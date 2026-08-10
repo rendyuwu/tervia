@@ -1,5 +1,5 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "identifier": "id.ilhamrisky.tedi.dev",
-  "productName": "TEDI Dev"
+  "identifier": "dev.rendy.tervia.dev",
+  "productName": "Tervia Dev"
 }
