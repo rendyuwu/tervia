@@ -1,5 +1,11 @@
 minimumReleaseAge: 1440
 trustPolicy: no-downgrade
+# Dev-only transitive deps of react-doctor (lint tooling); pnpm 11.18 flags them as
+# trust downgrades. None ship in the app bundle. Policy stays no-downgrade otherwise.
+trustPolicyExclude:
+  - effect
+  - "@effect/platform-node-shared"
+  - semver
 allowBuilds:
   esbuild: true
   msgpackr-extract: false
