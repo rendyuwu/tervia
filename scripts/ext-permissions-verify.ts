@@ -45,7 +45,6 @@ for (const p of [
   "s*",
   "sec*",
   "*read*",
-  "shell:*",
   "*fs_*",
 ]) {
   check(`permissionRiskTier("${p}")`, permissionRiskTier(p), "high");
@@ -57,13 +56,9 @@ for (const p of [
   "invoke:shell_run_command",
   "invoke:pty_open",
   "invoke:ssh_open",
-  "invoke:mcp_spawn",
   "invoke:fmt_run_external",
   "secrets:read",
   "ssh:connections",
-  "shell:transform",
-  "ai:configure",
-  "ai:prompt",
 ]) {
   check(`permissionRiskTier("${p}")`, permissionRiskTier(p), "high");
 }

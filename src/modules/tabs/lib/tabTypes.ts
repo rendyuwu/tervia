@@ -20,20 +20,6 @@ export type PaneTab = {
   preview?: boolean;
 };
 
-export type AiDiffStatus = "pending" | "approved" | "rejected";
-
-export type AiDiffTab = {
-  id: number;
-  kind: "ai-diff";
-  title: string;
-  path: string;
-  originalContent: string;
-  proposedContent: string;
-  approvalId: string;
-  status: AiDiffStatus;
-  isNewFile: boolean;
-};
-
 export type GitChangeStatusTab =
   | "modified"
   | "added"
@@ -118,4 +104,4 @@ export type ExtensionTab = {
   state?: ExtensionTabState;
 };
 
-export type Tab = PaneTab | AiDiffTab | GitDiffTab | ExtensionTab | ScmTab;
+export type Tab = PaneTab | GitDiffTab | ExtensionTab | ScmTab;

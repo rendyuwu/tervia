@@ -8,8 +8,6 @@ export {
   isTerminalLikeTab,
   type Tab,
   type PaneTab,
-  type AiDiffTab,
-  type AiDiffStatus,
   type GitDiffTab,
   type GitChangeStatusTab,
   type ScmTab,

@@ -1,8 +1,5 @@
 import { memo } from "react";
 import { IconTooltip } from "@/components/ui/icon-tooltip";
-import { AgentStatusPill } from "@/modules/ai/components/AgentStatusPill";
-import { AiOpenButton } from "@/modules/ai/components/AiStatusBarControls";
-import { useChatStore } from "@/modules/ai";
 import {
   BuiltinSectionRightToggles,
   ExtensionStatusItems,
@@ -11,7 +8,6 @@ import {
   RightPanelDefaultToggles,
   SidebarSectionRightToggles,
 } from "@/modules/extensions";
-import { SchedulerStatusPill } from "@/modules/scheduler";
 import { useScmRightPanelStore } from "@/modules/scm/scmRightPanelStore";
 import { useSshRightPanelStore } from "@/modules/ssh/sshRightPanelStore";
 import { SshRoutePill } from "@/modules/ssh/SshRoutePill";
@@ -30,7 +26,6 @@ type Props = {
   filePath?: string | null;
   home: string | null;
   onCd: (path: string) => void;
-  onOpenMini: () => void;
   /** Whether any SSH leaf is connected. Gates the right-slot Remote toggle so
    *  it appears only alongside a live session, mirroring the left sidebar. */
   hasAnySshLeaf: boolean;
@@ -63,14 +58,11 @@ function StatusBarInner({
   filePath,
   home,
   onCd,
-  onOpenMini,
   hasAnySshLeaf,
   activeIsSsh,
   sshSessionId,
   sshRoute,
 }: Props) {
-  const panelOpen = useChatStore((s) => s.panelOpen);
-  const togglePanel = useChatStore((s) => s.togglePanel);
   const compact = usePreferencesStore((s) => s.statusBarCompact);
 
   return (
@@ -94,11 +86,10 @@ function StatusBarInner({
         />
       </div>
       {/* Left to right: the update prompt, the zoom pill, things you READ, then
-          things you CLICK (actions first, panel toggles after). Zoom sits ahead
-          of the AI usage meters rather than with the other actions: it is only
-          on screen while zoomed, and that is where it is wanted. Compact mode
-          keeps only what you glance at - the update prompt, the AI meters and
-          the AI panel - and folds the rest away. */}
+          things you CLICK (actions first, panel toggles after). Zoom is only on
+          screen while zoomed, and that is where it is wanted. Compact mode keeps
+          only what you glance at - the update prompt and the extension meters -
+          and folds the rest away. */}
       <div className="flex shrink-0 items-center gap-1.5">
         {/* 1. Update. Leftmost and alone: it is the one thing here that asks
             something of you, and it is absent the rest of the time. */}
@@ -106,7 +97,7 @@ function StatusBarInner({
           <UpdaterPill />
         </Group>
 
-        {/* 2. Zoom, immediately left of the AI usage meters. Its own group so
+        {/* 2. Zoom, immediately left of the extension meters. Its own group so
             the hairline keeps it off them; it renders null at 100%, and
             `.sb-group:empty` drops the divider with it. */}
         {compact ? null : (
@@ -115,13 +106,10 @@ function StatusBarInner({
           </Group>
         )}
 
-        {/* 3. Status: read-only readouts. The agent pill leads (a pending
-            approval or an error has to read first), then the AI usage meters,
-            Discord, Remote Access and the scheduler. */}
+        {/* 3. Status: read-only readouts contributed by extensions - usage
+            meters, Discord, Remote Access. */}
         <Group>
-          <AgentStatusPill onClick={onOpenMini} />
           <ExtensionStatusItems kind="status" metersOnly={compact} />
-          {compact ? null : <SchedulerStatusPill />}
         </Group>
 
         {/* 4a. Actions: a click does the thing, nothing slides out. */}
@@ -133,8 +121,8 @@ function StatusBarInner({
         )}
 
         {/* 4b. Panel triggers: a click opens (or closes) a side panel. Always
-            has content (the AI button), so it always carries the last divider
-            when anything precedes it. */}
+            has content (the compact toggle), so it always carries the last
+            divider when anything precedes it. */}
         <Group>
           {compact ? null : (
             <>
@@ -146,7 +134,6 @@ function StatusBarInner({
               <SshRightOpenButton hasAnySshLeaf={hasAnySshLeaf} />
             </>
           )}
-          <AiOpenButton onToggle={togglePanel} active={panelOpen} />
           <CompactToggle compact={compact} />
         </Group>
       </div>
@@ -212,8 +199,8 @@ function OsBadge() {
  * Source Control status-bar toggle. Shown whenever the user has opted in to the
  * right-panel SCM layout (and SCM is enabled); it stays in place whether open or
  * closed (clicking toggles, the open state shows as active) so the status-bar
- * row never reflows. Icon-only chrome matches `AiOpenButton` and the extension
- * panel toggles so the right cluster reads as a single row of glyphs.
+ * row never reflows. Icon-only chrome matches the extension panel toggles so the
+ * right cluster reads as a single row of glyphs.
  */
 function ScmRightOpenButton() {
   const showSourceControl = usePreferencesStore((s) => s.showSourceControl);

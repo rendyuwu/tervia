@@ -6,7 +6,7 @@ import { cn } from "@/lib/utils";
 import { invoke } from "@tauri-apps/api/core";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 
-import { corsFallbackFetch } from "@/modules/ai/lib/httpProxy";
+import { corsFallbackFetch } from "@/lib/httpProxy";
 import { useExtensionsStore } from "@/modules/extensions";
 import type { InstalledExtension } from "@/modules/extensions";
 import { safeParseManifest } from "@/modules/extensions/manifest";

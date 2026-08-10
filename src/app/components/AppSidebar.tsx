@@ -28,7 +28,6 @@ type Props = {
   onPathRenamed: (from: string, to: string) => void;
   onPathDeleted: (path: string) => void;
   onRevealInTerminal: (path: string) => void;
-  onAttachToAgent: (path: string) => void;
   onPreviewInBrowser: (path: string) => void;
   activeFilePath: string | null;
   activeSshContext: {
@@ -112,7 +111,6 @@ export function AppSidebar({
   onPathRenamed,
   onPathDeleted,
   onRevealInTerminal,
-  onAttachToAgent,
   onPreviewInBrowser,
   activeFilePath,
   activeSshContext,
@@ -198,7 +196,6 @@ export function AppSidebar({
             onPathRenamed={onPathRenamed}
             onPathDeleted={onPathDeleted}
             onRevealInTerminal={onRevealInTerminal}
-            onAttachToAgent={onAttachToAgent}
             onPreviewInBrowser={onPreviewInBrowser}
             dragHandle={controls}
             collapsed={collapsed}

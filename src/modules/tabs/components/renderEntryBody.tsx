@@ -234,9 +234,9 @@ export function renderEntryBody(args: RenderEntryArgs): ReactNode {
   const hasContextActions =
     canRename || canRotate || canLeaveGroup || canMove || canTogglePrivate || canCloseToRight;
   const hasLeafActions = canRename || canRotate || canLeaveGroup || canMove || canTogglePrivate;
-  // Private tabs always get a tooltip explaining the AI-visibility implication;
-  // SSH / AI-CLI tooltips win the slot when both apply and append the private
-  // note as an extra line.
+  // Private tabs always get a tooltip explaining what the marker means; SSH /
+  // AI-CLI tooltips win the slot when both apply and append the private note as
+  // an extra line.
   const tooltipMode: "ssh" | "ai" | "private" | null = sshHost
     ? "ssh"
     : isPaneLeaf && e.aiCliStatus
@@ -244,7 +244,7 @@ export function renderEntryBody(args: RenderEntryArgs): ReactNode {
       : isPrivate
         ? "private"
         : null;
-  const PRIVATE_HINT = "Not visible to the native AI agent";
+  const PRIVATE_HINT = "Private: program title is never saved";
 
   // Build innermost-out. TabsTrigger must be the DOM child of every asChild
   // trigger so Radix' Slot can merge handlers. Tooltip is a Provider, not a

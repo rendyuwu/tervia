@@ -9,7 +9,6 @@ import {
   type PaneLeaf,
 } from "@/modules/terminal/lib/panes";
 import {
-  type AiDiffStatus,
   type ExtensionTab,
   type ExtensionTabState,
   type GitChangeStatusTab,
@@ -44,53 +43,6 @@ export function useAuxTabs({
   tabsRef,
   nextBrowserOrdinalRef,
 }: AuxTabsDeps) {
-  const openAiDiffTab = useCallback(
-    (input: {
-      path: string;
-      originalContent: string;
-      proposedContent: string;
-      approvalId: string;
-      isNewFile: boolean;
-    }) => {
-      let targetId: number | null = null;
-      setTabs((curr) => {
-        const existing = curr.find(
-          (t) => t.kind === "ai-diff" && t.approvalId === input.approvalId,
-        );
-        if (existing) {
-          targetId = existing.id;
-          return curr;
-        }
-        const id = nextIdRef.current++;
-        targetId = id;
-        const title = `${basename(input.path)} (AI diff)`;
-        return [
-          ...curr,
-          {
-            id,
-            kind: "ai-diff",
-            title,
-            path: input.path,
-            originalContent: input.originalContent,
-            proposedContent: input.proposedContent,
-            approvalId: input.approvalId,
-            status: "pending",
-            isNewFile: input.isNewFile,
-          },
-        ];
-      });
-      if (targetId !== null) setActiveId(targetId);
-      return targetId as number | null;
-    },
-    [],
-  );
-
-  const setAiDiffStatus = useCallback((approvalId: string, status: AiDiffStatus) => {
-    setTabs((curr) =>
-      curr.map((t) => (t.kind === "ai-diff" && t.approvalId === approvalId ? { ...t, status } : t)),
-    );
-  }, []);
-
   const openGitDiffTab = useCallback(
     (input: {
       path: string;
@@ -467,8 +419,6 @@ export function useAuxTabs({
   }, []);
 
   return {
-    openAiDiffTab,
-    setAiDiffStatus,
     openGitDiffTab,
     openScmTab,
     openBoardTab,

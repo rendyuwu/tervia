@@ -265,7 +265,7 @@ async function main(): Promise<void> {
   // wired (a ```nix block must highlight) and that no hand-written alias
   // contradicts the registry - the exact bug that had ```jl painted as Octave.
   const { highlight, isHighlightable } =
-    await import("../src/components/ai-elements/chat-code-lezer");
+    await import("../src/components/markdown/chat-code-lezer");
 
   for (const tag of [
     // These six lost their hand-written chat entries and now rely entirely on

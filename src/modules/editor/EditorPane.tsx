@@ -12,7 +12,7 @@ import { Streamdown } from "streamdown";
 import { readClipboardText } from "@/lib/clipboard";
 import { formatBytes } from "@/lib/format";
 import { safeUrlTransform } from "@/lib/markdownSafety";
-import { markdownComponents } from "@/components/ai-elements/markdown-code";
+import { markdownComponents } from "@/components/markdown/markdown-code";
 import { loadEditorTheme, tryEditorTheme } from "./lib/themes";
 import {
   useCallback,
@@ -49,10 +49,6 @@ import {
   ContextMenuTrigger,
 } from "@/components/ui/context-menu";
 import { useDocument } from "./lib/useDocument";
-import { inlineCompletion } from "./lib/autocomplete/inlineExtension";
-import { providerNeedsKey, type ProviderId } from "@/modules/ai/config";
-import { getKey } from "@/modules/ai/lib/keyring";
-import { onKeysChanged } from "@/modules/settings/store";
 import {
   EditorFindReplace,
   matchState,
@@ -115,10 +111,6 @@ type Props = {
   /** Edits a remote file over SFTP on the matching russh session id.
    *  Forwarded to `useDocument` so reads/writes hit the SSH backend. */
   sshSessionId?: number;
-  /** When true the inline AI autocomplete is force-disabled regardless of
-   *  user preferences. Set by PaneStack on editor leaves inside a private
-   *  tab so file content never reaches a model provider. */
-  aiDisabled?: boolean;
   ref?: Ref<EditorPaneHandle>;
 };
 
@@ -221,7 +213,6 @@ export function EditorPane({
   onClose,
   mdPreview,
   sshSessionId,
-  aiDisabled,
   ref,
 }: Props) {
   const { doc, liveContent, onChange, save, reload } = useDocument({
@@ -266,12 +257,6 @@ export function EditorPane({
   const lineWrap = usePreferencesStore((s) => s.lineWrap);
   const showMinimap = usePreferencesStore((s) => s.showMinimap);
   const languageRef = useRef<string | null>(null);
-  // The key is fetched asynchronously but the provider is read synchronously from
-  // the store, so the ref MUST carry which provider it belongs to. Without that,
-  // switching provider left the previous provider's key in the ref and the next
-  // keystroke shipped it to the new provider's endpoint: a real credential leak,
-  // not a narrow race.
-  const apiKeyRef = useRef<{ provider: ProviderId; key: string | null } | null>(null);
 
   // Manual "Change Language Mode" override (right-click). `null` follows path
   // detection. Reset whenever the open file changes so a forced mode never
@@ -290,40 +275,6 @@ export function EditorPane({
   // re-renders (which fire constantly via the marker overlay).
   const handlePickLanguage = useCallback((id: string | null) => setLangOverride(id), []);
 
-  useEffect(() => {
-    let cancelled = false;
-    const refresh = async () => {
-      const provider = usePreferencesStore.getState().autocompleteProvider;
-      if (!providerNeedsKey(provider)) {
-        apiKeyRef.current = { provider, key: null };
-        return;
-      }
-      // Clear first: until the fetch lands there is no valid key for this
-      // provider, and a stale one must never be offered in its place.
-      apiKeyRef.current = null;
-      const k = await getKey(provider);
-      if (cancelled) return;
-      // Two rapid switches race; only the fetch matching the CURRENT provider
-      // may publish, so the loser cannot land last.
-      if (usePreferencesStore.getState().autocompleteProvider !== provider) return;
-      apiKeyRef.current = { provider, key: k };
-    };
-    void refresh();
-    let unlistenKeys: (() => void) | undefined;
-    void onKeysChanged(() => void refresh()).then((un) => {
-      unlistenKeys = un;
-    });
-    const unsubPrefs = usePreferencesStore.subscribe((state, prev) => {
-      if (state.autocompleteProvider !== prev.autocompleteProvider) {
-        void refresh();
-      }
-    });
-    return () => {
-      cancelled = true;
-      unlistenKeys?.();
-      unsubPrefs();
-    };
-  }, []);
   // Themes are dynamic imports (~10-25 KB). Show cached immediately;
   // otherwise unstyled until ready.
   const [themeExt, setThemeExt] = useState<Extension | null>(() => tryEditorTheme(editorThemeId));
@@ -420,12 +371,6 @@ export function EditorPane({
   // preview mode. Mirrored into a ref so the handle's deps stay [path].
   const mdPreviewActiveRef = useRef(false);
   mdPreviewActiveRef.current = !!mdPreview && /\.(md|markdown|mdx)$/i.test(path);
-  // Mirror `aiDisabled` into a ref so the (memoised) extensions array can
-  // read the latest value without reconfiguring CodeMirror on every prop
-  // change.
-  const aiDisabledRef = useRef(aiDisabled === true);
-  aiDisabledRef.current = aiDisabled === true;
-
   const extensions = useMemo(
     () => [
       // basicSetup loads before user extensions, so vim needs Prec.highest
@@ -445,25 +390,6 @@ export function EditorPane({
       }),
       wrapCompartment.of(usePreferencesStore.getState().lineWrap ? EditorView.lineWrapping : []),
       languageCompartment.of([]),
-      inlineCompletion({
-        getPrefs: () => {
-          const s = usePreferencesStore.getState();
-          return {
-            // Private tabs force-disable AI autocomplete so file content
-            // never reaches the model provider.
-            enabled: s.autocompleteEnabled && !aiDisabledRef.current,
-            provider: s.autocompleteProvider,
-            modelId: s.autocompleteModelId,
-            // Only hand over a key that was fetched FOR this provider.
-            apiKey:
-              apiKeyRef.current?.provider === s.autocompleteProvider ? apiKeyRef.current.key : null,
-            lmstudioBaseURL: s.lmstudioBaseURL,
-            openaiCompatibleBaseURL: s.openaiCompatibleBaseURL,
-          };
-        },
-        getPath: () => pathRef.current,
-        getLanguage: () => languageRef.current,
-      }),
       keymap.of([
         {
           key: "Mod-s",

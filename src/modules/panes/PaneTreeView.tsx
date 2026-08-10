@@ -121,7 +121,6 @@ function floatParamsFor(node: PaneLeaf, title: string): FloatLeafParams | null {
       kind: "editor",
       title,
       path: node.path,
-      privateLeaf: node.private === true,
     };
   // A board mirrors like a terminal rather than handing off: it is a list, so
   // the main-window pane stays mounted (it owns the tab tree the float has no
@@ -520,7 +519,6 @@ const LeafBody = memo(function LeafBody({
           onClose={b.onCloseLeaf}
           mdPreview={mdPreview}
           sshSessionId={sshSessionId}
-          aiDisabled={node.private === true}
         />
       </Suspense>
     </ErrorBoundary>

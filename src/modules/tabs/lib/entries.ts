@@ -9,8 +9,8 @@ import { leafLabel, leafRenameSeed } from "./tabHelpers";
 
 /**
  * Tab strip entries: one per pane for pane tabs, one per tab for preview
- * and ai-diff. Clicking a pane entry focuses that pane; clicking a
- * preview/ai-diff entry activates that tab.
+ * and git-diff. Clicking a pane entry focuses that pane; clicking a
+ * preview/git-diff entry activates that tab.
  */
 type EntryBase = {
   /** Composite key like "tab-3" or "leaf-7". */
@@ -62,7 +62,7 @@ export type PaneEntry = EntryBase & {
 };
 
 type StandaloneEntry = EntryBase & {
-  kind: "ai-diff" | "git-diff" | "scm" | "board";
+  kind: "git-diff" | "scm" | "board";
 };
 
 type ExtensionEntry = EntryBase & {
@@ -81,8 +81,7 @@ export type Entry = PaneEntry | StandaloneEntry | ExtensionEntry;
 
 /**
  * Background color for the per-tab accent stripe. Emerald for local shell,
- * sky for SSH, brand blue for editor, cyan for preview, violet for AI diff,
- * amber for git diff. Rendered as a `<span>` (not `::after`) because the
+ * sky for SSH, brand blue for editor, cyan for preview, amber for git diff. Rendered as a `<span>` (not `::after`) because the
  * primitive `TabsTrigger` already uses `::after` with equal specificity.
  * Keep strings as full literals for Tailwind's JIT.
  */
@@ -104,11 +103,10 @@ export function tabAccentClass(e: Entry): string {
     if (e.leafKind === "extension-panel") return "bg-[color:var(--tedi-tab-ssh)]";
     return "bg-[color:var(--tedi-tab-editor)]";
   }
-  if (e.kind === "ai-diff") return "bg-[color:var(--tedi-tab-ai-diff)]";
   if (e.kind === "git-diff") return "bg-[color:var(--tedi-tab-git-diff)]";
   if (e.kind === "scm") return "bg-[color:var(--tedi-tab-git-diff)]";
-  // Board: reuse the AI-diff accent. It is the workspace's AI-status surface,
-  // and a token of its own would have to be added to all 20 theme presets.
+  // Board: reuses the violet accent rather than adding a token of its own to
+  // all 20 theme presets.
   if (e.kind === "board") return "bg-[color:var(--tedi-tab-ai-diff)]";
   // Extension tab. Reuse the SSH accent (sky blue) so workbench-style
   // extensions read as "remote-ish dev tools" next to terminal tabs.
@@ -213,15 +211,6 @@ export function buildEntries(
           renameSeed: leafRenameSeed(leaf, sshHosts, t.cwd),
         });
       }
-      continue;
-    }
-    if (t.kind === "ai-diff") {
-      out.push({
-        kind: "ai-diff",
-        key: `tab-${t.id}`,
-        tabId: t.id,
-        label: t.title,
-      });
       continue;
     }
     if (t.kind === "git-diff") {

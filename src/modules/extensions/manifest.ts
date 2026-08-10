@@ -93,16 +93,6 @@ const PanelSchema = z
   })
   .passthrough();
 
-const AiToolSchema = z
-  .object({
-    name: z.string().min(1),
-    description: z.string().min(1),
-    /** JSON Schema for the args. Loose in v1. */
-    parameters: z.record(z.string(), z.unknown()),
-    approval: z.enum(["auto", "needsApproval"]).default("auto"),
-  })
-  .passthrough();
-
 // `.passthrough()` so a newer TEDI's manifest with an unknown contribution
 // category (e.g. a future `contributes.notifications`) does not fail the
 // whole install on older TEDI builds. The host only iterates the
@@ -114,7 +104,6 @@ const ContributesSchema = z
     commands: z.array(CommandSchema).optional(),
     keybindings: z.array(KeybindingSchema).optional(),
     panels: z.array(PanelSchema).optional(),
-    aiTools: z.array(AiToolSchema).optional(),
   })
   .passthrough();
 
@@ -153,7 +142,6 @@ export type ContributedSetting = z.infer<typeof SettingSchema>;
 export type ContributedCommand = z.infer<typeof CommandSchema>;
 export type ContributedKeybinding = z.infer<typeof KeybindingSchema>;
 export type ContributedPanel = z.infer<typeof PanelSchema>;
-export type ContributedAiTool = z.infer<typeof AiToolSchema>;
 
 export function safeParseManifest(
   input: unknown,

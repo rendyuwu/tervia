@@ -78,14 +78,6 @@ export function InstallReviewDialog({
       checkPermission([p], "invoke:shell_run_command") &&
       checkPermission([p], "invoke:fs_read_file"),
   );
-  // AI tools the extension registers are callable by the assistant (and run the
-  // extension's code). Disclose them at install so the consent is informed.
-  // The DESCRIPTION is shown, not just the name: the description is what gets
-  // injected into the agent's tool list every turn, so it is the part that can
-  // carry instructions to the model, and it was the only part the user could
-  // not see before agreeing to it.
-  const aiTools = ready?.manifest.contributes?.aiTools ?? [];
-
   const title = isUpdate ? "Update extension?" : "Install extension?";
   const cta = busy
     ? isUpdate
@@ -212,24 +204,6 @@ export function InstallReviewDialog({
             <span className="font-medium">Near-total access.</span> This extension can call almost
             any internal command (filesystem, shell, SSH, git, …). Only install it if you trust the
             publisher.
-          </div>
-        ) : null}
-
-        {aiTools.length > 0 ? (
-          <div className="border-icon-working/40 bg-icon-working/5 text-foreground/80 rounded-md border px-2.5 py-1.5 text-[10.5px] leading-relaxed">
-            <span className="text-foreground font-medium">
-              Registers {aiTools.length} AI tool{aiTools.length === 1 ? "" : "s"}
-            </span>{" "}
-            the assistant can call. Each runs this extension&rsquo;s code and is gated by your
-            tool-approval flow.
-            <ul className="mt-1 space-y-0.5">
-              {aiTools.map((t) => (
-                <li key={t.name}>
-                  <span className="text-foreground font-medium">{t.name}</span>
-                  <span className="text-foreground/60"> &mdash; {t.description}</span>
-                </li>
-              ))}
-            </ul>
           </div>
         ) : null}
 

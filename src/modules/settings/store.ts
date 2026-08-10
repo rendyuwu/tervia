@@ -1,18 +1,6 @@
 import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { LazyStore } from "@tauri-apps/plugin-store";
-import {
-  DEFAULT_AUTOCOMPLETE_MODEL,
-  DEFAULT_MODEL_ID,
-  LMSTUDIO_DEFAULT_BASE_URL,
-  OPENAI_COMPATIBLE_DEFAULT_BASE_URL,
-  OPENAI_COMPATIBLE_LEGACY_INSTANCE_ID,
-  tryGetModel,
-  type AutocompleteProviderId,
-  type DynamicModelId,
-  type OpenAICompatibleInstance,
-  type ProviderId,
-} from "@/modules/ai/config";
 import type { KeyBinding, ShortcutId } from "@/modules/shortcuts/shortcuts";
 import { normalizeCustomTheme, type CustomTheme } from "./customTheme";
 import {
@@ -22,14 +10,11 @@ import {
   type TerminalPalette,
   type TerminalThemeMode,
 } from "./terminalPalette";
-import { withSubagentsDisabled } from "@/modules/ai/tools/catalog";
 import { DEFAULT_CONTENT_FONT_ID, isValidContentFontId } from "@/lib/fonts";
 import { DEFAULT_SEARCH_ENGINE_ID, searchEngineById, type SearchEngineId } from "./searchEngines";
 import { DEFAULT_CUSTOM_THEME } from "./themePresets";
 
 export type ThemePref = "system" | "light" | "dark";
-
-export type ApprovalMode = "ask" | "semi" | "yolo";
 
 export const EDITOR_THEMES = [
   "atomone",
@@ -81,9 +66,6 @@ export function cleanTerminalPath(raw: string): string {
 
 export type Preferences = {
   theme: ThemePref;
-  defaultModelId: DynamicModelId;
-  /** Provider for `defaultModelId`. Disambiguates ids shared across providers. Persisted for cold-boot restore. */
-  defaultProviderId: ProviderId | null;
   editorTheme: EditorThemeId;
   /**
    * Content font family id, applied to BOTH the terminal and the code editor.
@@ -111,48 +93,8 @@ export type Preferences = {
   terminalThemeId: string;
   /** Terminal palette applied when `terminalThemeMode === "custom"`. */
   terminalCustomPalette: TerminalPalette;
-  customInstructions: string;
-  // Sub-agents used to have a master on/off here. They are now switched in the
-  // tool picker like every other tool, so there is one switch instead of two
-  // that could disagree. `loadPreferences` migrates an old `false` into
-  // `disabledTools`.
-  /** Plain-chat mode. On sends a one-line system prompt and NO tools, and skips
-   *  the project memory, .tedi/memory, skills, MCP, and per-turn <env> loads
-   *  entirely. The agent prompt plus ~77 tool schemas cost ~12K input tokens on
-   *  every message, so a "hi" is priced like a code task; this is the off
-   *  switch for turns that are just conversation. Off = the full agent. */
-  chatMode: boolean;
-  /** Model-facing names of tools the user switched OFF in the tool picker.
-   *  Stores what is DISABLED, not what is enabled, so a tool added by an app
-   *  update (or by installing an MCP server / extension) is on by default
-   *  instead of silently missing until the user goes looking for it. */
-  disabledTools: string[];
-  /** Debug capture: when on, every request sent to the provider/API (system
-   *  prompt, messages, model, params, tool list) is snapshotted in-memory so it
-   *  can be inspected and downloaded as JSON from the chat. Off = no capture. */
-  debugEnabled: boolean;
   autostart: boolean;
   restoreWindowState: boolean;
-  autocompleteEnabled: boolean;
-  autocompleteProvider: AutocompleteProviderId;
-  autocompleteModelId: string;
-  lmstudioBaseURL: string;
-  /**
-   * Base URL for the FIRST (legacy / default) OpenAI-compatible endpoint. Kept
-   * as a top-level field for backward compatibility: older builds and the
-   * runtime fallback still read it. New code should prefer
-   * `openaiCompatibleInstances[0]`, which mirrors this value for the default
-   * instance. Migration keeps the two in sync.
-   */
-  openaiCompatibleBaseURL: string;
-  /**
-   * All configured OpenAI-compatible endpoints. Each entry is
-   * `{ id, label, baseURL }`; its API key lives in the OS keychain under
-   * `openai-compatible-api-key[:<id>]`. The first instance has the reserved id
-   * `"default"` and mirrors `openaiCompatibleBaseURL` for back-compat. Empty
-   * only on a brand-new install with no openai-compatible endpoint configured.
-   */
-  openaiCompatibleInstances: OpenAICompatibleInstance[];
   vimMode: boolean;
   lineWrap: boolean;
   /** Show the code editor minimap. Default true. */
@@ -183,16 +125,16 @@ export type Preferences = {
   showHiddenFiles: boolean;
   /**
    * Fold the status bar's right cluster down to what you glance at: the update
-   * prompt, the AI usage meters and the AI panel button. Everything else (zoom,
-   * the other status icons, the action + panel-toggle groups) hides until it is
-   * switched back off. Default false.
+   * prompt and the extension status meters. Everything else (zoom, the other
+   * status icons, the action + panel-toggle groups) hides until it is switched
+   * back off. Default false.
    */
   statusBarCompact: boolean;
   /** Show the Source Control panel. Default true. */
   showSourceControl: boolean;
   /**
-   * Mount Source Control in the right slot (next to AI sidebar / extension
-   * right panels) instead of as a sidebar pane on the left. Default false.
+   * Mount Source Control in the right slot (next to the extension right
+   * panels) instead of as a sidebar pane on the left. Default false.
    * When true, the left sidebar drops the SCM pane and a status-bar button
    * toggles the right-slot SCM panel.
    */
@@ -227,19 +169,6 @@ export type Preferences = {
    * Settings -> General "UI zoom" slider, not the keyboard shortcuts.
    */
   uiZoom: number;
-  /** Pinned model ids. Shown as "Pinned" at the top of the AI model dropdown. Newest first. */
-  pinnedModelIds: string[];
-  /**
-   * Approval mode for AI tool calls.
-   * "ask": every mutating tool needs approval (default).
-   * "semi": file edits need approval; shell commands auto-approve.
-   * "yolo": all tools auto-approve.
-   */
-  approvalMode: ApprovalMode;
-  /** Last model picked via the chat dropdown. Restored on boot. Null until first pick. */
-  lastModelId: DynamicModelId | null;
-  /** Provider for `lastModelId` at pick time. Persisted for cold-boot restore. */
-  lastProviderId: string | null;
   /** Toast and beep on AI CLI state transitions. Default on. Per-tab badge still updates when off. */
   aiNotificationsEnabled: boolean;
   /**
@@ -364,29 +293,14 @@ export function normalizeSoundData(value: unknown): string {
 
 const STORE_PATH = "tedi-settings.json";
 const KEY_THEME = "theme";
-const KEY_DEFAULT_MODEL = "defaultModelId";
-const KEY_DEFAULT_PROVIDER = "defaultProviderId";
 const KEY_EDITOR_THEME = "editorTheme";
 const KEY_FONT_FAMILY = "fontFamily";
 const KEY_EDITOR_FONT_SIZE = "editorFontSize";
 const KEY_TERMINAL_THEME_MODE = "terminalThemeMode";
 const KEY_TERMINAL_THEME_ID = "terminalThemeId";
 const KEY_TERMINAL_CUSTOM_PALETTE = "terminalCustomPalette";
-const KEY_CUSTOM_INSTRUCTIONS = "customInstructions";
-/** Removed preference, read once so an existing `false` can be migrated into
- *  `disabledTools`, then deleted. See `loadPreferences`. */
-const LEGACY_KEY_SUBAGENTS_ENABLED = "subagentsEnabled";
-const KEY_CHAT_MODE = "chatMode";
-const KEY_DISABLED_TOOLS = "disabledTools";
-const KEY_DEBUG_ENABLED = "debugEnabled";
 const KEY_AUTOSTART = "autostart";
 const KEY_RESTORE_WINDOW = "restoreWindowState";
-const KEY_AUTOCOMPLETE_ENABLED = "autocompleteEnabled";
-const KEY_AUTOCOMPLETE_PROVIDER = "autocompleteProvider";
-const KEY_AUTOCOMPLETE_MODEL = "autocompleteModelId";
-const KEY_LMSTUDIO_BASE_URL = "lmstudioBaseURL";
-const KEY_OPENAI_COMPATIBLE_BASE_URL = "openaiCompatibleBaseURL";
-const KEY_OPENAI_COMPATIBLE_INSTANCES = "openaiCompatibleInstances";
 const KEY_VIM_MODE = "vimMode";
 const KEY_LINE_WRAP = "lineWrap";
 const KEY_SHOW_MINIMAP = "showMinimap";
@@ -402,10 +316,6 @@ const KEY_SOURCE_CONTROL_IN_RIGHT_PANEL = "sourceControlInRightPanel";
 const KEY_SSH_IN_RIGHT_PANEL = "sshInRightPanel";
 const KEY_SHORTCUTS = "shortcuts";
 const KEY_EXTENSION_SHORTCUTS = "extensionShortcuts";
-const KEY_PINNED_MODELS = "pinnedModelIds";
-const KEY_APPROVAL_MODE = "approvalMode";
-const KEY_LAST_MODEL = "lastModelId";
-const KEY_LAST_PROVIDER = "lastProviderId";
 const KEY_CONTENT_ZOOM = "contentZoom";
 const KEY_UI_ZOOM = "uiZoom";
 const KEY_AI_NOTIFICATIONS_ENABLED = "aiNotificationsEnabled";
@@ -498,26 +408,14 @@ export const DEFAULT_FORMATTERS: Record<string, FormatterConfig> = {
 
 export const DEFAULT_PREFERENCES: Preferences = {
   theme: "system",
-  defaultModelId: DEFAULT_MODEL_ID,
-  defaultProviderId: tryGetModel(DEFAULT_MODEL_ID)?.provider ?? null,
   editorTheme: "atomone",
   fontFamily: DEFAULT_CONTENT_FONT_ID,
   editorFontSize: EDITOR_FONT_SIZE_DEFAULT,
   terminalThemeMode: "follow-app",
   terminalThemeId: DEFAULT_TERMINAL_THEME_ID,
   terminalCustomPalette: DEFAULT_TERMINAL_PALETTE,
-  customInstructions: "",
-  chatMode: false,
-  disabledTools: [],
-  debugEnabled: false,
   autostart: false,
   restoreWindowState: true,
-  autocompleteEnabled: false,
-  autocompleteProvider: "cerebras",
-  autocompleteModelId: DEFAULT_AUTOCOMPLETE_MODEL.cerebras,
-  lmstudioBaseURL: LMSTUDIO_DEFAULT_BASE_URL,
-  openaiCompatibleBaseURL: OPENAI_COMPATIBLE_DEFAULT_BASE_URL,
-  openaiCompatibleInstances: [],
   vimMode: false,
   lineWrap: false,
   showMinimap: true,
@@ -533,10 +431,6 @@ export const DEFAULT_PREFERENCES: Preferences = {
   sshInRightPanel: false,
   shortcuts: {} as Record<ShortcutId, KeyBinding[]>,
   extensionShortcuts: {} as Record<string, KeyBinding[]>,
-  pinnedModelIds: [],
-  approvalMode: "ask",
-  lastModelId: null,
-  lastProviderId: null,
   contentZoom: CONTENT_ZOOM_DEFAULT,
   uiZoom: UI_ZOOM_DEFAULT,
   aiNotificationsEnabled: true,
@@ -573,29 +467,6 @@ async function writePref<T>(key: string, value: T): Promise<void> {
   await Promise.all([store.save(), emit(PREFS_CHANGED_EVENT, { key, value, source: SELF_LABEL })]);
 }
 
-/**
- * Carry a removed `subagentsEnabled: false` over to the tool picker, which is
- * now the only switch. Without this, dropping the preference would silently turn
- * sub-agents back ON for anyone who had deliberately turned them off.
- *
- * Deleting the legacy key is what makes it one-time: leave it and re-enabling
- * the tools in the picker would be undone on the next load. The write is
- * fire-and-forget - the returned value already reflects it, so a failure only
- * means the migration runs again next boot, which is why it must not reject.
- */
-function migrateSubagentsPref(map: Map<string, unknown>, disabledTools: string[]): string[] {
-  if (map.get(LEGACY_KEY_SUBAGENTS_ENABLED) !== false) return disabledTools;
-  const merged = withSubagentsDisabled(disabledTools);
-  void (async () => {
-    await store.set(KEY_DISABLED_TOOLS, merged);
-    await store.delete(LEGACY_KEY_SUBAGENTS_ENABLED);
-    await store.save();
-  })().catch(() => {
-    // Retried on the next load; a boot must not fail over a preference write.
-  });
-  return merged;
-}
-
 export async function loadPreferences(): Promise<Preferences> {
   // Single IPC roundtrip. Per-key fetches were the dominant boot cost.
   const entries = await store.entries();
@@ -603,9 +474,6 @@ export async function loadPreferences(): Promise<Preferences> {
   const get = <T>(k: string): T | undefined => map.get(k) as T | undefined;
   return {
     theme: get<ThemePref>(KEY_THEME) ?? DEFAULT_PREFERENCES.theme,
-    defaultModelId: get<DynamicModelId>(KEY_DEFAULT_MODEL) ?? DEFAULT_PREFERENCES.defaultModelId,
-    defaultProviderId:
-      get<ProviderId | null>(KEY_DEFAULT_PROVIDER) ?? DEFAULT_PREFERENCES.defaultProviderId,
     editorTheme: get<EditorThemeId>(KEY_EDITOR_THEME) ?? DEFAULT_PREFERENCES.editorTheme,
     fontFamily: (() => {
       const v = get<string>(KEY_FONT_FAMILY);
@@ -621,32 +489,8 @@ export async function loadPreferences(): Promise<Preferences> {
       get<unknown>(KEY_TERMINAL_CUSTOM_PALETTE),
       DEFAULT_PREFERENCES.terminalCustomPalette,
     ),
-    customInstructions:
-      get<string>(KEY_CUSTOM_INSTRUCTIONS) ?? DEFAULT_PREFERENCES.customInstructions,
-    chatMode: get<boolean>(KEY_CHAT_MODE) ?? DEFAULT_PREFERENCES.chatMode,
-    disabledTools: migrateSubagentsPref(
-      map,
-      (get<unknown>(KEY_DISABLED_TOOLS) as string[] | undefined)?.filter(
-        (t): t is string => typeof t === "string",
-      ) ?? DEFAULT_PREFERENCES.disabledTools,
-    ),
-    debugEnabled: get<boolean>(KEY_DEBUG_ENABLED) ?? DEFAULT_PREFERENCES.debugEnabled,
     autostart: get<boolean>(KEY_AUTOSTART) ?? DEFAULT_PREFERENCES.autostart,
     restoreWindowState: get<boolean>(KEY_RESTORE_WINDOW) ?? DEFAULT_PREFERENCES.restoreWindowState,
-    autocompleteEnabled:
-      get<boolean>(KEY_AUTOCOMPLETE_ENABLED) ?? DEFAULT_PREFERENCES.autocompleteEnabled,
-    autocompleteProvider:
-      get<AutocompleteProviderId>(KEY_AUTOCOMPLETE_PROVIDER) ??
-      DEFAULT_PREFERENCES.autocompleteProvider,
-    autocompleteModelId:
-      get<string>(KEY_AUTOCOMPLETE_MODEL) ?? DEFAULT_PREFERENCES.autocompleteModelId,
-    lmstudioBaseURL: get<string>(KEY_LMSTUDIO_BASE_URL) ?? DEFAULT_PREFERENCES.lmstudioBaseURL,
-    openaiCompatibleBaseURL:
-      get<string>(KEY_OPENAI_COMPATIBLE_BASE_URL) ?? DEFAULT_PREFERENCES.openaiCompatibleBaseURL,
-    openaiCompatibleInstances: normalizeOpenAICompatibleInstances(
-      get<unknown>(KEY_OPENAI_COMPATIBLE_INSTANCES),
-      get<string>(KEY_OPENAI_COMPATIBLE_BASE_URL),
-    ),
     vimMode: get<boolean>(KEY_VIM_MODE) ?? DEFAULT_PREFERENCES.vimMode,
     lineWrap: get<boolean>(KEY_LINE_WRAP) ?? DEFAULT_PREFERENCES.lineWrap,
     showMinimap: get<boolean>(KEY_SHOW_MINIMAP) ?? DEFAULT_PREFERENCES.showMinimap,
@@ -671,10 +515,6 @@ export async function loadPreferences(): Promise<Preferences> {
     extensionShortcuts:
       get<Record<string, KeyBinding[]>>(KEY_EXTENSION_SHORTCUTS) ??
       DEFAULT_PREFERENCES.extensionShortcuts,
-    pinnedModelIds: get<string[]>(KEY_PINNED_MODELS) ?? DEFAULT_PREFERENCES.pinnedModelIds,
-    approvalMode: get<ApprovalMode>(KEY_APPROVAL_MODE) ?? DEFAULT_PREFERENCES.approvalMode,
-    lastModelId: get<DynamicModelId | null>(KEY_LAST_MODEL) ?? DEFAULT_PREFERENCES.lastModelId,
-    lastProviderId: get<string | null>(KEY_LAST_PROVIDER) ?? DEFAULT_PREFERENCES.lastProviderId,
     contentZoom: clampZoom(get<number>(KEY_CONTENT_ZOOM) ?? DEFAULT_PREFERENCES.contentZoom),
     uiZoom: clampUiZoom(get<number>(KEY_UI_ZOOM) ?? DEFAULT_PREFERENCES.uiZoom),
     aiNotificationsEnabled:
@@ -705,66 +545,6 @@ export async function loadPreferences(): Promise<Preferences> {
     formatOnSave: get<boolean>(KEY_FORMAT_ON_SAVE) ?? DEFAULT_PREFERENCES.formatOnSave,
     formatters: normalizeFormatters(get<unknown>(KEY_FORMATTERS)),
   };
-}
-
-/**
- * Normalise and migrate the persisted OpenAI-compatible instances list.
- *
- * - Drops malformed entries (non-object, missing/empty id or baseURL).
- * - Migration: when the list is absent/empty but a legacy
- *   `openaiCompatibleBaseURL` is present, synthesise the default instance from
- *   it so a user who configured the single endpoint before this change keeps
- *   their base URL (and, via the unsuffixed keychain account, their key).
- * - Always returns the default instance first when present, so it lines up
- *   with the legacy `openaiCompatibleBaseURL` field.
- *
- * Idempotent and safe: re-running on an already-migrated store is a no-op.
- */
-function normalizeOpenAICompatibleInstances(
-  raw: unknown,
-  legacyBaseURL: string | undefined,
-): OpenAICompatibleInstance[] {
-  const out: OpenAICompatibleInstance[] = [];
-  const seen = new Set<string>();
-  if (Array.isArray(raw)) {
-    for (const entry of raw) {
-      if (!entry || typeof entry !== "object") continue;
-      const e = entry as Record<string, unknown>;
-      const id = typeof e.id === "string" ? e.id.trim() : "";
-      const baseURL = typeof e.baseURL === "string" ? e.baseURL.trim() : "";
-      if (!id || !baseURL || seen.has(id)) continue;
-      const label = typeof e.label === "string" && e.label.trim() ? e.label.trim() : id;
-      seen.add(id);
-      // Hand-typed model ids. Deduped and trimmed here so a corrupt or
-      // duplicated persisted value cannot produce blank picker entries.
-      const manualModels = Array.isArray(e.manualModels)
-        ? [
-            ...new Set(
-              e.manualModels
-                .filter((m): m is string => typeof m === "string")
-                .map((m) => m.trim())
-                .filter(Boolean),
-            ),
-          ]
-        : [];
-      out.push({ id, label, baseURL, ...(manualModels.length ? { manualModels } : {}) });
-    }
-  }
-  // Migration: nothing persisted yet but a legacy single endpoint exists.
-  if (out.length === 0 && legacyBaseURL && legacyBaseURL.trim()) {
-    out.push({
-      id: OPENAI_COMPATIBLE_LEGACY_INSTANCE_ID,
-      label: "OpenAI Compatible",
-      baseURL: legacyBaseURL.trim(),
-    });
-  }
-  // Keep the default instance first so it mirrors `openaiCompatibleBaseURL`.
-  out.sort((a, b) => {
-    if (a.id === OPENAI_COMPATIBLE_LEGACY_INSTANCE_ID) return -1;
-    if (b.id === OPENAI_COMPATIBLE_LEGACY_INSTANCE_ID) return 1;
-    return 0;
-  });
-  return out;
 }
 
 /**
@@ -855,15 +635,6 @@ export async function setAutoOpenProjectUrl(value: boolean): Promise<void> {
   await writePref(KEY_AUTO_OPEN_PROJECT_URL, value);
 }
 
-export async function setDefaultModel(value: DynamicModelId, provider?: ProviderId): Promise<void> {
-  await writePref(KEY_DEFAULT_MODEL, value);
-  // Pair provider with id so boot restore picks the right entry when two
-  // providers ship the same id. Falls back to the static registry, then null
-  // (then to chat.selectedProvider at restore).
-  const resolved = provider ?? tryGetModel(value)?.provider ?? null;
-  await writePref(KEY_DEFAULT_PROVIDER, resolved);
-}
-
 export async function setEditorTheme(value: EditorThemeId): Promise<void> {
   await writePref(KEY_EDITOR_THEME, value);
 }
@@ -888,61 +659,12 @@ export async function setTerminalCustomPalette(value: TerminalPalette): Promise<
   await writePref(KEY_TERMINAL_CUSTOM_PALETTE, value);
 }
 
-export async function setCustomInstructions(value: string): Promise<void> {
-  await writePref(KEY_CUSTOM_INSTRUCTIONS, value);
-}
-
-export async function setChatMode(value: boolean): Promise<void> {
-  await writePref(KEY_CHAT_MODE, value);
-}
-
-export async function setDisabledTools(value: string[]): Promise<void> {
-  await writePref(KEY_DISABLED_TOOLS, [...new Set(value)].sort());
-}
-
-export async function setDebugEnabled(value: boolean): Promise<void> {
-  await writePref(KEY_DEBUG_ENABLED, value);
-}
-
 export async function setAutostart(value: boolean): Promise<void> {
   await writePref(KEY_AUTOSTART, value);
 }
 
 export async function setRestoreWindowState(value: boolean): Promise<void> {
   await writePref(KEY_RESTORE_WINDOW, value);
-}
-
-export async function setAutocompleteEnabled(value: boolean): Promise<void> {
-  await writePref(KEY_AUTOCOMPLETE_ENABLED, value);
-}
-
-export async function setAutocompleteProvider(value: AutocompleteProviderId): Promise<void> {
-  await writePref(KEY_AUTOCOMPLETE_PROVIDER, value);
-}
-
-export async function setAutocompleteModelId(value: string): Promise<void> {
-  await writePref(KEY_AUTOCOMPLETE_MODEL, value);
-}
-
-export async function setLmstudioBaseURL(value: string): Promise<void> {
-  await writePref(KEY_LMSTUDIO_BASE_URL, value);
-}
-
-/**
- * Persist the full list of OpenAI-compatible endpoints. Also mirrors the
- * default instance's base URL into the legacy `openaiCompatibleBaseURL` field
- * so the runtime fallback and older code paths keep resolving the first
- * endpoint. Both writes go through `writePref`, so cross-window listeners and
- * the on-disk store stay consistent.
- */
-export async function setOpenAICompatibleInstances(
-  value: OpenAICompatibleInstance[],
-): Promise<void> {
-  await writePref(KEY_OPENAI_COMPATIBLE_INSTANCES, value);
-  const def = value.find((i) => i.id === OPENAI_COMPATIBLE_LEGACY_INSTANCE_ID) ?? value[0];
-  if (def && def.baseURL) {
-    await writePref(KEY_OPENAI_COMPATIBLE_BASE_URL, def.baseURL);
-  }
 }
 
 export async function setVimMode(value: boolean): Promise<void> {
@@ -1016,22 +738,6 @@ export async function setExtensionShortcuts(
   value: Record<string, KeyBinding[]> | {},
 ): Promise<void> {
   await writePref(KEY_EXTENSION_SHORTCUTS, value);
-}
-
-export async function setPinnedModelIds(value: string[]): Promise<void> {
-  await writePref(KEY_PINNED_MODELS, value);
-}
-
-export async function setApprovalMode(value: ApprovalMode): Promise<void> {
-  await writePref(KEY_APPROVAL_MODE, value);
-}
-
-export async function setLastModelId(value: DynamicModelId | null): Promise<void> {
-  await writePref(KEY_LAST_MODEL, value);
-}
-
-export async function setLastProviderId(value: string | null): Promise<void> {
-  await writePref(KEY_LAST_PROVIDER, value);
 }
 
 export async function setContentZoom(value: number): Promise<void> {
@@ -1165,21 +871,6 @@ export function _onAnyChange(cb: (key: string, value: unknown) => void): Promise
   return subscribeRawChanges(cb);
 }
 
-export const APPROVAL_MODE_META: Record<ApprovalMode, { label: string; description: string }> = {
-  ask: {
-    label: "Ask",
-    description: "Every mutating tool needs your approval",
-  },
-  semi: {
-    label: "Semi",
-    description: "File edits need approval; shell auto-approves",
-  },
-  yolo: {
-    label: "Full Auto",
-    description: "All tools auto-approve · no interruptions",
-  },
-};
-
 export type PrefKey = keyof Preferences;
 
 /** Subscribe to changes from any window (settings to main). */
@@ -1193,26 +884,14 @@ export async function onPreferencesChange(
   // dropped). The reverse lookup the listeners need is derived below.
   const prefToStoreKey = {
     theme: KEY_THEME,
-    defaultModelId: KEY_DEFAULT_MODEL,
-    defaultProviderId: KEY_DEFAULT_PROVIDER,
     editorTheme: KEY_EDITOR_THEME,
     fontFamily: KEY_FONT_FAMILY,
     editorFontSize: KEY_EDITOR_FONT_SIZE,
     terminalThemeMode: KEY_TERMINAL_THEME_MODE,
     terminalThemeId: KEY_TERMINAL_THEME_ID,
     terminalCustomPalette: KEY_TERMINAL_CUSTOM_PALETTE,
-    customInstructions: KEY_CUSTOM_INSTRUCTIONS,
-    chatMode: KEY_CHAT_MODE,
-    disabledTools: KEY_DISABLED_TOOLS,
-    debugEnabled: KEY_DEBUG_ENABLED,
     autostart: KEY_AUTOSTART,
     restoreWindowState: KEY_RESTORE_WINDOW,
-    autocompleteEnabled: KEY_AUTOCOMPLETE_ENABLED,
-    autocompleteProvider: KEY_AUTOCOMPLETE_PROVIDER,
-    autocompleteModelId: KEY_AUTOCOMPLETE_MODEL,
-    lmstudioBaseURL: KEY_LMSTUDIO_BASE_URL,
-    openaiCompatibleBaseURL: KEY_OPENAI_COMPATIBLE_BASE_URL,
-    openaiCompatibleInstances: KEY_OPENAI_COMPATIBLE_INSTANCES,
     vimMode: KEY_VIM_MODE,
     lineWrap: KEY_LINE_WRAP,
     showMinimap: KEY_SHOW_MINIMAP,
@@ -1228,10 +907,6 @@ export async function onPreferencesChange(
     sshInRightPanel: KEY_SSH_IN_RIGHT_PANEL,
     shortcuts: KEY_SHORTCUTS,
     extensionShortcuts: KEY_EXTENSION_SHORTCUTS,
-    pinnedModelIds: KEY_PINNED_MODELS,
-    approvalMode: KEY_APPROVAL_MODE,
-    lastModelId: KEY_LAST_MODEL,
-    lastProviderId: KEY_LAST_PROVIDER,
     contentZoom: KEY_CONTENT_ZOOM,
     uiZoom: KEY_UI_ZOOM,
     aiNotificationsEnabled: KEY_AI_NOTIFICATIONS_ENABLED,
@@ -1256,15 +931,4 @@ export async function onPreferencesChange(
     const mapped = map[key];
     if (mapped) cb(mapped, value);
   });
-}
-
-// API keys live in the OS keychain, not the prefs store. Broadcast via Tauri event for cross-window listeners.
-const KEYS_CHANGED_EVENT = "tedi://ai-keys-changed";
-
-export async function emitKeysChanged(): Promise<void> {
-  await emit(KEYS_CHANGED_EVENT);
-}
-
-export function onKeysChanged(cb: () => void): Promise<UnlistenFn> {
-  return listen(KEYS_CHANGED_EVENT, () => cb());
 }

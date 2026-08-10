@@ -32,7 +32,6 @@ export function useHeaderActions({
   newSshTab,
 }: Params): {
   handleOpenDetectedPreview: () => void;
-  handleAddProviderKey: () => void;
   handleHeaderSelectEntry: (tabId: number, leafId: number | null) => void;
   handleHeaderCloseEntry: (tabId: number, leafId: number | null) => void;
   handleHeaderNewPreview: () => void;
@@ -45,7 +44,6 @@ export function useHeaderActions({
   const handleOpenDetectedPreview = useCallback(() => {
     if (detectedBrowserUrl) openPreviewTab(detectedBrowserUrl);
   }, [detectedBrowserUrl, openPreviewTab]);
-  const handleAddProviderKey = useCallback(() => void openSettingsWindow("models"), []);
 
   const handleHeaderSelectEntry = useCallback(
     (tabId: number, leafId: number | null) => {
@@ -85,7 +83,6 @@ export function useHeaderActions({
 
   return {
     handleOpenDetectedPreview,
-    handleAddProviderKey,
     handleHeaderSelectEntry,
     handleHeaderCloseEntry,
     handleHeaderNewPreview,

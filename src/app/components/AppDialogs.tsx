@@ -8,10 +8,8 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { SelectionAskAi } from "@/modules/ai";
 import { type SshConnection } from "@/modules/ssh/connections";
 import { HostKeyPromptDialog } from "@/modules/ssh/HostKeyPromptDialog";
-import { AnimatePresence } from "motion/react";
 import { lazy, Suspense, type Dispatch, type SetStateAction } from "react";
 import { type QuitGuard } from "../hooks/useQuitGuard";
 import { type PendingClose } from "../hooks/useTabActions";
@@ -31,9 +29,6 @@ const AgentSpawnDialog = lazy(() =>
 );
 
 type Props = {
-  askPopup: { x: number; y: number } | null;
-  onAskFromSelection: () => void;
-  setAskPopup: Dispatch<SetStateAction<{ x: number; y: number } | null>>;
   agentDialogMounted: boolean;
   agentDialogOpen: boolean;
   setAgentDialogOpen: Dispatch<SetStateAction<boolean>>;
@@ -64,9 +59,6 @@ type Props = {
  * preserved verbatim.
  */
 export function AppDialogs({
-  askPopup,
-  onAskFromSelection,
-  setAskPopup,
   agentDialogMounted,
   agentDialogOpen,
   setAgentDialogOpen,
@@ -89,18 +81,6 @@ export function AppDialogs({
 }: Props) {
   return (
     <>
-      <AnimatePresence>
-        {askPopup ? (
-          <SelectionAskAi
-            key="ask-ai-popup"
-            x={askPopup.x}
-            y={askPopup.y}
-            onAsk={onAskFromSelection}
-            onDismiss={() => setAskPopup(null)}
-          />
-        ) : null}
-      </AnimatePresence>
-
       {agentDialogMounted ? (
         <Suspense fallback={null}>
           <AgentSpawnDialog

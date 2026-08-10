@@ -18,18 +18,7 @@ import {
   useEffect,
   useState,
 } from "react";
-import {
-  Code,
-  Info,
-  Keyboard,
-  Palette,
-  Puzzle,
-  ScanSearch,
-  Settings,
-  Users,
-  X,
-  type LucideIcon,
-} from "lucide-react";
+import { Code, Info, Keyboard, Palette, Puzzle, Settings, X, type LucideIcon } from "lucide-react";
 
 const GeneralSection = lazy(() =>
   import("./sections/GeneralSection").then((m) => ({ default: m.GeneralSection })),
@@ -42,12 +31,6 @@ const ThemeSection = lazy(() =>
 );
 const ShortcutsSection = lazy(() =>
   import("./sections/ShortcutsSection").then((m) => ({ default: m.ShortcutsSection })),
-);
-const ModelsSection = lazy(() =>
-  import("./sections/ModelsSection").then((m) => ({ default: m.ModelsSection })),
-);
-const AgentsSection = lazy(() =>
-  import("./sections/AgentsSection").then((m) => ({ default: m.AgentsSection })),
 );
 const ExtensionsSection = lazy(() =>
   import("./sections/ExtensionsSection").then((m) => ({ default: m.ExtensionsSection })),
@@ -66,8 +49,6 @@ const TABS: {
   { id: "code-editor", label: "Code Editor", icon: Code, component: CodeEditorSection },
   { id: "theme", label: "Theme", icon: Palette, component: ThemeSection },
   { id: "shortcuts", label: "Shortcuts", icon: Keyboard, component: ShortcutsSection },
-  { id: "models", label: "Models", icon: ScanSearch, component: ModelsSection },
-  { id: "agents", label: "Agents", icon: Users, component: AgentsSection },
   { id: "extensions", label: "Extensions", icon: Puzzle, component: ExtensionsSection },
   { id: "about", label: "About", icon: Info, component: AboutSection },
 ];
@@ -78,8 +59,6 @@ function readInitialTab(): SettingsTab {
   if (typeof window === "undefined") return "general";
   const url = new URL(window.location.href);
   const t = url.searchParams.get("tab");
-  // Back-compat: legacy "ai" / "connections" map to "models". The SSH manager moved to the toolbar.
-  if (t === "ai" || t === "connections") return "models";
   if (t && (VALID_TABS as string[]).includes(t)) return t as SettingsTab;
   return "general";
 }
@@ -151,10 +130,6 @@ export function SettingsApp() {
 
   useEffect(() => {
     const apply = (detail: string) => {
-      if (detail === "ai" || detail === "connections") {
-        setActive("models");
-        return;
-      }
       if ((VALID_TABS as string[]).includes(detail)) {
         setActive(detail as SettingsTab);
       }

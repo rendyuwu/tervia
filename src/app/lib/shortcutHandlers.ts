@@ -35,8 +35,6 @@ export interface ShortcutHandlerDeps {
     kind?: "terminal" | "editor" | "browser",
   ) => void;
   focusNextPaneInTab: (tabId: number, delta: 1 | -1) => void;
-  togglePanelAndFocus: () => void;
-  askFromSelection: () => void;
   openScmTab: () => number;
   toggleSidebar: () => void;
   requestCloseLeaf: (leafId: number) => void;
@@ -62,8 +60,6 @@ export function buildShortcutHandlers(deps: ShortcutHandlerDeps): ShortcutHandle
     selectByIndex,
     splitActivePaneInActiveTab,
     focusNextPaneInTab,
-    togglePanelAndFocus,
-    askFromSelection,
     openScmTab,
     toggleSidebar,
     requestCloseLeaf,
@@ -128,8 +124,6 @@ export function buildShortcutHandlers(deps: ShortcutHandlerDeps): ShortcutHandle
       const handle = editorRefs.current.get(activeLeafIdInTab);
       handle?.openFindReplace();
     },
-    "ai.toggle": togglePanelAndFocus,
-    "ai.askSelection": askFromSelection,
     "scm.open": () => {
       openScmTab();
     },

@@ -21,11 +21,6 @@ export type ShortcutId =
   | "explorer.grep"
   | "explorer.replaceAll"
   | "editor.findReplace"
-  | "ai.toggle"
-  | "ai.askSelection"
-  | "ai.send"
-  | "ai.queueWhileBusy"
-  | "ai.newline"
   | "shortcuts.open"
   | "settings.open"
   | "sidebar.toggle"
@@ -51,7 +46,6 @@ export type ShortcutGroup =
   | "Tabs"
   | "Panes"
   | "Search"
-  | "AI"
   | "View"
   | "Editor"
   | "Terminal"
@@ -225,39 +219,6 @@ export const SHORTCUTS: Shortcut[] = [
     defaultBindings: [{ [MOD_PROP]: true, key: "f" }],
   },
   {
-    id: "ai.toggle",
-    label: "Toggle AI agent",
-    group: "AI",
-    defaultBindings: [{ [MOD_PROP]: true, key: "i" }],
-  },
-  {
-    id: "ai.askSelection",
-    label: "Ask AI about selection",
-    group: "AI",
-    defaultBindings: [{ [MOD_PROP]: true, key: "l" }],
-  },
-  {
-    id: "ai.send",
-    label: "Send prompt",
-    group: "AI",
-    defaultBindings: [{ key: "Enter" }],
-    readOnly: true,
-  },
-  {
-    id: "ai.queueWhileBusy",
-    label: "Queue prompt while AI is busy",
-    group: "AI",
-    defaultBindings: [{ [MOD_PROP]: true, key: "Enter" }],
-    readOnly: true,
-  },
-  {
-    id: "ai.newline",
-    label: "New line in prompt",
-    group: "AI",
-    defaultBindings: [{ shift: true, key: "Enter" }],
-    readOnly: true,
-  },
-  {
     // Opens the Command Palette — a searchable list of all commands. VS Code
     // parity: Cmd+Shift+P on macOS, Ctrl+Shift+P on Win/Linux.
     id: "commandPalette.open",
@@ -367,8 +328,8 @@ export const SHORTCUTS: Shortcut[] = [
   // floats above the DOM, so these fire from the address bar / pane chrome
   // (when our window, not the page, holds keyboard focus).
   {
-    // Edge/Chrome "focus location bar" is Ctrl+L, but that's taken by
-    // ai.askSelection; Mod+Shift+L keeps the L (Location) mnemonic, unused.
+    // Edge/Chrome "focus location bar" is Ctrl+L; Mod+Shift+L keeps the L
+    // (Location) mnemonic and stays clear of the terminal's Ctrl+L clear.
     id: "browser.focusAddressBar",
     label: "Focus address bar",
     group: "Browser",
@@ -407,7 +368,6 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
   "Terminal",
   "Browser",
   "Search",
-  "AI",
   "Command Palette",
 ];
 

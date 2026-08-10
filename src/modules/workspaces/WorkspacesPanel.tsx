@@ -838,7 +838,7 @@ function EntryRowItem({
             ) : null}
             {ai ? <span className="text-muted-foreground">{aiCliLabel(ai)}</span> : null}
             {isPrivate ? (
-              <span className="text-destructive">Not visible to the native AI agent</span>
+              <span className="text-destructive">Private: program title is never saved</span>
             ) : null}
           </div>
         </TooltipContent>

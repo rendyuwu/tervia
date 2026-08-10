@@ -21,12 +21,6 @@ export const GitDiffStack = lazy(() =>
 export const ScmStack = lazy(() =>
   import("@/modules/scm/ScmStack").then((m) => ({ default: m.ScmStack })),
 );
-export const AiDiffStack = lazy(() =>
-  import("@/modules/editor/AiDiffStack").then((m) => ({ default: m.AiDiffStack })),
-);
 export const SshFileExplorer = lazy(() =>
   import("@/modules/ssh/SshFileExplorer").then((m) => ({ default: m.SshFileExplorer })),
-);
-export const AiSidebarPanel = lazy(() =>
-  import("@/modules/ai/components/AiMiniWindow").then((m) => ({ default: m.AiSidebarPanel })),
 );

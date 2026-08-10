@@ -3,14 +3,13 @@
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
-import { useChatStore } from "@/modules/ai/store/chatStore";
-import { ChevronRight, CircleCheck, Copy, Terminal } from "lucide-react";
+import { CircleCheck, Copy } from "lucide-react";
 import { createContext, memo, use, useEffect, useRef, useState } from "react";
 
 import { Shimmer } from "./shimmer";
 import { highlight, isHighlightable, type HighlightedNode } from "./chat-code-lezer";
 
-// Shell langs that get the CommandCard UI (prompt prefix + Run button).
+// Shell langs that get the CommandCard UI (prompt prefix + copy button).
 // Still highlightable; the card delegates to HighlightedPre.
 const POSIX_SHELL = new Set(["bash", "sh", "zsh", "shell", "console", "shellscript"]);
 const WINDOWS_SHELL = new Set(["powershell", "pwsh", "ps1", "ps", "cmd", "bat", "batch"]);
@@ -189,7 +188,6 @@ function CommandCard({ code, lang }: { code: string; lang: string }) {
           {normalizeLangLabel(lang)}
         </span>
         <div className="flex items-center gap-1">
-          <RunInTerminalButton command={code} />
           <CopyButton text={code} />
         </div>
       </div>
@@ -265,40 +263,6 @@ const HighlightedShellCode = memo(function HighlightedShellCode({
     </pre>
   );
 });
-
-function RunInTerminalButton({ command }: { command: string }) {
-  const [sent, setSent] = useState(false);
-  const tRef = useRef<number>(0);
-  useEffect(() => () => window.clearTimeout(tRef.current), []);
-  const onRun = () => {
-    const ok = useChatStore.getState().live.injectIntoActivePty(command);
-    if (!ok) return;
-    setSent(true);
-    tRef.current = window.setTimeout(() => setSent(false), 1500);
-  };
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <Button
-          type="button"
-          size="sm"
-          variant="ghost"
-          onClick={onRun}
-          className="text-muted-foreground hover:text-foreground h-5 gap-1 px-1.5 text-[10px] font-medium"
-          aria-label="Run in active terminal"
-        >
-          {sent ? (
-            <Terminal size={11} strokeWidth={1.75} />
-          ) : (
-            <ChevronRight size={11} strokeWidth={1.75} />
-          )}
-          <span>{sent ? "Sent" : "Run"}</span>
-        </Button>
-      </TooltipTrigger>
-      <TooltipContent side="top">Run in active terminal</TooltipContent>
-    </Tooltip>
-  );
-}
 
 function CopyButton({ text }: { text: string }) {
   const [copied, setCopied] = useState(false);

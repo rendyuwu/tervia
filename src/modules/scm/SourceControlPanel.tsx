@@ -19,7 +19,6 @@ import { basename } from "@/lib/path";
 import { useSshBrowseStore } from "@/modules/ssh/sshBrowseStore";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { gitStatus, gitStatusSsh, isBranchSwitch, localOps, remoteOps, type GitOps } from "./api";
-import { DIFF_BYTE_CAP, fallbackCommitMessage, generateCommitMessage } from "./commitAi";
 import { GitGraphView } from "./GitGraphView";
 import { ChangeSection } from "./components/ChangeSection";
 import { CommitBox, type ScmBusy } from "./components/CommitBox";
@@ -557,53 +556,6 @@ export function SourceControlPanel({
 
   const loadBranches = useCallback(async () => (ops ? ops.branches() : []), [ops]);
 
-  const doGenerate = useCallback(async () => {
-    if (busy !== null) return;
-    if (!ops || !status?.isRepo || !status.root) {
-      toast("Not a git repository.", { variant: "warning" });
-      return;
-    }
-    if (sorted.length === 0) {
-      toast("No changes to summarize.", { variant: "warning" });
-      return;
-    }
-    const startRoot = status.root;
-    const startId = identity();
-    setBusy("ai");
-    try {
-      let diff = "";
-      try {
-        diff = await ops.diff(DIFF_BYTE_CAP);
-      } catch (e) {
-        // Diff read failed. Fall back to a deterministic message so the user can still commit.
-        if (identity() !== startId) return;
-        setMessage(fallbackCommitMessage(sorted));
-        toast(`Couldn't read diff: ${String(e)} - used a default message`, { variant: "warning" });
-        return;
-      }
-      const res = await generateCommitMessage({ repoPath: startRoot, diff, changes: sorted });
-      if (identity() !== startId) return;
-      setMessage(res.message);
-      if (res.fallback) {
-        toast(
-          `Used a default message (${res.reason ?? "AI unavailable"})${
-            res.modelLabel ? ` - tried ${res.modelLabel}` : ""
-          }`,
-          { variant: "warning" },
-        );
-      } else if (res.modelLabel) {
-        toast(`Generated with ${res.modelLabel}`, { variant: "success" });
-      }
-    } catch (e) {
-      // generateCommitMessage isn't supposed to throw, but catch anyway so the panel doesn't crash.
-      if (identity() !== startId) return;
-      setMessage(fallbackCommitMessage(sorted));
-      toast(`AI generation failed: ${String(e)} - used a default message`, { variant: "warning" });
-    } finally {
-      setBusy(null);
-    }
-  }, [busy, ops, status, sorted, identity]);
-
   const toggleSection = useCallback((key: string) => {
     setCollapsedSections((s) => ({ ...s, [key]: !s[key] }));
   }, []);
@@ -740,7 +692,6 @@ export function SourceControlPanel({
                 stagedCount={staged.length}
                 busy={busy}
                 doCommit={doCommit}
-                doGenerate={doGenerate}
                 doPush={doPush}
                 doPull={doPull}
                 doFetch={doFetch}
@@ -771,7 +722,6 @@ export function SourceControlPanel({
                   stagedCount={staged.length}
                   busy={busy}
                   doCommit={doCommit}
-                  doGenerate={doGenerate}
                   doPush={doPush}
                   doPull={doPull}
                   doFetch={doFetch}

@@ -64,7 +64,7 @@ pub mod modules;
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 use modules::{
-    backup, cli, cli_ext, cli_theme, cli_update, clipboard, extensions, format, fs, git, mcp, net,
+    backup, cli, cli_ext, cli_theme, cli_update, clipboard, extensions, format, fs, git, net,
     preview, pty, pty_daemon, secrets, shell, ssh,
 };
 use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
@@ -268,22 +268,6 @@ fn recenter_over_main(app: &tauri::AppHandle, window: &tauri::WebviewWindow) {
             let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
         }
     }
-}
-
-/// Open (or reveal) the Debug-requests window. A separate native window that
-/// mirrors the main window's in-memory debug captures over Tauri events (see
-/// src/modules/ai/store/debugBridge.ts). Same owner-window chrome as Settings.
-#[tauri::command]
-async fn open_debug_window(app: tauri::AppHandle) -> Result<(), String> {
-    open_or_reveal_child(
-        &app,
-        "debug",
-        "debug.html".to_string(),
-        "Debug",
-        (980.0, 680.0),
-        (460.0, 360.0),
-    )?;
-    Ok(())
 }
 
 /// Open (or reveal) an always-on-top floating window that hosts a single pane
@@ -638,7 +622,7 @@ pub fn run() {
         .plugin(
             tauri_plugin_window_state::Builder::new()
                 .with_state_flags(StateFlags::all() & !StateFlags::VISIBLE)
-                .with_denylist(&["settings", "debug"])
+                .with_denylist(&["settings"])
                 .build(),
         )
         .plugin(tauri_plugin_autostart::Builder::new().build())
@@ -701,7 +685,6 @@ pub fn run() {
             shell::shell_bg_list,
             format::fmt_run_external,
             open_settings_window,
-            open_debug_window,
             open_float_window,
             preview::preview_embed_update,
             preview::preview_embed_navigate,
@@ -738,9 +721,6 @@ pub fn run() {
             net::port_is_open,
             net::http_stream,
             net::http_abort,
-            mcp::mcp_spawn,
-            mcp::mcp_write,
-            mcp::mcp_kill,
             ssh::ssh_open,
             ssh::ssh_write,
             ssh::ssh_resize,
@@ -782,13 +762,13 @@ pub fn run() {
             // mirroring below covers Linux/macOS and decoration-less
             // transparent windows where the OS auto-mirror is unreliable.
             // Only the main window's events drive the mirroring onto its
-            // children (settings + debug); ignore the children's own events.
+            // children (settings); ignore the children's own events.
             let label = window.label();
             if label != "main" {
                 return;
             }
             let app = window.app_handle().clone();
-            const CHILDREN: [&str; 2] = ["settings", "debug"];
+            const CHILDREN: [&str; 1] = ["settings"];
             match event {
                 // On Windows, minimize arrives as a Resized event (Tauri 2 has
                 // no Minimized variant). Sample the state and mirror it.
@@ -810,8 +790,8 @@ pub fn run() {
                     }
                 }
                 // Destroyed, not CloseRequested: the GUI can veto its own close
-                // (the quit prompt), and taking the settings/debug windows down
-                // on a close the user then cancels would be wrong.
+                // (the quit prompt), and taking the settings window down on a
+                // close the user then cancels would be wrong.
                 tauri::WindowEvent::Destroyed => {
                     for child in CHILDREN {
                         if let Some(w) = app.get_webview_window(child) {

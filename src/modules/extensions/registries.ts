@@ -6,7 +6,6 @@
  */
 
 import type {
-  ContributedAiTool,
   ContributedCommand,
   ContributedKeybinding,
   ContributedPanel,
@@ -155,7 +154,6 @@ export const settingsRegistry = new Registry<ContributedSetting>();
 export const commandsRegistry = new Registry<ContributedCommand>();
 export const keybindingsRegistry = new Registry<ContributedKeybinding>();
 export const panelsRegistry = new Registry<ContributedPanel>();
-export const aiToolsRegistry = new Registry<ContributedAiTool>();
 
 /**
  * Runtime, id-keyed registry. Stores one `Map<itemId, T>` per extension;
@@ -372,59 +370,6 @@ export type SidebarSection = {
 export const sidebarSectionsRegistry = new KeyedRegistry<SidebarSection>("sidebar-section");
 
 /**
- * Shell-command transformer registry. Lets extensions rewrite shell commands
- * before the built-in AI tools execute them (e.g. RTK prefixing `git status`
- * as `rtk git status`).
- * Each transformer receives the command and a `kind` hint (`bash` for hidden
- * agent shells via `bash_run`/`bash_background`, `terminal` for visible PTY
- * injections via `suggest_command`/`run_in_terminal`) and returns the
- * rewritten string. `applyAll` chains transformers in insertion order.
- * Sync API: command-transform is on the AI hot path; extensions needing async
- * state should cache it.
- * Each transformer is wrapped in try/catch; non-string returns are dropped.
- * Disable/uninstall clears the extension's entry.
- */
-export type ShellCommandKind = "bash" | "terminal";
-export type ShellCommandTransformer = (command: string, kind: ShellCommandKind) => string;
-
-class ShellTransformerRegistry {
-  /** Insertion-ordered so `applyAll` is deterministic. */
-  private readonly byExt = new Map<string, ShellCommandTransformer>();
-
-  set(extensionId: string, transformer: ShellCommandTransformer): void {
-    this.byExt.set(extensionId, transformer);
-  }
-
-  clear(extensionId: string): void {
-    this.byExt.delete(extensionId);
-  }
-
-  size(): number {
-    return this.byExt.size;
-  }
-
-  applyAll(command: string, kind: ShellCommandKind): string {
-    if (this.byExt.size === 0) return command;
-    let result = command;
-    for (const [extId, transformer] of this.byExt) {
-      try {
-        const next = transformer(result, kind);
-        if (typeof next !== "string") {
-          console.error(`[extensions] shell transformer from "${extId}" returned non-string`, next);
-          continue;
-        }
-        result = next;
-      } catch (err) {
-        console.error(`[extensions] shell transformer from "${extId}" threw`, err);
-      }
-    }
-    return result;
-  }
-}
-
-export const shellTransformersRegistry = new ShellTransformerRegistry();
-
-/**
  * Panel renderer registry. Right-panel extensions declare panels in
  * `contributes.panels[]` (surface `"right"`) and bind a mount function via
  * `ctx.registerPanelRenderer(panelId, fn)`. The host calls it with a fresh
@@ -501,9 +446,7 @@ export function clearExtensionContributions(extensionId: string): void {
   keybindingsRegistry.clear(extensionId);
   panelsRegistry.clear(extensionId);
   panelRenderersRegistry.clear(extensionId);
-  aiToolsRegistry.clear(extensionId);
   statusItemsRegistry.clear(extensionId);
   headerItemsRegistry.clear(extensionId);
   sidebarSectionsRegistry.clear(extensionId);
-  shellTransformersRegistry.clear(extensionId);
 }

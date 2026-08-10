@@ -13,8 +13,6 @@ export type FloatLeafParams = {
   title: string;
   /** editor leaf: absolute path */
   path?: string;
-  /** editor leaf: private (AI disabled) */
-  privateLeaf?: boolean;
   /**
    * terminal leaf: the pty lives on a remote host (SSH), not on this machine.
    * The float builds its own xterm over the SAME byte stream, so it needs the

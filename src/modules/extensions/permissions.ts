@@ -76,12 +76,9 @@ const HIGH_PROBES: readonly string[] = [
   "invoke:secrets_get",
   "invoke:pty_open",
   "invoke:ssh_open",
-  "invoke:mcp_spawn",
   "invoke:fmt_run_external",
   "secrets:read",
   "ssh:connections",
-  "shell:transform",
-  "ai:configure",
 ];
 
 const GLOB_ESCAPE_RE = /[.+?^${}()|[\]\\]/g;
@@ -143,16 +140,14 @@ export function permissionRiskTier(p: string): "low" | "medium" | "high" {
     // Code-execution / remote-shell / arbitrary-binary families are HIGH even as
     // an exact single command: fs_ (disk), shell_ (process), secrets_ (keychain),
     // pty_ (spawns a real shell = local code execution), ssh_ (remote shell +
-    // SFTP write/delete), mcp_ (mcp_spawn launches an arbitrary binary as an MCP
-    // server, same class as pty_), and fmt_run_external (runs an arbitrary
-    // external binary, deliberately bypassing the shell).
+    // SFTP write/delete), and fmt_run_external (runs an arbitrary external
+    // binary, deliberately bypassing the shell).
     if (
       cmd.startsWith("fs_") ||
       cmd.startsWith("shell_") ||
       cmd.startsWith("secrets_") ||
       cmd.startsWith("pty_") ||
       cmd.startsWith("ssh_") ||
-      cmd.startsWith("mcp_") ||
       cmd === "fmt_run_external"
     )
       return "high";
@@ -176,12 +171,5 @@ export function permissionRiskTier(p: string): "low" | "medium" | "high" {
   // text; write replaces it via a CodeMirror transaction. Medium-risk
   // because an extension could quietly mangle code the user is editing.
   if (p === "editor:read" || p === "editor:write") return "medium";
-  // `shell:transform` lets an extension rewrite every AI shell command;
-  // mark high so the install dialog flags it.
-  if (p === "shell:transform") return "high";
-  // `ai:configure` retargets the agent's model/provider and `ai:prompt` submits
-  // turns on the user's behalf. Both spend the user's API credit and steer an
-  // agent that can write files, so neither is a "medium" the dialog should mute.
-  if (p.startsWith("ai:")) return "high";
   return "medium";
 }

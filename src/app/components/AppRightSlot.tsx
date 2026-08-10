@@ -1,5 +1,4 @@
 import { ResizableHandle, ResizablePanel } from "@/components/ui/resizable";
-import { AiInputBarConnect } from "@/modules/ai/components/AiInputBarConnect";
 import {
   BUILTIN_SECTION_EXT,
   panelsRegistry,
@@ -20,16 +19,13 @@ import { type SshStatus } from "@/modules/ssh/status";
 import { type Tab } from "@/modules/tabs";
 import { Suspense, type ReactNode, type RefObject } from "react";
 import { type TabsApi } from "../hooks/tabsApi";
-import { AiSidebarPanel, SourceControlPanel, SshFileExplorer } from "./lazyPanels";
+import { SourceControlPanel, SshFileExplorer } from "./lazyPanels";
 import { SectionStack, TALL_HEADER_COLLAPSED_SIZE, type StackSection } from "./SectionStack";
 
 type Props = {
   rightPanels: ActivePanel[];
   scmRightOpen: boolean;
   sshRightOpen: boolean;
-  keysLoaded: boolean;
-  panelOpen: boolean;
-  hasComposer: boolean;
   explorerRoot: string | null;
   onPathDeleted: (path: string) => void;
   closeScmRight: () => void;
@@ -42,14 +38,12 @@ type Props = {
     fromActiveLeaf: boolean;
   };
   onOpenRemoteFile: (path: string, sessionId: number, hostLabel: string | null) => void;
-  onAddProviderKey: () => void;
   /** Files-section props, so a right-docked Files section renders in the column
    *  (same values App passes to AppSidebar). */
   filesSection: {
     onOpenFile: (path: string, pin?: boolean) => void;
     onPathRenamed: (from: string, to: string) => void;
     onRevealInTerminal: (path: string) => void;
-    onAttachToAgent: (path: string) => void;
     onPreviewInBrowser: (path: string) => void;
     activeFilePath: string | null;
   };
@@ -71,9 +65,7 @@ type Props = {
 
 // Persisted in localStorage, alongside the left sidebar's own order key.
 const ORDER_LS_KEY = "tedi:right:sectionOrder";
-// The AI panel is the tall one (a conversation plus its composer); everything
-// else starts compact. Normalized by the group for whatever is actually open.
-const AI_DEFAULT_SIZE = "45%";
+// Sections start compact; the group normalizes for whatever is actually open.
 const PANEL_DEFAULT_SIZE = "25%";
 
 /** Move a docked section back to the left sidebar (undocks) vs just closing it
@@ -98,16 +90,12 @@ export function AppRightSlot({
   rightPanels,
   scmRightOpen,
   sshRightOpen,
-  keysLoaded,
-  panelOpen,
-  hasComposer,
   explorerRoot,
   onPathDeleted,
   closeScmRight,
   closeSshRight,
   activeSshContext,
   onOpenRemoteFile,
-  onAddProviderKey,
   filesSection,
   workspacesSection,
   openGitDiffTab,
@@ -120,31 +108,6 @@ export function AppRightSlot({
   const extSections = useRegistry(sidebarSectionsRegistry);
 
   const sections: StackSection[] = [];
-
-  if (keysLoaded && panelOpen) {
-    sections.push({
-      key: "ai",
-      title: "AI",
-      defaultSize: AI_DEFAULT_SIZE,
-      collapsedSize: TALL_HEADER_COLLAPSED_SIZE,
-      render: (controls) =>
-        hasComposer ? (
-          <Suspense fallback={null}>
-            <AiSidebarPanel dragHandle={controls} />
-          </Suspense>
-        ) : (
-          // No API key yet: the connect card stands in for the panel. It draws
-          // no header of its own, so the grip needs a rail or this is the one
-          // section in the column that cannot be reordered.
-          <div className="border-border/60 bg-background tedi-glass-panel flex h-full flex-col overflow-hidden rounded-md border">
-            <div className="border-border/60 flex h-5 shrink-0 items-center border-b px-1.5">
-              {controls}
-            </div>
-            <AiInputBarConnect onAdd={onAddProviderKey} />
-          </div>
-        ),
-    });
-  }
 
   if (scmRightOpen) {
     sections.push({
@@ -214,7 +177,6 @@ export function AppRightSlot({
               onPathRenamed={filesSection.onPathRenamed}
               onPathDeleted={onPathDeleted}
               onRevealInTerminal={filesSection.onRevealInTerminal}
-              onAttachToAgent={filesSection.onAttachToAgent}
               onPreviewInBrowser={filesSection.onPreviewInBrowser}
               activeFilePath={filesSection.activeFilePath}
               dragHandle={controls}

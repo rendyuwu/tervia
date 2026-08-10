@@ -43,8 +43,6 @@ import { useAuxTabs } from "./useAuxTabs";
 // `@/modules/tabs/lib/useTabs` (and the `@/modules/tabs` barrel) keep working.
 export type {
   PaneTab,
-  AiDiffStatus,
-  AiDiffTab,
   GitChangeStatusTab,
   GitDiffTab,
   ScmTab,
@@ -112,8 +110,6 @@ export function useTabs(initial?: { cwd?: string; title?: string }) {
   // sub-hook for size; the callbacks close over the same setters/refs and are
   // spread into this hook's return object below with identical keys.
   const {
-    openAiDiffTab,
-    setAiDiffStatus,
     openGitDiffTab,
     openScmTab,
     openBoardTab,
@@ -1108,8 +1104,6 @@ export function useTabs(initial?: { cwd?: string; title?: string }) {
     openExtensionTab,
     openExtensionPane,
     setExtensionTabState,
-    openAiDiffTab,
-    setAiDiffStatus,
     openGitDiffTab,
     openScmTab,
     openBoardTab,

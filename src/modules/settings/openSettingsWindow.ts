@@ -5,8 +5,6 @@ export type SettingsTab =
   | "code-editor"
   | "theme"
   | "shortcuts"
-  | "models"
-  | "agents"
   | "extensions"
   | "about";
 

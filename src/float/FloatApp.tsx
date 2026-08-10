@@ -7,7 +7,7 @@ import { EditorPane, type EditorPaneHandle } from "@/modules/editor";
 import { decodeFloatParams, floatEv, type FloatCards } from "@/modules/panes/floatProtocol";
 import { BoardColumns } from "@/modules/workspaces/WorkspaceBoard";
 import type { PaneEntry } from "@/modules/tabs/lib/entries";
-import { FloatTableProvider, markdownComponents } from "@/components/ai-elements/markdown-code";
+import { FloatTableProvider, markdownComponents } from "@/components/markdown/markdown-code";
 import { ExtensionPanelMount } from "@/modules/extensions/components/ExtensionPanelMount";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Toaster } from "@/components/ui/toast";
@@ -75,7 +75,7 @@ export function FloatApp() {
             ) : params?.kind === "table" && params.markdown ? (
               <FloatTableView markdown={params.markdown} />
             ) : params?.kind === "editor" && params.path ? (
-              <EditorPane ref={editorRef} path={params.path} aiDisabled={params.privateLeaf} />
+              <EditorPane ref={editorRef} path={params.path} />
             ) : params?.kind === "browser" ? (
               <FloatBrowser leafId={params.leafId} url={params.url ?? ""} />
             ) : params?.kind === "board" ? (

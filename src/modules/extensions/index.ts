@@ -8,7 +8,6 @@ export { ManifestSchema, safeParseManifest } from "./manifest";
 export { useExtensionsStore } from "./store";
 export type { InstalledExtension } from "./store";
 export {
-  aiToolsRegistry,
   commandsRegistry,
   keybindingsRegistry,
   panelRenderersRegistry,

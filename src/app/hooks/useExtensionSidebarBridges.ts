@@ -7,22 +7,20 @@ import {
   type OpenExtensionTabOpts,
   type SetExtensionTabStateOpts,
 } from "@/modules/extensions/tabsBridge";
-import { useChatStore } from "@/modules/ai";
 import { useRightPanelStore } from "@/modules/extensions";
 import { useScmRightPanelStore } from "@/modules/scm/scmRightPanelStore";
 import type { Tab } from "@/modules/tabs";
 import { useEffect, type RefObject } from "react";
 import type { PanelImperativeHandle } from "react-resizable-panels";
 
-/** Snapshot of the auto-restorable right-column surfaces (the AI chat and every
- *  open extension panel) at the moment an extension asked the column to close.
+/** Snapshot of the auto-restorable right-column surfaces (every open extension
+ *  panel) at the moment an extension asked the column to close.
  *  The column stacks its surfaces, so this records ALL of them, not just the
  *  newest — a bare "hide" that came back with one panel out of three would read
  *  as data loss. `null` means the column was either empty or held only Source
  *  Control: SCM is manual-only and is never auto-restored, so it gets closed
  *  alongside the others on hide but is never recorded for replay. */
 export type RightAuxSnapshot = {
-  chat: boolean;
   panels: Array<{ extensionId: string; panelId: string }>;
 } | null;
 
@@ -123,10 +121,9 @@ export function useExtensionSidebarBridges({
   }, []);
 
   // Mirror of the left-sidebar setter for the right-side aux column. The
-  // three right surfaces (AI chat, extension right panel, SCM right panel)
-  // are mutually exclusive so we just snapshot whichever was open, close
-  // them all on hide, and replay the snapshot when the owning ext tab goes
-  // away. `visible === true` clears the latch (no re-open: the user can
+  // two right surfaces (extension right panel, SCM right panel) are mutually
+  // exclusive so we just snapshot whichever was open, close them all on hide,
+  // and replay the snapshot when the owning ext tab goes away. `visible === true` clears the latch (no re-open: the user can
   // toggle it manually).
   //
   // Source Control is intentionally excluded from the snapshot: the user
@@ -135,13 +132,10 @@ export function useExtensionSidebarBridges({
   // it. They close behind the extension and stay closed.
   useEffect(() => {
     setRightSidebarSetter((visible, ownerExtensionId) => {
-      const chat = useChatStore.getState();
       const rightPanel = useRightPanelStore.getState();
       const scm = useScmRightPanelStore.getState();
       const snapshot: RightAuxSnapshot =
-        chat.panelOpen || rightPanel.panels.length > 0
-          ? { chat: chat.panelOpen, panels: rightPanel.panels.map((p) => ({ ...p })) }
-          : null;
+        rightPanel.panels.length > 0 ? { panels: rightPanel.panels.map((p) => ({ ...p })) } : null;
       if (ownerExtensionId && !visible) {
         if (!rightSidebarHiderRef.current) {
           rightSidebarHiderRef.current = { extensionId: ownerExtensionId, prior: snapshot };
@@ -150,11 +144,10 @@ export function useExtensionSidebarBridges({
         rightSidebarHiderRef.current = null;
       }
       if (!visible) {
-        if (chat.panelOpen) chat.closePanel();
         if (rightPanel.panels.length > 0) rightPanel.close();
         if (scm.open) scm.closePanel();
       }
-      // `visible === true` is a no-op: we don't know which of the three
+      // `visible === true` is a no-op: we don't know which of the two
       // surfaces to reopen from a bare call. The owner-restore effect
       // below handles the actual replay when the ext tab goes away.
     });
@@ -175,7 +168,6 @@ export function useExtensionSidebarBridges({
       if (!prior) return;
       // SCM is deliberately not in the snapshot: see the setter above. The
       // user must reopen it via the status-bar GitBranch icon.
-      if (prior.chat) useChatStore.getState().openPanel();
       for (const p of prior.panels) {
         useRightPanelStore.getState().open(p.extensionId, p.panelId);
       }
@@ -187,10 +179,8 @@ export function useExtensionSidebarBridges({
     }
     const onHiderTab = activeTab?.kind === "ext" && activeTab.extensionId === hider.extensionId;
     if (onHiderTab) {
-      const chat = useChatStore.getState();
       const rightPanel = useRightPanelStore.getState();
       const scm = useScmRightPanelStore.getState();
-      if (chat.panelOpen) chat.closePanel();
       if (rightPanel.panels.length > 0) rightPanel.close();
       if (scm.open) scm.closePanel();
     } else {

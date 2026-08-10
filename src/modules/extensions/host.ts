@@ -11,17 +11,11 @@ import { emit as tauriEmit, listen as tauriListen, type UnlistenFn } from "@taur
 import { toast } from "@/components/ui/toast";
 
 import type {
-  ContributedAiTool,
   ContributedCommand,
   ContributedKeybinding,
   ContributedPanel,
   ContributedSetting,
 } from "./manifest";
-import {
-  SUBAGENT_TOOL_NAMES,
-  subagentsAvailable,
-  withSubagentsDisabled,
-} from "@/modules/ai/tools/catalog";
 import { PermissionDeniedError, isInvokeAllowed, requirePermission } from "./permissions";
 import { useRightPanelStore } from "./rightPanelStore";
 import {
@@ -35,19 +29,16 @@ import {
 } from "@/modules/ssh/tunnel";
 import { mountCodeEditor, type CodeEditorHandle, type CodeEditorOptions } from "./codeEditor";
 import {
-  aiToolsRegistry,
   commandsRegistry,
   headerItemsRegistry,
   keybindingsRegistry,
   panelRenderersRegistry,
   panelsRegistry,
   settingsRegistry,
-  shellTransformersRegistry,
   sidebarSectionsRegistry,
   statusItemsRegistry,
   type HeaderItem,
   type PanelRenderer,
-  type ShellCommandTransformer,
   type SidebarSection,
   type StatusItem,
 } from "./registries";
@@ -173,35 +164,6 @@ export type AppContextSnapshot = {
   }[];
 };
 
-/**
- * Read-only view of the AI agent, derived live from `chatStore` +
- * `usePreferencesStore` on every call. Structural on purpose (the same
- * convention as `AppContextSnapshot`): extensions load as Blob modules and
- * cannot resolve the app's `@/` types, so the shape IS the contract.
- */
-export type AiStateSnapshot = {
-  /** Currently selected model id, as shown in the chat dropdown. */
-  modelId: string;
-  /** Provider that owns `modelId`. Pass this back to `setModel`. */
-  provider: string;
-  status: "idle" | "thinking" | "streaming" | "awaiting-approval" | "error";
-  /** Human-readable current step while running, else `null`. */
-  step: string | null;
-  approvalsPending: number;
-  /** Cumulative tokens for the active session, this app's own BYOK agent. */
-  usage: { input: number; output: number; cached: number };
-  activeSessionId: string | null;
-  /** The user's safety posture. Read-only by design; see `ctx.ai` below. */
-  approvalMode: "ask" | "semi" | "yolo";
-  /** Can the AI delegate to sub-agents? Kept in the API after the preference of
-   *  the same name was removed; it is now derived from the tool picker, so the
-   *  meaning is unchanged for extensions reading it. */
-  subagentsEnabled: boolean;
-  /** Whether a key is configured for `modelId`'s provider. False means a run
-   *  would fail; the key itself is never exposed. */
-  hasKey: boolean;
-};
-
 export type ExtensionContext = {
   id: string;
   /** Absolute path of the extension's install folder. Join with the sidecar
@@ -251,38 +213,6 @@ export type ExtensionContext = {
     get<T = unknown>(key: string): Promise<T | undefined>;
     set<T>(key: string, value: T): Promise<void>;
     onChange(key: string, cb: (value: unknown) => void): Disposer;
-  };
-  /**
-   * The AI agent. Reads are ungated (strictly less revealing than the already
-   * ungated `app.getContext()`, which exposes every terminal's window title).
-   * Writes that spend the user's API credit or retarget the agent need
-   * `ai:configure`; submitting a turn needs `ai:prompt`.
-   *
-   * There is deliberately NO `setApprovalMode`. `approvalMode` is the user's
-   * safety posture, and unlike everything else here a write to it PERSISTS
-   * across restarts, so an extension could permanently disarm the approval
-   * gate in one call and the user would have no event telling them it moved.
-   * Read it, branch on it, ask the user to change it themselves.
-   */
-  ai: {
-    getState(): AiStateSnapshot;
-    /** Fires on any agent or preference change. Coalesce if you render. */
-    onStateChange(cb: (state: AiStateSnapshot) => void): Disposer;
-    /** Retarget the agent. Takes effect on the NEXT prompt: an in-flight run
-     *  stays bound to the model it started with. `provider` is required
-     *  because ids can be shared across providers; pass `getState().provider`
-     *  when you only mean to change the model. Requires `ai:configure`. */
-    setModel(modelId: string, provider: string): Promise<void>;
-    /** Requires `ai:configure`. */
-    setSubagentsEnabled(enabled: boolean): Promise<void>;
-    /** Submit a turn as if the user typed it. Resolves `false` when the
-     *  composer refused (no key, or a run is already active). The agent's own
-     *  approval gate still applies to every tool it calls. Requires
-     *  `ai:prompt`. */
-    sendPrompt(text: string): Promise<boolean>;
-    /** Stop the active run. Ungated: de-escalating, and the user can always
-     *  do it from the UI. */
-    stop(): void;
   };
   /** Invoke a Rust command. Each command id needs an `invoke:` permission. */
   invoke<T = unknown>(command: string, args?: Record<string, unknown>): Promise<T>;
@@ -434,17 +364,6 @@ export type ExtensionContext = {
      *  closed once its last forward goes away. */
     closeForward(connectionId: string, remoteHost: string, remotePort: number): Promise<void>;
   };
-  /** AI shell hook. Registers a synchronous transformer that rewrites
-   *  commands before `bash_run`, `bash_background`, `run_in_terminal`, and
-   *  `suggest_command` execute. Receives the command and a `kind`
-   *  discriminator; return the rewritten string (or the original to pass
-   *  through). Transformers compose in insertion order; each call is wrapped
-   *  in try/catch. The returned `Disposer` clears this extension's
-   *  registration; the host also disposes on `deactivate`.
-   *  Requires `shell:transform`. */
-  shell: {
-    registerCommandTransformer(transformer: ShellCommandTransformer): Disposer;
-  };
   /** Mounts a right-panel renderer. Pair with a `panels[]` manifest entry
    *  whose `surface` is `"right"`. The renderer gets a fresh `<div>`; return
    *  a cleanup callback. Requires `panels:register`. Auto-disposed on
@@ -465,17 +384,10 @@ export type ExtensionContext = {
     commands(items: ContributedCommand[]): void;
     keybindings(items: ContributedKeybinding[]): void;
     panels(items: ContributedPanel[]): void;
-    aiTools(items: ContributedAiTool[]): void;
   };
   /** Binds a JS handler to a contributed command id. The command must be
    *  declared in `contribute.commands` first. */
   registerCommandHandler(commandId: string, handler: (...args: unknown[]) => unknown): void;
-  /** Binds a handler to a contributed AI tool. The host packages the result
-   *  for the AI SDK. */
-  registerAiToolHandler(
-    toolName: string,
-    handler: (args: Record<string, unknown>) => Promise<unknown> | unknown,
-  ): void;
   /** Logger that prefixes the extension id. */
   logger: {
     info(...args: unknown[]): void;
@@ -551,35 +463,11 @@ export async function buildContext(ext: ExtensionRuntime): Promise<{
     iconRoots.clear();
   });
 
-  const [{ getAppContext, subscribeAppContext }, chatMod, prefsMod, os, home] = await Promise.all([
+  const [{ getAppContext, subscribeAppContext }, os, home] = await Promise.all([
     import("./appBridge"),
-    import("@/modules/ai/store/chatStore"),
-    import("@/modules/settings/preferences"),
     detectOs(),
     detectHome(),
   ]);
-
-  // Derived on every call rather than pushed from a component: the only place
-  // that could push (AgentRunBridge) is mounted just when a key exists AND a
-  // session is active, so a pushed snapshot would report defaults for
-  // approvalMode/subagentsEnabled the rest of the time, and freeze mid-run
-  // values on unmount. Both stores are sync, so reading is cheap and honest.
-  const readAiState = (): AiStateSnapshot => {
-    const c = chatMod.useChatStore.getState();
-    const p = prefsMod.usePreferencesStore.getState();
-    return {
-      modelId: c.selectedModelId,
-      provider: c.selectedProvider,
-      status: c.agentMeta.status,
-      step: c.agentMeta.step,
-      approvalsPending: c.agentMeta.approvalsPending,
-      usage: { ...c.agentMeta.usage },
-      activeSessionId: c.activeSessionId,
-      approvalMode: p.approvalMode,
-      subagentsEnabled: subagentsAvailable(new Set(p.disabledTools)),
-      hasKey: chatMod.hasKeyForModel(c.selectedModelId),
-    };
-  };
 
   const context: ExtensionContext = {
     id: ext.id,
@@ -604,56 +492,6 @@ export async function buildContext(ext: ExtensionRuntime): Promise<{
         requirePermission(ext.id, declared, "workspaces:manage");
         return setActiveWorkspaceBridge(String(wsId ?? ""));
       },
-    },
-    ai: {
-      getState: () => readAiState(),
-      onStateChange: (cb) => {
-        // Fan-in: model/run state lives in chatStore, while approvalMode and the
-        // disabledTools that `subagentsEnabled` is derived from live in
-        // preferences. Either can move independently.
-        const emit = (): void => cb(readAiState());
-        const unsubs = [
-          chatMod.useChatStore.subscribe(emit),
-          prefsMod.usePreferencesStore.subscribe(emit),
-        ];
-        const dispose = (): void => {
-          for (const u of unsubs) u();
-        };
-        disposers.push(dispose);
-        return dispose;
-      },
-      async setModel(modelId: string, provider: string): Promise<void> {
-        requirePermission(ext.id, declared, "ai:configure");
-        // The model id is NOT validated against the registry on purpose:
-        // openai-compatible instances mint ids at runtime, so a registry check
-        // would reject valid ones. A bad id surfaces on the next run.
-        // The provider IS validated, because it is a closed union and an
-        // unrecognised one would be stored verbatim and break provider
-        // resolution silently. Unknown provider => let the store resolve it
-        // from the id, the same fallback an omitted argument gets.
-        const { PROVIDERS } = await import("@/modules/ai/config");
-        const known = PROVIDERS.find((p) => p.id === provider)?.id;
-        chatMod.useChatStore.getState().setSelectedModelId(String(modelId ?? ""), known);
-      },
-      // Kept in the extension API after the preference was removed: it now
-      // switches the spawn tools in the picker, which is the same user-visible
-      // effect. Only those two names are touched, so an extension calling this
-      // cannot clobber the rest of the user's picker choices.
-      async setSubagentsEnabled(enabled: boolean): Promise<void> {
-        requirePermission(ext.id, declared, "ai:configure");
-        const mod = await import("@/modules/settings/store");
-        const current = prefsMod.usePreferencesStore.getState().disabledTools;
-        await mod.setDisabledTools(
-          enabled
-            ? current.filter((n) => !(SUBAGENT_TOOL_NAMES as readonly string[]).includes(n))
-            : withSubagentsDisabled(current),
-        );
-      },
-      async sendPrompt(text: string): Promise<boolean> {
-        requirePermission(ext.id, declared, "ai:prompt");
-        return chatMod.sendMessage(String(text ?? ""));
-      },
-      stop: () => chatMod.stop(),
     },
     settings: {
       async get<T = unknown>(key: string): Promise<T | undefined> {
@@ -943,16 +781,6 @@ export async function buildContext(ext: ExtensionRuntime): Promise<{
         );
       },
     },
-    shell: {
-      registerCommandTransformer(transformer: ShellCommandTransformer): Disposer {
-        requirePermission(ext.id, declared, "shell:transform");
-        shellTransformersRegistry.set(ext.id, transformer);
-        const dispose = (): void => shellTransformersRegistry.clear(ext.id);
-        // Host disposes on disable/uninstall so the chain falls back to passthrough.
-        disposers.push(dispose);
-        return dispose;
-      },
-    },
     registerPanelRenderer(panelId: string, renderer: PanelRenderer): Disposer {
       requirePermission(ext.id, declared, "panels:register");
       panelRenderersRegistry.set(ext.id, panelId, renderer);
@@ -995,15 +823,9 @@ export async function buildContext(ext: ExtensionRuntime): Promise<{
         requirePermission(ext.id, declared, "panels:register");
         panelsRegistry.set(ext.id, items);
       },
-      aiTools(items) {
-        aiToolsRegistry.set(ext.id, items);
-      },
     },
     registerCommandHandler(commandId, handler) {
       commandsRegistry.setRuntime(ext.id, commandId, handler);
-    },
-    registerAiToolHandler(toolName, handler) {
-      aiToolsRegistry.setRuntime(ext.id, toolName, handler);
     },
     logger: {
       info: (...args) => log("info", args),

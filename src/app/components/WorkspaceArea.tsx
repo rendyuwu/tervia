@@ -9,7 +9,7 @@ import type { SearchAddon } from "@xterm/addon-search";
 import { Suspense } from "react";
 import { type TabsApi } from "../hooks/tabsApi";
 import { type usePaneHandles } from "../hooks/usePaneHandles";
-import { AiDiffStack, GitDiffStack, ScmStack } from "./lazyPanels";
+import { GitDiffStack, ScmStack } from "./lazyPanels";
 
 type PaneHandles = ReturnType<typeof usePaneHandles>;
 
@@ -37,11 +37,9 @@ type Props = {
   /** Detected local URL for the focused pane header's "open preview" globe. */
   detectedBrowserUrl: string | null;
   onOpenPreview: () => void;
-  hasAiDiffTab: boolean;
   hasGitDiffTab: boolean;
   hasScmTab: boolean;
   hasExtensionTab: boolean;
-  respondToApproval: (approvalId: string, approve: boolean) => void;
   onPathDeleted: (path: string) => void;
   /** Persist a split node's per-child size percentages after a divider drag. */
   onSplitSizes: (splitId: number, sizes: number[]) => void;
@@ -82,11 +80,9 @@ export function WorkspaceArea({
   onToggleMdPreview,
   detectedBrowserUrl,
   onOpenPreview,
-  hasAiDiffTab,
   hasGitDiffTab,
   hasScmTab,
   hasExtensionTab,
-  respondToApproval,
   onPathDeleted,
   onSplitSizes,
   setBrowserLeafUrl,
@@ -144,24 +140,6 @@ export function WorkspaceArea({
               sshBindingByConnection={sshBindingByConnection}
               onReconnectSsh={onReconnectSsh}
             />
-          </div>
-          <div
-            className={cn(
-              "absolute inset-0",
-              activeTab?.kind !== "ai-diff" && "pointer-events-none invisible",
-            )}
-            aria-hidden={activeTab?.kind === "ai-diff" ? "false" : "true"}
-          >
-            {hasAiDiffTab ? (
-              <Suspense fallback={null}>
-                <AiDiffStack
-                  tabs={tabs}
-                  activeId={activeId}
-                  onAccept={(id) => respondToApproval(id, true)}
-                  onReject={(id) => respondToApproval(id, false)}
-                />
-              </Suspense>
-            ) : null}
           </div>
           <div
             className={cn(

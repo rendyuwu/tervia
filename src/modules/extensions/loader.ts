@@ -15,7 +15,6 @@ import { buildContext, type ExtensionContext } from "./host";
 import { safeParseManifest, type Manifest } from "./manifest";
 import { satisfies } from "./semver";
 import {
-  aiToolsRegistry,
   clearExtensionContributions,
   commandsRegistry,
   keybindingsRegistry,
@@ -37,7 +36,6 @@ export function seedManifestContributions(ext: InstalledExtension): void {
   if (c.commands) commandsRegistry.set(ext.id, c.commands);
   if (c.keybindings) keybindingsRegistry.set(ext.id, c.keybindings);
   if (c.panels) panelsRegistry.set(ext.id, c.panels);
-  if (c.aiTools) aiToolsRegistry.set(ext.id, c.aiTools);
 }
 
 export type InstalledExtension = {

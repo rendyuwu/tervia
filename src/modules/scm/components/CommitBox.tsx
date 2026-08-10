@@ -17,10 +17,9 @@ import {
   CloudUpload,
   GitCommitHorizontal,
   RefreshCw,
-  Sparkles,
 } from "lucide-react";
 
-export type ScmBusy = null | "commit" | "push" | "pull" | "fetch" | "ai" | "stage" | "branch";
+export type ScmBusy = null | "commit" | "push" | "pull" | "fetch" | "stage" | "branch";
 
 type CommitBoxProps = {
   status: GitStatus;
@@ -32,7 +31,6 @@ type CommitBoxProps = {
   stagedCount: number;
   busy: ScmBusy;
   doCommit: (amend?: boolean) => Promise<void> | void;
-  doGenerate: () => Promise<void> | void;
   doPush: (force?: boolean) => Promise<void> | void;
   doPull: () => Promise<void> | void;
   doFetch: () => Promise<void> | void;
@@ -46,7 +44,6 @@ export function CommitBox({
   stagedCount,
   busy,
   doCommit,
-  doGenerate,
   doPush,
   doPull,
   doFetch,
@@ -74,34 +71,9 @@ export function CommitBox({
             }
           }}
           rows={2}
-          className="max-h-40 min-h-[3.25rem] w-full resize-y rounded-md py-1.5 pr-7 pl-2 text-[11.5px]"
+          className="max-h-40 min-h-[3.25rem] w-full resize-y rounded-md px-2 py-1.5 text-[11.5px]"
           disabled={busy !== null}
         />
-        <IconTooltip
-          label={
-            busy === "ai"
-              ? "Generating…"
-              : changeCount === 0
-                ? "No changes to summarize"
-                : "Generate commit message with AI"
-          }
-          side="bottom"
-        >
-          <Button
-            variant="ghost"
-            size="icon"
-            className="text-muted-foreground hover:text-foreground absolute top-1 right-0.5 size-6 rounded-md"
-            onClick={() => void doGenerate()}
-            disabled={changeCount === 0 || busy !== null}
-            aria-label="Generate commit message"
-          >
-            {busy === "ai" ? (
-              <Spinner className="size-3" />
-            ) : (
-              <Sparkles size={12} strokeWidth={2} />
-            )}
-          </Button>
-        </IconTooltip>
       </div>
 
       <div className="flex items-center gap-1">

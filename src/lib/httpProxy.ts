@@ -1,16 +1,17 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 
 /**
- * CORS-bypassing HTTP fetch for AI provider calls.
+ * CORS-bypassing HTTP fetch.
  *
- * A gateway that sends no `Access-Control-Allow-Origin` is blocked by the
+ * An endpoint that sends no `Access-Control-Allow-Origin` is blocked by the
  * WebView as a bare `TypeError: Failed to fetch`, with no status. Self-hosted
- * and tunnelled routers usually send no CORS headers, so native `fetch` fails
- * even when the endpoint is fine.
+ * services usually send no CORS headers, so native `fetch` fails even when the
+ * endpoint is fine.
  *
- * `corsFallbackFetch` keeps the native path for CORS-friendly clouds and falls
+ * `corsFallbackFetch` keeps the native path for CORS-friendly hosts and falls
  * back to the Rust/reqwest proxy (`http_stream`) only on that `TypeError`. The
- * proxy streams the body over an IPC `Channel`, so SSE stays token-by-token.
+ * proxy streams the body over an IPC `Channel`, so a chunked response stays
+ * incremental.
  */
 
 type StreamEvent =

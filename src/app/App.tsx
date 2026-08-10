@@ -9,19 +9,17 @@
  *
  * Where behaviors are set up (each is its own hook unless noted):
  *   - useWorkspaceRoot         - home / picked root + `tedi <path>` CLI targets
- *   - useAiBootstrap           - API keys, model restore/persist, store hydration
  *   - useExtensionPanelDefaults- extension boot + right-panel defaults
  *   - useWorkspacePersistence  - hydrate + auto-snapshot workspaces
  *   - useQuitGuard             - pre-quit snapshot flush + busy-terminal prompt
  *   - useWorkspaceSwitching    - switch / create / close orchestration
  *   - useRightPanelExclusion   - SCM / AI / extension right-slot mutual exclusion
  *   - useExtensionSidebarBridges - tabs/sidebar host bridges + auto-restore
- *   - useEditorBridge / useAgentBridges - ctx.editor + AI live-context + scheduler
+ *   - useEditorBridge          - ctx.editor bridge for extensions
  *   - useActiveLeafSurface     - active leaf search addon / URL / editor handle
- *   - useSelectionAskAi        - the "Ask AI about selection" popup
  *   - useSessionDisposal       - PTY/xterm teardown by pane tree
  *   - useChromeDerivations     - Header/StatusBar derived values
- *   - useTabSideEffects        - ai-diff reload, open-file chips, tab counts
+ *   - useTabSideEffects        - live per-workspace tab counts
  * Layout: AppSidebar / WorkspaceArea / AppRightSlot / AppDialogs.
  *
  * See ARCHITECTURE.md for the two-process model and TEDI.md for full detail.
@@ -30,8 +28,6 @@ import { pathToFileUrl } from "@/lib/path";
 import { ResizableHandle, ResizablePanelGroup } from "@/components/ui/resizable";
 import { Toaster } from "@/components/ui/toast";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { AgentRunBridge, hasAnyKey, useChatStore } from "@/modules/ai";
-import { AiComposerProvider } from "@/modules/ai/lib/composer";
 import { useRightPanelStore } from "@/modules/extensions";
 import { type EditorPaneHandle } from "@/modules/editor";
 import { Header, type SearchInlineHandle } from "@/modules/header";
@@ -47,7 +43,6 @@ import {
 } from "@/modules/shortcuts";
 import { StatusBar } from "@/modules/statusbar";
 import {
-  activeLeaf,
   activeLeafKind,
   isEditorLikeTab,
   isTerminalLikeTab,
@@ -88,13 +83,10 @@ import { useTabActions } from "./hooks/useTabActions";
 import { useFileActions } from "./hooks/useFileActions";
 import { useHeaderActions } from "./hooks/useHeaderActions";
 import { useWorkspaceRoot } from "./hooks/useWorkspaceRoot";
-import { useAiBootstrap } from "./hooks/useAiBootstrap";
 import { useExtensionPanelDefaults } from "./hooks/useExtensionPanelDefaults";
 import { useQuitGuard } from "./hooks/useQuitGuard";
 import { useWorkspacePersistence } from "./hooks/useWorkspacePersistence";
 import { useEditorBridge } from "./hooks/useEditorBridge";
-import { useAgentBridges } from "./hooks/useAgentBridges";
-import { useSelectionAskAi } from "./hooks/useSelectionAskAi";
 import { useSessionDisposal } from "./hooks/useSessionDisposal";
 import { useAdoptDaemonSessions } from "./hooks/useAdoptDaemonSessions";
 import { useActiveLeafSurface } from "./hooks/useActiveLeafSurface";
@@ -122,8 +114,6 @@ export default function App() {
     openExtensionTab,
     openExtensionPane,
     setExtensionTabState,
-    openAiDiffTab,
-    setAiDiffStatus,
     openGitDiffTab,
     openScmTab,
     openBoardTab,
@@ -181,15 +171,13 @@ export default function App() {
 
   // Lazy-mount the diff/scm/ext stacks. Each chunk only loads once a tab of
   // that kind exists.
-  const hasAiDiffTab = useMemo(() => tabs.some((t) => t.kind === "ai-diff"), [tabs]);
   const hasGitDiffTab = useMemo(() => tabs.some((t) => t.kind === "git-diff"), [tabs]);
   const hasScmTab = useMemo(() => tabs.some((t) => t.kind === "scm"), [tabs]);
   const hasExtensionTab = useMemo(() => tabs.some((t) => t.kind === "ext"), [tabs]);
 
   // Active leaf says what's focused in the current tab. Drives Search,
-  // AI selection, CWD wiring, etc.
+  // CWD wiring, etc.
   const activeLeafIdInTab = activePaneTab?.activeLeafId ?? null;
-  const activeLeafCurrent = activeTab ? activeLeaf(activeTab) : null;
   const activeLeafKindCurrent = activeTab ? activeLeafKind(activeTab) : null;
 
   // -------- shared runtime handles & state owned by the coordinator --------
@@ -296,18 +284,14 @@ export default function App() {
     openFileTab,
   });
 
-  // -------- AI / model boot + extension panel defaults --------
-  // useAiBootstrap runs initPrefs; useExtensionPanelDefaults boots the
-  // extension host, which must follow prefs - so it is called second.
-  const { keysLoaded } = useAiBootstrap();
+  // -------- Preferences boot + extension panel defaults --------
+  // Preferences must hydrate before the extension host boots, so `initPrefs`
+  // runs first and `useExtensionPanelDefaults` follows.
+  const initPrefs = usePreferencesStore((s) => s.init);
+  useEffect(() => {
+    void initPrefs();
+  }, [initPrefs]);
   useExtensionPanelDefaults();
-
-  // Chat-store slices App still needs for render / mutual exclusion.
-  const openMini = useChatStore((s) => s.openMini);
-  const panelOpen = useChatStore((s) => s.panelOpen);
-  const apiKeys = useChatStore((s) => s.apiKeys);
-  const respondToApproval = useChatStore((s) => s.respondToApproval);
-  const hasComposer = hasAnyKey(apiKeys);
 
   // Preferences used by the chrome / layout.
   const showSourceControl = usePreferencesStore((s) => s.showSourceControl);
@@ -389,7 +373,7 @@ export default function App() {
     skipNextSnapshotRef,
   });
 
-  const { liveTabCounts } = useTabSideEffects({ tabs, editorRefs, wsActiveId });
+  const { liveTabCounts } = useTabSideEffects({ tabs, wsActiveId });
 
   const { explorerRoot, inheritedCwdForNewTab } = useWorkspaceCwd(
     activeTab,
@@ -699,22 +683,6 @@ export default function App() {
   // never saw start by reading the url the project declares for itself.
   useProjectUrl(explorerRoot, handleProjectUrl);
 
-  const {
-    askPopup,
-    setAskPopup,
-    onAskFromSelection,
-    askFromSelection,
-    handleAttachFileToAgent,
-    togglePanelAndFocus,
-  } = useSelectionAskAi({
-    tabs,
-    activeId,
-    terminalRefs,
-    editorRefs,
-    hasComposer,
-    activeLeafKindCurrent,
-  });
-
   const { handleOpenFile, handleOpenRemoteFile, handlePathRenamed, handlePathDeleted } =
     useFileActions({
       tabs,
@@ -770,8 +738,6 @@ export default function App() {
         selectByIndex,
         splitActivePaneInActiveTab,
         focusNextPaneInTab,
-        togglePanelAndFocus,
-        askFromSelection,
         openScmTab,
         toggleSidebar,
         requestCloseLeaf,
@@ -799,8 +765,6 @@ export default function App() {
       selectByIndex,
       splitActivePaneInActiveTab,
       focusNextPaneInTab,
-      togglePanelAndFocus,
-      askFromSelection,
       toggleSidebar,
       openScmTab,
       commandPaletteHandler,
@@ -820,21 +784,13 @@ export default function App() {
       // Ctrl+K, Ctrl+L, Ctrl+[ Esc, Ctrl+I Tab, the tmux/screen prefix, …) and
       // every bare-Alt meta sequence (readline M-b / M-f / M-d / M-1..9). On
       // Win/Linux `Mod`=Ctrl, so those chords otherwise fire app actions (close
-      // tab, ask AI, word-wrap, …) and the byte never reaches the shell. Let
-      // them fall through. Exceptions: pane.splitRight (Ctrl+D) always fires,
-      // while ai.askSelection (Ctrl+L) fires only when the focused local or SSH
-      // terminal has selected text. With no selection Ctrl+L still reaches the
-      // shell as clear-screen. pane.splitDown already passes because it carries
-      // Shift. Terminal-safe app chords keep Shift/Meta or add a second modifier
-      // (Ctrl+Shift+C copy, Ctrl+Shift+X close, Ctrl+Alt+P, Shift+Alt+F) and stay
-      // active; Ctrl+Tab / Ctrl+digit / zoom are not control codes either.
+      // tab, word-wrap, …) and the byte never reaches the shell. Let them fall
+      // through. Exception: pane.splitRight (Ctrl+D) always fires;
+      // pane.splitDown already passes because it carries Shift. Terminal-safe
+      // app chords keep Shift/Meta or add a second modifier (Ctrl+Shift+C copy,
+      // Ctrl+Shift+X close, Ctrl+Alt+P, Shift+Alt+F) and stay active; Ctrl+Tab /
+      // Ctrl+digit / zoom are not control codes either.
       (id !== "pane.splitRight" &&
-        !(
-          id === "ai.askSelection" &&
-          activeLeafIdInTab !== null &&
-          !activeLeafCurrent?.private &&
-          !!terminalRefs.current.get(activeLeafIdInTab)?.getSelection()?.trim()
-        ) &&
         activeLeafKindCurrent === "terminal" &&
         (isTerminalControlChord(e) || isTerminalMetaChord(e))),
   });
@@ -862,29 +818,8 @@ export default function App() {
     setEditorLeafDirty,
   });
 
-  // AI live-context (`setLive`) + schedule-trigger engine bridges. Both read
-  // live workspace state through a stable ref so the closures don't churn.
-  useAgentBridges({
-    tabs,
-    activeId,
-    explorerRoot,
-    home,
-    openPreviewTab,
-    setBrowserLeafUrl,
-    newTab,
-    inheritedCwdForNewTab,
-    splitActivePane,
-    setActiveId,
-    focusPane,
-    moveLeafToTab,
-    rotateLeafSplit,
-    closePaneByLeaf,
-    terminalRefs,
-  });
-
   const {
     handleOpenDetectedPreview,
-    handleAddProviderKey,
     handleHeaderSelectEntry,
     handleHeaderCloseEntry,
     handleHeaderNewPreview,
@@ -963,7 +898,6 @@ export default function App() {
                 onPathRenamed={handlePathRenamed}
                 onPathDeleted={handlePathDeleted}
                 onRevealInTerminal={cdInNewTab}
-                onAttachToAgent={handleAttachFileToAgent}
                 onPreviewInBrowser={handlePreviewFileInBrowser}
                 activeFilePath={activeFilePath}
                 activeSshContext={activeSshContext}
@@ -1007,11 +941,9 @@ export default function App() {
                 onToggleMdPreview={toggleMdPreviewForLeaf}
                 detectedBrowserUrl={detectedBrowserUrl}
                 onOpenPreview={handleOpenDetectedPreview}
-                hasAiDiffTab={hasAiDiffTab}
                 hasGitDiffTab={hasGitDiffTab}
                 hasScmTab={hasScmTab}
                 hasExtensionTab={hasExtensionTab}
-                respondToApproval={respondToApproval}
                 onPathDeleted={handlePathDeleted}
                 setBrowserLeafUrl={setBrowserLeafUrl}
                 movePaneLeafToEdge={movePaneLeafToEdge}
@@ -1024,21 +956,16 @@ export default function App() {
                 rightPanels={rightPanels}
                 scmRightOpen={scmRightOpen}
                 sshRightOpen={sshRightOpen}
-                keysLoaded={keysLoaded}
-                panelOpen={panelOpen}
-                hasComposer={hasComposer}
                 explorerRoot={explorerRoot}
                 onPathDeleted={handlePathDeleted}
                 closeScmRight={closeScmRight}
                 closeSshRight={closeSshRight}
                 activeSshContext={activeSshContext}
                 onOpenRemoteFile={handleOpenRemoteFile}
-                onAddProviderKey={handleAddProviderKey}
                 filesSection={{
                   onOpenFile: handleOpenFile,
                   onPathRenamed: handlePathRenamed,
                   onRevealInTerminal: cdInNewTab,
-                  onAttachToAgent: handleAttachFileToAgent,
                   onPreviewInBrowser: handlePreviewFileInBrowser,
                   activeFilePath,
                 }}
@@ -1067,7 +994,6 @@ export default function App() {
             filePath={activeFilePath}
             home={home}
             onCd={sendCd}
-            onOpenMini={openMini}
             hasAnySshLeaf={hasAnySshLeaf}
             activeIsSsh={activeLeafIsSsh}
             sshSessionId={activeLeafIsSsh ? activeSshContext.sessionId : null}
@@ -1075,10 +1001,6 @@ export default function App() {
               activeLeafIdInTab != null ? sshStatuses.get(activeLeafIdInTab)?.route : undefined
             }
           />
-
-          {hasComposer ? (
-            <AgentRunBridge openAiDiffTab={openAiDiffTab} setAiDiffStatus={setAiDiffStatus} />
-          ) : null}
 
           <Toaster />
 
@@ -1090,9 +1012,6 @@ export default function App() {
           />
 
           <AppDialogs
-            askPopup={askPopup}
-            onAskFromSelection={onAskFromSelection}
-            setAskPopup={setAskPopup}
             agentDialogMounted={agentDialogMounted}
             agentDialogOpen={agentDialogOpen}
             setAgentDialogOpen={setAgentDialogOpen}
@@ -1118,5 +1037,5 @@ export default function App() {
     </ThemeProvider>
   );
 
-  return <AiComposerProvider>{shell}</AiComposerProvider>;
+  return shell;
 }

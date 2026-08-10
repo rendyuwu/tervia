@@ -59,7 +59,6 @@ for (const rootFile of [
   "src/app/App.tsx",
   "src/settings/SettingsApp.tsx",
   "src/float/FloatApp.tsx",
-  "src/debug/DebugApp.tsx",
 ]) {
   check(`${rootFile} mounts <Toaster />`, read(rootFile).includes("<Toaster />"));
 }
