@@ -1,8 +1,7 @@
 //! GitHub release discovery + the HTTP helpers it builds on.
 //!
-//! Neutral logic shared by the Tauri command surface (`commands.rs`) and the
-//! headless CLI (`cli_ext.rs`, `cli_update.rs`). Lives here so neither the
-//! command layer nor the CLI owns it. Resolves the latest release tag /
+//! Neutral logic behind the Tauri command surface (`commands.rs`). Lives in
+//! its own file so the command layer does not own it. Resolves the latest release tag /
 //! `.zip` asset for an `owner/repo`, with an unauthenticated fallback path
 //! for when the GitHub REST API is rate limited.
 

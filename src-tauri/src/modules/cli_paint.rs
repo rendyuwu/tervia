@@ -1,7 +1,6 @@
-//! Shared ANSI paint vocabulary for the headless `tedi` CLI surfaces
-//! (`cli`, `cli_ext`, `cli_theme`, `cli_update`). One palette so
-//! `tedi --help`, `tedi ext`, `tedi theme`, and `tedi --update` look like a
-//! single CLI rather than four styles.
+//! Shared ANSI paint vocabulary for the headless `tedi` CLI surface
+//! (`cli`). One palette so every future subcommand looks like a single CLI
+//! rather than a pile of styles.
 //!
 //! Colour is emitted only when stdout is a TTY and `NO_COLOR` is unset, so
 //! piped output (CI logs, file redirection) stays clean. The decision is

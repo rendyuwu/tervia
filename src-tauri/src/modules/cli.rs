@@ -52,40 +52,20 @@ pub fn help_text() -> String {
          \n\
          {usage}\n  \
          {tedi} {path}               Open folder or file in the running window\n  \
-         {tedi} {flag}               Show a flag-action below\n  \
-         {tedi} ext {sub}      Manage extensions   {dim_more}\n  \
-         {tedi} theme {sub}    Theme + wallpaper   {dim_more_t}\n\
+         {tedi} {flag}               Show a flag-action below\n\
          \n\
          {flags}\n  \
          {h_short}, {h_long}         Show this help and exit\n  \
          {v_short}, {v_long}      Print version and exit\n  \
-         {u_short}, {u_long}       Check for updates and install in place\n\
+         {u_short}, {u_long}       Open the app and check for updates\n\
          \n\
-         {ext_hdr}\n  \
-         install {ref_arg}     path | owner/repo | registry-id\n  \
-         list              Browse public registry (TTY picker)\n  \
-         installed         Show locally installed + updates\n  \
-         update {id_opt}     Check upstream / apply updates\n  \
-         enable | disable | uninstall {id_req}\n\
-         \n\
-         {thm_hdr}\n  \
-         list              Presets with color preview\n  \
-         show              Currently active theme\n  \
-         set {id_req}         Apply preset (queues for next launch)\n  \
-         on | off | reset  Toggle / restore Default\n  \
-         bg {bg_arg}      Set or clear wallpaper\n\
-         \n\
-         {dim_note}\n\
-         {dim_registry}\n",
+         {dim_note}\n",
         title = brand(&format!("TEDI {}", env!("CARGO_PKG_VERSION"))),
         tag = dim("· Terminal Director"),
         usage = header("USAGE"),
         tedi = cmd("tedi"),
         path = dim("[PATH]"),
         flag = dim("<FLAG>"),
-        sub = dim("<subcommand>"),
-        dim_more = dim("(tedi ext help)"),
-        dim_more_t = dim("(tedi theme help)"),
         flags = header("FLAGS"),
         h_short = cmd("-h"),
         h_long = cmd("--help"),
@@ -93,17 +73,10 @@ pub fn help_text() -> String {
         v_long = cmd("--version"),
         u_short = cmd("-u"),
         u_long = cmd("--update"),
-        ext_hdr = header("EXTENSIONS"),
-        thm_hdr = header("THEME"),
-        ref_arg = dim("<ref>"),
-        id_opt = dim("[<id>]"),
-        id_req = dim("<id>"),
-        bg_arg = dim("<url|file|off>"),
         dim_note = dim(
             "If TEDI is already running, the request is forwarded to that window\n\
              (a second window is not opened)."
         ),
-        dim_registry = dim("Registry: https://tedi.ilhamriski.com/extensions/"),
     )
 }
 
@@ -504,7 +477,7 @@ pub fn cli_install_path_shim() -> Result<ShimInstall, String> {
 mod tests {
     use super::*;
 
-    /// Lock the `--plain` flag out of the help text and ensure the new
+    /// Lock the `--plain` flag out of the help text and ensure the remaining
     /// section headers stay present. Tests run with stdout piped, so
     /// `cli_paint::ansi` falls back to plain text - the assertions match
     /// plain substrings.
@@ -523,11 +496,21 @@ mod tests {
             h.contains(env!("CARGO_PKG_VERSION")),
             "version missing from help"
         );
-        for section in ["USAGE", "FLAGS", "EXTENSIONS", "THEME"] {
+        for section in ["USAGE", "FLAGS"] {
             assert!(h.contains(section), "expected `{section}` section in help",);
         }
         for flag in ["--help", "--version", "--update"] {
             assert!(h.contains(flag), "expected `{flag}` in help");
+        }
+    }
+
+    /// The headless `ext` / `theme` subcommands were removed; the help must
+    /// not keep advertising them or the extension registry URL.
+    #[test]
+    fn help_text_drops_removed_subcommands() {
+        let h = help_text();
+        for gone in ["EXTENSIONS", "THEME", "wallpaper", "Registry:"] {
+            assert!(!h.contains(gone), "expected `{gone}` to be gone from help");
         }
     }
 }

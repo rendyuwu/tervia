@@ -1,8 +1,7 @@
 //! Lenient version comparison and `engines.tedi` constraint matching.
 //!
-//! Neutral logic shared by the Tauri command surface (`commands.rs`) and the
-//! headless CLI (`cli_ext.rs`, `cli_update.rs`). Lives here so neither the
-//! command layer nor the CLI owns it.
+//! Neutral logic behind the Tauri command surface (`commands.rs`). Lives in
+//! its own file so the command layer does not own the comparison rules.
 
 pub(crate) fn strip_v_prefix(tag: &str) -> String {
     tag.trim_start_matches(['v', 'V']).to_string()

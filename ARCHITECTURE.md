@@ -99,14 +99,11 @@ subsystems, flat files for single-purpose ones).
 | `git/`          | Backend for the SCM panel: runs `git` and parses status/diff into structured payloads.           |
 | `ssh/`          | SSH/SFTP sessions (`russh` + `russh-sftp`), including ProxyJump host chaining.                    |
 | `extensions/`   | Extension install pipeline, manifest validation, state store, GitHub resolution (Section 7).     |
-| `cli_ext/`      | Headless `tedi ext` CLI (list/install/update against the public registry).                       |
 | `preview/`      | Native-webview dev-server preview backend (`embed`, `proxy`, `util`).                             |
 | `format.rs`     | Direct-spawn external formatter executor (`fmt_run_external`).                                    |
 | `secrets.rs`    | OS keychain bridge (`keyring` crate; Linux file-store fallback).                                  |
 | `net.rs`        | Minimal HTTP probe (dev-server detection).                                                        |
-| `mcp.rs`        | Model Context Protocol support for the AI subsystem.                                              |
-| `cli.rs`        | `tedi` CLI entry, single-instance forwarding, PATH shim install.                                  |
-| `cli_theme.rs` / `cli_update.rs` | Headless `tedi theme` and `tedi --update` handlers.                              |
+| `cli.rs`        | `tedi` CLI entry, single-instance forwarding, PATH shim install. `--update` is captured here and handed to the in-app updater; there is no headless install path. |
 | `cli_paint.rs`, `events.rs`, `ids.rs`, `lockext.rs` | CLI color output, event-name constants, id helpers, lock extensions. |
 
 ## 4. Frontend (React, `src/`)

@@ -136,18 +136,6 @@ hex = "0.4"
 # right. The webview cannot do this itself: `crypto.subtle` is secure-context
 # only and the app origin is plain http.
 ring = "0.17"
-# Arrow-key `Select` prompt for interactive `tedi ext` subcommands when
-# the user omits the target argument. Default features bring `editor` /
-# `history` / `password` / fuzzy which we don't use; the bare Select widget
-# is in the always-on base. Picked over `ratatui` deliberately: dialoguer
-# stays inline (no alternate screen, no raw-mode contention with the
-# parent shell), which works reliably across every Windows console host
-# we ship to without needing a separate console-subsystem companion binary.
-dialoguer = { version = "0.11", default-features = false }
-# Verify-only minisign implementation. Same crate `tauri-plugin-updater`
-# uses internally - keeps the headless `tedi --update` path semantically
-# identical to the GUI updater. No signing dependencies pulled in.
-minisign-verify = "0.2"
 # Stable session ids for the sidecar PTY daemon. v4 (random) is plenty - we
 # only need uniqueness across the daemon's lifetime, not global ordering.
 uuid = { version = "1", features = ["v4", "serde"] }

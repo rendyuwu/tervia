@@ -803,28 +803,6 @@ export async function patchFormatter(
 }
 
 /**
- * Pending preset id written by `tedi theme set <id>` (CLI). Read + drained
- * once at app boot so the request is applied exactly once. Not exposed to
- * extensions and not part of the typed `Preferences` shape.
- */
-const KEY_THEME_PRESET_REQUEST = "customThemePresetRequest";
-
-export async function consumePendingPresetRequest(): Promise<string | null> {
-  const id = (await store.get<unknown>(KEY_THEME_PRESET_REQUEST)) ?? null;
-  if (typeof id !== "string" || id.length === 0) {
-    if (id !== null) {
-      // Corrupt value - drop it.
-      await store.delete(KEY_THEME_PRESET_REQUEST);
-      await store.save();
-    }
-    return null;
-  }
-  await store.delete(KEY_THEME_PRESET_REQUEST);
-  await store.save();
-  return id;
-}
-
-/**
  * Escape hatch for the extension host. Persists keys without typed setters.
  * Built-ins use the typed setters above; extension keys arrive here via
  * `tedi.settings.set`. Keys must be `ext:<extId>:<key>` to prevent

@@ -64,8 +64,8 @@ pub mod modules;
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 use modules::{
-    backup, cli, cli_ext, cli_theme, cli_update, clipboard, extensions, format, fs, git, net,
-    preview, pty, pty_daemon, secrets, shell, ssh,
+    backup, cli, clipboard, extensions, format, fs, git, net, preview, pty, pty_daemon, secrets,
+    shell, ssh,
 };
 use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_window_state::StateFlags;
@@ -474,20 +474,11 @@ pub fn run() {
     // `tedi --version` / `tedi --help`: print and exit without GUI boot.
     cli::handle_version_help_and_exit();
 
-    // `tedi ext ...` / `tedi --extension ...`: run install/list/update/
-    // uninstall headlessly against the same `<app_data_dir>/extensions/`
-    // directory the GUI uses, then exit.
-    cli_ext::handle_extension_command_and_exit();
-
-    // `tedi theme ...`: list / set / configure the custom theme + wallpaper
-    // by writing directly to `tedi-settings.json`. Returns without acting
-    // when the `theme` subcommand is absent.
-    cli_theme::handle_theme_command_and_exit();
-
-    // `tedi --update` / `-u`: fetch latest.json, verify the bundle's minisign
-    // signature, install in place per platform, exit. Returns without acting
-    // when the flag is absent.
-    cli_update::handle_update_command_and_exit();
+    // `tedi --update` / `-u` has no headless path: the flag is captured by
+    // `cli::capture_startup` below, the GUI boots, and the frontend drains it
+    // through `cli_take_initial_update_request` to run the in-app updater.
+    // A second invocation while a window is up forwards `TRIGGER_UPDATE`
+    // instead (see the single-instance handler).
 
     // `TEDIApp --pty-daemon`: run the sidecar PTY daemon forever and exit.
     // Spawned detached by the GUI on first launch. Returns immediately when

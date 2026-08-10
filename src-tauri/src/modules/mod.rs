@@ -1,10 +1,7 @@
 pub mod appimage;
 pub mod backup;
 pub mod cli;
-pub mod cli_ext;
 pub mod cli_paint;
-pub mod cli_theme;
-pub mod cli_update;
 pub mod clipboard;
 pub mod events;
 pub mod extensions;

@@ -1,7 +1,7 @@
 // Sidecar PTY daemon — owns the lifecycle of every interactive shell so
 // they survive the GUI window closing. Same binary as the GUI; the
 // daemon mode is selected by the `--pty-daemon` flag short-circuited
-// before Tauri boots (mirrors `cli_update` / `cli_ext`).
+// before Tauri boots (mirrors `cli::handle_version_help_and_exit`).
 //
 // Process model:
 //   `TEDIApp` (GUI)  <—local socket—>  `TEDIApp --pty-daemon`
@@ -28,7 +28,7 @@ pub mod spawn;
 pub mod transport;
 
 /// Argv flag selecting daemon mode. Mirrors the conventions of
-/// `cli::handle_version_help_and_exit` / `cli_update`.
+/// `cli::handle_version_help_and_exit`.
 pub const DAEMON_FLAG: &str = "--pty-daemon";
 
 /// Detect the daemon flag without consuming argv. Cheap; called once per
