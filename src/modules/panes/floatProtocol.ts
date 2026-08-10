@@ -5,7 +5,7 @@
  * WebView2 windows). Leaf params travel in the float window's URL query.
  */
 
-export type FloatKind = "terminal" | "editor" | "table" | "browser" | "extension-panel" | "board";
+export type FloatKind = "terminal" | "editor" | "table" | "extension-panel" | "board";
 
 export type FloatLeafParams = {
   leafId: number;
@@ -20,10 +20,6 @@ export type FloatLeafParams = {
    * SSH leaf must opt OUT of it, because that pty is a Unix one.
    */
   remotePty?: boolean;
-  /** browser leaf: the address to seed the float's address bar with. The page
-   *  itself is NOT reloaded - the same native webview is re-parented into the
-   *  float window - so this only tells the float what it is already showing. */
-  url?: string;
   /** table: the table serialized as markdown. Static content, so it rides in the
    *  window URL and needs no live event mirror (unlike terminals). */
   markdown?: string;
@@ -69,7 +65,6 @@ export const floatEv = {
   size: (id: number) => `tedi://float-size:${id}`, // host -> client: FloatSize
   bye: (id: number) => `tedi://float-bye:${id}`, // client -> host: closing
   close: (id: number) => `tedi://float-close:${id}`, // host -> client: please close (dock back)
-  url: (id: number) => `tedi://float-url:${id}`, // client -> host: browser navigated
   cards: (id: number) => `tedi://float-cards:${id}`, // host -> client: board cards
   focus: (id: number) => `tedi://float-focus:${id}`, // client -> host: focus a pane
 };
@@ -78,8 +73,8 @@ export type FloatSnap = { text: string; cols: number; rows: number };
 export type FloatSize = { cols: number; rows: number };
 
 /**
- * Board float payload. Unlike a terminal (a byte stream) or a browser (a
- * re-parented webview), a board is just a list, so it mirrors as plain data
+ * Board float payload. Unlike a terminal (a byte stream), a board is just a
+ * list, so it mirrors as plain data
  * re-sent whenever it changes. The entries are `PaneEntry` objects verbatim -
  * already serializable, and sending them whole is what lets the float render
  * with the SAME `EntryIcon` the main window uses instead of a lookalike.

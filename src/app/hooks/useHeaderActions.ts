@@ -2,13 +2,13 @@ import { openSettingsWindow } from "@/modules/settings/openSettingsWindow";
 import { type SshConnection } from "@/modules/ssh/connections";
 import { MAX_PANES_PER_TAB, type PaneTab } from "@/modules/tabs";
 import { leafIds } from "@/modules/terminal";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { useCallback, useMemo } from "react";
 import { type TabsApi } from "./tabsApi";
 
 type Params = {
   activePaneTab: PaneTab | null;
   detectedBrowserUrl: string | null;
-  openPreviewTab: (url: string) => number | null;
   handleClose: (id: number) => void;
   requestCloseLeaf: (leafId: number) => void;
 } & Pick<TabsApi, "setActiveId" | "focusPane" | "pinTab" | "newSshTab">;
@@ -17,13 +17,12 @@ type Params = {
  * Stable handlers for the memoised `<Header/>`. Each was previously an inline
  * arrow in the JSX, so the memo wrapper saw a fresh prop identity on every App
  * re-render. Bundled here verbatim with identical dependency arrays;
- * `handleClose` / `openPreviewTab` / `detectedBrowserUrl` are threaded in from
+ * `handleClose` / `detectedBrowserUrl` are threaded in from
  * App.
  */
 export function useHeaderActions({
   activePaneTab,
   detectedBrowserUrl,
-  openPreviewTab,
   handleClose,
   requestCloseLeaf,
   setActiveId,
@@ -34,16 +33,17 @@ export function useHeaderActions({
   handleOpenDetectedPreview: () => void;
   handleHeaderSelectEntry: (tabId: number, leafId: number | null) => void;
   handleHeaderCloseEntry: (tabId: number, leafId: number | null) => void;
-  handleHeaderNewPreview: () => void;
   handleHeaderPinLeaf: (tabId: number, leafId: number) => void;
   handleHeaderOpenExtensions: () => void;
   handleHeaderOpenSettings: () => void;
   handleHeaderConnectSsh: (conn: SshConnection, opts?: { private?: boolean }) => void;
   headerCanSplit: boolean;
 } {
+  // The pane header's globe pill: hand the detected dev-server url to the OS
+  // browser. There is no in-app browser to open it in any more.
   const handleOpenDetectedPreview = useCallback(() => {
-    if (detectedBrowserUrl) openPreviewTab(detectedBrowserUrl);
-  }, [detectedBrowserUrl, openPreviewTab]);
+    if (detectedBrowserUrl) void openUrl(detectedBrowserUrl).catch(console.error);
+  }, [detectedBrowserUrl]);
 
   const handleHeaderSelectEntry = useCallback(
     (tabId: number, leafId: number | null) => {
@@ -62,7 +62,6 @@ export function useHeaderActions({
     },
     [requestCloseLeaf, handleClose],
   );
-  const handleHeaderNewPreview = useCallback(() => openPreviewTab(""), [openPreviewTab]);
   const handleHeaderPinLeaf = useCallback(
     (tabId: number, leafId: number) => {
       focusPane(tabId, leafId);
@@ -85,7 +84,6 @@ export function useHeaderActions({
     handleOpenDetectedPreview,
     handleHeaderSelectEntry,
     handleHeaderCloseEntry,
-    handleHeaderNewPreview,
     handleHeaderPinLeaf,
     handleHeaderOpenExtensions,
     handleHeaderOpenSettings,

@@ -6,6 +6,9 @@
  * config beats scanning ports: a scan cannot tell which listening port belongs
  * to THIS project and would offer a database or a sibling checkout on 3000.
  *
+ * Lives in `lib/` rather than a feature module because the embedded browser it
+ * was written for is gone; the pill now hands the url to the OS browser.
+ *
  * No Tauri/window imports (the caller owns the IO) so project-url-verify can
  * run it under node.
  */

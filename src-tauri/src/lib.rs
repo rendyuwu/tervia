@@ -64,8 +64,7 @@ pub mod modules;
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 use modules::{
-    backup, cli, clipboard, extensions, format, fs, git, net, preview, pty, pty_daemon, secrets,
-    shell, ssh,
+    backup, cli, clipboard, extensions, format, fs, git, net, pty, pty_daemon, secrets, shell, ssh,
 };
 use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_window_state::StateFlags;
@@ -492,14 +491,6 @@ pub fn run() {
     #[cfg(target_os = "linux")]
     configure_linux_rendering();
 
-    // Windows: apply the embedded-browser WebView2 flags at the process
-    // environment level BEFORE any webview is created, so the main window and
-    // every preview child are built with the SAME additional args. A per-child
-    // override (different from the main webview's) renders the child BLANK on
-    // Windows - tauri-apps/tauri#13092.
-    #[cfg(target_os = "windows")]
-    preview::apply_webview2_browser_args_env();
-
     let builder = tauri::Builder::default().plugin(tauri_plugin_process::init());
 
     // Second-invocation forwarding: when `tedi <path>` runs while an instance
@@ -523,11 +514,6 @@ pub fn run() {
             }
         }
     }));
-
-    // Custom URI scheme that proxies http(s) URLs and strips X-Frame-Options
-    // / CSP frame-ancestors so the preview pane can embed sites that would
-    // otherwise refuse to render in an iframe.
-    let builder = preview::register(builder);
 
     // Updater is desktop-only; the plugin does not compile on android/ios.
     #[cfg(desktop)]
@@ -677,26 +663,6 @@ pub fn run() {
             format::fmt_run_external,
             open_settings_window,
             open_float_window,
-            preview::preview_embed_update,
-            preview::preview_embed_navigate,
-            preview::preview_embed_dispatch,
-            preview::preview_embed_read,
-            preview::preview_embed_console,
-            preview::preview_embed_act,
-            preview::preview_embed_screenshot,
-            preview::preview_embed_set_bg,
-            preview::preview_embed_zoom,
-            preview::preview_embed_zoom_get,
-            preview::preview_embed_url,
-            preview::preview_embed_reparent,
-            preview::preview_embed_loaded_exts,
-            preview::preview_embed_close,
-            preview::preview_resolve_favicon,
-            preview::browser_ext_list,
-            preview::browser_ext_install,
-            preview::browser_ext_install_file,
-            preview::browser_ext_set_enabled,
-            preview::browser_ext_remove,
             cli::cli_initial_target,
             cli::cli_classify_path,
             cli::cli_take_initial_update_request,

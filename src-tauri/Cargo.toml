@@ -69,9 +69,7 @@ mimalloc = "0.1"
 # `mi_collect`, which is what actually hands freed commit back to the OS. See
 # `purge_allocator` in lib.rs.
 libmimalloc-sys = { version = "0.1", features = ["extended"] }
-# `unstable` enables the multi-webview API (`Window::add_child`) used to embed
-# a real native browser webview inside the preview tab.
-tauri = { version = "2", features = ["unstable"] }
+tauri = { version = "2" }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
 # Clipboard READS run in the host process instead of through
@@ -106,10 +104,6 @@ tauri-plugin-os = "2"
 tauri-plugin-store = "2"
 tauri-plugin-process = "2"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2"] }
-# Streaming HTML rewriter (CloudFlare). Used by the preview proxy to route
-# subresource URLs (img/script/link/source) through ourselves so per-asset
-# CORP same-site headers can be stripped.
-lol_html = "1"
 url = "2"
 # Default features pull in aws-lc-rs which needs NASM at build time on
 # Windows. Use ring instead - pure-Rust + assembly, no toolchain hassle.
@@ -166,29 +160,15 @@ windows-sys = { version = "0.59", features = [
 	"Win32_Graphics_Gdi",
 	"Win32_UI_WindowsAndMessaging",
 ] }
-# Capture the focused tab's webview content directly (just the tab, no window
-# chrome) via ICoreWebView2::CapturePreview. A plain screen grab misses WebView2
-# on Windows because it composites through DirectComposition. Versions match the
-# copies wry already pulls in, so no duplicate crates are added.
+# WebView2 settings interop: `disable_browser_accelerator_keys` reaches for
+# `ICoreWebView2Settings3` so the app shell owns Ctrl+W / Ctrl+N / Ctrl+R rather
+# than the embedded browser. Versions match the copies wry already pulls in, so
+# no duplicate crates are added.
 webview2-com = "0.38"
 windows = { version = "0.61", features = [
 	"Win32_Foundation",
-	"Win32_System_Com",
-	"Win32_System_Com_StructuredStorage",
 	"Win32_System_Memory",
 ] }
-
-# macOS/Linux: their screen capture DOES include the webview surface, so the
-# on-demand browser screenshot grabs the composited screen and crops to the pane.
-[target.'cfg(not(target_os = "windows"))'.dependencies]
-# 0.4.0 is the last X11-only release (0.4.1+ pulls pipewire/Wayland, which needs
-# a newer libpipewire than ubuntu-22.04 ships). Fixes the macOS compile bug that
-# 0.0.14 had, while keeping the build light (xcb + dbus, no pipewire/clang).
-xcap = "=0.4.0"
-# Add only the JPEG codec to xcap's re-exported `image` crate (it defaults to
-# PNG-only). Feature-unifies with xcap's own `image` dep, so `xcap::image` gains
-# JPEG without image/default's heavy AVIF/webp encoders.
-image = { version = "0.25", default-features = false, features = ["jpeg"] }
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-autostart = "2"

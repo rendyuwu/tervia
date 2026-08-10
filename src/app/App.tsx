@@ -25,6 +25,7 @@
  * See ARCHITECTURE.md for the two-process model and TEDI.md for full detail.
  */
 import { pathToFileUrl } from "@/lib/path";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { ResizableHandle, ResizablePanelGroup } from "@/components/ui/resizable";
 import { Toaster } from "@/components/ui/toast";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -109,7 +110,6 @@ export default function App() {
     newSshTab,
     openFileTab,
     pinTab,
-    newBrowserTab,
     openExtensionTab,
     openExtensionPane,
     setExtensionTabState,
@@ -117,8 +117,6 @@ export default function App() {
     closeTab,
     selectByIndex,
     setLeafCwd,
-    setBrowserLeafUrl,
-    setBrowserLeafTitle,
     setLeafPtyId,
     setLeafActiveTool,
     setSplitSizes,
@@ -296,7 +294,6 @@ export default function App() {
   // The workspace pane counter-zooms back to 1 (see WorkspaceArea) so terminal /
   // editor / preview keep native resolution and their own `--content-zoom`.
   const uiZoom = usePreferencesStore((s) => s.uiZoom);
-  const autoOpenProjectUrl = usePreferencesStore((s) => s.autoOpenProjectUrl);
   // Apply --content-zoom (CSS var) and body.zoom from the prefs values.
   useApplyZoom(contentZoom, uiZoom);
 
@@ -621,7 +618,6 @@ export default function App() {
     sendCd,
     cdInNewTab,
     spawnAgents,
-    openPreviewTab,
     splitActivePaneInActiveTab,
     moveLeafToGroup,
     handleCloseTabOrPane,
@@ -640,7 +636,6 @@ export default function App() {
     setActiveId,
     newTab,
     newPaneGroupTab,
-    newBrowserTab,
     setLeafCwd,
     splitActivePane,
     moveLeafToTab,
@@ -658,12 +653,8 @@ export default function App() {
       activeLeafIdInTab,
       activeLeafKindCurrent,
       isTerminalLike,
-      tabs,
       setActiveSearchAddon,
       setActiveEditorHandle,
-      setBrowserLeafTitle,
-      autoOpenProjectUrl,
-      openPreviewTab,
     });
 
   // The other half of the open-in-browser pill: finds a server the terminal
@@ -676,27 +667,23 @@ export default function App() {
       disposeTab,
       openFileTab,
       setEditorLeafPath,
-      openPreviewTab,
       sshBindingByConnection,
     });
 
   // Drop a file onto an editor pane or the tab strip to open it, VSCode-style —
   // works for any absolute path, even outside the current workspace root. A
   // dropped folder opens a terminal tab rooted there instead. Routed through
-  // `handleOpenFile` (not `openFileTab`) so a dropped PDF lands in a browser
-  // pane exactly like one clicked in the explorer. Declared here rather than
+  // `handleOpenFile` (not `openFileTab`) so a dropped PDF goes to the OS handler
+  // exactly like one clicked in the explorer. Declared here rather than
   // beside the other drop listeners because it needs `handleOpenFile`.
   useEditorFileDrop({ openFile: handleOpenFile, newTerminalTab: newTab });
 
-  // Explorer "Preview in Browser" (HTML files): open the local file in a new
-  // in-app browser preview tab via its file:// URL.
-  const handlePreviewFileInBrowser = useCallback(
-    (path: string) => {
-      const url = pathToFileUrl(path);
-      if (url) openPreviewTab(url, true);
-    },
-    [openPreviewTab],
-  );
+  // Explorer "Preview in Browser" (HTML files): hand the file:// URL to the OS
+  // browser.
+  const handlePreviewFileInBrowser = useCallback((path: string) => {
+    const url = pathToFileUrl(path);
+    if (url) void openUrl(url).catch(console.error);
+  }, []);
 
   const { searchTarget, activeCwd, activeFilePath } = useChromeDerivations({
     isTerminalLike,
@@ -719,7 +706,6 @@ export default function App() {
       buildShortcutHandlers({
         openNewTab,
         openNewPrivateTab,
-        openPreviewTab,
         handleCloseTabOrPane,
         cycleTab,
         selectByIndex,
@@ -747,7 +733,6 @@ export default function App() {
       handleCloseTabOrPane,
       openNewTab,
       openNewPrivateTab,
-      openPreviewTab,
       selectByIndex,
       splitActivePaneInActiveTab,
       focusNextPaneInTab,
@@ -756,15 +741,10 @@ export default function App() {
     ],
   );
 
-  // Gate the browser.* shortcuts to a focused browser pane so they fall through
-  // to the shell/editor everywhere else - the terminal keeps Ctrl+Shift+R,
-  // Alt+Left/Right, etc. on Windows, Linux, and macOS. pane.splitBrowser is
-  // intentionally not gated: like the other splits it acts on whatever pane is
-  // focused. The options object is read fresh each keydown (see useGlobalShortcuts),
-  // so closing over activeLeafKindCurrent without a dep array is fine.
+  // The options object is read fresh each keydown (see useGlobalShortcuts), so
+  // closing over activeLeafKindCurrent without a dep array is fine.
   useGlobalShortcuts(shortcutHandlers, {
     isDisabled: (id, e) =>
-      (id.startsWith("browser.") && activeLeafKindCurrent !== "browser") ||
       // A focused terminal owns every bare-Ctrl control code (Ctrl+E, Ctrl+W,
       // Ctrl+K, Ctrl+L, Ctrl+[ Esc, Ctrl+I Tab, the tmux/screen prefix, …) and
       // every bare-Alt meta sequence (readline M-b / M-f / M-d / M-1..9). On
@@ -807,7 +787,6 @@ export default function App() {
     handleOpenDetectedPreview,
     handleHeaderSelectEntry,
     handleHeaderCloseEntry,
-    handleHeaderNewPreview,
     handleHeaderPinLeaf,
     handleHeaderOpenExtensions,
     handleHeaderOpenSettings,
@@ -816,7 +795,6 @@ export default function App() {
   } = useHeaderActions({
     activePaneTab,
     detectedBrowserUrl,
-    openPreviewTab,
     handleClose,
     requestCloseLeaf,
     setActiveId,
@@ -848,7 +826,6 @@ export default function App() {
             onNewPrivateTerminal={openNewPrivateTab}
             onTogglePrivate={togglePrivate}
             onRenameLeaf={renameLeaf}
-            onNewPreview={handleHeaderNewPreview}
             onOpenAgents={() => setAgentDialogOpen(true)}
             onPinLeaf={handleHeaderPinLeaf}
             onReorderTabs={reorderTabs}
@@ -922,7 +899,6 @@ export default function App() {
                 detectedBrowserUrl={detectedBrowserUrl}
                 onOpenPreview={handleOpenDetectedPreview}
                 hasExtensionTab={hasExtensionTab}
-                setBrowserLeafUrl={setBrowserLeafUrl}
                 movePaneLeafToEdge={movePaneLeafToEdge}
                 moveExtTabToPane={moveExtTabToPane}
                 setLeafTerminalTheme={setLeafTerminalTheme}

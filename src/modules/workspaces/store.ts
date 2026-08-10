@@ -77,15 +77,19 @@ export type SavedEditorLeaf = {
   customTitle?: string;
 };
 
+/**
+ * LEGACY, read-only. The embedded browser was removed after v0.4.22, so nothing
+ * writes this shape any more - but a layout saved by an older build still holds
+ * them, and dropping the variant from the union would make `savedToNode`
+ * un-narrowable. It restores as an empty terminal leaf so the tree keeps its
+ * shape and saved split sizes.
+ */
 export type SavedBrowserLeaf = {
   kind: "leaf";
   leafKind: "browser";
-  /** Last URL the embedded browser showed. Reopened on restore. */
   url: string;
-  /** FIFO chip number ("Browser 3"). Persisted so it stays stable after restart. */
   browserOrdinal?: number;
   private?: boolean;
-  /** User-chosen tab name from the tab's right-click "Rename". */
   customTitle?: string;
 };
 
@@ -126,9 +130,9 @@ export type SavedPaneTab = {
 };
 
 /**
- * Legacy standalone browser ("preview") tab format from before browsers became
- * pane leaves. The on-disk discriminator stays `"preview"` for back-compat;
- * `savedToTab` migrates it into a pane tab with a single browser leaf.
+ * LEGACY, read-only. A standalone browser ("preview") tab from before browsers
+ * became pane leaves, and before the embedded browser was removed entirely.
+ * `savedToTab` restores it as an empty terminal pane.
  */
 export type SavedPreviewTab = {
   kind: "preview";

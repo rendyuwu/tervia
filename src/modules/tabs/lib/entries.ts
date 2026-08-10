@@ -28,11 +28,9 @@ type EntryBase = {
 export type PaneEntry = EntryBase & {
   kind: "pane-leaf";
   leafId: number;
-  leafKind: "terminal" | "editor" | "browser" | "extension-panel" | "board";
-  /** Current page URL for browser leaves. Drives the tab-strip favicon. */
-  browserUrl?: string;
-  /** 1-based FIFO badge number for terminal + browser leaves. For terminals
-   *  this is the same identifier the AI sees in `<env>`. */
+  leafKind: "terminal" | "editor" | "extension-panel" | "board";
+  /** 1-based FIFO badge number for terminal leaves - the same identifier the
+   *  AI sees in `<env>`. */
   ordinal?: number;
   /** Working directory of a terminal leaf. Only consumed by hover surfaces (the
    *  Workspaces panel's tooltip); the label itself is already derived. */
@@ -97,7 +95,6 @@ export function tabAccentClass(e: Entry): string {
         ? "bg-[color:var(--tedi-tab-ssh)]"
         : "bg-[color:var(--tedi-tab-terminal)]";
     }
-    if (e.leafKind === "browser") return "bg-[color:var(--tedi-tab-browser)]";
     // Extension panel: reuse the SSH/extension accent (sky) so it reads as a
     // "dev tool" leaf, matching the extension tab strip color.
     if (e.leafKind === "extension-panel") return "bg-[color:var(--tedi-tab-ssh)]";
@@ -169,15 +166,12 @@ export function buildEntries(
         const label = leafLabel(leaf, sshHosts, t.cwd);
         const sshConnectionId = leaf.leafKind === "terminal" ? leaf.sshConnectionId : undefined;
         // FIFO ordinal assigned at leaf creation. Preserved through drag,
-        // reorder, move-to-group, and workspace restarts. Terminals use the
-        // same number the AI sees in the per-turn `<env>` block; browsers have
-        // their own independent sequence.
+        // reorder, move-to-group, and workspace restarts. It is the same
+        // number the AI sees in the per-turn `<env>` block.
         const ord =
           leaf.leafKind === "terminal" && typeof leaf.terminalOrdinal === "number"
             ? leaf.terminalOrdinal
-            : leaf.leafKind === "browser" && typeof leaf.browserOrdinal === "number"
-              ? leaf.browserOrdinal
-              : undefined;
+            : undefined;
         const remoteHost =
           leaf.leafKind === "editor" && isRemoteEditorLeaf(leaf)
             ? (leaf.sshHostLabel ?? "remote")
@@ -188,7 +182,6 @@ export function buildEntries(
           tabId: t.id,
           leafId: leaf.id,
           leafKind: leaf.leafKind,
-          browserUrl: leaf.leafKind === "browser" ? leaf.url : undefined,
           cwd: leaf.leafKind === "terminal" ? leaf.cwd : undefined,
           label,
           ordinal: ord,

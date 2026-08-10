@@ -1,6 +1,5 @@
-// Unified pane tree. Leaves are terminal, editor, or preview (an embedded
-// native browser). `kind: "leaf"` stays for back-compat; the discriminator is
-// `leafKind`.
+// Unified pane tree. Leaves are terminal, editor, extension panel, or board.
+// `kind: "leaf"` stays for back-compat; the discriminator is `leafKind`.
 
 import type { ExtensionTabState } from "@/modules/tabs/lib/tabTypes";
 import type { AiCliKind } from "./aiCliStatus";
@@ -109,27 +108,6 @@ export type EditorLeafState = {
   customTitle?: string;
 };
 
-export type BrowserLeafState = {
-  leafKind: "browser";
-  /** Current page URL of the embedded browser. Empty = show the address bar. */
-  url: string;
-  /** Live `document.title` of the page, reported by the webview. Drives the
-   *  tab/pane label; falls back to the URL host when empty. */
-  title?: string;
-  /**
-   * FIFO creation index for browser leaves, 1-based. Shown on the tab chip
-   * exactly like `terminalOrdinal` on terminals, with its own counter (so
-   * browsers number "Browser 1, 2, 3" independently of terminals). Set at
-   * creation, preserved across split/drag/move/restart. Optional for
-   * back-compat with older saved state.
-   */
-  browserOrdinal?: number;
-  /** Privacy flag, kept for uniformity with the other leaf kinds. */
-  private?: boolean;
-  /** User-chosen tab name; see {@link TerminalLeafState.customTitle}. */
-  customTitle?: string;
-};
-
 export type ExtensionPanelLeafState = {
   leafKind: "extension-panel";
   /** Owning extension id + the panel id registered via
@@ -173,7 +151,10 @@ export type BoardLeafState = {
 };
 
 export type LeafState =
-  TerminalLeafState | EditorLeafState | BrowserLeafState | ExtensionPanelLeafState | BoardLeafState;
+  | TerminalLeafState
+  | EditorLeafState
+  | ExtensionPanelLeafState
+  | BoardLeafState;
 
 export type PaneLeaf = { kind: "leaf"; id: PaneId } & LeafState;
 
@@ -407,24 +388,6 @@ export function setLeafCustomTitle(n: PaneNode, id: PaneId, title: string | null
   return { ...n, children: n.children.map((c) => setLeafCustomTitle(c, id, title)) };
 }
 
-/** Update a preview leaf's current URL. No-op for other leaves or mismatched ids. */
-export function updateBrowserLeaf(n: PaneNode, id: PaneId, url: string): PaneNode {
-  if (isLeaf(n)) {
-    if (n.id !== id || n.leafKind !== "browser" || n.url === url) return n;
-    return { ...n, url };
-  }
-  return { ...n, children: n.children.map((c) => updateBrowserLeaf(c, id, url)) };
-}
-
-/** Update a preview leaf's page title. No-op for other leaves or mismatched ids. */
-export function updateBrowserLeafTitle(n: PaneNode, id: PaneId, title: string): PaneNode {
-  if (isLeaf(n)) {
-    if (n.id !== id || n.leafKind !== "browser" || n.title === title) return n;
-    return { ...n, title };
-  }
-  return { ...n, children: n.children.map((c) => updateBrowserLeafTitle(c, id, title)) };
-}
-
 /** Patch an extension-panel leaf's `title` and/or lifecycle `state` by id.
  *  `state: null` clears the tone. Returns the same tree by reference when
  *  nothing changed so callers can bail. No-op for other leaves / mismatched
@@ -473,7 +436,7 @@ export function updateEditorLeaf(
 
 /**
  * Clone a leaf's state (without its id) for a live move/extract, so the leaf's
- * attached PTY / editor session / browser webview travels with it. Drops the
+ * attached PTY / editor session travels with it. Drops the
  * serialization-only `ptyId`/`savedPtyId` (the live session re-stamps them).
  */
 export function cloneLeafState(leaf: PaneLeaf): LeafState {
@@ -514,17 +477,8 @@ export function cloneLeafState(leaf: PaneLeaf): LeafState {
       ...(leaf.private ? { private: true } : {}),
     };
   }
-  if (leaf.leafKind === "board") {
-    // No state of its own: the columns are rebuilt from the live tab tree.
-    return { leafKind: "board", ...(leaf.private ? { private: true } : {}) };
-  }
-  return {
-    leafKind: "browser",
-    url: leaf.url,
-    ...(leaf.title ? { title: leaf.title } : {}),
-    ...(leaf.browserOrdinal != null ? { browserOrdinal: leaf.browserOrdinal } : {}),
-    ...(leaf.private ? { private: true } : {}),
-  };
+  // Board: no state of its own - the columns are rebuilt from the live tab tree.
+  return { leafKind: "board", ...(leaf.private ? { private: true } : {}) };
 }
 
 /**

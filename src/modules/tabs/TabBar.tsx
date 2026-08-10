@@ -40,7 +40,6 @@ type Props = {
   onNewTerminal: () => void;
   /** Open a new local terminal tab pre-flagged as private. */
   onNewPrivateTerminal?: () => void;
-  onNewPreview: () => void;
   /** `+` -> Agent...: open the agent picker dialog. */
   onOpenAgents: () => void;
   /** Flip the `private` flag on a single leaf (per-tab in the strip, not the whole split group). */
@@ -119,7 +118,6 @@ export function TabBar({
   onCloseEntry,
   onNewTerminal,
   onNewPrivateTerminal,
-  onNewPreview,
   onOpenAgents,
   onTogglePrivate,
   onRenameLeaf,
@@ -447,7 +445,6 @@ export function TabBar({
           <NewTabMenu
             onNewTerminal={onNewTerminal}
             onNewPrivateTerminal={onNewPrivateTerminal}
-            onNewPreview={onNewPreview}
             onOpenAgents={onOpenAgents}
             onSplit={onSplit}
             canSplit={canSplit}

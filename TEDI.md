@@ -66,7 +66,6 @@ src-tauri/                      Backend (Rust)
     ssh/{mod,session,sftp}.rs   ssh + sftp + ProxyJump
     extensions/{mod,commands,install,github,manifest,state,version}.rs
     cli_ext/{mod,commands,registry,install,helpers,types}.rs    headless `tedi ext`
-    preview/{mod,embed,proxy,util}.rs   native-webview preview backend
     format.rs secrets.rs net.rs mcp.rs
     cli.rs cli_theme.rs cli_update.rs cli_paint.rs events.rs ids.rs lockext.rs
   tedi-cli/                     Windows console-subsystem `tedi` launcher (separate crate)
@@ -99,7 +98,6 @@ src/                            Frontend (React webview), alias @/* -> src/*
 | `git/`        | `git_status/diff_full/commit/push/log/discard_*`. Only status + ignored + branch have callers. |
 | `ssh/`        | `ssh_connect/run/disconnect`, `ssh_agent_keys`, `ssh_sftp_*`. `russh` + `russh-sftp`, ProxyJump chaining, ssh-agent auth (named pipe / Pageant / `SSH_AUTH_SOCK`). |
 | `extensions/` | `ext_install_from_zip/from_github`, `ext_peek_*`, `ext_check_update`, `ext_list/enable/disable/uninstall`, `ext_read_manifest/asset/asset_bytes`. |
-| `preview/`    | `preview_embed_*` native-webview compositing (update/navigate/dispatch/read/act/console/screenshot/set_bg/close); `tedi-frame://` proxy for remote marketplace icons. Every pane gets a document-start script that records console errors, uncaught exceptions, and unhandled rejections into a capped ring, drained by `preview_embed_console`. |
 | `format.rs`   | `fmt_run_external` direct-spawn external formatter (15 s timeout, 8 MiB cap).          |
 | `secrets.rs`  | `secrets_get/set/delete/get_all` (keychain; Linux file-store fallback). `get_all` never exposed to extensions. |
 | `net.rs`      | `http_ping` dev-server probe.                                                          |
@@ -158,7 +156,6 @@ macOS/Linux rely on `Drop for Session -> killer.kill()`.
 | `terminal/`   | One mounted xterm per tab via `useTerminalSession` + pty-bridge; OSC 7/133 handlers; themes. |
 | `editor/`     | CodeMirror 6 (`EditorPane`), language modes, AI inline autocomplete, format-on-save, vim mode, prebuilt themes. |
 | `explorer/`   | File tree (Material/Catppuccin icons), fuzzy search, keyboard nav, inline rename. `basename` splits on `/` and `\`. |
-| `browser/`    | The preview/browser tab: a real native webview (WebView2/WebKit) docked over the pane via `preview_embed_*` (not an iframe), with address bar, back/forward, favicon. Status-bar pill suggests opening on a detected `localhost` URL. |
 | `panes/`      | Split-pane orchestration via `react-resizable-panels` (`PaneStack`, `PaneTreeView`). |
 | `tabs/`       | Source of truth: `useTabs` (tab list + active id), `useWorkspaceCwd`, serialization. |
 | `workspaces/` | Workspace persistence + switching (`store.ts`, `serialize.ts`).                       |
@@ -177,7 +174,7 @@ macOS/Linux rely on `Drop for Session -> killer.kill()`.
 
 **Tab model** (`tabs/lib/tabTypes.ts`): `Tab = PaneTab | AiDiffTab | GitDiffTab |
 ExtensionTab | ScmTab`. `PaneTab` (`kind:"pane"`) holds a split tree whose leaves
-are `terminal` / `editor` / `browser` / `ssh` / `extension-panel`.
+are `terminal` / `editor` / `ssh` / `extension-panel`.
 
 ## AI subsystem (`src/modules/ai/`)
 

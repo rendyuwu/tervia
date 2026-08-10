@@ -29,7 +29,6 @@ import {
   type PaneLayout,
   type PaneLeaf,
   type PaneNode,
-  type BrowserLeafState,
   type ExtensionPanelLeafState,
   type SplitDir,
   type TerminalLeafState,
@@ -94,22 +93,15 @@ export function useTabs(initial?: { cwd?: string; title?: string }) {
   // any path pick the next unused integer. Drag/reorder doesn't bump this;
   // the ordinal belongs to the leaf, not its position.
   const nextOrdinalRef = useRef(2);
-  // Monotonic FIFO counter for the browser chip number ("Browser 3"). Its own
-  // sequence so browsers number independently of terminals.
-  const nextBrowserOrdinalRef = useRef(1);
-
-  // Non-pane tab openers + browser-leaf URL/title updaters. Extracted into a
-  // sub-hook for size; the callbacks close over the same setters/refs and are
-  // spread into this hook's return object below with identical keys.
-  const {
-    openBoardTab,
-    newBrowserTab,
-    openExtensionTab,
-    openExtensionPane,
-    setExtensionTabState,
-    setBrowserLeafUrl,
-    setBrowserLeafTitle,
-  } = useAuxTabs({ setTabs, setActiveId, nextIdRef, tabsRef, nextBrowserOrdinalRef });
+  // Non-pane tab openers. Extracted into a sub-hook for size; the callbacks
+  // close over the same setters/refs and are spread into this hook's return
+  // object below with identical keys.
+  const { openBoardTab, openExtensionTab, openExtensionPane, setExtensionTabState } = useAuxTabs({
+    setTabs,
+    setActiveId,
+    nextIdRef,
+    tabsRef,
+  });
 
   /** Highest `terminalOrdinal` currently in use. */
   const peekMaxOrdinal = useCallback((curr: Tab[]): number => {
@@ -134,31 +126,6 @@ export function useTabs(initial?: { cwd?: string; title?: string }) {
       return ord;
     },
     [peekMaxOrdinal],
-  );
-
-  /** Highest `browserOrdinal` currently in use. */
-  const peekMaxBrowserOrdinal = useCallback((curr: Tab[]): number => {
-    let max = 0;
-    for (const t of curr) {
-      if (t.kind !== "pane") continue;
-      for (const l of leaves(t.paneTree)) {
-        if (l.leafKind === "browser" && typeof l.browserOrdinal === "number") {
-          if (l.browserOrdinal > max) max = l.browserOrdinal;
-        }
-      }
-    }
-    return max;
-  }, []);
-
-  /** Returns the next browser ordinal and advances the counter. */
-  const allocBrowserOrdinal = useCallback(
-    (curr: Tab[]): number => {
-      const max = Math.max(nextBrowserOrdinalRef.current - 1, peekMaxBrowserOrdinal(curr));
-      const ord = max + 1;
-      nextBrowserOrdinalRef.current = ord + 1;
-      return ord;
-    },
-    [peekMaxBrowserOrdinal],
   );
 
   const newTab = useCallback(
@@ -647,7 +614,7 @@ export function useTabs(initial?: { cwd?: string; title?: string }) {
     (
       tabId: number,
       dir: SplitDir,
-      newKind?: "terminal" | "editor" | "browser",
+      newKind?: "terminal" | "editor",
       cwdOverride?: string,
     ): number | null => {
       let newLeafId: number | null = null;
@@ -659,7 +626,7 @@ export function useTabs(initial?: { cwd?: string; title?: string }) {
           if (!active) return t;
 
           // Default to terminal so Ctrl+D from an editor still produces a shell.
-          const kind: "terminal" | "editor" | "browser" = newKind ?? "terminal";
+          const kind: "terminal" | "editor" = newKind ?? "terminal";
 
           const splitId = nextIdRef.current++;
           const leafId = nextIdRef.current++;
@@ -674,7 +641,7 @@ export function useTabs(initial?: { cwd?: string; title?: string }) {
               terminalOrdinal: allocOrdinal(curr),
             };
             state = ts;
-          } else if (kind === "editor") {
+          } else {
             // Duplicate the active editor; fall back to any editor in the tab.
             // No editor in the tab means nothing to clone, so the split is a no-op.
             const source =
@@ -699,15 +666,6 @@ export function useTabs(initial?: { cwd?: string; title?: string }) {
               ...(source.sshHostLabel ? { sshHostLabel: source.sshHostLabel } : {}),
             };
             state = es;
-          } else {
-            // Browser leaf. Starts blank so the address bar shows; a URL can be
-            // passed via the override (e.g. "split with this localhost URL").
-            const ps: BrowserLeafState = {
-              leafKind: "browser",
-              url: cwdOverride ?? "",
-              browserOrdinal: allocBrowserOrdinal(curr),
-            };
-            state = ps;
           }
           const paneTree = splitLeaf(t.paneTree, t.activeLeafId, splitId, leafId, dir, state);
           return syncPaneMirror({ ...t, paneTree, activeLeafId: leafId });
@@ -715,7 +673,7 @@ export function useTabs(initial?: { cwd?: string; title?: string }) {
       );
       return newLeafId;
     },
-    [allocOrdinal, allocBrowserOrdinal],
+    [allocOrdinal],
   );
 
   const closePaneByLeaf = useCallback((leafId: number): void => {
@@ -755,7 +713,6 @@ export function useTabs(initial?: { cwd?: string; title?: string }) {
   const replaceAllTabs = useCallback((nextTabs: Tab[], nextActiveId: number | null) => {
     let maxId = 0;
     let maxOrdinal = 0;
-    let maxBrowserOrdinal = 0;
     for (const t of nextTabs) {
       if (t.id > maxId) maxId = t.id;
       if (t.kind === "pane") {
@@ -764,21 +721,14 @@ export function useTabs(initial?: { cwd?: string; title?: string }) {
           if (l.leafKind === "terminal" && typeof l.terminalOrdinal === "number") {
             if (l.terminalOrdinal > maxOrdinal) maxOrdinal = l.terminalOrdinal;
           }
-          if (l.leafKind === "browser" && typeof l.browserOrdinal === "number") {
-            if (l.browserOrdinal > maxBrowserOrdinal) maxBrowserOrdinal = l.browserOrdinal;
-          }
         }
       }
     }
     let nextOrdinal = maxOrdinal + 1;
-    let nextBrowserOrdinal = maxBrowserOrdinal + 1;
     const stamp = (node: PaneNode): PaneNode => {
       if (node.kind === "leaf") {
         if (node.leafKind === "terminal" && node.terminalOrdinal == null) {
           return { ...node, terminalOrdinal: nextOrdinal++ };
-        }
-        if (node.leafKind === "browser" && node.browserOrdinal == null) {
-          return { ...node, browserOrdinal: nextBrowserOrdinal++ };
         }
         return node;
       }
@@ -791,7 +741,6 @@ export function useTabs(initial?: { cwd?: string; title?: string }) {
     if (nextActiveId !== null) setActiveId(nextActiveId);
     nextIdRef.current = Math.max(nextIdRef.current, maxId + 1);
     nextOrdinalRef.current = nextOrdinal;
-    nextBrowserOrdinalRef.current = nextBrowserOrdinal;
   }, []);
 
   /** Allocate a fresh id from the same counter as tabs and leaves. */
@@ -1090,7 +1039,6 @@ export function useTabs(initial?: { cwd?: string; title?: string }) {
     newSshTab,
     openFileTab,
     pinTab,
-    newBrowserTab,
     openExtensionTab,
     openExtensionPane,
     setExtensionTabState,
@@ -1100,8 +1048,6 @@ export function useTabs(initial?: { cwd?: string; title?: string }) {
     setLeafCwd,
     renameLeaf,
     setLeafTerminalTheme,
-    setBrowserLeafUrl,
-    setBrowserLeafTitle,
     setLeafPtyId,
     setLeafActiveTool,
     setSplitSizes,

@@ -83,23 +83,13 @@ function leafToSaved(leaf: PaneLeaf): SavedPaneNode {
     // extension-panel leaf, so this is never reached. Guard for exhaustiveness.
     throw new Error("extension-panel leaves are not serialized");
   }
-  if (leaf.leafKind === "board") {
-    // Restorable from nothing but its own existence: the columns are rebuilt
-    // from the live tab tree. Unlike an extension panel it needs no host, so
-    // the pane tab holding it is saved whole rather than dropped - which
-    // matters when a board is split next to a terminal worth keeping.
-    return {
-      kind: "leaf",
-      leafKind: "board",
-      ...(leaf.private ? { private: true } : {}),
-      ...(leaf.customTitle ? { customTitle: leaf.customTitle } : {}),
-    };
-  }
+  // Board: restorable from nothing but its own existence, since the columns are
+  // rebuilt from the live tab tree. Unlike an extension panel it needs no host,
+  // so the pane tab holding it is saved whole rather than dropped - which
+  // matters when a board is split next to a terminal worth keeping.
   return {
     kind: "leaf",
-    leafKind: "browser",
-    url: leaf.url,
-    ...(leaf.browserOrdinal != null ? { browserOrdinal: leaf.browserOrdinal } : {}),
+    leafKind: "board",
     ...(leaf.private ? { private: true } : {}),
     ...(leaf.customTitle ? { customTitle: leaf.customTitle } : {}),
   };
@@ -273,14 +263,15 @@ function savedToNode(node: SavedPaneNode, allocId: () => number, outLeafIds: num
         ...(node.customTitle ? { customTitle: node.customTitle } : {}),
       };
     }
+    // Unknown leafKind, including the `browser` leaves saved by builds up to
+    // v0.4.22. Restore it as an empty terminal rather than dropping the node:
+    // the tree's shape (and the split sizes saved alongside it) stays valid,
+    // and the user gets a usable pane where the page used to be.
     return {
       kind: "leaf",
       id,
-      leafKind: "browser",
-      url: node.url,
-      ...(node.browserOrdinal != null ? { browserOrdinal: node.browserOrdinal } : {}),
+      leafKind: "terminal",
       ...(node.private ? { private: true } : {}),
-      ...(node.customTitle ? { customTitle: node.customTitle } : {}),
     };
   }
   const children = node.children.map((c) => savedToNode(c, allocId, outLeafIds));
@@ -297,11 +288,12 @@ function savedToNode(node: SavedPaneNode, allocId: () => number, outLeafIds: num
 
 export function savedToTab(saved: SavedTab, allocId: () => number): Tab {
   if (saved.kind === "preview") {
-    // Legacy standalone browser ("preview") tab -> migrate to a pane tab whose
-    // tree is a single browser leaf, matching the unified model.
+    // Legacy standalone browser ("preview") tab, from a build that still had an
+    // embedded browser. Restore it as an empty terminal pane so the tab (and
+    // whatever the user named it) survives instead of vanishing on upgrade.
     const tabId = allocId();
     const leafId = allocId();
-    const leaf: PaneNode = { kind: "leaf", id: leafId, leafKind: "browser", url: saved.url };
+    const leaf: PaneNode = { kind: "leaf", id: leafId, leafKind: "terminal" };
     return {
       id: tabId,
       kind: "pane",

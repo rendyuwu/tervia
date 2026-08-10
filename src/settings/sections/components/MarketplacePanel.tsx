@@ -2,7 +2,6 @@ import { useMemo, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
-import { buildProxyUrl } from "@/modules/browser/lib/proxy";
 
 export type MarketplaceItem = {
   /** Catalog id, e.g. `discord-rich-presence`. Not the installed manifest id
@@ -105,14 +104,9 @@ function MarketplaceCard({ item, onInstall }: { item: MarketplaceItem; onInstall
   // are passed through untouched.
   const iconSrc = useMemo(() => {
     if (!item.icon) return null;
-    const lower = item.icon.toLowerCase();
-    if (lower.startsWith("http://") || lower.startsWith("https://")) {
-      try {
-        return buildProxyUrl(item.icon);
-      } catch {
-        return item.icon;
-      }
-    }
+    // Remote icons load straight from their origin: `<img>` is not CORS-gated
+    // for rendering, and the proxy scheme that used to front them went with the
+    // embedded browser.
     return item.icon;
   }, [item.icon]);
   const showImg = !!iconSrc && !iconBroken;

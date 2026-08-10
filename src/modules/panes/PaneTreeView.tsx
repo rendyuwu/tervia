@@ -51,7 +51,6 @@ import { LeafIcon, type LeafIconInfo } from "@/components/LeafIcon";
 import { cn } from "@/lib/utils";
 import { type EditorPaneHandle } from "@/modules/editor";
 import { useExplorerIconsReady } from "@/modules/explorer/lib/iconResolver";
-import { BrowserPane, setPaneDragActive } from "@/modules/browser";
 import { ExtensionPanelMount } from "@/modules/extensions/components/ExtensionPanelMount";
 import { WorkspaceBoard } from "@/modules/workspaces/WorkspaceBoard";
 import { TerminalPane, type TerminalPaneHandle } from "@/modules/terminal";
@@ -96,10 +95,8 @@ const EditorPane = lazy(() => import("@/modules/editor").then((m) => ({ default:
  *  it hands off: the main pane unmounts its editor while floating (so two live
  *  CodeMirror views can't race and save-stomp the same file) and saves before
  *  float + on dock-back. Remote/SFTP editors depend on the main window's russh
- *  session, so those are gated out. A browser leaf hands off too, but by MOVING
- *  its native webview into the float window rather than re-rendering anything, so
- *  the page, its scroll position and any playing media survive the pop-out with no
- *  reload. An extension panel hands off too, by re-running its renderer: panel
+ *  session, so those are gated out. An extension panel hands off too, by
+ *  re-running its renderer: panel
  *  registries are per-webview, so the float ACTIVATES the extension in its own
  *  context. That makes two live copies against one storage, which is why a panel
  *  that persists (the API Client's collections) refreshes on mount rather than
@@ -113,8 +110,6 @@ function floatParamsFor(node: PaneLeaf, title: string): FloatLeafParams | null {
       title,
       remotePty: node.sshConnectionId !== undefined,
     };
-  if (node.leafKind === "browser")
-    return { leafId: node.id, kind: "browser", title, url: node.url };
   if (node.leafKind === "editor" && !isRemoteEditorLeaf(node))
     return {
       leafId: node.id,
@@ -157,8 +152,6 @@ export type LeafBundle = {
   setEditorRef: (h: EditorPaneHandle | null) => void;
   onDirtyChange: (dirty: boolean) => void;
   onCloseLeaf: () => void;
-  // preview-only
-  onBrowserUrlChange: (url: string) => void;
 };
 
 type Props = {
@@ -327,7 +320,6 @@ function leafIconInfo(node: PaneLeaf, aiCliStatuses?: Map<number, AiCliStatus>):
     isSsh: node.leafKind === "terminal" && !!node.sshConnectionId,
     editorFileName: node.leafKind === "editor" ? basename(node.path) : undefined,
     editorRemote: isRemoteEditorLeaf(node),
-    browserUrl: node.leafKind === "browser" ? node.url : undefined,
     aiCliStatus: node.leafKind === "terminal" ? (aiCliStatuses?.get(node.id) ?? null) : null,
     extIcon: node.leafKind === "extension-panel" ? node.icon : undefined,
   };
@@ -449,24 +441,6 @@ const LeafBody = memo(function LeafBody({
             onPtyId={(_id, ptyId) => b.onPtyId(ptyId)}
           />
         </div>
-      </ErrorBoundary>
-    );
-  }
-  if (node.leafKind === "browser") {
-    // While floating, the float window OWNS this leaf's webview (it was moved
-    // there) and drives its bounds. Staying mounted here would fight it: the rAF
-    // loop would keep pushing main-window rectangles at a webview living in
-    // another window, and hide it outright whenever this tab is not visible. So
-    // hand off completely, exactly like the editor does.
-    if (isFloating) return null;
-    return (
-      <ErrorBoundary label="browser pane" resetKeys={[node.id]}>
-        <BrowserPane
-          id={node.id}
-          url={node.url}
-          visible={tabVisible}
-          onUrlChange={b.onBrowserUrlChange}
-        />
       </ErrorBoundary>
     );
   }
@@ -647,8 +621,8 @@ function PaneLeafFrame({
   }, [node, sshHosts, sshBindingByConnection, onReconnectSsh]);
 
   // Float the pane into its own always-on-top window (terminals mirror live via
-  // Tauri events; editors open the file; browsers move their webview; extension
-  // panels re-run their renderer in the float's own context).
+  // Tauri events; editors open the file; extension panels re-run their renderer
+  // in the float's own context).
   const floatParams = floatParamsFor(node, baseLabel);
   const frameRef = useRef<HTMLDivElement>(null);
   const editorHandleRef = useRef<EditorPaneHandle | null>(null);
@@ -660,15 +634,7 @@ function PaneLeafFrame({
     // by path) opens the live content and the main editor's unmount can't drop
     // unsaved edits. No-op when clean; skipped when already floating (ref is null).
     if (floatParams.kind === "editor") await editorHandleRef.current?.save();
-    // Browser hand-off: the float owns the page, so let it push navigation back
-    // into this leaf. The leaf's url is what the tab title and the AI's browser
-    // list read, and both would otherwise freeze at the pop-out address.
-    void floatPane(
-      floatParams,
-      { w: r?.width ?? 720, h: r?.height ?? 480 },
-      b.onBrowserUrlChange,
-      onFocusEntry,
-    );
+    void floatPane(floatParams, { w: r?.width ?? 720, h: r?.height ?? 480 }, onFocusEntry);
   };
 
   return (
@@ -758,7 +724,7 @@ function PaneLeafFrame({
               <span className="bg-foreground/60 size-1.5 shrink-0 rounded-full" />
             )}
             {/* Everything this pane's *content* can do (view mode, wrap,
-                format, open in a browser), fenced off by a rule from the three
+                format), fenced off by a rule from the three
                 that act on the pane itself (float / theme / close).
                 `empty:hidden` retires the rule with the group: only some leaf
                 kinds fill it, and `ExtensionHeaderItems` renders nothing at all
@@ -835,15 +801,15 @@ function PaneLeafFrame({
               {onlyHere && node.leafKind === "editor" && (
                 <ExtensionHeaderItems placement="left" compact />
               )}
-              {/* "Open preview" for a detected local URL (a printed dev-server
-                address, or a running port found from the project's config).
+              {/* Hand a detected local URL (a printed dev-server address, or a
+                running port found from the project's config) to the OS browser.
                 `detectedBrowserUrl` is already resolved against the active
                 leaf, so it rides the focused pane. */}
               {onlyHere && detectedBrowserUrl && onOpenPreview && (
-                <IconTooltip label={`Open ${detectedBrowserUrl} as a preview tab`} side="bottom">
+                <IconTooltip label={`Open ${detectedBrowserUrl} in your browser`} side="bottom">
                   <button
                     type="button"
-                    aria-label={`Open ${detectedBrowserUrl} as a preview tab`}
+                    aria-label={`Open ${detectedBrowserUrl} in your browser`}
                     onClick={(e) => {
                       e.stopPropagation();
                       onOpenPreview();
@@ -1148,16 +1114,11 @@ export function PaneTreeView({
   const reset = () => {
     latestRef.current = { over: null, edge: null };
     setDrag({ sourceLeafId: null, overLeafId: null, edge: null });
-    // Restore any preview webviews hidden for the drag.
-    setPaneDragActive(false);
   };
 
   const handleDragStart = (ev: DragStartEvent) => {
     latestRef.current = { over: null, edge: null };
     setDrag({ sourceLeafId: parsePaneId(ev.active.id, DRAG_PREFIX), overLeafId: null, edge: null });
-    // Hide preview webviews so the DOM drop indicators show over a browser pane
-    // and the pointer reaches the DOM drop zones instead of the webview surface.
-    setPaneDragActive(true);
   };
 
   const handleDragMove = (ev: DragMoveEvent) => {
@@ -1266,7 +1227,7 @@ export function PaneTreeView({
       <DragOverlay dropAnimation={null}>
         {draggedLeaf && (
           // Fixed 1:1 (28x28) chip with the leaf's own icon centered (file-type
-          // glyph for editors, favicon for browsers, terminal/cloud for shells,
+          // glyph for editors, terminal/cloud for shells,
           // lock for private). The pane drag handle is tiny, so a centered
           // icon-only square reads cleaner than an icon+label pill clipped to the
           // handle's width.

@@ -37,13 +37,7 @@ type Props = {
   hasExtensionTab: boolean;
   /** Persist a split node's per-child size percentages after a divider drag. */
   onSplitSizes: (splitId: number, sizes: number[]) => void;
-} & Pick<
-  TabsApi,
-  | "setBrowserLeafUrl"
-  | "movePaneLeafToEdge"
-  | "moveExtTabToPane"
-  | "setLeafTerminalTheme"
->;
+} & Pick<TabsApi, "movePaneLeafToEdge" | "moveExtTabToPane" | "setLeafTerminalTheme">;
 
 /**
  * The center workspace column. Stacks the live PaneStack and the four overlay
@@ -74,7 +68,6 @@ export function WorkspaceArea({
   onOpenPreview,
   hasExtensionTab,
   onSplitSizes,
-  setBrowserLeafUrl,
   movePaneLeafToEdge,
   moveExtTabToPane,
   setLeafTerminalTheme,
@@ -112,7 +105,6 @@ export function WorkspaceArea({
               registerEditorHandle={paneHandles.registerEditorHandle}
               onDirtyChange={paneHandles.handleEditorDirty}
               onCloseLeaf={paneHandles.handleEditorCloseLeaf}
-              onBrowserUrlChange={setBrowserLeafUrl}
               mdPreviewLeafIds={mdPreviewLeafIds}
               onToggleMdPreview={onToggleMdPreview}
               detectedBrowserUrl={detectedBrowserUrl}

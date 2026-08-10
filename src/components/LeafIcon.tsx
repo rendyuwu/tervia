@@ -1,7 +1,6 @@
 import { cn } from "@/lib/utils";
 import { CliAgentIcon } from "./CliAgentIcon";
 import { fileIconUrl } from "@/modules/explorer/lib/iconResolver";
-import { BrowserFavicon } from "@/modules/browser/BrowserFavicon";
 import { aiCliIconClass, type AiCliStatus } from "@/modules/terminal/lib/aiCliStatus";
 import { resolveExtIcon, useIconsReady } from "@/lib/iconRegistry";
 import { Database, Lock, Server, SquarePen, SquareTerminal } from "lucide-react";
@@ -9,7 +8,7 @@ import { Database, Lock, Server, SquarePen, SquareTerminal } from "lucide-react"
 /** Normalized description of one pane leaf, enough to pick its icon. Built from
  *  a tab-strip `Entry` or a `PaneLeaf` so both feed the same renderer. */
 export type LeafIconInfo = {
-  leafKind: "terminal" | "editor" | "browser" | "extension-panel" | "board";
+  leafKind: "terminal" | "editor" | "extension-panel" | "board";
   /** Private leaf (AI cannot read it): forces a lock glyph over kind/ssh. */
   isPrivate?: boolean;
   /** Terminal bound to a saved SSH host: cloud glyph instead of local terminal. */
@@ -18,8 +17,6 @@ export type LeafIconInfo = {
   editorFileName?: string;
   /** Editor backed by SFTP: recolor the file icon (remote variant). */
   editorRemote?: boolean;
-  /** Browser page URL. Drives the site favicon. */
-  browserUrl?: string;
   /** Terminal AI CLI status: tints the glyph idle/working/blocking. */
   aiCliStatus?: AiCliStatus | null;
   /** Icon hint the extension passed to `openExtensionPane` (`lucide:<Name>`).
@@ -34,7 +31,7 @@ export type LeafIconInfo = {
  * strip and the header.
  *
  * Precedence (matches every surface): private (lock) > editor file-type icon /
- * browser favicon / SSH cloud / local terminal. The AI CLI status tints the
+ * SSH cloud / local terminal. The AI CLI status tints the
  * glyph; `className` carries the default (non-AI) colour and the AI tint wins
  * via tailwind-merge when present. The terminal FIFO ordinal badge is NOT
  * rendered here - it stays specific to the tab strip.
@@ -90,10 +87,6 @@ export function LeafIcon({
         className={cn("shrink-0", className)}
       />
     );
-  }
-
-  if (info.leafKind === "browser") {
-    return <BrowserFavicon url={info.browserUrl ?? ""} size={size} className={className} />;
   }
 
   if (info.leafKind === "extension-panel") {

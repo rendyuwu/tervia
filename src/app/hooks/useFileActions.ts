@@ -3,6 +3,7 @@ import { setExtensionWorkspaceBridge } from "@/modules/extensions/workspaceBridg
 import { type Tab } from "@/modules/tabs";
 import type { SshConnectionBinding } from "@/modules/ssh/status";
 import { leaves } from "@/modules/terminal";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { useCallback, useEffect } from "react";
 import { type TabsApi } from "./tabsApi";
 
@@ -13,9 +14,6 @@ type Params = {
    *  opened from the remote tree record which PROFILE it came from, not just the
    *  session number, so the tab can be restored after a restart. */
   sshBindingByConnection: Map<string, SshConnectionBinding>;
-  /** Opens a URL in a browser pane. Used for file types the editor cannot
-   *  render but the native webview can - see `isPdfPath`. */
-  openPreviewTab: (url: string, activate?: boolean) => number | null;
 } & Pick<TabsApi, "openFileTab" | "setEditorLeafPath">;
 
 /**
@@ -34,7 +32,6 @@ export function useFileActions({
   openFileTab,
   setEditorLeafPath,
   sshBindingByConnection,
-  openPreviewTab,
 }: Params): {
   handleOpenFile: (path: string, pin?: boolean) => void;
   handleOpenRemoteFile: (path: string, sessionId: number, hostLabel: string | null) => void;
@@ -43,18 +40,18 @@ export function useFileActions({
 } {
   const handleOpenFile = useCallback(
     (path: string, pin?: boolean) => {
-      // PDF goes to a browser pane; everything else to an editor tab. Images
+      // PDF goes to the OS handler; everything else to an editor tab. Images
       // need no branch here - `fs_read_file` returns them as a data URL and
       // `EditorPane` renders it. A non-absolute path yields a null URL and
-      // falls through rather than opening a blank browser tab.
+      // falls through to the editor rather than opening nothing.
       const url = isPdfPath(path) ? pathToFileUrl(path) : null;
       if (url) {
-        openPreviewTab(url, true);
+        void openUrl(url).catch(console.error);
         return;
       }
       openFileTab(path, pin ?? false);
     },
-    [openFileTab, openPreviewTab],
+    [openFileTab],
   );
 
   // Wire the extension workspace bridge to the live file-open handler.

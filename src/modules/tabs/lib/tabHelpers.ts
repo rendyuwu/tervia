@@ -3,15 +3,6 @@ import { findLeaf, type PaneLeaf } from "@/modules/terminal/lib/panes";
 import { type SshConnection } from "@/modules/ssh/connections";
 import { type PaneTab, type Tab } from "./tabTypes";
 
-export function titleFromUrl(url: string): string {
-  try {
-    const u = new URL(url);
-    return u.host || url;
-  } catch {
-    return url || "browser";
-  }
-}
-
 /** What an extension puts between its own name and the detail it is showing:
  *  "SQL Explorer · sakila", "API Client · checkout". */
 const EXT_TITLE_SEP = "·";
@@ -94,7 +85,6 @@ export function leafLabel(
     return tag ? `${tag}:${leaf.customTitle}` : leaf.customTitle;
   }
   if (leaf.leafKind === "editor") return basename(leaf.path);
-  if (leaf.leafKind === "browser") return leaf.title || titleFromUrl(leaf.url);
   if (leaf.leafKind === "extension-panel") return leaf.title || "panel";
   if (leaf.leafKind === "board") return "Board";
   // SSH leaves: show "ssh:<name>" when the saved connection has a name, else
@@ -145,12 +135,12 @@ export function activeLeaf(tab: Tab): PaneLeaf | null {
   return findLeaf(tab.paneTree, tab.activeLeafId);
 }
 
-export function activeLeafKind(tab: Tab): "terminal" | "editor" | "browser" | null {
+export function activeLeafKind(tab: Tab): "terminal" | "editor" | null {
   const leaf = activeLeaf(tab);
   if (!leaf) return null;
-  // Extension-panel and board leaves aren't one of the terminal/editor/browser
-  // kinds the chrome derivations branch on; report null so callers fall to
-  // their defaults instead of every one having to special-case them.
+  // Extension-panel and board leaves aren't one of the terminal/editor kinds
+  // the chrome derivations branch on; report null so callers fall to their
+  // defaults instead of every one having to special-case them.
   return leaf.leafKind === "extension-panel" || leaf.leafKind === "board" ? null : leaf.leafKind;
 }
 

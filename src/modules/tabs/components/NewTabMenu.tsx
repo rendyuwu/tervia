@@ -10,27 +10,25 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { fmtShortcut, MOD_KEY } from "@/lib/platform";
 import { cn } from "@/lib/utils";
 import { TOOLBAR_HOVER } from "@/lib/toolbarButton";
-import { Bot, Columns2, Globe, Lock, Plus, Rows2, SquareTerminal } from "lucide-react";
+import { Bot, Columns2, Lock, Plus, Rows2, SquareTerminal } from "lucide-react";
 
 type NewTabMenuProps = {
   onNewTerminal: () => void;
   /** Open a new local terminal tab pre-flagged as private. */
   onNewPrivateTerminal?: () => void;
-  onNewPreview: () => void;
   /** Open the agent picker (`AgentSpawnDialog`). */
   onOpenAgents: () => void;
   /** Split the active pane. Wired into the `+` dropdown next to New Terminal.
    *  `kind` picks what the new pane holds (defaults to a terminal). */
-  onSplit?: (dir: "row" | "col", kind?: "terminal" | "editor" | "browser") => void;
+  onSplit?: (dir: "row" | "col", kind?: "terminal" | "editor") => void;
   /** Disable the split-pane items when the active tab is at its split cap. */
   canSplit: boolean;
 };
 
-/** New-tab cluster: the `+` dropdown trigger plus its terminal/agent/preview/split items. */
+/** New-tab cluster: the `+` dropdown trigger plus its terminal/agent/split items. */
 export function NewTabMenu({
   onNewTerminal,
   onNewPrivateTerminal,
-  onNewPreview,
   onOpenAgents,
   onSplit,
   canSplit,
@@ -76,13 +74,6 @@ export function NewTabMenu({
             {fmtShortcut(MOD_KEY, "Shift", "N")}
           </span>
         </DropdownMenuItem>
-        <DropdownMenuItem onSelect={() => onNewPreview()}>
-          <Globe size={14} strokeWidth={1.75} />
-          <span className="flex-1 whitespace-nowrap">Browser</span>
-          <span className="text-muted-foreground ml-4 text-xs whitespace-nowrap">
-            {fmtShortcut(MOD_KEY, "Alt", "P")}
-          </span>
-        </DropdownMenuItem>
         {onSplit ? (
           <>
             <DropdownMenuSeparator />
@@ -98,13 +89,6 @@ export function NewTabMenu({
               <span className="flex-1 whitespace-nowrap">Split down</span>
               <span className="text-muted-foreground ml-4 text-xs whitespace-nowrap">
                 {fmtShortcut(MOD_KEY, "Shift", "D")}
-              </span>
-            </DropdownMenuItem>
-            <DropdownMenuItem disabled={!canSplit} onSelect={() => onSplit("row", "browser")}>
-              <Globe size={14} strokeWidth={1.75} />
-              <span className="flex-1 whitespace-nowrap">Split with browser</span>
-              <span className="text-muted-foreground ml-4 text-xs whitespace-nowrap">
-                {fmtShortcut(MOD_KEY, "Shift", "B")}
               </span>
             </DropdownMenuItem>
           </>

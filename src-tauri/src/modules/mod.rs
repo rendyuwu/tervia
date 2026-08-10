@@ -11,7 +11,6 @@ pub mod git;
 pub mod ids;
 pub mod lockext;
 pub mod net;
-pub mod preview;
 pub mod pty;
 pub mod pty_daemon;
 pub mod secrets;

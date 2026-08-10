@@ -99,7 +99,6 @@ subsystems, flat files for single-purpose ones).
 | `git/`          | Runs `git` and parses status/diff into structured payloads (explorer decorations, branch name).  |
 | `ssh/`          | SSH/SFTP sessions (`russh` + `russh-sftp`), including ProxyJump host chaining.                    |
 | `extensions/`   | Extension install pipeline, manifest validation, state store, GitHub resolution (Section 7).     |
-| `preview/`      | Native-webview dev-server preview backend (`embed`, `proxy`, `util`).                             |
 | `format.rs`     | Direct-spawn external formatter executor (`fmt_run_external`).                                    |
 | `secrets.rs`    | OS keychain bridge (`keyring` crate; Linux file-store fallback).                                  |
 | `net.rs`        | Minimal HTTP probe (dev-server detection).                                                        |
@@ -117,7 +116,6 @@ lives in 19 self-contained modules.
 | `terminal/`   | xterm.js sessions, PTY bridge, OSC 7/133 shell-integration handlers, terminal themes. |
 | `editor/`     | CodeMirror 6 stack, language modes, format-on-save, AI inline autocomplete, vim mode. |
 | `explorer/`   | File tree, Material/Catppuccin icons, fuzzy search, keyboard nav, inline rename.       |
-| `browser/`    | The preview/browser tab: a real native webview (WebView2/WebKit) docked over the pane. |
 | `panes/`      | Split-pane orchestration (horizontal/vertical) via `react-resizable-panels`.          |
 | `tabs/`       | The tab model (source of truth): `useTabs`, workspace-cwd derivation, serialization.  |
 | `workspaces/` | Workspace persistence and switching (tab layout + cwd).                               |
@@ -143,7 +141,7 @@ Tab = PaneTab | AiDiffTab | GitDiffTab | ExtensionTab | ScmTab
 ```
 
 `PaneTab` (`kind: "pane"`) holds a split-pane tree whose leaves are one of
-`terminal`, `editor`, `browser`, `ssh`, or `extension-panel`. The one other
+`terminal`, `editor`, `ssh`, or `extension-panel`. The one other
 kind (`ext`) is a whole-tab surface. Tabs are never unmounted on switch.
 
 ## 5. The AI subsystem (`src/modules/ai/`)
@@ -328,7 +326,6 @@ never silently widen a grant.
 | PTY daemon sidecar                                 | Dev servers and long jobs survive a window close without surviving a crash or reboot (bounded).   |
 | Injected bridges over direct coupling             | The extension host and cross-module wiring stay decoupled from React and feature internals.       |
 | Install-time trust, no sandbox                    | Full-privilege JS matches the VS Code model; a real sandbox would block the integrations authors need. A consent gate keeps the review dialog authoritative. |
-| Native webview for preview, not an iframe          | YouTube, logged-in apps, DRM video, WebSockets, and HMR dev servers all work; no XFO/CSP fights.  |
 | BYOK keys in the OS keychain only                 | Keys never touch disk or web storage; a compromised renderer cannot read the plaintext at rest.   |
 | Fresh Blob-URL module per activation              | Enable/disable/update is fully live with clean per-activation isolation and no recompile.         |
 | Tabs never unmount                                | Background PTYs and dev servers keep streaming; switching is instant.                             |

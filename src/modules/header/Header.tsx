@@ -30,7 +30,6 @@ type Props = {
   onTogglePrivate?: (leafId: number) => void;
   /** Set a leaf's tab name, or `null` to fall back to the derived one. */
   onRenameLeaf?: (leafId: number, title: string | null) => void;
-  onNewPreview: () => void;
   /** `+` -> Agent...: open the agent picker dialog. */
   onOpenAgents: () => void;
   /** Pin a preview-editor leaf on double-click. */
@@ -103,7 +102,6 @@ function HeaderImpl({
   onNewPrivateTerminal,
   onTogglePrivate,
   onRenameLeaf,
-  onNewPreview,
   onOpenAgents,
   onPinLeaf,
   onReorderTabs,
@@ -253,7 +251,6 @@ function HeaderImpl({
           onNewPrivateTerminal={onNewPrivateTerminal}
           onTogglePrivate={onTogglePrivate}
           onRenameLeaf={onRenameLeaf}
-          onNewPreview={onNewPreview}
           onOpenAgents={onOpenAgents}
           onPinLeaf={onPinLeaf}
           onReorderTabs={onReorderTabs}

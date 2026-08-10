@@ -33,8 +33,6 @@ type Props = {
   registerEditorHandle: (leafId: number, handle: EditorPaneHandle | null) => void;
   onDirtyChange: (leafId: number, dirty: boolean) => void;
   onCloseLeaf: (leafId: number) => void;
-  // Preview (browser) leaf callbacks
-  onBrowserUrlChange: (leafId: number, url: string) => void;
   /** Editor leaf ids rendered as markdown preview instead of source. */
   mdPreviewLeafIds: ReadonlySet<number>;
   // Shared
@@ -89,7 +87,6 @@ export function PaneStack({
   registerEditorHandle,
   onDirtyChange,
   onCloseLeaf,
-  onBrowserUrlChange,
   mdPreviewLeafIds,
   onFocusLeaf,
   onMovePaneLeaf,
@@ -137,7 +134,6 @@ export function PaneStack({
     registerEditorHandle,
     onDirtyChange,
     onCloseLeaf,
-    onBrowserUrlChange,
   });
   cbRef.current = {
     registerTerminalHandle,
@@ -153,7 +149,6 @@ export function PaneStack({
     registerEditorHandle,
     onDirtyChange,
     onCloseLeaf,
-    onBrowserUrlChange,
   };
 
   const bundles = useRef(new Map<number, LeafBundle>());
@@ -174,7 +169,6 @@ export function PaneStack({
         setEditorRef: (h) => cbRef.current.registerEditorHandle(leafId, h),
         onDirtyChange: (dirty) => cbRef.current.onDirtyChange(leafId, dirty),
         onCloseLeaf: () => cbRef.current.onCloseLeaf(leafId),
-        onBrowserUrlChange: (url) => cbRef.current.onBrowserUrlChange(leafId, url),
       };
       bundles.current.set(leafId, b);
     }
@@ -182,9 +176,9 @@ export function PaneStack({
   };
 
   // Prune per-leaf bundles whose leaf has disappeared from the active
-  // workspace's tabs. The native browser webview close decision lives in
-  // useSessionDisposal instead, which reconciles against ALL workspaces so a
-  // preview leaf isn't destroyed merely because its workspace went inactive.
+  // workspace's tabs. Terminal session disposal lives in useSessionDisposal
+  // instead, which reconciles against ALL workspaces so a leaf isn't disposed
+  // merely because its workspace went inactive.
   useEffect(() => {
     const live = new Set<number>();
     for (const t of paneTabs) {
