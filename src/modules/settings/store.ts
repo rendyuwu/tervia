@@ -130,20 +130,10 @@ export type Preferences = {
    * back off. Default false.
    */
   statusBarCompact: boolean;
-  /** Show the Source Control panel. Default true. */
-  showSourceControl: boolean;
-  /**
-   * Mount Source Control in the right slot (next to the extension right
-   * panels) instead of as a sidebar pane on the left. Default false.
-   * When true, the left sidebar drops the SCM pane and a status-bar button
-   * toggles the right-slot SCM panel.
-   */
-  sourceControlInRightPanel: boolean;
   /**
    * Mount the SSH (Remote) file explorer in the right slot instead of as a
    * sidebar pane on the left. Default false. When true, the left sidebar drops
    * the SSH pane and a status-bar button toggles the right-slot SSH panel.
-   * Mirrors `sourceControlInRightPanel`.
    */
   sshInRightPanel: boolean;
   shortcuts: Record<ShortcutId, KeyBinding[]>;
@@ -311,8 +301,6 @@ const KEY_TERMINAL_SCROLLBACK = "terminalScrollback";
 const KEY_TERMINAL_ENV_PATH = "terminalEnvPath";
 const KEY_SHOW_HIDDEN_FILES = "showHiddenFiles";
 const KEY_STATUS_BAR_COMPACT = "statusBarCompact";
-const KEY_SHOW_SOURCE_CONTROL = "showSourceControl";
-const KEY_SOURCE_CONTROL_IN_RIGHT_PANEL = "sourceControlInRightPanel";
 const KEY_SSH_IN_RIGHT_PANEL = "sshInRightPanel";
 const KEY_SHORTCUTS = "shortcuts";
 const KEY_EXTENSION_SHORTCUTS = "extensionShortcuts";
@@ -426,8 +414,6 @@ export const DEFAULT_PREFERENCES: Preferences = {
   terminalEnvPath: [],
   showHiddenFiles: false,
   statusBarCompact: false,
-  showSourceControl: true,
-  sourceControlInRightPanel: false,
   sshInRightPanel: false,
   shortcuts: {} as Record<ShortcutId, KeyBinding[]>,
   extensionShortcuts: {} as Record<string, KeyBinding[]>,
@@ -504,11 +490,6 @@ export async function loadPreferences(): Promise<Preferences> {
     terminalEnvPath: normalizeTerminalPathEntries(get<unknown>(KEY_TERMINAL_ENV_PATH)),
     showHiddenFiles: get<boolean>(KEY_SHOW_HIDDEN_FILES) ?? DEFAULT_PREFERENCES.showHiddenFiles,
     statusBarCompact: get<boolean>(KEY_STATUS_BAR_COMPACT) ?? DEFAULT_PREFERENCES.statusBarCompact,
-    showSourceControl:
-      get<boolean>(KEY_SHOW_SOURCE_CONTROL) ?? DEFAULT_PREFERENCES.showSourceControl,
-    sourceControlInRightPanel:
-      get<boolean>(KEY_SOURCE_CONTROL_IN_RIGHT_PANEL) ??
-      DEFAULT_PREFERENCES.sourceControlInRightPanel,
     sshInRightPanel: get<boolean>(KEY_SSH_IN_RIGHT_PANEL) ?? DEFAULT_PREFERENCES.sshInRightPanel,
     shortcuts:
       get<Record<ShortcutId, KeyBinding[]>>(KEY_SHORTCUTS) ?? DEFAULT_PREFERENCES.shortcuts,
@@ -695,14 +676,6 @@ export async function setStatusBarCompact(value: boolean): Promise<void> {
   await writePref(KEY_STATUS_BAR_COMPACT, value);
 }
 
-export async function setShowSourceControl(value: boolean): Promise<void> {
-  await writePref(KEY_SHOW_SOURCE_CONTROL, value);
-}
-
-export async function setSourceControlInRightPanel(value: boolean): Promise<void> {
-  await writePref(KEY_SOURCE_CONTROL_IN_RIGHT_PANEL, value);
-}
-
 export async function setSshInRightPanel(value: boolean): Promise<void> {
   await writePref(KEY_SSH_IN_RIGHT_PANEL, value);
 }
@@ -880,8 +853,6 @@ export async function onPreferencesChange(
     terminalEnvPath: KEY_TERMINAL_ENV_PATH,
     showHiddenFiles: KEY_SHOW_HIDDEN_FILES,
     statusBarCompact: KEY_STATUS_BAR_COMPACT,
-    showSourceControl: KEY_SHOW_SOURCE_CONTROL,
-    sourceControlInRightPanel: KEY_SOURCE_CONTROL_IN_RIGHT_PANEL,
     sshInRightPanel: KEY_SSH_IN_RIGHT_PANEL,
     shortcuts: KEY_SHORTCUTS,
     extensionShortcuts: KEY_EXTENSION_SHORTCUTS,

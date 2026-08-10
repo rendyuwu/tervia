@@ -13,7 +13,7 @@
  *   - useWorkspacePersistence  - hydrate + auto-snapshot workspaces
  *   - useQuitGuard             - pre-quit snapshot flush + busy-terminal prompt
  *   - useWorkspaceSwitching    - switch / create / close orchestration
- *   - useRightPanelExclusion   - SCM / AI / extension right-slot mutual exclusion
+ *   - useRightPanelExclusion   - closes a docked right-slot panel when its pref flips off
  *   - useExtensionSidebarBridges - tabs/sidebar host bridges + auto-restore
  *   - useEditorBridge          - ctx.editor bridge for extensions
  *   - useActiveLeafSurface     - active leaf search addon / URL / editor handle
@@ -32,7 +32,6 @@ import { useRightPanelStore } from "@/modules/extensions";
 import { type EditorPaneHandle } from "@/modules/editor";
 import { Header, type SearchInlineHandle } from "@/modules/header";
 import { usePreferencesStore } from "@/modules/settings/preferences";
-import { useScmRightPanelStore } from "@/modules/scm/scmRightPanelStore";
 import { useSshRightPanelStore } from "@/modules/ssh/sshRightPanelStore";
 import {
   isTerminalControlChord,
@@ -114,8 +113,6 @@ export default function App() {
     openExtensionTab,
     openExtensionPane,
     setExtensionTabState,
-    openGitDiffTab,
-    openScmTab,
     openBoardTab,
     closeTab,
     selectByIndex,
@@ -169,10 +166,8 @@ export default function App() {
   const isTerminalLike = activeTab ? isTerminalLikeTab(activeTab) : false;
   const isEditorLike = activeTab ? isEditorLikeTab(activeTab) : false;
 
-  // Lazy-mount the diff/scm/ext stacks. Each chunk only loads once a tab of
-  // that kind exists.
-  const hasGitDiffTab = useMemo(() => tabs.some((t) => t.kind === "git-diff"), [tabs]);
-  const hasScmTab = useMemo(() => tabs.some((t) => t.kind === "scm"), [tabs]);
+  // Lazy-mount the ext stack. The chunk only loads once a tab of that kind
+  // exists.
   const hasExtensionTab = useMemo(() => tabs.some((t) => t.kind === "ext"), [tabs]);
 
   // Active leaf says what's focused in the current tab. Drives Search,
@@ -294,8 +289,6 @@ export default function App() {
   useExtensionPanelDefaults();
 
   // Preferences used by the chrome / layout.
-  const showSourceControl = usePreferencesStore((s) => s.showSourceControl);
-  const sourceControlInRightPanel = usePreferencesStore((s) => s.sourceControlInRightPanel);
   const sshInRightPanel = usePreferencesStore((s) => s.sshInRightPanel);
   const contentZoom = usePreferencesStore((s) => s.contentZoom);
   // UI zoom scales the chrome only (header / tabs, sidebar, side panels, status
@@ -307,14 +300,12 @@ export default function App() {
   // Apply --content-zoom (CSS var) and body.zoom from the prefs values.
   useApplyZoom(contentZoom, uiZoom);
 
-  const scmRightOpen = useScmRightPanelStore((s) => s.open);
-  const closeScmRight = useScmRightPanelStore((s) => s.closePanel);
   const sshRightOpen = useSshRightPanelStore((s) => s.open);
   const closeSshRight = useSshRightPanelStore((s) => s.closePanel);
 
-  // Extension right-panels, SCM/SSH right panels and the AI sidebar all live in
-  // the right column TOGETHER, stacked like the left sidebar's sections (see
-  // AppRightSlot). This is the list of extension-owned ones.
+  // Extension right-panels and the SSH right panel all live in the right column
+  // TOGETHER, stacked like the left sidebar's sections (see AppRightSlot). This
+  // is the list of extension-owned ones.
   const rightPanels = useRightPanelStore((s) => s.panels);
   // Re-open a sidebar section docked to the right slot on boot (else it would
   // vanish: gone from the left sidebar, closed in the right).
@@ -473,10 +464,6 @@ export default function App() {
   // off). Declared here (not up with the other store reads) because it needs
   // hasAnySshLeaf from useSshLeafState.
   useRightPanelExclusion(
-    scmRightOpen,
-    sourceControlInRightPanel,
-    showSourceControl,
-    closeScmRight,
     sshRightOpen,
     sshInRightPanel,
     hasAnySshLeaf,
@@ -738,7 +725,6 @@ export default function App() {
         selectByIndex,
         splitActivePaneInActiveTab,
         focusNextPaneInTab,
-        openScmTab,
         toggleSidebar,
         requestCloseLeaf,
         setNewEditorOpen,
@@ -766,7 +752,6 @@ export default function App() {
       splitActivePaneInActiveTab,
       focusNextPaneInTab,
       toggleSidebar,
-      openScmTab,
       commandPaletteHandler,
     ],
   );
@@ -902,8 +887,6 @@ export default function App() {
                 activeFilePath={activeFilePath}
                 activeSshContext={activeSshContext}
                 onOpenRemoteFile={handleOpenRemoteFile}
-                showSourceControl={showSourceControl}
-                sourceControlInRightPanel={sourceControlInRightPanel}
                 sshInRightPanel={sshInRightPanel}
                 onSwitchWorkspace={switchToWorkspace}
                 onCreateWorkspace={createNewWorkspace}
@@ -916,8 +899,6 @@ export default function App() {
                 onCloseEntry={handleHeaderCloseEntry}
                 activeLeafId={activePaneTab?.activeLeafId ?? null}
                 sshStatuses={sshStatuses}
-                openGitDiffTab={openGitDiffTab}
-                openScmTab={openScmTab}
                 openBoardTab={openBoardTab}
               />
               <ResizableHandle withHandle />
@@ -927,7 +908,6 @@ export default function App() {
                 activeTab={activeTab}
                 activePaneTab={activePaneTab}
                 uiZoom={uiZoom}
-                explorerRoot={explorerRoot}
                 paneHandles={paneHandles}
                 onSearchReady={handleSearchReady}
                 onDetectedLocalUrl={handleDetectedLocalUrl}
@@ -941,24 +921,18 @@ export default function App() {
                 onToggleMdPreview={toggleMdPreviewForLeaf}
                 detectedBrowserUrl={detectedBrowserUrl}
                 onOpenPreview={handleOpenDetectedPreview}
-                hasGitDiffTab={hasGitDiffTab}
-                hasScmTab={hasScmTab}
                 hasExtensionTab={hasExtensionTab}
-                onPathDeleted={handlePathDeleted}
                 setBrowserLeafUrl={setBrowserLeafUrl}
                 movePaneLeafToEdge={movePaneLeafToEdge}
                 moveExtTabToPane={moveExtTabToPane}
-                openGitDiffTab={openGitDiffTab}
                 setLeafTerminalTheme={setLeafTerminalTheme}
                 onSplitSizes={setSplitSizes}
               />
               <AppRightSlot
                 rightPanels={rightPanels}
-                scmRightOpen={scmRightOpen}
                 sshRightOpen={sshRightOpen}
                 explorerRoot={explorerRoot}
                 onPathDeleted={handlePathDeleted}
-                closeScmRight={closeScmRight}
                 closeSshRight={closeSshRight}
                 activeSshContext={activeSshContext}
                 onOpenRemoteFile={handleOpenRemoteFile}
@@ -982,8 +956,6 @@ export default function App() {
                   activeLeafId: activePaneTab?.activeLeafId ?? null,
                   sshStatuses,
                 }}
-                openGitDiffTab={openGitDiffTab}
-                openScmTab={openScmTab}
                 openBoardTab={openBoardTab}
               />
             </ResizablePanelGroup>

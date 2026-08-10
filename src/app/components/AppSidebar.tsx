@@ -17,7 +17,7 @@ import { WorkspacesPanel } from "@/modules/workspaces";
 import { Suspense, useMemo, type ReactNode, type RefObject } from "react";
 import type { PanelImperativeHandle } from "react-resizable-panels";
 import { type TabsApi } from "../hooks/tabsApi";
-import { SourceControlPanel, SshFileExplorer } from "./lazyPanels";
+import { SshFileExplorer } from "./lazyPanels";
 import { SectionStack, type StackSection } from "./SectionStack";
 
 type Props = {
@@ -37,10 +37,8 @@ type Props = {
     fromActiveLeaf: boolean;
   };
   onOpenRemoteFile: (path: string, sessionId: number, hostLabel: string | null) => void;
-  showSourceControl: boolean;
-  sourceControlInRightPanel: boolean;
   /** When true, the Remote/SSH section is docked in the right slot, so the
-   *  sidebar drops its pane (mirrors `sourceControlInRightPanel`). */
+   *  sidebar drops its pane. */
   sshInRightPanel: boolean;
   onSwitchWorkspace: (workspaceId: string) => void;
   onCreateWorkspace: () => void;
@@ -63,17 +61,16 @@ type Props = {
   activeLeafId: number | null;
   /** Live SSH status per leaf, so a connected host is green in Workspaces too. */
   sshStatuses: Map<number, SshStatus>;
-} & Pick<TabsApi, "openGitDiffTab" | "openScmTab" | "openBoardTab">;
+} & Pick<TabsApi, "openBoardTab">;
 
 // The reorderable built-in sidebar sections, in canonical order. Extension
 // sections (keyed `xsec:<extId>:<sectionId>`) are appended dynamically — they
 // exist only while their extension is active.
-const BUILTIN_KEYS = ["files", "ssh", "scm", "workspaces"] as const;
+const BUILTIN_KEYS = ["files", "ssh", "workspaces"] as const;
 type BuiltinKey = (typeof BUILTIN_KEYS)[number];
 const BUILTIN_TITLES: Record<BuiltinKey, string> = {
   files: "Files",
   ssh: "Remote",
-  scm: "Source Control",
   workspaces: "Workspaces",
 };
 // Initial split (the panel group normalizes for whichever sections are visible);
@@ -81,7 +78,6 @@ const BUILTIN_TITLES: Record<BuiltinKey, string> = {
 const BUILTIN_DEFAULT_SIZE: Record<BuiltinKey, string> = {
   files: "45%",
   ssh: "25%",
-  scm: "18%",
   workspaces: "12%",
 };
 const EXT_DEFAULT_SIZE = "20%";
@@ -115,8 +111,6 @@ export function AppSidebar({
   activeFilePath,
   activeSshContext,
   onOpenRemoteFile,
-  showSourceControl,
-  sourceControlInRightPanel,
   sshInRightPanel,
   onSwitchWorkspace,
   onCreateWorkspace,
@@ -129,8 +123,6 @@ export function AppSidebar({
   onCloseEntry,
   activeLeafId,
   sshStatuses,
-  openGitDiffTab,
-  openScmTab,
   openBoardTab,
 }: Props) {
   // Extension-contributed sections (present only while their extension is
@@ -147,14 +139,13 @@ export function AppSidebar({
     return m;
   }, [extEntries]);
 
-  const scmVisible = showSourceControl && !sourceControlInRightPanel;
   const sshVisible = hasAnySshLeaf && !sshInRightPanel;
   // Extension sections moved to the right slot (placement === "right") leave the
   // left sidebar; they're reachable from a status-bar icon instead.
   const placement = useSidebarPlacementStore((s) => s.placement);
 
   // Dock a built-in section (Files / Workspaces) into the right column,
-  // mirroring how Source Control / SSH / extension sections move right: persist
+  // mirroring how SSH / extension sections move right: persist
   // the placement (so AppSidebar drops it from the left) and open it in the
   // right column via the shared right-panel store.
   const moveSectionRight = (key: BuiltinSectionId) => {
@@ -217,21 +208,6 @@ export function AppSidebar({
             />
           </Suspense>
         );
-      case "scm":
-        return (
-          <Suspense fallback={null}>
-            <SourceControlPanel
-              rootPath={explorerRoot}
-              onPathDeleted={onPathDeleted}
-              onOpenDiff={openGitDiffTab}
-              onOpenInTab={openScmTab}
-              dragHandle={controls}
-              collapsed={collapsed}
-              sshSessionId={activeSshContext.fromActiveLeaf ? activeSshContext.sessionId : null}
-              sshCwd={activeSshContext.cwd}
-            />
-          </Suspense>
-        );
       case "workspaces":
         return (
           <WorkspacesPanel
@@ -256,7 +232,6 @@ export function AppSidebar({
 
   const sections: StackSection[] = [];
   for (const key of BUILTIN_KEYS) {
-    if (key === "scm" && !scmVisible) continue;
     if (key === "ssh" && !sshVisible) continue;
     if (placement[key] === "right") continue;
     sections.push({

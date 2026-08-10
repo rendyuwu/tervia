@@ -19,16 +19,14 @@ import { type SshStatus } from "@/modules/ssh/status";
 import { type Tab } from "@/modules/tabs";
 import { Suspense, type ReactNode, type RefObject } from "react";
 import { type TabsApi } from "../hooks/tabsApi";
-import { SourceControlPanel, SshFileExplorer } from "./lazyPanels";
+import { SshFileExplorer } from "./lazyPanels";
 import { SectionStack, TALL_HEADER_COLLAPSED_SIZE, type StackSection } from "./SectionStack";
 
 type Props = {
   rightPanels: ActivePanel[];
-  scmRightOpen: boolean;
   sshRightOpen: boolean;
   explorerRoot: string | null;
   onPathDeleted: (path: string) => void;
-  closeScmRight: () => void;
   closeSshRight: () => void;
   /** SSH context for the right-slot Remote explorer (same source the sidebar uses). */
   activeSshContext: {
@@ -61,7 +59,7 @@ type Props = {
     activeLeafId: number | null;
     sshStatuses: Map<number, SshStatus>;
   };
-} & Pick<TabsApi, "openGitDiffTab" | "openScmTab" | "openBoardTab">;
+} & Pick<TabsApi, "openBoardTab">;
 
 // Persisted in localStorage, alongside the left sidebar's own order key.
 const ORDER_LS_KEY = "tedi:right:sectionOrder";
@@ -69,7 +67,7 @@ const ORDER_LS_KEY = "tedi:right:sectionOrder";
 const PANEL_DEFAULT_SIZE = "25%";
 
 /** Move a docked section back to the left sidebar (undocks) vs just closing it
- *  (keeps the dock; the status-bar toggle reopens it) - mirrors SCM/SSH. Module
+ *  (keeps the dock; the status-bar toggle reopens it) - mirrors SSH. Module
  *  scope because it reads both stores imperatively and closes over nothing. */
 function dockLeft(key: BuiltinSectionId): void {
   useSidebarPlacementStore.getState().moveLeft(key);
@@ -77,8 +75,8 @@ function dockLeft(key: BuiltinSectionId): void {
 }
 
 /**
- * The right column: the AI panel, Source Control, Remote, right-docked sidebar
- * sections and extension panels, STACKED rather than mutually exclusive.
+ * The right column: Remote, right-docked sidebar sections and extension
+ * panels, STACKED rather than mutually exclusive.
  *
  * It renders through the same `SectionStack` as the left sidebar, so every
  * surface here is resizable against its neighbours, minimizable to its header,
@@ -88,18 +86,14 @@ function dockLeft(key: BuiltinSectionId): void {
  */
 export function AppRightSlot({
   rightPanels,
-  scmRightOpen,
   sshRightOpen,
   explorerRoot,
   onPathDeleted,
-  closeScmRight,
   closeSshRight,
   activeSshContext,
   onOpenRemoteFile,
   filesSection,
   workspacesSection,
-  openGitDiffTab,
-  openScmTab,
   openBoardTab,
 }: Props) {
   // Titles for the stack's drag overlay + aria labels. Extension panels and
@@ -108,31 +102,6 @@ export function AppRightSlot({
   const extSections = useRegistry(sidebarSectionsRegistry);
 
   const sections: StackSection[] = [];
-
-  if (scmRightOpen) {
-    sections.push({
-      key: "scm",
-      title: "Source Control",
-      defaultSize: PANEL_DEFAULT_SIZE,
-      render: (controls, collapsed) => (
-        <div className="border-border/60 bg-background tedi-glass-panel flex h-full min-h-0 flex-col overflow-hidden rounded-md border">
-          <Suspense fallback={null}>
-            <SourceControlPanel
-              rootPath={explorerRoot}
-              onPathDeleted={onPathDeleted}
-              onOpenDiff={openGitDiffTab}
-              onClose={closeScmRight}
-              onOpenInTab={openScmTab}
-              dragHandle={controls}
-              collapsed={collapsed}
-              sshSessionId={activeSshContext.fromActiveLeaf ? activeSshContext.sessionId : null}
-              sshCwd={activeSshContext.cwd}
-            />
-          </Suspense>
-        </div>
-      ),
-    });
-  }
 
   if (sshRightOpen) {
     sections.push({

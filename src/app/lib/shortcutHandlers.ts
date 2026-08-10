@@ -35,7 +35,6 @@ export interface ShortcutHandlerDeps {
     kind?: "terminal" | "editor" | "browser",
   ) => void;
   focusNextPaneInTab: (tabId: number, delta: 1 | -1) => void;
-  openScmTab: () => number;
   toggleSidebar: () => void;
   requestCloseLeaf: (leafId: number) => void;
   setNewEditorOpen: (open: boolean) => void;
@@ -60,7 +59,6 @@ export function buildShortcutHandlers(deps: ShortcutHandlerDeps): ShortcutHandle
     selectByIndex,
     splitActivePaneInActiveTab,
     focusNextPaneInTab,
-    openScmTab,
     toggleSidebar,
     requestCloseLeaf,
     setNewEditorOpen,
@@ -123,9 +121,6 @@ export function buildShortcutHandlers(deps: ShortcutHandlerDeps): ShortcutHandle
       if (activeLeafKindCurrent !== "editor" || activeLeafIdInTab === null) return;
       const handle = editorRefs.current.get(activeLeafIdInTab);
       handle?.openFindReplace();
-    },
-    "scm.open": () => {
-      openScmTab();
     },
     "shortcuts.open": () => void openSettingsWindow("shortcuts"),
     "settings.open": () => void openSettingsWindow(),

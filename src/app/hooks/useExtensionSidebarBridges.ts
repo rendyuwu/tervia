@@ -8,7 +8,6 @@ import {
   type SetExtensionTabStateOpts,
 } from "@/modules/extensions/tabsBridge";
 import { useRightPanelStore } from "@/modules/extensions";
-import { useScmRightPanelStore } from "@/modules/scm/scmRightPanelStore";
 import type { Tab } from "@/modules/tabs";
 import { useEffect, type RefObject } from "react";
 import type { PanelImperativeHandle } from "react-resizable-panels";
@@ -125,15 +124,9 @@ export function useExtensionSidebarBridges({
   // exclusive so we just snapshot whichever was open, close them all on hide,
   // and replay the snapshot when the owning ext tab goes away. `visible === true` clears the latch (no re-open: the user can
   // toggle it manually).
-  //
-  // Source Control is intentionally excluded from the snapshot: the user
-  // has asked for SCM to be strictly status-bar-icon-driven, so even if
-  // it was open when the extension hid the sidebar, we don't auto-restore
-  // it. They close behind the extension and stay closed.
   useEffect(() => {
     setRightSidebarSetter((visible, ownerExtensionId) => {
       const rightPanel = useRightPanelStore.getState();
-      const scm = useScmRightPanelStore.getState();
       const snapshot: RightAuxSnapshot =
         rightPanel.panels.length > 0 ? { panels: rightPanel.panels.map((p) => ({ ...p })) } : null;
       if (ownerExtensionId && !visible) {
@@ -145,11 +138,10 @@ export function useExtensionSidebarBridges({
       }
       if (!visible) {
         if (rightPanel.panels.length > 0) rightPanel.close();
-        if (scm.open) scm.closePanel();
       }
-      // `visible === true` is a no-op: we don't know which of the two
-      // surfaces to reopen from a bare call. The owner-restore effect
-      // below handles the actual replay when the ext tab goes away.
+      // `visible === true` is a no-op: a bare call does not say which panel
+      // to reopen. The owner-restore effect below handles the actual replay
+      // when the ext tab goes away.
     });
     return () => setRightSidebarSetter(null);
   }, []);
@@ -166,8 +158,6 @@ export function useExtensionSidebarBridges({
     const replay = (): void => {
       const prior = hider.prior;
       if (!prior) return;
-      // SCM is deliberately not in the snapshot: see the setter above. The
-      // user must reopen it via the status-bar GitBranch icon.
       for (const p of prior.panels) {
         useRightPanelStore.getState().open(p.extensionId, p.panelId);
       }
@@ -180,9 +170,7 @@ export function useExtensionSidebarBridges({
     const onHiderTab = activeTab?.kind === "ext" && activeTab.extensionId === hider.extensionId;
     if (onHiderTab) {
       const rightPanel = useRightPanelStore.getState();
-      const scm = useScmRightPanelStore.getState();
       if (rightPanel.panels.length > 0) rightPanel.close();
-      if (scm.open) scm.closePanel();
     } else {
       replay();
     }

@@ -8,9 +8,6 @@ export {
   isTerminalLikeTab,
   type Tab,
   type PaneTab,
-  type GitDiffTab,
-  type GitChangeStatusTab,
-  type ScmTab,
 } from "./lib/useTabs";
 export { useWorkspaceCwd } from "./lib/useWorkspaceCwd";
 export { countTabEntries } from "./lib/entries";

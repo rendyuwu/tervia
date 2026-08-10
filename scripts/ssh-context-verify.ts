@@ -85,10 +85,12 @@ const onLocal = run({ sshStatuses: statuses, focusPaneTab: localTab, tabs: [sshT
 check("session still offered for the tree", onLocal.sessionId, 77);
 check("but NOT as the focused one", onLocal.fromActiveLeaf, false);
 
-console.log("\n[the bug] a tab with no leaves must not retarget Source Control");
+console.log("\n[the bug] a tab with no leaves must not retarget the SSH context");
 // Each of these used to null out `activePaneTab` and silently move the panel
-// off the remote repository the user was working in.
-for (const kind of ["scm", "git-diff", "ai-diff", "settings"]) {
+// off the remote host the user was working on. `scm` / `git-diff` / `ai-diff`
+// are kinds this build no longer creates; they stay in the list so the guard
+// also covers a leafless tab of an unrecognised kind.
+for (const kind of ["scm", "git-diff", "ai-diff", "settings", "ext"]) {
   const ctx = run({
     sshStatuses: statuses,
     // What the hook now passes: the last PANE tab, held across the leafless one.

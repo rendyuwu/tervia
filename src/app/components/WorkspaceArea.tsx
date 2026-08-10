@@ -6,10 +6,8 @@ import { type AiCliStatus } from "@/modules/terminal/lib/aiCliStatus";
 import { type SshConnectionBinding, type SshStatus } from "@/modules/ssh/status";
 import { type PaneTab, type Tab } from "@/modules/tabs";
 import type { SearchAddon } from "@xterm/addon-search";
-import { Suspense } from "react";
 import { type TabsApi } from "../hooks/tabsApi";
 import { type usePaneHandles } from "../hooks/usePaneHandles";
-import { GitDiffStack, ScmStack } from "./lazyPanels";
 
 type PaneHandles = ReturnType<typeof usePaneHandles>;
 
@@ -19,7 +17,6 @@ type Props = {
   activeTab: Tab | undefined;
   activePaneTab: PaneTab | null;
   uiZoom: number;
-  explorerRoot: string | null;
   paneHandles: PaneHandles;
   onSearchReady: (leafId: number, addon: SearchAddon) => void;
   onDetectedLocalUrl: (leafId: number, url: string) => void;
@@ -37,10 +34,7 @@ type Props = {
   /** Detected local URL for the focused pane header's "open preview" globe. */
   detectedBrowserUrl: string | null;
   onOpenPreview: () => void;
-  hasGitDiffTab: boolean;
-  hasScmTab: boolean;
   hasExtensionTab: boolean;
-  onPathDeleted: (path: string) => void;
   /** Persist a split node's per-child size percentages after a divider drag. */
   onSplitSizes: (splitId: number, sizes: number[]) => void;
 } & Pick<
@@ -48,13 +42,12 @@ type Props = {
   | "setBrowserLeafUrl"
   | "movePaneLeafToEdge"
   | "moveExtTabToPane"
-  | "openGitDiffTab"
   | "setLeafTerminalTheme"
 >;
 
 /**
  * The center workspace column. Stacks the live PaneStack and the four overlay
- * surfaces (AI diff, git diff, SCM, extension tabs) in one relative box, each
+ * surfaces (extension tabs) in one relative box, each
  * shown/hidden by the active tab kind via the `invisible`/`pointer-events-none`
  * pattern (kept mounted so their session/scroll state survives a tab switch).
  * Lifted out of App verbatim; the per-leaf handlers arrive bundled as
@@ -66,7 +59,6 @@ export function WorkspaceArea({
   activeTab,
   activePaneTab,
   uiZoom,
-  explorerRoot,
   paneHandles,
   onSearchReady,
   onDetectedLocalUrl,
@@ -80,15 +72,11 @@ export function WorkspaceArea({
   onToggleMdPreview,
   detectedBrowserUrl,
   onOpenPreview,
-  hasGitDiffTab,
-  hasScmTab,
   hasExtensionTab,
-  onPathDeleted,
   onSplitSizes,
   setBrowserLeafUrl,
   movePaneLeafToEdge,
   moveExtTabToPane,
-  openGitDiffTab,
   setLeafTerminalTheme,
 }: Props) {
   return (
@@ -140,38 +128,6 @@ export function WorkspaceArea({
               sshBindingByConnection={sshBindingByConnection}
               onReconnectSsh={onReconnectSsh}
             />
-          </div>
-          <div
-            className={cn(
-              "absolute inset-0",
-              activeTab?.kind !== "git-diff" && "pointer-events-none invisible",
-            )}
-            aria-hidden={activeTab?.kind === "git-diff" ? "false" : "true"}
-          >
-            {hasGitDiffTab ? (
-              <Suspense fallback={null}>
-                <GitDiffStack tabs={tabs} activeId={activeId} />
-              </Suspense>
-            ) : null}
-          </div>
-          <div
-            className={cn(
-              "absolute inset-0",
-              activeTab?.kind !== "scm" && "pointer-events-none invisible",
-            )}
-            aria-hidden={activeTab?.kind === "scm" ? "false" : "true"}
-          >
-            {hasScmTab ? (
-              <Suspense fallback={null}>
-                <ScmStack
-                  tabs={tabs}
-                  activeId={activeId}
-                  rootPath={explorerRoot}
-                  onPathDeleted={onPathDeleted}
-                  onOpenDiff={openGitDiffTab}
-                />
-              </Suspense>
-            ) : null}
           </div>
           {/* The Board is a pane LEAF, not an overlay surface: it renders
               inside PaneStack above, with the same header every other pane has. */}

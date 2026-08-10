@@ -132,7 +132,6 @@ export function useAppContextBridge({
   const workspaceCount = wsList.length;
   const activeTabKind = useMemo<AppContextSnapshot["activeTabKind"]>(() => {
     if (!activeTab) return null;
-    if (activeTab.kind === "git-diff") return "diff";
     if (activeTab.kind === "ext") return "ext";
     if (activeTab.kind === "pane") {
       const leaf = activeLeaf(activeTab);

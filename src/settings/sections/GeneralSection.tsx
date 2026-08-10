@@ -30,7 +30,6 @@ import {
   setSearchEngine,
   setUiZoom,
   setShowHiddenFiles,
-  setShowSourceControl,
   setFontFamily,
   setTerminalFontSize,
   setTerminalScrollback,
@@ -74,7 +73,6 @@ export function GeneralSection() {
   const terminalFontSize = usePreferencesStore((s) => s.terminalFontSize);
   const terminalScrollback = usePreferencesStore((s) => s.terminalScrollback);
   const showHiddenFiles = usePreferencesStore((s) => s.showHiddenFiles);
-  const showSourceControl = usePreferencesStore((s) => s.showSourceControl);
   // SQL Explorer "show/hide" maps to enabling/disabling the extension (which
   // adds/removes its Databases panel everywhere). Only offered when installed.
   const sqlExplorerExt = useExtensionsStore((s) => s.list).find(
@@ -380,15 +378,6 @@ export function GeneralSection() {
 
       <div className="flex flex-col gap-2">
         <Label>Sidebar panels</Label>
-        <SettingRow
-          title="Show Source Control"
-          description="Display the Source Control panel in the sidebar."
-        >
-          <Switch
-            checked={showSourceControl}
-            onCheckedChange={(v) => void setShowSourceControl(v)}
-          />
-        </SettingRow>
         {sqlExplorerExt ? (
           <SettingRow
             title="Show SQL Explorer"

@@ -1,5 +1,4 @@
 import { useCallback, type Dispatch, type RefObject, type SetStateAction } from "react";
-import { basename } from "@/lib/path";
 import {
   hasLeaf,
   leaves,
@@ -8,13 +7,7 @@ import {
   updateExtensionPanelLeaf as updateExtensionPanelLeafInTree,
   type PaneLeaf,
 } from "@/modules/terminal/lib/panes";
-import {
-  type ExtensionTab,
-  type ExtensionTabState,
-  type GitChangeStatusTab,
-  type ScmTab,
-  type Tab,
-} from "./tabTypes";
+import { type ExtensionTab, type ExtensionTabState, type Tab } from "./tabTypes";
 import { syncPaneMirror, titleFromUrl } from "./tabHelpers";
 
 /**
@@ -43,98 +36,12 @@ export function useAuxTabs({
   tabsRef,
   nextBrowserOrdinalRef,
 }: AuxTabsDeps) {
-  const openGitDiffTab = useCallback(
-    (input: {
-      path: string;
-      relative: string;
-      repoPath: string;
-      changeStatus: GitChangeStatusTab;
-      commitSha?: string;
-      baseRev?: string | null;
-      oldRelative?: string | null;
-      commitLabel?: string;
-    }) => {
-      const commitSha = input.commitSha ?? undefined;
-      let targetId: number | null = null;
-      setTabs((curr) => {
-        // Working-tree diffs dedupe on (relative, repo); per-commit diffs also
-        // key on the commit so the same file at different commits coexist.
-        const existing = curr.find(
-          (t) =>
-            t.kind === "git-diff" &&
-            t.relative === input.relative &&
-            t.repoPath === input.repoPath &&
-            (t.commitSha ?? undefined) === commitSha,
-        );
-        if (existing) {
-          // Bump reloadKey so the pane re-reads its two sides.
-          targetId = existing.id;
-          return curr.map((t) =>
-            t.id === existing.id && t.kind === "git-diff"
-              ? {
-                  ...t,
-                  reloadKey: t.reloadKey + 1,
-                  changeStatus: input.changeStatus,
-                }
-              : t,
-          );
-        }
-        const id = nextIdRef.current++;
-        targetId = id;
-        const title = commitSha
-          ? `${basename(input.path)} @ ${input.commitLabel ?? commitSha.slice(0, 7)}`
-          : `${basename(input.path)} (diff)`;
-        return [
-          ...curr,
-          {
-            id,
-            kind: "git-diff",
-            title,
-            path: input.path,
-            relative: input.relative,
-            repoPath: input.repoPath,
-            changeStatus: input.changeStatus,
-            reloadKey: 0,
-            ...(commitSha
-              ? {
-                  commitSha,
-                  baseRev: input.baseRev ?? null,
-                  oldRelative: input.oldRelative ?? null,
-                  commitLabel: input.commitLabel,
-                }
-              : {}),
-          },
-        ];
-      });
-      if (targetId !== null) setActiveId(targetId);
-      return targetId as number | null;
-    },
-    [],
-  );
-
-  /**
-   * Open (or focus) the single Source Control tab. Dedupes against
-   * `tabsRef.current` so `setActiveId` always lands even when the caller
-   * schedules other state updates first (see `openExtensionTab`).
-   */
-  const openScmTab = useCallback(() => {
-    const existing = tabsRef.current.find((t) => t.kind === "scm");
-    if (existing) {
-      setActiveId(existing.id);
-      return existing.id;
-    }
-    const id = nextIdRef.current++;
-    setTabs((curr) => [...curr, { id, kind: "scm", title: "Source Control" } satisfies ScmTab]);
-    setActiveId(id);
-    return id;
-  }, []);
-
   /**
    * Open (or focus) the workspace Board. A board is a pane LEAF, not a
    * standalone tab, so it arrives as a pane tab holding one - which is what
    * gives it the ordinary pane header (drag, close, split) rather than a second
-   * hand-rolled copy of it. Same single-instance dedup as `openScmTab`: two
-   * boards would chart the same workspace twice.
+   * hand-rolled copy of it. Single-instance dedup: two boards would chart the
+   * same workspace twice.
    */
   const openBoardTab = useCallback(() => {
     const existing = tabsRef.current.find(
@@ -419,8 +326,6 @@ export function useAuxTabs({
   }, []);
 
   return {
-    openGitDiffTab,
-    openScmTab,
     openBoardTab,
     newBrowserTab,
     openExtensionTab,

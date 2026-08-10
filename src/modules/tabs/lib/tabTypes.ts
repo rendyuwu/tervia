@@ -20,54 +20,6 @@ export type PaneTab = {
   preview?: boolean;
 };
 
-export type GitChangeStatusTab =
-  | "modified"
-  | "added"
-  | "deleted"
-  | "renamed"
-  | "copied"
-  | "untracked"
-  | "conflicted"
-  | "ignored";
-
-export type GitDiffTab = {
-  id: number;
-  kind: "git-diff";
-  title: string;
-  /** Absolute working-tree path. */
-  path: string;
-  /** Repo-relative forward-slash path. */
-  relative: string;
-  /** Absolute repo root. */
-  repoPath: string;
-  changeStatus: GitChangeStatusTab;
-  /** Bumps on Refresh so the pane re-reads HEAD and working tree. */
-  reloadKey: number;
-  /**
-   * Per-commit diff mode. When `commitSha` is set the pane diffs the file at
-   * `commitSha` against `baseRev` (its first parent, or null for the root
-   * commit) instead of HEAD vs the working tree.
-   */
-  commitSha?: string;
-  baseRev?: string | null;
-  /** Previous repo-relative path for a renamed/copied file (left side at `baseRev`). */
-  oldRelative?: string | null;
-  /** Short SHA shown in the diff header. */
-  commitLabel?: string;
-};
-
-/**
- * Full Source Control surface hosted in a tab (branch + working-tree changes,
- * commit/push, and a commit-history graph with per-commit detail + diffs).
- * Deduped to one instance; `openScmTab` focuses the existing tab. Content is
- * driven by the live workspace root, so the tab carries no repo state itself.
- */
-export type ScmTab = {
-  id: number;
-  kind: "scm";
-  title: string;
-};
-
 /**
  * Lifecycle hint an extension can attach to its tab so the title text
  * colour reflects connection / job state. Mirrors the SSH tab palette so
@@ -104,4 +56,4 @@ export type ExtensionTab = {
   state?: ExtensionTabState;
 };
 
-export type Tab = PaneTab | GitDiffTab | ExtensionTab | ScmTab;
+export type Tab = PaneTab | ExtensionTab;

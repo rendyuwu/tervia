@@ -135,8 +135,8 @@ export function FileExplorer({
     sortMode,
   });
   // Git status + ignored list for VSCode-style decorations (colored names +
-  // M/A/U badges, dimmed gitignored rows). Self-contained: polls independently
-  // of the Source Control panel so it shows even when that panel is closed.
+  // M/A/U badges, dimmed gitignored rows). Self-contained: this is the only
+  // git surface left in the app, and it owns its own polling.
   // Pass null while collapsed: the tree body isn't rendered, so polling git
   // every 2.5s behind the clip just burns CPU + spawns git subprocesses for
   // decorations nobody can see. Resumes (with an immediate fetch) on expand.

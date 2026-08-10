@@ -11,12 +11,10 @@ import type { GitChangeStatus, GitStatus } from "@/modules/scm/types";
 import { FS_REFRESH_EVENT } from "./useFileTree";
 import { coalesceResume } from "@/lib/windowResume";
 
-/** Poll cadence for git status while the window is focused. Mirrors the
- *  Source Control panel so explorer decorations stay in step with that view. */
+/** Poll cadence for git status while the window is focused. */
 const GIT_STATUS_POLL_MS = 2500;
 
-/** Single letter shown at the right edge of a changed file row (VSCode-style).
- *  Keep in sync with scm/components/ChangeRow.tsx. */
+/** Single letter shown at the right edge of a changed file row (VSCode-style). */
 const STATUS_LETTER: Record<GitChangeStatus, string> = {
   modified: "M",
   added: "A",
@@ -28,8 +26,7 @@ const STATUS_LETTER: Record<GitChangeStatus, string> = {
   ignored: "I",
 };
 
-/** Theme-token text color per status. Keep in sync with scm ChangeRow so the
- *  explorer badge color matches the Source Control panel exactly. */
+/** Theme-token text color per status. */
 const STATUS_TONE: Record<GitChangeStatus, string> = {
   modified: "text-icon-working",
   added: "text-diff-added",
@@ -184,9 +181,9 @@ function sameData(a: GitDecorationData, b: GitDecorationData): boolean {
 }
 
 /** Polls `git status` + the ignored-file list for `rootPath` (or empty data
- *  outside a repo). Mirrors the Source Control panel's focus/visibility/idle
- *  polling and also refreshes immediately on the explorer's FS-refresh event,
- *  so decorations update right after edits, saves, or AI writes. Returns a
+ *  outside a repo). Pauses when the window is unfocused or hidden, and
+ *  refreshes immediately on the explorer's FS-refresh event, so decorations
+ *  update right after edits or saves. Returns a
  *  referentially-stable object while nothing changed so the memoized tree
  *  doesn't repaint on every poll tick. */
 export function useGitStatusPoll(rootPath: string | null): GitDecorationData {

@@ -8,9 +8,9 @@ import type { Tab } from "./useTabs";
 import { leafLabel, leafRenameSeed } from "./tabHelpers";
 
 /**
- * Tab strip entries: one per pane for pane tabs, one per tab for preview
- * and git-diff. Clicking a pane entry focuses that pane; clicking a
- * preview/git-diff entry activates that tab.
+ * Tab strip entries: one per pane for pane tabs, one per tab otherwise.
+ * Clicking a pane entry focuses that pane; clicking a standalone entry
+ * activates that tab.
  */
 type EntryBase = {
   /** Composite key like "tab-3" or "leaf-7". */
@@ -62,7 +62,7 @@ export type PaneEntry = EntryBase & {
 };
 
 type StandaloneEntry = EntryBase & {
-  kind: "git-diff" | "scm" | "board";
+  kind: "board";
 };
 
 type ExtensionEntry = EntryBase & {
@@ -81,7 +81,7 @@ export type Entry = PaneEntry | StandaloneEntry | ExtensionEntry;
 
 /**
  * Background color for the per-tab accent stripe. Emerald for local shell,
- * sky for SSH, brand blue for editor, cyan for preview, amber for git diff. Rendered as a `<span>` (not `::after`) because the
+ * sky for SSH, brand blue for editor, cyan for preview. Rendered as a `<span>` (not `::after`) because the
  * primitive `TabsTrigger` already uses `::after` with equal specificity.
  * Keep strings as full literals for Tailwind's JIT.
  */
@@ -103,8 +103,6 @@ export function tabAccentClass(e: Entry): string {
     if (e.leafKind === "extension-panel") return "bg-[color:var(--tedi-tab-ssh)]";
     return "bg-[color:var(--tedi-tab-editor)]";
   }
-  if (e.kind === "git-diff") return "bg-[color:var(--tedi-tab-git-diff)]";
-  if (e.kind === "scm") return "bg-[color:var(--tedi-tab-git-diff)]";
   // Board: reuses the violet accent rather than adding a token of its own to
   // all 20 theme presets.
   if (e.kind === "board") return "bg-[color:var(--tedi-tab-ai-diff)]";
@@ -211,24 +209,6 @@ export function buildEntries(
           renameSeed: leafRenameSeed(leaf, sshHosts, t.cwd),
         });
       }
-      continue;
-    }
-    if (t.kind === "git-diff") {
-      out.push({
-        kind: "git-diff",
-        key: `tab-${t.id}`,
-        tabId: t.id,
-        label: t.title,
-      });
-      continue;
-    }
-    if (t.kind === "scm") {
-      out.push({
-        kind: "scm",
-        key: `tab-${t.id}`,
-        tabId: t.id,
-        label: t.title,
-      });
       continue;
     }
     // ext: extension-owned tab. Carry icon + ext id forward for rendering.

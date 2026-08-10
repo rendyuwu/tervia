@@ -77,14 +77,11 @@ export function useChromeDerivations({
 
   // Absolute local path of the file currently being viewed. Drives the
   // status-bar breadcrumb and the file-explorer "reveal" behavior, so it
-  // must cover every tab kind that has a workspace file backing it: editor
-  // leaf and git diff. SSH editor leaves are excluded - their `path` is remote
-  // and would never match the local explorer root.
+  // must cover every tab kind that has a workspace file backing it: today
+  // that is the editor leaf. SSH editor leaves are excluded - their `path` is
+  // remote and would never match the local explorer root.
   const activeFilePath = useMemo<string | null>(() => {
     if (!activeTab) return null;
-    if (activeTab.kind === "git-diff") {
-      return activeTab.path;
-    }
     if (activeTab.kind === "pane") {
       const leaf = activeLeaf(activeTab);
       if (leaf?.leafKind === "editor" && !isRemoteEditorLeaf(leaf)) return leaf.path;

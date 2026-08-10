@@ -62,7 +62,7 @@ src-tauri/                      Backend (Rust)
     pty_daemon/{mod,protocol,transport,paths,server,client,spawn}.rs   sidecar
     fs/{mod,tree,file,mutate,search,grep,atomic}.rs
     shell/{mod,session,background,ringbuffer}.rs
-    git/{mod,commands,...}.rs   scm backend
+    git/{mod,commands,...}.rs   git status / branch backend
     ssh/{mod,session,sftp}.rs   ssh + sftp + ProxyJump
     extensions/{mod,commands,install,github,manifest,state,version}.rs
     cli_ext/{mod,commands,registry,install,helpers,types}.rs    headless `tedi ext`
@@ -96,7 +96,7 @@ src/                            Frontend (React webview), alias @/* -> src/*
 | `pty_daemon/` | Sidecar owning PTYs across GUI restarts (`--pty-daemon` flag, no Tauri commands).     |
 | `fs/`         | `fs_read_dir/read_file/read_file_portion/write_file/create_*/rename/delete/search/grep/glob`. |
 | `shell/`      | `shell_run_command`, `shell_session_*`, `shell_bg_*`. Distinct from interactive PTYs. |
-| `git/`        | `git_status/diff_full/commit/push/log/discard_*` for the SCM panel.                   |
+| `git/`        | `git_status/diff_full/commit/push/log/discard_*`. Only status + ignored + branch have callers. |
 | `ssh/`        | `ssh_connect/run/disconnect`, `ssh_agent_keys`, `ssh_sftp_*`. `russh` + `russh-sftp`, ProxyJump chaining, ssh-agent auth (named pipe / Pageant / `SSH_AUTH_SOCK`). |
 | `extensions/` | `ext_install_from_zip/from_github`, `ext_peek_*`, `ext_check_update`, `ext_list/enable/disable/uninstall`, `ext_read_manifest/asset/asset_bytes`. |
 | `preview/`    | `preview_embed_*` native-webview compositing (update/navigate/dispatch/read/act/console/screenshot/set_bg/close); `tedi-frame://` proxy for remote marketplace icons. Every pane gets a document-start script that records console errors, uncaught exceptions, and unhandled rejections into a capped ring, drained by `preview_embed_console`. |
@@ -169,7 +169,7 @@ macOS/Linux rely on `Drop for Session -> killer.kill()`.
 | `settings/`   | Settings store (`store.ts` via `tauri-plugin-store`), preferences, window opener.     |
 | `theme/`      | `next-themes` provider.                                                                |
 | `ai/`         | AI agent subsystem (below).                                                            |
-| `scm/`        | `SourceControlPanel` + `GitDiffPane`; `api.ts` wraps `git_*`; AI commit-message affordance. |
+| `scm/`        | `api.ts` wraps `git_*`, `branch.ts` the branch name, `types.ts` the payloads. No UI.   |
 | `ssh/`        | Connection manager + remote SFTP explorer; `connections.ts` persists hosts (password/key in keychain, or `agent` mode which stores nothing and lets the local ssh-agent sign) and owns `authFields`, the one mode-to-wire mapping; ProxyJump chain resolution. |
 | `scheduler/`  | In-conversation task/timer surface for the AI agent (distinct from Rust `shell` background jobs). |
 | `updater/`    | In-app updater UI on `tauri-plugin-updater`; listens for `tedi:trigger-update`.       |

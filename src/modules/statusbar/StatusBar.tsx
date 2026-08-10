@@ -8,7 +8,6 @@ import {
   RightPanelDefaultToggles,
   SidebarSectionRightToggles,
 } from "@/modules/extensions";
-import { useScmRightPanelStore } from "@/modules/scm/scmRightPanelStore";
 import { useSshRightPanelStore } from "@/modules/ssh/sshRightPanelStore";
 import { SshRoutePill } from "@/modules/ssh/SshRoutePill";
 import type { SshRouteHop } from "@/modules/ssh/status";
@@ -19,7 +18,7 @@ import { cn } from "@/lib/utils";
 import { IS_LINUX, IS_MAC, IS_WINDOWS } from "@/lib/platform";
 import { CwdBreadcrumb } from "./CwdBreadcrumb";
 import { ZoomControl } from "./ZoomControl";
-import { GitBranch, Server } from "lucide-react";
+import { Server } from "lucide-react";
 
 type Props = {
   cwd: string | null;
@@ -130,7 +129,6 @@ function StatusBarInner({
               <SidebarSectionRightToggles />
               <BuiltinSectionRightToggles />
               <RightPanelDefaultToggles />
-              <ScmRightOpenButton />
               <SshRightOpenButton hasAnySshLeaf={hasAnySshLeaf} />
             </>
           )}
@@ -196,38 +194,7 @@ function OsBadge() {
 }
 
 /**
- * Source Control status-bar toggle. Shown whenever the user has opted in to the
- * right-panel SCM layout (and SCM is enabled); it stays in place whether open or
- * closed (clicking toggles, the open state shows as active) so the status-bar
- * row never reflows. Icon-only chrome matches the extension panel toggles so the
- * right cluster reads as a single row of glyphs.
- */
-function ScmRightOpenButton() {
-  const showSourceControl = usePreferencesStore((s) => s.showSourceControl);
-  const sourceControlInRightPanel = usePreferencesStore((s) => s.sourceControlInRightPanel);
-  const open = useScmRightPanelStore((s) => s.open);
-  const toggle = useScmRightPanelStore((s) => s.toggle);
-  if (!showSourceControl || !sourceControlInRightPanel) return null;
-  return (
-    <IconTooltip label={`${open ? "Close" : "Open"} Source Control`} side="top">
-      <button
-        type="button"
-        onClick={toggle}
-        aria-label={`${open ? "Close" : "Open"} Source Control`}
-        aria-pressed={open}
-        className={cn(
-          "flex size-6 cursor-pointer items-center justify-center rounded-md transition-colors",
-          open ? "text-foreground bg-accent/60" : "text-muted-foreground hover:text-foreground",
-        )}
-      >
-        <GitBranch size={16} strokeWidth={1.75} className="shrink-0" />
-      </button>
-    </IconTooltip>
-  );
-}
-
-/**
- * SSH (Remote) status-bar toggle. Mirrors `ScmRightOpenButton`: shown whenever
+ * SSH (Remote) status-bar toggle. Shown whenever
  * the user has docked the Remote explorer to the right AND a session is live
  * (the left sidebar hides SSH the same way when no leaf is connected). Clicking
  * toggles the right-slot panel; the open state shows as active.

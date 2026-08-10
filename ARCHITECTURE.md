@@ -96,7 +96,7 @@ subsystems, flat files for single-purpose ones).
 | `pty_daemon/`   | Sidecar process that owns PTYs across GUI restarts (see Section 6). Same binary, `--pty-daemon`. |
 | `fs/`           | Explorer and editor IO, fuzzy finder, content search (`ignore` + `grep-*` crates).               |
 | `shell/`        | One-shot exec for AI tools, a persistent agent shell, and bounded-log background processes.      |
-| `git/`          | Backend for the SCM panel: runs `git` and parses status/diff into structured payloads.           |
+| `git/`          | Runs `git` and parses status/diff into structured payloads (explorer decorations, branch name).  |
 | `ssh/`          | SSH/SFTP sessions (`russh` + `russh-sftp`), including ProxyJump host chaining.                    |
 | `extensions/`   | Extension install pipeline, manifest validation, state store, GitHub resolution (Section 7).     |
 | `preview/`      | Native-webview dev-server preview backend (`embed`, `proxy`, `util`).                             |
@@ -128,7 +128,7 @@ lives in 19 self-contained modules.
 | `settings/`   | Shared settings store and preferences (state layer read by both windows).             |
 | `theme/`      | `next-themes` provider.                                                                |
 | `ai/`         | The AI agent subsystem (Section 5), the largest module.                               |
-| `scm/`        | Source-control panel and diffs (frontend for the Rust `git_*` commands).              |
+| `scm/`        | Thin frontend for the Rust `git_*` commands: status, ignored list, branch. No panel.  |
 | `ssh/`        | SSH connection manager and remote SFTP explorer.                                       |
 | `scheduler/`  | In-conversation task/timer surface used by the AI agent.                              |
 | `updater/`    | In-app updater UI on top of `tauri-plugin-updater`.                                    |
@@ -143,9 +143,8 @@ Tab = PaneTab | AiDiffTab | GitDiffTab | ExtensionTab | ScmTab
 ```
 
 `PaneTab` (`kind: "pane"`) holds a split-pane tree whose leaves are one of
-`terminal`, `editor`, `browser`, `ssh`, or `extension-panel`. The other kinds
-(`ai-diff`, `git-diff`, `ext`, `scm`) are whole-tab surfaces. Tabs are never
-unmounted on switch.
+`terminal`, `editor`, `browser`, `ssh`, or `extension-panel`. The one other
+kind (`ext`) is a whole-tab surface. Tabs are never unmounted on switch.
 
 ## 5. The AI subsystem (`src/modules/ai/`)
 

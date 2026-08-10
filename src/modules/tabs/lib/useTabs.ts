@@ -41,15 +41,7 @@ import { useAuxTabs } from "./useAuxTabs";
 
 // Re-export the tab types from their new home so existing imports of
 // `@/modules/tabs/lib/useTabs` (and the `@/modules/tabs` barrel) keep working.
-export type {
-  PaneTab,
-  GitChangeStatusTab,
-  GitDiffTab,
-  ScmTab,
-  ExtensionTabState,
-  ExtensionTab,
-  Tab,
-} from "./tabTypes";
+export type { PaneTab, ExtensionTabState, ExtensionTab, Tab } from "./tabTypes";
 
 // Re-export the active-leaf discriminators from their new home so callers that
 // import them from this module (or the barrel) are unaffected by the move.
@@ -110,8 +102,6 @@ export function useTabs(initial?: { cwd?: string; title?: string }) {
   // sub-hook for size; the callbacks close over the same setters/refs and are
   // spread into this hook's return object below with identical keys.
   const {
-    openGitDiffTab,
-    openScmTab,
     openBoardTab,
     newBrowserTab,
     openExtensionTab,
@@ -1104,8 +1094,6 @@ export function useTabs(initial?: { cwd?: string; title?: string }) {
     openExtensionTab,
     openExtensionPane,
     setExtensionTabState,
-    openGitDiffTab,
-    openScmTab,
     openBoardTab,
     closeTab,
     selectByIndex,

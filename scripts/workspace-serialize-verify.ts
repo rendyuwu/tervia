@@ -393,13 +393,15 @@ console.log("\n[active index] savedActiveTabIndex must match what serializeTabs 
   check("index skips the dropped remote-editor tab", savedActiveTabIndex(tabs, paneTab.id), 0);
 }
 
-// Session-only tab kinds were already skipped; guard against a regression.
+// Non-pane tab kinds were always skipped, including kinds that no longer exist
+// (`scm` shipped up to v0.4.22). Guard against a regression, and against an
+// unknown kind from a future or older build slipping into the saved layout.
 {
-  const scmTab = { id: id(), kind: "scm", title: "scm" } as unknown as Tab;
+  const legacyTab = { id: id(), kind: "scm", title: "scm" } as unknown as Tab;
   const paneTab = tab(term(1002), 1002);
-  const tabs = [scmTab, paneTab];
-  check("scm tab is not emitted", serializeTabs(tabs).length, 1);
-  check("index skips a session-only scm tab", savedActiveTabIndex(tabs, paneTab.id), 0);
+  const tabs = [legacyTab, paneTab];
+  check("an unknown tab kind is not emitted", serializeTabs(tabs).length, 1);
+  check("index skips the unknown tab", savedActiveTabIndex(tabs, paneTab.id), 0);
 }
 
 // 4. A tab renamed from its right-click menu must survive a restart, on every

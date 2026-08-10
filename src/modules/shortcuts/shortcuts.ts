@@ -24,7 +24,6 @@ export type ShortcutId =
   | "shortcuts.open"
   | "settings.open"
   | "sidebar.toggle"
-  | "scm.open"
   | "view.zoomIn"
   | "view.zoomOut"
   | "view.zoomReset"
@@ -231,12 +230,6 @@ export const SHORTCUTS: Shortcut[] = [
     label: "Toggle file explorer",
     group: "View",
     defaultBindings: [{ [MOD_PROP]: true, key: "b" }],
-  },
-  {
-    id: "scm.open",
-    label: "Open Source Control in a tab",
-    group: "View",
-    defaultBindings: [{ [MOD_PROP]: true, shift: true, key: "g" }],
   },
   {
     // `=` is the unshifted "+" on US layouts. Matches VS Code and browsers,
