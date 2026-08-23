@@ -44,14 +44,12 @@ import { TERMINAL_PRESETS, type TerminalPalette } from "@/modules/settings/termi
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import { setLineWrap } from "@/modules/settings/store";
 import { shortcutHint } from "@/modules/shortcuts/shortcuts";
-import { ExtensionHeaderItems } from "@/modules/extensions/components/ExtensionHeaderItems";
 import { IconTooltip } from "@/components/ui/icon-tooltip";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { LeafIcon, type LeafIconInfo } from "@/components/LeafIcon";
 import { cn } from "@/lib/utils";
 import { type EditorPaneHandle } from "@/modules/editor";
 import { useExplorerIconsReady } from "@/modules/explorer/lib/iconResolver";
-import { ExtensionPanelMount } from "@/modules/extensions/components/ExtensionPanelMount";
 import { WorkspaceBoard } from "@/modules/workspaces/WorkspaceBoard";
 import { TerminalPane, type TerminalPaneHandle } from "@/modules/terminal";
 import type { SearchAddon } from "@xterm/addon-search";
@@ -444,18 +442,8 @@ const LeafBody = memo(function LeafBody({
       </ErrorBoundary>
     );
   }
-  if (node.leafKind === "extension-panel") {
-    return (
-      <ErrorBoundary label="extension pane" resetKeys={[node.id]}>
-        <ExtensionPanelMount
-          extensionId={node.extensionId}
-          panelId={node.panelId}
-          surface="pane"
-          reuseKey={node.reuseKey}
-        />
-      </ErrorBoundary>
-    );
-  }
+  // The extension host is gone; the leaf kind itself is removed next.
+  if (node.leafKind === "extension-panel") return null;
   if (node.leafKind === "board") {
     return (
       <ErrorBoundary label="board pane" resetKeys={[node.id]}>
@@ -727,9 +715,7 @@ function PaneLeafFrame({
                 format), fenced off by a rule from the three
                 that act on the pane itself (float / theme / close).
                 `empty:hidden` retires the rule with the group: only some leaf
-                kinds fill it, and `ExtensionHeaderItems` renders nothing at all
-                unless a `placement: "left"` extension is installed - a JS
-                check could not see that second case. Under ~17rem the label has
+                kinds fill it. Under ~17rem the label has
                 nothing left to give, so the whole group steps aside rather than
                 shove the close button off the frame. */}
             <div className="border-border flex shrink-0 items-center gap-1 border-r pr-1 empty:hidden @max-[17rem]:hidden">
@@ -793,13 +779,6 @@ function PaneLeafFrame({
                     <WrapText size={12} strokeWidth={2} />
                   </button>
                 </IconTooltip>
-              )}
-              {/* Extension buttons that opt-in to `placement: "left"` (Beautify).
-                They act on the *active* editor's buffer, so they ride the
-                focused editor pane rather than the app toolbar - one copy, on
-                the pane they format. */}
-              {onlyHere && node.leafKind === "editor" && (
-                <ExtensionHeaderItems placement="left" compact />
               )}
               {/* Hand a detected local URL (a printed dev-server address, or a
                 running port found from the project's config) to the OS browser.

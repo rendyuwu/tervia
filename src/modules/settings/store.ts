@@ -137,12 +137,6 @@ export type Preferences = {
   sshInRightPanel: boolean;
   shortcuts: Record<ShortcutId, KeyBinding[]>;
   /**
-   * User overrides for extension keybindings. Keyed by command id from
-   * `contributes.keybindings[].command`. Empty array means cleared; absent
-   * entry means use the manifest default.
-   */
-  extensionShortcuts: Record<string, KeyBinding[]>;
-  /**
    * Zoom for content surfaces only: terminal (xterm `fontSize`) and code
    * editor/diff (CodeMirror via `--content-zoom`). 1.0 = 100%. Scoped this
    * way because window-wide CSS `zoom` breaks xterm's glyph positioning.
@@ -288,7 +282,6 @@ const KEY_SHOW_HIDDEN_FILES = "showHiddenFiles";
 const KEY_STATUS_BAR_COMPACT = "statusBarCompact";
 const KEY_SSH_IN_RIGHT_PANEL = "sshInRightPanel";
 const KEY_SHORTCUTS = "shortcuts";
-const KEY_EXTENSION_SHORTCUTS = "extensionShortcuts";
 const KEY_CONTENT_ZOOM = "contentZoom";
 const KEY_UI_ZOOM = "uiZoom";
 const KEY_AI_NOTIFICATIONS_ENABLED = "aiNotificationsEnabled";
@@ -399,7 +392,6 @@ export const DEFAULT_PREFERENCES: Preferences = {
   statusBarCompact: false,
   sshInRightPanel: false,
   shortcuts: {} as Record<ShortcutId, KeyBinding[]>,
-  extensionShortcuts: {} as Record<string, KeyBinding[]>,
   contentZoom: CONTENT_ZOOM_DEFAULT,
   uiZoom: UI_ZOOM_DEFAULT,
   aiNotificationsEnabled: true,
@@ -474,9 +466,6 @@ export async function loadPreferences(): Promise<Preferences> {
     sshInRightPanel: get<boolean>(KEY_SSH_IN_RIGHT_PANEL) ?? DEFAULT_PREFERENCES.sshInRightPanel,
     shortcuts:
       get<Record<ShortcutId, KeyBinding[]>>(KEY_SHORTCUTS) ?? DEFAULT_PREFERENCES.shortcuts,
-    extensionShortcuts:
-      get<Record<string, KeyBinding[]>>(KEY_EXTENSION_SHORTCUTS) ??
-      DEFAULT_PREFERENCES.extensionShortcuts,
     contentZoom: clampZoom(get<number>(KEY_CONTENT_ZOOM) ?? DEFAULT_PREFERENCES.contentZoom),
     uiZoom: clampUiZoom(get<number>(KEY_UI_ZOOM) ?? DEFAULT_PREFERENCES.uiZoom),
     aiNotificationsEnabled:
@@ -677,12 +666,6 @@ export async function setShortcuts(value: Record<ShortcutId, KeyBinding[]> | {})
   await writePref(KEY_SHORTCUTS, value);
 }
 
-export async function setExtensionShortcuts(
-  value: Record<string, KeyBinding[]> | {},
-): Promise<void> {
-  await writePref(KEY_EXTENSION_SHORTCUTS, value);
-}
-
 export async function setContentZoom(value: number): Promise<void> {
   await writePref(KEY_CONTENT_ZOOM, clampZoom(value));
 }
@@ -745,32 +728,9 @@ export async function patchFormatter(
   await setFormatters(next);
 }
 
-/**
- * Escape hatch for the extension host. Persists keys without typed setters.
- * Built-ins use the typed setters above; extension keys arrive here via
- * `tedi.settings.set`. Keys must be `ext:<extId>:<key>` to prevent
- * overwriting built-ins. Validation lives here so the rule holds even if a
- * future host bypasses the namespace.
- */
-export async function _writeAny(key: string, value: unknown): Promise<void> {
-  if (!key.startsWith("ext:")) {
-    throw new Error(`settings._writeAny can only write namespaced extension keys, got "${key}"`);
-  }
-  await writePref(key, value);
-}
-
-/** Reader for ext-namespaced keys. `loadPreferences()` ignores them. */
-export async function _readAny<T = unknown>(key: string): Promise<T | undefined> {
-  if (!key.startsWith("ext:")) {
-    throw new Error(`settings._readAny can only read namespaced extension keys, got "${key}"`);
-  }
-  const v = await store.get<T>(key);
-  return v ?? undefined;
-}
-
 // Subscribe to raw store-key changes from both same-process writes (store.onChange)
 // and cross-window writes (the Tauri event from writePref), with the self-delivered
-// event deduped via SELF_LABEL. Shared by _onAnyChange and onPreferencesChange.
+// event deduped via SELF_LABEL.
 async function subscribeRawChanges(cb: (key: string, value: unknown) => void): Promise<UnlistenFn> {
   const [unsubLocal, unsubEvent] = await Promise.all([
     store.onChange<unknown>((key, value) => cb(key, value)),
@@ -785,11 +745,6 @@ async function subscribeRawChanges(cb: (key: string, value: unknown) => void): P
     unsubLocal();
     unsubEvent();
   };
-}
-
-/** Subscribe to changes of any key, typed or namespaced. Used by the extension host's `tedi.settings.onChange`. */
-export function _onAnyChange(cb: (key: string, value: unknown) => void): Promise<UnlistenFn> {
-  return subscribeRawChanges(cb);
 }
 
 export type PrefKey = keyof Preferences;
@@ -825,7 +780,6 @@ export async function onPreferencesChange(
     statusBarCompact: KEY_STATUS_BAR_COMPACT,
     sshInRightPanel: KEY_SSH_IN_RIGHT_PANEL,
     shortcuts: KEY_SHORTCUTS,
-    extensionShortcuts: KEY_EXTENSION_SHORTCUTS,
     contentZoom: KEY_CONTENT_ZOOM,
     uiZoom: KEY_UI_ZOOM,
     aiNotificationsEnabled: KEY_AI_NOTIFICATIONS_ENABLED,

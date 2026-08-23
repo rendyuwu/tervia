@@ -6,7 +6,7 @@ import { cn } from "@/lib/utils";
 import { Minus, Plus } from "lucide-react";
 
 // Content-zoom control: [-] [100%] [+] as one segmented pill, leading the
-// status bar's right cluster (just before the extension status items).
+// status bar's right cluster.
 //
 // Every segment runs the SAME command the keyboard does, through the shared
 // command registry, so a button and its shortcut can never drift apart - the
@@ -18,7 +18,7 @@ import { Minus, Plus } from "lucide-react";
 
 /** Segment chrome. The pill is `h-6` / `rounded-md` / `text-[11px]`, matching the
  *  right cluster's pill language (UpdaterPill, SchedulerStatusPill) so it sits
- *  beside the extension status items as a sibling. */
+ *  beside the panel toggles as a sibling. */
 const SEG =
   "flex h-full cursor-pointer items-center justify-center transition-colors hover:bg-accent hover:text-accent-foreground disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent";
 

@@ -1,10 +1,9 @@
 import { isPdfPath, pathToFileUrl } from "@/lib/path";
-import { setExtensionWorkspaceBridge } from "@/modules/extensions/workspaceBridge";
 import { type Tab } from "@/modules/tabs";
 import type { SshConnectionBinding } from "@/modules/ssh/status";
 import { leaves } from "@/modules/terminal";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { useCallback, useEffect } from "react";
+import { useCallback } from "react";
 import { type TabsApi } from "./tabsApi";
 
 type Params = {
@@ -53,17 +52,6 @@ export function useFileActions({
     },
     [openFileTab],
   );
-
-  // Wire the extension workspace bridge to the live file-open handler.
-  // Extensions mounting `ctx.ui.mountFolderTree` route click-to-open
-  // through this bridge so they get the same behavior as the left
-  // explorer.
-  useEffect(() => {
-    setExtensionWorkspaceBridge({
-      openFile: (path, opts) => handleOpenFile(path, opts?.pin ?? false),
-    });
-    return () => setExtensionWorkspaceBridge(null);
-  }, [handleOpenFile]);
 
   // SSH tree calls this when the user clicks a remote file. Pin the tab
   // because preview-mode shares one slot with local previews and would

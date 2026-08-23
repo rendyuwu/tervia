@@ -2,20 +2,17 @@
  * App.tsx - the main-window top-level COORDINATOR (not a feature dump).
  *
  * App's job is to own the shared runtime state (the per-leaf handle maps, the
- * sidebar/right-aux hider latches, the workspace live-tab cache) and to compose
+ * workspace live-tab cache) and to compose
  * the domain hooks + layout components that implement each behavior. Features
  * themselves live in src/modules/<area>/; the wiring lives in the domain hooks
  * under src/app/hooks/ and the render tree in src/app/components/.
  *
  * Where behaviors are set up (each is its own hook unless noted):
  *   - useWorkspaceRoot         - home / picked root + `tedi <path>` CLI targets
- *   - useExtensionPanelDefaults- extension boot + right-panel defaults
  *   - useWorkspacePersistence  - hydrate + auto-snapshot workspaces
  *   - useQuitGuard             - pre-quit snapshot flush + busy-terminal prompt
  *   - useWorkspaceSwitching    - switch / create / close orchestration
  *   - useRightPanelExclusion   - closes a docked right-slot panel when its pref flips off
- *   - useExtensionSidebarBridges - tabs/sidebar host bridges + auto-restore
- *   - useEditorBridge          - ctx.editor bridge for extensions
  *   - useActiveLeafSurface     - active leaf search addon / URL / editor handle
  *   - useSessionDisposal       - PTY/xterm teardown by pane tree
  *   - useChromeDerivations     - Header/StatusBar derived values
@@ -29,7 +26,6 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { ResizableHandle, ResizablePanelGroup } from "@/components/ui/resizable";
 import { Toaster } from "@/components/ui/toast";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { useRightPanelStore } from "@/modules/extensions";
 import { type EditorPaneHandle } from "@/modules/editor";
 import { Header, type SearchInlineHandle } from "@/modules/header";
 import { usePreferencesStore } from "@/modules/settings/preferences";
@@ -37,7 +33,6 @@ import { useSshRightPanelStore } from "@/modules/ssh/sshRightPanelStore";
 import {
   isTerminalControlChord,
   isTerminalMetaChord,
-  useExtensionShortcuts,
   useGlobalShortcuts,
   type ShortcutHandlers,
 } from "@/modules/shortcuts";
@@ -53,15 +48,12 @@ import {
 import {
   acknowledgeAiCli,
   ensureFsDragListener,
-  leaves,
   useTerminalFileDrop,
   type TerminalPaneHandle,
 } from "@/modules/terminal";
 import { useCliAgentsStore } from "@/modules/terminal/lib/cliAgents";
 import { ThemeProvider } from "@/modules/theme";
-import { listConnections, type SshConnection } from "@/modules/ssh/connections";
-import { setSshConnectionBridge } from "@/modules/extensions/sshBridge";
-import { setWorkspaceMgmtBridge } from "@/modules/extensions/workspaceMgmtBridge";
+import { type SshConnection } from "@/modules/ssh/connections";
 import { useWorkspacesStore } from "@/modules/workspaces";
 import type { SearchAddon } from "@xterm/addon-search";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -69,24 +61,18 @@ import type { PanelImperativeHandle } from "react-resizable-panels";
 import { buildShortcutHandlers } from "./lib/shortcutHandlers";
 import { useApplyZoom } from "./hooks/useApplyZoom";
 import { useRightPanelExclusion } from "./hooks/useRightPanelExclusion";
+import { useRightColumnStore } from "@/modules/rightPanel";
 import { useDockedSectionAutoOpen } from "./hooks/useDockedSectionAutoOpen";
-import {
-  useExtensionSidebarBridges,
-  type RightAuxSnapshot,
-} from "./hooks/useExtensionSidebarBridges";
 import { useWorkspaceSwitching } from "./hooks/useWorkspaceSwitching";
 import { useSshLeafState } from "./hooks/useSshLeafState";
-import { useAppContextBridge } from "./hooks/useAppContextBridge";
 import { usePaneHandles } from "./hooks/usePaneHandles";
 import { useEditorFileDrop } from "./hooks/useEditorFileDrop";
 import { useTabActions } from "./hooks/useTabActions";
 import { useFileActions } from "./hooks/useFileActions";
 import { useHeaderActions } from "./hooks/useHeaderActions";
 import { useWorkspaceRoot } from "./hooks/useWorkspaceRoot";
-import { useExtensionPanelDefaults } from "./hooks/useExtensionPanelDefaults";
 import { useQuitGuard } from "./hooks/useQuitGuard";
 import { useWorkspacePersistence } from "./hooks/useWorkspacePersistence";
-import { useEditorBridge } from "./hooks/useEditorBridge";
 import { useSessionDisposal } from "./hooks/useSessionDisposal";
 import { useAdoptDaemonSessions } from "./hooks/useAdoptDaemonSessions";
 import { useActiveLeafSurface } from "./hooks/useActiveLeafSurface";
@@ -110,9 +96,6 @@ export default function App() {
     newSshTab,
     openFileTab,
     pinTab,
-    openExtensionTab,
-    openExtensionPane,
-    setExtensionTabState,
     openBoardTab,
     closeTab,
     selectByIndex,
@@ -145,11 +128,10 @@ export default function App() {
   // at the app root hit-tests the cursor.
   useTerminalFileDrop();
 
-  // HTML5 drags from `[data-fs-path]` elements (sidebar tree, extension
-  // panels via `ctx.ui.mountFolderTree`, etc.) populate dataTransfer at a
-  // document-level capture listener. Bypasses React's per-root delegation
-  // so drag sources from separate `createRoot` trees still work. Module
-  // guard prevents double-attach.
+  // HTML5 drags from `[data-fs-path]` elements (the sidebar tree) populate
+  // dataTransfer at a document-level capture listener. Bypasses React's
+  // per-root delegation so drag sources from separate `createRoot` trees still
+  // work. Module guard prevents double-attach.
   useEffect(() => {
     ensureFsDragListener();
   }, []);
@@ -166,7 +148,6 @@ export default function App() {
 
   // Lazy-mount the ext stack. The chunk only loads once a tab of that kind
   // exists.
-  const hasExtensionTab = useMemo(() => tabs.some((t) => t.kind === "ext"), [tabs]);
 
   // Active leaf says what's focused in the current tab. Drives Search,
   // CWD wiring, etc.
@@ -229,26 +210,9 @@ export default function App() {
   }, []);
 
   const sidebarRef = useRef<PanelImperativeHandle | null>(null);
-  // Tracks an ext-requested sidebar hide so we can auto-restore the user's
-  // prior visibility when they switch off that extension's tab, and re-hide
-  // when they switch back. Cleared on any manual toggle or when the
-  // owning extension no longer has an open ext tab. Ref (not state) so the
-  // bridge callback can mutate it without re-binding via setSidebarSetter.
-  const sidebarHiderRef = useRef<{ extensionId: string; prior: boolean } | null>(null);
-  // Twin of `sidebarHiderRef` for the right-side aux column (AI chat / ext
-  // right panel / SCM right panel). Tracks which (if any) of the three was
-  // open when an extension asked the right slot to close, so we can restore
-  // it once the user leaves that extension's tab. Snapshot is a tag, not a
-  // re-open call: we never reopen a panel the user has since dismissed
-  // explicitly.
-  const rightSidebarHiderRef = useRef<{
-    extensionId: string;
-    prior: RightAuxSnapshot;
-  } | null>(null);
   const toggleSidebar = useCallback(() => {
     const p = sidebarRef.current;
     if (!p) return;
-    sidebarHiderRef.current = null;
     if (p.getSize().asPercentage <= 0) p.expand();
     else p.collapse();
   }, []);
@@ -277,14 +241,11 @@ export default function App() {
     openFileTab,
   });
 
-  // -------- Preferences boot + extension panel defaults --------
-  // Preferences must hydrate before the extension host boots, so `initPrefs`
-  // runs first and `useExtensionPanelDefaults` follows.
+  // -------- Preferences boot --------
   const initPrefs = usePreferencesStore((s) => s.init);
   useEffect(() => {
     void initPrefs();
   }, [initPrefs]);
-  useExtensionPanelDefaults();
 
   // Preferences used by the chrome / layout.
   const sshInRightPanel = usePreferencesStore((s) => s.sshInRightPanel);
@@ -300,10 +261,10 @@ export default function App() {
   const sshRightOpen = useSshRightPanelStore((s) => s.open);
   const closeSshRight = useSshRightPanelStore((s) => s.closePanel);
 
-  // Extension right-panels and the SSH right panel all live in the right column
+  // Docked sidebar sections and the SSH right panel all live in the right column
   // TOGETHER, stacked like the left sidebar's sections (see AppRightSlot). This
-  // is the list of extension-owned ones.
-  const rightPanels = useRightPanelStore((s) => s.panels);
+  // is the list of docked sections that are currently open.
+  const rightSections = useRightColumnStore((s) => s.open);
   // Re-open a sidebar section docked to the right slot on boot (else it would
   // vanish: gone from the left sidebar, closed in the right).
   useDockedSectionAutoOpen();
@@ -382,23 +343,6 @@ export default function App() {
     }
   }, [explorerRoot, home]);
 
-  // Register the extension-host tabs/sidebar bridge setters and run the
-  // sidebar / right-aux auto-restore effects. The shared refs (sidebar
-  // handle + the two hider latches) stay in App; other effects read them.
-  useExtensionSidebarBridges({
-    openExtensionTab,
-    openExtensionPane,
-    setExtensionTabState,
-    sidebarRef,
-    sidebarHiderRef,
-    rightSidebarHiderRef,
-    activeTab,
-    tabs,
-  });
-
-  // Wire `ctx.editor.{getActive,setActiveContent}` to the active editor pane.
-  useEditorBridge({ activeEditorHandle, activePaneTab });
-
   const {
     sshStatuses,
     setSshStatuses,
@@ -460,26 +404,7 @@ export default function App() {
   // Right-column housekeeping (close a docked panel when its enabling pref flips
   // off). Declared here (not up with the other store reads) because it needs
   // hasAnySshLeaf from useSshLeafState.
-  useRightPanelExclusion(
-    sshRightOpen,
-    sshInRightPanel,
-    hasAnySshLeaf,
-    closeSshRight,
-  );
-
-  // Publish the live-state snapshot to extensions. Placed AFTER useSshLeafState
-  // so it can include SSH tab numbers (keyed by the live SSH session id), which
-  // a mirror like Remote Access needs to label SSH tabs the same as the desktop.
-  useAppContextBridge({
-    activePaneTab,
-    activeTab,
-    tabs,
-    wsList,
-    wsActiveId,
-    explorerRoot,
-    sshStatuses,
-    liveTabsByWorkspace,
-  });
+  useRightPanelExclusion(sshRightOpen, sshInRightPanel, hasAnySshLeaf, closeSshRight);
 
   const disposeTab = useCallback(
     (id: number) => {
@@ -516,95 +441,6 @@ export default function App() {
     restoreDone: wsHydrated,
     enabled: !isDevSession,
   });
-
-  // Wire the SSH-connection bridge so a permitted extension (the Remote Access
-  // browser "+ New SSH") can list saved hosts and open one BY ID. Secrets never
-  // cross: the keychain read + `ssh_open` happen later in the normal newSshTab
-  // flow (openSshForSession). Only PINNED connections are listed/openable - a
-  // first connect needs human host-key verification on the desktop, which a web
-  // user can't safely do, so unpinned hosts are withheld and refused here too.
-  useEffect(() => {
-    setSshConnectionBridge(
-      async () => {
-        const list = await listConnections();
-        const pinnedConnections: Array<{
-          id: string;
-          name: string;
-          host: string;
-          port: number;
-          user: string;
-          pinned: true;
-        }> = [];
-        for (const c of list) {
-          if (!c.lastFingerprint) continue;
-          pinnedConnections.push({
-            id: c.id,
-            name: c.name,
-            host: c.host,
-            port: c.port,
-            user: c.user,
-            pinned: true,
-          });
-        }
-        return pinnedConnections;
-      },
-      async (id) => {
-        const conn = (await listConnections()).find((c) => c.id === id);
-        if (!conn) return { ok: false, error: "connection not found" };
-        if (!conn.lastFingerprint) {
-          return { ok: false, error: "host key not pinned; connect once on the desktop first" };
-        }
-        newSshTab(conn.id, conn.name);
-        return { ok: true };
-      },
-      (sessionId) => {
-        // Close the desktop tab whose live SSH session id matches, so a remote
-        // "close tab" closes BOTH sides (not just the underlying SSH session).
-        let leafId: number | null = null;
-        for (const [lid, st] of sshStatuses) {
-          if (st.kind === "connected" && st.sessionId === sessionId) {
-            leafId = lid;
-            break;
-          }
-        }
-        if (leafId === null) return false;
-        const tab = tabs.find(
-          (t) => t.kind === "pane" && leaves(t.paneTree).some((l) => l.id === leafId),
-        );
-        if (!tab) return false;
-        closeTab(tab.id);
-        return true;
-      },
-    );
-    return () => setSshConnectionBridge(null, null, null);
-  }, [newSshTab, sshStatuses, tabs, closeTab]);
-
-  // Wire the workspace-management bridge so the Remote Access extension can let
-  // the browser SWITCH to a target workspace or CREATE a new one. Only a
-  // workspace id / name ever crosses; the shell spawn stays on the existing,
-  // separately-gated open path (the terminal the browser then opens is adopted
-  // into the now-active workspace). Creating switches to the fresh workspace,
-  // which auto-seeds a default terminal so it shows up in the mirror.
-  useEffect(() => {
-    setWorkspaceMgmtBridge(
-      async (name) => {
-        const trimmed = (name || "").trim().slice(0, 60);
-        const finalName =
-          trimmed || `Workspace ${useWorkspacesStore.getState().workspaces.length + 1}`;
-        const ws = wsCreate(finalName);
-        switchToWorkspace(ws.id);
-        return { ok: true, wsId: ws.id };
-      },
-      async (wsId) => {
-        if (!useWorkspacesStore.getState().workspaces.some((w) => w.id === wsId)) {
-          return { ok: false, error: "workspace not found" };
-        }
-        switchToWorkspace(wsId);
-        return { ok: true };
-      },
-    );
-    return () => setWorkspaceMgmtBridge(null, null);
-  }, [wsCreate, switchToWorkspace]);
 
   const {
     pendingClose,
@@ -755,15 +591,10 @@ export default function App() {
       // app chords keep Shift/Meta or add a second modifier (Ctrl+Shift+C copy,
       // Ctrl+Shift+X close, Ctrl+Alt+P, Shift+Alt+F) and stay active; Ctrl+Tab /
       // Ctrl+digit / zoom are not control codes either.
-      (id !== "pane.splitRight" &&
-        activeLeafKindCurrent === "terminal" &&
-        (isTerminalControlChord(e) || isTerminalMetaChord(e))),
+      id !== "pane.splitRight" &&
+      activeLeafKindCurrent === "terminal" &&
+      (isTerminalControlChord(e) || isTerminalMetaChord(e)),
   });
-
-  // Generic dispatcher for extension-contributed keybindings. Walks
-  // `keybindingsRegistry` and `commandsRegistry` on each keydown and
-  // fires the matching command. No per-extension wiring here.
-  useExtensionShortcuts();
 
   const paneHandles = usePaneHandles({
     terminalRefs,
@@ -880,7 +711,6 @@ export default function App() {
               <WorkspaceArea
                 tabs={tabs}
                 activeId={activeId}
-                activeTab={activeTab}
                 activePaneTab={activePaneTab}
                 uiZoom={uiZoom}
                 paneHandles={paneHandles}
@@ -896,14 +726,13 @@ export default function App() {
                 onToggleMdPreview={toggleMdPreviewForLeaf}
                 detectedBrowserUrl={detectedBrowserUrl}
                 onOpenPreview={handleOpenDetectedPreview}
-                hasExtensionTab={hasExtensionTab}
                 movePaneLeafToEdge={movePaneLeafToEdge}
                 moveExtTabToPane={moveExtTabToPane}
                 setLeafTerminalTheme={setLeafTerminalTheme}
                 onSplitSizes={setSplitSizes}
               />
               <AppRightSlot
-                rightPanels={rightPanels}
+                rightSections={rightSections}
                 sshRightOpen={sshRightOpen}
                 explorerRoot={explorerRoot}
                 onPathDeleted={handlePathDeleted}

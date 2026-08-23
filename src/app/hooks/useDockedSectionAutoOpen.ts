@@ -1,16 +1,12 @@
 import { useEffect, useMemo, useRef } from "react";
 
 import {
-  BUILTIN_SECTION_EXT,
-  isRightPanelOpen,
-  MOVABLE_BUILTIN_SECTIONS,
-  sectionPanelId,
-  sidebarSectionKey,
-  sidebarSectionsRegistry,
-  useRegistry,
-  useRightPanelStore,
+  isRightSectionOpen,
+  MOVABLE_SECTIONS,
+  useRightColumnStore,
   useSidebarPlacementStore,
-} from "@/modules/extensions";
+  type RightSectionId,
+} from "@/modules/rightPanel";
 
 /**
  * Restore right-docked sidebar sections' open/closed state across launches.
@@ -32,39 +28,25 @@ import {
  * after the user closed it (the reported "DB panel always opens on startup").
  */
 export function useDockedSectionAutoOpen(): void {
-  const sections = useRegistry(sidebarSectionsRegistry);
   const placement = useSidebarPlacementStore((s) => s.placement);
-  const panels = useRightPanelStore((s) => s.panels);
+  const open = useRightColumnStore((s) => s.open);
   const decided = useRef(false);
 
-  // Every right-docked section: built-ins (Workspaces) first, then extension
-  // sections that opt in via movableToRight.
-  const docked = useMemo<Array<{ key: string; extensionId: string; panelId: string }>>(() => {
-    const out: Array<{ key: string; extensionId: string; panelId: string }> = [];
-    for (const b of MOVABLE_BUILTIN_SECTIONS) {
-      if (placement[b.id] === "right") {
-        out.push({ key: b.id, extensionId: BUILTIN_SECTION_EXT, panelId: sectionPanelId(b.id) });
-      }
-    }
-    for (const s of sections) {
-      const key = sidebarSectionKey(s.extensionId, s.item.id);
-      if (s.item.movableToRight && placement[key] === "right") {
-        out.push({ key, extensionId: s.extensionId, panelId: sectionPanelId(s.item.id) });
-      }
-    }
-    return out;
-  }, [sections, placement]);
+  const docked = useMemo<RightSectionId[]>(
+    () => MOVABLE_SECTIONS.filter((s) => placement[s.id] === "right").map((s) => s.id),
+    [placement],
+  );
 
   // One-shot restore on the first mount where a docked section exists.
   useEffect(() => {
     if (decided.current) return;
-    if (docked.length === 0) return; // none docked yet (extensions may still be loading)
+    if (docked.length === 0) return; // none docked
     decided.current = true;
     const { rightOpen } = useSidebarPlacementStore.getState();
-    for (const d of docked) {
+    for (const id of docked) {
       // Respect the persisted last state: a section the user closed stays closed.
-      if (rightOpen[d.key] === false) continue;
-      useRightPanelStore.getState().open(d.extensionId, d.panelId);
+      if (rightOpen[id] === false) continue;
+      useRightColumnStore.getState().openSection(id);
     }
   }, [docked]);
 
@@ -73,8 +55,8 @@ export function useDockedSectionAutoOpen(): void {
   useEffect(() => {
     if (!decided.current) return;
     const store = useSidebarPlacementStore.getState();
-    for (const d of docked) {
-      store.setRightOpen(d.key, isRightPanelOpen(panels, d.extensionId, d.panelId));
+    for (const id of docked) {
+      store.setRightOpen(id, isRightSectionOpen(open, id));
     }
-  }, [panels, docked]);
+  }, [open, docked]);
 }

@@ -7,7 +7,6 @@ import { decodeFloatParams, floatEv, type FloatCards } from "@/modules/panes/flo
 import { BoardColumns } from "@/modules/workspaces/WorkspaceBoard";
 import type { PaneEntry } from "@/modules/tabs/lib/entries";
 import { FloatTableProvider, markdownComponents } from "@/components/markdown/markdown-code";
-import { ExtensionPanelMount } from "@/modules/extensions/components/ExtensionPanelMount";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Toaster } from "@/components/ui/toast";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
@@ -65,12 +64,6 @@ export function FloatApp() {
               <EditorPane ref={editorRef} path={params.path} />
             ) : params?.kind === "board" ? (
               <FloatBoard leafId={params.leafId} />
-            ) : params?.kind === "extension-panel" && params.extensionId && params.panelId ? (
-              <FloatExtensionPanel
-                extensionId={params.extensionId}
-                panelId={params.panelId}
-                reuseKey={params.reuseKey}
-              />
             ) : (
               <div className="text-muted-foreground flex h-full items-center justify-center text-[12px]">
                 This pane can't be floated.
@@ -124,62 +117,6 @@ function FloatBoard({ leafId }: { leafId: number }) {
       onOpen={(tabId, focusLeafId) =>
         void emit(floatEv.focus(leafId), { tabId, leafId: focusLeafId })
       }
-    />
-  );
-}
-
-/**
- * An extension panel popped out into a float window.
- *
- * Panel renderers live in per-webview registries and only the main window boots
- * extensions, so this window activates the one it needs itself - there is no
- * mirror to receive. The extension then runs as a second live copy against the
- * same `ctx.storage`, which is the contract panels are expected to handle (the
- * API Client refreshes its tree whenever the panel mounts).
- */
-function FloatExtensionPanel({
-  extensionId,
-  panelId,
-  reuseKey,
-}: {
-  extensionId: string;
-  panelId: string;
-  reuseKey?: string;
-}) {
-  const [error, setError] = useState<string | null>(null);
-  useEffect(() => {
-    let alive = true;
-    void (async () => {
-      try {
-        // Dynamic: keeps the extension host + loader out of the float window's
-        // first paint, which is a terminal or an editor far more often.
-        const loader = await import("@/modules/extensions/loader");
-        const ext = (await loader.listInstalled()).find((e) => e.id === extensionId);
-        if (!ext) throw new Error(`${extensionId} is not installed.`);
-        if (!ext.enabled) throw new Error(`${ext.manifest.name} is disabled.`);
-        await loader.activate(ext); // no-op if this window already activated it
-      } catch (err) {
-        if (alive) setError(err instanceof Error ? err.message : String(err));
-      }
-    })();
-    return () => {
-      alive = false;
-    };
-  }, [extensionId]);
-
-  if (error) {
-    return (
-      <div className="text-muted-foreground flex h-full items-center justify-center px-6 text-center text-[12px]">
-        {error}
-      </div>
-    );
-  }
-  return (
-    <ExtensionPanelMount
-      extensionId={extensionId}
-      panelId={panelId}
-      surface="pane"
-      reuseKey={reuseKey}
     />
   );
 }
