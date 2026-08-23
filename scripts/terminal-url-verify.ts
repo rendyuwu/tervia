@@ -3,7 +3,7 @@
  * Run: `npx tsx scripts/terminal-url-verify.ts`.
  *
  * This is what lights the open-in-browser pill when a server is started INSIDE
- * TEDI. The failure is silent - no error, the pill simply never appears - and it
+ * Tervia. The failure is silent - no error, the pill simply never appears - and it
  * was live: vite prints its port in bold, and the escape both split the port off
  * the host and glued the colour code's trailing `m` to `http`, so `npm run dev`
  * matched nothing at all. Laravel only worked by luck, printing a `[` between

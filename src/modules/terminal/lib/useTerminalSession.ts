@@ -4,7 +4,7 @@ import { buildTerminalTheme } from "@/styles/terminalTheme";
 import { buildContentFontFamily } from "@/lib/fonts";
 import { useCallback, useEffect, useLayoutEffect, useRef } from "react";
 import type { SearchAddon } from "@xterm/addon-search";
-import { type TediOpenInput, type TediSpawnTabInput } from "./osc-handlers";
+import { type TerviaOpenInput, type TerviaSpawnTabInput } from "./osc-handlers";
 import type { SshStatus } from "@/modules/ssh/status";
 import { cursorLineLooksLikeShellPrompt } from "./aiCliDetector";
 import type { AiCliKind, AiCliStatus } from "./aiCliStatus";
@@ -15,7 +15,7 @@ import { disconnectSsh, reconnectSsh, retrySsh } from "./ssh-session";
 import { loadWebglRenderer, disposeWebglRenderer, syncRendererForWallpaper } from "./webgl";
 import { ensureSession, attachSession, detachSession, canFit } from "./session-lifecycle";
 
-export type { TediOpenInput, TediSpawnTabInput };
+export type { TerviaOpenInput, TerviaSpawnTabInput };
 export { disconnectSsh, reconnectSsh, respawnSession };
 export {
   writeToLeaf,
@@ -71,8 +71,8 @@ type Options = {
   onExit?: (code: number) => void;
   onCwd?: (cwd: string) => void;
   onDetectedLocalUrl?: (url: string) => void;
-  onTediOpen?: (input: TediOpenInput) => void;
-  onTediSpawnTab?: (input: TediSpawnTabInput) => void;
+  onTerviaOpen?: (input: TerviaOpenInput) => void;
+  onTerviaSpawnTab?: (input: TerviaSpawnTabInput) => void;
   /** Fires on SSH connection state change. */
   onSshStatus?: (status: SshStatus) => void;
   /** Fires when an AI CLI starts, changes state, or exits. */
@@ -99,8 +99,8 @@ export function useTerminalSession({
   onExit,
   onCwd,
   onDetectedLocalUrl,
-  onTediOpen,
-  onTediSpawnTab,
+  onTerviaOpen,
+  onTerviaSpawnTab,
   onSshStatus,
   onAiCliStatus,
   onPtyId,
@@ -110,8 +110,8 @@ export function useTerminalSession({
     onExit,
     onCwd,
     onDetectedLocalUrl,
-    onTediOpen,
-    onTediSpawnTab,
+    onTerviaOpen,
+    onTerviaSpawnTab,
     onSshStatus,
     onAiCliStatus,
     onPtyId,
@@ -121,8 +121,8 @@ export function useTerminalSession({
     onExit,
     onCwd,
     onDetectedLocalUrl,
-    onTediOpen,
-    onTediSpawnTab,
+    onTerviaOpen,
+    onTerviaSpawnTab,
     onSshStatus,
     onAiCliStatus,
     onPtyId,
@@ -155,8 +155,8 @@ export function useTerminalSession({
       onExit: (c) => cbRef.current.onExit?.(c),
       onCwd: (c) => cbRef.current.onCwd?.(c),
       onDetectedLocalUrl: (u) => cbRef.current.onDetectedLocalUrl?.(u),
-      onTediOpen: (input) => cbRef.current.onTediOpen?.(input),
-      onTediSpawnTab: (input) => cbRef.current.onTediSpawnTab?.(input),
+      onTerviaOpen: (input) => cbRef.current.onTerviaOpen?.(input),
+      onTerviaSpawnTab: (input) => cbRef.current.onTerviaSpawnTab?.(input),
       onSshStatus: (status) => cbRef.current.onSshStatus?.(status),
       onAiCliStatus: (status) => cbRef.current.onAiCliStatus?.(status),
       onPtyId: (ptyId) => cbRef.current.onPtyId?.(ptyId),
@@ -226,7 +226,7 @@ export function useTerminalSession({
       // a ConPTY init and the late resolution would just close as stale.
       if (s.ptyOpening) return;
       console.warn(
-        `[tedi-pty] stuck-recovery: leaf=${leafId} pty=null lastPtyError=null ptyOpening=${s.ptyOpening} sshConn=${s.sshConnectionId ?? "-"} sshStatus=${s.sshStatus.kind} containerAttached=${s.term.element !== undefined} after ${STUCK_RECOVERY_MS}ms - forcing retry`,
+        `[tervia-pty] stuck-recovery: leaf=${leafId} pty=null lastPtyError=null ptyOpening=${s.ptyOpening} sshConn=${s.sshConnectionId ?? "-"} sshStatus=${s.sshStatus.kind} containerAttached=${s.term.element !== undefined} after ${STUCK_RECOVERY_MS}ms - forcing retry`,
       );
       if (s.sshConnectionId) {
         // SSH has its own reconnect. Only intervene from idle.

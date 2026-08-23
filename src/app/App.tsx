@@ -8,7 +8,7 @@
  * under src/app/hooks/ and the render tree in src/app/components/.
  *
  * Where behaviors are set up (each is its own hook unless noted):
- *   - useWorkspaceRoot         - home / picked root + `tedi <path>` CLI targets
+ *   - useWorkspaceRoot         - home / picked root + `tervia <path>` CLI targets
  *   - useWorkspacePersistence  - hydrate + auto-snapshot workspaces
  *   - useQuitGuard             - pre-quit snapshot flush + busy-terminal prompt
  *   - useWorkspaceSwitching    - switch / create / close orchestration

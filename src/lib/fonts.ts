@@ -78,7 +78,7 @@ export function detectMonoFontFamily(): string {
 }
 
 /**
- * Static fallback family chain, used as the inline `var(--tedi-mono-font, …)`
+ * Static fallback family chain, used as the inline `var(--tervia-mono-font, …)`
  * fallback in the editor theme so the first paint (before the applier runs) is
  * still a sane monospace, and as the globals.css default for the var.
  */
@@ -129,13 +129,13 @@ export function buildContentFontFamily(id: string): string {
   return `"${opt.family}", ${base}`;
 }
 
-const MONO_FONT_VAR = "--tedi-mono-font";
-const EDITOR_FONT_SIZE_VAR = "--tedi-editor-font-size";
-const EDITOR_LIGATURES_VAR = "--tedi-editor-ligatures";
+const MONO_FONT_VAR = "--tervia-mono-font";
+const EDITOR_FONT_SIZE_VAR = "--tervia-editor-font-size";
+const EDITOR_LIGATURES_VAR = "--tervia-editor-ligatures";
 const MONO_FONT_SHADOW = "tervia-mono-font-shadow";
 const EDITOR_FONT_SIZE_SHADOW = "tervia-editor-font-size-shadow";
 
-/** Apply the chosen content font to the editor (`--tedi-mono-font`). The
+/** Apply the chosen content font to the editor (`--tervia-mono-font`). The
  *  terminal reads its own `fontFamily` option in `useTerminalSession`. */
 export function applyMonoFontVar(id: string): void {
   if (typeof document === "undefined") return;
@@ -148,7 +148,7 @@ export function applyMonoFontVar(id: string): void {
 }
 
 /**
- * Apply the editor ligature preference (`--tedi-editor-ligatures`). JetBrains
+ * Apply the editor ligature preference (`--tervia-editor-ligatures`). JetBrains
  * Mono fuses `=>` into an arrow, `!=` into `≠`, `===` into a triple bar. That
  * is on by default (an unset `font-variant-ligatures` already did it); the pref
  * exists so it can be turned off when the fused glyph is harder to read than
@@ -160,7 +160,7 @@ export function applyEditorLigaturesVar(on: boolean): void {
   document.documentElement.style.setProperty(EDITOR_LIGATURES_VAR, on ? "normal" : "none");
 }
 
-/** Apply the editor base font size (`--tedi-editor-font-size`, in px). */
+/** Apply the editor base font size (`--tervia-editor-font-size`, in px). */
 export function applyEditorFontSizeVar(px: number): void {
   if (typeof document === "undefined" || !Number.isFinite(px)) return;
   document.documentElement.style.setProperty(EDITOR_FONT_SIZE_VAR, `${px}px`);

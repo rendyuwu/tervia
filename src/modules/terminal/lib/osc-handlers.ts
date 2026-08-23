@@ -74,23 +74,23 @@ export function registerProgressHandler(
   return () => d.dispose();
 }
 
-export type TediOpenInput = {
+export type TerviaOpenInput = {
   file: string;
 };
 
-export function registerTediOpenHandler(
+export function registerTerviaOpenHandler(
   term: Terminal,
-  onTediOpen: (input: TediOpenInput) => void,
+  onTerviaOpen: (input: TerviaOpenInput) => void,
 ): () => void {
   const d = term.parser.registerOscHandler(8888, (data) => {
-    const input = parseTediOpen(data);
-    if (input) onTediOpen(input);
+    const input = parseTerviaOpen(data);
+    if (input) onTerviaOpen(input);
     return true;
   });
   return () => d.dispose();
 }
 
-export type TediSpawnTabInput = {
+export type TerviaSpawnTabInput = {
   cwd?: string;
   cmd?: string;
   title?: string;
@@ -99,12 +99,12 @@ export type TediSpawnTabInput = {
   split?: "row" | "col";
 };
 
-export function registerTediSpawnTabHandler(
+export function registerTerviaSpawnTabHandler(
   term: Terminal,
-  onSpawnTab: (input: TediSpawnTabInput) => void,
+  onSpawnTab: (input: TerviaSpawnTabInput) => void,
 ): () => void {
   const d = term.parser.registerOscHandler(8889, (data) => {
-    const input = parseTediSpawnTab(data);
+    const input = parseTerviaSpawnTab(data);
     if (input) onSpawnTab(input);
     return true;
   });
@@ -123,7 +123,7 @@ function parseOsc7(data: string): string | null {
   return path;
 }
 
-function parseTediOpen(data: string): TediOpenInput | null {
+function parseTerviaOpen(data: string): TerviaOpenInput | null {
   // Format: "file=/path/to/file"
   const fileMatch = data.match(/file=([^;]+)/);
 
@@ -136,7 +136,7 @@ function parseTediOpen(data: string): TediOpenInput | null {
   }
 }
 
-function parseTediSpawnTab(data: string): TediSpawnTabInput | null {
+function parseTerviaSpawnTab(data: string): TerviaSpawnTabInput | null {
   // Format: "cwd=/path;cmd=php artisan serve;title=Vite". All fields optional;
   // at least one required. Values are URL-encoded.
   const decode = (s: string): string => {
@@ -146,7 +146,7 @@ function parseTediSpawnTab(data: string): TediSpawnTabInput | null {
       return s;
     }
   };
-  const out: TediSpawnTabInput = {};
+  const out: TerviaSpawnTabInput = {};
   for (const part of data.split(";")) {
     const eq = part.indexOf("=");
     if (eq < 0) continue;

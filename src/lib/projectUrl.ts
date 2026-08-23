@@ -2,7 +2,7 @@
  * The url a project declares for itself, read out of its own config.
  *
  * The open-in-browser pill rides on terminal output, so a server started
- * outside TEDI (Laragon's Apache, a container) never fires it. Reading the
+ * outside Tervia (Laragon's Apache, a container) never fires it. Reading the
  * config beats scanning ports: a scan cannot tell which listening port belongs
  * to THIS project and would offer a database or a sibling checkout on 3000.
  *
@@ -68,7 +68,7 @@ export function parseHostsFile(text: string): Set<string> {
  * `raw` normalised, or null if it does not name a server on this machine.
  *
  * THE security boundary: a config file arrives with a cloned repo, so without
- * this a repo's `.env` could aim TEDI's browser anywhere - unattended, with
+ * this a repo's `.env` could aim Tervia's browser anywhere - unattended, with
  * auto-open on. A host passes only by being loopback by definition or by this
  * machine's hosts file, never on the config's say-so.
  */

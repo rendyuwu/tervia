@@ -9,7 +9,7 @@
 // blocks a release.
 import { readFileSync } from "node:fs";
 
-const REPO = "https://github.com/IlhamriSKY/TEDI";
+const REPO = "https://github.com/IlhamriSKY/Tervia";
 
 const version = (process.argv[2] ?? "").replace(/^v/, "").trim();
 if (!version) {
@@ -35,7 +35,10 @@ if (start !== -1) {
     }
   }
   // Skip the header line itself; the release title already names the version.
-  section = lines.slice(start + 1, end).join("\n").trim();
+  section = lines
+    .slice(start + 1, end)
+    .join("\n")
+    .trim();
 }
 
 const body = section || `Release ${version}. Full changelog: ${REPO}/blob/main/CHANGELOG.md`;
@@ -43,10 +46,10 @@ const body = section || `Release ${version}. Full changelog: ${REPO}/blob/main/C
 const footer = [
   "---",
   "",
-  '**macOS users:** if Gatekeeper says TEDI "can\'t be opened because Apple cannot check it for malicious software" or "is damaged and can\'t be opened", drag the app to `/Applications` and run this once in Terminal:',
+  '**macOS users:** if Gatekeeper says Tervia "can\'t be opened because Apple cannot check it for malicious software" or "is damaged and can\'t be opened", drag the app to `/Applications` and run this once in Terminal:',
   "",
   "```",
-  "xattr -cr /Applications/TEDI.app",
+  "xattr -cr /Applications/Tervia.app",
   "```",
 ].join("\n");
 

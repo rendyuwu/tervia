@@ -53,13 +53,13 @@ export function aiCliLabel(s: NonNullable<AiCliStatus>): string {
 export function aiCliStateColorClass(state: AiCliState): string {
   switch (state) {
     case "idle":
-      return "text-[color:var(--tedi-icon-idle)]";
+      return "text-[color:var(--tervia-icon-idle)]";
     case "working":
-      return "text-[color:var(--tedi-icon-working)]";
+      return "text-[color:var(--tervia-icon-working)]";
     case "blocking":
-      return "text-[color:var(--tedi-icon-blocked)]";
+      return "text-[color:var(--tervia-icon-blocked)]";
     case "done":
-      return "text-[color:var(--tedi-icon-done)]";
+      return "text-[color:var(--tervia-icon-done)]";
   }
 }
 
@@ -75,7 +75,7 @@ export function aiCliIconColorClass(s: NonNullable<AiCliStatus>): string {
  * Tailwind classes for the terminal-leaf icon when an AI CLI is active:
  * themable color + a smooth "breathing" pulse while working / blocking so an
  * active prompt is always visible. Idle stays solid (no animation). Color
- * resolves from the themable `--tedi-icon-*` CSS variables.
+ * resolves from the themable `--tervia-icon-*` CSS variables.
  */
 export function aiCliIconClass(s: NonNullable<AiCliStatus>): string {
   const color = aiCliIconColorClass(s);

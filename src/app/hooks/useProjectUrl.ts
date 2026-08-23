@@ -12,7 +12,7 @@ import { IS_WINDOWS } from "@/lib/platform";
 /**
  * IO half of `lib/projectUrl`: on workspace-root change, walk up for a config
  * naming the project's url, then probe that one port. A hit lights the same
- * pill a terminal-printed url does, so a server TEDI never saw start
+ * pill a terminal-printed url does, so a server Tervia never saw start
  * (Laragon's Apache, a container) stops being invisible.
  */
 

@@ -54,7 +54,7 @@ type Props = {
 } & Pick<TabsApi, "openBoardTab">;
 
 // Persisted in localStorage, alongside the left sidebar's own order key.
-const ORDER_LS_KEY = "tedi:right:sectionOrder";
+const ORDER_LS_KEY = "tervia:right:sectionOrder";
 // Sections start compact; the group normalizes for whatever is actually open.
 const PANEL_DEFAULT_SIZE = "25%";
 
@@ -96,7 +96,7 @@ export function AppRightSlot({
       title: "Remote",
       defaultSize: PANEL_DEFAULT_SIZE,
       render: (controls, collapsed) => (
-        <div className="border-border/60 bg-background tedi-glass-panel flex h-full min-h-0 flex-col overflow-hidden rounded-md border">
+        <div className="border-border/60 bg-background tervia-glass-panel flex h-full min-h-0 flex-col overflow-hidden rounded-md border">
           <Suspense fallback={null}>
             <SshFileExplorer
               sessionId={activeSshContext.sessionId}
@@ -120,7 +120,7 @@ export function AppRightSlot({
         title: "Files",
         defaultSize: PANEL_DEFAULT_SIZE,
         render: (controls, collapsed) => (
-          <div className="border-border/60 bg-background tedi-glass-panel flex h-full min-h-0 flex-col overflow-hidden rounded-md border">
+          <div className="border-border/60 bg-background tervia-glass-panel flex h-full min-h-0 flex-col overflow-hidden rounded-md border">
             <FileExplorer
               rootPath={explorerRoot}
               onOpenFile={filesSection.onOpenFile}
@@ -146,7 +146,7 @@ export function AppRightSlot({
         title: "Workspaces",
         defaultSize: PANEL_DEFAULT_SIZE,
         render: (controls) => (
-          <div className="border-border/60 bg-background tedi-glass-panel flex h-full min-h-0 flex-col overflow-hidden rounded-md border">
+          <div className="border-border/60 bg-background tervia-glass-panel flex h-full min-h-0 flex-col overflow-hidden rounded-md border">
             <WorkspacesPanel
               onSwitch={workspacesSection.onSwitch}
               onCreate={workspacesSection.onCreate}

@@ -80,7 +80,7 @@ throws("null", () => parseBackupFile(null), "not a Tervia SSH backup");
 throws("an array", () => parseBackupFile([]), "not a Tervia SSH backup");
 throws("a theme file", () => parseBackupFile({ kind: "tervia-theme" }), "not a Tervia SSH backup");
 throws("no version", () => parseBackupFile(envelope({ version: "1" })), "version");
-// A newer TEDI may add fields this build would silently drop, so refuse rather
+// A newer Tervia may add fields this build would silently drop, so refuse rather
 // than import a partial connection.
 throws("a newer format", () => parseBackupFile(envelope({ version: 99 })), "newer Tervia");
 throws("no connections list", () => parseBackupFile(envelope({ connections: {} })), "connections");

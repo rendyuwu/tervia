@@ -9,7 +9,7 @@ import { findLeafIdFromPoint, writeToLeaf } from "./useTerminalSession";
 //      Captured by Tauri (`dragDropEnabled: true` by default) and emitted
 //      as `tauri://drag-drop`. Handled by `useTerminalFileDrop` below
 //      with screen-coordinate hit-testing via `findLeafIdFromPoint`.
-//   2. Internal drops from a TEDI file explorer row → terminal pane.
+//   2. Internal drops from a Tervia file explorer row → terminal pane.
 //      Synthesized from raw mouse events by `ensureFsDragListener`
 //      (HTML5 drag-drop is unreliable inside the WebView because the
 //      Tauri intercept consumes drag events before HTML sees them).
@@ -50,7 +50,7 @@ let dragStyleInjected = false;
  *
  *   - `mousedown` on `data-fs-path="<abs path>"` arms the source.
  *   - `mousemove` past a 5 px threshold activates drag mode (cursor +
- *     drop-target outline via `tedi-fs-dragging`).
+ *     drop-target outline via `tervia-fs-dragging`).
  *   - `mouseup` over `data-terminal-leaf-id` writes the shell-quoted
  *     path into that PTY.
  *   - `mouseup` elsewhere or `Escape` cancels cleanly.
@@ -78,20 +78,20 @@ function injectFsDragStyle(): void {
   // Belt-and-suspenders for Vite HMR: module-scope guards reset on
   // hot reload but the previously-injected `<style>` survives in the
   // DOM. A DOM check prevents accumulating duplicate tags during dev.
-  if (document.querySelector('style[data-tedi-fs-drag="1"]')) {
+  if (document.querySelector('style[data-tervia-fs-drag="1"]')) {
     dragStyleInjected = true;
     return;
   }
   dragStyleInjected = true;
   const style = document.createElement("style");
-  style.setAttribute("data-tedi-fs-drag", "1");
+  style.setAttribute("data-tervia-fs-drag", "1");
   style.textContent = `
-body.tedi-fs-dragging,
-body.tedi-fs-dragging * {
+body.tervia-fs-dragging,
+body.tervia-fs-dragging * {
   cursor: copy !important;
   user-select: none !important;
 }
-body.tedi-fs-dragging [data-terminal-leaf-id].tedi-fs-drop-target {
+body.tervia-fs-dragging [data-terminal-leaf-id].tervia-fs-drop-target {
   outline: 2px solid var(--ring, #3b82f6);
   outline-offset: -2px;
   transition: outline-color 80ms;
@@ -110,7 +110,7 @@ export function ensureFsDragListener(): void {
 
   const clearDropTarget = (): void => {
     if (drag?.currentTarget) {
-      drag.currentTarget.classList.remove("tedi-fs-drop-target");
+      drag.currentTarget.classList.remove("tervia-fs-drop-target");
       drag.currentTarget = null;
     }
   };
@@ -118,7 +118,7 @@ export function ensureFsDragListener(): void {
   const reset = (): void => {
     clearDropTarget();
     drag = null;
-    document.body.classList.remove("tedi-fs-dragging");
+    document.body.classList.remove("tervia-fs-dragging");
   };
 
   document.addEventListener(
@@ -156,7 +156,7 @@ export function ensureFsDragListener(): void {
         const dy = e.clientY - drag.startY;
         if (dx * dx + dy * dy < DRAG_ACTIVATION_PX * DRAG_ACTIVATION_PX) return;
         drag.active = true;
-        document.body.classList.add("tedi-fs-dragging");
+        document.body.classList.add("tervia-fs-dragging");
       }
       // Highlight the terminal pane under the cursor. `elementFromPoint`
       // is more reliable than `e.target` here because the cursor may be
@@ -165,9 +165,9 @@ export function ensureFsDragListener(): void {
       const under = document.elementFromPoint(e.clientX, e.clientY);
       const leafEl = (under?.closest?.("[data-terminal-leaf-id]") ?? null) as HTMLElement | null;
       if (leafEl !== drag.currentTarget) {
-        drag.currentTarget?.classList.remove("tedi-fs-drop-target");
+        drag.currentTarget?.classList.remove("tervia-fs-drop-target");
         drag.currentTarget = leafEl;
-        leafEl?.classList.add("tedi-fs-drop-target");
+        leafEl?.classList.add("tervia-fs-drop-target");
       }
     },
     true,
@@ -180,7 +180,7 @@ export function ensureFsDragListener(): void {
       const wasActive = drag.active;
       const path = drag.path;
       const targetLeaf = drag.currentTarget;
-      // Any button release ends the gesture and clears `tedi-fs-dragging` FIRST,
+      // Any button release ends the gesture and clears `tervia-fs-dragging` FIRST,
       // so the body class (which forces cursor:copy + user-select:none app-wide)
       // can never get stuck if the terminating release isn't the left button
       // (chorded click, or a WebView2 quirk). Only a left-button release over a

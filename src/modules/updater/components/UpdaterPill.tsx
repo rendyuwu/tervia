@@ -9,14 +9,14 @@ export function UpdaterPill() {
   const updater = useUpdater();
   const [open, setOpen] = useState(false);
 
-  // `tedi --update` (and its single-instance forward) bumps `forceOpenSeq`.
+  // `tervia --update` (and its single-instance forward) bumps `forceOpenSeq`.
   // Mirror into local open flag so the dialog pops.
   useEffect(() => {
     if (updater.forceOpenSeq > 0) setOpen(true);
   }, [updater.forceOpenSeq]);
 
   // Surface the pill for the error state too, so an explicit check that fails
-  // (`tedi --update`, the trigger event, the dialog's Retry) tells the user why.
+  // (`tervia --update`, the trigger event, the dialog's Retry) tells the user why.
   // Background sweeps that fail no longer reach `error` (see useUpdater's silent
   // flag), so an unreachable GitHub at launch never lights up the red pill.
   const visible =
@@ -66,7 +66,7 @@ export function UpdaterPill() {
   // Retry drives error → checking → error - and the remount race left Radix's
   // scroll-lock with `pointer-events: none` stuck on the body, so the modal
   // could no longer be clicked or closed. Toggle only the pill button; the
-  // dialog stays mounted in place for every state (incl. `tedi --update`,
+  // dialog stays mounted in place for every state (incl. `tervia --update`,
   // which pops it without a pill).
   return (
     <>

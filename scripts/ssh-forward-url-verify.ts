@@ -3,7 +3,7 @@
  * Run: `npx tsx scripts/ssh-forward-url-verify.ts`.
  *
  * A remote `npm run dev` prints `http://localhost:5173`, which means port 5173
- * ON THE SERVER. TEDI tunnels it and offers the local end in the open-in-browser
+ * ON THE SERVER. Tervia tunnels it and offers the local end in the open-in-browser
  * pill, so these two functions decide which port gets tunnelled and which url
  * the user is handed. Both failure modes are silent and bad: read the wrong
  * port and the tunnel points at nothing, rewrite the url wrongly and the pill

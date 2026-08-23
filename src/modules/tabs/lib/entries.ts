@@ -66,14 +66,14 @@ export function tabAccentClass(e: Entry): string {
   if (e.kind === "pane-leaf") {
     if (e.leafKind === "terminal") {
       return e.sshConnectionId
-        ? "bg-[color:var(--tedi-tab-ssh)]"
-        : "bg-[color:var(--tedi-tab-terminal)]";
+        ? "bg-[color:var(--tervia-tab-ssh)]"
+        : "bg-[color:var(--tervia-tab-terminal)]";
     }
-    return "bg-[color:var(--tedi-tab-editor)]";
+    return "bg-[color:var(--tervia-tab-editor)]";
   }
   // Board: reuses the violet accent rather than adding a token of its own to
   // all 20 theme presets.
-  return "bg-[color:var(--tedi-tab-ai-diff)]";
+  return "bg-[color:var(--tervia-tab-ai-diff)]";
 }
 
 /**

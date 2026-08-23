@@ -863,9 +863,10 @@ function AgentPanel({ state, onRecheck }: { state: AgentState; onRecheck: () => 
         ) : null}
       </div>
       <span className="text-muted-foreground text-[10.5px]">
-        The key never leaves the agent: TEDI asks it to sign each handshake and stores nothing · the
-        server must already have the matching public key · Windows uses the OpenSSH Authentication
-        Agent service or Pageant, elsewhere <span className="font-mono">SSH_AUTH_SOCK</span>.
+        The key never leaves the agent: Tervia asks it to sign each handshake and stores nothing ·
+        the server must already have the matching public key · Windows uses the OpenSSH
+        Authentication Agent service or Pageant, elsewhere{" "}
+        <span className="font-mono">SSH_AUTH_SOCK</span>.
       </span>
     </Field>
   );

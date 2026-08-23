@@ -12,7 +12,7 @@ import { useGlobalShortcuts } from "@/modules/shortcuts";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import { Folder } from "lucide-react";
 
-const SORT_STORAGE_KEY = "tedi:explorer:sortMode";
+const SORT_STORAGE_KEY = "tervia:explorer:sortMode";
 
 function readStoredSortMode(): SortMode {
   if (typeof window === "undefined") return "default";

@@ -16,9 +16,9 @@ import { SectionHeader } from "../components/SectionHeader";
 import { SettingsCard } from "../components/SettingsCard";
 import { Download, Globe, RefreshCw } from "lucide-react";
 
-const REPO_URL = "https://github.com/IlhamriSKY/TEDI";
+const REPO_URL = "https://github.com/rendyuwu/tervia";
 const UPSTREAM_URL = "https://github.com/crynta/terax-ai";
-const SITE_URL = "https://tedi.ilhamriski.com";
+const SITE_URL = "https://tervia.rendy.dev";
 
 const PLATFORM_LABEL: Record<string, string> = {
   macos: "macOS",
@@ -53,7 +53,7 @@ type CheckState =
 
 export function AboutSection() {
   const [version, setVersion] = useState("");
-  const [name, setName] = useState("TEDI");
+  const [name, setName] = useState("Tervia");
   const [build] = useState(initialBuildLabel);
   const [checkState, setCheckState] = useState<CheckState>({ kind: "idle" });
   // Held in a ref, not state. The Update handle is non-serialisable and bound
@@ -122,7 +122,7 @@ export function AboutSection() {
               className="hover:text-foreground inline-flex cursor-pointer items-center gap-1.5 rounded-md text-[12px] underline-offset-2 hover:underline"
             >
               <Globe size={12} strokeWidth={1.75} />
-              tedi.ilhamriski.com
+              tervia.rendy.dev
             </button>
           </dd>
 
@@ -134,7 +134,7 @@ export function AboutSection() {
               className="hover:text-foreground inline-flex cursor-pointer items-center gap-1.5 rounded-md text-[12px] underline-offset-2 hover:underline"
             >
               <BrandIcon brand="github" size={12} />
-              IlhamriSKY/TEDI
+              rendyuwu/tervia
             </button>
           </dd>
 
@@ -295,7 +295,7 @@ function updaterMessage(state: CheckState): string {
     case "downloading":
       return `Downloading v${state.version}…`;
     case "ready":
-      return `v${state.version} is installed. Restart TEDI to apply.`;
+      return `v${state.version} is installed. Restart Tervia to apply.`;
     case "manual-available":
       return `v${state.version} is available - install manually via your package manager.`;
     case "uptodate":

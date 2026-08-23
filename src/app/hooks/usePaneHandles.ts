@@ -6,8 +6,8 @@ import {
   leaves,
   respawnSession,
   type TerminalPaneHandle,
-  type TediOpenInput,
-  type TediSpawnTabInput,
+  type TerviaOpenInput,
+  type TerviaSpawnTabInput,
 } from "@/modules/terminal";
 import { useCallback, useRef, type Dispatch, type RefObject, type SetStateAction } from "react";
 import { isQuitting } from "./useQuitGuard";
@@ -62,8 +62,8 @@ export function usePaneHandles({
   handlePtyId: (leafId: number, ptyId: string) => void;
   handleFocusLeaf: (tabId: number, leafId: number) => void;
   handleLeafExit: (leafId: number, _code: number) => void;
-  handleTediOpen: (_leafId: number, input: TediOpenInput) => void;
-  handleTediSpawnTab: (_leafId: number, input: TediSpawnTabInput) => void;
+  handleTerviaOpen: (_leafId: number, input: TerviaOpenInput) => void;
+  handleTerviaSpawnTab: (_leafId: number, input: TerviaSpawnTabInput) => void;
   handleEditorDirty: (leafId: number, dirty: boolean) => void;
   handleEditorCloseLeaf: (leafId: number) => void;
   handlePaneHeaderClose: (leafId: number) => void;
@@ -132,23 +132,23 @@ export function usePaneHandles({
     [closePaneByLeaf],
   );
 
-  const handleTediOpen = useCallback(
-    (_leafId: number, input: TediOpenInput) => {
+  const handleTerviaOpen = useCallback(
+    (_leafId: number, input: TerviaOpenInput) => {
       openFileTab(input.file);
     },
     [openFileTab],
   );
 
-  // OSC 8889: shell asks TEDI to open a new terminal tab at `cwd` and run
+  // OSC 8889: shell asks Tervia to open a new terminal tab at `cwd` and run
   // `cmd`. Used by tools like Laravel's `php artisan dev:serve` to keep
-  // dev processes inside TEDI instead of spawning cmd.exe windows.
+  // dev processes inside Tervia instead of spawning cmd.exe windows.
   //
   // If `split` is set, splits the last spawned pane in the same tab
   // instead of opening a new tab. Lets `dev:serve` cluster
   // Vite/Reverb/Queue into one tab with horizontal splits.
   const lastSpawnedTabIdRef = useRef<number | null>(null);
-  const handleTediSpawnTab = useCallback(
-    (_leafId: number, input: TediSpawnTabInput) => {
+  const handleTerviaSpawnTab = useCallback(
+    (_leafId: number, input: TerviaSpawnTabInput) => {
       const cwd = input.cwd;
       const cmd = input.cmd;
 
@@ -236,8 +236,8 @@ export function usePaneHandles({
     handlePtyId,
     handleFocusLeaf,
     handleLeafExit,
-    handleTediOpen,
-    handleTediSpawnTab,
+    handleTerviaOpen,
+    handleTerviaSpawnTab,
     handleEditorDirty,
     handleEditorCloseLeaf,
     handlePaneHeaderClose,

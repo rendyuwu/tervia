@@ -10,7 +10,7 @@
  * backlog grows unbounded behind the lock screen (hundreds of MB of retained
  * chunks), `Terminal.write` eventually throws at its own 50 MB ceiling — taking
  * the rest of the data handler with it — and unlocking pays for the whole
- * backlog in one parse storm. That is the "lock the PC, come back, TEDI is
+ * backlog in one parse storm. That is the "lock the PC, come back, Tervia is
  * frozen" report.
  *
  * Past `WRITE_HIGH_WATER` bytes accepted-but-not-yet-parsed we stop feeding

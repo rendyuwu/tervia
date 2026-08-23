@@ -22,7 +22,7 @@ import type { Session } from "./sessionState";
  * enough panes) fires `webglcontextlost`; the addon waits 3s for a restore and
  * then gives up. Disposing without re-loading drops the pane to the DOM
  * renderer — an order of magnitude slower — silently, for the rest of the
- * session, which reads as "TEDI got sluggish after I unlocked". Capped so a
+ * session, which reads as "Tervia got sluggish after I unlocked". Capped so a
  * genuine context storm settles on the DOM renderer instead of ping-ponging.
  */
 const MAX_CONTEXT_LOSS_RELOADS = 3;

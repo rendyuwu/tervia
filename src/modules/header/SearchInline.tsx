@@ -32,7 +32,7 @@ const FIELD_BUTTON = cn(
  * Resolves xterm search decoration colours from the active theme. xterm's
  * canvas renderer needs concrete rgb strings (not `var(...)`), so we probe
  * the live CSS custom properties on demand. Active match tracks
- * `--tedi-icon-working` (gold/amber in default; canonical per preset),
+ * `--tervia-icon-working` (gold/amber in default; canonical per preset),
  * inactive matches use `--muted-foreground` so they read as "found but not
  * focused". Recomputed per call so theme switches re-tint immediately.
  */
@@ -51,7 +51,7 @@ function termDecorations(): {
     probe.style.color = `var(${varName}, ${fallback})`;
     return getComputedStyle(probe).color || fallback;
   };
-  const active = resolve("--tedi-icon-working", "#d18616");
+  const active = resolve("--tervia-icon-working", "#d18616");
   const match = resolve("--muted-foreground", "#515c6a");
   probe.remove();
   return {

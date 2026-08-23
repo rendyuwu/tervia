@@ -1,5 +1,5 @@
 /**
- * Shortcut-collision audit for TEDI. Verifies, for the Windows/Linux expansion
+ * Shortcut-collision audit for Tervia. Verifies, for the Windows/Linux expansion
  * (Mod = Ctrl, the case where app chords can shadow shell control codes):
  *   A. No two DIFFERENT catalog actions share the same chord (intra-app clash).
  *   B. In a focused terminal (local PTY and SSH are the same "terminal" leaf),

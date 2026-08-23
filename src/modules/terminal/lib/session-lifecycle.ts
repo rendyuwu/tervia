@@ -21,8 +21,8 @@ import {
   registerCwdHandler,
   registerProgressHandler,
   registerPromptTracker,
-  registerTediOpenHandler,
-  registerTediSpawnTabHandler,
+  registerTerviaOpenHandler,
+  registerTerviaSpawnTabHandler,
 } from "./osc-handlers";
 import { createAiCliDetector } from "./aiCliDetector";
 import type { AiCliKind } from "./aiCliStatus";
@@ -114,7 +114,7 @@ if (opacityWin && !opacityWin.__tediCanvasOpacityBound) {
       // calling buildTerminalTheme() per session (which forces ~20
       // getComputedStyle probe reads each). The full rebuild still runs on real
       // palette changes (ensureSession + the React re-theme effect in
-      // TerminalPane). Reads the terminal-owned `--tedi-term-bg`, so a custom
+      // TerminalPane). Reads the terminal-owned `--tervia-term-bg`, so a custom
       // terminal theme keeps its own background under glass.
       const globalBackground = resolveTerminalBackground();
       for (const s of sessions.values()) {
@@ -426,11 +426,11 @@ export function ensureSession(
         session.lastCwd = cwd;
         session.callbacks.onCwd?.(cwd);
       }),
-      registerTediOpenHandler(term, (input) => {
-        session.callbacks.onTediOpen?.(input);
+      registerTerviaOpenHandler(term, (input) => {
+        session.callbacks.onTerviaOpen?.(input);
       }),
-      registerTediSpawnTabHandler(term, (input) => {
-        session.callbacks.onTediSpawnTab?.(input);
+      registerTerviaSpawnTabHandler(term, (input) => {
+        session.callbacks.onTerviaSpawnTab?.(input);
       }),
       // OSC 9;4 progress (Claude Code emits `9;4;3` busy / `9;4;0` done). The
       // detector treats this as its most reliable per-turn busy/idle oracle -
@@ -530,17 +530,17 @@ export function attachSession(
     s.lastSentRows = Math.max(MIN_PTY_DIM, s.term.rows);
     // Immediate visual feedback so the user doesn't see a blank pane while
     // ConPTY initializes and the shell loads its profile. SSH leaves get
-    // their own "[tedi] connecting to …" banner from `openSshForSession`,
+    // their own "[tervia] connecting to …" banner from `openSshForSession`,
     // so skip the placeholder there. Cleared by `onData` on the first byte.
     if (firstAttach && !s.sshConnectionId && !s.placeholderShown) {
       s.placeholderShown = true;
-      s.term.write("\x1b[2m[tedi] starting shell…\x1b[0m");
+      s.term.write("\x1b[2m[tervia] starting shell…\x1b[0m");
     }
     const debug = isDebugPty();
     const tAttach = performance.now();
     if (debug) {
       console.info(
-        `[tedi-pty] attach leaf=${leafId} cols=${s.term.cols} rows=${s.term.rows} containerWxH=${container.clientWidth}x${container.clientHeight} firstAttach=${firstAttach} ssh=${s.sshConnectionId ?? "-"}`,
+        `[tervia-pty] attach leaf=${leafId} cols=${s.term.cols} rows=${s.term.rows} containerWxH=${container.clientWidth}x${container.clientHeight} firstAttach=${firstAttach} ssh=${s.sshConnectionId ?? "-"}`,
       );
     }
     const myPromise = openPtyForSession(s, s.initialCwd);
@@ -550,7 +550,7 @@ export function attachSession(
       .then((pty) => {
         if (debug) {
           console.info(
-            `[tedi-pty] spawn ok leaf=${leafId} ptyId=${pty.id} after ${Math.round(performance.now() - tAttach)}ms disposed=${s.disposed} stale=${myEpoch !== s.ptySpawnEpoch}`,
+            `[tervia-pty] spawn ok leaf=${leafId} ptyId=${pty.id} after ${Math.round(performance.now() - tAttach)}ms disposed=${s.disposed} stale=${myEpoch !== s.ptySpawnEpoch}`,
           );
         }
         if (s.disposed) {
@@ -585,11 +585,11 @@ export function attachSession(
           if (isHostKeyMismatchError(e)) {
             // Fingerprint mismatch can't auto-recover. Park in error so the user can fix the saved fingerprint.
             s.sshReconnectAttempts = 0;
-            writeSshBanner(s, `\r\n\x1b[31m[tedi] ${msg}\x1b[0m\r\n`);
+            writeSshBanner(s, `\r\n\x1b[31m[tervia] ${msg}\x1b[0m\r\n`);
             emitSshStatus(s, { kind: "error", message: msg, canRetry: true });
             return;
           }
-          writeSshBanner(s, `\r\n\x1b[31m[tedi] ssh connect failed: ${msg}\x1b[0m\r\n`);
+          writeSshBanner(s, `\r\n\x1b[31m[tervia] ssh connect failed: ${msg}\x1b[0m\r\n`);
           scheduleSshReconnect(s, msg);
           return;
         }

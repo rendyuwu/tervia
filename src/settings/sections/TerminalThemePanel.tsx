@@ -263,7 +263,7 @@ function TerminalPreview({ palette }: { palette: TerminalPalette }) {
       </div>
       <div className="px-3 py-2.5 font-mono text-[11.5px] leading-relaxed">
         <div>
-          <span style={{ color: palette.ansi.green }}>~/tedi</span>{" "}
+          <span style={{ color: palette.ansi.green }}>~/tervia</span>{" "}
           <span style={{ color: palette.ansi.blue }}>git:(</span>
           <span style={{ color: palette.ansi.red }}>main</span>
           <span style={{ color: palette.ansi.blue }}>)</span>{" "}

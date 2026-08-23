@@ -26,7 +26,7 @@ type Params = {
 /**
  * Owns the workspace root: `home` (resolved once from $HOME) and `pickedRoot`
  * (the user-chosen folder, persisted to localStorage). Bundles the "Open
- * Folder" picker plus the `tedi .` / `tedi <path>` CLI-target handling - the
+ * Folder" picker plus the `tervia .` / `tervia <path>` CLI-target handling - the
  * one-shot startup drain and the live `single-instance` forward. Moved verbatim
  * from App with identical dependency arrays. The root values are read widely
  * (explorer, AI context, inherited cwd), so they are returned for App to thread
@@ -88,8 +88,8 @@ export function useWorkspaceRoot({ tabs, activePaneTab, newTab, openFileTab }: P
       .catch(() => setHome(null));
   }, []);
 
-  // Handles `tedi .` / `tedi <path>`. Drained from Rust on boot and pushed
-  // live by the single-instance plugin when a second `tedi` invocation
+  // Handles `tervia .` / `tervia <path>`. Drained from Rust on boot and pushed
+  // live by the single-instance plugin when a second `tervia` invocation
   // forwards its argv. Folder: adopt as root and open a terminal there.
   // File: adopt parent as root and open the file in an editor tab.
   const openCliTarget = useCallback(
@@ -108,7 +108,7 @@ export function useWorkspaceRoot({ tabs, activePaneTab, newTab, openFileTab }: P
         // adopts the parent as the workspace root, which is what the explorer
         // reads, and `openFileTab` appends its own pane tab when no editor
         // leaf matches - it does not need a terminal to attach to. Spawning
-        // one anyway meant "Open with TEDI" on a file produced an unasked-for
+        // one anyway meant "Open with Tervia" on a file produced an unasked-for
         // shell next to the editor, unlike every other file-open path
         // (explorer click, drag-drop, OSC 8889, New File dialog).
         openFileTab(target.path);
@@ -123,7 +123,7 @@ export function useWorkspaceRoot({ tabs, activePaneTab, newTab, openFileTab }: P
   // Gate on workspace hydration: `useWorkspacePersistence` restores the saved
   // workspace by calling `replaceAllTabs` once `wsHydrated` flips true. That
   // disk-backed restore lands later than this fast in-memory IPC, so an
-  // ungated drain would open the `tedi .` tab first and then have it wiped by
+  // ungated drain would open the `tervia .` tab first and then have it wiped by
   // the restore - leaving the previously saved folder on screen. Waiting for
   // hydration flips the order: the restore runs synchronously inside the same
   // commit while this drain's tab mutation happens in the async `then`, so the
@@ -139,7 +139,7 @@ export function useWorkspaceRoot({ tabs, activePaneTab, newTab, openFileTab }: P
     });
   }, [openCliTarget, wsHydrated]);
 
-  // Live forwarding from `tauri-plugin-single-instance` when `tedi <path>`
+  // Live forwarding from `tauri-plugin-single-instance` when `tervia <path>`
   // runs while this window is already up.
   useEffect(() => {
     const unlistenP = listen<CliTarget>(IPC_EVENTS.OPEN_CLI_TARGET, (e) => {

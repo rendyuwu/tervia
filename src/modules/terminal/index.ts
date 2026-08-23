@@ -3,8 +3,8 @@ export {
   disposeSession,
   respawnSession,
   acknowledgeAiCli,
-  type TediOpenInput,
-  type TediSpawnTabInput,
+  type TerviaOpenInput,
+  type TerviaSpawnTabInput,
 } from "./lib/useTerminalSession";
 export { useTerminalFileDrop, ensureFsDragListener } from "./lib/useTerminalFileDrop";
 export {

@@ -121,7 +121,7 @@ export async function openSshForSession(
   emitSshStatus(s, { kind: "connecting", attempt });
   writeSshBanner(
     s,
-    `\x1b[2m[tedi] connecting to ${conn.user}@${conn.host}:${conn.port}…\x1b[0m\r\n`,
+    `\x1b[2m[tervia] connecting to ${conn.user}@${conn.host}:${conn.port}…\x1b[0m\r\n`,
   );
 
   // Route the first of onExit/onError into the reconnect scheduler; russh can fire both.
@@ -216,7 +216,7 @@ export async function openSshForSession(
           // via the dialog, which already dequeued the prompt). Drop our ref so
           // the failure path can never dismiss a prompt that isn't ours.
           hostKeyPromptId = null;
-          writeSshBanner(s, `\x1b[2m[tedi] server key ${fp}\x1b[0m\r\n`);
+          writeSshBanner(s, `\x1b[2m[tervia] server key ${fp}\x1b[0m\r\n`);
           pendingFingerprint = fp;
           // Fire-and-forget. Timestamp write failure shouldn't break the session.
           void markConnected(sshConnectionId, fp).catch(() => {});
@@ -245,7 +245,7 @@ export async function openSshForSession(
           handleTerminal(code === 0 ? "remote closed" : `exit ${code}`);
         },
         onError: (msg) => {
-          writeSshBanner(s, `\r\n\x1b[31m[tedi] ssh error: ${msg}\x1b[0m\r\n`);
+          writeSshBanner(s, `\r\n\x1b[31m[tervia] ssh error: ${msg}\x1b[0m\r\n`);
           handleTerminal(msg);
         },
       },
@@ -278,12 +278,12 @@ export async function openSshForSession(
       (bound) =>
         writeSshBanner(
           s,
-          `\x1b[2m[tedi] forwarding localhost:${bound} -> ${f.remoteHost}:${f.remotePort}\x1b[0m\r\n`,
+          `\x1b[2m[tervia] forwarding localhost:${bound} -> ${f.remoteHost}:${f.remotePort}\x1b[0m\r\n`,
         ),
       (e) =>
         writeSshBanner(
           s,
-          `\x1b[33m[tedi] port forward ${f.localPort} -> ${f.remoteHost}:${f.remotePort} failed: ${describeError(e)}\x1b[0m\r\n`,
+          `\x1b[33m[tervia] port forward ${f.localPort} -> ${f.remoteHost}:${f.remotePort} failed: ${describeError(e)}\x1b[0m\r\n`,
         ),
     );
   }
@@ -344,7 +344,7 @@ export async function forwardDetectedUrl(
       (bound) => {
         writeSshBanner(
           s,
-          `\x1b[2m[tedi] forwarding localhost:${bound} -> remote localhost:${remotePort}\x1b[0m\r\n`,
+          `\x1b[2m[tervia] forwarding localhost:${bound} -> remote localhost:${remotePort}\x1b[0m\r\n`,
         );
         return bound;
       },
@@ -375,7 +375,7 @@ export function scheduleSshReconnect(s: Session, reason: string): void {
     });
     writeSshBanner(
       s,
-      `\r\n\x1b[33m[tedi] disconnected (${reason}). Press Enter or click Retry to reconnect.\x1b[0m\r\n`,
+      `\r\n\x1b[33m[tervia] disconnected (${reason}). Press Enter or click Retry to reconnect.\x1b[0m\r\n`,
     );
     return;
   }
@@ -389,7 +389,7 @@ export function scheduleSshReconnect(s: Session, reason: string): void {
   });
   writeSshBanner(
     s,
-    `\r\n\x1b[33m[tedi] connection lost (${reason}); reconnecting in ${Math.round(
+    `\r\n\x1b[33m[tervia] connection lost (${reason}); reconnecting in ${Math.round(
       delay / 1000,
     )}s (attempt ${attempt}/${MAX_SSH_RECONNECT_ATTEMPTS})…\x1b[0m\r\n`,
   );
@@ -427,7 +427,7 @@ async function runSshReconnect(s: Session): Promise<void> {
       // Fingerprint mismatches can't auto-recover. Park in error so the user can
       // edit the saved connection (clear lastFingerprint) and retry manually.
       s.sshReconnectAttempts = 0;
-      writeSshBanner(s, `\r\n\x1b[31m[tedi] ${msg}\x1b[0m\r\n`);
+      writeSshBanner(s, `\r\n\x1b[31m[tervia] ${msg}\x1b[0m\r\n`);
       emitSshStatus(s, { kind: "error", message: msg, canRetry: true });
       return;
     }
@@ -474,7 +474,7 @@ export async function disconnectSsh(leafId: number): Promise<void> {
   });
   writeSshBanner(
     s,
-    `\r\n\x1b[33m[tedi] disconnected. Press Enter or click Reconnect to come back.\x1b[0m\r\n`,
+    `\r\n\x1b[33m[tervia] disconnected. Press Enter or click Reconnect to come back.\x1b[0m\r\n`,
   );
 }
 

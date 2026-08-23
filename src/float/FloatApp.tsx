@@ -40,7 +40,7 @@ export function FloatApp() {
     void getCurrentWindow().close();
   }, [params?.kind]);
 
-  // "Dock back into TEDI" from the main pane closes this window (saving first).
+  // "Dock back into Tervia" from the main pane closes this window (saving first).
   useEffect(() => {
     if (leafId === undefined) return;
     const un = listen(floatEv.close(leafId), () => void closeWindow());

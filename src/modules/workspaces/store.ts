@@ -198,7 +198,7 @@ export const useWorkspacesStore = create<State & Actions>((set, get) => {
       // released the store yet). Letting it clear avoids falling through to a
       // default that then overwrites recoverable saved workspaces. A genuinely
       // corrupt/parse failure just exhausts the retries. `hydrated` MUST still
-      // flip true regardless - the `tedi .` CLI drain and other consumers gate
+      // flip true regardless - the `tervia .` CLI drain and other consumers gate
       // on it, so a read failure that left it false would strand them, not just
       // lose the saved workspaces.
       for (let attempt = 0; attempt < 3; attempt++) {

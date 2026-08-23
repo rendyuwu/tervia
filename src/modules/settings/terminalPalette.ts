@@ -2,7 +2,7 @@
  * Terminal theme palette + runtime applier.
  *
  * The terminal is themed INDEPENDENTLY of the app chrome. It reads its own
- * `--tedi-term-*` CSS variables, which default (in globals.css) to the app
+ * `--tervia-term-*` CSS variables, which default (in globals.css) to the app
  * tokens so `mode: "follow-app"` is pixel-identical to the app theme with no
  * JS at all. In `mode: "custom"` this module overrides those vars with the
  * chosen palette, so from then on changing the app theme no longer touches the
@@ -72,30 +72,30 @@ export const ANSI_KEYS = [
 
 /** ANSI slot -> CSS var consumed by `buildTerminalTheme` via `readTerminalTokens`. */
 const ANSI_VAR: Record<keyof TerminalAnsi, string> = {
-  black: "--tedi-term-ansi-black",
-  red: "--tedi-term-ansi-red",
-  green: "--tedi-term-ansi-green",
-  yellow: "--tedi-term-ansi-yellow",
-  blue: "--tedi-term-ansi-blue",
-  magenta: "--tedi-term-ansi-magenta",
-  cyan: "--tedi-term-ansi-cyan",
-  white: "--tedi-term-ansi-white",
-  brightBlack: "--tedi-term-ansi-bright-black",
-  brightRed: "--tedi-term-ansi-bright-red",
-  brightGreen: "--tedi-term-ansi-bright-green",
-  brightYellow: "--tedi-term-ansi-bright-yellow",
-  brightBlue: "--tedi-term-ansi-bright-blue",
-  brightMagenta: "--tedi-term-ansi-bright-magenta",
-  brightCyan: "--tedi-term-ansi-bright-cyan",
-  brightWhite: "--tedi-term-ansi-bright-white",
+  black: "--tervia-term-ansi-black",
+  red: "--tervia-term-ansi-red",
+  green: "--tervia-term-ansi-green",
+  yellow: "--tervia-term-ansi-yellow",
+  blue: "--tervia-term-ansi-blue",
+  magenta: "--tervia-term-ansi-magenta",
+  cyan: "--tervia-term-ansi-cyan",
+  white: "--tervia-term-ansi-white",
+  brightBlack: "--tervia-term-ansi-bright-black",
+  brightRed: "--tervia-term-ansi-bright-red",
+  brightGreen: "--tervia-term-ansi-bright-green",
+  brightYellow: "--tervia-term-ansi-bright-yellow",
+  brightBlue: "--tervia-term-ansi-bright-blue",
+  brightMagenta: "--tervia-term-ansi-bright-magenta",
+  brightCyan: "--tervia-term-ansi-bright-cyan",
+  brightWhite: "--tervia-term-ansi-bright-white",
 };
 
-const VAR_BG = "--tedi-term-bg";
-const VAR_FG = "--tedi-term-fg";
-const VAR_CURSOR = "--tedi-term-cursor";
-const VAR_SELECTION = "--tedi-term-selection";
+const VAR_BG = "--tervia-term-bg";
+const VAR_FG = "--tervia-term-fg";
+const VAR_CURSOR = "--tervia-term-cursor";
+const VAR_SELECTION = "--tervia-term-selection";
 
-/** ANSI slots, in order, as the `--tedi-term-ansi-*` var names. Internal: used
+/** ANSI slots, in order, as the `--tervia-term-ansi-*` var names. Internal: used
  *  by the applier to clear the custom overrides. */
 const TERMINAL_ANSI_VARS = ANSI_KEYS.map((k) => ANSI_VAR[k]);
 const TERMINAL_BASE_VARS = [VAR_BG, VAR_FG, VAR_CURSOR, VAR_SELECTION] as const;
@@ -219,7 +219,7 @@ function readShadow(): Shadow | null {
 /**
  * Synchronous fast-path. Call before React mounts so the first xterm paint uses
  * the saved custom palette instead of the app-derived default. `follow-app`
- * needs no work: the globals.css `--tedi-term-*` defaults already mirror the
+ * needs no work: the globals.css `--tervia-term-*` defaults already mirror the
  * app tokens.
  */
 export function applyTerminalThemeFastPath(): void {

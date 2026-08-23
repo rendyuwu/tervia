@@ -7,7 +7,7 @@ import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { useCallback, useEffect, useRef, useState } from "react";
 
-export const GITHUB_REPO = "IlhamriSKY/TEDI";
+export const GITHUB_REPO = "rendyuwu/tervia";
 export const GITHUB_LATEST_RELEASE = `https://api.github.com/repos/${GITHUB_REPO}/releases/latest`;
 
 export interface ManualUpdateInfo {
@@ -95,7 +95,7 @@ export async function fetchLinuxRelease(): Promise<ManualUpdateInfo | null> {
 export function useUpdater() {
   const [state, setState] = useState<UpdaterState>({ kind: "idle" });
   const updateRef = useRef<Update | null>(null);
-  // Bumped on every `tedi --update` request. UpdaterPill watches this.
+  // Bumped on every `tervia --update` request. UpdaterPill watches this.
   const [forceOpenSeq, setForceOpenSeq] = useState(0);
 
   const reset = useCallback(() => {
@@ -106,7 +106,7 @@ export function useUpdater() {
   // `silent` checks are the unattended background sweeps (first-run + 6h
   // interval). When GitHub is unreachable (offline at launch, proxy, DNS) they
   // must NOT light up the red "Update check failed" pill - a failed reachability
-  // probe is not news the user asked for. Only explicit checks (`tedi --update`,
+  // probe is not news the user asked for. Only explicit checks (`tervia --update`,
   // the trigger event, the dialog's Retry button) surface the error.
   //
   // Silent sweeps also stay invisible mid-flight: they skip the "checking"
@@ -212,7 +212,7 @@ export function useUpdater() {
     return () => window.clearTimeout(first);
   }, [checkForUpdate]);
 
-  // `tedi --update`: drain startup flag once and re-fire on single-instance forwards.
+  // `tervia --update`: drain startup flag once and re-fire on single-instance forwards.
   // Both paths force the dialog and skip the 8s delay.
   const updateFlagDrainedRef = useRef(false);
   useEffect(() => {

@@ -3,7 +3,7 @@ import type { TerminalPalette } from "@/modules/settings/terminalPalette";
 import type { ITheme } from "@xterm/xterm";
 
 /**
- * Builds an xterm theme from the TERMINAL tokens (`--tedi-term-*`), which are
+ * Builds an xterm theme from the TERMINAL tokens (`--tervia-term-*`), which are
  * independent of the app chrome. In `follow-app` mode those vars default (in
  * globals.css) to the app palette, so the result is identical to the app theme;
  * in `custom` mode they carry the user's own terminal palette, fully decoupled
@@ -25,7 +25,7 @@ import type { ITheme } from "@xterm/xterm";
  *
  * `override` is a per-leaf palette (Pane header -> "Terminal theme"). When
  * passed, the xterm theme is built straight from it instead of the global
- * `--tedi-term-*` tokens, so a single pane can carry its own palette while the
+ * `--tervia-term-*` tokens, so a single pane can carry its own palette while the
  * rest follow the global theme. Glass alpha is still applied to the background.
  */
 export function buildTerminalTheme(override?: TerminalPalette | null): ITheme {
@@ -102,10 +102,10 @@ function applyGlassAlpha(solidResolved: string): string {
   if (typeof document === "undefined") return solidResolved;
   const root = document.documentElement;
   // Transparency is owned by the single "App opacity" control
-  // (`data-tedi-glass` + `--tedi-app-opacity`). When off, the canvas is solid.
-  if (root.dataset.tediGlass !== "on") return solidResolved;
+  // (`data-tervia-glass` + `--tervia-app-opacity`). When off, the canvas is solid.
+  if (root.dataset.terviaGlass !== "on") return solidResolved;
   const cs = getComputedStyle(root);
-  const raw = parseFloat(cs.getPropertyValue("--tedi-app-opacity").trim() || "1");
+  const raw = parseFloat(cs.getPropertyValue("--tervia-app-opacity").trim() || "1");
   const a = isFinite(raw) ? Math.max(0, Math.min(1, raw)) : 1;
   return withAlpha(solidResolved, a) ?? solidResolved;
 }

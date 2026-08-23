@@ -10,8 +10,8 @@
  */
 import { create } from "zustand";
 
-const LS_KEY = "tedi:sidebar:placement";
-const LS_OPEN_KEY = "tedi:sidebar:right-open";
+const LS_KEY = "tervia:sidebar:placement";
+const LS_OPEN_KEY = "tervia:sidebar:right-open";
 
 /**
  * Sidebar sections the user can dock to the right column. `id` is both the
