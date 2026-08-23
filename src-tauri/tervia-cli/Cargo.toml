@@ -3,36 +3,36 @@
 # nsis bundlers enumerate `[[bin]]` entries from the manifest they're
 # invoked against and try to copy each to the install layout. With the
 # stub declared in the GUI's `Cargo.toml`, POSIX bundles either tried to
-# ship an unwanted `/usr/bin/tedi` (Linux) or dropped a secondary binary
-# into `TEDI.app/Contents/MacOS/` that ad-hoc codesign on x86_64 refused
+# ship an unwanted `/usr/bin/tervia` (Linux) or dropped a secondary binary
+# into `Tervia.app/Contents/MacOS/` that ad-hoc codesign on x86_64 refused
 # to walk. `required-features` did not filter the bundler's enumeration -
 # it only skips the cargo build step, so the bundler then fails with
-# "target/release/tedi does not exist". A standalone package keeps the
+# "target/release/tervia does not exist". A standalone package keeps the
 # stub out of the GUI manifest entirely; only the Windows release step
-# (`cargo build --release -p tedi-cli`) builds it.
-name = "tedi-cli"
-version = "0.3.14"
-description = "Console-subsystem launcher stub for the TEDI GUI app (Windows)."
-authors = ["IlhamriSKY"]
+# (`cargo build --release -p tervia-cli`) builds it.
+name = "tervia-cli"
+version = "0.1.0"
+description = "Console-subsystem launcher stub for the Tervia GUI app (Windows)."
+authors = ["rendyuwu"]
 license = "Apache-2.0"
-repository = "https://github.com/IlhamriSKY/TEDI"
+repository = "https://github.com/rendyuwu/tervia"
 edition = "2021"
 publish = false
 
 [[bin]]
-# Output filename is `tedi.exe` - this is what PATHEXT resolves the
-# user's `tedi` to on Windows. The companion GUI binary is `TEDIApp.exe`
+# Output filename is `tervia.exe` - this is what PATHEXT resolves the
+# user's `tervia` to on Windows. The companion GUI binary is `TerviaApp.exe`
 # (renamed via `mainBinaryName` in `tauri.conf.json`) so the two cannot
 # collide on a case-insensitive filesystem.
-name = "tedi"
+name = "tervia"
 path = "src/main.rs"
 
 [dependencies]
 # Path-dep on the GUI crate so the stub's `--help` reuses
-# `tedi_lib::modules::cli::help_text` and never drifts. The package on
-# disk is named `tedi`; we keep the import name `tedi_lib` because that's
+# `tervia_lib::modules::cli::help_text` and never drifts. The package on
+# disk is named `tervia`; we keep the import name `tervia_lib` because that's
 # what its `[lib].name` field exposes and what the GUI code uses too.
-tedi_lib = { path = "..", package = "tedi" }
+tervia_lib = { path = "..", package = "tervia" }
 
 # Release profile is inherited from the workspace root (Cargo only honours
 # `[profile.*]` at the workspace root; declaring one here would emit

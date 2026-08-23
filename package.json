@@ -1,17 +1,17 @@
 {
-  "name": "tedi",
+  "name": "tervia",
   "private": true,
   "version": "0.1.0",
-  "description": "TEDI - Terminal Director. A lightweight terminal with split screens, tab grouping, and workspaces.",
-  "author": "IlhamriSKY",
+  "description": "Tervia - a lightweight desktop client for remote machines: SSH, port forwarding, SFTP and RDP.",
+  "author": "rendyuwu",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/IlhamriSKY/TEDI.git"
+    "url": "https://github.com/rendyuwu/tervia.git"
   },
-  "homepage": "https://github.com/IlhamriSKY/TEDI",
+  "homepage": "https://github.com/rendyuwu/tervia",
   "bugs": {
-    "url": "https://github.com/IlhamriSKY/TEDI/issues"
+    "url": "https://github.com/rendyuwu/tervia/issues"
   },
   "type": "module",
   "engines": {

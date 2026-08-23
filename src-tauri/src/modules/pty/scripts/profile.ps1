@@ -1,4 +1,4 @@
-# tedi-shell-integration (PowerShell)
+# tervia-shell-integration (PowerShell)
 # Emits OSC 7 (cwd) + OSC 133 A/B/D so the host tracks cwd and prompt boundaries.
 
 # ConPTY's output stream sometimes stalls before the first write on Windows 11
@@ -8,8 +8,8 @@
 [Console]::Out.Write([char]27 + "[?25h")
 [Console]::Out.Flush()
 
-if ($global:__TEDI_HOOKS_LOADED) { return }
-$global:__TEDI_HOOKS_LOADED = $true
+if ($global:__TERVIA_HOOKS_LOADED) { return }
+$global:__TERVIA_HOOKS_LOADED = $true
 
 try {
     [Console]::InputEncoding  = [System.Text.UTF8Encoding]::new($false)
@@ -25,10 +25,10 @@ try {
 try { Set-PSReadLineOption -BellStyle None } catch {}
 
 if (Test-Path Function:prompt) {
-    Copy-Item Function:prompt Function:__tedi_user_prompt -Force -ErrorAction SilentlyContinue
+    Copy-Item Function:prompt Function:__tervia_user_prompt -Force -ErrorAction SilentlyContinue
 }
 
-function global:__tedi_urlencode {
+function global:__tervia_urlencode {
     param([string]$s)
     $bytes = [System.Text.Encoding]::UTF8.GetBytes($s)
     $sb = [System.Text.StringBuilder]::new($bytes.Length)
@@ -60,13 +60,13 @@ function global:prompt {
     if ($loc.Provider.Name -eq 'FileSystem') {
         $cwd = $loc.ProviderPath -replace '\\','/'
         if ($cwd -match '^[A-Za-z]:') { $cwd = "/$cwd" }
-        $cwdEnc = __tedi_urlencode $cwd
+        $cwdEnc = __tervia_urlencode $cwd
         $hostName = [System.Environment]::MachineName
         $osc7 = "$esc]7;file://$hostName$cwdEnc$esc\"
     }
 
-    $original = if (Test-Path Function:__tedi_user_prompt) {
-        try { & __tedi_user_prompt } catch { "PS $((Get-Location).Path)> " }
+    $original = if (Test-Path Function:__tervia_user_prompt) {
+        try { & __tervia_user_prompt } catch { "PS $((Get-Location).Path)> " }
     } else {
         "PS $((Get-Location).Path)> "
     }

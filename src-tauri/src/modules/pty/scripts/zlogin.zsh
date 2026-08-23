@@ -1,4 +1,4 @@
-# tedi-shell-integration (zlogin)
+# tervia-shell-integration (zlogin)
 #
 # This is the LAST init file zsh runs before entering the prompt loop, so its
 # exit status becomes `$?` for the very first prompt. Without the trailing `:`,
@@ -6,8 +6,8 @@
 # first render - themes that condition prompt color on `%?` (robbyrussell etc.)
 # show a red error indicator on a clean shell start.
 {
-  _tedi_user_zdotdir="${TEDI_USER_ZDOTDIR:-$HOME}"
-  [ -f "$_tedi_user_zdotdir/.zlogin" ] && source "$_tedi_user_zdotdir/.zlogin"
-  unset _tedi_user_zdotdir
+  _tervia_user_zdotdir="${TERVIA_USER_ZDOTDIR:-$HOME}"
+  [ -f "$_tervia_user_zdotdir/.zlogin" ] && source "$_tervia_user_zdotdir/.zlogin"
+  unset _tervia_user_zdotdir
 }
 :

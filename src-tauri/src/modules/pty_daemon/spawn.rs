@@ -5,7 +5,7 @@
 // Unix: `process_group(0)` makes the child its own process-group leader, so
 // SIGHUP propagated to the GUI's pgroup at session-leader exit doesn't
 // reach the daemon. We don't `setsid()` (no stable libc dep) — process
-// group isolation is enough for our case: TEDI's daemon never holds a
+// group isolation is enough for our case: Tervia's daemon never holds a
 // controlling terminal anyway.
 //
 // Windows: `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW`

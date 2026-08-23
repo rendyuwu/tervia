@@ -1,9 +1,9 @@
-//! CLI argument handling for `tedi .` / `tedi <path>`.
+//! CLI argument handling for `tervia .` / `tervia <path>`.
 //!
 //! Captures the first positional arg once at startup (before any
 //! `set_current_dir`), resolves it against the launch cwd, and classifies it
 //! as folder or file. The frontend reads it via `cli_initial_target` on boot
-//! and again via the `tedi:open-cli-target` event when single-instance
+//! and again via the `tervia:open-cli-target` event when single-instance
 //! forwards a fresh invocation.
 
 use serde::Serialize;
@@ -19,9 +19,9 @@ pub enum CliTarget {
 
 static INITIAL_TARGET: Mutex<Option<CliTarget>> = Mutex::new(None);
 
-/// Set when `tedi --update` / `-u` appears in argv at startup. Drained once
+/// Set when `tervia --update` / `-u` appears in argv at startup. Drained once
 /// by the frontend on boot; second invocations forwarding `--update` arrive
-/// via the `tedi:trigger-update` event.
+/// via the `tervia:trigger-update` event.
 static INITIAL_UPDATE_REQUEST: Mutex<bool> = Mutex::new(false);
 
 /// Returns true for flag-shaped args (`--foo`, `-bar`). Used to skip flags
@@ -51,8 +51,8 @@ pub fn help_text() -> String {
         "{title}  {tag}\n\
          \n\
          {usage}\n  \
-         {tedi} {path}               Open folder or file in the running window\n  \
-         {tedi} {flag}               Show a flag-action below\n\
+         {tervia} {path}               Open folder or file in the running window\n  \
+         {tervia} {flag}               Show a flag-action below\n\
          \n\
          {flags}\n  \
          {h_short}, {h_long}         Show this help and exit\n  \
@@ -60,10 +60,10 @@ pub fn help_text() -> String {
          {u_short}, {u_long}       Open the app and check for updates\n\
          \n\
          {dim_note}\n",
-        title = brand(&format!("TEDI {}", env!("CARGO_PKG_VERSION"))),
-        tag = dim("· Terminal Director"),
+        title = brand(&format!("Tervia {}", env!("CARGO_PKG_VERSION"))),
+        tag = dim("· Remote machine client"),
         usage = header("USAGE"),
-        tedi = cmd("tedi"),
+        tervia = cmd("tervia"),
         path = dim("[PATH]"),
         flag = dim("<FLAG>"),
         flags = header("FLAGS"),
@@ -74,7 +74,7 @@ pub fn help_text() -> String {
         u_short = cmd("-u"),
         u_long = cmd("--update"),
         dim_note = dim(
-            "If TEDI is already running, the request is forwarded to that window\n\
+            "If Tervia is already running, the request is forwarded to that window\n\
              (a second window is not opened)."
         ),
     )
@@ -85,8 +85,8 @@ pub fn help_text() -> String {
 /// write to the shell that spawned it. No-op on macOS/Linux; stdio is
 /// inherited there.
 ///
-/// The install dir ships both `tedi.exe` (GUI subsystem) and `tedi.cmd`.
-/// Windows PATHEXT resolves `.EXE` before `.CMD`, so `tedi --version` lands
+/// The install dir ships both `tervia.exe` (GUI subsystem) and `tervia.cmd`.
+/// Windows PATHEXT resolves `.EXE` before `.CMD`, so `tervia --version` lands
 /// on the EXE and the shim never runs. Without `AttachConsole` the EXE's
 /// `println!` writes to a detached handle and the user sees nothing.
 #[cfg(target_os = "windows")]
@@ -110,7 +110,7 @@ pub(crate) fn attach_parent_console() {
 pub(crate) fn attach_parent_console() {}
 
 /// Print `--version` / `--help` and exit before GUI setup runs. Matches the
-/// flag anywhere in argv, so `tedi <path> --version` still prints version.
+/// flag anywhere in argv, so `tervia <path> --version` still prints version.
 ///
 /// On Windows the GUI binary has stdout detached; [`attach_parent_console`]
 /// re-binds it to the launching shell. No-op on macOS/Linux.
@@ -145,7 +145,7 @@ where
 /// Resolve `raw` against `base`. Relative paths join `base`, absolute paths
 /// pass through. Avoids `canonicalize` because on Windows it returns UNC
 /// paths (`\\?\C:\...`) that `portable-pty` and the frontend handle
-/// inconsistently. Folds `.` / `..` so `tedi .` does not produce a path
+/// inconsistently. Folds `.` / `..` so `tervia .` does not produce a path
 /// ending in a literal `.` (which would surface as a tab title).
 fn resolve(base: &Path, raw: &str) -> PathBuf {
     let p = Path::new(raw);
@@ -175,7 +175,7 @@ fn normalize_components(p: &Path) -> PathBuf {
 }
 
 /// Normalize to forward-slash form to match the frontend's canonical path
-/// representation (see TEDI.md, UI conventions).
+/// representation (see Tervia.md, UI conventions).
 fn to_forward_slash(p: &Path) -> String {
     p.to_string_lossy().replace('\\', "/")
 }
@@ -208,7 +208,7 @@ pub fn parse(args: Vec<String>, cwd: &Path) -> Option<CliTarget> {
 }
 
 /// Returns true when argv contains `--update` / `-u` anywhere after argv[0].
-/// Used at startup and by single-instance forwarding so a second `tedi --update`
+/// Used at startup and by single-instance forwarding so a second `tervia --update`
 /// triggers the in-app updater on the running window.
 pub fn update_requested_in<I, S>(args: I) -> bool
 where
@@ -246,7 +246,7 @@ fn take_initial_target() -> Option<CliTarget> {
 }
 
 /// Flips true the first time the frontend drains the startup slot, which it
-/// does once on mount. Past that point the `tedi:open-cli-target` listener is
+/// does once on mount. Past that point the `tervia:open-cli-target` listener is
 /// registered, so a target can be delivered live instead of stashed. Only
 /// `handle_opened_urls` needs the distinction - see its doc comment.
 static FRONTEND_DRAINED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -257,7 +257,7 @@ pub fn cli_initial_target() -> Option<CliTarget> {
     take_initial_target()
 }
 
-/// Classify an arbitrary path the same way `tedi <path>` does. Exposed so the
+/// Classify an arbitrary path the same way `tervia <path>` does. Exposed so the
 /// frontend can route a drag-and-drop by what the path actually IS rather than
 /// by guessing from its name: a folder becomes a terminal tab, a file becomes
 /// an editor tab, and anything that is neither (a dangling path, a socket, a
@@ -268,7 +268,7 @@ pub fn cli_classify_path(path: String) -> Option<CliTarget> {
     classify(Path::new(&path))
 }
 
-/// macOS Finder delivery: "Open With > TEDI", double-clicking a file TEDI is
+/// macOS Finder delivery: "Open With > Tervia", double-clicking a file Tervia is
 /// the default handler for, or dropping a folder on the Dock icon. Launch
 /// Services sends `application:openURLs:`, which Tauri surfaces as
 /// `RunEvent::Opened`. The declared UTIs live in `src-tauri/Info.plist`.
@@ -276,7 +276,7 @@ pub fn cli_classify_path(path: String) -> Option<CliTarget> {
 /// Cold start and warm start need different delivery and the window's mere
 /// existence cannot tell them apart: on a cold open the main window is built
 /// in `setup` before the event loop starts, so it exists while the webview is
-/// still booting and has no `tedi:open-cli-target` listener yet - an emit
+/// still booting and has no `tervia:open-cli-target` listener yet - an emit
 /// there would vanish. `FRONTEND_DRAINED` marks the point where the listener
 /// is definitely live, so before it we stash into the same slot
 /// `capture_startup` uses and the frontend picks the target up on mount.
@@ -284,7 +284,7 @@ pub fn cli_classify_path(path: String) -> Option<CliTarget> {
 pub fn handle_opened_urls(app: &tauri::AppHandle, urls: &[url::Url]) {
     use tauri::{Emitter, Manager};
 
-    // Finder can hand over a multi-selection; TEDI opens one target, so take
+    // Finder can hand over a multi-selection; Tervia opens one target, so take
     // the first entry that is a real file or folder on disk.
     let Some(target) = urls
         .iter()
@@ -333,7 +333,7 @@ pub enum ShimInstall {
         target: String,
         on_path: bool,
     },
-    /// Platform handles `tedi` via its native installer (Windows -> NSIS).
+    /// Platform handles `tervia` via its native installer (Windows -> NSIS).
     /// Frontend surfaces this as an info note, not an error.
     #[allow(dead_code)]
     NotApplicable { message: String },
@@ -366,15 +366,15 @@ fn shell_escape_single(s: &str) -> String {
     out
 }
 
-/// Marker planted in every TEDI-written shim. `refresh_shim_if_present` uses
-/// it to distinguish our shim from a user-authored `~/.local/bin/tedi`.
+/// Marker planted in every Tervia-written shim. `refresh_shim_if_present` uses
+/// it to distinguish our shim from a user-authored `~/.local/bin/tervia`.
 #[cfg(unix)]
-const SHIM_MARKER: &str = "# tedi-cli-shim v1";
+const SHIM_MARKER: &str = "# tervia-cli-shim v1";
 
 #[cfg(unix)]
 fn render_shim(target: &std::path::Path) -> String {
     // POSIX wrapper. `exec` replaces the shell so no extra `sh` lingers.
-    // Argv forwards verbatim; `tedi .` arrives as argv[1] = "." which
+    // Argv forwards verbatim; `tervia .` arrives as argv[1] = "." which
     // `capture_startup` resolves against the caller's cwd.
     format!(
         "#!/bin/sh\n{}\nexec {} \"$@\"\n",
@@ -404,7 +404,7 @@ fn install_shim_unix() -> Result<ShimInstall, String> {
         .map_err(|e| format!("could not create {}: {e}", bin_dir.display()))?;
 
     let target = resolve_shim_target()?;
-    let shim_path = bin_dir.join("tedi");
+    let shim_path = bin_dir.join("tervia");
     write_shim(&shim_path, &target)?;
 
     let on_path = std::env::var_os("PATH")
@@ -418,12 +418,12 @@ fn install_shim_unix() -> Result<ShimInstall, String> {
     })
 }
 
-/// Called once per launch from Tauri's `setup` hook. If a TEDI-owned shim
-/// exists at `~/.local/bin/tedi`, rewrite it to point at the running binary.
-/// Heals two upgrade scenarios that would otherwise break `tedi .`:
+/// Called once per launch from Tauri's `setup` hook. If a Tervia-owned shim
+/// exists at `~/.local/bin/tervia`, rewrite it to point at the running binary.
+/// Heals two upgrade scenarios that would otherwise break `tervia .`:
 ///
-/// - macOS: user moves `TEDI.app`, so the absolute path in the shim is stale.
-/// - Linux AppImage: user replaces `TEDI-0.2.0.AppImage` with a different
+/// - macOS: user moves `Tervia.app`, so the absolute path in the shim is stale.
+/// - Linux AppImage: user replaces `Tervia-0.2.0.AppImage` with a different
 ///   filename; `$APPIMAGE` points at the new file but the shim still
 ///   references the old one.
 ///
@@ -436,7 +436,7 @@ pub fn refresh_shim_if_present() {
         let Some(home) = dirs::home_dir() else {
             return;
         };
-        let shim_path = home.join(".local").join("bin").join("tedi");
+        let shim_path = home.join(".local").join("bin").join("tervia");
         let Ok(existing) = std::fs::read_to_string(&shim_path) else {
             return;
         };
@@ -459,10 +459,10 @@ pub fn cli_install_path_shim() -> Result<ShimInstall, String> {
     #[cfg(target_os = "windows")]
     {
         Ok(ShimInstall::NotApplicable {
-            message: "On Windows the `tedi` command is installed by the NSIS \
-                      installer (it ships a console-subsystem `tedi.exe` \
-                      launcher next to `TEDIApp.exe` and appends the install \
-                      directory to your user PATH). Reinstall TEDI if `tedi` \
+            message: "On Windows the `tervia` command is installed by the NSIS \
+                      installer (it ships a console-subsystem `tervia.exe` \
+                      launcher next to `TerviaApp.exe` and appends the install \
+                      directory to your user PATH). Reinstall Tervia if `tervia` \
                       isn't recognised after opening a new terminal."
                 .into(),
         })

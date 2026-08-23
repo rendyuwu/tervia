@@ -1,5 +1,5 @@
-// `pub` so the `tedi-cli` workspace member's stub binary
-// (src-tauri/tedi-cli/src/main.rs) can reach `cli::help_text()` and the
+// `pub` so the `tervia-cli` workspace member's stub binary
+// (src-tauri/tervia-cli/src/main.rs) can reach `cli::help_text()` and the
 // version constants - keeps the help text single-sourced between the GUI
 // binary and the launcher.
 // Process-wide allocator (GUI + the `--pty-daemon` sidecar share this binary).
@@ -58,8 +58,8 @@ fn spawn_allocator_purge_thread() {
 pub mod modules;
 
 /// Version string this crate was compiled against. Re-exposed so the
-/// `tedi-cli` launcher (which has its own `CARGO_PKG_VERSION` for the
-/// `tedi-cli` package) can print the GUI crate's version instead and
+/// `tervia-cli` launcher (which has its own `CARGO_PKG_VERSION` for the
+/// `tervia-cli` package) can print the GUI crate's version instead and
 /// stay in sync without a duplicate version constant.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -197,7 +197,7 @@ fn apply_windows_frame_fixes(_window: &tauri::WebviewWindow) {}
 /// WebView2 treats Ctrl+W (close window), Ctrl+N/T, Ctrl+P, Ctrl+R/F5, etc. as
 /// browser shortcuts and acts on them BEFORE web content can cancel them with
 /// `preventDefault` - so Ctrl+W closed the whole window (quitting the app)
-/// instead of running the app's own close-tab shortcut. TEDI is an app shell,
+/// instead of running the app's own close-tab shortcut. Tervia is an app shell,
 /// not a browser, so the app's keyboard handlers should own those combos. The
 /// in-app browser child webview is a separate webview and keeps its own defaults.
 #[cfg(target_os = "windows")]
@@ -468,21 +468,21 @@ fn has_nvidia_gpu() -> bool {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // `tedi --version` / `tedi --help`: print and exit without GUI boot.
+    // `tervia --version` / `tervia --help`: print and exit without GUI boot.
     cli::handle_version_help_and_exit();
 
-    // `tedi --update` / `-u` has no headless path: the flag is captured by
+    // `tervia --update` / `-u` has no headless path: the flag is captured by
     // `cli::capture_startup` below, the GUI boots, and the frontend drains it
     // through `cli_take_initial_update_request` to run the in-app updater.
     // A second invocation while a window is up forwards `TRIGGER_UPDATE`
     // instead (see the single-instance handler).
 
-    // `TEDIApp --pty-daemon`: run the sidecar PTY daemon forever and exit.
+    // `TerviaApp --pty-daemon`: run the sidecar PTY daemon forever and exit.
     // Spawned detached by the GUI on first launch. Returns immediately when
     // the flag is absent so normal startup proceeds. See `pty_daemon::mod`.
     pty_daemon::handle_pty_daemon_command_and_exit();
 
-    // Resolve `tedi .` / `tedi <path>` against the launch cwd before any
+    // Resolve `tervia .` / `tervia <path>` against the launch cwd before any
     // later code can shift the working directory.
     cli::capture_startup();
 
@@ -491,7 +491,7 @@ pub fn run() {
 
     let builder = tauri::Builder::default().plugin(tauri_plugin_process::init());
 
-    // Second-invocation forwarding: when `tedi <path>` runs while an instance
+    // Second-invocation forwarding: when `tervia <path>` runs while an instance
     // is already up, the new process forwards its argv and exits. Desktop-only
     // (the plugin does not build for android/ios). Skipped in debug builds so
     // `pnpm tauri dev` can run alongside an installed release.
@@ -554,7 +554,7 @@ pub fn run() {
             {
                 use tauri::menu::{MenuBuilder, SubmenuBuilder};
                 let h = app.handle();
-                let app_menu = SubmenuBuilder::new(h, "TEDI")
+                let app_menu = SubmenuBuilder::new(h, "Tervia")
                     .about(None)
                     .separator()
                     .services()
@@ -585,7 +585,7 @@ pub fn run() {
                     .build()?;
                 h.set_menu(menu)?;
             }
-            // Heal a stale `~/.local/bin/tedi` shim after an update that moved
+            // Heal a stale `~/.local/bin/tervia` shim after an update that moved
             // the binary (macOS .app relocation, AppImage filename change).
             // No-op on Windows; the NSIS hook handles upgrades there.
             cli::refresh_shim_if_present();
@@ -743,7 +743,7 @@ pub fn run() {
             }
         })
         // `build` + `run` rather than `run(context)` so the run loop can see
-        // `RunEvent::Opened` - macOS Launch Services' "Open With > TEDI" and
+        // `RunEvent::Opened` - macOS Launch Services' "Open With > Tervia" and
         // drag-onto-Dock delivery. Every other platform routes the same open
         // through argv (`cli::capture_startup`) or single-instance forwarding.
         .build(tauri::generate_context!())
@@ -802,7 +802,7 @@ mod allocator_tests {
         std::hint::black_box(&held);
     }
 
-    /// The regression guard for "TEDI gets heavy and then stops responding after
+    /// The regression guard for "Tervia gets heavy and then stops responding after
     /// a long session". Both halves are needed and they assert different things.
     ///
     /// Deliberately ONE test function rather than two: each phase reads the

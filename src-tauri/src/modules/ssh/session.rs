@@ -779,7 +779,7 @@ async fn open_agent() -> Result<Agent, String> {
 /// then signs over that same connection.
 ///
 /// Certificates are dropped from the list: they need
-/// `authenticate_certificate_with`, a flow TEDI does not implement, and offering
+/// `authenticate_certificate_with`, a flow Tervia does not implement, and offering
 /// them as plain keys would only burn the server's auth attempts.
 pub(crate) async fn agent_keys() -> Result<(Agent, Vec<PublicKey>), String> {
     let probe = async {
@@ -816,7 +816,7 @@ fn agent_hash_alg(key: &PublicKey) -> Option<HashAlg> {
 }
 
 /// Public-key auth where the private key NEVER LEAVES THE AGENT: the agent signs
-/// each challenge and TEDI only ever sees the signature. That is the whole point
+/// each challenge and Tervia only ever sees the signature. That is the whole point
 /// of this mode - nothing to paste, nothing in the keychain, nothing that can
 /// leak from here.
 async fn authenticate_agent(
@@ -1283,48 +1283,48 @@ mod chain_tests {
     /// Shared fixture for the live tests below. Every input comes from env vars
     /// - nothing about anyone's infra is hard-coded:
     ///
-    ///   TEDI_IT_KEY_PATH     PEM private key file (used for every hop)
-    ///   TEDI_IT_TARGET_HOST  final host, TEDI_IT_TARGET_USER, TEDI_IT_TARGET_FP
-    ///   TEDI_IT_JUMP_HOST    jump host (optional), TEDI_IT_JUMP_USER, TEDI_IT_JUMP_FP
+    ///   TERVIA_IT_KEY_PATH     PEM private key file (used for every hop)
+    ///   TERVIA_IT_TARGET_HOST  final host, TERVIA_IT_TARGET_USER, TERVIA_IT_TARGET_FP
+    ///   TERVIA_IT_JUMP_HOST    jump host (optional), TERVIA_IT_JUMP_USER, TERVIA_IT_JUMP_FP
     ///
     /// The `*_FP` SHA256 fingerprints pin each hop so the handshake never blocks
     /// on the interactive host-key dialog (there is no GUI in a test). Missing
     /// required vars => `None`, and the caller skips.
     fn it_input(tag: &str) -> Option<SshOpenInput> {
         let (Ok(key_path), Ok(target_host)) = (
-            std::env::var("TEDI_IT_KEY_PATH"),
-            std::env::var("TEDI_IT_TARGET_HOST"),
+            std::env::var("TERVIA_IT_KEY_PATH"),
+            std::env::var("TERVIA_IT_TARGET_HOST"),
         ) else {
-            eprintln!("[{tag}] skipped: set TEDI_IT_KEY_PATH + TEDI_IT_TARGET_HOST");
+            eprintln!("[{tag}] skipped: set TERVIA_IT_KEY_PATH + TERVIA_IT_TARGET_HOST");
             return None;
         };
         let key = std::fs::read_to_string(&key_path).expect("read key file");
         let env_opt = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
 
         let mut jumps = Vec::new();
-        if let Some(jump_host) = env_opt("TEDI_IT_JUMP_HOST") {
+        if let Some(jump_host) = env_opt("TERVIA_IT_JUMP_HOST") {
             jumps.push(SshJumpHop {
                 connection_id: "it-jump".into(),
                 host: jump_host,
                 port: 22,
-                user: env_opt("TEDI_IT_JUMP_USER").unwrap_or_else(|| "ubuntu".into()),
+                user: env_opt("TERVIA_IT_JUMP_USER").unwrap_or_else(|| "ubuntu".into()),
                 use_agent: false,
                 password: None,
                 private_key: Some(key.clone()),
                 private_key_passphrase: None,
-                expected_fingerprint: env_opt("TEDI_IT_JUMP_FP"),
+                expected_fingerprint: env_opt("TERVIA_IT_JUMP_FP"),
             });
         }
 
         Some(SshOpenInput {
             host: target_host,
             port: 22,
-            user: env_opt("TEDI_IT_TARGET_USER").unwrap_or_else(|| "ubuntu".into()),
+            user: env_opt("TERVIA_IT_TARGET_USER").unwrap_or_else(|| "ubuntu".into()),
             use_agent: false,
             password: None,
             private_key: Some(key),
             private_key_passphrase: None,
-            expected_fingerprint: env_opt("TEDI_IT_TARGET_FP"),
+            expected_fingerprint: env_opt("TERVIA_IT_TARGET_FP"),
             jumps,
             cols: 80,
             rows: 24,

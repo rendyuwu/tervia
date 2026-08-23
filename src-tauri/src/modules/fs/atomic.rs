@@ -22,7 +22,7 @@ use std::path::Path;
 
 /// Atomically replace `path` with `bytes`.
 ///
-/// Stages into `<dir>/.<filename>.tedi.tmp`, fsyncs it, then renames over
+/// Stages into `<dir>/.<filename>.tervia.tmp`, fsyncs it, then renames over
 /// `path`. Removes the temp on any failure. Returns the underlying
 /// [`io::Error`] so callers can map it to their own error type.
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
@@ -46,7 +46,7 @@ pub fn atomic_write_mode(path: &Path, bytes: &[u8], mode: u32) -> io::Result<()>
     })
 }
 
-/// Stage `bytes` into `<dir>/.<filename>.tedi.tmp` (opened via `open_tmp`),
+/// Stage `bytes` into `<dir>/.<filename>.tervia.tmp` (opened via `open_tmp`),
 /// fsync, then rename over `path`. Removes the temp on any failure.
 fn write_staged<F>(path: &Path, bytes: &[u8], open_tmp: F) -> io::Result<()>
 where
@@ -62,7 +62,7 @@ where
     // Temp lives beside the target so `rename` stays on one filesystem.
     let mut tmp_name = std::ffi::OsString::from(".");
     tmp_name.push(file_name);
-    tmp_name.push(".tedi.tmp");
+    tmp_name.push(".tervia.tmp");
     let tmp = parent.join(tmp_name);
 
     // Wrap the body so a single `?` short-circuit funnels through the cleanup

@@ -4,7 +4,7 @@
 // before Tauri boots (mirrors `cli::handle_version_help_and_exit`).
 //
 // Process model:
-//   `TEDIApp` (GUI)  <—local socket—>  `TEDIApp --pty-daemon`
+//   `TerviaApp` (GUI)  <—local socket—>  `TerviaApp --pty-daemon`
 //
 // Lifecycle goals (see plan `rosy-dreaming-wombat.md`):
 //   • GUI close       → daemon survives, sessions persist

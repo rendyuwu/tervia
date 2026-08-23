@@ -1,37 +1,37 @@
-# Workspace root. The companion console-subsystem launcher `tedi.exe`
-# lives in a separate workspace member (`tedi-cli/`) so Tauri 2's deb /
+# Workspace root. The companion console-subsystem launcher `tervia.exe`
+# lives in a separate workspace member (`tervia-cli/`) so Tauri 2's deb /
 # dmg bundlers only see the GUI binary when they enumerate `[[bin]]`
 # entries from THIS manifest. Trying to gate the stub via `[[bin]]
 # required-features` here did NOT work - the bundlers ignored the gate
-# and still expected `target/release/tedi` to exist, then failed because
+# and still expected `target/release/tervia` to exist, then failed because
 # cargo had legitimately skipped the build. Splitting the package
 # removes the entry from the bundler's view entirely.
 #
 # `default-members = ["."]` keeps `cargo build` in this directory
 # scoped to the GUI package; the release workflow builds the stub
-# explicitly via `cargo build --release -p tedi-cli` on Windows only.
+# explicitly via `cargo build --release -p tervia-cli` on Windows only.
 [workspace]
-members = ["tedi-cli"]
+members = ["tervia-cli"]
 default-members = ["."]
 
 [package]
-name = "tedi"
+name = "tervia"
 version = "0.1.0"
-description = "TEDI - Terminal Director. A lightweight terminal with split screens, tab grouping, and workspaces."
-authors = ["IlhamriSKY"]
+description = "Tervia - a lightweight desktop client for remote machines: SSH, port forwarding, SFTP and RDP."
+authors = ["rendyuwu"]
 license = "Apache-2.0"
-repository = "https://github.com/IlhamriSKY/TEDI"
-homepage = "https://github.com/IlhamriSKY/TEDI"
+repository = "https://github.com/rendyuwu/tervia"
+homepage = "https://github.com/rendyuwu/tervia"
 readme = "../README.md"
 edition = "2021"
 # Tauri-action invokes `cargo build` without `--bin` and asks Cargo which
-# binary to bundle. With the implicit bin (from package.name = "tedi" +
-# src/main.rs) plus the explicit `[[bin]] TEDIApp` pointing to the same
+# binary to bundle. With the implicit bin (from package.name = "tervia" +
+# src/main.rs) plus the explicit `[[bin]] TerviaApp` pointing to the same
 # source, Cargo can refuse with "failed to find main binary". Pinning
 # default-run resolves it deterministically.
-default-run = "TEDIApp"
-# Disable auto-discovery so the implicit `tedi` bin (from package.name +
-# src/main.rs) does not collide with the explicit `[[bin]] TEDIApp` that
+default-run = "TerviaApp"
+# Disable auto-discovery so the implicit `tervia` bin (from package.name +
+# src/main.rs) does not collide with the explicit `[[bin]] TerviaApp` that
 # also points to src/main.rs. The companion launcher lives in a separate
 # workspace member, never in `src/bin/` of this package.
 autobins = false
@@ -42,16 +42,16 @@ autobins = false
 # The `_lib` suffix may seem redundant but it is necessary
 # to make the lib name unique and wouldn't conflict with the bin name.
 # This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
-name = "tedi_lib"
+name = "tervia_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 # Main GUI binary. `windows_subsystem = "windows"` (set in main.rs) detaches
 # stdio on Windows so the binary cannot synchronously print to the parent
-# shell - see the `tedi` console stub below. Renamed from the default
-# package-name `tedi.exe` so PATHEXT on Windows finds the console stub first
+# shell - see the `tervia` console stub below. Renamed from the default
+# package-name `tervia.exe` so PATHEXT on Windows finds the console stub first
 # (the two cannot share a name on a case-insensitive filesystem).
 [[bin]]
-name = "TEDIApp"
+name = "TerviaApp"
 path = "src/main.rs"
 
 [build-dependencies]

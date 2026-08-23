@@ -31,7 +31,7 @@ pub struct SessionRunOutput {
 /// Sentinel emitted on stdout right before the command exits so we can
 /// recover the post-command cwd. Unlikely literal; collisions with real
 /// output would corrupt cwd tracking.
-const CWD_SENTINEL: &str = "__TEDI_CWD__";
+const CWD_SENTINEL: &str = "__TERVIA_CWD__";
 
 impl ShellSession {
     pub fn new(initial_cwd: PathBuf) -> Self {
@@ -95,14 +95,14 @@ impl ShellSession {
 #[cfg(unix)]
 fn wrap_with_sentinel(command: &str) -> String {
     format!(
-        "{command}\n__tedi_rc=$?\nprintf '\\n%s%s\\n' '{CWD_SENTINEL}' \"$(pwd)\"\nexit $__tedi_rc\n",
+        "{command}\n__tervia_rc=$?\nprintf '\\n%s%s\\n' '{CWD_SENTINEL}' \"$(pwd)\"\nexit $__tervia_rc\n",
     )
 }
 
 #[cfg(windows)]
 fn wrap_with_sentinel(command: &str) -> String {
     format!(
-        "{command}\n$__tedi_rc = if ($null -ne $LASTEXITCODE) {{ $LASTEXITCODE }} elseif ($?) {{ 0 }} else {{ 1 }}\n\"`n{CWD_SENTINEL}$($PWD.Path)\"\nexit $__tedi_rc\n",
+        "{command}\n$__tervia_rc = if ($null -ne $LASTEXITCODE) {{ $LASTEXITCODE }} elseif ($?) {{ 0 }} else {{ 1 }}\n\"`n{CWD_SENTINEL}$($PWD.Path)\"\nexit $__tervia_rc\n",
     )
 }
 

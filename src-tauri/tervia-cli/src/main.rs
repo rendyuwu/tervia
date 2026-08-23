@@ -1,9 +1,9 @@
-//! Console-subsystem entry point shipped as `tedi.exe` next to the GUI
-//! binary `TEDIApp.exe` on Windows. PATHEXT finds this binary first when
-//! the user types `tedi` (the GUI binary intentionally has a non-matching
+//! Console-subsystem entry point shipped as `tervia.exe` next to the GUI
+//! binary `TerviaApp.exe` on Windows. PATHEXT finds this binary first when
+//! the user types `tervia` (the GUI binary intentionally has a non-matching
 //! name so it stays off the shell's resolution path).
 //!
-//! Why it exists: TEDIApp.exe is `windows_subsystem = "windows"` (set in
+//! Why it exists: TerviaApp.exe is `windows_subsystem = "windows"` (set in
 //! `main.rs`). PowerShell - the default Windows 11 shell - does NOT
 //! synchronously wait for GUI-subsystem children. The next prompt is drawn
 //! immediately after spawn, and any output the GUI binary later emits via
@@ -17,18 +17,18 @@
 //!   `--help` / `--version`         → print inline, no spawn (fast - no
 //!                                     Tauri runtime boot for a 20-line
 //!                                     string).
-//!   `--update`                    → spawn TEDIApp.exe synchronously with
+//!   `--update`                    → spawn TerviaApp.exe synchronously with
 //!                                     `Stdio::inherit` so output streams
 //!                                     to the shell in real time and the
 //!                                     stub's exit code mirrors the child's.
-//!   anything else (no args, paths) → spawn TEDIApp.exe DETACHED with
+//!   anything else (no args, paths) → spawn TerviaApp.exe DETACHED with
 //!                                     null stdio so the shell prompt
 //!                                     returns immediately.
 //!
-//! macOS / Linux ship without a subsystem split - there `tedi` resolves
+//! macOS / Linux ship without a subsystem split - there `tervia` resolves
 //! directly to the GUI binary which inherits stdio natively. This stub is
 //! built on every platform for `cargo check` parity but only the NSIS
-//! installer bundles `tedi.exe`.
+//! installer bundles `tervia.exe`.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -37,29 +37,29 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let rest = &args[1..];
 
-    // --help / --version: handle natively. Reuses `tedi_lib::cli::help_text`
+    // --help / --version: handle natively. Reuses `tervia_lib::cli::help_text`
     // so the text never drifts from the GUI binary's `--help` output.
     if rest.iter().any(|a| matches!(a.as_str(), "--help" | "-h")) {
-        println!("{}", tedi_lib::modules::cli::help_text());
+        println!("{}", tervia_lib::modules::cli::help_text());
         return;
     }
     if rest
         .iter()
         .any(|a| matches!(a.as_str(), "--version" | "-v" | "-V"))
     {
-        // Print "tedi <ver>" - the literal binary name the user invoked.
-        // `env!("CARGO_PKG_NAME")` would render as "tedi-cli" (this launcher
+        // Print "tervia <ver>" - the literal binary name the user invoked.
+        // `env!("CARGO_PKG_NAME")` would render as "tervia-cli" (this launcher
         // package's Cargo name) which would confuse anyone tracking down a
-        // version string; the user typed `tedi`, the answer says `tedi`.
+        // version string; the user typed `tervia`, the answer says `tervia`.
         // Version comes from the GUI crate so both --version paths agree.
-        println!("tedi {}", tedi_lib::VERSION);
+        println!("tervia {}", tervia_lib::VERSION);
         return;
     }
 
     let Some(gui_exe) = resolve_gui_exe() else {
         eprintln!(
-            "tedi: could not locate TEDIApp.exe next to the launcher. \
-             Reinstall TEDI if this persists."
+            "tervia: could not locate TerviaApp.exe next to the launcher. \
+             Reinstall Tervia if this persists."
         );
         std::process::exit(2);
     };
@@ -79,16 +79,16 @@ fn main() {
         {
             Ok(status) => std::process::exit(status.code().unwrap_or(0)),
             Err(e) => {
-                eprintln!("tedi: failed to spawn TEDIApp.exe: {e}");
+                eprintln!("tervia: failed to spawn TerviaApp.exe: {e}");
                 std::process::exit(2);
             }
         }
     }
 
-    // GUI launch (`tedi`, `tedi .`, `tedi <path>`). Detach so the shell
+    // GUI launch (`tervia`, `tervia .`, `tervia <path>`). Detach so the shell
     // prompt returns immediately - the GUI lives its own life from here.
     // Errors are intentionally swallowed: if the GUI fails to start the
-    // user sees nothing in their shell (matches `start "" TEDIApp.exe`
+    // user sees nothing in their shell (matches `start "" TerviaApp.exe`
     // behaviour). Errors will surface in the Windows Event Log if needed.
     spawn_detached(&gui_exe, rest);
 }
@@ -99,9 +99,9 @@ fn resolve_gui_exe() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let dir = exe.parent()?;
     let candidate = dir.join(if cfg!(target_os = "windows") {
-        "TEDIApp.exe"
+        "TerviaApp.exe"
     } else {
-        "TEDIApp"
+        "TerviaApp"
     });
     candidate.exists().then_some(candidate)
 }

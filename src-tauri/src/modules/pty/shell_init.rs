@@ -56,7 +56,7 @@ fn ensure_utf8_locale(cmd: &mut CommandBuilder) {
 fn apply_common(cmd: &mut CommandBuilder, cwd: Option<String>) {
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
-    cmd.env("TEDI_TERMINAL", "1");
+    cmd.env("TERVIA_TERMINAL", "1");
     ensure_utf8_locale(cmd);
     apply_extra_path(cmd);
 
@@ -325,7 +325,7 @@ mod unix {
                 match prepare_zdotdir() {
                     Ok(zdotdir) => {
                         if let Ok(user_zd) = std::env::var("ZDOTDIR") {
-                            cmd.env("TEDI_USER_ZDOTDIR", user_zd);
+                            cmd.env("TERVIA_USER_ZDOTDIR", user_zd);
                         }
                         cmd.env("ZDOTDIR", zdotdir);
                     }
