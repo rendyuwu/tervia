@@ -185,6 +185,15 @@ ironrdp-input = "=0.6.0"
 # version would make the rectangle types distinct and stop compiling.
 ironrdp-pdu = "=0.8.0"
 ironrdp-core = { version = "=0.2.1", features = ["alloc"] }
+# TCP keepalive with a usable idle time on the RDP socket. Already in the tree
+# via tokio/hyper at exactly this version, so this is a promotion, not a new
+# crate. Needed because tokio only exposes `TcpSocket::set_keepalive(bool)`,
+# which turns SO_KEEPALIVE on at the OS default idle - two hours on Linux - and
+# an RDP session that has silently lost its network needs to notice in seconds,
+# not after lunch. `TCP_KEEPIDLE`/`TCP_KEEPINTVL` need socket2. See
+# `KEEPALIVE_IDLE` in `modules/rdp/session.rs`; the SSH module solves the same
+# problem with russh's own `keepalive_interval`.
+socket2 = "0.6"
 # Leaf-certificate parsing for the RDP certificate TOFU check: the SHA-256
 # fingerprint's subject/issuer labels, and the `x509_cert::Certificate` that
 # `ironrdp_tls::extract_tls_server_public_key` takes (CredSSP binds to the

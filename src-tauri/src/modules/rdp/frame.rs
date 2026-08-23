@@ -107,30 +107,32 @@ pub struct Rect {
 
 /// True for the all-zero rectangle IronRDP uses to mean "nothing happened".
 ///
-/// This has to be filtered before the rect reaches [`Rect::from_inclusive`],
-/// and skipping it is a correctness bug, not a tidiness one. When a bitmap
-/// update falls outside the framebuffer, `DecodedImage` logs it and returns
-/// `InclusiveRectangle::empty()` - all zeros - instead of reporting nothing
-/// (`ironrdp-session` image.rs:556-561). Two things then go wrong:
+/// When a bitmap update falls outside the framebuffer, `DecodedImage` logs it
+/// and returns `InclusiveRectangle::empty()` - all zeros - instead of reporting
+/// nothing (`ironrdp-session` image.rs:556-561). Because the bounds are
+/// *inclusive*, `{0,0,0,0}` reports `width() == 1` and `height() == 1`, so
+/// [`Rect::from_inclusive`] would turn it into a spurious 1x1 update at the
+/// origin rather than a zero-area one. Filtering it here is what prevents that.
 ///
-/// * Because the bounds are *inclusive*, `{0,0,0,0}` reports `width() == 1` and
-///   `height() == 1`. Taken at face value it is a spurious 1x1 update at the
-///   origin, not a zero-area one.
-/// * `fast_path::Processor` unions it into the region accumulated from the same
-///   PDU (fast_path.rs:297-300), and `Rectangle::union` takes the `min` of
-///   left/top (`ironrdp-pdu` geometry.rs:73-85) - so the sentinel **drags the
-///   dirty region's origin to (0,0)** and inflates every rect it is mixed with.
+/// **What this does not fix.** `fast_path::Processor` unions the sentinel into
+/// the region accumulated from the same PDU (fast_path.rs:297-300), and
+/// `Rectangle::union` takes the `min` of left/top (`ironrdp-pdu`
+/// geometry.rs:73-85), so when the sentinel arrives alongside a real rect the
+/// region's origin has already been dragged to (0,0) *before* we see it - and
+/// the result is not all-zero, so this returns `false` for it. The filter
+/// therefore catches only the case where the sentinel is the sole contributor.
+/// The inflated-region case is harmless: the framebuffer is authoritative, so an
+/// over-large rect over-ships pixels that happen to be correct, and the only
+/// cost is bandwidth.
 ///
-/// It fires exactly when the server sends updates sized for the old desktop
-/// after a resize but before the framebuffer has been rebuilt, which is why the
-/// reactivation path rebuilds `DecodedImage` in the same breath as handling
+/// It fires when the server sends updates sized for the old desktop after a
+/// resize but before the framebuffer has been rebuilt, which is why
+/// `apply_reactivation` rebuilds `DecodedImage` in the same breath as handling
 /// `DeactivateAll`.
 ///
-/// This is unavoidably a heuristic: there is no way to tell the sentinel from a
-/// genuine one-pixel update at the top-left corner. Losing the occasional real
-/// corner pixel is the right trade - the next update covering it repaints it,
-/// whereas an unfiltered sentinel corrupts the geometry of everything it is
-/// unioned with.
+/// Unavoidably a heuristic: there is no way to tell the sentinel from a genuine
+/// one-pixel update at the top-left corner. Losing the occasional real corner
+/// pixel is the right trade, since the next update covering it repaints it.
 pub fn is_empty_sentinel(rect: &InclusiveRectangle) -> bool {
     rect.left == 0 && rect.top == 0 && rect.right == 0 && rect.bottom == 0
 }
@@ -401,13 +403,35 @@ pub struct FrameBuffer<'a> {
 /// table always agrees with the payload that follows it and no slice index can
 /// run off the end of `fb.data`.
 ///
-/// Alpha is forced to `0xFF` on the way out. IronRDP's own framebuffer does not
-/// guarantee it: `DecodedImage::apply_rgb32_bitmap` memcpys 32bpp bitmap rows
-/// straight in when the wire format matches the framebuffer format, padding
-/// byte included, and RDP servers commonly leave that byte 0. Those pixels
-/// would then be fully transparent in a canvas. An RDP desktop is opaque by
-/// definition, so there is no information to lose, and doing it here means the
-/// frontend can feed a rect to `ImageData` as-is.
+/// Alpha is forced to `0xFF` on the way out, because IronRDP's framebuffer does
+/// not guarantee it.
+///
+/// **The reason is unpainted pixels, not decoded ones.** `DecodedImage::new`
+/// zero-fills (`ironrdp-session` image.rs:146-151), so every pixel the server
+/// has not painted yet has alpha 0 and would be fully transparent in a canvas.
+/// That is exactly what `rdp_snapshot` and a fresh `rdp_attach` return in the
+/// window between reaching the active stage and the first full repaint, and
+/// again after every reactivation, which rebuilds the framebuffer blank.
+///
+/// An earlier version of this comment blamed `apply_rgb32_bitmap`'s memcpy
+/// branch copying the wire's padding byte. That is **not** reachable in this
+/// configuration: the framebuffer is `RgbA32` and that function is always
+/// called with `BgrX32` (`fast_path.rs:273,290`), so `format ==
+/// self.pixel_format` is never true, and the conversion branch it takes instead
+/// already writes opaque alpha because `BgrX32::has_alpha()` is false. The
+/// citation was wrong; the fixup is still load-bearing for the reason above.
+///
+/// Possibly also relevant, unverified as to pixel format: the RemoteFX
+/// `apply_tile` -> `copy_to` path has an `else` branch that memcpys a full row
+/// including the alpha byte (`image.rs:138-141`).
+///
+/// An RDP desktop is opaque by definition, so there is nothing to lose, and
+/// doing it here means the frontend can hand a rect to `ImageData` as-is.
+///
+/// Cost: fused into the row copy rather than run as a second pass over the
+/// finished payload. Same number of writes, but they land on bytes still hot in
+/// cache from `extend_from_slice`, instead of re-traversing up to a whole
+/// framebuffer (8.3M pixels for a collapsed 4K keyframe) after the fact.
 pub fn encode_batch(fb: FrameBuffer<'_>, batch: &Batch) -> Vec<u8> {
     let rects: Vec<Rect> = batch
         .rects
@@ -435,26 +459,28 @@ pub fn encode_batch(fb: FrameBuffer<'_>, batch: &Batch) -> Vec<u8> {
         out.extend_from_slice(&r.h.to_le_bytes());
     }
 
-    let payload_start = out.len();
     let stride = usize::from(fb.width) * BYTES_PER_PIXEL;
     for r in &rects {
         let row_bytes = usize::from(r.w) * BYTES_PER_PIXEL;
         for row in 0..usize::from(r.h) {
             let start = (usize::from(r.y) + row) * stride + usize::from(r.x) * BYTES_PER_PIXEL;
             let end = start + row_bytes;
+            let row_start = out.len();
             match fb.data.get(start..end) {
                 Some(src) => out.extend_from_slice(src),
                 // Only reachable if `fb.data` is shorter than width * height *
                 // 4, i.e. the caller lied about the dimensions. Pad so the
                 // payload still matches the length in the header.
-                None => out.resize(out.len() + row_bytes, 0),
+                None => out.resize(row_start + row_bytes, 0),
             }
-        }
-    }
-
-    if out.len() > payload_start + 3 {
-        for alpha in out[payload_start + 3..].iter_mut().step_by(BYTES_PER_PIXEL) {
-            *alpha = 0xFF;
+            // Opaque alpha, on the row just appended while it is still in cache.
+            for alpha in out[row_start..]
+                .iter_mut()
+                .skip(BYTES_PER_PIXEL - 1)
+                .step_by(BYTES_PER_PIXEL)
+            {
+                *alpha = 0xFF;
+            }
         }
     }
 
@@ -586,12 +612,16 @@ mod tests {
         }));
     }
 
-    /// The failure mode the filter prevents: unioned with a real rect, the
-    /// sentinel drags the origin to (0,0) and inflates the region. This asserts
-    /// IronRDP's own `union` behaviour, so it fails loudly if a version bump
-    /// ever changes it.
+    /// The case the filter does **not** catch, pinned so nobody assumes it
+    /// does: unioned with a real rect inside the same PDU, the sentinel drags
+    /// the origin to (0,0) and inflates the region before it ever reaches us,
+    /// and the result is not all-zero so `is_empty_sentinel` returns false.
+    /// Harmless - the framebuffer is authoritative, so this only over-ships
+    /// correct pixels - but it is bandwidth, not a no-op. Also asserts
+    /// IronRDP's own `union` behaviour, so a version bump that changes it fails
+    /// loudly here.
     #[test]
-    fn unfiltered_sentinel_would_inflate_the_region() {
+    fn sentinel_unioned_with_a_real_rect_is_not_caught() {
         let real = InclusiveRectangle {
             left: 600,
             top: 400,
@@ -610,6 +640,10 @@ mod tests {
             Rect::from_inclusive(&polluted).area(),
             620 * 410,
             "a 200 px update becomes a 254k px one once the sentinel is unioned in"
+        );
+        assert!(
+            !is_empty_sentinel(&polluted),
+            "the filter cannot see this case - the damage is done upstream of us"
         );
     }
 

@@ -50,6 +50,33 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(45);
 /// batch rather than one IPC message each.
 const FLUSH_WINDOW: Duration = Duration::from_millis(16);
 
+/// Maximum input events in one fastpath PDU. **Do not remove the chunking this
+/// feeds; it is not an optimisation.**
+///
+/// `FastPathInput::new` rejects any slice outside `1..=255`
+/// (`ironrdp-pdu-0.8.0/src/input/fast_path.rs:284-290`) because `nEvents` is a
+/// single byte on the wire, and `ActiveStage::process_fastpath_input` calls it
+/// on the whole slice unconditionally and propagates the error
+/// (`ironrdp-session-0.10.0/src/active_stage.rs:104`). The session task treats
+/// that as fatal, so an over-long batch would not drop input - it would emit
+/// `error` + `disconnected` and take the tab down.
+///
+/// This is reachable from ordinary use, with no attacker and no bug on the
+/// frontend's side:
+///
+/// * a drag of 256 moves in one batch - a 1000 Hz `pointerrawupdate` with the
+///   webview's main thread stalled ~300 ms gets there without trying;
+/// * 128 characters pasted as keystrokes, which is 256
+///   `unicodeDown`/`unicodeUp` events;
+/// * a single `releaseAll`, on its own: `Database::release_all` walks a 512-bit
+///   keyboard array plus five mouse buttons and appends every held one to the
+///   same vector (`ironrdp-input-0.6.0/src/lib.rs:351-381`).
+///
+/// Chunking has to happen on the *emitted* `FastPathInputEvent`s rather than on
+/// the incoming operations: `Database::apply` emits zero, one or two events per
+/// operation, so bounding the operation count would not bound this.
+const MAX_FASTPATH_EVENTS: usize = 255;
+
 /// Process the server's pointer updates rather than dropping them, and
 /// composite the cursor into the framebuffer instead of emitting bitmaps.
 ///
@@ -114,7 +141,11 @@ pub enum RdpEvent {
     PointerHidden,
     /// Server-initiated cursor warp.
     PointerPosition { x: u16, y: u16 },
-    /// The session ended, for this reason. Always the last event.
+    /// The session ended, for this reason. Always the last event, on every
+    /// path: a remote hangup, a fault, and a local `rdp_close` all emit it
+    /// (`close` sends it before aborting the task, since the abort means the
+    /// task's own tail never runs). Treat it as idempotent - a local close
+    /// racing a remote hangup can deliver two.
     Disconnected { reason: String },
     /// Something went wrong. Followed by `disconnected` when it was fatal.
     Error { message: String },
@@ -147,10 +178,26 @@ struct ChannelTransport {
 }
 
 impl FrameTransport for ChannelTransport {
+    /// One owned copy of the batch per sink, which is Tauri's floor and not a
+    /// missed optimisation: `InvokeResponseBody::Raw` owns a `Vec<u8>`, and
+    /// under the 1024-byte threshold the channel `eval`s it while at or above it
+    /// the body is parked in `ChannelDataIpcQueue` as its own map entry - so
+    /// there is no point in the API where an `Arc` could be shared. The
+    /// original is moved into the last send rather than cloned, so N sinks cost
+    /// exactly N buffers. `MAX_MIRROR_SINKS` is what bounds the total, and it is
+    /// deliberately low for this reason.
+    ///
+    /// `Err(TransportGone)` is **currently unreachable**. `Channel::send`
+    /// returns `Ok` on both paths whether or not the frontend ever collects the
+    /// payload - the queued path's JS side is `.catch(console.error)`
+    /// (channel.rs:178) and never reports back - so this is not a liveness
+    /// signal and the caller must not treat it as backpressure. Kept because it
+    /// is the right shape for the seam and a pull transport (RDP-01) would have
+    /// a real answer here.
     fn deliver(&mut self, bytes: Vec<u8>) -> Result<(), TransportGone> {
         {
-            // Prune sinks whose webview went away, exactly as the SSH pump's
-            // fan does, so dead mirrors do not cost a clone per frame forever.
+            // Prune sinks whose channel has closed, exactly as the SSH pump's
+            // fan does, so dead mirrors do not cost a copy per frame forever.
             let mut mirrors = self.mirrors.lock_or_recover();
             mirrors.retain(|sink| sink.send(InvokeResponseBody::Raw(bytes.clone())).is_ok());
         }
@@ -187,6 +234,12 @@ pub struct RdpSession {
     /// evicts the id from `RdpState`.
     exit_signal: Mutex<Option<oneshot::Receiver<()>>>,
     shared: Arc<Shared>,
+    /// The GUI's own sink. Held so `close` can emit the final `disconnected`
+    /// itself: aborting the task means `run`'s tail never executes, so without
+    /// this a locally-closed session would end silently and the documented
+    /// "`disconnected` is always the last event" would be false for mirrors,
+    /// which have no other way to learn the session is gone.
+    primary: EventSink,
     host: String,
     username: String,
     /// SHA-256 fingerprint the server actually presented. The frontend persists
@@ -211,6 +264,11 @@ impl RdpSession {
     /// `rdp_snapshot` and the keyframe a fresh `rdp_attach` gets: unlike SSH
     /// there is no byte stream to replay, so a new consumer needs one whole
     /// frame before deltas mean anything.
+    ///
+    /// Empty when there is no framebuffer to describe, rather than a
+    /// `rectCount == 0` header the wire format tells the reader to treat as
+    /// corrupt. Unreachable while `connect` refuses a zero desktop size, but
+    /// this is the same guard `flush` carries and the two should not disagree.
     pub fn keyframe(&self) -> Vec<u8> {
         self.keyframe_with_dims().0
     }
@@ -229,6 +287,9 @@ impl RdpSession {
             },
             &Batch::keyframe(width, height),
         );
+        if bytes.len() <= HEADER_LEN {
+            return (Vec::new(), width, height);
+        }
         (bytes, width, height)
     }
 
@@ -252,11 +313,12 @@ impl RdpSession {
             desktop_height: height,
             server_fingerprint: self.fingerprint.clone(),
         }));
-        let _ = sink.send(InvokeResponseBody::Raw(keyframe));
+        if !keyframe.is_empty() {
+            let _ = sink.send(InvokeResponseBody::Raw(keyframe));
+        }
         // Bound the live sink count: a buggy caller could call rdp_attach in a
-        // loop, and every extra sink costs a full frame clone per batch. Evict
-        // the oldest.
-        const MAX_MIRROR_SINKS: usize = 4;
+        // loop, and every extra sink costs a full owned copy of every batch.
+        // Evict the oldest.
         while mirrors.len() >= MAX_MIRROR_SINKS {
             mirrors.remove(0);
         }
@@ -294,11 +356,29 @@ impl RdpSession {
     /// *disconnected* rather than logged off, which is what every other RDP
     /// client does on window close. A graceful `ShutdownRequest` would need a
     /// round trip and is not worth blocking a tab close on.
+    ///
+    /// The `disconnected` event is emitted HERE, before the abort, because
+    /// aborting means `run`'s tail never runs. The caller of `rdp_close` already
+    /// knows it closed the session, but attached mirrors do not, and they have
+    /// no other way to find out.
     pub async fn close(self: Arc<Self>) {
         self.shared.alive.store(false, Ordering::Release);
+        self.emit_all(&RdpEvent::Disconnected {
+            reason: "closed by the client".to_owned(),
+        });
         if let Some(task) = self.task.lock().await.take() {
             task.abort();
         }
+    }
+
+    /// Fan an event to the primary sink and every mirror, pruning dead ones.
+    /// Mirrors `run`'s own `emit`; kept as a method so `close` can use it after
+    /// the task is gone.
+    fn emit_all(&self, event: &RdpEvent) {
+        let body = event_body(event);
+        let _ = self.primary.send(body.clone());
+        let mut mirrors = self.shared.mirrors.lock_or_recover();
+        mirrors.retain(|mirror| mirror.send(body.clone()).is_ok());
     }
 }
 
@@ -312,6 +392,39 @@ impl Drop for RdpSession {
             }
         }
     }
+}
+
+/// Idle time before the kernel starts probing, and the gap between probes.
+///
+/// An RDP session is almost entirely server-driven: the task sits in
+/// `read_pdu()`, and the only writes are responses to server PDUs or user input.
+/// So if the network dies silently there is nothing to fail against - no write
+/// to error, no FIN to read - and `read_pdu()` simply never returns. The session
+/// then hangs with no `disconnected`, and `rdp_list_sessions` keeps reporting
+/// `alive: true`. Kernel keepalive is what turns that into a read error.
+///
+/// `30s` idle matches the SSH module's `KEEPALIVE` (`ssh/session.rs`), which
+/// exists for the same failure. With `10s` probes and the platform default
+/// retry count, a dead peer surfaces in roughly a minute.
+const KEEPALIVE_IDLE: Duration = Duration::from_secs(30);
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
+
+/// Live mirror sinks per session. Low because Tauri's channel API needs an
+/// owned `Vec<u8>` per sink (see `ChannelTransport::deliver`), so each extra
+/// mirror is a full copy of every batch - up to one framebuffer.
+const MAX_MIRROR_SINKS: usize = 4;
+
+/// Turn on kernel TCP keepalive with a usable idle time.
+///
+/// tokio only offers `TcpSocket::set_keepalive(bool)`, which enables
+/// SO_KEEPALIVE at the OS default idle - 7200 s on Linux - so it would satisfy
+/// the letter of "keepalive is on" while leaving a dead session undetected for
+/// two hours. Setting `TCP_KEEPIDLE`/`TCP_KEEPINTVL` needs socket2.
+fn set_keepalive(tcp: &TcpStream) -> std::io::Result<()> {
+    let params = socket2::TcpKeepalive::new()
+        .with_time(KEEPALIVE_IDLE)
+        .with_interval(KEEPALIVE_INTERVAL);
+    socket2::SockRef::from(tcp).set_tcp_keepalive(&params)
 }
 
 /// Flatten an error's `Display` and its whole `source()` chain into one line.
@@ -434,6 +547,14 @@ fn build_config(input: &RdpOpenInput, password: &str) -> Config {
         work_dir: String::new(),
         platform: MajorPlatformType::UNIX,
         hardware_id: None,
+        // `None` makes the connector fill the X.224 Connection Request with
+        // `NegoRequestData::cookie(username)` (`ironrdp-connector-0.9.0`
+        // connection.rs:270-277). That cookie goes out on plain TCP inside
+        // `connect_begin`, i.e. before TLS and therefore before the certificate
+        // check. Kept deliberately: `mstsc` sends it and RD Connection Broker
+        // routes on it, so suppressing it would be a real interop regression to
+        // buy a small disclosure. See the note on `connect` about exactly what
+        // does and does not cross the wire before the certificate is verified.
         request_data: None,
         autologon: false,
         enable_audio_playback: false,
@@ -455,7 +576,20 @@ fn build_config(input: &RdpOpenInput, password: &str) -> Config {
 /// Ordering matters: `connect_begin` stops as soon as the connector wants the
 /// security upgrade, i.e. before any TLS exists. The certificate check then
 /// happens inside the TLS handshake, and only after it passes does
-/// `connect_finalize` run CredSSP and send credentials.
+/// `connect_finalize` run CredSSP.
+///
+/// # What crosses the wire before the certificate is verified
+///
+/// Precisely one thing: the **username**, as the X.224 Connection Request
+/// cookie, on plain TCP inside `connect_begin` (see `request_data` in
+/// `build_config`). So a first-connect man-in-the-middle that the user then
+/// rejects still learns the account name.
+///
+/// What does **not** cross: the password, and the NTLM exchange that would
+/// expose a crackable NetNTLMv2 response. Both live inside `connect_finalize`,
+/// which runs only after `verify_server_cert` has returned `Ok`. That is the
+/// property the certificate check buys, and it is worth being exact about
+/// rather than claiming "no credential of any kind", which is not true.
 pub async fn connect(
     input: RdpOpenInput,
     password: String,
@@ -481,6 +615,11 @@ pub async fn connect(
     // single keystroke fastpath frame is not acceptable.
     if let Err(e) = tcp.set_nodelay(true) {
         log::warn!("rdp: could not disable Nagle on {host}:{port}: {e}");
+    }
+    if let Err(e) = set_keepalive(&tcp) {
+        // Not fatal: the session works, it just will not notice a silently
+        // dropped network until something tries to write.
+        log::warn!("rdp: could not enable TCP keepalive on {host}:{port}: {e}");
     }
     let client_addr = tcp
         .local_addr()
@@ -566,7 +705,10 @@ pub async fn connect(
         .ok_or_else(|| "rdp: server presented no certificate".to_string())?
         .to_vec();
     // CredSSP binds to the server's SubjectPublicKey, not to the whole
-    // certificate, so this is a separate extraction from the fingerprint.
+    // certificate, so this is a separate extraction from the fingerprint. The
+    // parse cannot fail here: the verifier already parsed the same DER and
+    // refused the connection if it would not, specifically so a user is never
+    // asked to confirm a certificate that is about to be rejected anyway.
     let server_public_key = {
         use x509_cert::der::Decode as _;
         let cert = x509_cert::Certificate::from_der(&leaf_der)
@@ -615,7 +757,18 @@ pub async fn connect(
     .map_err(|_| format!("rdp: authentication with {host}:{port} timed out"))?
     .map_err(|e| connect_error("rdp: authentication failed", &e))?;
 
+    // The server's size, not ours - it is free to disagree with what we asked
+    // for. A zero in either axis has to be refused here: `DecodedImage::new`
+    // would happily build an empty framebuffer, nothing would panic, and the
+    // session would sit at `alive: true` forever delivering no frames while
+    // `keyframe()` emitted a `rectCount == 0` header that the wire format tells
+    // the frontend to treat as corrupt. Failing the connect says what happened.
     let (width, height) = (result.desktop_size.width, result.desktop_size.height);
+    if width == 0 || height == 0 {
+        return Err(format!(
+            "rdp: {host}:{port} reported an unusable desktop size of {width}x{height}"
+        ));
+    }
     log::info!(
         "rdp: active on {host}:{port} desktop={width}x{height} share_id={} compression={:?}",
         result.share_id,
@@ -645,9 +798,10 @@ pub async fn connect(
         mirrors,
     };
     let task_shared = Arc::clone(&shared);
+    let task_sink = sink.clone();
     let task = tokio::spawn(async move {
         let _exit_tx = exit_tx;
-        run(result, framed, input_rx, task_shared, sink, transport).await;
+        run(result, framed, input_rx, task_shared, task_sink, transport).await;
     });
 
     let created_at_ms = SystemTime::now()
@@ -660,6 +814,7 @@ pub async fn connect(
         task: tokio::sync::Mutex::new(Some(task)),
         exit_signal: Mutex::new(Some(exit_rx)),
         shared,
+        primary: sink,
         host,
         username: input.username,
         fingerprint,
@@ -763,16 +918,29 @@ async fn run(
                     // pixel); nothing to send.
                     continue;
                 }
+                // One PDU per MAX_FASTPATH_EVENTS. Over that,
+                // `process_fastpath_input` returns Err and this arm would end
+                // the session - see MAX_FASTPATH_EVENTS for why that is
+                // reachable from ordinary use.
                 let mut image = shared.image.lock_or_recover();
-                match stage.process_fastpath_input(&mut image, &events) {
-                    Ok(outputs) => outputs,
-                    Err(e) => {
-                        break 'session Ending::Faulted(session_error(
-                            "rdp: encoding input failed",
-                            &e,
-                        ))
+                let mut collected = Vec::new();
+                let mut failure = None;
+                for chunk in events.chunks(MAX_FASTPATH_EVENTS) {
+                    match stage.process_fastpath_input(&mut image, chunk) {
+                        // Extended in chunk order, so the `ResponseFrame`s are
+                        // written to the wire in the order the user typed them.
+                        Ok(outputs) => collected.extend(outputs),
+                        Err(e) => {
+                            failure = Some(session_error("rdp: encoding input failed", &e));
+                            break;
+                        }
                     }
                 }
+                drop(image);
+                if let Some(message) = failure {
+                    break 'session Ending::Faulted(message);
+                }
+                collected
             }
             Wake::Flush => {
                 flush(&mut batcher, &shared.image, &mut transport);
@@ -842,15 +1010,47 @@ async fn run(
                 }
                 ActiveStageOutput::DeactivateAll(mut activation) => {
                     log::info!("rdp: DeactivateAll, re-running the activation sequence");
-                    let reactivated = reactivate(&mut framed, &mut activation).await;
-                    let (new_width, new_height, share_id, server_pointer, software_pointer) =
-                        match reactivated {
-                            Ok(values) => values,
-                            Err(e) => break 'session Ending::Faulted(e),
-                        };
+                    // Bounded, unlike every earlier version of this. The
+                    // sequence starts in `CapabilitiesExchange`, whose
+                    // `next_pdu_hint()` is `Some(&X224_HINT)`
+                    // (`ironrdp-connector-0.9.0` connection_activation.rs:52-84),
+                    // so the first step awaits a read that a server which sent
+                    // `ServerDeactivateAll` and then went quiet will never
+                    // satisfy. Without a deadline that parks the task here
+                    // forever: no PDU reads, no input drain, no `error`, no
+                    // `disconnected`, and `rdp_list_sessions` still saying
+                    // `alive: true` - a hang indistinguishable from an idle
+                    // session, which is worse than a crash. Every other leg of
+                    // the connection is bounded; this was the only hole.
+                    let reactivated = match tokio::time::timeout(
+                        HANDSHAKE_TIMEOUT,
+                        reactivate(&mut framed, &mut activation),
+                    )
+                    .await
                     {
-                        let mut image = shared.image.lock_or_recover();
-                        *image = DecodedImage::new(PixelFormat::RgbA32, new_width, new_height);
+                        Ok(result) => result,
+                        Err(_) => {
+                            break 'session Ending::Faulted(format!(
+                                "rdp: the server stopped responding during the \
+                                 deactivation-reactivation sequence (no progress in {}s)",
+                                HANDSHAKE_TIMEOUT.as_secs()
+                            ))
+                        }
+                    };
+                    let Reactivation {
+                        width: new_width,
+                        height: new_height,
+                        share_id,
+                        server_pointer,
+                        software_pointer,
+                    } = match reactivated {
+                        Ok(values) => values,
+                        Err(e) => break 'session Ending::Faulted(e),
+                    };
+                    // Framebuffer, dims and batcher, validated together.
+                    if let Err(e) = apply_reactivation(&shared, &mut batcher, new_width, new_height)
+                    {
+                        break 'session Ending::Faulted(e);
                     }
                     stage.set_fastpath_processor(
                         fast_path::ProcessorBuilder {
@@ -867,15 +1067,16 @@ async fn run(
                     );
                     stage.set_share_id(share_id);
                     stage.set_enable_server_pointer(server_pointer);
-                    // Whatever had accumulated describes a framebuffer that no
-                    // longer exists. The new one is blank and the server
-                    // repaints it, so the next deltas are already correct - no
-                    // point shipping a black keyframe first.
-                    batcher.resize(new_width, new_height);
                     flush_at = None;
                     (width, height) = (new_width, new_height);
-                    *shared.dims.lock_or_recover() = (width, height);
                     emit(&RdpEvent::Resize { width, height });
+                    // Known and accepted: `ActiveStage::process` appends
+                    // processor updates AFTER the x224 outputs, so a
+                    // `GraphicsUpdate` carrying old-framebuffer coordinates can
+                    // still be in `outputs` behind us and will land in the
+                    // already-resized batcher. It gets clipped to the new
+                    // framebuffer and the server repaints, so the worst case is
+                    // a transient artifact rather than bad geometry.
                 }
                 // UDP sideband transport is out of scope; the server falls back
                 // to the TCP connection when the client never establishes it.
@@ -970,20 +1171,39 @@ fn flush(
         return;
     }
     if transport.deliver(bytes).is_err() {
-        // Not fatal: a mirror sink may still be attached, and the session is
-        // worth keeping alive for it.
-        log::debug!("rdp: frame sink is gone");
+        // Not fatal, and in practice not reachable either - see
+        // `ChannelTransport::deliver` on why `Channel::send` cannot report a
+        // frontend that has stopped collecting. Left in place so the seam has
+        // one, rather than swallowing an error a pull transport would care
+        // about.
+        log::debug!("rdp: frame sink reported itself gone");
     }
+}
+
+/// What the server told us in the `Finalized` state of a reactivation.
+///
+/// The pointer flags are re-read rather than assumed unchanged: the server
+/// renegotiates capabilities, so it may have changed its mind about them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Reactivation {
+    width: u16,
+    height: u16,
+    share_id: u32,
+    server_pointer: bool,
+    software_pointer: bool,
 }
 
 /// Drive a Deactivation-Reactivation sequence to completion.
 ///
-/// Returns `(width, height, share_id, enable_server_pointer,
-/// pointer_software_rendering)` from the `Finalized` state.
+/// Has no internal deadline on purpose - the caller wraps it in one, because
+/// the natural budget is the same `HANDSHAKE_TIMEOUT` the rest of the
+/// activation sequence gets and there is no reason for this to invent a second
+/// one. Not busy-spinning either: `Finalized` and `Consumed` both make `step`
+/// return `Err`, so the loop cannot run hot.
 async fn reactivate(
     framed: &mut TlsFramed,
     activation: &mut ConnectionActivationSequence,
-) -> Result<(u16, u16, u32, bool, bool), String> {
+) -> Result<Reactivation, String> {
     let mut buf = WriteBuf::new();
     loop {
         if let ConnectionActivationState::Finalized {
@@ -994,13 +1214,13 @@ async fn reactivate(
             ..
         } = activation.connection_activation_state()
         {
-            return Ok((
-                desktop_size.width,
-                desktop_size.height,
+            return Ok(Reactivation {
+                width: desktop_size.width,
+                height: desktop_size.height,
                 share_id,
-                enable_server_pointer,
-                pointer_software_rendering,
-            ));
+                server_pointer: enable_server_pointer,
+                software_pointer: pointer_software_rendering,
+            });
         }
         ironrdp_tokio::single_sequence_step(framed, activation, &mut buf)
             .await
@@ -1008,9 +1228,46 @@ async fn reactivate(
     }
 }
 
+/// Adopt a new desktop size after a reactivation: rebuild the framebuffer,
+/// publish the new dims, and drop whatever the batcher had accumulated.
+///
+/// Split out from the `DeactivateAll` arm because it is the stateful half -
+/// three pieces of shared state that have to move together - and because it is
+/// the only part of the reactivation path testable without a live TLS stream.
+/// The three `ActiveStage` calls that follow it in the arm are single
+/// delegating setters with no logic of their own.
+///
+/// Rejects a zero axis for the same reason `connect` does: `DecodedImage::new`
+/// would build an empty framebuffer and the session would look alive while
+/// being incapable of ever producing a frame.
+fn apply_reactivation(
+    shared: &Shared,
+    batcher: &mut FrameBatcher,
+    width: u16,
+    height: u16,
+) -> Result<(), String> {
+    if width == 0 || height == 0 {
+        return Err(format!(
+            "rdp: the server reactivated with an unusable desktop size of {width}x{height}"
+        ));
+    }
+    {
+        let mut image = shared.image.lock_or_recover();
+        *image = DecodedImage::new(PixelFormat::RgbA32, width, height);
+    }
+    // Whatever had accumulated describes a framebuffer that no longer exists.
+    // The new one is blank and the server repaints it, so the next deltas are
+    // already correct - no point shipping a black keyframe first.
+    batcher.resize(width, height);
+    *shared.dims.lock_or_recover() = (width, height);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
+    use super::frame::RECT_LEN;
     use super::*;
+    use ironrdp_pdu::input::fast_path::{FastPathInput, FastPathInputEvent};
 
     /// The frontend reads these tags and fields by name, so the serialised
     /// shape is the contract. `rename_all_fields` is what turns
@@ -1149,6 +1406,312 @@ mod tests {
         assert_eq!(
             flatten(&outer, core::error::Error::source(&outer)),
             "CredSSP: the user name or password is incorrect"
+        );
+    }
+
+    /// `n` distinct key presses. Distinct because `Database` suppresses no-op
+    /// transitions, so repeating a scancode would emit nothing; distinct keys
+    /// give exactly one fastpath event each. Codes 0..256 are plain and
+    /// 256..512 carry the extended flag, which is the full width of the
+    /// keyboard bit array.
+    fn distinct_key_presses(n: usize) -> Vec<InputOp> {
+        (0..n)
+            .map(|i| {
+                let extended = i >= 256;
+                let code = u8::try_from(i % 256).expect("masked into range");
+                InputOp::Op(Operation::KeyPressed(ironrdp_input::Scancode::from_u8(
+                    extended, code,
+                )))
+            })
+            .collect()
+    }
+
+    /// Chunk the way the `Wake::Input` arm does, so these tests exercise the
+    /// same split the session task performs.
+    fn chunks_of(events: &[FastPathInputEvent]) -> Vec<&[FastPathInputEvent]> {
+        events.chunks(MAX_FASTPATH_EVENTS).collect()
+    }
+
+    /// A batch bigger than one PDU must split, not fail. Before chunking this
+    /// was an `Ending::Faulted`, i.e. `error` + `disconnected` and the tab
+    /// gone - not a dropped batch.
+    #[test]
+    fn oversized_input_batch_is_chunked_not_fatal() {
+        let mut keys = Database::new();
+        let events = apply_input(&mut keys, distinct_key_presses(300));
+        assert_eq!(events.len(), 300, "one event per distinct key press");
+
+        let chunks = chunks_of(&events);
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].len(), MAX_FASTPATH_EVENTS);
+        assert_eq!(chunks[1].len(), 300 - MAX_FASTPATH_EVENTS);
+
+        // Order must survive the split, or keystrokes arrive transposed.
+        let rejoined: Vec<FastPathInputEvent> =
+            chunks.iter().flat_map(|c| c.iter().cloned()).collect();
+        assert_eq!(rejoined, events, "chunks cover the input exactly, in order");
+
+        for (i, chunk) in chunks.iter().enumerate() {
+            assert!(
+                FastPathInput::new(chunk.to_vec()).is_ok(),
+                "chunk {i} must be encodable"
+            );
+        }
+    }
+
+    /// The boundary. The `is_err` on 256 is the oracle for
+    /// `MAX_FASTPATH_EVENTS` itself: if upstream ever moves the cap, this fails
+    /// rather than the constant silently drifting out of step.
+    #[test]
+    fn chunk_boundary_is_255() {
+        let mut keys = Database::new();
+        let exact = apply_input(&mut keys, distinct_key_presses(MAX_FASTPATH_EVENTS));
+        assert_eq!(exact.len(), 255);
+        assert_eq!(chunks_of(&exact).len(), 1, "255 still fits one PDU");
+        assert!(FastPathInput::new(exact.clone()).is_ok());
+
+        let mut keys = Database::new();
+        let over = apply_input(&mut keys, distinct_key_presses(MAX_FASTPATH_EVENTS + 1));
+        assert_eq!(over.len(), 256);
+        let chunks = chunks_of(&over);
+        assert_eq!(chunks.len(), 2, "256 needs two");
+        assert_eq!((chunks[0].len(), chunks[1].len()), (255, 1));
+        assert!(
+            FastPathInput::new(over).is_err(),
+            "unchunked, 256 events are rejected - this is the bug the chunking fixes"
+        );
+    }
+
+    /// `releaseAll` can blow the cap on its own, with no oversized batch from
+    /// the caller: it releases everything currently held, and "everything" is
+    /// bounded only by the 512-bit keyboard array.
+    #[test]
+    fn release_all_alone_can_exceed_the_cap() {
+        let mut keys = Database::new();
+        // Press 300 keys, chunked the way the session task would.
+        let pressed = apply_input(&mut keys, distinct_key_presses(300));
+        assert_eq!(pressed.len(), 300);
+
+        // Now one single-item batch. This is the whole input from the caller.
+        let released = apply_input(&mut keys, vec![InputOp::ReleaseAll]);
+        assert_eq!(
+            released.len(),
+            300,
+            "release_all emits one event per held key"
+        );
+        assert!(
+            FastPathInput::new(released.clone()).is_err(),
+            "a lone releaseAll would have killed the session"
+        );
+
+        let chunks = chunks_of(&released);
+        assert_eq!(chunks.len(), 2);
+        for chunk in &chunks {
+            assert!(FastPathInput::new(chunk.to_vec()).is_ok());
+        }
+    }
+
+    /// A framebuffer of `width` x `height` with a recognisable fill, wrapped in
+    /// the shared state the session task and the command layer both touch.
+    fn shared_fixture(width: u16, height: u16) -> Arc<Shared> {
+        Arc::new(Shared {
+            image: Mutex::new(DecodedImage::new(PixelFormat::RgbA32, width, height)),
+            mirrors: Arc::new(Mutex::new(Vec::new())),
+            dims: Mutex::new((width, height)),
+            alive: AtomicBool::new(true),
+        })
+    }
+
+    /// A session with no network behind it. Everything `RdpSession` needs is
+    /// constructible: the input channel's receiver is simply dropped, and there
+    /// is no task. Enough to exercise `keyframe`, `add_mirror_sink`, `info` and
+    /// `close`'s event, which are otherwise only reachable through a real
+    /// connect.
+    fn session_fixture(shared: Arc<Shared>, primary: EventSink) -> Arc<RdpSession> {
+        let (input_tx, _input_rx) = mpsc::unbounded_channel::<Vec<InputOp>>();
+        Arc::new(RdpSession {
+            input_tx,
+            task: tokio::sync::Mutex::new(None),
+            exit_signal: Mutex::new(None),
+            shared,
+            primary,
+            host: "win.example.com".to_owned(),
+            username: "admin".to_owned(),
+            fingerprint: "AA:BB".to_owned(),
+            created_at_ms: 1,
+        })
+    }
+
+    /// Records what a sink received, in order, tagging each payload by kind so
+    /// the connected-then-keyframe ordering is checkable.
+    #[derive(Default)]
+    struct Recorder {
+        seen: Mutex<Vec<(&'static str, String, usize)>>,
+    }
+
+    fn recording(recorder: &Arc<Recorder>) -> EventSink {
+        let recorder = Arc::clone(recorder);
+        EventSink::new(move |body| {
+            let entry = match body {
+                InvokeResponseBody::Json(json) => ("json", json, 0),
+                InvokeResponseBody::Raw(bytes) => ("raw", String::new(), bytes.len()),
+            };
+            recorder.seen.lock_or_recover().push(entry);
+            Ok(())
+        })
+    }
+
+    /// The stateful half of a reactivation: framebuffer, dims and batcher have
+    /// to move together, and stale rects describing the old framebuffer must go.
+    #[test]
+    fn reactivation_rebuilds_the_framebuffer_and_clears_stale_rects() {
+        let shared = shared_fixture(1280, 800);
+        let mut batcher = FrameBatcher::new(1280, 800);
+        // A rect that only makes sense at the old size.
+        batcher.push(Rect {
+            x: 1000,
+            y: 700,
+            w: 200,
+            h: 80,
+        });
+        assert!(!batcher.is_empty());
+
+        apply_reactivation(&shared, &mut batcher, 640, 480).expect("valid size");
+
+        assert_eq!(*shared.dims.lock_or_recover(), (640, 480), "dims published");
+        {
+            let image = shared.image.lock_or_recover();
+            assert_eq!((image.width(), image.height()), (640, 480));
+            assert_eq!(
+                image.data().len(),
+                640 * 480 * 4,
+                "the framebuffer was rebuilt, not resized in place"
+            );
+        }
+        assert!(
+            batcher.is_empty(),
+            "rects describing the old framebuffer are dropped, not carried over"
+        );
+
+        // The new batcher really is at the new size: a rect valid only at the
+        // old one is now clipped away entirely.
+        batcher.push(Rect {
+            x: 1000,
+            y: 700,
+            w: 200,
+            h: 80,
+        });
+        assert!(
+            batcher.is_empty(),
+            "out-of-bounds rects are dropped at the new size"
+        );
+    }
+
+    /// A server that reactivates to a zero axis has to fail the session, for the
+    /// same reason `connect` refuses one: nothing panics, but the session would
+    /// sit at `alive: true` forever and never produce a frame.
+    #[test]
+    fn reactivation_refuses_an_unusable_size() {
+        let shared = shared_fixture(1280, 800);
+        let mut batcher = FrameBatcher::new(1280, 800);
+
+        for (w, h) in [(0, 480), (640, 0), (0, 0)] {
+            let err = apply_reactivation(&shared, &mut batcher, w, h)
+                .expect_err("a zero axis must be refused");
+            assert!(err.contains("unusable desktop size"), "got: {err}");
+        }
+        // And it left the old state untouched rather than half-applying.
+        assert_eq!(*shared.dims.lock_or_recover(), (1280, 800));
+        assert_eq!(shared.image.lock_or_recover().width(), 1280);
+    }
+
+    /// A fresh mirror needs the size before the pixels, then one whole frame.
+    #[test]
+    fn mirror_sink_is_primed_with_connected_then_keyframe() {
+        let shared = shared_fixture(8, 4);
+        let session = session_fixture(shared, EventSink::new(|_| Ok(())));
+
+        let recorder = Arc::new(Recorder::default());
+        assert!(
+            session.add_mirror_sink(recording(&recorder)),
+            "a live session reports alive"
+        );
+
+        let seen = recorder.seen.lock_or_recover().clone();
+        assert_eq!(seen.len(), 2, "exactly connected + keyframe");
+        assert_eq!(seen[0].0, "json", "the size must arrive before the pixels");
+        assert!(seen[0].1.contains(r#""type":"connected""#));
+        assert!(seen[0].1.contains(r#""desktopWidth":8"#));
+        assert!(seen[0].1.contains(r#""desktopHeight":4"#));
+        assert!(seen[0].1.contains(r#""serverFingerprint":"AA:BB""#));
+        assert_eq!(seen[1].0, "raw", "then one full-framebuffer keyframe");
+        assert_eq!(
+            seen[1].2,
+            HEADER_LEN + RECT_LEN + 8 * 4 * 4,
+            "header + one rect + every pixel"
+        );
+    }
+
+    /// The bound exists because each extra sink costs a full copy of every
+    /// batch. Oldest out.
+    #[test]
+    fn mirror_sinks_are_bounded() {
+        let shared = shared_fixture(4, 4);
+        let session = session_fixture(Arc::clone(&shared), EventSink::new(|_| Ok(())));
+
+        for _ in 0..MAX_MIRROR_SINKS + 3 {
+            session.add_mirror_sink(EventSink::new(|_| Ok(())));
+        }
+        assert_eq!(
+            shared.mirrors.lock_or_recover().len(),
+            MAX_MIRROR_SINKS,
+            "the list never grows past the bound"
+        );
+    }
+
+    /// `add_mirror_sink` reports liveness, which is how an attaching consumer
+    /// learns it just attached to a corpse.
+    #[test]
+    fn mirror_sink_reports_a_dead_session() {
+        let shared = shared_fixture(4, 4);
+        shared.alive.store(false, Ordering::Release);
+        let session = session_fixture(shared, EventSink::new(|_| Ok(())));
+        assert!(!session.add_mirror_sink(EventSink::new(|_| Ok(()))));
+    }
+
+    /// `close` aborts the task, so `run`'s tail never emits. The event has to
+    /// come from `close` itself or a locally-closed session would end silently -
+    /// and mirrors have no other way to find out.
+    #[test]
+    fn close_emits_disconnected_to_primary_and_mirrors() {
+        let shared = shared_fixture(4, 4);
+        let primary = Arc::new(Recorder::default());
+        let session = session_fixture(Arc::clone(&shared), recording(&primary));
+
+        let mirror = Arc::new(Recorder::default());
+        session.add_mirror_sink(recording(&mirror));
+        // Drop the priming events so only the close is left.
+        mirror.seen.lock_or_recover().clear();
+        primary.seen.lock_or_recover().clear();
+
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime")
+            .block_on(Arc::clone(&session).close());
+
+        for (who, recorder) in [("primary", &primary), ("mirror", &mirror)] {
+            let seen = recorder.seen.lock_or_recover().clone();
+            assert_eq!(seen.len(), 1, "{who} got exactly one event");
+            assert_eq!(seen[0].0, "json");
+            assert!(
+                seen[0].1.contains(r#""type":"disconnected""#),
+                "{who} got: {}",
+                seen[0].1
+            );
+        }
+        assert!(
+            !shared.alive.load(Ordering::Acquire),
+            "and the session is marked dead"
         );
     }
 

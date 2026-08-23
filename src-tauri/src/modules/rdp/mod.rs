@@ -18,11 +18,13 @@
 //! # Certificate trust
 //!
 //! SHA-256 fingerprint pinning over the leaf certificate, checked *inside* the
-//! TLS handshake so a rejection happens before CredSSP sends any credential.
-//! First connect prompts the user; later connects pass the recorded fingerprint
-//! back as `expectedCertFingerprint` and a mismatch aborts. See [`tls`] for the
-//! full policy, including why the pin is keyed to the saved connection rather
-//! than to `host:port`.
+//! TLS handshake, so a rejection happens before CredSSP sends the password or
+//! runs the NTLM exchange. The username does go out earlier, as the X.224
+//! Connection Request cookie on plain TCP - see [`tls`] and
+//! `session::build_config`. First connect prompts the user; later connects pass
+//! the recorded fingerprint back as `expectedCertFingerprint` and a mismatch
+//! aborts. See [`tls`] for the full policy, including why the pin is keyed to
+//! the saved connection rather than to `host:port`.
 //!
 //! # Out of scope for this phase
 //!
@@ -351,8 +353,18 @@ pub async fn rdp_open(
 }
 
 /// Queue a batch of input events. Batched rather than one command per event
-/// because a single mouse drag produces dozens of moves per second and each
-/// IPC round trip is far more expensive than the fastpath frame it produces.
+/// because a single mouse drag produces dozens of moves per second and each IPC
+/// round trip is far more expensive than the fastpath frame it produces.
+///
+/// **The batch size is unbounded from the caller's side.** There is a hard
+/// 255-event ceiling on a single RDP fastpath PDU, but the caller does not need
+/// to know the number or do the arithmetic: the session task splits the events
+/// a batch produces into PDU-sized runs, in order (see `MAX_FASTPATH_EVENTS` in
+/// `session.rs`). Send whatever accumulated in the frame - a 1000 Hz pointer
+/// stream, a pasted line arriving as keystrokes, a `releaseAll` releasing
+/// everything at once - and do not pre-chunk on the frontend. The count that
+/// matters is the one the events *expand into*, which only the backend can see:
+/// one `releaseAll` can become hundreds of events on its own.
 #[tauri::command]
 pub async fn rdp_input(
     state: tauri::State<'_, RdpState>,
@@ -411,8 +423,18 @@ pub async fn rdp_attach(
 }
 
 /// The current framebuffer as one keyframe batch, in the same wire format the
-/// session channel uses. Returned as a raw `Response` so the pixels do not go
-/// through JSON.
+/// session channel uses.
+///
+/// Returned as a raw `Response`, which is the one path in this module where
+/// pixels genuinely never touch JSON. The channel path is not so clean: Tauri
+/// only avoids JSON for raw payloads of 1024 bytes or more
+/// (`MAX_RAW_DIRECT_EXECUTE_THRESHOLD`, `tauri-2.11.5/src/ipc/channel.rs:39`).
+/// Below that it serialises the bytes as a JSON number array and `eval`s
+/// `new Uint8Array([...]).buffer` (channel.rs:163-167) - and a small delta like
+/// a blinking text caret (~2x16 px = 128 bytes) is exactly that case, so on an
+/// idle desktop most batches do go through JSON. At or above the threshold the
+/// body is parked in `ChannelDataIpcQueue` and pulled back by a JS `invoke`
+/// (channel.rs:169-181).
 #[tauri::command]
 pub async fn rdp_snapshot(state: tauri::State<'_, RdpState>, id: u32) -> Result<Response, String> {
     let session = lookup(&state, id, "rdp_snapshot").await?;

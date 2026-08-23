@@ -13,9 +13,17 @@
 //!
 //! [`TofuVerifier::verify_server_cert`] runs *inside* the TLS handshake, which
 //! is strictly before `ironrdp_tokio::connect_finalize` starts CredSSP. So a
-//! rejection here means no credential of any kind has crossed the wire: not the
-//! password, not the NTLM response. That is the whole point of doing it in the
-//! verifier instead of as a post-handshake comparison.
+//! rejection here means the **password** has not crossed the wire, and neither
+//! has the NTLM exchange that would leak a crackable NetNTLMv2 response. That
+//! is the point of doing it in the verifier rather than as a post-handshake
+//! comparison.
+//!
+//! One thing has already crossed by then: the **username**, as the X.224
+//! Connection Request cookie, sent on plain TCP during `connect_begin` (see
+//! `request_data` in `session::build_config` for why that cookie is kept). So a
+//! first-connect MITM that the user rejects still learns the account name.
+//! Worth stating precisely rather than claiming "no credential of any kind",
+//! which would be false.
 //!
 //! # Fingerprint format
 //!
@@ -73,6 +81,13 @@ pub(super) fn take_pending_cert(prompt_id: &str) -> Option<std::sync::mpsc::Send
     pending_certs().lock_or_recover().remove(prompt_id)
 }
 
+/// Whether a prompt id is still parked. Test-only: it is how the leak
+/// assertions check that every `drop_pending_cert` site actually clears up.
+#[cfg(test)]
+pub(super) fn is_cert_prompt_pending(prompt_id: &str) -> bool {
+    pending_certs().lock_or_recover().contains_key(prompt_id)
+}
+
 /// What the verifier observed, read back by the connect path to build the
 /// `connected` event or a specific error message.
 #[derive(Debug, Default)]
@@ -88,6 +103,8 @@ pub(super) struct CertReport {
     /// Set to the seen fingerprint when the user - or a confirm timeout -
     /// refused a brand-new certificate.
     pub rejected: Option<String>,
+    /// The leaf would not parse, so the handshake was refused before prompting.
+    pub unparseable: bool,
 }
 
 /// SHA-256 over the leaf's DER bytes, colon-separated uppercase hex.
@@ -121,18 +138,20 @@ pub(super) fn fingerprints_match(a: &str, b: &str) -> bool {
 }
 
 /// RFC 4514 subject and issuer of a DER leaf, for the confirmation dialog.
-/// Unparseable certificates get placeholders rather than failing the connect:
-/// the fingerprint is what the trust decision rests on, and these two strings
-/// are only there to give the user something recognisable to look at.
-pub(super) fn certificate_names(der: &[u8]) -> (String, String) {
+///
+/// `None` when the leaf will not parse. The caller must treat that as fatal
+/// *before* prompting: `connect` needs the same parse to succeed for
+/// `extract_tls_server_public_key`, so degrading to a `<unparseable>`
+/// placeholder here would show the user a dialog, have them compare a
+/// fingerprint and confirm it, and only then fail the connect with a parse
+/// error. Fail first instead.
+pub(super) fn certificate_names(der: &[u8]) -> Option<(String, String)> {
     use x509_cert::der::Decode as _;
-    match x509_cert::Certificate::from_der(der) {
-        Ok(cert) => (
-            cert.tbs_certificate.subject.to_string(),
-            cert.tbs_certificate.issuer.to_string(),
-        ),
-        Err(_) => ("<unparseable>".to_owned(), "<unparseable>".to_owned()),
-    }
+    let cert = x509_cert::Certificate::from_der(der).ok()?;
+    Some((
+        cert.tbs_certificate.subject.to_string(),
+        cert.tbs_certificate.issuer.to_string(),
+    ))
 }
 
 /// Certificate verifier implementing the pin-or-ask policy.
@@ -179,7 +198,19 @@ impl ServerCertVerifier for TofuVerifier {
         _now: pki_types::UnixTime,
     ) -> Result<ServerCertVerified, rustls::Error> {
         let seen = fingerprint_sha256(end_entity.as_ref());
-        let (subject, issuer) = certificate_names(end_entity.as_ref());
+        // Parsed here, before any prompt, because `connect` needs the same
+        // parse to succeed to pull out the SubjectPublicKey for CredSSP.
+        // Deferring would mean prompting the user, having them compare a
+        // fingerprint and confirm it, and only then failing the connect.
+        let Some((subject, issuer)) = certificate_names(end_entity.as_ref()) else {
+            log::warn!(
+                "rdp: the server's leaf certificate does not parse; refusing fingerprint={seen}"
+            );
+            self.report.lock_or_recover().unparseable = true;
+            return Err(rustls::Error::General(
+                "rdp: the server's certificate could not be parsed".to_owned(),
+            ));
+        };
         {
             let mut report = self.report.lock_or_recover();
             report.seen = Some(seen.clone());
@@ -220,7 +251,7 @@ impl ServerCertVerifier for TofuVerifier {
             issuer,
         }));
 
-        if await_decision(&rx) {
+        if await_decision(&rx, CERT_CONFIRM_TIMEOUT) {
             log::info!("rdp: user confirmed new server certificate fingerprint={seen}");
             return Ok(ServerCertVerified::assertion());
         }
@@ -295,8 +326,11 @@ impl ServerCertVerifier for TofuVerifier {
 /// * `block_in_place` panics on a current-thread runtime, so the flavor is
 ///   checked. Outside a runtime entirely (unit tests) it falls through to the
 ///   plain blocking receive.
-fn await_decision(rx: &std::sync::mpsc::Receiver<bool>) -> bool {
-    let wait = || matches!(rx.recv_timeout(CERT_CONFIRM_TIMEOUT), Ok(true));
+///
+/// `timeout` is a parameter rather than reading `CERT_CONFIRM_TIMEOUT` directly
+/// so the timeout branch is testable without a two-minute test.
+fn await_decision(rx: &std::sync::mpsc::Receiver<bool>, timeout: Duration) -> bool {
+    let wait = || matches!(rx.recv_timeout(timeout), Ok(true));
     match tokio::runtime::Handle::try_current() {
         Ok(handle)
             if matches!(
@@ -404,8 +438,17 @@ pub(super) async fn upgrade(
 
 /// Turn a failed TLS upgrade into a specific, user-actionable message using the
 /// verifier's structured report, falling back to the raw rustls text.
+///
+/// Branch order matters: `unparseable` is checked first because the verifier
+/// returns before recording anything else, and `mismatch` / `rejected` are
+/// mutually exclusive (a pinned connect never prompts).
 pub(super) fn upgrade_error(report: &Mutex<CertReport>, raw: String) -> String {
     let report = report.lock_or_recover();
+    if report.unparseable {
+        return "rdp: the server's certificate could not be parsed, so it cannot be verified \
+                or pinned. The connection was aborted before any credential was sent."
+            .to_owned();
+    }
     if let Some(seen) = report.rejected.clone() {
         return format!(
             "rdp: server certificate not trusted: {seen} was not confirmed; \
@@ -476,11 +519,138 @@ mod tests {
         assert!(!fingerprints_match("", ""));
     }
 
+    /// An unparseable leaf must be `None`, so the verifier refuses it *before*
+    /// prompting. Degrading to a placeholder would show the user a dialog, have
+    /// them compare a fingerprint and confirm it, and only then fail the connect
+    /// on the same parse in `session::connect`.
     #[test]
-    fn unparseable_certificate_still_yields_labels() {
-        let (subject, issuer) = certificate_names(b"not a certificate");
-        assert_eq!(subject, "<unparseable>");
-        assert_eq!(issuer, "<unparseable>");
+    fn unparseable_certificate_is_rejected_not_labelled() {
+        assert!(certificate_names(b"not a certificate").is_none());
+        assert!(certificate_names(b"").is_none());
+    }
+
+    /// The three branches of the message a user actually acts on, in the order
+    /// `upgrade_error` checks them.
+    #[test]
+    fn upgrade_error_reports_each_cause() {
+        let raw = || "some rustls text".to_owned();
+
+        let clean = Mutex::new(CertReport::default());
+        assert_eq!(
+            upgrade_error(&clean, raw()),
+            "some rustls text",
+            "nothing recorded falls back to the transport error verbatim"
+        );
+
+        let unparseable = Mutex::new(CertReport {
+            unparseable: true,
+            ..CertReport::default()
+        });
+        let text = upgrade_error(&unparseable, raw());
+        assert!(text.contains("could not be parsed"), "got: {text}");
+        assert!(text.contains("before any credential was sent"));
+        assert!(
+            !text.contains("some rustls text"),
+            "the specific cause wins"
+        );
+
+        let rejected = Mutex::new(CertReport {
+            rejected: Some("AA:BB".to_owned()),
+            ..CertReport::default()
+        });
+        let text = upgrade_error(&rejected, raw());
+        assert!(text.contains("not trusted"), "got: {text}");
+        assert!(
+            text.contains("AA:BB"),
+            "names the fingerprint that was refused"
+        );
+
+        // The one a user has to act on: both values, and what to do about it.
+        let mismatch = Mutex::new(CertReport {
+            mismatch: Some(("AA:BB".to_owned(), "CC:DD".to_owned())),
+            ..CertReport::default()
+        });
+        let text = upgrade_error(&mismatch, raw());
+        assert!(text.contains("expected=AA:BB"), "got: {text}");
+        assert!(text.contains("server=CC:DD"));
+        assert!(
+            text.contains("clear the recorded fingerprint"),
+            "must say how to re-trust a legitimately rotated certificate"
+        );
+        assert!(
+            text.contains("man-in-the-middle"),
+            "and must say what it could mean if it was not a rotation"
+        );
+    }
+
+    /// The timeout arm. Runs outside any runtime, so `await_decision` takes the
+    /// plain blocking path rather than `block_in_place`, and a short timeout
+    /// keeps it fast.
+    #[test]
+    fn await_decision_times_out_as_a_rejection() {
+        let (_tx, rx) = std::sync::mpsc::channel::<bool>();
+        let started = std::time::Instant::now();
+        assert!(
+            !await_decision(&rx, Duration::from_millis(50)),
+            "silence is a rejection, never a default accept"
+        );
+        assert!(
+            started.elapsed() >= Duration::from_millis(50),
+            "it must actually wait, not return early"
+        );
+    }
+
+    #[test]
+    fn await_decision_takes_the_answer() {
+        let (tx, rx) = std::sync::mpsc::channel::<bool>();
+        tx.send(true).expect("buffered");
+        assert!(await_decision(&rx, Duration::from_secs(5)));
+
+        let (tx, rx) = std::sync::mpsc::channel::<bool>();
+        tx.send(false).expect("buffered");
+        assert!(!await_decision(&rx, Duration::from_secs(5)));
+    }
+
+    /// A dropped sender - the command never fired, or fired after the prompt was
+    /// already reaped - is a rejection, not a hang.
+    #[test]
+    fn await_decision_treats_a_dropped_sender_as_rejection() {
+        let (tx, rx) = std::sync::mpsc::channel::<bool>();
+        drop(tx);
+        assert!(!await_decision(&rx, Duration::from_secs(30)));
+    }
+
+    /// `build_verifier` parks a prompt only when nothing is pinned, and
+    /// `drop_pending_cert` clears it. This is the mechanism behind the three
+    /// `drop_pending_cert` calls on `connect`'s failure paths; those sites
+    /// themselves need a TLS handshake that fails mid-way, which is not
+    /// reachable from a unit test.
+    #[test]
+    fn a_parked_prompt_does_not_leak() {
+        let sink = EventSink::new(|_| Ok(()));
+
+        // Pinned: no prompt is possible, so nothing is parked.
+        let (_v, _r, pinned_id, needs_confirm) =
+            build_verifier(Some("AA:BB".to_owned()), sink.clone(), "host".to_owned());
+        assert!(!needs_confirm);
+        assert!(
+            !is_cert_prompt_pending(&pinned_id),
+            "a pinned connect must never park a prompt"
+        );
+
+        // First connect: parked, then released.
+        let (_v, _r, id, needs_confirm) = build_verifier(None, sink, "host".to_owned());
+        assert!(needs_confirm);
+        assert!(is_cert_prompt_pending(&id), "a first connect parks one");
+        drop_pending_cert(&id);
+        assert!(
+            !is_cert_prompt_pending(&id),
+            "the registry must be empty again after the connect fails"
+        );
+        // Idempotent: connect's success path also calls it after the verifier
+        // already consumed the entry.
+        drop_pending_cert(&id);
+        assert!(!is_cert_prompt_pending(&id));
     }
 
     /// The prompt registry hands a parked sender out exactly once, so a second
