@@ -139,7 +139,7 @@ pub fn spawn(command: String, cwd: Option<String>) -> Result<Arc<BackgroundProc>
 
 /// Direct-binary background spawn. Unlike [`spawn`], this never wraps the
 /// program in a shell. The tracked PID is the binary's own process, so
-/// `shell_bg_kill` actually terminates it. Use this for extension-bundled
+/// `shell_bg_kill` actually terminates it. Use this for bundled
 /// native sidecars where a leaked grandchild would keep talking to
 /// external systems (Discord IPC, etc.) after the parent thinks it's gone.
 pub fn spawn_direct(

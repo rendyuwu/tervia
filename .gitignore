@@ -63,10 +63,3 @@ REMOTE-ACCESS-SPEC.md
 FEATURE-STUDY.md
 # Exported theme files are personal / test artifacts, not repo content.
 *.tedi
-
-# Extensions are developed in this workspace but pushed to their own
-# repos (each one has its own .git, README, LICENSE, release CI). Keep
-# the working copies on disk for local iteration but never commit them
-# to the TEDI main repo.
-/extensions/*/
-!/extensions/README.md

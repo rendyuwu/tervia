@@ -75,7 +75,7 @@ fn redirect_host_blocked(url: &url::Url) -> bool {
 /// credentials. The URL host is resolved first so a hostname pointing into that
 /// space is caught as well. Loopback (localhost dev servers) and private LAN
 /// ranges stay allowed, so the preview and local-AI features keep working. The
-/// AI tools and extensions can reach this over raw IPC, so the guard lives in
+/// Callers reach this over raw IPC, so the guard lives in
 /// the backend rather than the webview.
 pub(crate) async fn reject_metadata_ssrf(url: &str) -> Result<(), String> {
     let parsed = url::Url::parse(url).map_err(|_| "invalid url".to_string())?;

@@ -17,8 +17,7 @@
 //!   `--help` / `--version`         → print inline, no spawn (fast - no
 //!                                     Tauri runtime boot for a 20-line
 //!                                     string).
-//!   `--update`, `ext`, `--extension`
-//!                                  → spawn TEDIApp.exe synchronously with
+//!   `--update`                    → spawn TEDIApp.exe synchronously with
 //!                                     `Stdio::inherit` so output streams
 //!                                     to the shell in real time and the
 //!                                     stub's exit code mirrors the child's.
@@ -111,16 +110,7 @@ fn resolve_gui_exe() -> Option<PathBuf> {
 /// (rather than open a window). Mirrors the routing in `lib::run`'s
 /// `handle_*_and_exit` short-circuits.
 fn is_cli_invocation(rest: &[String]) -> bool {
-    if rest.iter().any(|a| matches!(a.as_str(), "--update" | "-u")) {
-        return true;
-    }
-    if rest.iter().any(|a| a == "--extension") {
-        return true;
-    }
-    matches!(
-        rest.first().map(String::as_str),
-        Some("ext") | Some("theme")
-    )
+    rest.iter().any(|a| matches!(a.as_str(), "--update" | "-u"))
 }
 
 #[cfg(target_os = "windows")]

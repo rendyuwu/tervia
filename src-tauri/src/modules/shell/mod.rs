@@ -319,8 +319,8 @@ pub async fn shell_bg_spawn(
 /// Background spawn that bypasses the host shell. The tracked PID is the
 /// binary itself, so `shell_bg_kill` actually terminates the program rather
 /// than a `pwsh` / `bash` wrapper that leaks the real child. Use this for
-/// extension sidecars where a leaked grandchild would keep an external
-/// connection alive (e.g. Discord IPC) after the extension is disabled.
+/// sidecar processes where a leaked grandchild would keep an external
+/// connection alive after the parent is gone.
 #[tauri::command]
 pub async fn shell_bg_spawn_direct(
     state: tauri::State<'_, ShellState>,

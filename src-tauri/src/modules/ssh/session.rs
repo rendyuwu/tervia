@@ -300,7 +300,7 @@ impl SshSession {
             });
         }
         if let Ok(mut s) = self.mirror_sinks.lock() {
-            // Bound the live sink count (a buggy or hostile extension could call
+            // Bound the live sink count (a buggy caller could call
             // ssh_attach in a loop); evict the oldest so a reconnect storm can't
             // grow it without bound. The pump's fan also prunes dead sinks.
             const MAX_MIRROR_SINKS: usize = 8;

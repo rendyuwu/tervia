@@ -63,9 +63,7 @@ pub mod modules;
 /// stay in sync without a duplicate version constant.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-use modules::{
-    backup, cli, clipboard, extensions, format, fs, git, net, pty, pty_daemon, secrets, shell, ssh,
-};
+use modules::{backup, cli, clipboard, format, fs, git, net, pty, pty_daemon, secrets, shell, ssh};
 use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_window_state::StateFlags;
 
@@ -616,7 +614,6 @@ pub fn run() {
         .manage(shell::ShellState::default())
         .manage(secrets::SecretsState::default())
         .manage(ssh::SshState::default())
-        .manage(extensions::ExtensionsState::default())
         .invoke_handler(tauri::generate_handler![
             pty::pty_open,
             pty::pty_attach,
@@ -698,20 +695,6 @@ pub fn run() {
             ssh::sftp::ssh_sftp_create_dir,
             ssh::sftp::ssh_sftp_rename,
             ssh::sftp::ssh_sftp_delete,
-            extensions::commands::ext_list,
-            extensions::commands::ext_read_manifest,
-            extensions::commands::ext_read_asset,
-            extensions::commands::ext_read_asset_bytes,
-            extensions::commands::ext_install_from_zip,
-            extensions::commands::ext_install_from_github,
-            extensions::commands::ext_peek_zip,
-            extensions::commands::ext_peek_github,
-            extensions::commands::ext_check_update,
-            extensions::commands::ext_enable,
-            extensions::commands::ext_disable,
-            extensions::commands::ext_uninstall,
-            extensions::commands::github_head_sha,
-            extensions::commands::github_repo_text_files,
         ])
         .on_window_event(|window, event| {
             // Mirror main-window minimize/restore onto the settings child.
