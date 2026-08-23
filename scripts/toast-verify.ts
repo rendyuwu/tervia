@@ -8,7 +8,7 @@
  *   - a window that can `toast()` but renders no `<Toaster />`: toast listeners
  *     are a per-webview module Set, so the notification is dropped with no
  *     error anywhere (this is exactly how the Settings and float windows lost
- *     every extension-install and format-failure toast).
+ *     every format-failure toast).
  *
  * Source text, not imports: this file is JSX + a path alias + lucide, none of
  * which is worth booting for four structural facts.

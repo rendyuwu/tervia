@@ -110,16 +110,6 @@ url = "2"
 russh = { version = "0.60", default-features = false, features = ["ring", "flate2", "rsa"] }
 russh-sftp = "2.1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "net"] }
-# Extension system: zip extraction with path-traversal guards via
-# `ZipFile::enclosed_name()`. Tracks the same major line that
-# `tauri-plugin-updater` already pulls in (zip 4.x) so the build ships one
-# copy of the crate and the untrusted-archive parser stays on the maintained
-# line. Default features bring deflate/bzip2/zstd which cover released zips.
-zip = { version = "4", default-features = false, features = ["deflate"] }
-# SHA-256 for extension integrity hashing (used to surface a stable
-# fingerprint in the install-review dialog; not used as a trust anchor).
-sha2 = "0.10"
-hex = "0.4"
 # PBKDF2 + AES-256-GCM + CSPRNG for the passphrase-encrypted SSH connection
 # backup (`modules/backup.rs`). Already in the tree as russh's crypto backend
 # (`features = ["ring"]`), so this only promotes a transitive dependency to a

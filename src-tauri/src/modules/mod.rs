@@ -4,7 +4,6 @@ pub mod cli;
 pub mod cli_paint;
 pub mod clipboard;
 pub mod events;
-pub mod extensions;
 pub mod format;
 pub mod fs;
 pub mod git;

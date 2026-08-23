@@ -7,14 +7,14 @@
 ;   tedi.exe      console subsystem — built from tedi-cli/src/main.rs. This is
 ;                 what PowerShell / cmd invoke when the user types `tedi`.
 ;                 Dispatches `--help` / `--version` inline, runs `--update`
-;                 and `ext` synchronously with inherited stdio, detaches
+;                 synchronously with inherited stdio, detaches
 ;                 GUI launches. Fixes the long-standing PowerShell-doesn't-
 ;                 wait-for-GUI ordering bug where `tedi --help` printed
 ;                 below the next prompt and left the cursor garbled.
 ;
 ; On install:
-;   * Snapshot the user's app-data dir (history, settings, sessions,
-;     extensions, ...) to %TEMP% before the rest of the installer (or the
+;   * Snapshot the user's app-data dir (history, settings, sessions, ...)
+;     to %TEMP% before the rest of the installer (or the
 ;     previous uninstaller, which auto-update invokes in passive mode) gets
 ;     a chance to touch it. PREINSTALL runs before any file deletion.
 ;   * Drop `tedi.exe` (console stub) next to `TEDIApp.exe` via NSIS File

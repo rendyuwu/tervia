@@ -505,7 +505,7 @@ mod tests {
     }
 
     /// The headless `ext` / `theme` subcommands were removed; the help must
-    /// not keep advertising them or the extension registry URL.
+    /// not keep advertising them.
     #[test]
     fn help_text_drops_removed_subcommands() {
         let h = help_text();
