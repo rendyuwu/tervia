@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Tervia application mark. Source of truth for every raster in this
+  directory - regenerate with scripts/gen-icons.mjs after editing.
+
+  Deliberately not TEDI's mark: TEDI ships a solid slab "T" on #0057fe, and
+  Apache-2.0 section 6 does not license trademarks. This is a two-stroke
+  monogram whose stem curves into a terminal hook, on a teal-to-indigo
+  gradient. Treat it as a placeholder that is legally safe to ship, not as
+  finished brand work.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0f9e8e" />
+      <stop offset="1" stop-color="#3b3ba8" />
+    </linearGradient>
+  </defs>
+
+  <rect width="512" height="512" rx="112" fill="url(#bg)" />
+
+  <!--
+    Stroke width is 54 so the mark still resolves at 32x32, where a hairline
+    monogram turns to mush.
+  -->
+  <g fill="none" stroke="#ffffff" stroke-width="54" stroke-linecap="round">
+    <!-- Crossbar, detached from the stem so the two strokes read separately. -->
+    <path d="M120 146 H392" />
+    <!-- Stem, curving right into a terminal hook. -->
+    <path d="M256 214 V304 a62 62 0 0 0 62 62 h40" stroke-linejoin="round" />
+  </g>
+</svg>

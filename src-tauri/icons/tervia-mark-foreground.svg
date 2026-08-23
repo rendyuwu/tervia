@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Android adaptive-icon foreground layer: the glyph from tervia-mark.svg on a
+  transparent canvas, scaled into the 66% safe zone that launchers keep
+  visible after masking. The background comes from
+  android/values/ic_launcher_background.xml, not from here.
+
+  Generated output lives in android/mipmap-*/ic_launcher_foreground.png; run
+  scripts/gen-icons.mjs after editing.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <g transform="translate(256 256) scale(0.66) translate(-256 -256)">
+    <g fill="none" stroke="#ffffff" stroke-width="54" stroke-linecap="round">
+      <path d="M120 146 H392" />
+      <path d="M256 214 V304 a62 62 0 0 0 62 62 h40" stroke-linejoin="round" />
+    </g>
+  </g>
+</svg>
