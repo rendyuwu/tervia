@@ -60,7 +60,7 @@ function worstSurface(colors: ThemeColors, face: string): string | null {
  * input untouched when it passes. Called from `normalizeCustomTheme` (on read,
  * not on write: clamping mid-edit would fight the colour picker).
  *
- * This guarantee is what lets extensions read `--tedi-button-face` directly.
+ * This guarantee is what lets any surface read `--tedi-button-face` directly.
  */
 export function ensureVisibleButtonFace(colors: ThemeColors): ThemeColors {
   let out = colors;
