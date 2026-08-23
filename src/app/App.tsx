@@ -788,7 +788,6 @@ export default function App() {
     handleHeaderSelectEntry,
     handleHeaderCloseEntry,
     handleHeaderPinLeaf,
-    handleHeaderOpenExtensions,
     handleHeaderOpenSettings,
     handleHeaderConnectSsh,
     headerCanSplit,
@@ -834,7 +833,6 @@ export default function App() {
             onOpenFolder={openWorkspaceFolder}
             onSplit={splitActivePaneInActiveTab}
             canSplit={headerCanSplit}
-            onOpenExtensions={handleHeaderOpenExtensions}
             onOpenSettings={handleHeaderOpenSettings}
             onConnectSsh={handleHeaderConnectSsh}
             onMoveLeafToGroup={moveLeafToGroup}

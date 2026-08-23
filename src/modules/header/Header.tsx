@@ -14,7 +14,7 @@ import { ExtensionHeaderItems } from "@/modules/extensions/components/ExtensionH
 import type { SshConnection } from "@/modules/ssh/connections";
 import type { SshStatus } from "@/modules/ssh/status";
 import type { AiCliStatus } from "@/modules/terminal/lib/aiCliStatus";
-import { FolderOpen, PanelLeft, Puzzle, Settings } from "lucide-react";
+import { FolderOpen, PanelLeft, Settings } from "lucide-react";
 
 type Props = {
   tabs: Tab[];
@@ -44,7 +44,6 @@ type Props = {
   onSplit: (dir: "row" | "col") => void;
   /** True when the active tab still has room for another split. */
   canSplit: boolean;
-  onOpenExtensions: () => void;
   onOpenSettings: () => void;
   /** Open a saved SSH host as a new terminal tab. `opts.private` opens it
    *  pre-flagged as private (AI cannot see its contents or even existence). */
@@ -110,7 +109,6 @@ function HeaderImpl({
   onOpenFolder,
   onSplit,
   canSplit,
-  onOpenExtensions,
   onOpenSettings,
   onConnectSsh,
   onMoveLeafToGroup,
@@ -134,20 +132,6 @@ function HeaderImpl({
     ro.observe(el);
     return () => ro.disconnect();
   }, []);
-
-  const extensionsButton = (
-    <IconTooltip label="Extensions">
-      <Button
-        variant="ghost"
-        size="icon"
-        className={cn("text-muted-foreground", TOOLBAR_HOVER, "size-7 shrink-0 rounded-md")}
-        onClick={onOpenExtensions}
-        aria-label="Extensions"
-      >
-        <Puzzle size={16} strokeWidth={1.75} />
-      </Button>
-    </IconTooltip>
-  );
 
   const settingsButton = (
     <IconTooltip label="Settings">
@@ -216,7 +200,6 @@ function HeaderImpl({
 
         <SshMenu onConnect={onConnectSsh} />
         <ExtensionHeaderItems />
-        {extensionsButton}
         {settingsButton}
 
         {USE_CUSTOM_WINDOW_CONTROLS && (

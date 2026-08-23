@@ -4,14 +4,11 @@ import { Input } from "@/components/ui/input";
 import { Kbd, KbdGroup } from "@/components/ui/kbd";
 import { DESTRUCTIVE_ACTION } from "@/lib/toolbarButton";
 import { cn } from "@/lib/utils";
-import { commandsRegistry, keybindingsRegistry, useExtensionsStore } from "@/modules/extensions";
-import { useRegistry } from "@/modules/extensions/useRegistry";
 import { usePreferencesStore } from "@/modules/settings/preferences";
-import { setExtensionShortcuts, setShortcuts } from "@/modules/settings/store";
+import { setShortcuts } from "@/modules/settings/store";
 import {
   canonicalKeyFromEvent,
   getBindingTokens,
-  parseKeybindingString,
   SHORTCUTS,
   SHORTCUT_GROUPS,
   type KeyBinding,
@@ -100,7 +97,6 @@ export function ShortcutsSection() {
       </div>
 
       <div className="flex flex-col gap-8">
-        <ExtensionShortcutsGroup search={search} />
         {SHORTCUT_GROUPS.map((group) => {
           const items = filteredShortcuts.filter((s) => s.group === group);
           if (items.length === 0) return null;
@@ -325,99 +321,6 @@ function Recorder({
     <div className="bg-accent/50 ring-accent flex items-center gap-2 rounded px-2 py-1 text-[11px] ring-1">
       <span className="animate-pulse font-medium">Recording…</span>
       <span className="text-muted-foreground">(Esc to cancel)</span>
-    </div>
-  );
-}
-
-/**
- * Renders one row per `keybindingsRegistry` entry. Row, recorder, and
- * persistence to `preferences.extensionShortcuts` are generic. Hidden when
- * no extension contributes shortcuts.
- */
-function ExtensionShortcutsGroup({ search }: { search: string }) {
-  const keybindingEntries = useRegistry(keybindingsRegistry);
-  const commandEntries = useRegistry(commandsRegistry);
-  const extensions = useExtensionsStore((s) => s.list);
-  const userOverrides = usePreferencesStore((s) => s.extensionShortcuts);
-  const [recordingId, setRecordingId] = useState<string | null>(null);
-
-  const rows = useMemo(() => {
-    const lower = search.trim().toLowerCase();
-    return keybindingEntries.flatMap(({ extensionId, item }) => {
-      const command = commandEntries.find(
-        (c) => c.extensionId === extensionId && c.item.id === item.command,
-      );
-      const ext = extensions.find((e) => e.id === extensionId);
-      const title = command?.item.title ?? item.command;
-      const extName = ext?.manifest.name ?? extensionId;
-      if (
-        lower.length > 0 &&
-        !title.toLowerCase().includes(lower) &&
-        !extName.toLowerCase().includes(lower)
-      ) {
-        return [];
-      }
-      const defaultBinding = parseKeybindingString(item.key);
-      return [
-        {
-          // Composite key in case two extensions share a command id.
-          rowId: `${extensionId}:${item.command}`,
-          extensionId,
-          commandId: item.command,
-          title,
-          extName,
-          defaultBinding,
-        },
-      ];
-    });
-  }, [keybindingEntries, commandEntries, extensions, search]);
-
-  if (rows.length === 0) return null;
-
-  const writeOverrides = (next: Record<string, KeyBinding[]>): void => {
-    void setExtensionShortcuts(next);
-  };
-
-  return (
-    <div className="flex flex-col gap-3">
-      <h3 className="text-muted-foreground text-[11px] font-semibold tracking-wider uppercase">
-        Extensions
-      </h3>
-      <div className="divide-border/40 border-border/60 bg-card/40 flex flex-col divide-y overflow-hidden rounded-lg border">
-        {rows.map((row) => {
-          const userBindings = userOverrides[row.commandId];
-          const effective = userBindings ?? (row.defaultBinding ? [row.defaultBinding] : []);
-          const isModified = userBindings !== undefined;
-          const isRecording = recordingId === row.rowId;
-          // Reuse ShortcutRow with a synthetic Shortcut. The row only reads label, defaultBindings, and readOnly.
-          const fakeShortcut: Shortcut = {
-            id: row.rowId as ShortcutId, // typing only; never compared
-            label: `${row.extName} · ${row.title}`,
-            group: "General",
-            defaultBindings: row.defaultBinding ? [row.defaultBinding] : [],
-          };
-          return (
-            <ShortcutRow
-              key={row.rowId}
-              shortcut={fakeShortcut}
-              isRecording={isRecording}
-              onStartRecording={() => setRecordingId(row.rowId)}
-              onStopRecording={() => setRecordingId(null)}
-              onRecord={(b) => {
-                writeOverrides({ ...userOverrides, [row.commandId]: [b] });
-                setRecordingId(null);
-              }}
-              onClear={() => writeOverrides({ ...userOverrides, [row.commandId]: [] })}
-              onReset={() => {
-                const next = { ...userOverrides };
-                delete next[row.commandId];
-                writeOverrides(next);
-              }}
-              userBindings={isModified ? effective : undefined}
-            />
-          );
-        })}
-      </div>
     </div>
   );
 }

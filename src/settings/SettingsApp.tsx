@@ -5,7 +5,6 @@ import { Toaster } from "@/components/ui/toast";
 import { IS_MAC, USE_CUSTOM_WINDOW_CONTROLS } from "@/lib/platform";
 import { IPC_EVENTS } from "@/lib/ipc";
 import type { SettingsTab } from "@/modules/settings/openSettingsWindow";
-import { useExtensionsStore } from "@/modules/extensions";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import {
@@ -18,7 +17,7 @@ import {
   useEffect,
   useState,
 } from "react";
-import { Code, Info, Keyboard, Palette, Puzzle, Settings, X, type LucideIcon } from "lucide-react";
+import { Code, Info, Keyboard, Palette, Settings, X, type LucideIcon } from "lucide-react";
 
 const GeneralSection = lazy(() =>
   import("./sections/GeneralSection").then((m) => ({ default: m.GeneralSection })),
@@ -31,9 +30,6 @@ const ThemeSection = lazy(() =>
 );
 const ShortcutsSection = lazy(() =>
   import("./sections/ShortcutsSection").then((m) => ({ default: m.ShortcutsSection })),
-);
-const ExtensionsSection = lazy(() =>
-  import("./sections/ExtensionsSection").then((m) => ({ default: m.ExtensionsSection })),
 );
 const AboutSection = lazy(() =>
   import("./sections/AboutSection").then((m) => ({ default: m.AboutSection })),
@@ -49,7 +45,6 @@ const TABS: {
   { id: "code-editor", label: "Code Editor", icon: Code, component: CodeEditorSection },
   { id: "theme", label: "Theme", icon: Palette, component: ThemeSection },
   { id: "shortcuts", label: "Shortcuts", icon: Keyboard, component: ShortcutsSection },
-  { id: "extensions", label: "Extensions", icon: Puzzle, component: ExtensionsSection },
   { id: "about", label: "About", icon: Info, component: AboutSection },
 ];
 
@@ -120,13 +115,6 @@ export function SettingsApp() {
   useEffect(() => {
     void init();
   }, [init]);
-
-  // Seed extension contribution registries so the Extensions and Shortcuts
-  // tabs can render every installed extension's declarations. The Settings
-  // window doesn't activate extensions; `init()` handles non-main-window mode.
-  useEffect(() => {
-    void useExtensionsStore.getState().init();
-  }, []);
 
   useEffect(() => {
     const apply = (detail: string) => {
@@ -206,8 +194,8 @@ export function SettingsApp() {
           </div>
         </main>
         {/* Each webview owns its own toast listener set, so a window that can
-            fire a toast must render its own Toaster. Without this, every
-            extension install / update / error toast in here was dropped. */}
+            fire a toast must render its own Toaster. Without this, every toast
+            raised in here was dropped. */}
         <Toaster />
       </div>
     </TooltipProvider>
