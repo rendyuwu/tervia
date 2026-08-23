@@ -10,7 +10,6 @@ import { SearchInline, type SearchInlineHandle, type SearchTarget } from "./Sear
 import type { Tab } from "@/modules/tabs";
 import { TabBar } from "@/modules/tabs";
 import { SshMenu } from "@/modules/ssh/SshMenu";
-import { ExtensionHeaderItems } from "@/modules/extensions/components/ExtensionHeaderItems";
 import type { SshConnection } from "@/modules/ssh/connections";
 import type { SshStatus } from "@/modules/ssh/status";
 import type { AiCliStatus } from "@/modules/terminal/lib/aiCliStatus";
@@ -199,7 +198,6 @@ function HeaderImpl({
         <span className="bg-border mx-1 h-5 w-px shrink-0" />
 
         <SshMenu onConnect={onConnectSsh} />
-        <ExtensionHeaderItems />
         {settingsButton}
 
         {USE_CUSTOM_WINDOW_CONTROLS && (

@@ -1,13 +1,6 @@
 import { memo } from "react";
 import { IconTooltip } from "@/components/ui/icon-tooltip";
-import {
-  BuiltinSectionRightToggles,
-  ExtensionStatusItems,
-  RightPanelActionToggles,
-  RightPanelCompactToggles,
-  RightPanelDefaultToggles,
-  SidebarSectionRightToggles,
-} from "@/modules/extensions";
+import { RightSectionToggles } from "@/modules/rightPanel";
 import { useSshRightPanelStore } from "@/modules/ssh/sshRightPanelStore";
 import { SshRoutePill } from "@/modules/ssh/SshRoutePill";
 import type { SshRouteHop } from "@/modules/ssh/status";
@@ -44,8 +37,8 @@ type Props = {
 /** One status-bar group. The hairline that separates it from the group before
  *  it is drawn by `.sb-group` in globals.css, which hides an empty group and
  *  only gives a group its divider when a non-empty one precedes it - so a group
- *  whose children all render null (zoom at 100%, no extension items, agent
- *  idle) never leaves a dangling line behind. */
+ *  whose children all render null (zoom at 100%, nothing docked right) never
+ *  leaves a dangling line behind. */
 function Group({ children }: { children: React.ReactNode }) {
   return <div className="sb-group flex shrink-0 items-center gap-1.5">{children}</div>;
 }
@@ -84,11 +77,10 @@ function StatusBarInner({
           sshSessionId={sshSessionId}
         />
       </div>
-      {/* Left to right: the update prompt, the zoom pill, things you READ, then
-          things you CLICK (actions first, panel toggles after). Zoom is only on
-          screen while zoomed, and that is where it is wanted. Compact mode keeps
-          only what you glance at - the update prompt and the extension meters -
-          and folds the rest away. */}
+      {/* Left to right: the update prompt, the zoom pill, then the panel
+          toggles you CLICK. Zoom is only on screen while zoomed, and that is
+          where it is wanted. Compact mode keeps only what you glance at - the
+          update prompt - and folds the rest away. */}
       <div className="flex shrink-0 items-center gap-1.5">
         {/* 1. Update. Leftmost and alone: it is the one thing here that asks
             something of you, and it is absent the rest of the time. */}
@@ -96,39 +88,22 @@ function StatusBarInner({
           <UpdaterPill />
         </Group>
 
-        {/* 2. Zoom, immediately left of the extension meters. Its own group so
-            the hairline keeps it off them; it renders null at 100%, and
-            `.sb-group:empty` drops the divider with it. */}
+        {/* 2. Zoom. Its own group so the hairline keeps it off its neighbours;
+            it renders null at 100%, and `.sb-group:empty` drops the divider
+            with it. */}
         {compact ? null : (
           <Group>
             <ZoomControl />
           </Group>
         )}
 
-        {/* 3. Status: read-only readouts contributed by extensions - usage
-            meters, Discord, Remote Access. */}
-        <Group>
-          <ExtensionStatusItems kind="status" metersOnly={compact} />
-        </Group>
-
-        {/* 4a. Actions: a click does the thing, nothing slides out. */}
-        {compact ? null : (
-          <Group>
-            <ExtensionStatusItems kind="action" />
-            <RightPanelActionToggles />
-          </Group>
-        )}
-
-        {/* 4b. Panel triggers: a click opens (or closes) a side panel. Always
+        {/* 3. Panel triggers: a click opens (or closes) a side panel. Always
             has content (the compact toggle), so it always carries the last
             divider when anything precedes it. */}
         <Group>
           {compact ? null : (
             <>
-              <RightPanelCompactToggles />
-              <SidebarSectionRightToggles />
-              <BuiltinSectionRightToggles />
-              <RightPanelDefaultToggles />
+              <RightSectionToggles />
               <SshRightOpenButton hasAnySshLeaf={hasAnySshLeaf} />
             </>
           )}

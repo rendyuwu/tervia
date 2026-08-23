@@ -1,6 +1,5 @@
 import { ResizablePanel } from "@/components/ui/resizable";
 import { cn } from "@/lib/utils";
-import { ExtensionTabStack } from "@/modules/extensions/components/ExtensionTabStack";
 import { PaneStack } from "@/modules/panes";
 import { type AiCliStatus } from "@/modules/terminal/lib/aiCliStatus";
 import { type SshConnectionBinding, type SshStatus } from "@/modules/ssh/status";
@@ -14,7 +13,6 @@ type PaneHandles = ReturnType<typeof usePaneHandles>;
 type Props = {
   tabs: Tab[];
   activeId: number;
-  activeTab: Tab | undefined;
   activePaneTab: PaneTab | null;
   uiZoom: number;
   paneHandles: PaneHandles;
@@ -34,23 +32,18 @@ type Props = {
   /** Detected local URL for the focused pane header's "open preview" globe. */
   detectedBrowserUrl: string | null;
   onOpenPreview: () => void;
-  hasExtensionTab: boolean;
   /** Persist a split node's per-child size percentages after a divider drag. */
   onSplitSizes: (splitId: number, sizes: number[]) => void;
 } & Pick<TabsApi, "movePaneLeafToEdge" | "moveExtTabToPane" | "setLeafTerminalTheme">;
 
 /**
- * The center workspace column. Stacks the live PaneStack and the four overlay
- * surfaces (extension tabs) in one relative box, each
- * shown/hidden by the active tab kind via the `invisible`/`pointer-events-none`
- * pattern (kept mounted so their session/scroll state survives a tab switch).
+ * The center workspace column. Renders the live PaneStack.
  * Lifted out of App verbatim; the per-leaf handlers arrive bundled as
  * `paneHandles`, with the chrome/ssh/tabs-api handlers threaded in alongside.
  */
 export function WorkspaceArea({
   tabs,
   activeId,
-  activeTab,
   activePaneTab,
   uiZoom,
   paneHandles,
@@ -66,7 +59,6 @@ export function WorkspaceArea({
   onToggleMdPreview,
   detectedBrowserUrl,
   onOpenPreview,
-  hasExtensionTab,
   onSplitSizes,
   movePaneLeafToEdge,
   moveExtTabToPane,
@@ -123,17 +115,6 @@ export function WorkspaceArea({
           </div>
           {/* The Board is a pane LEAF, not an overlay surface: it renders
               inside PaneStack above, with the same header every other pane has. */}
-          {hasExtensionTab ? (
-            <div
-              className={cn(
-                "absolute inset-0",
-                activeTab?.kind !== "ext" && "pointer-events-none invisible",
-              )}
-              aria-hidden={activeTab?.kind === "ext" ? "false" : "true"}
-            >
-              <ExtensionTabStack tabs={tabs} activeId={activeId} />
-            </div>
-          ) : null}
         </div>
       </div>
     </ResizablePanel>

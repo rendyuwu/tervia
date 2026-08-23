@@ -1,46 +1,39 @@
 /**
- * Status-bar toggle buttons for BUILT-IN sidebar sections (Files / Workspaces)
- * that the user has docked to the right slot. Mirrors `SidebarSectionRightToggles`
- * (extension sections) and `ScmRightOpenButton`: an icon-only button that
- * opens/closes the section in the shared right slot, shown while its placement is
- * "right" (never removed, so the row doesn't reflow). The open state reads active.
+ * Status-bar toggle buttons for the sidebar sections the user has docked to the
+ * right column. Mirrors `SshRightOpenButton`: an icon-only button that
+ * opens/closes the section in the column, shown while its placement is "right"
+ * (never removed, so the row doesn't reflow). The open state reads active.
  */
 import { IconTooltip } from "@/components/ui/icon-tooltip";
 import { cn } from "@/lib/utils";
 import { FolderTree, LayoutDashboard, type LucideIcon } from "lucide-react";
 
-import { isRightPanelOpen, useRightPanelStore } from "../rightPanelStore";
-import {
-  BUILTIN_SECTION_EXT,
-  MOVABLE_BUILTIN_SECTIONS,
-  sectionPanelId,
-  useSidebarPlacementStore,
-  type BuiltinSectionId,
-} from "../sidebarPlacementStore";
+import { MOVABLE_SECTIONS, useSidebarPlacementStore, type RightSectionId } from "./placement";
+import { isRightSectionOpen, useRightColumnStore } from "./store";
 
-const ICONS: Record<BuiltinSectionId, LucideIcon> = {
+const ICONS: Record<RightSectionId, LucideIcon> = {
   files: FolderTree,
   workspaces: LayoutDashboard,
 };
 
-export function BuiltinSectionRightToggles() {
+export function RightSectionToggles() {
   const placement = useSidebarPlacementStore((s) => s.placement);
-  const panels = useRightPanelStore((s) => s.panels);
-  const toggle = useRightPanelStore((s) => s.toggle);
+  const open = useRightColumnStore((s) => s.open);
+  const toggle = useRightColumnStore((s) => s.toggleSection);
 
-  const moved = MOVABLE_BUILTIN_SECTIONS.filter((s) => placement[s.id] === "right");
+  const moved = MOVABLE_SECTIONS.filter((s) => placement[s.id] === "right");
   if (moved.length === 0) return null;
 
   return (
     <div className="flex items-center gap-1.5">
       {moved.map(({ id, title }) => {
         const Icon = ICONS[id];
-        const isOpen = isRightPanelOpen(panels, BUILTIN_SECTION_EXT, sectionPanelId(id));
+        const isOpen = isRightSectionOpen(open, id);
         return (
           <IconTooltip key={id} label={`${isOpen ? "Close" : "Open"} ${title}`} side="top">
             <button
               type="button"
-              onClick={() => toggle(BUILTIN_SECTION_EXT, sectionPanelId(id))}
+              onClick={() => toggle(id)}
               aria-label={`${isOpen ? "Close" : "Open"} ${title}`}
               aria-pressed={isOpen}
               className={cn(

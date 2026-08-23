@@ -1,20 +1,15 @@
 import { ResizablePanel } from "@/components/ui/resizable";
 import { FileExplorer } from "@/modules/explorer";
 import {
-  BUILTIN_SECTION_EXT,
-  ExtensionSidebarSection,
-  MOVABLE_BUILTIN_SECTIONS,
-  sectionPanelId,
-  sidebarSectionsRegistry,
-  useRegistry,
-  useRightPanelStore,
+  isMovableSection,
+  useRightColumnStore,
   useSidebarPlacementStore,
-  type BuiltinSectionId,
-} from "@/modules/extensions";
+  type RightSectionId,
+} from "@/modules/rightPanel";
 import { type SshStatus } from "@/modules/ssh/status";
 import { type Tab } from "@/modules/tabs";
 import { WorkspacesPanel } from "@/modules/workspaces";
-import { Suspense, useMemo, type ReactNode, type RefObject } from "react";
+import { Suspense, type ReactNode, type RefObject } from "react";
 import type { PanelImperativeHandle } from "react-resizable-panels";
 import { type TabsApi } from "../hooks/tabsApi";
 import { SshFileExplorer } from "./lazyPanels";
@@ -63,9 +58,7 @@ type Props = {
   sshStatuses: Map<number, SshStatus>;
 } & Pick<TabsApi, "openBoardTab">;
 
-// The reorderable built-in sidebar sections, in canonical order. Extension
-// sections (keyed `xsec:<extId>:<sectionId>`) are appended dynamically — they
-// exist only while their extension is active.
+// The reorderable sidebar sections, in canonical order.
 const BUILTIN_KEYS = ["files", "ssh", "workspaces"] as const;
 type BuiltinKey = (typeof BUILTIN_KEYS)[number];
 const BUILTIN_TITLES: Record<BuiltinKey, string> = {
@@ -80,24 +73,14 @@ const BUILTIN_DEFAULT_SIZE: Record<BuiltinKey, string> = {
   ssh: "25%",
   workspaces: "12%",
 };
-const EXT_DEFAULT_SIZE = "20%";
-
-const EXT_KEY_PREFIX = "xsec:";
-const extSectionKey = (extensionId: string, sectionId: string): string =>
-  `${EXT_KEY_PREFIX}${extensionId}:${sectionId}`;
-
-/** The built-in section `key` is, when it is one that may be docked right. */
-const movableBuiltin = (key: string): BuiltinSectionId | null =>
-  MOVABLE_BUILTIN_SECTIONS.find((s) => s.id === key)?.id ?? null;
-
 // Persisted in localStorage (sidebar lives in the main window only).
 const ORDER_LS_KEY = "tedi:sidebar:sectionOrder";
 
 /**
- * The left sidebar column. Sections (Files, Remote/SSH, Source Control,
- * Workspaces) are stacked resizable panels, collapsible to their header and
- * drag-reorderable by the grip in that header - all of which lives in the
- * shared `SectionStack`, so the right column behaves identically.
+ * The left sidebar column. Sections (Files, Remote/SSH, Workspaces) are stacked
+ * resizable panels, collapsible to their header and drag-reorderable by the grip
+ * in that header - all of which lives in the shared `SectionStack`, so the right
+ * column behaves identically.
  */
 export function AppSidebar({
   sidebarRef,
@@ -125,54 +108,28 @@ export function AppSidebar({
   sshStatuses,
   openBoardTab,
 }: Props) {
-  // Extension-contributed sections (present only while their extension is
-  // active). Keyed `xsec:<extId>:<sectionId>`, mapped back to their descriptor.
-  const extEntries = useRegistry(sidebarSectionsRegistry);
-  const extByKey = useMemo(() => {
-    const m = new Map<
-      string,
-      { extensionId: string; section: (typeof extEntries)[number]["item"] }
-    >();
-    for (const { extensionId, item } of extEntries) {
-      m.set(extSectionKey(extensionId, item.id), { extensionId, section: item });
-    }
-    return m;
-  }, [extEntries]);
-
   const sshVisible = hasAnySshLeaf && !sshInRightPanel;
-  // Extension sections moved to the right slot (placement === "right") leave the
-  // left sidebar; they're reachable from a status-bar icon instead.
+  // A section moved to the right column (placement === "right") leaves the left
+  // sidebar; it's reachable from a status-bar icon instead.
   const placement = useSidebarPlacementStore((s) => s.placement);
 
-  // Dock a built-in section (Files / Workspaces) into the right column,
-  // mirroring how SSH / extension sections move right: persist
-  // the placement (so AppSidebar drops it from the left) and open it in the
-  // right column via the shared right-panel store.
-  const moveSectionRight = (key: BuiltinSectionId) => {
+  // Dock a section (Files / Workspaces) into the right column, mirroring how SSH
+  // moves right: persist the placement (so AppSidebar drops it from the left) and
+  // open it in the right column via the shared right-column store.
+  const moveSectionRight = (key: RightSectionId) => {
     useSidebarPlacementStore.getState().moveRight(key);
-    useRightPanelStore.getState().open(BUILTIN_SECTION_EXT, sectionPanelId(key));
+    useRightColumnStore.getState().openSection(key);
   };
 
   /**
    * Drag-to-dock: a section handed to the right column by dragging its grip
    * across, rather than by its header's "Move to right panel" button. The rule
    * for WHICH sections may go is read off the same list the move BUTTON uses
-   * (`MOVABLE_BUILTIN_SECTIONS` / the section's `movableToRight`), so the two
-   * routes can never disagree.
+   * (`MOVABLE_SECTIONS`), so the two routes can never disagree.
    */
-  const canDockRight = (key: string): boolean =>
-    movableBuiltin(key) !== null || !!extByKey.get(key)?.section.movableToRight;
   const dockRight = (key: string): void => {
-    const builtin = movableBuiltin(key);
-    if (builtin) {
-      moveSectionRight(builtin);
-      return;
-    }
-    const ext = extByKey.get(key);
-    if (!ext) return;
-    // Same pair ExtensionSidebarSection's own move button fires.
-    useSidebarPlacementStore.getState().moveRight(key);
-    useRightPanelStore.getState().open(ext.extensionId, sectionPanelId(ext.section.id));
+    if (!isMovableSection(key)) return;
+    moveSectionRight(key);
   };
 
   const renderBuiltin = (key: BuiltinKey, controls: ReactNode, collapsed: boolean): ReactNode => {
@@ -241,22 +198,6 @@ export function AppSidebar({
       render: (controls, collapsed) => renderBuiltin(key, controls, collapsed),
     });
   }
-  for (const [key, ext] of extByKey) {
-    if (placement[key] === "right") continue;
-    sections.push({
-      key,
-      title: ext.section.title,
-      defaultSize: EXT_DEFAULT_SIZE,
-      render: (controls, collapsed) => (
-        <ExtensionSidebarSection
-          extensionId={ext.extensionId}
-          section={ext.section}
-          dragHandle={controls}
-          collapsed={collapsed}
-        />
-      ),
-    });
-  }
 
   return (
     <ResizablePanel
@@ -287,7 +228,7 @@ export function AppSidebar({
           orderStorageKey={ORDER_LS_KEY}
           idPrefix="sidebar"
           column="left"
-          canMoveColumn={canDockRight}
+          canMoveColumn={isMovableSection}
           onMoveColumn={dockRight}
         />
       </div>

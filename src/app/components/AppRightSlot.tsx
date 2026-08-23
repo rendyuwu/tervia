@@ -1,29 +1,21 @@
 import { ResizableHandle, ResizablePanel } from "@/components/ui/resizable";
 import {
-  BUILTIN_SECTION_EXT,
-  panelsRegistry,
-  parseSectionPanelId,
-  RightPanelHost,
-  sectionPanelId,
-  undockTarget,
-  sidebarSectionsRegistry,
-  useRegistry,
-  useRightPanelStore,
+  isMovableSection,
+  useRightColumnStore,
   useSidebarPlacementStore,
-  type ActivePanel,
-  type BuiltinSectionId,
-} from "@/modules/extensions";
+  type RightSectionId,
+} from "@/modules/rightPanel";
 import { FileExplorer } from "@/modules/explorer";
 import { WorkspacesPanel } from "@/modules/workspaces";
 import { type SshStatus } from "@/modules/ssh/status";
 import { type Tab } from "@/modules/tabs";
-import { Suspense, type ReactNode, type RefObject } from "react";
+import { Suspense, type RefObject } from "react";
 import { type TabsApi } from "../hooks/tabsApi";
 import { SshFileExplorer } from "./lazyPanels";
-import { SectionStack, TALL_HEADER_COLLAPSED_SIZE, type StackSection } from "./SectionStack";
+import { SectionStack, type StackSection } from "./SectionStack";
 
 type Props = {
-  rightPanels: ActivePanel[];
+  rightSections: RightSectionId[];
   sshRightOpen: boolean;
   explorerRoot: string | null;
   onPathDeleted: (path: string) => void;
@@ -69,14 +61,14 @@ const PANEL_DEFAULT_SIZE = "25%";
 /** Move a docked section back to the left sidebar (undocks) vs just closing it
  *  (keeps the dock; the status-bar toggle reopens it) - mirrors SSH. Module
  *  scope because it reads both stores imperatively and closes over nothing. */
-function dockLeft(key: BuiltinSectionId): void {
+function dockLeft(key: RightSectionId): void {
   useSidebarPlacementStore.getState().moveLeft(key);
-  useRightPanelStore.getState().close(BUILTIN_SECTION_EXT, sectionPanelId(key));
+  useRightColumnStore.getState().closeSection(key);
 }
 
 /**
- * The right column: Remote, right-docked sidebar sections and extension
- * panels, STACKED rather than mutually exclusive.
+ * The right column: Remote plus the right-docked sidebar sections, STACKED
+ * rather than mutually exclusive.
  *
  * It renders through the same `SectionStack` as the left sidebar, so every
  * surface here is resizable against its neighbours, minimizable to its header,
@@ -85,7 +77,7 @@ function dockLeft(key: BuiltinSectionId): void {
  * is empty.
  */
 export function AppRightSlot({
-  rightPanels,
+  rightSections,
   sshRightOpen,
   explorerRoot,
   onPathDeleted,
@@ -96,11 +88,6 @@ export function AppRightSlot({
   workspacesSection,
   openBoardTab,
 }: Props) {
-  // Titles for the stack's drag overlay + aria labels. Extension panels and
-  // right-docked extension sections both name themselves in their manifest.
-  const extPanels = useRegistry(panelsRegistry);
-  const extSections = useRegistry(sidebarSectionsRegistry);
-
   const sections: StackSection[] = [];
 
   if (sshRightOpen) {
@@ -126,14 +113,8 @@ export function AppRightSlot({
     });
   }
 
-  for (const panel of rightPanels) {
-    // A built-in section (Files / Workspaces) docked into the column is flagged
-    // by the sentinel extensionId; it is a plain React panel, not an extension one.
-    const builtin =
-      panel.extensionId === BUILTIN_SECTION_EXT
-        ? (parseSectionPanelId(panel.panelId) as BuiltinSectionId | null)
-        : null;
-    if (builtin === "files") {
+  for (const docked of rightSections) {
+    if (docked === "files") {
       sections.push({
         key: "files",
         title: "Files",
@@ -151,9 +132,7 @@ export function AppRightSlot({
               dragHandle={controls}
               collapsed={collapsed}
               onMoveToLeft={() => dockLeft("files")}
-              onClose={() =>
-                useRightPanelStore.getState().close(BUILTIN_SECTION_EXT, panel.panelId)
-              }
+              onClose={() => useRightColumnStore.getState().closeSection("files")}
               hideSort
             />
           </div>
@@ -161,7 +140,7 @@ export function AppRightSlot({
       });
       continue;
     }
-    if (builtin === "workspaces") {
+    if (docked === "workspaces") {
       sections.push({
         key: "workspaces",
         title: "Workspaces",
@@ -183,48 +162,12 @@ export function AppRightSlot({
               sshStatuses={workspacesSection.sshStatuses}
               dragHandle={controls}
               onMoveToLeft={() => dockLeft("workspaces")}
-              onClosePanel={() =>
-                useRightPanelStore.getState().close(BUILTIN_SECTION_EXT, panel.panelId)
-              }
+              onClosePanel={() => useRightColumnStore.getState().closeSection("workspaces")}
             />
           </div>
         ),
       });
-      continue;
     }
-    // A right-docked extension SECTION carries the `__section__:` sentinel and
-    // is named by the sidebar-section registry; a manifest panel by the panel
-    // registry. Both fall back to the raw id so the grip is never unlabelled.
-    // The collapsed height follows whichever header the host will draw: the
-    // section's own h-8, the host's h-11, or the slim grip rail a
-    // `hideHostHeader` panel gets.
-    const sectionId = parseSectionPanelId(panel.panelId);
-    const meta = sectionId
-      ? null
-      : extPanels.find((p) => p.extensionId === panel.extensionId && p.item.id === panel.panelId);
-    const title = sectionId
-      ? (extSections.find((s) => s.extensionId === panel.extensionId && s.item.id === sectionId)
-          ?.item.title ?? sectionId)
-      : (meta?.item.title ?? panel.panelId);
-    sections.push({
-      key: `xp:${panel.extensionId}:${panel.panelId}`,
-      title,
-      defaultSize: PANEL_DEFAULT_SIZE,
-      // A `hideHostHeader` panel is collapsed to the stack's default (an h-8
-      // header + the card borders), because that is now what stays visible: it
-      // wears the grip + chevron on its OWN header row via the controls slot.
-      // The old 22px was sized for the slim rail that row replaced, and would
-      // clip the panel's header in half.
-      collapsedSize:
-        sectionId || meta?.item.hideHostHeader ? undefined : TALL_HEADER_COLLAPSED_SIZE,
-      render: (controls: ReactNode) => (
-        <RightPanelHost
-          extensionId={panel.extensionId}
-          panelId={panel.panelId}
-          dragHandle={controls}
-        />
-      ),
-    });
   }
 
   if (sections.length === 0) return null;
@@ -240,12 +183,9 @@ export function AppRightSlot({
             idPrefix="right"
             chrome={false}
             column="right"
-            canMoveColumn={(key) => undockTarget(key) !== null}
+            canMoveColumn={isMovableSection}
             onMoveColumn={(key) => {
-              const t = undockTarget(key);
-              if (!t) return;
-              useSidebarPlacementStore.getState().moveLeft(t.placement);
-              useRightPanelStore.getState().close(t.extensionId, t.panelId);
+              if (isMovableSection(key)) dockLeft(key);
             }}
           />
         </div>
