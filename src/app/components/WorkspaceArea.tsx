@@ -34,7 +34,7 @@ type Props = {
   onOpenPreview: () => void;
   /** Persist a split node's per-child size percentages after a divider drag. */
   onSplitSizes: (splitId: number, sizes: number[]) => void;
-} & Pick<TabsApi, "movePaneLeafToEdge" | "moveExtTabToPane" | "setLeafTerminalTheme">;
+} & Pick<TabsApi, "movePaneLeafToEdge" | "setLeafTerminalTheme">;
 
 /**
  * The center workspace column. Renders the live PaneStack.
@@ -61,7 +61,6 @@ export function WorkspaceArea({
   onOpenPreview,
   onSplitSizes,
   movePaneLeafToEdge,
-  moveExtTabToPane,
   setLeafTerminalTheme,
 }: Props) {
   return (
@@ -104,7 +103,6 @@ export function WorkspaceArea({
               onFocusLeaf={paneHandles.handleFocusLeaf}
               onMovePaneLeaf={movePaneLeafToEdge}
               onCloseLeafRequest={paneHandles.handlePaneHeaderClose}
-              onSplitWithExtTab={moveExtTabToPane}
               onSetTerminalTheme={setLeafTerminalTheme}
               onSplitSizes={onSplitSizes}
               sshStatuses={sshStatuses}

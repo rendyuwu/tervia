@@ -153,7 +153,7 @@ export function applyMonoFontVar(id: string): void {
  * is on by default (an unset `font-variant-ligatures` already did it); the pref
  * exists so it can be turned off when the fused glyph is harder to read than
  * the characters. Consumed by every CodeMirror surface: the editor, the diff
- * panes, and the extension host's editor.
+ * panes.
  */
 export function applyEditorLigaturesVar(on: boolean): void {
   if (typeof document === "undefined") return;

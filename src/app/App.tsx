@@ -117,7 +117,6 @@ export default function App() {
     reorderTabs,
     reorderLeafInGroup,
     movePaneLeafToEdge,
-    moveExtTabToPane,
     togglePrivate,
     renameLeaf,
     setLeafTerminalTheme,
@@ -727,7 +726,6 @@ export default function App() {
                 detectedBrowserUrl={detectedBrowserUrl}
                 onOpenPreview={handleOpenDetectedPreview}
                 movePaneLeafToEdge={movePaneLeafToEdge}
-                moveExtTabToPane={moveExtTabToPane}
                 setLeafTerminalTheme={setLeafTerminalTheme}
                 onSplitSizes={setSplitSizes}
               />

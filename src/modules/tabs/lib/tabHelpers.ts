@@ -3,30 +3,15 @@ import { findLeaf, type PaneLeaf } from "@/modules/terminal/lib/panes";
 import { type SshConnection } from "@/modules/ssh/connections";
 import { type PaneTab, type Tab } from "./tabTypes";
 
-/** What an extension puts between its own name and the detail it is showing:
- *  "SQL Explorer · sakila", "API Client · checkout". */
-const EXT_TITLE_SEP = "·";
-
 /**
  * The KIND tag that stays in front of a tab's name, or null when the kind needs
- * no word (a terminal, an editor, a browser - their names already read as what
- * they are).
+ * no word (a terminal, an editor - their names already read as what they are).
  *
  * Renaming replaces the NAME, never this. An SSH pane called "prod" is still
- * `ssh:prod`, and a renamed SQL Explorer / API Client pane still says which tool
- * it is, in the strip AND in the Workspaces panel, where the icon alone was the
- * only clue left once the derived title was gone.
- *
- * The extension tag is the first word of the extension's own title, because core
- * must not carry a table of which extensions exist: "SQL Explorer · sakila"
- * gives `SQL`, "API Client · checkout" gives `API`.
+ * `ssh:prod`, in the strip AND in the Workspaces panel.
  */
 export function leafKindTag(leaf: PaneLeaf): string | null {
   if (leaf.leafKind === "terminal" && leaf.sshConnectionId) return "ssh";
-  if (leaf.leafKind === "extension-panel") {
-    const head = (leaf.title ?? "").split(EXT_TITLE_SEP)[0].trim().split(/\s+/)[0];
-    return head || null;
-  }
   return null;
 }
 
@@ -42,13 +27,6 @@ export function leafRenameSeed(
   fallbackCwd?: string,
 ): string {
   if (leaf.customTitle) return leaf.customTitle;
-  if (leaf.leafKind === "extension-panel") {
-    // The extension's title is "<its name> · <detail>". Only the detail is a
-    // name; the head is the tag we re-apply.
-    const t = (leaf.title ?? "").trim();
-    const i = t.indexOf(EXT_TITLE_SEP);
-    return i >= 0 ? t.slice(i + EXT_TITLE_SEP.length).trim() : "";
-  }
   const tag = leafKindTag(leaf);
   const label = leafLabel(leaf, sshHosts, fallbackCwd);
   if (!tag) return label;
@@ -85,7 +63,6 @@ export function leafLabel(
     return tag ? `${tag}:${leaf.customTitle}` : leaf.customTitle;
   }
   if (leaf.leafKind === "editor") return basename(leaf.path);
-  if (leaf.leafKind === "extension-panel") return leaf.title || "panel";
   if (leaf.leafKind === "board") return "Board";
   // SSH leaves: show "ssh:<name>" when the saved connection has a name, else
   // fall back to the host/IP. Bare "ssh" if the connection was deleted.
@@ -138,10 +115,10 @@ export function activeLeaf(tab: Tab): PaneLeaf | null {
 export function activeLeafKind(tab: Tab): "terminal" | "editor" | null {
   const leaf = activeLeaf(tab);
   if (!leaf) return null;
-  // Extension-panel and board leaves aren't one of the terminal/editor kinds
-  // the chrome derivations branch on; report null so callers fall to their
-  // defaults instead of every one having to special-case them.
-  return leaf.leafKind === "extension-panel" || leaf.leafKind === "board" ? null : leaf.leafKind;
+  // Board leaves aren't one of the terminal/editor kinds the chrome derivations
+  // branch on; report null so callers fall to their defaults instead of every
+  // one having to special-case them.
+  return leaf.leafKind === "board" ? null : leaf.leafKind;
 }
 
 export function isTerminalLikeTab(tab: Tab): boolean {

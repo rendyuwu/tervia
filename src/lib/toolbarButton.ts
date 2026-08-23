@@ -1,6 +1,6 @@
 /**
  * Shared hover / open / active styling for the top toolbar icon buttons
- * (Header, inline Search, SSH menu, extension header items) so every one of
+ * (Header, inline Search, SSH menu) so every one of
  * them picks up the active theme's `--accent` identically.
  *
  * Why this exists: these buttons are shadcn `<Button variant="ghost">`, and the
@@ -21,7 +21,7 @@ export const TOOLBAR_HOVER =
 /**
  * The same hover, in the pane header's quieter vocabulary. A pane header's own
  * buttons (grip / float / gear / close) are raw `<button>`s that hover to
- * `bg-muted`; an extension's `<Button variant="ghost">` sitting among them needs
+ * `bg-muted`; a `<Button variant="ghost">` sitting among them needs
  * the `dark:` twin spelled out for exactly the reason above, or dark mode gives
  * it `muted/50` and it hovers a shade paler than every button beside it.
  */

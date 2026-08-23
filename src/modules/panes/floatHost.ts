@@ -191,11 +191,10 @@ export async function floatPane(
   } else if (params.kind === "board") {
     if (!useFloatStore.getState().floating.has(params.leafId)) hosts.get(params.leafId)?.();
     startBoardHost(params.leafId, onBoardFocus);
-  } else if (params.kind === "editor" || params.kind === "extension-panel") {
-    // These hand off rather than mirror, so they need no output bridge. An
-    // extension panel hands off by re-running its renderer in the float's own
-    // webview, so the main pane must unmount its copy - which is what registering
-    // a host (and the floating flag it sets) does.
+  } else if (params.kind === "editor") {
+    // An editor hands off rather than mirrors, so it needs no output bridge. The
+    // main pane must unmount its copy - which is what registering a host (and
+    // the floating flag it sets) does.
     if (!useFloatStore.getState().floating.has(params.leafId)) hosts.get(params.leafId)?.();
     startPassiveHost(params.leafId);
   }

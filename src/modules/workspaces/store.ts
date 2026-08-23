@@ -96,9 +96,7 @@ export type SavedBrowserLeaf = {
 /**
  * The workspace Board pane. Holds nothing: its columns are rebuilt from the
  * live tab tree, so existence is the whole of its saved state. That is what
- * lets a pane tab containing one be persisted normally, unlike an
- * extension-panel leaf (which needs a live host and takes its whole tab down
- * with it).
+ * lets a pane tab containing one be persisted normally.
  */
 export type SavedBoardLeaf = {
   kind: "leaf";

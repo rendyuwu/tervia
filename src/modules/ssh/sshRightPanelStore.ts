@@ -1,7 +1,7 @@
 /**
  * Open/closed state for the SSH (Remote) file explorer hosted in the right slot.
  * Not persisted - session-scoped only. Mutual exclusion with the AI sidebar,
- * SCM right panel, and extension right panels lives in App.tsx. Mirrors
+ * right-docked sidebar sections lives in App.tsx. Mirrors
  * `scmRightPanelStore`.
  */
 import { create } from "zustand";

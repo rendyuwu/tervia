@@ -40,7 +40,7 @@ type Handlers = {
  * Folder-vs-file is decided by `cli_classify_path` (a real fs stat), not by the
  * file name: a folder opens a terminal tab rooted there, a file goes to
  * `openFile`, and a path that is neither is ignored. Guessing from the
- * extension would open an editor onto a directory, which then fails to load.
+ * caller would open an editor onto a directory, which then fails to load.
  * Which surface a FILE lands in is `openFile`'s call, not this hook's.
  */
 export function useEditorFileDrop({ openFile, newTerminalTab }: Handlers): void {

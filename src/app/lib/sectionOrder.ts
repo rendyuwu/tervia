@@ -2,7 +2,7 @@
  * Persisted drag order for a sidebar column's sections.
  *
  * Both columns stack a set of sections that changes under them: a section
- * disappears when its extension is disabled or it is docked to the other side,
+ * disappears when it is docked to the other side,
  * and appears when it is opened. The persisted order is therefore never
  * authoritative on its own - it is reconciled against whatever exists right now.
  */
@@ -32,7 +32,7 @@ export function writeSectionOrder(storageKey: string, order: string[]): void {
  * ones in the order the caller listed them.
  *
  * Dropping unknown keys rather than rendering them is what stops a disabled
- * extension's section from leaving a hole, and appending rather than resetting
+ * removed section from leaving a hole, and appending rather than resetting
  * is what stops a newly-opened panel from shuffling everything the user
  * arranged.
  */

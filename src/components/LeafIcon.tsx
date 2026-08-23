@@ -2,13 +2,12 @@ import { cn } from "@/lib/utils";
 import { CliAgentIcon } from "./CliAgentIcon";
 import { fileIconUrl } from "@/modules/explorer/lib/iconResolver";
 import { aiCliIconClass, type AiCliStatus } from "@/modules/terminal/lib/aiCliStatus";
-import { resolveExtIcon, useIconsReady } from "@/lib/iconRegistry";
-import { Database, Lock, Server, SquarePen, SquareTerminal } from "lucide-react";
+import { Lock, Server, SquarePen, SquareTerminal } from "lucide-react";
 
 /** Normalized description of one pane leaf, enough to pick its icon. Built from
  *  a tab-strip `Entry` or a `PaneLeaf` so both feed the same renderer. */
 export type LeafIconInfo = {
-  leafKind: "terminal" | "editor" | "extension-panel" | "board";
+  leafKind: "terminal" | "editor" | "board";
   /** Private leaf (AI cannot read it): forces a lock glyph over kind/ssh. */
   isPrivate?: boolean;
   /** Terminal bound to a saved SSH host: cloud glyph instead of local terminal. */
@@ -19,9 +18,6 @@ export type LeafIconInfo = {
   editorRemote?: boolean;
   /** Terminal AI CLI status: tints the glyph idle/working/blocking. */
   aiCliStatus?: AiCliStatus | null;
-  /** Icon hint the extension passed to `openExtensionPane` (`lucide:<Name>`).
-   *  Falls back to the generic database glyph when absent or unresolvable. */
-  extIcon?: string;
 };
 
 /**
@@ -45,9 +41,6 @@ export function LeafIcon({
   size?: number;
   className?: string;
 }) {
-  // Subscribe so the extension-panel glyph re-renders once the lazy lucide
-  // chunk lands and `resolveExtIcon` starts returning a component.
-  useIconsReady();
   const aiTint = info.aiCliStatus ? aiCliIconClass(info.aiCliStatus) : null;
 
   if (info.isPrivate) {
@@ -87,13 +80,6 @@ export function LeafIcon({
         className={cn("shrink-0", className)}
       />
     );
-  }
-
-  if (info.leafKind === "extension-panel") {
-    // The extension's own glyph when it hinted one (API Client sends a paper
-    // plane), else the generic database shape the SQL Explorer wants anyway.
-    const Icon = resolveExtIcon(info.extIcon) ?? Database;
-    return <Icon size={size} strokeWidth={2} className={cn("shrink-0", className)} />;
   }
 
   // A running agent replaces the terminal shape with its own vendor mark, so a

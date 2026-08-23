@@ -1,10 +1,6 @@
 import { useCallback, type Dispatch, type RefObject, type SetStateAction } from "react";
-import {
-  leaves,
-  updateExtensionPanelLeaf as updateExtensionPanelLeafInTree,
-  type PaneLeaf,
-} from "@/modules/terminal/lib/panes";
-import { type ExtensionTab, type ExtensionTabState, type Tab } from "./tabTypes";
+import { leaves, type PaneLeaf } from "@/modules/terminal/lib/panes";
+import { type Tab } from "./tabTypes";
 import { syncPaneMirror } from "./tabHelpers";
 
 /**
@@ -20,16 +16,11 @@ type AuxTabsDeps = {
 };
 
 /**
- * The non-pane tab openers, extracted from `useTabs` unchanged. Bodies and
+ * The non-terminal tab openers, extracted from `useTabs` unchanged. Bodies and
  * dependency arrays are identical to the originals; `useTabs` spreads the
  * returned callbacks into its return object.
  */
-export function useAuxTabs({
-  setTabs,
-  setActiveId,
-  nextIdRef,
-  tabsRef,
-}: AuxTabsDeps) {
+export function useAuxTabs({ setTabs, setActiveId, nextIdRef, tabsRef }: AuxTabsDeps) {
   /**
    * Open (or focus) the workspace Board. A board is a pane LEAF, not a
    * standalone tab, so it arrives as a pane tab holding one - which is what
@@ -62,196 +53,5 @@ export function useAuxTabs({
     return tabId;
   }, []);
 
-  /**
-   * Open (or focus) an extension-owned tab. Caller passes a `reuseKey` to
-   * dedupe; if a tab with the same `(extensionId, panelId, reuseKey)`
-   * already exists, we activate it instead of pushing a new one. The
-   * extension's panel renderer (registered via `ctx.registerPanelRenderer`)
-   * is mounted by `ExtensionTabStack`.
-   *
-   * Reuse detection + id allocation runs against `tabsRef.current` (not
-   * inside the `setTabs` updater) so `setActiveId(id)` always receives a
-   * concrete value. Mutating a closure variable from inside the updater
-   * only works when React performs eager state computation; callers that
-   * schedule unrelated state updates first (e.g. SQL Explorer hiding both
-   * sidebars before opening its tab) force React to defer the updater,
-   * and the active-id then stays on the previous tab.
-   */
-  // If a panel is already live as a split-pane leaf, focus that pane instead of
-  // mounting a duplicate — a second mount would race the panel's module
-  // singletons (the SQL Explorer keeps one sidecar + CodeMirror, so a duplicate
-  // mount blanks one of them). Returns the focused tab id, or null if not found.
-  const focusExistingExtPaneLeaf = (
-    extensionId: string,
-    panelId: string,
-    reuseKey?: string,
-  ): number | null => {
-    for (const t of tabsRef.current) {
-      if (t.kind !== "pane") continue;
-      const leaf = leaves(t.paneTree).find(
-        (l) =>
-          l.leafKind === "extension-panel" &&
-          l.extensionId === extensionId &&
-          l.panelId === panelId &&
-          // The key is part of the identity: one panel can run an instance per
-          // key (a workbench per collection), and those are different panes,
-          // not a duplicate mount of the same one.
-          (l.reuseKey ?? undefined) === (reuseKey ?? undefined),
-      );
-      if (leaf) {
-        setTabs((curr) =>
-          curr.map((x) =>
-            x.id === t.id && x.kind === "pane" ? { ...x, activeLeafId: leaf.id } : x,
-          ),
-        );
-        setActiveId(t.id);
-        return t.id;
-      }
-    }
-    return null;
-  };
-
-  const openExtensionTab = useCallback(
-    (opts: {
-      extensionId: string;
-      panelId: string;
-      title: string;
-      icon?: string;
-      reuseKey?: string;
-    }) => {
-      const hit = focusExistingExtPaneLeaf(opts.extensionId, opts.panelId, opts.reuseKey);
-      if (hit !== null) return hit;
-      const reuse = opts.reuseKey
-        ? tabsRef.current.find(
-            (t) =>
-              t.kind === "ext" &&
-              t.extensionId === opts.extensionId &&
-              t.panelId === opts.panelId &&
-              t.reuseKey === opts.reuseKey,
-          )
-        : null;
-      if (reuse) {
-        setActiveId(reuse.id);
-        return reuse.id;
-      }
-      const id = nextIdRef.current++;
-      setTabs((curr) => [
-        ...curr,
-        {
-          id,
-          kind: "ext",
-          title: opts.title,
-          extensionId: opts.extensionId,
-          panelId: opts.panelId,
-          icon: opts.icon,
-          reuseKey: opts.reuseKey,
-        } satisfies ExtensionTab,
-      ]);
-      setActiveId(id);
-      return id;
-    },
-    [],
-  );
-
-  /**
-   * Open (or focus) an extension panel as a NATIVE pane leaf — same frame as a
-   * terminal/editor, splittable and joinable — instead of a standalone
-   * `kind:"ext"` tab. Mirrors `openBoardTab` (a pane tab whose tree is a single
-   * leaf). If the panel is already live as a pane leaf anywhere, that pane is
-   * focused instead of mounting a duplicate (the panel keeps module singletons).
-   */
-  const openExtensionPane = useCallback(
-    (opts: {
-      extensionId: string;
-      panelId: string;
-      title: string;
-      icon?: string;
-      reuseKey?: string;
-    }) => {
-      const hit = focusExistingExtPaneLeaf(opts.extensionId, opts.panelId, opts.reuseKey);
-      if (hit !== null) return hit;
-      const tabId = nextIdRef.current++;
-      const leafId = nextIdRef.current++;
-      const leaf: PaneLeaf = {
-        kind: "leaf",
-        id: leafId,
-        leafKind: "extension-panel",
-        extensionId: opts.extensionId,
-        panelId: opts.panelId,
-        ...(opts.reuseKey ? { reuseKey: opts.reuseKey } : {}),
-        ...(opts.title ? { title: opts.title } : {}),
-        ...(opts.icon ? { icon: opts.icon } : {}),
-      };
-      setTabs((curr) => [
-        ...curr,
-        syncPaneMirror({
-          id: tabId,
-          kind: "pane",
-          title: opts.title,
-          paneTree: leaf,
-          activeLeafId: leafId,
-        }),
-      ]);
-      setActiveId(tabId);
-      return tabId;
-    },
-    [],
-  );
-
-  /**
-   * Update an extension panel's lifecycle tone and (optionally) its title.
-   * Matches on `(extensionId, panelId, reuseKey)` — `reuseKey` optional and
-   * matches panels opened without one. Patches BOTH a standalone `kind:"ext"`
-   * tab AND a live `extension-panel` pane leaf (the SQL Explorer opens as a
-   * pane), so a connection-status tone + a "SQL Explorer · db" title show on
-   * the tab chip + pane header. Pass `null` state to clear the tone.
-   */
-  const setExtensionTabState = useCallback(
-    (opts: {
-      extensionId: string;
-      panelId: string;
-      reuseKey?: string;
-      state: ExtensionTabState | null;
-      title?: string;
-    }) => {
-      const matches = (extensionId: string, panelId: string, reuseKey?: string) =>
-        extensionId === opts.extensionId &&
-        panelId === opts.panelId &&
-        (reuseKey ?? undefined) === (opts.reuseKey ?? undefined);
-      setTabs((curr) =>
-        curr.map((t) => {
-          if (t.kind === "ext") {
-            if (!matches(t.extensionId, t.panelId, t.reuseKey)) return t;
-            const next: ExtensionTab = { ...t };
-            if (opts.state === null) delete next.state;
-            else next.state = opts.state;
-            if (opts.title !== undefined) next.title = opts.title;
-            return next;
-          }
-          if (t.kind === "pane") {
-            const leaf = leaves(t.paneTree).find(
-              (l) =>
-                l.leafKind === "extension-panel" && matches(l.extensionId, l.panelId, l.reuseKey),
-            );
-            if (!leaf) return t;
-            const paneTree = updateExtensionPanelLeafInTree(t.paneTree, leaf.id, {
-              ...(opts.title !== undefined ? { title: opts.title } : {}),
-              state: opts.state,
-            });
-            if (paneTree === t.paneTree) return t;
-            return syncPaneMirror({ ...t, paneTree });
-          }
-          return t;
-        }),
-      );
-    },
-    [],
-  );
-
-  return {
-    openBoardTab,
-    openExtensionTab,
-    openExtensionPane,
-    setExtensionTabState,
-  };
+  return { openBoardTab };
 }
