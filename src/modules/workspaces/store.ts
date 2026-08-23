@@ -17,8 +17,6 @@ export type SavedTerminalLeaf = {
   sshConnectionId?: string;
   /** FIFO chip number. Persisted so "Terminal 3" stays the same after restart. Backfilled by `useTabs.ts` for older state. */
   terminalOrdinal?: number;
-  /** Per-leaf privacy flag. AI subsystem ignores private leaves. */
-  private?: boolean;
   /** Per-pane terminal theme override (a `TERMINAL_PRESETS` id). Persisted so a
    *  pane keeps its chosen palette across restart. Absent = follow global. */
   terminalThemeId?: string;
@@ -35,8 +33,8 @@ export type SavedTerminalLeaf = {
    * e.g. a running agent's task or a TUI's filename. Persisted so the
    * Workspaces panel can show it next to the folder name for INACTIVE
    * workspaces too; live titles only exist for the active workspace's
-   * terminals. Omitted for private leaves. May be stale after a restart
-   * until the workspace is reopened and its terminals go live again.
+   * terminals. May be stale after a restart until the workspace is reopened
+   * and its terminals go live again.
    */
   title?: string;
   /**
@@ -49,9 +47,7 @@ export type SavedTerminalLeaf = {
   /**
    * User-chosen tab name from the tab's right-click "Rename". Distinct from
    * `title` above, which is the program-set OSC title and is derived, not
-   * chosen: this one is the user's and must survive a restart, so it is
-   * persisted for private leaves too (it holds no shell or path information -
-   * only what the user decided to call the tab).
+   * chosen: this one is the user's and must survive a restart.
    */
   customTitle?: string;
 };
@@ -71,8 +67,6 @@ export type SavedEditorLeaf = {
   sshConnectionId?: string;
   /** Display label for the remote host, shown while the leaf waits to rebind. */
   sshHostLabel?: string;
-  /** Per-leaf privacy flag. AI inline autocomplete refuses on private leaves. */
-  private?: boolean;
   /** User-chosen tab name from the tab's right-click "Rename". */
   customTitle?: string;
 };
@@ -89,7 +83,6 @@ export type SavedBrowserLeaf = {
   leafKind: "browser";
   url: string;
   browserOrdinal?: number;
-  private?: boolean;
   customTitle?: string;
 };
 
@@ -101,7 +94,6 @@ export type SavedBrowserLeaf = {
 export type SavedBoardLeaf = {
   kind: "leaf";
   leafKind: "board";
-  private?: boolean;
   /** User-chosen tab name from the tab's right-click "Rename". */
   customTitle?: string;
 };

@@ -10,12 +10,10 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { fmtShortcut, MOD_KEY } from "@/lib/platform";
 import { cn } from "@/lib/utils";
 import { TOOLBAR_HOVER } from "@/lib/toolbarButton";
-import { Bot, Columns2, Lock, Plus, Rows2, SquareTerminal } from "lucide-react";
+import { Bot, Columns2, Plus, Rows2, SquareTerminal } from "lucide-react";
 
 type NewTabMenuProps = {
   onNewTerminal: () => void;
-  /** Open a new local terminal tab pre-flagged as private. */
-  onNewPrivateTerminal?: () => void;
   /** Open the agent picker (`AgentSpawnDialog`). */
   onOpenAgents: () => void;
   /** Split the active pane. Wired into the `+` dropdown next to New Terminal.
@@ -26,13 +24,7 @@ type NewTabMenuProps = {
 };
 
 /** New-tab cluster: the `+` dropdown trigger plus its terminal/agent/split items. */
-export function NewTabMenu({
-  onNewTerminal,
-  onNewPrivateTerminal,
-  onOpenAgents,
-  onSplit,
-  canSplit,
-}: NewTabMenuProps) {
+export function NewTabMenu({ onNewTerminal, onOpenAgents, onSplit, canSplit }: NewTabMenuProps) {
   return (
     <DropdownMenu>
       <Tooltip>
@@ -58,15 +50,6 @@ export function NewTabMenu({
             {fmtShortcut(MOD_KEY, "T")}
           </span>
         </DropdownMenuItem>
-        {onNewPrivateTerminal ? (
-          <DropdownMenuItem onSelect={() => onNewPrivateTerminal()}>
-            <Lock size={14} strokeWidth={1.75} className="text-destructive" />
-            <span className="flex-1 whitespace-nowrap">Private Terminal</span>
-            <span className="text-muted-foreground ml-4 text-xs whitespace-nowrap">
-              {fmtShortcut(MOD_KEY, "Shift", "T")}
-            </span>
-          </DropdownMenuItem>
-        ) : null}
         <DropdownMenuItem onSelect={() => onOpenAgents()}>
           <Bot size={14} strokeWidth={1.75} />
           <span className="flex-1 whitespace-nowrap">Agent...</span>

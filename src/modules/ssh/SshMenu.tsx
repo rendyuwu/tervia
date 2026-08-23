@@ -58,10 +58,8 @@ const SshBackupDialog = lazy(() =>
 );
 
 type Props = {
-  /** Opens a saved host as a new terminal tab. `opts.private` is kept for
-   *  backward compatibility with callers that still pass it; the SSH menu
-   *  itself no longer exposes a private-mode shortcut button. */
-  onConnect: (conn: SshConnection, opts?: { private?: boolean }) => void;
+  /** Opens a saved host as a new terminal tab. */
+  onConnect: (conn: SshConnection) => void;
 };
 
 export function SshMenu({ onConnect }: Props) {

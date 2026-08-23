@@ -56,7 +56,6 @@ export type RenderEntryArgs = {
   onMoveLeafToGroup?: (leafId: number, targetTabId: number) => void;
   onMoveLeafToNewTab?: (leafId: number) => "ok" | "invalid";
   onRotateLeafSplit?: (leafId: number) => void;
-  onTogglePrivate?: (leafId: number) => void;
   paneGroupsForMove: PaneGroupForMove[];
   /** Leaf currently being renamed inline, or null. Owned by the caller because
    *  this is a plain render function, not a component, so it holds no state. */
@@ -90,7 +89,6 @@ export function renderEntryBody(args: RenderEntryArgs): ReactNode {
     onMoveLeafToGroup,
     onMoveLeafToNewTab,
     onRotateLeafSplit,
-    onTogglePrivate,
     paneGroupsForMove,
     renamingLeafId,
     onSetRenaming,
@@ -190,8 +188,8 @@ export function renderEntryBody(args: RenderEntryArgs): ReactNode {
             className={cn(
               "truncate",
               e.italic && "italic",
-              // SSH / extension lifecycle / private tone. Shared with the
-              // Workspaces panel so the same entry is the same colour in both.
+              // SSH status tone. Shared with the Workspaces panel so the same
+              // entry is the same colour in both.
               entryLabelClass(e),
             )}
           >
@@ -223,28 +221,19 @@ export function renderEntryBody(args: RenderEntryArgs): ReactNode {
 
   // Right-click actions: rotate split, leave group, join group, close right.
   // Rotate/leave-group only for leaves inside a split. Move-to-group needs another tab.
-  const isPrivate = isPaneLeaf && e.isPrivate === true;
   const moveTargets =
     isPaneLeaf && onMoveLeafToGroup ? paneGroupsForMove.filter((g) => g.id !== e.tabId) : [];
   const canRotate = isPaneLeaf && isSplit && !!onRotateLeafSplit;
   const canLeaveGroup = isPaneLeaf && isSplit && !!onMoveLeafToNewTab;
   const canMove = moveTargets.length > 0;
-  const canTogglePrivate = isPaneLeaf && !!onTogglePrivate;
   const canCloseToRight = lastEntryKey !== null && e.key !== lastEntryKey;
-  const hasContextActions =
-    canRename || canRotate || canLeaveGroup || canMove || canTogglePrivate || canCloseToRight;
-  const hasLeafActions = canRename || canRotate || canLeaveGroup || canMove || canTogglePrivate;
-  // Private tabs always get a tooltip explaining what the marker means; SSH /
-  // AI-CLI tooltips win the slot when both apply and append the private note as
-  // an extra line.
-  const tooltipMode: "ssh" | "ai" | "private" | null = sshHost
+  const hasContextActions = canRename || canRotate || canLeaveGroup || canMove || canCloseToRight;
+  const hasLeafActions = canRename || canRotate || canLeaveGroup || canMove;
+  const tooltipMode: "ssh" | "ai" | null = sshHost
     ? "ssh"
     : isPaneLeaf && e.aiCliStatus
       ? "ai"
-      : isPrivate
-        ? "private"
-        : null;
-  const PRIVATE_HINT = "Private: program title is never saved";
+      : null;
 
   // Build innermost-out. TabsTrigger must be the DOM child of every asChild
   // trigger so Radix' Slot can merge handlers. Tooltip is a Provider, not a
@@ -314,15 +303,6 @@ export function renderEntryBody(args: RenderEntryArgs): ReactNode {
               </ContextMenuSubContent>
             </ContextMenuSub>
           )}
-          {canTogglePrivate && (
-            <ContextMenuItem
-              onSelect={() => {
-                if (e.kind === "pane-leaf") onTogglePrivate!(e.leafId);
-              }}
-            >
-              <span className="flex-1">{isPrivate ? "Mark as Public" : "Mark as Private"}</span>
-            </ContextMenuItem>
-          )}
           {canCloseToRight && hasLeafActions && <ContextMenuSeparator />}
           {canCloseToRight && (
             <ContextMenuItem onSelect={() => onCloseEntriesAfter(e)}>
@@ -365,7 +345,6 @@ export function renderEntryBody(args: RenderEntryArgs): ReactNode {
               </span>
             ) : null}
             {ai ? <span className="text-muted-foreground">{aiCliLabel(ai)}</span> : null}
-            {isPrivate ? <span className="text-destructive">{PRIVATE_HINT}</span> : null}
           </div>
         </TooltipContent>
       </Tooltip>
@@ -378,17 +357,7 @@ export function renderEntryBody(args: RenderEntryArgs): ReactNode {
         <TooltipContent side="bottom">
           <div className="flex flex-col gap-0.5 text-[11px]">
             <span>{aiCliLabel(ai)}</span>
-            {isPrivate ? <span className="text-destructive">{PRIVATE_HINT}</span> : null}
           </div>
-        </TooltipContent>
-      </Tooltip>
-    );
-  } else if (tooltipMode === "private") {
-    wrapped = (
-      <Tooltip>
-        {wrapped}
-        <TooltipContent side="bottom">
-          <div className="text-destructive text-destructive text-[11px]">{PRIVATE_HINT}</div>
         </TooltipContent>
       </Tooltip>
     );

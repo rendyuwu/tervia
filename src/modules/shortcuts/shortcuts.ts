@@ -4,7 +4,6 @@ import { IS_MAC, KEY_SEP, MOD_PROP } from "@/lib/platform";
 
 export type ShortcutId =
   | "tab.new"
-  | "tab.newPrivate"
   | "tab.newEditor"
   | "tab.newAgent"
   | "tab.close"
@@ -35,14 +34,7 @@ export type ShortcutId =
   | "commandPalette.open";
 
 export type ShortcutGroup =
-  | "General"
-  | "Tabs"
-  | "Panes"
-  | "Search"
-  | "View"
-  | "Editor"
-  | "Terminal"
-  | "Command Palette";
+  "General" | "Tabs" | "Panes" | "Search" | "View" | "Editor" | "Terminal" | "Command Palette";
 
 export type KeyBinding = {
   key: string;
@@ -80,12 +72,6 @@ export const SHORTCUTS: Shortcut[] = [
     label: "New tab",
     group: "Tabs",
     defaultBindings: [{ [MOD_PROP]: true, key: "t" }],
-  },
-  {
-    id: "tab.newPrivate",
-    label: "New private terminal tab",
-    group: "Tabs",
-    defaultBindings: [{ [MOD_PROP]: true, shift: true, key: "t" }],
   },
   {
     id: "tab.newEditor",

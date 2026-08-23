@@ -117,7 +117,6 @@ export default function App() {
     reorderTabs,
     reorderLeafInGroup,
     movePaneLeafToEdge,
-    togglePrivate,
     renameLeaf,
     setLeafTerminalTheme,
   } = useTabs();
@@ -449,7 +448,6 @@ export default function App() {
     cancelClose,
     cycleTab,
     openNewTab,
-    openNewPrivateTab,
     sendCd,
     cdInNewTab,
     spawnAgents,
@@ -540,7 +538,6 @@ export default function App() {
     () =>
       buildShortcutHandlers({
         openNewTab,
-        openNewPrivateTab,
         handleCloseTabOrPane,
         cycleTab,
         selectByIndex,
@@ -567,7 +564,6 @@ export default function App() {
       cycleTab,
       handleCloseTabOrPane,
       openNewTab,
-      openNewPrivateTab,
       selectByIndex,
       splitActivePaneInActiveTab,
       focusNextPaneInTab,
@@ -652,8 +648,6 @@ export default function App() {
             onSelectEntry={handleHeaderSelectEntry}
             onCloseEntry={handleHeaderCloseEntry}
             onNewTerminal={openNewTab}
-            onNewPrivateTerminal={openNewPrivateTab}
-            onTogglePrivate={togglePrivate}
             onRenameLeaf={renameLeaf}
             onOpenAgents={() => setAgentDialogOpen(true)}
             onPinLeaf={handleHeaderPinLeaf}

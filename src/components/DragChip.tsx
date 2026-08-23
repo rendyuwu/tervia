@@ -17,7 +17,6 @@ export function DragChip({
   label,
   className,
   italic = false,
-  isPrivate = false,
   dirty = false,
 }: {
   icon: ReactNode;
@@ -26,8 +25,6 @@ export function DragChip({
   className?: string;
   /** Transient/preview leaf: italic label. */
   italic?: boolean;
-  /** Private leaf (AI can't read it): label turns red. */
-  isPrivate?: boolean;
   /** Editor leaf with unsaved edits: trailing dot. */
   dirty?: boolean;
 }) {
@@ -39,9 +36,7 @@ export function DragChip({
       )}
     >
       {icon}
-      <span className={cn("truncate", italic && "italic", isPrivate && "text-destructive")}>
-        {label}
-      </span>
+      <span className={cn("truncate", italic && "italic")}>{label}</span>
       {dirty && <span className="bg-icon-working size-1.5 shrink-0 rounded-full" />}
     </div>
   );

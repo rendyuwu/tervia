@@ -736,7 +736,6 @@ function EntryRowItem({
   const cwd = e.kind === "pane-leaf" ? e.cwd : undefined;
   const sshStatus = e.kind === "pane-leaf" ? e.sshStatus : undefined;
   const ai = e.kind === "pane-leaf" ? e.aiCliStatus : undefined;
-  const isPrivate = e.kind === "pane-leaf" && e.isPrivate === true;
   // The OSC title repeats the label often enough (a shell that titles itself
   // after its folder) that showing both would just read as a stutter.
   const showTitle = !!title && title !== e.label && title !== cwd;
@@ -837,9 +836,6 @@ function EntryRowItem({
               </span>
             ) : null}
             {ai ? <span className="text-muted-foreground">{aiCliLabel(ai)}</span> : null}
-            {isPrivate ? (
-              <span className="text-destructive">Private: program title is never saved</span>
-            ) : null}
           </div>
         </TooltipContent>
       </Tooltip>

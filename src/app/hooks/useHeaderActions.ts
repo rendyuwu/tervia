@@ -35,7 +35,7 @@ export function useHeaderActions({
   handleHeaderCloseEntry: (tabId: number, leafId: number | null) => void;
   handleHeaderPinLeaf: (tabId: number, leafId: number) => void;
   handleHeaderOpenSettings: () => void;
-  handleHeaderConnectSsh: (conn: SshConnection, opts?: { private?: boolean }) => void;
+  handleHeaderConnectSsh: (conn: SshConnection) => void;
   headerCanSplit: boolean;
 } {
   // The pane header's globe pill: hand the detected dev-server url to the OS
@@ -70,7 +70,7 @@ export function useHeaderActions({
   );
   const handleHeaderOpenSettings = useCallback(() => void openSettingsWindow(), []);
   const handleHeaderConnectSsh = useCallback(
-    (conn: SshConnection, opts?: { private?: boolean }) => newSshTab(conn.id, conn.name, opts),
+    (conn: SshConnection) => newSshTab(conn.id, conn.name),
     [newSshTab],
   );
   const headerCanSplit = useMemo(
