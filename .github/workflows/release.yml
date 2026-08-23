@@ -51,9 +51,9 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           {
-            echo 'body<<TEDI_NOTES_EOF'
+            echo 'body<<TERVIA_NOTES_EOF'
             node scripts/release-notes.mjs "$TAG"
-            echo 'TEDI_NOTES_EOF'
+            echo 'TERVIA_NOTES_EOF'
           } >> "$GITHUB_OUTPUT"
 
       - name: Create draft release
@@ -69,7 +69,7 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               tag_name: tag,
-              name: `TEDI ${tag}`,
+              name: `Tervia ${tag}`,
               body: process.env.RELEASE_BODY,
               draft: true,
               prerelease: false,
@@ -138,24 +138,24 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
-      # Build the `tedi` console-subsystem launcher (Windows only). The
+      # Build the `tervia` console-subsystem launcher (Windows only). The
       # NSIS hook in `installer.nsh` `File`s the resulting binary from
-      # `src-tauri/target/release/tedi.exe` into the install dir alongside
-      # the GUI `TEDIApp.exe`. `tauri-action` below only builds the main
+      # `src-tauri/target/release/tervia.exe` into the install dir alongside
+      # the GUI `TerviaApp.exe`. `tauri-action` below only builds the main
       # binary (the one named by `default-run`), so the stub needs an
       # explicit step. Cargo's incremental cache means the subsequent main
       # build reuses everything compiled here.
-      - name: Build tedi console launcher (Windows only)
+      - name: Build tervia console launcher (Windows only)
         if: matrix.platform == 'windows-latest'
         shell: pwsh
         working-directory: src-tauri
-        # The launcher lives in the `tedi-cli/` workspace member - kept
+        # The launcher lives in the `tervia-cli/` workspace member - kept
         # separate from the GUI package on purpose so Tauri 2's deb / dmg
         # bundlers don't enumerate it as a `[[bin]]` to bundle on POSIX.
         # The shared workspace target dir means the produced
-        # `target/release/tedi.exe` sits next to the GUI's TEDIApp.exe,
+        # `target/release/tervia.exe` sits next to the GUI's TerviaApp.exe,
         # ready for the NSIS hook's `File` directive.
-        run: cargo build --release -p tedi-cli
+        run: cargo build --release -p tervia-cli
 
       # tauri-action fills latest.json's `notes` (the in-app updater changelog)
       # from `releaseBody`; without it the updater shows no notes. Recompute the
@@ -167,9 +167,9 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           {
-            echo 'body<<TEDI_NOTES_EOF'
+            echo 'body<<TERVIA_NOTES_EOF'
             node scripts/release-notes.mjs "$TAG"
-            echo 'TEDI_NOTES_EOF'
+            echo 'TERVIA_NOTES_EOF'
           } >> "$GITHUB_OUTPUT"
 
       # Uploads this platform's signed installers + updater artifacts into the

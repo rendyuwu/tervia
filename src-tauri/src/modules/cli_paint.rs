@@ -1,4 +1,4 @@
-//! Shared ANSI paint vocabulary for the headless `tedi` CLI surface
+//! Shared ANSI paint vocabulary for the headless `tervia` CLI surface
 //! (`cli`). One palette so every future subcommand looks like a single CLI
 //! rather than a pile of styles.
 //!
@@ -83,7 +83,7 @@ pub fn paint_installed(text: &str) -> String {
 }
 
 // ── progress rendering ───────────────────────────────────────────────────
-// One bar style shared by every download (`tedi --update`, `tedi ext
+// One bar style shared by every download (`tervia --update`
 // install`) and the extraction tick, so progress looks identical wherever it
 // shows up. Carriage-return overwrites only fire on a TTY; piped output stays
 // free of control bytes.

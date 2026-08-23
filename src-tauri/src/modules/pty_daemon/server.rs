@@ -1,4 +1,4 @@
-// Daemon server — runs inside `TEDIApp --pty-daemon`. Owns every PTY
+// Daemon server — runs inside `TerviaApp --pty-daemon`. Owns every PTY
 // across GUI window-close events so sessions survive into the next
 // launch. See `mod.rs` for the lifecycle goals.
 //
@@ -59,7 +59,7 @@ const SCROLLBACK_SLACK: usize = 256 * 1024;
 const WRITER_QUEUE: usize = 1024;
 
 /// Default idle-timeout: shut down after a full day with no client
-/// connections. Overridable via `TEDI_PTYD_IDLE_SECS` env var for testing.
+/// connections. Overridable via `TERVIA_PTYD_IDLE_SECS` env var for testing.
 const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 24 * 60 * 60;
 
 /// Cap for CLIENT->daemon frames. The only large frame in the protocol
@@ -246,7 +246,7 @@ impl log::Log for StderrLogger {
 }
 
 fn init_logging() {
-    let level = std::env::var("TEDI_PTYD_LOG")
+    let level = std::env::var("TERVIA_PTYD_LOG")
         .ok()
         .and_then(|v| v.parse::<log::LevelFilter>().ok())
         .unwrap_or(log::LevelFilter::Info);
@@ -285,7 +285,7 @@ async fn server_main() -> std::io::Result<()> {
     let listener = bind_async()?;
     let state = Arc::new(DaemonState::new());
 
-    let idle_timeout_secs = std::env::var("TEDI_PTYD_IDLE_SECS")
+    let idle_timeout_secs = std::env::var("TERVIA_PTYD_IDLE_SECS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(DEFAULT_IDLE_TIMEOUT_SECS);

@@ -182,15 +182,15 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       # Same step release.yml runs, and for the same reason: the NSIS hook in
-      # `installer.nsh` `File`s `src-tauri/target/release/tedi.exe` into the
+      # `installer.nsh` `File`s `src-tauri/target/release/tervia.exe` into the
       # install dir beside the GUI binary, and tauri-action only builds the
       # binary named by `default-run`. Without this the Windows installer build
       # fails outright, so the PR bundle would not match the released one.
-      - name: Build tedi console launcher (Windows only)
+      - name: Build tervia console launcher (Windows only)
         if: runner.os == 'Windows'
         shell: pwsh
         working-directory: src-tauri
-        run: cargo build --release -p tedi-cli
+        run: cargo build --release -p tervia-cli
 
       # REQUIRED — do not "simplify" this step away. With
       # `createUpdaterArtifacts: true` and a pubkey set, a bundle build with no

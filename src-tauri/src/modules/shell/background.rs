@@ -20,7 +20,7 @@ const RING_CAP: usize = 4 * 1024 * 1024;
 
 /// Suppress the auto-allocated console window Windows hands a
 /// console-subsystem child of a GUI parent. Without it, every sidecar exe
-/// (e.g. `tedi-discord-helper.exe`) flashes a black cmd window on spawn.
+/// (e.g. `tervia-discord-helper.exe`) flashes a black cmd window on spawn.
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
@@ -41,7 +41,7 @@ pub struct BackgroundProc {
     // until its next read return; orphan grandchildren are NOT force-killed in
     // this build (no `libc`/`nix` dep for `kill(-pgid)`).
     stop_readers: AtomicBool,
-    // Windows: kill-on-close Job Object catches descendants when TEDI dies.
+    // Windows: kill-on-close Job Object catches descendants when Tervia dies.
     // Without it a pwsh-wrapped `npm run dev` leaks its node grandchild.
     #[cfg(windows)]
     _job: Option<crate::modules::pty::job::PtyJob>,
