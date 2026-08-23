@@ -41,7 +41,7 @@ const SECTION_COLLAPSED_SIZE = "34px";
 export const TALL_HEADER_COLLAPSED_SIZE = "46px";
 /** Stays px on purpose. The sidebar panel's own minSize had to become a
  *  percentage (see AppSidebar) to survive a minimize, but the same change here
- *  would cap the column at 100/N sections, and N grows with every extension
+ *  would cap the column at 100/N sections, and N grows with every section
  *  section. A px minimum scales with window height instead, which is what makes
  *  a tall window able to show them all. */
 const SECTION_MIN_SIZE = "100px";
@@ -117,7 +117,7 @@ export function SectionStack({
    *  button. */
   column?: SectionColumn;
   /** Whether `key` may change columns at all. Mirror whatever decides the move
-   *  BUTTON, or drag and button will disagree (an extension section that never
+   *  BUTTON, or drag and button will disagree (a section that never
    *  opted into `movableToRight` must answer false). */
   canMoveColumn?: (key: string) => boolean;
   /** Hand `key` to the other column. Absent = this stack keeps its sections. */

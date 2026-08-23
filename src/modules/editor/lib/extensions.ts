@@ -14,7 +14,7 @@ import { showMinimap } from "@replit/codemirror-minimap";
 import { colorDecorations, colorLinesField } from "./colorDecorations";
 // VS Code-style fold gutter: chevrons hide until hover, folded markers stay
 // visible so collapsed sections are obvious. The glyph itself is shared with
-// the extension host's editor, so the two never drift apart.
+// every editor surface, so they never drift apart.
 import { makeFoldMarker } from "./foldMarker";
 
 // Compartments for runtime reconfigure without rebuilding state.

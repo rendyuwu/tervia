@@ -1,6 +1,5 @@
 import { cn } from "@/lib/utils";
 import { type PaneLeaf, isRemoteEditorLeaf, leaves } from "@/modules/terminal/lib/panes";
-import { type ExtensionTabState } from "./useTabs";
 import { type SshConnection } from "@/modules/ssh/connections";
 import { statusLabelClass, type SshStatus } from "@/modules/ssh/status";
 import { type AiCliStatus } from "@/modules/terminal/lib/aiCliStatus";
@@ -28,7 +27,7 @@ type EntryBase = {
 export type PaneEntry = EntryBase & {
   kind: "pane-leaf";
   leafId: number;
-  leafKind: "terminal" | "editor" | "extension-panel" | "board";
+  leafKind: "terminal" | "editor" | "board";
   /** 1-based FIFO badge number for terminal leaves - the same identifier the
    *  AI sees in `<env>`. */
   ordinal?: number;
@@ -45,12 +44,6 @@ export type PaneEntry = EntryBase & {
   remoteHost?: string;
   /** Inherited from the owning tab. Drives the red badge + lock icon. */
   isPrivate?: boolean;
-  /** Lifecycle tone for an extension-panel leaf (mirrors the ext tab). Drives
-   *  the label text colour, set via `ctx.tabs.setExtensionTabState(...)`. */
-  extState?: ExtensionTabState;
-  /** Icon hint of an extension-panel leaf (`lucide:<Name>`), same field the
-   *  standalone ext tab carries. Drives the tab-strip glyph. */
-  extIcon?: string;
   /** True when `label` is a name the user typed rather than a derived one. Only
    *  drives whether the right-click menu offers "Reset name". */
   renamed?: boolean;
@@ -63,19 +56,7 @@ type StandaloneEntry = EntryBase & {
   kind: "board";
 };
 
-type ExtensionEntry = EntryBase & {
-  kind: "ext";
-  extensionId: string;
-  panelId: string;
-  /** Icon hint from the extension. Either `lucide:<Name>` (or legacy
-   *  `hugeicon:<Name>`) for an inline icon, or a relative asset path. */
-  icon?: string;
-  /** Lifecycle tone set by the extension via
-   *  `ctx.tabs.setExtensionTabState(...)`. Drives the title text colour. */
-  state?: ExtensionTabState;
-};
-
-export type Entry = PaneEntry | StandaloneEntry | ExtensionEntry;
+export type Entry = PaneEntry | StandaloneEntry;
 
 /**
  * Background color for the per-tab accent stripe. Emerald for local shell,
@@ -95,43 +76,16 @@ export function tabAccentClass(e: Entry): string {
         ? "bg-[color:var(--tedi-tab-ssh)]"
         : "bg-[color:var(--tedi-tab-terminal)]";
     }
-    // Extension panel: reuse the SSH/extension accent (sky) so it reads as a
-    // "dev tool" leaf, matching the extension tab strip color.
-    if (e.leafKind === "extension-panel") return "bg-[color:var(--tedi-tab-ssh)]";
     return "bg-[color:var(--tedi-tab-editor)]";
   }
   // Board: reuses the violet accent rather than adding a token of its own to
   // all 20 theme presets.
-  if (e.kind === "board") return "bg-[color:var(--tedi-tab-ai-diff)]";
-  // Extension tab. Reuse the SSH accent (sky blue) so workbench-style
-  // extensions read as "remote-ish dev tools" next to terminal tabs.
-  return "bg-[color:var(--tedi-tab-ssh)]";
-}
-
-/** Tailwind `text-*` class for an extension tab title. Mirrors the SSH
- *  palette so workbench-style extensions read consistently: connecting
- *  pulses yellow, connected is green, disconnected/error is red. Returns
- *  "" for idle/unknown so the label inherits the tab's default colour. */
-export function extensionStateLabelClass(state: ExtensionTabState | undefined): string {
-  if (!state) return "";
-  switch (state) {
-    case "connecting":
-    case "reconnecting":
-      return "text-icon-working animate-pulse";
-    case "connected":
-      return "text-icon-idle";
-    case "disconnected":
-    case "error":
-      return "text-icon-blocked";
-    case "idle":
-      return "";
-  }
+  return "bg-[color:var(--tedi-tab-ai-diff)]";
 }
 
 /**
- * Tailwind `text-*` tone for an entry's LABEL: SSH session state, extension
- * lifecycle state (a SQL Explorer's DB connection, say), then private, which
- * wins because "the AI cannot see this" outranks any liveness colour.
+ * Tailwind `text-*` tone for an entry's LABEL: SSH session state, then private,
+ * which wins because "not persisted" outranks any liveness colour.
  *
  * Shared by the tab strip and the Workspaces panel so one connected host is
  * green in both places instead of green in the strip and grey in the panel.
@@ -141,12 +95,6 @@ export function entryLabelClass(e: Entry): string {
     // Pulse yellow while connecting, emerald when connected, red on
     // disconnect/error. The icon stays sky so the two signals don't collide.
     e.kind === "pane-leaf" && e.sshConnectionId ? statusLabelClass(e.sshStatus) : null,
-    // Same palette, driven by the extension via `ctx.tabs.setExtensionTabState`,
-    // for both the standalone ext tab and an extension-panel pane leaf.
-    e.kind === "ext" ? extensionStateLabelClass(e.state) : null,
-    e.kind === "pane-leaf" && e.leafKind === "extension-panel"
-      ? extensionStateLabelClass(e.extState)
-      : null,
     // Private leaves carry the red on the label (not the icon) so the icon
     // colour stays free for AI CLI status. Last = wins.
     e.kind === "pane-leaf" && e.isPrivate === true && "text-destructive",
@@ -196,25 +144,11 @@ export function buildEntries(
           aiCliStatus: leaf.leafKind === "terminal" ? aiCliStatuses?.get(leaf.id) : undefined,
           remoteHost,
           isPrivate: leaf.private === true,
-          extState: leaf.leafKind === "extension-panel" ? leaf.state : undefined,
-          extIcon: leaf.leafKind === "extension-panel" ? leaf.icon : undefined,
           renamed: leaf.customTitle !== undefined,
           renameSeed: leafRenameSeed(leaf, sshHosts, t.cwd),
         });
       }
-      continue;
     }
-    // ext: extension-owned tab. Carry icon + ext id forward for rendering.
-    out.push({
-      kind: "ext",
-      key: `tab-${t.id}`,
-      tabId: t.id,
-      label: t.title,
-      extensionId: t.extensionId,
-      panelId: t.panelId,
-      icon: t.icon,
-      state: t.state,
-    });
   }
   return out;
 }

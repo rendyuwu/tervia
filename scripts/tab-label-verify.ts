@@ -79,17 +79,6 @@ console.log("\nleaf labels");
   check("an editor reads its file name", leafLabel(editor) === "main.rs");
 }
 
-const extLeaf = (title: string | undefined, customTitle?: string): PaneLeaf =>
-  ({
-    kind: "leaf",
-    id: id(),
-    leafKind: "extension-panel",
-    extensionId: "e",
-    panelId: "p",
-    ...(title === undefined ? {} : { title }),
-    ...(customTitle ? { customTitle } : {}),
-  }) as PaneLeaf;
-
 console.log("\na user-set name outranks every derived one");
 {
   const named = [
@@ -113,26 +102,6 @@ console.log("\nbut the KIND tag is not the user's to rename away");
   } as PaneLeaf;
   check("a renamed SSH pane keeps its ssh tag", leafLabel(ssh, hosts) === "ssh:build");
   check("even with no host map to resolve", leafLabel(ssh) === "ssh:build");
-
-  check(
-    "a renamed SQL Explorer panel still says SQL",
-    leafLabel(extLeaf("SQL Explorer · sakila", "build")) === "SQL:build",
-  );
-  check(
-    "a renamed API Client panel still says API",
-    leafLabel(extLeaf("API Client · checkout", "build")) === "API:build",
-  );
-  check(
-    "a detail-less extension title still yields a tag",
-    leafLabel(extLeaf("SQL Explorer", "build")) === "SQL:build",
-  );
-  // A panel that has not published a title yet has nothing to derive a tag
-  // from. It must not invent one, and it must not throw.
-  check(
-    "a title-less panel is renamed bare",
-    leafLabel(extLeaf(undefined, "build")) === "build",
-  );
-  check("and un-renamed panels are untouched", leafLabel(extLeaf("SQL Explorer · sakila")) === "SQL Explorer · sakila");
 }
 
 console.log("\nthe rename field is seeded WITHOUT the tag");
@@ -149,14 +118,6 @@ console.log("\nthe rename field is seeded WITHOUT the tag");
   check(
     "a renamed one seeds the name the user typed",
     leafRenameSeed({ ...ssh, customTitle: "build" } as PaneLeaf, hosts) === "build",
-  );
-  check(
-    "an extension panel seeds only the detail after the separator",
-    leafRenameSeed(extLeaf("SQL Explorer · sakila")) === "sakila",
-  );
-  check(
-    "a detail-less panel seeds empty rather than its own tag",
-    leafRenameSeed(extLeaf("API Client")) === "",
   );
   check(
     "an untagged leaf seeds its plain label",

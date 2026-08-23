@@ -5,7 +5,7 @@
  * SECURITY: credentials never leave this module. The caller names a SAVED SSH
  * connection by id and gets back a loopback port; the password / private key
  * come from the OS keychain exactly the way the terminal's own connect reads
- * them. That is what lets an extension (SQL Explorer) tunnel to a private
+ * them. That is what lets a caller tunnel to a private
  * database without ever handling the key.
  *
  * A connection with no pinned server key is REFUSED, mirroring

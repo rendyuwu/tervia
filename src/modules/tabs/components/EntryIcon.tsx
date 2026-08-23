@@ -1,8 +1,7 @@
 import { cn } from "@/lib/utils";
 import { LeafIcon } from "@/components/LeafIcon";
-import { resolveExtIcon } from "@/lib/iconRegistry";
 import type { Entry } from "../lib/entries";
-import { Database, Kanban } from "lucide-react";
+import { Kanban } from "lucide-react";
 
 /**
  * Pill badge stamped next to terminal entries ("Terminal 3") - the same ordinal
@@ -12,9 +11,7 @@ import { Database, Kanban } from "lucide-react";
  * signal that the AI cannot see this tab.
  */
 function OrdinalBadge({ ordinal, isPrivate }: { ordinal: number; isPrivate?: boolean }) {
-  const label = isPrivate
-    ? `Terminal ${ordinal} (private, hidden from AI)`
-    : `Terminal ${ordinal}`;
+  const label = isPrivate ? `Terminal ${ordinal} (private, hidden from AI)` : `Terminal ${ordinal}`;
   return (
     <span
       aria-label={label}
@@ -42,7 +39,6 @@ export function EntryIcon({ entry }: { entry: Entry }) {
           editorFileName: entry.leafKind === "editor" ? entry.label : undefined,
           editorRemote: !!entry.remoteHost,
           aiCliStatus: entry.aiCliStatus,
-          extIcon: entry.extIcon,
         }}
         size={14}
       />
@@ -58,16 +54,7 @@ export function EntryIcon({ entry }: { entry: Entry }) {
     }
     return glyph;
   }
-  if (entry.kind === "ext") {
-    // Extension tab icon: resolve `lucide:<Name>` / legacy `hugeicon:<Name>` if
-    // the extension hinted one, else fall back to a generic database glyph. No
-    // tint: inherits the surrounding tab's foreground colour so ext tabs
-    // visually match the default tab cluster.
-    const Icon = resolveExtIcon(entry.icon) ?? Database;
-    return <Icon size={14} strokeWidth={2} className="shrink-0" />;
-  }
-  // Board: untinted, like the extension tabs - the board is a view, not a
-  // status, and a coloured glyph here would read as one of the four column
-  // states.
+  // Board: untinted - the board is a view, not a status, and a coloured glyph
+  // here would read as one of the four column states.
   return <Kanban size={14} strokeWidth={2} className="shrink-0" />;
 }

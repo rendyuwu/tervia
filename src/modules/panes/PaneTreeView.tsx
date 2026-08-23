@@ -27,12 +27,6 @@ import {
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable";
 import { basename } from "@/lib/path";
 import {
-  ContextMenu,
-  ContextMenuContent,
-  ContextMenuItem,
-  ContextMenuTrigger,
-} from "@/components/ui/context-menu";
-import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuRadioGroup,
@@ -53,11 +47,11 @@ import { useExplorerIconsReady } from "@/modules/explorer/lib/iconResolver";
 import { WorkspaceBoard } from "@/modules/workspaces/WorkspaceBoard";
 import { TerminalPane, type TerminalPaneHandle } from "@/modules/terminal";
 import type { SearchAddon } from "@xterm/addon-search";
-import type { PaneEdge, PaneLeaf, PaneNode, SplitDir } from "@/modules/terminal/lib/panes";
+import type { PaneEdge, PaneLeaf, PaneNode } from "@/modules/terminal/lib/panes";
 import { editorPaneSession, isRemoteEditorLeaf, leaves } from "@/modules/terminal/lib/panes";
 import type { TediOpenInput, TediSpawnTabInput } from "@/modules/terminal/lib/useTerminalSession";
 import { statusLabelClass, type SshConnectionBinding, type SshStatus } from "@/modules/ssh/status";
-import { extensionStateLabelClass, type PaneEntry } from "@/modules/tabs/lib/entries";
+import { type PaneEntry } from "@/modules/tabs/lib/entries";
 import type { Tab } from "@/modules/tabs";
 import { leafLabel } from "@/modules/tabs/lib/tabHelpers";
 import type { SshConnection } from "@/modules/ssh/connections";
@@ -93,12 +87,7 @@ const EditorPane = lazy(() => import("@/modules/editor").then((m) => ({ default:
  *  it hands off: the main pane unmounts its editor while floating (so two live
  *  CodeMirror views can't race and save-stomp the same file) and saves before
  *  float + on dock-back. Remote/SFTP editors depend on the main window's russh
- *  session, so those are gated out. An extension panel hands off too, by
- *  re-running its renderer: panel
- *  registries are per-webview, so the float ACTIVATES the extension in its own
- *  context. That makes two live copies against one storage, which is why a panel
- *  that persists (the API Client's collections) refreshes on mount rather than
- *  trusting its module state. NOTE: float windows only run on a real Tauri
+ *  session, so those are gated out. NOTE: float windows only run on a real Tauri
  *  build, so this path is build-green but needs a manual smoke test. */
 function floatParamsFor(node: PaneLeaf, title: string): FloatLeafParams | null {
   if (node.leafKind === "terminal")
@@ -119,18 +108,6 @@ function floatParamsFor(node: PaneLeaf, title: string): FloatLeafParams | null {
   // the main-window pane stays mounted (it owns the tab tree the float has no
   // copy of) and pushes its cards over.
   if (node.leafKind === "board") return { leafId: node.id, kind: "board", title };
-  if (node.leafKind === "extension-panel")
-    return {
-      leafId: node.id,
-      kind: "extension-panel",
-      title,
-      extensionId: node.extensionId,
-      panelId: node.panelId,
-      // The float re-runs the renderer in its own webview, so it needs the key
-      // to mount the SAME instance: without it a panel with one instance per
-      // key (the API Client's per-collection workbench) floats the wrong one.
-      reuseKey: node.reuseKey,
-    };
   return null;
 }
 
@@ -164,11 +141,6 @@ type Props = {
   onMovePaneLeaf?: (sourceLeafId: number, targetLeafId: number, edge: PaneEdge) => void;
   /** Close button in a pane header. Hidden when omitted. */
   onCloseLeaf?: (leafId: number) => void;
-  /** Open extension tabs offered in the per-pane "Split with…" header menu. */
-  extTabs?: { id: number; title: string }[];
-  /** Split this tab's pane (next to `leafId`, in `dir`) with an open extension
-   *  tab, relocating it into the pane. */
-  onSplitWithExtTab?: (extTabId: number, leafId: number, dir: SplitDir) => void;
   /** Set (or clear, with `null`) a terminal leaf's per-pane theme override.
    *  `themeId` is a `TERMINAL_PRESETS` id. Backs the header "Terminal theme" menu. */
   onSetTerminalTheme?: (leafId: number, themeId: string | null) => void;
@@ -208,8 +180,6 @@ type PaneDndValue = {
   drag: PaneDragState;
   leafCount: number;
   onCloseLeaf?: (leafId: number) => void;
-  extTabs?: { id: number; title: string }[];
-  onSplitWithExtTab?: (extTabId: number, leafId: number, dir: SplitDir) => void;
   onSetTerminalTheme?: (leafId: number, themeId: string | null) => void;
   onToggleMdPreview?: (leafId: number) => void;
   detectedBrowserUrl?: string | null;
@@ -319,7 +289,6 @@ function leafIconInfo(node: PaneLeaf, aiCliStatuses?: Map<number, AiCliStatus>):
     editorFileName: node.leafKind === "editor" ? basename(node.path) : undefined,
     editorRemote: isRemoteEditorLeaf(node),
     aiCliStatus: node.leafKind === "terminal" ? (aiCliStatuses?.get(node.id) ?? null) : null,
-    extIcon: node.leafKind === "extension-panel" ? node.icon : undefined,
   };
 }
 
@@ -442,8 +411,6 @@ const LeafBody = memo(function LeafBody({
       </ErrorBoundary>
     );
   }
-  // The extension host is gone; the leaf kind itself is removed next.
-  if (node.leafKind === "extension-panel") return null;
   if (node.leafKind === "board") {
     return (
       <ErrorBoundary label="board pane" resetKeys={[node.id]}>
@@ -525,8 +492,6 @@ function PaneLeafFrame({
     drag,
     leafCount,
     onCloseLeaf,
-    extTabs,
-    onSplitWithExtTab,
     onSetTerminalTheme,
     onToggleMdPreview,
     detectedBrowserUrl,
@@ -560,8 +525,8 @@ function PaneLeafFrame({
   const lineWrap = usePreferencesStore((s) => s.lineWrap);
   const userShortcuts = usePreferencesStore((s) => s.shortcuts);
 
-  // Header buttons that act on whatever leaf is *active* (the Beautify
-  // extension's wand, the detected-URL globe) must render exactly once. Every
+  // Header buttons that act on whatever leaf is *active* (the detected-URL
+  // globe) must render exactly once. Every
   // pane tab keeps a focused leaf even while hidden, so `focused` alone would
   // mount one copy per background tab.
   const onlyHere = tabVisible && focused;
@@ -571,9 +536,6 @@ function PaneLeafFrame({
   const isPrivate = node.private === true;
   const isSsh = node.leafKind === "terminal" && !!node.sshConnectionId;
   const sshStatus = isSsh ? sshStatuses?.get(node.id) : undefined;
-  // Extension-panel lifecycle tone (e.g. SQL Explorer connection state).
-  const extState = node.leafKind === "extension-panel" ? node.state : undefined;
-
   // Program-set terminal title (OSC 2), e.g. a running agent's task. Appended to
   // the folder label so the pane header reads identically to the Workspaces
   // panel's terminal list for the same leaf.
@@ -609,8 +571,7 @@ function PaneLeafFrame({
   }, [node, sshHosts, sshBindingByConnection, onReconnectSsh]);
 
   // Float the pane into its own always-on-top window (terminals mirror live via
-  // Tauri events; editors open the file; extension panels re-run their renderer
-  // in the float's own context).
+  // Tauri events; editors open the file).
   const floatParams = floatParamsFor(node, baseLabel);
   const frameRef = useRef<HTMLDivElement>(null);
   const editorHandleRef = useRef<EditorPaneHandle | null>(null);
@@ -646,10 +607,7 @@ function PaneLeafFrame({
     >
       {/* Per-pane navigation header (drag handle + label + float + terminal-theme
           gear + close). A terminal leaf's per-pane theme is a gear-icon dropdown
-          placed between the float + close buttons (no longer a right-click menu);
-          any leaf also offers a right-click "Split with <extension>" while an
-          extension panel tab is open. That right-click menu is dropped entirely
-          when there is nothing to show, so the header never opens an empty box. */}
+          placed between the float + close buttons. */}
       {(() => {
         const headerBar = (
           // `@container` so the per-file cluster below can shed itself on a
@@ -698,9 +656,6 @@ function PaneLeafFrame({
                 node.leafKind === "editor" && node.preview && "italic",
                 // SSH status colors the label, matching the tab strip.
                 isSsh && statusLabelClass(sshStatus),
-                // Extension-panel lifecycle tone (SQL Explorer connection state),
-                // same palette + tab-strip parity.
-                extState && extensionStateLabelClass(extState),
                 // Private signal lives on the label (red), not the icon. Last = wins.
                 isPrivate && "text-destructive",
               )}
@@ -887,38 +842,9 @@ function PaneLeafFrame({
           </div>
         );
 
-        // Split-with-extension only applies while an extension panel is open as
-        // a tab; without one there is nothing to relocate into the split. The
-        // per-pane terminal theme moved to the header gear button (between float +
-        // close), so the right-click menu now only offers the split actions.
-        const hasSplit = !!onSplitWithExtTab && !!extTabs && extTabs.length > 0;
-        // Nothing to offer -> render the bare header (no empty right-click box).
-        if (!hasSplit) return headerBar;
-
-        return (
-          <ContextMenu>
-            <ContextMenuTrigger asChild>{headerBar}</ContextMenuTrigger>
-            <ContextMenuContent>
-              {/* hasSplit (checked above) guarantees onSplitWithExtTab + extTabs
-                  are present and extTabs is non-empty; optional chaining keeps it
-                  type-safe without a redundant always-true guard. */}
-              {extTabs?.flatMap((et) => [
-                <ContextMenuItem
-                  key={`${et.id}-row`}
-                  onSelect={() => onSplitWithExtTab?.(et.id, node.id, "row")}
-                >
-                  Split right with {et.title || "panel"}
-                </ContextMenuItem>,
-                <ContextMenuItem
-                  key={`${et.id}-col`}
-                  onSelect={() => onSplitWithExtTab?.(et.id, node.id, "col")}
-                >
-                  Split down with {et.title || "panel"}
-                </ContextMenuItem>,
-              ])}
-            </ContextMenuContent>
-          </ContextMenu>
-        );
+        // The per-pane terminal theme moved to the header gear button (between
+        // float + close), so the header carries no right-click menu of its own.
+        return headerBar;
       })()}
       {/* While floating, an independent window mirrors this leaf, so the pane
           hides its now-redundant terminal (kept mounted so the PTY + mirror tap
@@ -1052,8 +978,6 @@ export function PaneTreeView({
   mdPreviewLeafIds,
   onMovePaneLeaf,
   onCloseLeaf,
-  extTabs,
-  onSplitWithExtTab,
   onSetTerminalTheme,
   onToggleMdPreview,
   detectedBrowserUrl,
@@ -1134,8 +1058,6 @@ export function PaneTreeView({
       drag,
       leafCount,
       onCloseLeaf,
-      extTabs,
-      onSplitWithExtTab,
       onSetTerminalTheme,
       onToggleMdPreview,
       detectedBrowserUrl,
@@ -1145,8 +1067,6 @@ export function PaneTreeView({
       drag,
       leafCount,
       onCloseLeaf,
-      extTabs,
-      onSplitWithExtTab,
       onSetTerminalTheme,
       onToggleMdPreview,
       detectedBrowserUrl,

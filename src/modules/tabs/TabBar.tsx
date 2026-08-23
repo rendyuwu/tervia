@@ -6,7 +6,6 @@ import { MAX_PANES_PER_TAB } from "./lib/useTabs";
 import { useSshHosts } from "@/modules/ssh/connections";
 import { type SshStatus } from "@/modules/ssh/status";
 import { type AiCliStatus } from "@/modules/terminal/lib/aiCliStatus";
-import { useIconsReady } from "@/lib/iconRegistry";
 import { useExplorerIconsReady } from "@/modules/explorer/lib/iconResolver";
 import {
   closestCenter,
@@ -138,11 +137,9 @@ export function TabBar({
   // Leaf ids are never reused, so a stale id after a close simply matches nothing.
   const [renamingLeafId, setRenamingLeafId] = useState<number | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
-  // Re-render once the lazy icon chunk and catppuccin file-icon set finish
-  // loading so extension tab icons + editor-tab file icons swap from the
-  // fallback glyph to the real one. Both hooks return true immediately when
-  // already cached and flip on load completion.
-  useIconsReady();
+  // Re-render once the catppuccin file-icon set finishes loading so editor-tab
+  // file icons swap from the fallback glyph to the real one. Returns true
+  // immediately when already cached and flips on load completion.
   useExplorerIconsReady();
   // dnd-kit drag id. `tab:<n>` for whole-group, `leaf:<n>` for in-group reorder. Prefix routes `handleDragEnd`.
   const [activeDragId, setActiveDragId] = useState<string | null>(null);

@@ -1,6 +1,6 @@
 import type { EditorPaneHandle } from "@/modules/editor";
 import type { PaneTab, Tab } from "@/modules/tabs";
-import { leaves, type PaneEdge, type SplitDir } from "@/modules/terminal/lib/panes";
+import { leaves, type PaneEdge } from "@/modules/terminal/lib/panes";
 import type { TerminalPaneHandle } from "@/modules/terminal";
 import type { TediOpenInput, TediSpawnTabInput } from "@/modules/terminal/lib/useTerminalSession";
 import type { SshConnectionBinding, SshStatus } from "@/modules/ssh/status";
@@ -41,14 +41,6 @@ type Props = {
   onMovePaneLeaf?: (sourceLeafId: number, targetLeafId: number, edge: PaneEdge) => void;
   /** Close button in each pane header. */
   onCloseLeafRequest?: (leafId: number) => void;
-  /** Split a pane (next to `targetLeafId` in `targetTabId`) with an open
-   *  extension tab, relocating that tab into the pane. */
-  onSplitWithExtTab?: (
-    extTabId: number,
-    targetTabId: number,
-    targetLeafId: number,
-    dir: SplitDir,
-  ) => void;
   /** Set (or clear, with `null`) a terminal leaf's per-pane theme override.
    *  `themeId` is a `TERMINAL_PRESETS` id. Backs the header "Terminal theme" menu. */
   onSetTerminalTheme?: (leafId: number, themeId: string | null) => void;
@@ -91,7 +83,6 @@ export function PaneStack({
   onFocusLeaf,
   onMovePaneLeaf,
   onCloseLeafRequest,
-  onSplitWithExtTab,
   onSetTerminalTheme,
   onToggleMdPreview,
   detectedBrowserUrl,
@@ -104,13 +95,6 @@ export function PaneStack({
 }: Props) {
   // Memoize the filter so the prune effect below sees a stable identity.
   const paneTabs = useMemo(() => tabs.filter((t): t is PaneTab => t.kind === "pane"), [tabs]);
-
-  // Open extension tabs offered in the per-pane "Split with…" context menu.
-  // All tab kinds carry `id` + `title`, so no narrowing cast is needed.
-  const extTabList = useMemo(
-    () => tabs.filter((t) => t.kind === "ext").map((t) => ({ id: t.id, title: t.title })),
-    [tabs],
-  );
 
   // Resolve a leaf's `sshConnectionId` to a host for the `ssh:<host>` header
   // label. Read here (not per-leaf), from the same hook the tab strip and the
@@ -220,12 +204,6 @@ export function PaneStack({
               mdPreviewLeafIds={mdPreviewLeafIds}
               onMovePaneLeaf={onMovePaneLeaf}
               onCloseLeaf={onCloseLeafRequest}
-              extTabs={extTabList}
-              onSplitWithExtTab={
-                onSplitWithExtTab
-                  ? (extTabId, leafId, dir) => onSplitWithExtTab(extTabId, t.id, leafId, dir)
-                  : undefined
-              }
               onSetTerminalTheme={onSetTerminalTheme}
               onToggleMdPreview={onToggleMdPreview}
               detectedBrowserUrl={detectedBrowserUrl}

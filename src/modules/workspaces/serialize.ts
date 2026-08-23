@@ -78,15 +78,8 @@ function leafToSaved(leaf: PaneLeaf): SavedPaneNode {
       ...(leaf.customTitle ? { customTitle: leaf.customTitle } : {}),
     };
   }
-  if (leaf.leafKind === "extension-panel") {
-    // Session-only: `tabToSaved` skips any pane tab containing an
-    // extension-panel leaf, so this is never reached. Guard for exhaustiveness.
-    throw new Error("extension-panel leaves are not serialized");
-  }
   // Board: restorable from nothing but its own existence, since the columns are
-  // rebuilt from the live tab tree. Unlike an extension panel it needs no host,
-  // so the pane tab holding it is saved whole rather than dropped - which
-  // matters when a board is split next to a terminal worth keeping.
+  // rebuilt from the live tab tree.
   return {
     kind: "leaf",
     leafKind: "board",
@@ -145,26 +138,16 @@ function nodeToSaved(node: PaneNode): SavedPaneNode | null {
 }
 
 /**
- * True for exactly the tabs `tabToSaved` emits. The session-only kinds
- * (ai-diff, git-diff, ext, scm) are never persisted - only pane tabs are.
- * A pane tab holding an extension-panel leaf is skipped whole, and a pane tab
- * whose every leaf is an ad-hoc remote editor has nothing left to save.
+ * True for exactly the tabs `tabToSaved` emits. A pane tab whose every leaf is
+ * an ad-hoc remote editor has nothing left to save.
  *
  * Single source of truth for "which tabs are saved", shared by `tabToSaved`
  * and `savedActiveTabIndex` so the saved active-index can't drift from the
- * saved array. It previously counted every pane tab, including the
- * extension-panel ones `tabToSaved` drops, which mis-focused the restored
- * workspace whenever such a tab preceded the active one.
+ * saved array.
  */
 function isPersistedTab(tab: Tab): tab is PaneTab {
   if (tab.kind !== "pane") return false;
-  const all = leaves(tab.paneTree);
-  // Extension-panel leaves are session-only. If a pane tab contains one, skip
-  // persisting the whole tab so the serializer never hits a non-saveable leaf.
-  // (MVP: a terminal split next to an extension panel isn't restored either;
-  // acceptable until extension-panel leaves round-trip.)
-  if (all.some((l) => l.leafKind === "extension-panel")) return false;
-  return all.some((l) => !isUnrestorableEditorLeaf(l));
+  return leaves(tab.paneTree).some((l) => !isUnrestorableEditorLeaf(l));
 }
 
 function tabToSaved(tab: Tab): SavedTab | null {

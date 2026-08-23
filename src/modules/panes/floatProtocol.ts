@@ -5,7 +5,7 @@
  * WebView2 windows). Leaf params travel in the float window's URL query.
  */
 
-export type FloatKind = "terminal" | "editor" | "table" | "extension-panel" | "board";
+export type FloatKind = "terminal" | "editor" | "table" | "board";
 
 export type FloatLeafParams = {
   leafId: number;
@@ -23,14 +23,6 @@ export type FloatLeafParams = {
   /** table: the table serialized as markdown. Static content, so it rides in the
    *  window URL and needs no live event mirror (unlike terminals). */
   markdown?: string;
-  /** extension-panel leaf: which panel to mount. Panel renderers live in
-   *  per-webview registries, so the float window activates the extension in its
-   *  own JS context and re-runs the renderer - nothing is mirrored. */
-  extensionId?: string;
-  panelId?: string;
-  /** extension-panel leaf: the key the pane was opened with, so the float
-   *  mounts the same instance a per-key panel would otherwise have to guess. */
-  reuseKey?: string;
 };
 
 /** Encode leaf params for the float window URL (`float.html?p=...`). */

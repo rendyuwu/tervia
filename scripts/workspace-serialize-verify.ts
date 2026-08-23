@@ -77,15 +77,6 @@ function savedRemoteEditor(leafId: number, path: string): PaneNode {
     sshHostLabel: "u@h:22",
   };
 }
-function extPanel(leafId: number): PaneNode {
-  return {
-    kind: "leaf",
-    id: leafId,
-    leafKind: "extension-panel",
-    extensionId: "tedi.sql-explorer",
-    panelId: "main",
-  };
-}
 function split(dir: "row" | "col", children: PaneNode[], sizes?: number[]): PaneNode {
   return { kind: "split", id: id(), dir, children, ...(sizes ? { sizes } : {}) };
 }
@@ -175,7 +166,7 @@ console.log("\n[prune] a remote editor leaf must not round-trip");
   check("nested collapse flattens", shape(s[0]), "split(terminal,terminal)");
 }
 
-// Nothing left to save: the whole tab goes, exactly like an extension-panel tab.
+// Nothing left to save: the whole tab goes.
 {
   const s = serializeTabs([tab(adHocRemoteEditor(601, "/srv/a.ts"), 601)]);
   check("remote-editor-only tab is dropped", s.length, 0);
@@ -375,16 +366,8 @@ console.log("\n[mount] a remote pane must never open an editor without a session
 
 console.log("\n[active index] savedActiveTabIndex must match what serializeTabs emits");
 
-// The pre-existing drift: an extension-panel tab was counted but never emitted.
-{
-  const extTab = tab(extPanel(801), 801);
-  const paneTab = tab(term(802), 802);
-  const tabs = [extTab, paneTab];
-  check("extension-panel tab is not emitted", serializeTabs(tabs).length, 1);
-  check("index skips the dropped extension-panel tab", savedActiveTabIndex(tabs, paneTab.id), 0);
-}
-
-// Same drift via a dropped remote-editor-only tab.
+// The drift this pins: a dropped remote-editor-only tab was counted but never
+// emitted, so the saved active index pointed one tab too far.
 {
   const remoteTab = tab(adHocRemoteEditor(901, "/srv/a.ts"), 901);
   const paneTab = tab(term(902), 902);
