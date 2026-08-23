@@ -35,9 +35,9 @@ jobs:
     outputs:
       release_id: ${{ steps.create-release.outputs.result }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
 
@@ -58,7 +58,7 @@ jobs:
 
       - name: Create draft release
         id: create-release
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         env:
           TAG: ${{ github.ref_name }}
           RELEASE_BODY: ${{ steps.notes.outputs.body }}
@@ -99,7 +99,7 @@ jobs:
 
     runs-on: ${{ matrix.platform }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Same package list and same script as ci.yml's bundle matrix, so a green
       # PR build means the release build has the same libraries under it. The
@@ -109,14 +109,15 @@ jobs:
         timeout-minutes: 10
         run: bash .github/scripts/install-linux-deps.sh ${{ env.LINUX_DEPS }}
 
-      # Pinned to v4: pnpm/action-setup@v6's self-installer crashes on
-      # windows-2025 runners with STATUS_STACK_BUFFER_OVERRUN (0xC0000409).
-      # v4 uses a different install mechanism that works on all platforms.
-      - uses: pnpm/action-setup@v4
+      # This was pinned to v4 because pnpm/action-setup@v6's self-installer
+      # crashed on windows-2025 runners with STATUS_STACK_BUFFER_OVERRUN
+      # (0xC0000409). v6.0.8 fixed that by dropping patchPnpmEnv, and v4 runs on
+      # Node 20, which the runners now force onto Node 24 and warn about.
+      - uses: pnpm/action-setup@v6
         with:
           version: 10
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: pnpm
