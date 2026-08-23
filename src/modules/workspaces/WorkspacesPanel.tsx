@@ -60,9 +60,7 @@ type Props = {
   onClose: (workspaceId: string) => void;
   /**
    * Live tab-strip entry count per workspace id (one per pane leaf, so a split
-   * group tab counts its panes; plus every standalone/session-only diff / scm /
-   * extension tab the persisted snapshot drops). Covers every workspace visited
-   * this session. Workspaces not present here (restored from disk, not yet
+   * group tab counts its panes). Covers every workspace visited this session. Workspaces not present here (restored from disk, not yet
    * opened) fall back to `countSavedTabEntries` over their persisted tabs.
    */
   tabCounts?: Record<string, number>;
@@ -80,18 +78,16 @@ type Props = {
    * its persisted snapshot, which carries no live status.
    */
   cachedTabsByWorkspace?: RefObject<Map<string, { tabs: Tab[]; activeId: number | null }>>;
-  /** Focus a live entry: activates its tab, and the pane inside it for a leaf.
-   *  Standalone tabs (SCM, diffs, extension tabs) pass a leaf id no tree holds,
-   *  which the tab side already ignores, so they just activate. */
+  /** Focus a live entry: activates its tab, and the pane inside it for a leaf. */
   onFocusLeaf?: (tabId: number, leafId: number) => void;
   /** Rename a live pane leaf, or reset it to the derived name with `null`. Same
    *  handler the tab strip's right-click Rename uses, so both write one field. */
   onRenameLeaf?: (leafId: number, title: string | null) => void;
   /**
-   * Close one listed tab / pane. `leafId` is null for a standalone tab (SCM, a
-   * diff, an extension tab) - the same signature and the same handler the tab
-   * strip's X uses, so a close from here also gets the busy-terminal and
-   * unsaved-editor confirms rather than a second, weaker code path.
+   * Close one listed tab / pane. `leafId` is null for a tab with no pane tree -
+   * the same signature and the same handler the tab strip's X uses, so a close
+   * from here also gets the busy-terminal and unsaved-editor confirms rather
+   * than a second, weaker code path.
    */
   onCloseEntry?: (tabId: number, leafId: number | null) => void;
   /** Open (or focus) the Board tab: this workspace's terminals in columns of
