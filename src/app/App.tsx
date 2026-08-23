@@ -335,7 +335,7 @@ export default function App() {
   // installed "to this project" lands where the agent actually looks.
   useEffect(() => {
     try {
-      localStorage.setItem("tedi.liveWorkspaceRoot", explorerRoot ?? home ?? "");
+      localStorage.setItem("tervia.liveWorkspaceRoot", explorerRoot ?? home ?? "");
     } catch {
       /* storage unavailable */
     }

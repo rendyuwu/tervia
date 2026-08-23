@@ -160,7 +160,7 @@ export function resolveTerminalPreset(id: string | null | undefined): TerminalPa
   return TERMINAL_PRESETS.find((p) => p.id === id)?.palette ?? null;
 }
 
-const FAST_PATH_KEY = "tedi-terminal-theme-shadow";
+const FAST_PATH_KEY = "tervia-terminal-theme-shadow";
 
 type Shadow = { mode: TerminalThemeMode; palette: TerminalPalette | null };
 

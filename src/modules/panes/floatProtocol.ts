@@ -50,15 +50,15 @@ function b64ToStr(b64: string): string {
 
 // Per-leaf event names so multiple open floats never cross-talk.
 export const floatEv = {
-  out: (id: number) => `tedi://float-out:${id}`, // host -> client: output bytes (base64)
-  in: (id: number) => `tedi://float-in:${id}`, // client -> host: input string
-  hello: (id: number) => `tedi://float-hello:${id}`, // client -> host: ready, send snapshot
-  snap: (id: number) => `tedi://float-snap:${id}`, // host -> client: FloatSnap
-  size: (id: number) => `tedi://float-size:${id}`, // host -> client: FloatSize
-  bye: (id: number) => `tedi://float-bye:${id}`, // client -> host: closing
-  close: (id: number) => `tedi://float-close:${id}`, // host -> client: please close (dock back)
-  cards: (id: number) => `tedi://float-cards:${id}`, // host -> client: board cards
-  focus: (id: number) => `tedi://float-focus:${id}`, // client -> host: focus a pane
+  out: (id: number) => `tervia://float-out:${id}`, // host -> client: output bytes (base64)
+  in: (id: number) => `tervia://float-in:${id}`, // client -> host: input string
+  hello: (id: number) => `tervia://float-hello:${id}`, // client -> host: ready, send snapshot
+  snap: (id: number) => `tervia://float-snap:${id}`, // host -> client: FloatSnap
+  size: (id: number) => `tervia://float-size:${id}`, // host -> client: FloatSize
+  bye: (id: number) => `tervia://float-bye:${id}`, // client -> host: closing
+  close: (id: number) => `tervia://float-close:${id}`, // host -> client: please close (dock back)
+  cards: (id: number) => `tervia://float-cards:${id}`, // host -> client: board cards
+  focus: (id: number) => `tervia://float-focus:${id}`, // client -> host: focus a pane
 };
 
 export type FloatSnap = { text: string; cols: number; rows: number };

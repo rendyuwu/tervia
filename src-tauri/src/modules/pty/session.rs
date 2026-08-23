@@ -49,7 +49,8 @@ const READ_BUF: usize = 16 * 1024;
 // state. 4 MiB is ~1000 full 80x24 screens.
 const MAX_PENDING: usize = 4 * 1024 * 1024;
 // Hard reset (ESC c) + dim notice. Written verbatim when backlog is dropped.
-const OVERFLOW_NOTICE: &[u8] = b"\x1bc\x1b[2m[tedi: dropped output due to backpressure]\x1b[0m\r\n";
+const OVERFLOW_NOTICE: &[u8] =
+    b"\x1bc\x1b[2m[tervia: dropped output due to backpressure]\x1b[0m\r\n";
 
 #[derive(Serialize, Clone)]
 #[serde(tag = "type", rename_all = "camelCase")]
@@ -229,7 +230,7 @@ pub fn spawn_with_sink(
 
     let pending_r = pending.clone();
     let reader_thread = thread::Builder::new()
-        .name("tedi-pty-reader".into())
+        .name("tervia-pty-reader".into())
         .spawn(move || {
             let mut buf = [0u8; READ_BUF];
             let mut dropped_bytes: u64 = 0;
@@ -272,7 +273,7 @@ pub fn spawn_with_sink(
     let pending_f = pending.clone();
     let done_f = done.clone();
     thread::Builder::new()
-        .name("tedi-pty-flusher".into())
+        .name("tervia-pty-flusher".into())
         .spawn(move || loop {
             thread::sleep(FLUSH_INTERVAL);
             let chunk = {
@@ -305,7 +306,7 @@ pub fn spawn_with_sink(
     // map_err cleanup path below if waiter spawn fails.
     let done_e = done.clone();
     thread::Builder::new()
-        .name("tedi-pty-waiter".into())
+        .name("tervia-pty-waiter".into())
         .spawn(move || {
             let code = match child.wait() {
                 Ok(status) => status.exit_code() as i32,

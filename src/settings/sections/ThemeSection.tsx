@@ -230,7 +230,7 @@ export function ThemeSection() {
     try {
       const selected = await openFileDialog({
         multiple: false,
-        filters: [{ name: "TEDI theme", extensions: ["tedi", "json"] }],
+        filters: [{ name: "Tervia theme", extensions: ["tervia", "json"] }],
       });
       const path = typeof selected === "string" ? selected : null;
       if (!path) return;
@@ -251,8 +251,8 @@ export function ThemeSection() {
   const onExport = async () => {
     try {
       const target = await saveFileDialog({
-        defaultPath: `${slugify(theme.name, "theme")}.tedi`,
-        filters: [{ name: "TEDI theme", extensions: ["tedi"] }],
+        defaultPath: `${slugify(theme.name, "theme")}.tervia`,
+        filters: [{ name: "Tervia theme", extensions: ["tervia"] }],
       });
       if (!target) return;
       // Keep HTTP(S) URLs in the export so recipients reuse the same
@@ -628,7 +628,7 @@ export function ThemeSection() {
                 onPreview={(n) =>
                   // Live-preview on the main window's real wallpaper layer
                   // (kind-aware via applyBackground). The old code poked
-                  // `#tedi-bg-layer` directly, but that element doesn't exist in
+                  // `#tervia-bg-layer` directly, but that element doesn't exist in
                   // the Settings webview, so the preview was a no-op. We send only
                   // the numbers; the main window merges them onto the wallpaper it
                   // already holds (no image blob over IPC).
@@ -684,7 +684,7 @@ export function ThemeSection() {
       <SettingsAccordion title="Import / Export">
         <div className="flex flex-col gap-2">
           <SettingRow
-            title=".tedi theme file"
+            title=".tervia theme file"
             description="Share themes with teammates. Files contain all colors plus background settings (image data is excluded from the export)."
           >
             <div className="flex items-center gap-2">

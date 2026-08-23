@@ -36,7 +36,7 @@ fn ssh_runtime() -> &'static Runtime {
         tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
-            .thread_name("tedi-ssh")
+            .thread_name("tervia-ssh")
             .build()
             .expect("init ssh tokio runtime")
     })

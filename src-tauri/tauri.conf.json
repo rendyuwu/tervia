@@ -14,7 +14,7 @@
   "app": {
     "windows": [
       {
-        "title": "TEDI",
+        "title": "Tervia",
         "width": 800,
         "height": 600,
         "minWidth": 420,
@@ -69,10 +69,10 @@
       }
     },
     "category": "DeveloperTool",
-    "copyright": "Copyright © 2026 IlhamriSKY. Built on Terax © 2026 Crynta. Apache License 2.0.",
+    "copyright": "Copyright © 2026 rendyuwu. Derived from TEDI © 2026 IlhamriSKY, itself derived from Terax © 2026 Crynta. Apache License 2.0.",
     "licenseFile": "../LICENSE",
-    "shortDescription": "Terminal Director",
-    "longDescription": "TEDI (Terminal Director) is a lightweight, low-footprint terminal that boosts developer productivity with split-screen terminals, tab grouping, and workspaces."
+    "shortDescription": "Remote machine client",
+    "longDescription": "Tervia is a lightweight desktop client for remote machines: SSH sessions, port forwarding, SFTP browsing, and an encrypted backup of your saved connections."
   },
   "plugins": {
     "updater": {

@@ -1,6 +1,6 @@
 /**
  * Export / import saved SSH connections as a single passphrase-encrypted
- * `.tedi-ssh` file, so moving to another machine is one import instead of
+ * `.tervia-ssh` file, so moving to another machine is one import instead of
  * retyping every host and credential.
  *
  * The credentials live in the OS keychain and CANNOT travel with the store

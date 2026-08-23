@@ -101,8 +101,8 @@
 ; `app_data_dir` resolves to `%APPDATA%\<identifier>\` on Windows. The
 ; backup lives in %TEMP% so it disappears on reboot even if a restore is
 ; somehow skipped — never accumulates stale snapshots.
-!define TEDI_DATA_DIR    "$APPDATA\id.ilhamrisky.tedi"
-!define TEDI_DATA_BACKUP "$TEMP\tedi-userdata-backup"
+!define TEDI_DATA_DIR    "$APPDATA\dev.rendy.tervia"
+!define TEDI_DATA_BACKUP "$TEMP\tervia-userdata-backup"
 
 !macro NSIS_HOOK_PREINSTALL
   ; --- snapshot user data --------------------------------------------------
@@ -224,9 +224,9 @@
   ; clean install the backup never existed and this is a no-op.
   IfFileExists "${TEDI_DATA_BACKUP}\*.*" 0 tedi_postinstall_no_restore
     StrCpy $5 "0"
-    IfFileExists "${TEDI_DATA_DIR}\tedi-settings.json" +2 0
+    IfFileExists "${TEDI_DATA_DIR}\tervia-settings.json" +2 0
       StrCpy $5 "1"
-    IfFileExists "${TEDI_DATA_DIR}\tedi-sessions.json" +2 0
+    IfFileExists "${TEDI_DATA_DIR}\tervia-workspaces.json" +2 0
       StrCpy $5 "1"
     ${If} $5 == "1"
       CreateDirectory "${TEDI_DATA_DIR}"

@@ -44,7 +44,7 @@ if (typeof window !== "undefined" && !window.__TAURI_INTERNALS__) {
 
   // Backing storage for @tauri-apps/plugin-store: one bucket per store path,
   // serialized as JSON in localStorage.
-  const STORE_PREFIX = "tedi:shim:store:";
+  const STORE_PREFIX = "tervia:shim:store:";
   type StoreData = Record<string, unknown>;
   const loadStore = (path: string): StoreData => {
     try {

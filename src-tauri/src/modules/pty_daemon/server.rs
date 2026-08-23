@@ -265,17 +265,17 @@ pub fn run_forever() -> ! {
     init_logging();
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
-        .thread_name("tedi-ptyd")
+        .thread_name("tervia-ptyd")
         .build()
-        .expect("build tokio runtime for tedi-ptyd");
+        .expect("build tokio runtime for tervia-ptyd");
     let result = rt.block_on(async { server_main().await });
     match result {
         Ok(()) => {
-            log::info!("tedi-ptyd shutting down");
+            log::info!("tervia-ptyd shutting down");
             std::process::exit(0)
         }
         Err(e) => {
-            log::error!("tedi-ptyd fatal: {e}");
+            log::error!("tervia-ptyd fatal: {e}");
             std::process::exit(1)
         }
     }
@@ -294,7 +294,7 @@ async fn server_main() -> std::io::Result<()> {
         tokio::spawn(idle_watcher(s, Duration::from_secs(idle_timeout_secs)));
     }
 
-    log::info!("tedi-ptyd ready (idle_timeout={idle_timeout_secs}s)");
+    log::info!("tervia-ptyd ready (idle_timeout={idle_timeout_secs}s)");
     accept_loop(listener, state).await
 }
 
@@ -322,7 +322,7 @@ async fn accept_loop(
                 return Ok(());
             }
             log::info!(
-                "tedi-ptyd shutdown raced a live connection (clients={clients}, \
+                "tervia-ptyd shutdown raced a live connection (clients={clients}, \
                  live_sessions={live_sessions}); resuming"
             );
             state.shutdown_requested.store(false, Ordering::Release);
@@ -355,7 +355,7 @@ async fn idle_watcher(state: Arc<DaemonState>, timeout: Duration) {
         if let Some(t) = last {
             if t.elapsed() >= timeout {
                 log::info!(
-                    "tedi-ptyd idle for {}s, requesting shutdown",
+                    "tervia-ptyd idle for {}s, requesting shutdown",
                     t.elapsed().as_secs()
                 );
                 state.shutdown_requested.store(true, Ordering::Release);
@@ -876,7 +876,7 @@ fn close_session(state: &Arc<DaemonState>, session_id: Uuid) {
     // keep ConPTY close from racing a sibling spawn (the same blank-pane
     // hazard the in-process `pty_close` path handles).
     let _ = std::thread::Builder::new()
-        .name(format!("tedi-ptyd-drop-{session_id}"))
+        .name(format!("tervia-ptyd-drop-{session_id}"))
         .spawn(move || {
             let pty_arc = shell.pty.get().cloned();
             drop(shell);

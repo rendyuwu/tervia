@@ -547,7 +547,7 @@ mod replace_in_file_tests {
         // Unique-per-call name without pulling in a tempfile dep: mix the
         // content length and address of a stack local into the file name.
         let marker = &content as *const _ as usize;
-        let p = std::env::temp_dir().join(format!("tedi_rif_{}_{}.txt", content.len(), marker));
+        let p = std::env::temp_dir().join(format!("tervia_rif_{}_{}.txt", content.len(), marker));
         let mut f = fs::File::create(&p).unwrap();
         f.write_all(content.as_bytes()).unwrap();
         p

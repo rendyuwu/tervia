@@ -2,24 +2,21 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>NSMicrophoneUsageDescription</key>
-	<string>TEDI uses your microphone for AI voice input.</string>
-
 	<!--
 	  Finder "Open With" support. macOS has no per-app right-click verb the way
-	  Explorer does; declaring the UTIs TEDI can handle is what puts it in the
+	  Explorer does; declaring the UTIs Tervia can handle is what puts it in the
 	  Open With submenu (and makes drag-onto-Dock work) for folders and files
 	  alike. Launch Services delivers the selection as `application:openURLs:`,
 	  which Tauri surfaces as `RunEvent::Opened` - handled in
 	  `cli::handle_opened_urls`.
 
-	  LSHandlerRank Alternate on every entry: TEDI offers to open these, but
+	  LSHandlerRank Alternate on every entry: Tervia offers to open these, but
 	  never claims the default-application slot away from the user's editor, or
 	  from Finder itself for folders.
 
 	  public.data is the root UTI for "any file", included deliberately so a
 	  file with no recognised extension (.env, a Dockerfile, an extensionless
-	  script) still lists TEDI. Rank Alternate keeps that from turning TEDI into
+	  script) still lists Tervia. Rank Alternate keeps that from turning Tervia into
 	  the default handler for archives and media.
 	-->
 	<key>CFBundleDocumentTypes</key>

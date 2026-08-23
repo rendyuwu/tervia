@@ -260,7 +260,7 @@ export function normalizeSoundData(value: unknown): string {
   return v;
 }
 
-const STORE_PATH = "tedi-settings.json";
+const STORE_PATH = "tervia-settings.json";
 const KEY_THEME = "theme";
 const KEY_EDITOR_THEME = "editorTheme";
 const KEY_FONT_FAMILY = "fontFamily";
@@ -414,7 +414,7 @@ const store = new LazyStore(STORE_PATH, { defaults: {}, autoSave: 200 });
 // through a Tauri event so listeners that only attach the event path also see
 // the change; `source` lets the writing window dedupe its own self-delivered
 // event (Tauri v2 self-delivers emit()) and handle it via onChange only.
-const PREFS_CHANGED_EVENT = "tedi://prefs-changed";
+const PREFS_CHANGED_EVENT = "tervia://prefs-changed";
 
 // Label of the webview that performed a write. Used to ignore the
 // self-delivered PREFS_CHANGED_EVENT in the writing window (the store.onChange

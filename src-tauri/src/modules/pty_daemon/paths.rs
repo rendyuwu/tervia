@@ -21,25 +21,25 @@ pub fn daemon_log_path() -> PathBuf {
         .unwrap_or_else(std::env::temp_dir);
     let dir = base.join(BUNDLE_ID).join("logs");
     let _ = std::fs::create_dir_all(&dir);
-    dir.join("tedi-ptyd.log")
+    dir.join("tervia-ptyd.log")
 }
 
-/// Unix domain socket path. Prefers `$XDG_RUNTIME_DIR/tedi-ptyd.sock`
+/// Unix domain socket path. Prefers `$XDG_RUNTIME_DIR/tervia-ptyd.sock`
 /// (per-user, tmpfs-backed on systemd distros, auto-cleaned on logout).
-/// Falls back to `$TMPDIR/tedi-ptyd-<USER>.sock` (or `/tmp` if `TMPDIR`
+/// Falls back to `$TMPDIR/tervia-ptyd-<USER>.sock` (or `/tmp` if `TMPDIR`
 /// unset). `$USER` provides per-user isolation since `/tmp` is shared.
 #[cfg(unix)]
 pub fn socket_path() -> PathBuf {
     if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR") {
         let mut p = PathBuf::from(dir);
-        p.push("tedi-ptyd.sock");
+        p.push("tervia-ptyd.sock");
         return p;
     }
     let tmp = std::env::var_os("TMPDIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/tmp"));
     let user = std::env::var("USER").unwrap_or_else(|_| "default".into());
-    tmp.join(format!("tedi-ptyd-{user}.sock"))
+    tmp.join(format!("tervia-ptyd-{user}.sock"))
 }
 
 /// Windows named-pipe name. The kernel namespace is shared across the
@@ -49,7 +49,7 @@ pub fn socket_path() -> PathBuf {
 #[cfg(windows)]
 pub fn socket_name() -> String {
     let user = std::env::var("USERNAME").unwrap_or_else(|_| "default".into());
-    format!("tedi-ptyd-{:08x}", fnv1a(user.as_bytes()))
+    format!("tervia-ptyd-{:08x}", fnv1a(user.as_bytes()))
 }
 
 #[cfg(windows)]
@@ -80,6 +80,6 @@ mod tests {
         let a = socket_name();
         let b = socket_name();
         assert_eq!(a, b, "socket name must be deterministic for one user");
-        assert!(a.starts_with("tedi-ptyd-"));
+        assert!(a.starts_with("tervia-ptyd-"));
     }
 }

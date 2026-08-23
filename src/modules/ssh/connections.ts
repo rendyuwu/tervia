@@ -8,10 +8,10 @@ import type { SshJumpHop } from "./bridge";
 // passphrase, private key) go in the OS keychain via secrets_* IPC. The
 // store only holds metadata and flags marking which secrets exist.
 
-const STORE_PATH = "tedi-ssh-connections.json";
+const STORE_PATH = "tervia-ssh-connections.json";
 const STORE_KEY = "connections";
 
-export const SSH_KEYRING_SERVICE = "tedi-ssh";
+export const SSH_KEYRING_SERVICE = "tervia-ssh";
 
 const PASSWORD_FIELD = "password";
 const PRIVATE_KEY_FIELD = "privateKey";
@@ -112,7 +112,7 @@ export type SshConnection = {
 };
 
 const store = new LazyStore(STORE_PATH, { defaults: {}, autoSave: 200 });
-const CHANGED_EVENT = "tedi://ssh-connections-changed";
+const CHANGED_EVENT = "tervia://ssh-connections-changed";
 
 // Serialize every store mutation through one chain so concurrent callers can't
 // interleave a read-modify-write (listConnections -> mutate -> persist) and lose

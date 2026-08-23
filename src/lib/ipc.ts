@@ -32,9 +32,9 @@ export type FsReadPortionResult =
  */
 export const IPC_EVENTS = {
   /** Rust -> Settings webview: focus a settings tab (payload: tab id string). */
-  SETTINGS_TAB: "tedi:settings-tab",
+  SETTINGS_TAB: "tervia:settings-tab",
   /** Rust -> main window: open a path passed to the `tedi` CLI (single-instance forward). */
-  OPEN_CLI_TARGET: "tedi:open-cli-target",
+  OPEN_CLI_TARGET: "tervia:open-cli-target",
   /** Rust -> main window: the `tedi --update` shim asks the UI to start updating. */
-  TRIGGER_UPDATE: "tedi:trigger-update",
+  TRIGGER_UPDATE: "tervia:trigger-update",
 } as const;

@@ -11,7 +11,7 @@ type Props = ComponentProps<typeof Button> & {
 /**
  * The canonical "upload / import / pick a file" button for Settings. Single
  * source of truth so every file-upload affordance stays visually identical -
- * the `.tedi` theme Import button is the reference. Pass the label as children;
+ * the `.tervia` theme Import button is the reference. Pass the label as children;
  * forwards every Button prop (`onClick`, `disabled`, …). Add `className` to
  * extend, never to change the height/variant.
  */

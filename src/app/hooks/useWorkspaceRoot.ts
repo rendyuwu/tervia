@@ -41,7 +41,7 @@ export function useWorkspaceRoot({ tabs, activePaneTab, newTab, openFileTab }: P
   const [home, setHome] = useState<string | null>(null);
   const [pickedRoot, setPickedRoot] = useState<string | null>(() => {
     try {
-      return localStorage.getItem("tedi.workspaceRoot");
+      return localStorage.getItem("tervia.workspaceRoot");
     } catch {
       return null;
     }
@@ -73,7 +73,7 @@ export function useWorkspaceRoot({ tabs, activePaneTab, newTab, openFileTab }: P
     const normalized = selected.replace(/\\/g, "/");
     setPickedRoot(normalized);
     try {
-      localStorage.setItem("tedi.workspaceRoot", normalized);
+      localStorage.setItem("tervia.workspaceRoot", normalized);
     } catch {
       // Storage unavailable (private mode etc.). Skip persistence.
     }
@@ -97,7 +97,7 @@ export function useWorkspaceRoot({ tabs, activePaneTab, newTab, openFileTab }: P
       const root = target.kind === "folder" ? target.path : target.parent;
       setPickedRoot(root);
       try {
-        localStorage.setItem("tedi.workspaceRoot", root);
+        localStorage.setItem("tervia.workspaceRoot", root);
       } catch {
         // Storage unavailable. Skip persistence.
       }

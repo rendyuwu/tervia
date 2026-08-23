@@ -1,5 +1,5 @@
 /**
- * Shape and validation for the `.tedi-ssh` connection backup.
+ * Shape and validation for the `.tervia-ssh` connection backup.
  *
  * An import is a TRUST BOUNDARY: the file came off a USB stick or a chat, and
  * whatever survives this module is written straight into the connections store
@@ -14,9 +14,9 @@
  */
 import type { SshConnection, SshAuthMode, SshPortForward } from "./connections";
 
-export const BACKUP_KIND = "tedi-ssh-connections";
+export const BACKUP_KIND = "tervia-ssh-connections";
 export const BACKUP_VERSION = 1;
-export const BACKUP_EXTENSION = "tedi-ssh";
+export const BACKUP_EXTENSION = "tervia-ssh";
 
 /** Encrypted payload produced by the Rust `backup_seal` command. */
 export type SealedBlob = {
@@ -148,19 +148,19 @@ export function clearDanglingJumps(list: SshConnection[], known: Set<string>): S
 
 /**
  * Parse and validate a backup file. Throws with a user-facing message when the
- * file is not a TEDI SSH backup at all; skips individual bad entries instead of
+ * file is not a Tervia SSH backup at all; skips individual bad entries instead of
  * failing the whole import, and reports how many were skipped.
  */
 export function parseBackupFile(raw: unknown): { file: SshBackupFile; skipped: number } {
-  if (!isRecord(raw)) throw new Error("Not a TEDI SSH backup file.");
-  if (raw.kind !== BACKUP_KIND) throw new Error("Not a TEDI SSH backup file.");
+  if (!isRecord(raw)) throw new Error("Not a Tervia SSH backup file.");
+  if (raw.kind !== BACKUP_KIND) throw new Error("Not a Tervia SSH backup file.");
   const version = raw.version;
   if (typeof version !== "number" || !Number.isInteger(version) || version < 1) {
     throw new Error("Backup file has no usable version.");
   }
   if (version > BACKUP_VERSION) {
     throw new Error(
-      `This backup was written by a newer TEDI (format v${version}); this build reads up to v${BACKUP_VERSION}.`,
+      `This backup was written by a newer Tervia (format v${version}); this build reads up to v${BACKUP_VERSION}.`,
     );
   }
   if (!Array.isArray(raw.connections)) throw new Error("Backup file has no connections list.");

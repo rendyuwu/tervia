@@ -6,7 +6,7 @@
 
 import { BRAND_COLOR_DEFAULT, normalizeBrandColor } from "./store";
 
-const FAST_PATH_KEY = "tedi-brand-color-shadow";
+const FAST_PATH_KEY = "tervia-brand-color-shadow";
 
 // CSS vars driven directly by the brand hex. Identical in light and dark.
 const PRIMARY_VARS = [

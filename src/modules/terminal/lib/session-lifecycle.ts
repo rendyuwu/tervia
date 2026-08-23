@@ -88,7 +88,7 @@ function trackCommandInput(session: Session, data: string): void {
 }
 
 // Live-refresh every terminal's rgba background when the "App opacity" slider
-// moves (`appOpacity.ts` dispatches `tedi:canvas-opacity`). rAF-throttled so a
+// moves (`appOpacity.ts` dispatches `tervia:canvas-opacity`). rAF-throttled so a
 // fast drag re-themes at most once per frame, and the renderer only toggles
 // when crossing the glass on/off edge (not during a 0..1 drag). Keeps the
 // terminal in sync with the CSS surfaces without a write/IPC per pixel.
@@ -103,7 +103,7 @@ const opacityWin =
 if (opacityWin && !opacityWin.__tediCanvasOpacityBound) {
   opacityWin.__tediCanvasOpacityBound = true;
   let scheduled = false;
-  window.addEventListener("tedi:canvas-opacity", () => {
+  window.addEventListener("tervia:canvas-opacity", () => {
     if (scheduled) return;
     scheduled = true;
     requestAnimationFrame(() => {

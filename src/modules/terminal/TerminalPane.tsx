@@ -115,7 +115,7 @@ export function TerminalPane({
   const globalTerminalThemeId = usePreferencesStore((s) => s.terminalThemeId);
   const terminalCustomPalette = usePreferencesStore((s) => s.terminalCustomPalette);
   // Note: app-opacity changes re-theme the terminal via the rAF-throttled
-  // `tedi:canvas-opacity` window listener in `useTerminalSession`, so it stays
+  // `tervia:canvas-opacity` window listener in `useTerminalSession`, so it stays
   // smooth during live slider drags (not a per-tick effect here).
 
   const session = useTerminalSession({

@@ -54,7 +54,7 @@ async function tempFilePath(originalPath: string): Promise<string> {
   // Tauri's tempDir would need an extra plugin, so write the temp file beside
   // the original with a hidden prefix instead.
   const dir = dirOf(originalPath);
-  const name = `.tedi-fmt-${randomToken()}${ext}`;
+  const name = `.tervia-fmt-${randomToken()}${ext}`;
   return dir ? `${dir}/${name}` : name;
 }
 

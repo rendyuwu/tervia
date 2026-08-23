@@ -164,7 +164,7 @@ impl PtyClient {
         let (hs_tx, hs_rx) =
             std::sync::mpsc::channel::<Result<interprocess::local_socket::Stream, String>>();
         thread::Builder::new()
-            .name("tedi-ptyd-handshake".into())
+            .name("tervia-ptyd-handshake".into())
             .spawn(move || {
                 let res = (|| {
                     transport::write_msg(
@@ -205,7 +205,7 @@ impl PtyClient {
         // never leave a thread blocked on the socket.
         let reader_state = state.clone();
         thread::Builder::new()
-            .name("tedi-ptyd-client-reader".into())
+            .name("tervia-ptyd-client-reader".into())
             .spawn(move || reader_loop(reader_state))
             .map_err(|e| format!("spawn client reader: {e}"))?;
         Ok(Self { state })

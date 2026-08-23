@@ -6,7 +6,7 @@ use portable_pty::CommandBuilder;
 /// Shared shell-integration helpers (platform-neutral; used by both submodules).
 fn integration_root() -> Result<PathBuf, String> {
     let home = dirs::home_dir().ok_or_else(|| "could not resolve home dir".to_string())?;
-    let root = home.join(".cache").join("tedi").join("shell-integration");
+    let root = home.join(".cache").join("tervia").join("shell-integration");
     fs::create_dir_all(&root).map_err(|e| format!("create {}: {e}", root.display()))?;
     Ok(root)
 }
@@ -85,7 +85,7 @@ fn apply_common(cmd: &mut CommandBuilder, cwd: Option<String>) {
 /// threaded through the daemon protocol: `apply_common` runs in whichever
 /// process owns the PTY (the GUI for the in-process backend, the sidecar for
 /// the daemon backend), and both resolve the same
-/// `<data_dir>/<BUNDLE_ID>/tedi-settings.json`. Reading per spawn keeps the
+/// `<data_dir>/<BUNDLE_ID>/tervia-settings.json`. Reading per spawn keeps the
 /// setting live - a newly opened terminal sees edits without a daemon restart.
 ///
 /// The plugin-store writes via a non-atomic `fs::write` (truncate-in-place), so
@@ -98,7 +98,7 @@ pub(crate) fn user_extra_path_dirs() -> Vec<String> {
     let Some(dir) = crate::modules::ids::app_data_dir() else {
         return Vec::new();
     };
-    let path = dir.join("tedi-settings.json");
+    let path = dir.join("tervia-settings.json");
     for attempt in 0..3 {
         if let Ok(raw) = std::fs::read_to_string(&path) {
             if !raw.trim().is_empty() {
