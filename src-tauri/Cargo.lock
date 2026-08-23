@@ -7151,8 +7151,10 @@ dependencies = [
  "ignore",
  "interprocess",
  "ironrdp-connector",
+ "ironrdp-core",
  "ironrdp-graphics",
  "ironrdp-input",
+ "ironrdp-pdu",
  "ironrdp-session",
  "ironrdp-tls",
  "ironrdp-tokio",
@@ -7189,6 +7191,7 @@ dependencies = [
  "webview2-com",
  "windows 0.61.3",
  "windows-sys 0.59.0",
+ "x509-cert",
 ]
 
 [[package]]

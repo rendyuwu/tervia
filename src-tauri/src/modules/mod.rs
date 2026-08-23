@@ -12,6 +12,7 @@ pub mod lockext;
 pub mod net;
 pub mod pty;
 pub mod pty_daemon;
+pub mod rdp;
 pub mod secrets;
 pub mod shell;
 pub mod ssh;

@@ -220,23 +220,35 @@ fn legacy_keyring_delete(service: &str, account: &str) {
     }
 }
 
-#[tauri::command]
-pub async fn secrets_get(
-    app: AppHandle,
-    state: tauri::State<'_, SecretsState>,
-    service: String,
-    account: String,
+/// Read one secret, doing the per-platform keychain-or-fallback work.
+///
+/// The single implementation behind both [`secrets_get`] (the IPC surface the
+/// frontend uses) and the in-process callers that must NOT round-trip a
+/// plaintext through the webview - today `rdp::rdp_open`, which resolves a
+/// credential reference and hands the password straight to CredSSP. Two copies
+/// of this would drift, and the Windows Credential Manager fallback below is
+/// exactly the kind of thing that silently stops being applied in the copy
+/// nobody edits.
+///
+/// Blocking: a small file read plus one DPAPI call on Windows, a Keychain call
+/// on macOS. `secrets_get` has always done this inline in its async body; the
+/// callers here do the same rather than paying a `spawn_blocking` hop.
+pub(crate) fn read_secret(
+    app: &AppHandle,
+    state: &SecretsState,
+    service: &str,
+    account: &str,
 ) -> Result<Option<String>, String> {
     #[cfg(any(target_os = "linux", target_os = "windows"))]
     {
-        let k = key(&service, &account);
-        let hit = with_store(&app, &state, |m| m.get(&k).cloned())?;
+        let k = key(service, account);
+        let hit = with_store(app, state, |m| m.get(&k).cloned())?;
         if hit.is_some() {
             return Ok(hit);
         }
         #[cfg(target_os = "windows")]
         {
-            Ok(legacy_keyring_get(&service, &account))
+            Ok(legacy_keyring_get(service, account))
         }
         #[cfg(target_os = "linux")]
         {
@@ -246,13 +258,23 @@ pub async fn secrets_get(
     #[cfg(target_os = "macos")]
     {
         let _ = (app, state);
-        let e = entry(&service, &account)?;
+        let e = entry(service, account)?;
         match e.get_password() {
             Ok(v) => Ok(Some(v)),
             Err(keyring::Error::NoEntry) => Ok(None),
             Err(err) => Err(err.to_string()),
         }
     }
+}
+
+#[tauri::command]
+pub async fn secrets_get(
+    app: AppHandle,
+    state: tauri::State<'_, SecretsState>,
+    service: String,
+    account: String,
+) -> Result<Option<String>, String> {
+    read_secret(&app, &state, &service, &account)
 }
 
 #[tauri::command]

@@ -175,6 +175,23 @@ ironrdp-tls = { version = "0.2", default-features = false, features = [
 ] }
 ironrdp-graphics = "=0.8.1"
 ironrdp-input = "=0.6.0"
+# Already in the tree as transitive dependencies of the four crates above, at
+# exactly these versions - promoted to direct entries because nothing
+# re-exports them and the RDP module names their types. `ironrdp-pdu` for
+# `Action` (the discriminant `Framed::read_pdu` hands back), `InclusiveRectangle`
+# and the `Rectangle` trait that gives it `width()`/`height()`; `ironrdp-core`
+# for `WriteBuf`, which appears in every `Sequence::step` signature. The `=`
+# pins are the versions connector 0.9 / session 0.10 resolve to; a different
+# version would make the rectangle types distinct and stop compiling.
+ironrdp-pdu = "=0.8.0"
+ironrdp-core = { version = "=0.2.1", features = ["alloc"] }
+# Leaf-certificate parsing for the RDP certificate TOFU check: the SHA-256
+# fingerprint's subject/issuer labels, and the `x509_cert::Certificate` that
+# `ironrdp_tls::extract_tls_server_public_key` takes (CredSSP binds to the
+# server's SubjectPublicKey, not to the whole certificate). Already in the tree
+# with the same feature set as `ironrdp-tls`'s own dependency, so this adds no
+# new compilation.
+x509-cert = { version = "0.2", default-features = false, features = ["std"] }
 # Direct entries so the custom `ServerCertVerifier` doing certificate TOFU can
 # be injected into the `TlsConnector`. `ironrdp-tls` hardcodes
 # `NoCertificateVerification` with no callback seam, so owning the connector is
