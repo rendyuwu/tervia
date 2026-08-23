@@ -277,6 +277,50 @@ pub async fn secrets_get(
     read_secret(&app, &state, &service, &account)
 }
 
+/// Write one secret, doing the per-platform keychain-or-fallback work.
+///
+/// The counterpart of [`read_secret`], and split out for the same reason: the
+/// in-process callers that must NOT round-trip a plaintext through the webview
+/// need the identical write path, and the Windows Credential Manager cleanup
+/// below is exactly the kind of step that quietly stops happening in a second
+/// copy. Today the in-process caller is `backup::backup_apply_secrets`, which
+/// takes credentials straight out of a decrypted backup into the keychain.
+///
+/// Blocking, on the same terms as [`read_secret`].
+pub(crate) fn write_secret(
+    app: &AppHandle,
+    state: &SecretsState,
+    service: &str,
+    account: &str,
+    password: &str,
+) -> Result<(), String> {
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    {
+        let k = key(service, account);
+        // Mutate and snapshot under one lock acquisition so a concurrent
+        // writer cannot slip an update between, which would leave the on-disk
+        // file lagging the in-memory cache (lost-update race).
+        let snapshot = with_store(app, state, |m| {
+            m.insert(k, password.to_owned());
+            m.clone()
+        })?;
+        write_store(app, &snapshot)?;
+        #[cfg(target_os = "windows")]
+        {
+            // Stale Credential Manager entry from an earlier build would
+            // shadow updates on read; delete it so the file store wins.
+            legacy_keyring_delete(service, account);
+        }
+        Ok(())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = (app, state);
+        let e = entry(service, account)?;
+        e.set_password(password).map_err(|e| e.to_string())
+    }
+}
+
 #[tauri::command]
 pub async fn secrets_set(
     app: AppHandle,
@@ -285,31 +329,7 @@ pub async fn secrets_set(
     account: String,
     password: String,
 ) -> Result<(), String> {
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
-    {
-        let k = key(&service, &account);
-        // Mutate and snapshot under one lock acquisition so a concurrent
-        // writer cannot slip an update between, which would leave the on-disk
-        // file lagging the in-memory cache (lost-update race).
-        let snapshot = with_store(&app, &state, |m| {
-            m.insert(k, password);
-            m.clone()
-        })?;
-        write_store(&app, &snapshot)?;
-        #[cfg(target_os = "windows")]
-        {
-            // Stale Credential Manager entry from an earlier build would
-            // shadow updates on read; delete it so the file store wins.
-            legacy_keyring_delete(&service, &account);
-        }
-        Ok(())
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let _ = (app, state);
-        let e = entry(&service, &account)?;
-        e.set_password(&password).map_err(|e| e.to_string())
-    }
+    write_secret(&app, &state, &service, &account, &password)
 }
 
 #[tauri::command]

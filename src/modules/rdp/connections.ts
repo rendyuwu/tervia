@@ -22,6 +22,14 @@ export const RDP_KEYRING_SERVICE = "tervia-rdp";
 
 const PASSWORD_FIELD = "password";
 
+/**
+ * Every keychain field one RDP connection can own. One entry today, and the
+ * list exists for the same reason the SSH one does: `backup.ts` enumerates it
+ * to build keychain references, so adding a second field later makes it travel
+ * in the backup without anyone having to remember this file.
+ */
+export const RDP_SECRET_FIELDS = [PASSWORD_FIELD] as const;
+
 /** RDP's default port. A row always carries a real port, so this is only the
  *  seed for a new one. */
 export const RDP_DEFAULT_PORT = 3389;

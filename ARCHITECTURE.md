@@ -84,7 +84,8 @@ These invariants shape the whole codebase. Violating one is almost always a bug.
   the source of truth.
 - **Credentials only ever live in the platform secret store.** SSH passwords,
   private keys, and key passphrases go through the Rust `secrets_*` commands
-  under the service name `tervia-ssh`. They never touch the settings store,
+  under the service name `tervia-ssh`; RDP passwords under `tervia-rdp`. They
+  never touch the settings store,
   `localStorage`, or the connection store, which holds only metadata plus
   `hasPassword` / `hasPrivateKey` / `hasKeyPassphrase` flags. The one place a
   secret leaves the machine is the connection backup, which is sealed before it
@@ -351,13 +352,30 @@ and a chatty `~/.bashrc` prepends its own greeting to every capture.
 
 ### Encrypted connection backup
 
-Export writes a `.tervia-ssh` file: plaintext connection metadata plus one
-sealed block holding every credential pulled back out of the secret store. The
-credentials cannot travel any other way — a keychain does not move between
-machines — and a plaintext export would be a credential leak the moment it
-touched Downloads or a synced folder, so the block is always encrypted.
+Export writes a `.tervia-backup` file (format v2, JSON kind
+`tervia-connections`): one sealed blob over **everything** — both the SSH and
+the RDP inventory and every credential pulled out of the secret store — inside
+an envelope carrying nothing but the kind, the version and a timestamp. The
+credentials cannot travel any other way, a keychain does not move between
+machines, and a plaintext export would be a credential leak the moment it
+touched Downloads or a synced folder.
 
-The crypto is `backup_seal` / `backup_open` in
+Sealing the whole payload rather than only the credentials is deliberate: v1
+(`.tervia-ssh`, kind `tervia-ssh-connections`, SSH only) left the inventory in
+the clear, so the file protected the passwords while publishing which machines
+exist and who logs into them. v1 files still import; nothing writes them.
+
+**The credentials do not pass through the webview on the v2 path.** An export
+sends keychain _references_ and `backup_seal_payload` reads the values in the
+host process; an import gets back only the connection metadata, with the
+credentials parked in Rust behind a handle, and `backup_apply_secrets` writes
+the ones the validated ids ask for straight to the keychain. That two-step
+shape exists so the per-connection validation stays in
+`ssh/backupFile.ts`, where the trust-boundary rules already live, without the
+secrets travelling with it. A v1 import is the one remaining exception, and it
+cannot be otherwise: a v1 file's sealed block _is_ the credential map.
+
+The crypto is `seal_blob` / `open_blob` in
 [`src-tauri/src/modules/backup.rs`](src-tauri/src/modules/backup.rs), and it
 lives in Rust for a specific reason: `crypto.subtle` is gated to secure
 contexts and the app origin is plain http, so the webview simply cannot do it.
@@ -369,10 +387,13 @@ GCM's auth tag is what makes a wrong passphrase, a truncated file, and a flipped
 byte all fail closed with the _same_ message — distinguishing them would tell an
 attacker which guess was closer.
 
-Import decrypts before touching the store, so a wrong passphrase leaves the
+Import decrypts before touching either store, so a wrong passphrase leaves the
 existing connections exactly as they were. The merge is by connection id, which
 is stable across renames, so re-importing updates instead of duplicating, and
-nothing is ever deleted.
+nothing is ever deleted. Credentials are written before the store rows, because
+`upsertConnection` recomputes each `has*` flag by asking the keychain what is
+actually there — the other order would pin every flag to false on a host that
+connects fine.
 
 ## 6. Data flow and lifecycles
 

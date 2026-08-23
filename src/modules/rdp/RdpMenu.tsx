@@ -56,8 +56,14 @@ type Props = {
  * of the keychain and into the webview - the exact thing the RDP credential
  * path exists to prevent. A copy that silently dropped the password would be a
  * connection that looks saved and cannot connect, so the action is left out
- * rather than shipped half-working. Export / import are absent for the same
- * reason (the SSH backup format carries secrets through JS).
+ * rather than shipped half-working.
+ *
+ * Export / import are absent for a different reason, and no longer a
+ * credential one: backup format v2 covers RDP hosts and their keychain rows
+ * without the passwords passing through JS (`ssh/backup.ts` sends keychain
+ * references and Rust seals the values). But there is ONE backup covering both
+ * protocols, so a second pair of menu items would just be two doors to the
+ * same dialog. They live in the SSH menu.
  */
 export function RdpMenu({ onConnect, open, onOpenChange }: Props) {
   const [conns, setConns] = useState<RdpConnection[] | null>(null);
