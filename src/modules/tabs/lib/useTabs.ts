@@ -15,7 +15,6 @@ import {
   rotateLeafWithNeighbor,
   setLeafActiveTool as setLeafActiveToolInTree,
   setLeafCwd as setLeafCwdInTree,
-  setLeafPrivate as setLeafPrivateInTree,
   setLeafPtyId as setLeafPtyIdInTree,
   setLeafCustomTitle as setLeafCustomTitleInTree,
   setLeafTerminalTheme as setLeafTerminalThemeInTree,
@@ -128,7 +127,7 @@ export function useTabs(initial?: { cwd?: string; title?: string }) {
   );
 
   const newTab = useCallback(
-    (cwd?: string, opts?: { private?: boolean; savedPtyId?: string }) => {
+    (cwd?: string, opts?: { savedPtyId?: string }) => {
       const tabId = nextIdRef.current++;
       const leafId = nextIdRef.current++;
       setTabs((curr) => {
@@ -138,7 +137,6 @@ export function useTabs(initial?: { cwd?: string; title?: string }) {
           leafKind: "terminal",
           cwd,
           terminalOrdinal: allocOrdinal(curr),
-          ...(opts?.private ? { private: true } : {}),
           // Adopt an existing daemon session: the restore path in
           // openPtyForSession sees `savedPtyId` and calls reattachPty instead
           // of spawning a fresh shell. Used by useAdoptDaemonSessions.
@@ -198,7 +196,7 @@ export function useTabs(initial?: { cwd?: string; title?: string }) {
 
   /** Open a tab whose initial terminal leaf is bound to a saved SSH connection. Routes through `ssh_open`. */
   const newSshTab = useCallback(
-    (sshConnectionId: string, title: string, opts?: { private?: boolean }) => {
+    (sshConnectionId: string, title: string) => {
       const tabId = nextIdRef.current++;
       const leafId = nextIdRef.current++;
       setTabs((curr) => {
@@ -208,7 +206,6 @@ export function useTabs(initial?: { cwd?: string; title?: string }) {
           leafKind: "terminal",
           sshConnectionId,
           terminalOrdinal: allocOrdinal(curr),
-          ...(opts?.private ? { private: true } : {}),
         };
         return [
           ...curr,
@@ -226,25 +223,6 @@ export function useTabs(initial?: { cwd?: string; title?: string }) {
     },
     [allocOrdinal],
   );
-
-  /**
-   * Flip the per-leaf privacy flag. Each entry in the tab strip toggles
-   * independently - a split group can mix private and public terminals.
-   * The AI subsystem ignores private leaves entirely.
-   */
-  const togglePrivate = useCallback((leafId: number) => {
-    setTabs((curr) =>
-      curr.map((t) => {
-        if (t.kind !== "pane") return t;
-        const leaf = findLeaf(t.paneTree, leafId);
-        if (!leaf) return t;
-        const nextValue = !leaf.private;
-        const paneTree = setLeafPrivateInTree(t.paneTree, leafId, nextValue);
-        if (paneTree === t.paneTree) return t;
-        return syncPaneMirror({ ...t, paneTree });
-      }),
-    );
-  }, []);
 
   /** Find a pane tab with an editor leaf matching `predicate`. Used by openFileTab for dedup. */
   const findEditorLeafIn = useCallback(
@@ -1011,6 +989,5 @@ export function useTabs(initial?: { cwd?: string; title?: string }) {
     reorderTabs,
     reorderLeafInGroup,
     movePaneLeafToEdge,
-    togglePrivate,
   };
 }

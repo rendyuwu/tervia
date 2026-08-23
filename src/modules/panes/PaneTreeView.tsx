@@ -284,7 +284,6 @@ function computeEdge(
 function leafIconInfo(node: PaneLeaf, aiCliStatuses?: Map<number, AiCliStatus>): LeafIconInfo {
   return {
     leafKind: node.leafKind,
-    isPrivate: node.private === true,
     isSsh: node.leafKind === "terminal" && !!node.sshConnectionId,
     editorFileName: node.leafKind === "editor" ? basename(node.path) : undefined,
     editorRemote: isRemoteEditorLeaf(node),
@@ -533,7 +532,6 @@ function PaneLeafFrame({
 
   const isSource = drag.sourceLeafId === node.id;
   const isOver = drag.overLeafId === node.id && drag.sourceLeafId !== node.id && drag.edge !== null;
-  const isPrivate = node.private === true;
   const isSsh = node.leafKind === "terminal" && !!node.sshConnectionId;
   const sshStatus = isSsh ? sshStatuses?.get(node.id) : undefined;
   // Program-set terminal title (OSC 2), e.g. a running agent's task. Appended to
@@ -656,8 +654,6 @@ function PaneLeafFrame({
                 node.leafKind === "editor" && node.preview && "italic",
                 // SSH status colors the label, matching the tab strip.
                 isSsh && statusLabelClass(sshStatus),
-                // Private signal lives on the label (red), not the icon. Last = wins.
-                isPrivate && "text-destructive",
               )}
             >
               {baseLabel}
@@ -1126,8 +1122,8 @@ export function PaneTreeView({
       <DragOverlay dropAnimation={null}>
         {draggedLeaf && (
           // Fixed 1:1 (28x28) chip with the leaf's own icon centered (file-type
-          // glyph for editors, terminal/cloud for shells,
-          // lock for private). The pane drag handle is tiny, so a centered
+          // glyph for editors, terminal/cloud for shells). The pane drag handle
+          // is tiny, so a centered
           // icon-only square reads cleaner than an icon+label pill clipped to the
           // handle's width.
           <div className="bg-accent text-accent-foreground ring-border flex size-7 items-center justify-center shadow-lg ring-1">

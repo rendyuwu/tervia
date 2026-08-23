@@ -25,7 +25,6 @@ import {
 // fall through globally (that is how Enter reaches the shell in a terminal).
 const HANDLED = new Set<string>([
   "tab.new",
-  "tab.newPrivate",
   "tab.newPreview",
   "tab.newEditor",
   "tab.newAgent",

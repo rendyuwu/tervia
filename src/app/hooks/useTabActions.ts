@@ -90,7 +90,6 @@ export function useTabActions({
   cancelClose: () => void;
   cycleTab: (delta: 1 | -1) => void;
   openNewTab: () => void;
-  openNewPrivateTab: () => void;
   sendCd: (path: string) => void;
   cdInNewTab: (path: string) => void;
   spawnAgents: (agentIds: string[], layout?: PaneLayout) => void;
@@ -185,12 +184,6 @@ export function useTabActions({
     // Ctrl+T opens the new shell in the explorer's root so the tab matches
     // the folder being browsed.
     newTab(explorerRoot ?? inheritedCwdForNewTab());
-  }, [newTab, inheritedCwdForNewTab, explorerRoot]);
-
-  /** Same as `openNewTab` but flags the new tab private so the AI cannot
-   *  see its scrollback, cwd, or even existence in `<env>`. */
-  const openNewPrivateTab = useCallback(() => {
-    newTab(explorerRoot ?? inheritedCwdForNewTab(), { private: true });
   }, [newTab, inheritedCwdForNewTab, explorerRoot]);
 
   const sendCd = useCallback(
@@ -362,7 +355,6 @@ export function useTabActions({
     cancelClose,
     cycleTab,
     openNewTab,
-    openNewPrivateTab,
     sendCd,
     cdInNewTab,
     spawnAgents,

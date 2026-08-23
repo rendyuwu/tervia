@@ -37,12 +37,8 @@ type Props = {
   /** Close a pane leaf or standalone tab. `leafId` is null for standalone. */
   onCloseEntry: (tabId: number, leafId: number | null) => void;
   onNewTerminal: () => void;
-  /** Open a new local terminal tab pre-flagged as private. */
-  onNewPrivateTerminal?: () => void;
   /** `+` -> Agent...: open the agent picker dialog. */
   onOpenAgents: () => void;
-  /** Flip the `private` flag on a single leaf (per-tab in the strip, not the whole split group). */
-  onTogglePrivate?: (leafId: number) => void;
   /** Set a leaf's tab name, or `null` to fall back to the derived one (folder
    *  basename, file name, page title). Backs the right-click Rename. */
   onRenameLeaf?: (leafId: number, title: string | null) => void;
@@ -116,9 +112,7 @@ export function TabBar({
   onSelectEntry,
   onCloseEntry,
   onNewTerminal,
-  onNewPrivateTerminal,
   onOpenAgents,
-  onTogglePrivate,
   onRenameLeaf,
   onPinLeaf,
   onReorderTabs,
@@ -416,7 +410,6 @@ export function TabBar({
                       onMoveLeafToGroup={onMoveLeafToGroup}
                       onMoveLeafToNewTab={onMoveLeafToNewTab}
                       onRotateLeafSplit={onRotateLeafSplit}
-                      onTogglePrivate={onTogglePrivate}
                       renamingLeafId={renamingLeafId}
                       onSetRenaming={setRenamingLeafId}
                       onRename={onRenameLeaf}
@@ -432,7 +425,6 @@ export function TabBar({
                     label={draggedEntry.label}
                     className={compact ? "max-w-32" : "max-w-44"}
                     italic={draggedEntry.italic}
-                    isPrivate={draggedEntry.kind === "pane-leaf" && draggedEntry.isPrivate === true}
                     dirty={draggedEntry.dirty}
                   />
                 )}
@@ -441,7 +433,6 @@ export function TabBar({
           </Tabs>
           <NewTabMenu
             onNewTerminal={onNewTerminal}
-            onNewPrivateTerminal={onNewPrivateTerminal}
             onOpenAgents={onOpenAgents}
             onSplit={onSplit}
             canSplit={canSplit}

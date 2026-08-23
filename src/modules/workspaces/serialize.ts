@@ -40,17 +40,14 @@ function leafToSaved(leaf: PaneLeaf): SavedPaneNode {
   if (leaf.leafKind === "terminal") {
     // Capture the live program title (OSC 0/2) so an inactive workspace still
     // shows it next to the folder name. Read straight from the singleton title
-    // store (same store the live rows use). Private leaves never persist it.
-    const title = leaf.private ? undefined : useTerminalTitles.getState().titles[leaf.id];
+    // store (same store the live rows use).
+    const title = useTerminalTitles.getState().titles[leaf.id];
     return {
       kind: "leaf",
       leafKind: "terminal",
       cwd: leaf.cwd,
       sshConnectionId: leaf.sshConnectionId,
       terminalOrdinal: leaf.terminalOrdinal,
-      ...(leaf.private ? { private: true } : {}),
-      // Persisted even for private leaves: a name the user typed reveals
-      // nothing about the shell, its cwd or its output.
       ...(leaf.customTitle ? { customTitle: leaf.customTitle } : {}),
       ...(leaf.terminalThemeId ? { terminalThemeId: leaf.terminalThemeId } : {}),
       ...(title ? { title } : {}),
@@ -58,9 +55,9 @@ function leafToSaved(leaf: PaneLeaf): SavedPaneNode {
       // remote session id separately and aren't restored via pty_attach.
       ...(leaf.ptyId && !leaf.sshConnectionId ? { ptyId: leaf.ptyId } : {}),
       // Persist the running agent kind only for reattachable local leaves
-      // (same gate as ptyId), and never for private ones. On restore it
-      // pre-activates the detector so a still-running agent's badge survives.
-      ...(leaf.activeTool && leaf.ptyId && !leaf.sshConnectionId && !leaf.private
+      // (same gate as ptyId). On restore it pre-activates the detector so a
+      // still-running agent's badge survives.
+      ...(leaf.activeTool && leaf.ptyId && !leaf.sshConnectionId
         ? { activeTool: leaf.activeTool }
         : {}),
     };
@@ -74,7 +71,6 @@ function leafToSaved(leaf: PaneLeaf): SavedPaneNode {
       // is deliberately dropped: see `isUnrestorableEditorLeaf`.
       ...(leaf.sshConnectionId ? { sshConnectionId: leaf.sshConnectionId } : {}),
       ...(leaf.sshConnectionId && leaf.sshHostLabel ? { sshHostLabel: leaf.sshHostLabel } : {}),
-      ...(leaf.private ? { private: true } : {}),
       ...(leaf.customTitle ? { customTitle: leaf.customTitle } : {}),
     };
   }
@@ -83,7 +79,6 @@ function leafToSaved(leaf: PaneLeaf): SavedPaneNode {
   return {
     kind: "leaf",
     leafKind: "board",
-    ...(leaf.private ? { private: true } : {}),
     ...(leaf.customTitle ? { customTitle: leaf.customTitle } : {}),
   };
 }
@@ -208,7 +203,6 @@ function savedToNode(node: SavedPaneNode, allocId: () => number, outLeafIds: num
         cwd: node.cwd,
         sshConnectionId: node.sshConnectionId,
         terminalOrdinal: node.terminalOrdinal,
-        ...(node.private ? { private: true } : {}),
         ...(node.terminalThemeId ? { terminalThemeId: node.terminalThemeId } : {}),
         // `savedPtyId` is the signal for `useTerminalSession.attachSession`
         // to attempt `reattachPty` before falling back to `openPty`. The
@@ -233,7 +227,6 @@ function savedToNode(node: SavedPaneNode, allocId: () => number, outLeafIds: num
         // unbound remote path can never reach the local filesystem.
         ...(node.sshConnectionId ? { sshConnectionId: node.sshConnectionId } : {}),
         ...(node.sshHostLabel ? { sshHostLabel: node.sshHostLabel } : {}),
-        ...(node.private ? { private: true } : {}),
         ...(node.customTitle ? { customTitle: node.customTitle } : {}),
       };
     }
@@ -242,7 +235,6 @@ function savedToNode(node: SavedPaneNode, allocId: () => number, outLeafIds: num
         kind: "leaf",
         id,
         leafKind: "board",
-        ...(node.private ? { private: true } : {}),
         ...(node.customTitle ? { customTitle: node.customTitle } : {}),
       };
     }
@@ -254,7 +246,6 @@ function savedToNode(node: SavedPaneNode, allocId: () => number, outLeafIds: num
       kind: "leaf",
       id,
       leafKind: "terminal",
-      ...(node.private ? { private: true } : {}),
     };
   }
   const children = node.children.map((c) => savedToNode(c, allocId, outLeafIds));

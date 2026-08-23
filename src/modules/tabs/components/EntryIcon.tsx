@@ -4,20 +4,18 @@ import type { Entry } from "../lib/entries";
 import { Kanban } from "lucide-react";
 
 /**
- * Pill badge stamped next to terminal entries ("Terminal 3") - the same ordinal
- * the AI sees in `<env>`. Public tabs use the muted palette so the
- * emerald/yellow/red palette stays reserved for the AI CLI icon tint. Private
- * tabs override the badge to solid red so the number-going-red is the headline
- * signal that the AI cannot see this tab.
+ * Pill badge stamped next to terminal entries ("Terminal 3"). Uses the muted
+ * palette so the emerald/yellow/red palette stays reserved for the AI CLI icon
+ * tint.
  */
-function OrdinalBadge({ ordinal, isPrivate }: { ordinal: number; isPrivate?: boolean }) {
-  const label = isPrivate ? `Terminal ${ordinal} (private, hidden from AI)` : `Terminal ${ordinal}`;
+function OrdinalBadge({ ordinal }: { ordinal: number }) {
+  const label = `Terminal ${ordinal}`;
   return (
     <span
       aria-label={label}
       className={cn(
         "inline-flex shrink-0 items-center self-center rounded px-1.5 py-[3px] font-mono text-[10px] leading-none font-semibold tabular-nums",
-        isPrivate ? "bg-destructive text-background" : "bg-muted text-muted-foreground",
+        "bg-muted text-muted-foreground",
       )}
     >
       {ordinal}
@@ -34,7 +32,6 @@ export function EntryIcon({ entry }: { entry: Entry }) {
       <LeafIcon
         info={{
           leafKind: entry.leafKind,
-          isPrivate: entry.isPrivate,
           isSsh: !!entry.sshConnectionId,
           editorFileName: entry.leafKind === "editor" ? entry.label : undefined,
           editorRemote: !!entry.remoteHost,
@@ -48,7 +45,7 @@ export function EntryIcon({ entry }: { entry: Entry }) {
       return (
         <span className="inline-flex shrink-0 items-center gap-1">
           {glyph}
-          <OrdinalBadge ordinal={ordinal} isPrivate={entry.isPrivate} />
+          <OrdinalBadge ordinal={ordinal} />
         </span>
       );
     }

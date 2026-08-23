@@ -23,10 +23,7 @@ type Props = {
   /** Close a pane entry or standalone tab. */
   onCloseEntry: (tabId: number, leafId: number | null) => void;
   onNewTerminal: () => void;
-  /** Open a new local terminal tab pre-flagged as private (AI cannot read it). */
-  onNewPrivateTerminal?: () => void;
   /** Toggle the per-leaf privacy flag from the tab right-click menu. */
-  onTogglePrivate?: (leafId: number) => void;
   /** Set a leaf's tab name, or `null` to fall back to the derived one. */
   onRenameLeaf?: (leafId: number, title: string | null) => void;
   /** `+` -> Agent...: open the agent picker dialog. */
@@ -44,9 +41,8 @@ type Props = {
   /** True when the active tab still has room for another split. */
   canSplit: boolean;
   onOpenSettings: () => void;
-  /** Open a saved SSH host as a new terminal tab. `opts.private` opens it
-   *  pre-flagged as private (AI cannot see its contents or even existence). */
-  onConnectSsh: (conn: SshConnection, opts?: { private?: boolean }) => void;
+  /** Open a saved SSH host as a new terminal tab. */
+  onConnectSsh: (conn: SshConnection) => void;
   /** Move a leaf into `targetTabId` as a split. Caller toasts on full. */
   onMoveLeafToGroup: (leafId: number, targetTabId: number) => void;
   /** Pop `leafId` out into a new top-level tab. Returns "invalid" if not in a multi-leaf split. */
@@ -97,8 +93,6 @@ function HeaderImpl({
   onSelectEntry,
   onCloseEntry,
   onNewTerminal,
-  onNewPrivateTerminal,
-  onTogglePrivate,
   onRenameLeaf,
   onOpenAgents,
   onPinLeaf,
@@ -229,8 +223,6 @@ function HeaderImpl({
           onSelectEntry={onSelectEntry}
           onCloseEntry={onCloseEntry}
           onNewTerminal={onNewTerminal}
-          onNewPrivateTerminal={onNewPrivateTerminal}
-          onTogglePrivate={onTogglePrivate}
           onRenameLeaf={onRenameLeaf}
           onOpenAgents={onOpenAgents}
           onPinLeaf={onPinLeaf}

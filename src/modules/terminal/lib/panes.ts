@@ -25,18 +25,12 @@ export type TerminalLeafState = {
    */
   terminalOrdinal?: number;
   /**
-   * Privacy flag. Per-leaf (not per pane-tab) so a split group can mix
-   * private and public terminals. When true the AI subsystem never sees
-   * the leaf's existence, cwd, scrollback, or accepts injects/runs on it.
-   */
-  private?: boolean;
-  /**
    * User-chosen name for this pane's tab-strip entry, set from the tab's
    * right-click "Rename". Overrides everything derived (a terminal's folder
    * basename, an editor's file name, a page title), because the whole point of
    * renaming is that the derived name is not what you want it called. Cleared
    * back to `undefined` by "Reset name", never emptied to `""`. Declared on
-   * every leaf kind (like `private`) so the rename works on any entry.
+   * every leaf kind so the rename works on any entry.
    */
   customTitle?: string;
   /**
@@ -101,8 +95,6 @@ export type EditorLeafState = {
   sshSessionId?: number;
   /** Display label for the remote host. Set alongside either ssh field. */
   sshHostLabel?: string;
-  /** Privacy flag. AI autocomplete + tools refuse on private editor leaves. */
-  private?: boolean;
   /** User-chosen tab name; see {@link TerminalLeafState.customTitle}. */
   customTitle?: string;
 };
@@ -118,8 +110,6 @@ export type EditorLeafState = {
  */
 export type BoardLeafState = {
   leafKind: "board";
-  /** Privacy flag kept for uniformity with the other leaf kinds. */
-  private?: boolean;
   /** User-chosen tab name; see {@link TerminalLeafState.customTitle}. */
   customTitle?: string;
 };
@@ -303,22 +293,6 @@ export function setSplitSizes(n: PaneNode, splitId: PaneId, sizes: number[]): Pa
 }
 
 /**
- * Set or clear the per-leaf privacy flag. Pass `undefined` (or false) to
- * clear and remove the optional field entirely. Works on both terminal
- * and editor leaves.
- */
-export function setLeafPrivate(n: PaneNode, id: PaneId, value: boolean): PaneNode {
-  if (isLeaf(n)) {
-    if (n.id !== id) return n;
-    if (value) return { ...n, private: true };
-    if (n.private === undefined) return n;
-    const { private: _drop, ...rest } = n;
-    return rest as PaneLeaf;
-  }
-  return { ...n, children: n.children.map((c) => setLeafPrivate(c, id, value)) };
-}
-
-/**
  * Set or clear a terminal leaf's per-leaf theme override. `themeId` is a
  * `TERMINAL_PRESETS` id; pass `null` to clear it (the pane reverts to the
  * global terminal theme). Returns the same tree by reference on no-op. No-op
@@ -386,7 +360,6 @@ export function cloneLeafState(leaf: PaneLeaf): LeafState {
       cwd: leaf.cwd,
       sshConnectionId: leaf.sshConnectionId,
       terminalOrdinal: leaf.terminalOrdinal,
-      ...(leaf.private ? { private: true } : {}),
       ...(leaf.terminalThemeId ? { terminalThemeId: leaf.terminalThemeId } : {}),
       // Carry the live agent kind so a move/extract doesn't drop the badge
       // until the detector re-emits; the same session keeps running.
@@ -402,11 +375,10 @@ export function cloneLeafState(leaf: PaneLeaf): LeafState {
       sshConnectionId: leaf.sshConnectionId,
       sshSessionId: leaf.sshSessionId,
       sshHostLabel: leaf.sshHostLabel,
-      ...(leaf.private ? { private: true } : {}),
     };
   }
   // Board: no state of its own - the columns are rebuilt from the live tab tree.
-  return { leafKind: "board", ...(leaf.private ? { private: true } : {}) };
+  return { leafKind: "board" };
 }
 
 /**

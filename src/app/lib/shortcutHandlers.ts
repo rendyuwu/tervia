@@ -24,14 +24,10 @@ import { type Tab } from "@/modules/tabs";
  */
 export interface ShortcutHandlerDeps {
   openNewTab: () => void;
-  openNewPrivateTab: () => void;
   handleCloseTabOrPane: () => void;
   cycleTab: (delta: 1 | -1) => void;
   selectByIndex: (idx: number) => void;
-  splitActivePaneInActiveTab: (
-    dir: "row" | "col",
-    kind?: "terminal" | "editor",
-  ) => void;
+  splitActivePaneInActiveTab: (dir: "row" | "col", kind?: "terminal" | "editor") => void;
   focusNextPaneInTab: (tabId: number, delta: 1 | -1) => void;
   toggleSidebar: () => void;
   requestCloseLeaf: (leafId: number) => void;
@@ -50,7 +46,6 @@ export interface ShortcutHandlerDeps {
 export function buildShortcutHandlers(deps: ShortcutHandlerDeps): ShortcutHandlers {
   const {
     openNewTab,
-    openNewPrivateTab,
     handleCloseTabOrPane,
     cycleTab,
     selectByIndex,
@@ -72,7 +67,6 @@ export function buildShortcutHandlers(deps: ShortcutHandlerDeps): ShortcutHandle
   return {
     "commandPalette.open": commandPaletteOpen,
     "tab.new": openNewTab,
-    "tab.newPrivate": openNewPrivateTab,
     "tab.newEditor": () => setNewEditorOpen(true),
     "tab.newAgent": () => setAgentDialogOpen(true),
     "tab.close": handleCloseTabOrPane,

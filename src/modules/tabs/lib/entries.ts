@@ -42,8 +42,6 @@ export type PaneEntry = EntryBase & {
   aiCliStatus?: AiCliStatus;
   /** Set on editor leaves backed by SFTP. Flips the file icon to a remote variant. */
   remoteHost?: string;
-  /** Inherited from the owning tab. Drives the red badge + lock icon. */
-  isPrivate?: boolean;
   /** True when `label` is a name the user typed rather than a derived one. Only
    *  drives whether the right-click menu offers "Reset name". */
   renamed?: boolean;
@@ -66,11 +64,6 @@ export type Entry = PaneEntry | StandaloneEntry;
  */
 export function tabAccentClass(e: Entry): string {
   if (e.kind === "pane-leaf") {
-    // Private tabs win the accent regardless of leaf kind so the red stripe
-    // is the dominant signal. AI cannot see this tab. Uses the `destructive`
-    // (danger) token, matching the private LABEL text elsewhere, rather than
-    // the AI-CLI `icon-blocked` status color.
-    if (e.isPrivate) return "bg-destructive";
     if (e.leafKind === "terminal") {
       return e.sshConnectionId
         ? "bg-[color:var(--tedi-tab-ssh)]"
@@ -84,21 +77,15 @@ export function tabAccentClass(e: Entry): string {
 }
 
 /**
- * Tailwind `text-*` tone for an entry's LABEL: SSH session state, then private,
- * which wins because "not persisted" outranks any liveness colour.
+ * Tailwind `text-*` tone for an entry's LABEL: the SSH session state. Pulse
+ * yellow while connecting, emerald when connected, red on disconnect/error.
+ * The icon stays sky so the two signals don't collide.
  *
  * Shared by the tab strip and the Workspaces panel so one connected host is
  * green in both places instead of green in the strip and grey in the panel.
  */
 export function entryLabelClass(e: Entry): string {
-  return cn(
-    // Pulse yellow while connecting, emerald when connected, red on
-    // disconnect/error. The icon stays sky so the two signals don't collide.
-    e.kind === "pane-leaf" && e.sshConnectionId ? statusLabelClass(e.sshStatus) : null,
-    // Private leaves carry the red on the label (not the icon) so the icon
-    // colour stays free for AI CLI status. Last = wins.
-    e.kind === "pane-leaf" && e.isPrivate === true && "text-destructive",
-  );
+  return cn(e.kind === "pane-leaf" && e.sshConnectionId ? statusLabelClass(e.sshStatus) : null);
 }
 
 export function buildEntries(
@@ -143,7 +130,6 @@ export function buildEntries(
           // AI CLI status on SSH leaves too. Detector runs on the byte stream regardless of PTY locality.
           aiCliStatus: leaf.leafKind === "terminal" ? aiCliStatuses?.get(leaf.id) : undefined,
           remoteHost,
-          isPrivate: leaf.private === true,
           renamed: leaf.customTitle !== undefined,
           renameSeed: leafRenameSeed(leaf, sshHosts, t.cwd),
         });
