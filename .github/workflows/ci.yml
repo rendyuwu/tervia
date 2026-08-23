@@ -45,15 +45,22 @@ jobs:
     # hung step otherwise burns all six hours before anyone is told it stalled.
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      # Pinned to v4 to match release.yml (which needed the downgrade to
-      # avoid pnpm/action-setup@v6's self-installer crash on windows-2025).
-      - uses: pnpm/action-setup@v4
+      # v6, not the v4 this repo used to pin. The reason for that pin was
+      # pnpm/action-setup@v6's self-installer crashing on windows-2025 with
+      # STATUS_STACK_BUFFER_OVERRUN (0xC0000409); v6.0.8 fixed it by dropping
+      # patchPnpmEnv. v4 runs on Node 20, which the runners now force onto
+      # Node 24 and warn about.
+      #
+      # `version: 10` is deliberate even though v6 defaults to pnpm 11 and local
+      # development uses 11.21: the last green CI run installed with pnpm 10, and
+      # the lockfile is version 9.0. Moving CI to pnpm 11 is a separate change.
+      - uses: pnpm/action-setup@v6
         with:
           version: 10
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: pnpm
@@ -73,7 +80,7 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # The script pins the apt mirror and gives apt a timeout; without those a
       # stalled Azure mirror hangs this step indefinitely.
@@ -144,18 +151,18 @@ jobs:
             args: --target x86_64-apple-darwin
             bundle-root: src-tauri/target/x86_64-apple-darwin/release/bundle
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
         timeout-minutes: 10
         run: bash .github/scripts/install-linux-deps.sh ${{ env.LINUX_DEPS }}
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           version: 10
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: pnpm
@@ -239,7 +246,7 @@ jobs:
       # updater artifacts were actually signed, so a signing regression shows up
       # on the PR instead of at tag time.
       - name: Upload bundles
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: tervia-${{ matrix.id }}
           path: |
