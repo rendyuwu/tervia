@@ -35,8 +35,8 @@ function writeShadow(value: number): void {
 }
 
 /**
- * Apply whole-app opacity to the main window: set `--tedi-app-opacity` and
- * toggle `data-tedi-glass`, which globals.css uses to fade the canvas +
+ * Apply whole-app opacity to the main window: set `--tervia-app-opacity` and
+ * toggle `data-tervia-glass`, which globals.css uses to fade the canvas +
  * surfaces. Settings window opts out so its controls stay readable.
  */
 /**
@@ -46,9 +46,9 @@ function writeShadow(value: number): void {
 function applyOpacityCss(value: number): void {
   if (isSecondaryWindow()) return;
   const root = document.documentElement;
-  root.style.setProperty("--tedi-app-opacity", String(value));
-  if (value < GLASS_EPSILON) root.dataset.tediGlass = "on";
-  else delete root.dataset.tediGlass;
+  root.style.setProperty("--tervia-app-opacity", String(value));
+  if (value < GLASS_EPSILON) root.dataset.terviaGlass = "on";
+  else delete root.dataset.terviaGlass;
   // Surfaces follow the CSS var instantly; nudge the terminal canvases too
   // (their rgba background is JS-rendered). Listener is rAF-throttled.
   window.dispatchEvent(new Event("tervia:canvas-opacity"));

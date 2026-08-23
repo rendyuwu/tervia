@@ -84,7 +84,7 @@ export function openPtyForSession(s: Session, cwd: string | undefined): Promise<
     if (debug && !firstByteLogged) {
       firstByteLogged = true;
       console.info(
-        `[tedi-pty] leaf=${s.term.cols}x${s.term.rows} epoch=${myEpoch} first byte after ${Math.round(
+        `[tervia-pty] leaf=${s.term.cols}x${s.term.rows} epoch=${myEpoch} first byte after ${Math.round(
           performance.now() - spawnedAtForLog,
         )}ms (${bytes.length}B)`,
       );
@@ -150,7 +150,7 @@ export function openPtyForSession(s: Session, cwd: string | undefined): Promise<
             (e) =>
               writeSshBanner(
                 s,
-                `\x1b[33m[tedi] could not forward ${url}: ${describeError(e)}\x1b[0m\r\n`,
+                `\x1b[33m[tervia] could not forward ${url}: ${describeError(e)}\x1b[0m\r\n`,
               ),
           );
         }
@@ -160,7 +160,7 @@ export function openPtyForSession(s: Session, cwd: string | undefined): Promise<
   const onExit = (code: number) => {
     if (debug) {
       console.info(
-        `[tedi-pty] onExit epoch=${myEpoch} code=${code} totalBytes=${totalBytes} elapsed=${Math.round(performance.now() - spawnedAtForLog)}ms`,
+        `[tervia-pty] onExit epoch=${myEpoch} code=${code} totalBytes=${totalBytes} elapsed=${Math.round(performance.now() - spawnedAtForLog)}ms`,
       );
     }
     // Late exit from a replaced pty. Ignore to avoid clobbering newer state.
@@ -224,7 +224,7 @@ export function openPtyForSession(s: Session, cwd: string | undefined): Promise<
         } catch (e) {
           if (isDebugPty()) {
             console.info(
-              `[tedi-pty] reattach failed for ${reattachId}, falling back to fresh spawn: ${describeError(e)}`,
+              `[tervia-pty] reattach failed for ${reattachId}, falling back to fresh spawn: ${describeError(e)}`,
             );
           }
           return openPty(spawnCols, spawnRows, { onData, onExit }, cwd);
@@ -232,7 +232,7 @@ export function openPtyForSession(s: Session, cwd: string | undefined): Promise<
         if (attached.alive === false) {
           if (isDebugPty()) {
             console.info(
-              `[tedi-pty] reattach ${reattachId} resolved dead (shell already exited); respawning fresh`,
+              `[tervia-pty] reattach ${reattachId} resolved dead (shell already exited); respawning fresh`,
             );
           }
           // Tell the daemon to drop the dead session (also reaps its
@@ -304,7 +304,7 @@ export function writePtyError(s: Session, message: string): void {
   s.placeholderShown = false;
   s.term.options.disableStdin = false;
   s.term.write(
-    "\x1b[31m\x1b[1m[tedi] failed to start shell\x1b[0m\r\n" +
+    "\x1b[31m\x1b[1m[tervia] failed to start shell\x1b[0m\r\n" +
       `\x1b[31m${message.replace(/\r?\n/g, "\r\n")}\x1b[0m\r\n\r\n` +
       "\x1b[2mPress Enter to retry, or close the tab.\x1b[0m\r\n",
   );
@@ -337,7 +337,7 @@ export function armNoDataWatchdog(s: Session, epoch: number): void {
       NO_DATA_WATCHDOG_MS / 1000,
     )}s of opening - likely stalled during init`;
     s.lastPtyError = msg;
-    console.warn("[tedi-pty] no-data watchdog fired:", msg);
+    console.warn("[tervia-pty] no-data watchdog fired:", msg);
     writePtyError(s, msg);
   }, NO_DATA_WATCHDOG_MS);
 }
@@ -414,7 +414,7 @@ function armBlankViewportRepaint(s: Session, epoch: number): void {
     // spaced resizes so ConPTY can't coalesce them into a net no-op.
     if (isDebugPty()) {
       console.info(
-        "[tedi-pty] blank-viewport repaint nudge: viewport empty after first paint, forcing redraw",
+        "[tervia-pty] blank-viewport repaint nudge: viewport empty after first paint, forcing redraw",
       );
     }
     nudgeResizeRoundTrip(s, epoch);
@@ -497,7 +497,7 @@ function maybeNudgeOnRendererSwitch(s: Session, bytes: Uint8Array): void {
  *      against the wrong top/bottom margins (the fragmented box + stray rules in
  *      the bug report).
  *   2. A same-size `term.resize` is a no-op (CoreBrowserTerminal.resize
- *      early-returns when cols/rows are unchanged), and TEDI's only repaint
+ *      early-returns when cols/rows are unchanged), and Tervia's only repaint
  *      trigger - the ResizeObserver - never fires because the pane's pixel size
  *      did not change. So nothing recovers the pane on its own.
  * The line-editor redraw then lands off-screen / clipped by the bad margins, so
@@ -547,7 +547,7 @@ export async function retryPty(s: Session): Promise<void> {
   s.lastPtyError = null;
   s.term.reset();
   s.term.options.disableStdin = false;
-  s.term.write("\x1b[2m[tedi] retrying…\x1b[0m\r\n");
+  s.term.write("\x1b[2m[tervia] retrying…\x1b[0m\r\n");
   // Treat the retrying hint as the new placeholder so the first PTY byte
   // wipes it instead of leaving "retrying…" stuck above the prompt.
   s.placeholderShown = true;

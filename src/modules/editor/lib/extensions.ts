@@ -75,13 +75,13 @@ export function buildSharedExtensions(opts?: {
         // Font family + base size come from the user's font picker via CSS vars
         // (set by `applyMonoFontVar` / `applyEditorFontSizeVar`). The inline
         // fallbacks keep the first paint sane before prefs hydrate.
-        fontFamily: `var(--tedi-mono-font, ${MONO_FONT_CSS_FALLBACK})`,
+        fontFamily: `var(--tervia-mono-font, ${MONO_FONT_CSS_FALLBACK})`,
         // `normal` fallback = the browser default, so an unset var (float and
         // settings windows, first paint) keeps the ligatures the font already
         // drew. Settings > Code Editor > Font ligatures flips it to `none`.
-        fontVariantLigatures: "var(--tedi-editor-ligatures, normal)",
+        fontVariantLigatures: "var(--tervia-editor-ligatures, normal)",
         // Editor base size scales with `--content-zoom` (set by App.tsx).
-        fontSize: "calc(var(--tedi-editor-font-size, 13px) * var(--content-zoom, 1))",
+        fontSize: "calc(var(--tervia-editor-font-size, 13px) * var(--content-zoom, 1))",
         lineHeight: "1.55",
         backgroundColor: "transparent !important",
       },

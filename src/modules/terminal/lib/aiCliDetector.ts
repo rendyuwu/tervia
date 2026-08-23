@@ -571,7 +571,7 @@ export type AiCliDetector = {
    */
   pushProgress: (state: number, progress: number | null) => void;
   /**
-   * Force-activate `tool` without a typed command. Needed because TEDI's own
+   * Force-activate `tool` without a typed command. Needed because Tervia's own
    * launchers (`+` -> Agent, OSC 8889 spawn) write straight to the PTY, so the
    * command never reaches `pushInput` and the type-a-command gate never fires.
    * Also the only way a renamed launcher (`claude-start`) or a user-defined CLI

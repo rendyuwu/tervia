@@ -124,16 +124,20 @@ check(
 console.log("\n[urlFromEnv] APP_URL, the line a laravel / laragon project already has");
 check(
   "plain",
-  urlFromEnv("APP_NAME=Tedi\nAPP_URL=http://tedi.test\nDB_HOST=127.0.0.1"),
-  "http://tedi.test",
+  urlFromEnv("APP_NAME=Tervia\nAPP_URL=http://tervia.test\nDB_HOST=127.0.0.1"),
+  "http://tervia.test",
 );
-check("double quoted", urlFromEnv('APP_URL="http://tedi.test"'), "http://tedi.test");
-check("single quoted", urlFromEnv("APP_URL='http://tedi.test'"), "http://tedi.test");
-check("trailing comment", urlFromEnv("APP_URL=http://tedi.test # local vhost"), "http://tedi.test");
-check("export prefix", urlFromEnv("export APP_URL=http://tedi.test"), "http://tedi.test");
-check("indented", urlFromEnv("  APP_URL=http://tedi.test"), "http://tedi.test");
+check("double quoted", urlFromEnv('APP_URL="http://tervia.test"'), "http://tervia.test");
+check("single quoted", urlFromEnv("APP_URL='http://tervia.test'"), "http://tervia.test");
+check(
+  "trailing comment",
+  urlFromEnv("APP_URL=http://tervia.test # local vhost"),
+  "http://tervia.test",
+);
+check("export prefix", urlFromEnv("export APP_URL=http://tervia.test"), "http://tervia.test");
+check("indented", urlFromEnv("  APP_URL=http://tervia.test"), "http://tervia.test");
 check("with a port", urlFromEnv("APP_URL=http://localhost:8000"), "http://localhost:8000");
-check("absent", urlFromEnv("APP_NAME=Tedi\nDB_HOST=127.0.0.1"), null);
+check("absent", urlFromEnv("APP_NAME=Tervia\nDB_HOST=127.0.0.1"), null);
 check("empty value", urlFromEnv("APP_URL="), null);
 // A key that merely ENDS in APP_URL is a different variable.
 check("similar key is not APP_URL", urlFromEnv("VITE_APP_URL=http://other.test"), null);
@@ -171,7 +175,7 @@ check(
 );
 
 console.log("\n[urlFromConfig] what the pane actually calls, filter included");
-check("env url", urlFromConfig(".env", "APP_URL=http://tedi.test\n"), "http://tedi.test/");
+check("env url", urlFromConfig(".env", "APP_URL=http://tervia.test\n"), "http://tervia.test/");
 // The filter runs on config-sourced urls too, not just on hand-typed ones.
 check(
   "env url off this machine is dropped",
@@ -210,7 +214,7 @@ check("unknown file", urlFromConfig("README.md", "http://localhost:8000"), null)
 // hold for a file that is not.
 check(
   "value past the scan cap is not read",
-  urlFromConfig(".env", `${"# padding\n".repeat(9000)}APP_URL=http://tedi.test`),
+  urlFromConfig(".env", `${"# padding\n".repeat(9000)}APP_URL=http://tervia.test`),
   null,
 );
 

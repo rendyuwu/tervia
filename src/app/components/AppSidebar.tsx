@@ -74,7 +74,7 @@ const BUILTIN_DEFAULT_SIZE: Record<BuiltinKey, string> = {
   workspaces: "12%",
 };
 // Persisted in localStorage (sidebar lives in the main window only).
-const ORDER_LS_KEY = "tedi:sidebar:sectionOrder";
+const ORDER_LS_KEY = "tervia:sidebar:sectionOrder";
 
 /**
  * The left sidebar column. Sections (Files, Remote/SSH, Workspaces) are stacked

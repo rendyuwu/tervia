@@ -1,5 +1,5 @@
 /**
- * The fold chevron TEDI paints in a gutter.
+ * The fold chevron Tervia paints in a gutter.
  *
  * Its own module (with no imports) so a lightweight
  * `ctx.ui.codeEditor` can use the exact same glyph as the editor pane without

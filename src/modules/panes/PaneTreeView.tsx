@@ -49,7 +49,10 @@ import { TerminalPane, type TerminalPaneHandle } from "@/modules/terminal";
 import type { SearchAddon } from "@xterm/addon-search";
 import type { PaneEdge, PaneLeaf, PaneNode } from "@/modules/terminal/lib/panes";
 import { editorPaneSession, isRemoteEditorLeaf, leaves } from "@/modules/terminal/lib/panes";
-import type { TediOpenInput, TediSpawnTabInput } from "@/modules/terminal/lib/useTerminalSession";
+import type {
+  TerviaOpenInput,
+  TerviaSpawnTabInput,
+} from "@/modules/terminal/lib/useTerminalSession";
 import { statusLabelClass, type SshConnectionBinding, type SshStatus } from "@/modules/ssh/status";
 import { type PaneEntry } from "@/modules/tabs/lib/entries";
 import type { Tab } from "@/modules/tabs";
@@ -118,8 +121,8 @@ export type LeafBundle = {
   onCwd: (cwd: string) => void;
   onDetectedLocalUrl: (url: string) => void;
   onExit: (code: number) => void;
-  onTediOpen: (input: TediOpenInput) => void;
-  onTediSpawnTab: (input: TediSpawnTabInput) => void;
+  onTerviaOpen: (input: TerviaOpenInput) => void;
+  onTerviaSpawnTab: (input: TerviaSpawnTabInput) => void;
   onSshStatus: (status: SshStatus) => void;
   onAiCliStatus: (status: AiCliStatus) => void;
   onPtyId: (ptyId: string) => void;
@@ -400,8 +403,8 @@ const LeafBody = memo(function LeafBody({
             onCwd={(_id, cwd) => b.onCwd(cwd)}
             onDetectedLocalUrl={(_id, url) => b.onDetectedLocalUrl(url)}
             onExit={(_id, code) => b.onExit(code)}
-            onTediOpen={(_id, input) => b.onTediOpen(input)}
-            onTediSpawnTab={(_id, input) => b.onTediSpawnTab(input)}
+            onTerviaOpen={(_id, input) => b.onTerviaOpen(input)}
+            onTerviaSpawnTab={(_id, input) => b.onTerviaSpawnTab(input)}
             onSshStatus={(_id, status) => b.onSshStatus(status)}
             onAiCliStatus={(_id, status) => b.onAiCliStatus(status)}
             onPtyId={(_id, ptyId) => b.onPtyId(ptyId)}

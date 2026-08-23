@@ -7,7 +7,7 @@
 
 import { toForwardSlash } from "@/lib/path";
 
-export const FS_REFRESH_EVENT = "tedi:refresh-fs";
+export const FS_REFRESH_EVENT = "tervia:refresh-fs";
 
 type FsRefreshDetail = { path?: string; file?: string };
 

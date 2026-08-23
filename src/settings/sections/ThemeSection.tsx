@@ -294,7 +294,7 @@ export function ThemeSection() {
 
       <SettingRow
         title="Enable custom theme"
-        description="When off, TEDI uses the default palette tinted by your main color."
+        description="When off, Tervia uses the default palette tinted by your main color."
       >
         <Switch checked={enabled} onCheckedChange={(v) => void setCustomThemeEnabled(v)} />
       </SettingRow>

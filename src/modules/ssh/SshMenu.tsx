@@ -135,7 +135,7 @@ export function SshMenu({ onConnect }: Props) {
     try {
       const selected = await openFileDialog({
         multiple: false,
-        filters: [{ name: "TEDI SSH backup", extensions: [BACKUP_EXTENSION, "json"] }],
+        filters: [{ name: "Tervia SSH backup", extensions: [BACKUP_EXTENSION, "json"] }],
       });
       const path = typeof selected === "string" ? selected : null;
       if (!path) return;

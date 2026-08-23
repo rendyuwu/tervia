@@ -201,45 +201,45 @@ const COLOR_VAR_MAP: Record<keyof ThemeColors, readonly string[]> = {
   destructive: ["--destructive"],
   border: ["--border"],
   input: ["--input"],
-  buttonFace: ["--tedi-button-face"],
-  buttonFaceForeground: ["--tedi-button-face-foreground"],
+  buttonFace: ["--tervia-button-face"],
+  buttonFaceForeground: ["--tervia-button-face-foreground"],
   ring: ["--ring", "--sidebar-ring"],
   sidebar: ["--sidebar"],
   sidebarForeground: ["--sidebar-foreground"],
   sidebarBorder: ["--sidebar-border"],
   sidebarAccent: ["--sidebar-accent"],
   sidebarAccentForeground: ["--sidebar-accent-foreground"],
-  iconWorking: ["--tedi-icon-working"],
-  iconIdle: ["--tedi-icon-idle"],
-  iconBlocked: ["--tedi-icon-blocked"],
-  iconDone: ["--tedi-icon-done"],
-  iconBranch: ["--tedi-icon-branch"],
-  diffAdded: ["--tedi-diff-added"],
-  diffRemoved: ["--tedi-diff-removed"],
-  info: ["--tedi-info"],
-  tabAccentTerminal: ["--tedi-tab-terminal"],
-  tabAccentSsh: ["--tedi-tab-ssh"],
-  tabAccentEditor: ["--tedi-tab-editor"],
-  tabAccentPreview: ["--tedi-tab-browser"],
-  tabAccentAiDiff: ["--tedi-tab-ai-diff"],
-  tabAccentGitDiff: ["--tedi-tab-git-diff"],
-  resizeHandle: ["--tedi-resize-handle"],
-  ansiBlack: ["--tedi-ansi-black"],
-  ansiRed: ["--tedi-ansi-red"],
-  ansiGreen: ["--tedi-ansi-green"],
-  ansiYellow: ["--tedi-ansi-yellow"],
-  ansiBlue: ["--tedi-ansi-blue"],
-  ansiMagenta: ["--tedi-ansi-magenta"],
-  ansiCyan: ["--tedi-ansi-cyan"],
-  ansiWhite: ["--tedi-ansi-white"],
-  ansiBrightBlack: ["--tedi-ansi-bright-black"],
-  ansiBrightRed: ["--tedi-ansi-bright-red"],
-  ansiBrightGreen: ["--tedi-ansi-bright-green"],
-  ansiBrightYellow: ["--tedi-ansi-bright-yellow"],
-  ansiBrightBlue: ["--tedi-ansi-bright-blue"],
-  ansiBrightMagenta: ["--tedi-ansi-bright-magenta"],
-  ansiBrightCyan: ["--tedi-ansi-bright-cyan"],
-  ansiBrightWhite: ["--tedi-ansi-bright-white"],
+  iconWorking: ["--tervia-icon-working"],
+  iconIdle: ["--tervia-icon-idle"],
+  iconBlocked: ["--tervia-icon-blocked"],
+  iconDone: ["--tervia-icon-done"],
+  iconBranch: ["--tervia-icon-branch"],
+  diffAdded: ["--tervia-diff-added"],
+  diffRemoved: ["--tervia-diff-removed"],
+  info: ["--tervia-info"],
+  tabAccentTerminal: ["--tervia-tab-terminal"],
+  tabAccentSsh: ["--tervia-tab-ssh"],
+  tabAccentEditor: ["--tervia-tab-editor"],
+  tabAccentPreview: ["--tervia-tab-browser"],
+  tabAccentAiDiff: ["--tervia-tab-ai-diff"],
+  tabAccentGitDiff: ["--tervia-tab-git-diff"],
+  resizeHandle: ["--tervia-resize-handle"],
+  ansiBlack: ["--tervia-ansi-black"],
+  ansiRed: ["--tervia-ansi-red"],
+  ansiGreen: ["--tervia-ansi-green"],
+  ansiYellow: ["--tervia-ansi-yellow"],
+  ansiBlue: ["--tervia-ansi-blue"],
+  ansiMagenta: ["--tervia-ansi-magenta"],
+  ansiCyan: ["--tervia-ansi-cyan"],
+  ansiWhite: ["--tervia-ansi-white"],
+  ansiBrightBlack: ["--tervia-ansi-bright-black"],
+  ansiBrightRed: ["--tervia-ansi-bright-red"],
+  ansiBrightGreen: ["--tervia-ansi-bright-green"],
+  ansiBrightYellow: ["--tervia-ansi-bright-yellow"],
+  ansiBrightBlue: ["--tervia-ansi-bright-blue"],
+  ansiBrightMagenta: ["--tervia-ansi-bright-magenta"],
+  ansiBrightCyan: ["--tervia-ansi-bright-cyan"],
+  ansiBrightWhite: ["--tervia-ansi-bright-white"],
 };
 
 const FAST_PATH_KEY = "tervia-custom-theme-shadow";
@@ -309,14 +309,14 @@ function clearCssVars(): void {
     for (const v of vars) root.style.removeProperty(v);
   }
   // Clean up the canvas base colour; the globals.css default takes over.
-  root.style.removeProperty("--tedi-canvas-bg");
+  root.style.removeProperty("--tervia-canvas-bg");
 }
 
 // Wallpaper is intentionally main-window only (isSecondaryWindow): the utility
 // windows have their own roots and we don't want a busy image behind their
 // controls. Colors still apply so their UI stays in palette.
-const BG_MEDIA_ATTR = "data-tedi-bg-media";
-const BG_DARKEN_ATTR = "data-tedi-bg-darken";
+const BG_MEDIA_ATTR = "data-tervia-bg-media";
+const BG_DARKEN_ATTR = "data-tervia-bg-darken";
 
 type BgKind = "image" | "video" | "youtube";
 
@@ -404,10 +404,10 @@ export function applyBackground(bg: ThemeBackground): void {
       // so the first frame after a reload has no image. Paint the theme canvas
       // colour as a placeholder so glass surfaces fade toward the THEME
       // background instead of the bare desktop bleeding through, until the
-      // async store load re-applies the real image. `--tedi-canvas-bg` is set
+      // async store load re-applies the real image. `--tervia-canvas-bg` is set
       // synchronously on :root before this runs in the fast path.
       el.style.display = "block";
-      el.style.backgroundColor = "var(--tedi-canvas-bg)";
+      el.style.backgroundColor = "var(--tervia-canvas-bg)";
     } else {
       el.style.display = "none";
       el.style.backgroundColor = "";
@@ -545,7 +545,7 @@ export function applyCustomTheme(theme: CustomTheme | null): void {
   // Canvas base colour the glass tint mixes against (editor/terminal rgba +
   // the panel tints). Removed by clearCssVars when the custom theme turns off,
   // so the base palette default in globals.css takes over.
-  root.style.setProperty("--tedi-canvas-bg", colors.background);
+  root.style.setProperty("--tervia-canvas-bg", colors.background);
   writeShadow(theme);
 }
 

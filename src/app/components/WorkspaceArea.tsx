@@ -88,8 +88,8 @@ export function WorkspaceArea({
               onCwd={paneHandles.handleTerminalCwd}
               onDetectedLocalUrl={onDetectedLocalUrl}
               onExit={paneHandles.handleLeafExit}
-              onTediOpen={paneHandles.handleTediOpen}
-              onTediSpawnTab={paneHandles.handleTediSpawnTab}
+              onTerviaOpen={paneHandles.handleTerviaOpen}
+              onTerviaSpawnTab={paneHandles.handleTerviaSpawnTab}
               onSshStatus={onSshStatus}
               onAiCliStatus={onAiCliStatus}
               onPtyId={paneHandles.handlePtyId}

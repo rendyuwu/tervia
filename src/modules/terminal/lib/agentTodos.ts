@@ -5,7 +5,7 @@
  * The chain, all of it verified against live sessions:
  *   ~/.claude/sessions/<pid>.json      -> { sessionId, cwd }
  *   ~/.claude/projects/<slug>/<sessionId>.jsonl -> the session log
- * A TEDI terminal already knows its cwd, so that is the join - no pty
+ * A Tervia terminal already knows its cwd, so that is the join - no pty
  * inspection, no PID plumbing.
  *
  * Why the LOG and not `~/.claude/tasks/<sessionId>/`: that directory holds one

@@ -5,8 +5,8 @@ import type { SearchAddon } from "@xterm/addon-search";
 import { useEffect, useImperativeHandle, useRef, type Ref } from "react";
 import {
   useTerminalSession,
-  type TediOpenInput,
-  type TediSpawnTabInput,
+  type TerviaOpenInput,
+  type TerviaSpawnTabInput,
 } from "./lib/useTerminalSession";
 import type { SshStatus } from "@/modules/ssh/status";
 import type { AiCliKind, AiCliStatus } from "./lib/aiCliStatus";
@@ -63,8 +63,8 @@ type Props = {
   onExit?: (leafId: number, code: number) => void;
   onCwd?: (leafId: number, cwd: string) => void;
   onDetectedLocalUrl?: (leafId: number, url: string) => void;
-  onTediOpen?: (leafId: number, input: TediOpenInput) => void;
-  onTediSpawnTab?: (leafId: number, input: TediSpawnTabInput) => void;
+  onTerviaOpen?: (leafId: number, input: TerviaOpenInput) => void;
+  onTerviaSpawnTab?: (leafId: number, input: TerviaSpawnTabInput) => void;
   onSshStatus?: (leafId: number, status: SshStatus) => void;
   onAiCliStatus?: (leafId: number, status: AiCliStatus) => void;
   /**
@@ -89,8 +89,8 @@ export function TerminalPane({
   onExit,
   onCwd,
   onDetectedLocalUrl,
-  onTediOpen,
-  onTediSpawnTab,
+  onTerviaOpen,
+  onTerviaSpawnTab,
   onSshStatus,
   onAiCliStatus,
   onPtyId,
@@ -132,8 +132,8 @@ export function TerminalPane({
     onExit: (c) => onExit?.(leafId, c),
     onCwd: (c) => onCwd?.(leafId, c),
     onDetectedLocalUrl: (u) => onDetectedLocalUrl?.(leafId, u),
-    onTediOpen: (input) => onTediOpen?.(leafId, input),
-    onTediSpawnTab: (input) => onTediSpawnTab?.(leafId, input),
+    onTerviaOpen: (input) => onTerviaOpen?.(leafId, input),
+    onTerviaSpawnTab: (input) => onTerviaSpawnTab?.(leafId, input),
     onSshStatus: (status) => onSshStatus?.(leafId, status),
     onAiCliStatus: (status) => onAiCliStatus?.(leafId, status),
     onPtyId: (ptyId) => onPtyId?.(leafId, ptyId),
@@ -148,7 +148,7 @@ export function TerminalPane({
 
   useEffect(() => {
     // Defer one frame so CSS variable tokens see the new class / new
-    // `--tedi-canvas-*` values written by `applyCustomTheme`.
+    // `--tervia-canvas-*` values written by `applyCustomTheme`.
     const id = requestAnimationFrame(() => sessionRef.current.applyTheme());
     return () => cancelAnimationFrame(id);
   }, [

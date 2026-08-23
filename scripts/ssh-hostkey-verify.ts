@@ -56,7 +56,7 @@ check(
 check("the deeper hop in a chain", hostKeyOwners("relay.example.com", target, [bastion, relay]), [
   "c-relay",
 ]);
-// A host TEDI is not dialling in this connect has no row to pin: recording it
+// A host Tervia is not dialling in this connect has no row to pin: recording it
 // against the target would write another machine's key onto it, and the next
 // connect would then refuse as a key mismatch, which reads as an attack.
 check("an unrelated host pins nothing", hostKeyOwners("evil.example.com", target, [bastion]), []);

@@ -24,7 +24,7 @@ function resolve(varName: string): string {
 
 /**
  * Terminal-owned tokens, kept SEPARATE from the app chrome tokens above. The
- * terminal reads its own `--tedi-term-*` vars so it can be themed independently
+ * terminal reads its own `--tervia-term-*` vars so it can be themed independently
  * of the app. In `follow-app` mode those vars default (in globals.css) to the
  * app tokens, so this still resolves to the chrome palette without any coupling
  * in the read path.
@@ -58,12 +58,12 @@ export type TerminalTokens = {
 
 export function readTerminalTokens(): TerminalTokens {
   const ansi = {} as Record<(typeof TERM_ANSI_NAMES)[number], string>;
-  for (const name of TERM_ANSI_NAMES) ansi[name] = resolve(`tedi-term-ansi-${name}`);
+  for (const name of TERM_ANSI_NAMES) ansi[name] = resolve(`tervia-term-ansi-${name}`);
   return {
-    bg: resolve("tedi-term-bg"),
-    fg: resolve("tedi-term-fg"),
-    cursor: resolve("tedi-term-cursor"),
-    selection: resolve("tedi-term-selection"),
+    bg: resolve("tervia-term-bg"),
+    fg: resolve("tervia-term-fg"),
+    cursor: resolve("tervia-term-cursor"),
+    selection: resolve("tervia-term-selection"),
     ansi,
   };
 }

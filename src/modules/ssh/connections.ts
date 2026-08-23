@@ -22,7 +22,7 @@ const KEY_PASSPHRASE_FIELD = "keyPassphrase";
  * - `password`: sent to the server, stored in the OS keychain.
  * - `key`: the private key itself lives in the keychain and is handed to the
  *   handshake.
- * - `agent`: the local ssh-agent signs the handshake. TEDI never sees, stores or
+ * - `agent`: the local ssh-agent signs the handshake. Tervia never sees, stores or
  *   backs up the key, so there is nothing here to leak: one copy, in the agent.
  */
 export type SshAuthMode = "password" | "key" | "agent";

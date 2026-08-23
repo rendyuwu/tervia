@@ -157,7 +157,7 @@ export function AppDialogs({
             </AlertDialogTitle>
             <AlertDialogDescription>
               Leave them running and they keep going in the background, then reattach the next time
-              you open TEDI. Closing them stops whatever they are doing right now.
+              you open Tervia. Closing them stops whatever they are doing right now.
             </AlertDialogDescription>
           </AlertDialogHeader>
           {/* Three choices don't fit the shared two-column footer; stack them.

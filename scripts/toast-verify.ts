@@ -66,7 +66,7 @@ for (const rootFile of [
 // ---- countdown bar + leave animation -------------------------------------
 check(
   "countdown keyframe exists",
-  toastSrc.includes("tedi-toast-drain") && cssSrc.includes("@keyframes tedi-toast-drain"),
+  toastSrc.includes("tervia-toast-drain") && cssSrc.includes("@keyframes tervia-toast-drain"),
 );
 
 // The card is removed from the list on a timer, so that timer must outlast the

@@ -27,7 +27,7 @@ applyBrandColorFastPath();
 applyCustomThemeFastPath();
 // Terminal theme is independent of the app theme. In "custom" mode this paints
 // the saved terminal palette before the first xterm renders; "follow-app" is a
-// no-op (the globals.css `--tedi-term-*` defaults already mirror the app).
+// no-op (the globals.css `--tervia-term-*` defaults already mirror the app).
 applyTerminalThemeFastPath();
 // Whole-app glass: fade the canvas toward the desktop on first paint so there
 // is no opaque flash before hydration re-applies the stored value.
@@ -43,7 +43,7 @@ ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <ErrorBoundary
     fallback={(error, reset) => (
       <div className="bg-background text-foreground flex h-screen w-screen flex-col items-center justify-center gap-3 p-6">
-        <span className="text-sm font-semibold">TEDI hit an unexpected error.</span>
+        <span className="text-sm font-semibold">Tervia hit an unexpected error.</span>
         <pre className="text-muted-foreground max-h-48 max-w-xl overflow-auto font-mono text-[11px] whitespace-pre-wrap">
           {error.message}
         </pre>

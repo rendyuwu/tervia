@@ -2,7 +2,7 @@ import type { FitAddon } from "@xterm/addon-fit";
 import type { SearchAddon } from "@xterm/addon-search";
 import type { WebglAddon } from "@xterm/addon-webgl";
 import type { Terminal } from "@xterm/xterm";
-import type { TediOpenInput, TediSpawnTabInput } from "./osc-handlers";
+import type { TerviaOpenInput, TerviaSpawnTabInput } from "./osc-handlers";
 import type { PtySession } from "./pty-bridge";
 import type { SshRouteHop, SshStatus } from "@/modules/ssh/status";
 import type { AiCliDetector } from "./aiCliDetector";
@@ -14,8 +14,8 @@ export type Callbacks = {
   onExit?: (code: number) => void;
   onCwd?: (cwd: string) => void;
   onDetectedLocalUrl?: (url: string) => void;
-  onTediOpen?: (input: TediOpenInput) => void;
-  onTediSpawnTab?: (input: TediSpawnTabInput) => void;
+  onTerviaOpen?: (input: TerviaOpenInput) => void;
+  onTerviaSpawnTab?: (input: TerviaSpawnTabInput) => void;
   /** Emitted for SSH-bound leaves. Drives the tab dot and status pill. */
   onSshStatus?: (status: SshStatus) => void;
   /** Emitted on AI CLI detection/state change. */
@@ -79,7 +79,7 @@ export type Session = {
    * Per-leaf terminal theme override palette (resolved from the leaf's
    * `terminalThemeId`). When set, `applyTheme` and the opacity-drag refresh
    * build the xterm theme from this palette instead of the global
-   * `--tedi-term-*` tokens, so this pane is themed independently. Null =
+   * `--tervia-term-*` tokens, so this pane is themed independently. Null =
    * follow the global terminal theme.
    */
   terminalThemeOverride: TerminalPalette | null;
@@ -114,7 +114,7 @@ export type Session = {
    */
   blankRepaintEpoch: number;
   /**
-   * "[tedi] starting shell…" placeholder is currently visible in the term
+   * "[tervia] starting shell…" placeholder is currently visible in the term
    * buffer. Cleared (via `\x1b[H\x1b[2J`) on the next PTY byte so the shell
    * paints onto a clean viewport instead of leaving the dim hint as
    * scrollback. Eliminates the perceived "blank pane" between attach and

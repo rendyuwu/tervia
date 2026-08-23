@@ -81,7 +81,7 @@ export type Preferences = {
    * Terminal theme mode. "follow-app" (default) mirrors the app theme so the
    * terminal matches the chrome with zero visual change; "custom" applies
    * `terminalCustomPalette` and is fully independent of the app theme. The
-   * terminal reads its own `--tedi-term-*` CSS vars either way.
+   * terminal reads its own `--tervia-term-*` CSS vars either way.
    */
   terminalThemeMode: TerminalThemeMode;
   /**
@@ -115,7 +115,7 @@ export type Preferences = {
    * Extra directories prepended to the interactive terminal shell's PATH at
    * spawn. Each entry can be individually enabled/disabled. Lets commands that
    * live outside the OS PATH (e.g. a Laragon `composer`, a portable toolchain)
-   * resolve in TEDI's terminal without editing the system PATH. Read directly
+   * resolve in Tervia's terminal without editing the system PATH. Read directly
    * by the Rust PTY layer from this settings file, so edits apply to newly
    * opened terminals without a daemon restart; existing terminals keep their
    * original PATH. Empty by default.
@@ -166,7 +166,7 @@ export type Preferences = {
   /**
    * Brand color as 6-digit hex (`#RRGGBB`). Drives `--primary`, `--ring`,
    * `--sidebar-primary`, `--sidebar-ring`, and a derived `--accent`.
-   * Default `#0057fe` (TEDI logo blue).
+   * Default `#0057fe` (Tervia logo blue).
    */
   brandColor: string;
   /**

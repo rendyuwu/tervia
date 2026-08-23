@@ -330,7 +330,7 @@ export function GeneralSection() {
 
       <SettingsAccordion
         title="Command line"
-        description="Run `tedi .` from any terminal to open a folder in TEDI."
+        description="Run `tervia .` from any terminal to open a folder in Tervia."
         summary={
           IS_WINDOWS
             ? "via installer"
@@ -342,15 +342,15 @@ export function GeneralSection() {
         <div className="flex flex-col gap-2">
           {IS_WINDOWS ? (
             <SettingRow
-              title="tedi command"
-              description="The Windows installer adds a `tedi.cmd` shim and appends the install dir to your user PATH. Reinstall TEDI if `tedi .` isn't found."
+              title="tervia command"
+              description="The Windows installer adds a `tervia.exe` shim and appends the install dir to your user PATH. Reinstall Tervia if `tervia .` isn't found."
             >
               <span className="text-muted-foreground text-[11px]">via installer</span>
             </SettingRow>
           ) : (
             <SettingRow
-              title="Install `tedi` command in PATH"
-              description="Drops a wrapper at ~/.local/bin/tedi so terminals can run `tedi .` to open the current folder. Re-run after upgrading TEDI."
+              title="Install `tervia` command in PATH"
+              description="Drops a wrapper at ~/.local/bin/tervia so terminals can run `tervia .` to open the current folder. Re-run after upgrading Tervia."
             >
               <Button
                 variant="outline"
@@ -370,7 +370,7 @@ export function GeneralSection() {
               Installed at <code className="text-foreground">{shimStatus.path}</code> →{" "}
               <code className="text-foreground">{shimStatus.target}</code>.{" "}
               {shimStatus.on_path
-                ? "Open a new terminal and try `tedi .`."
+                ? "Open a new terminal and try `tervia .`."
                 : '~/.local/bin isn\'t on your PATH yet - add `export PATH="$HOME/.local/bin:$PATH"` to your shell rc.'}
             </span>
           ) : null}
@@ -418,7 +418,7 @@ export function GeneralSection() {
         <div className="flex flex-col gap-2">
           <SettingRow
             title="Launch at login"
-            description="Open TEDI automatically when you sign in."
+            description="Open Tervia automatically when you sign in."
           >
             <Switch checked={autostart} onCheckedChange={(v) => void onToggleAutostart(v)} />
           </SettingRow>

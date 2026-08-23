@@ -6,7 +6,7 @@
  * across windows via a Tauri event like `agentsStore`):
  *   - a built-in's `command`, because the binary is often renamed or wrapped
  *     (`claude` -> `claude-start`), and its `pinned` flag;
- *   - whole custom agents, for CLIs TEDI doesn't ship a default for.
+ *   - whole custom agents, for CLIs Tervia doesn't ship a default for.
  *
  * `id` doubles as the detector's {@link AiCliKind} for built-ins, so a renamed
  * command still lights the right status badge - see `launchAgent`, which tags

@@ -260,7 +260,7 @@ function BoardCardItem({
                   className={cn(
                     "flex min-w-0 items-start gap-1 text-[10px]",
                     t.status === "completed" && "text-muted-foreground/50 line-through",
-                    t.status === "in_progress" && "text-[color:var(--tedi-icon-working)]",
+                    t.status === "in_progress" && "text-[color:var(--tervia-icon-working)]",
                     t.status === "pending" && "text-muted-foreground/70",
                   )}
                 >

@@ -83,21 +83,21 @@ const VARIANTS: Record<
   success: {
     Icon: CircleCheck,
     fg: "text-diff-added",
-    surface: "bg-[color-mix(in_oklab,var(--tedi-diff-added)_14%,var(--popover))]",
+    surface: "bg-[color-mix(in_oklab,var(--tervia-diff-added)_14%,var(--popover))]",
     border: "border-diff-added/35",
     bar: "bg-diff-added",
   },
   info: {
     Icon: Info,
     fg: "text-info",
-    surface: "bg-[color-mix(in_oklab,var(--tedi-info)_14%,var(--popover))]",
+    surface: "bg-[color-mix(in_oklab,var(--tervia-info)_14%,var(--popover))]",
     border: "border-info/35",
     bar: "bg-info",
   },
   warning: {
     Icon: TriangleAlert,
     fg: "text-icon-working",
-    surface: "bg-[color-mix(in_oklab,var(--tedi-icon-working)_14%,var(--popover))]",
+    surface: "bg-[color-mix(in_oklab,var(--tervia-icon-working)_14%,var(--popover))]",
     border: "border-icon-working/35",
     bar: "bg-icon-working",
   },
@@ -173,7 +173,7 @@ function ToastCard({ item, onDone }: { item: ToastItem; onDone: (id: number) => 
         aria-hidden
         className={cn("absolute inset-x-0 bottom-0 h-0.5 origin-left", bar)}
         style={{
-          animation: `tedi-toast-drain ${item.durationMs}ms linear forwards`,
+          animation: `tervia-toast-drain ${item.durationMs}ms linear forwards`,
           animationPlayState: paused || leaving ? "paused" : "running",
         }}
       />

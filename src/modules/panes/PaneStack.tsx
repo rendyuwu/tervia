@@ -2,7 +2,10 @@ import type { EditorPaneHandle } from "@/modules/editor";
 import type { PaneTab, Tab } from "@/modules/tabs";
 import { leaves, type PaneEdge } from "@/modules/terminal/lib/panes";
 import type { TerminalPaneHandle } from "@/modules/terminal";
-import type { TediOpenInput, TediSpawnTabInput } from "@/modules/terminal/lib/useTerminalSession";
+import type {
+  TerviaOpenInput,
+  TerviaSpawnTabInput,
+} from "@/modules/terminal/lib/useTerminalSession";
 import type { SshConnectionBinding, SshStatus } from "@/modules/ssh/status";
 import { useSshHosts } from "@/modules/ssh/connections";
 import type { AiCliStatus } from "@/modules/terminal/lib/aiCliStatus";
@@ -19,8 +22,8 @@ type Props = {
   onCwd: (leafId: number, cwd: string) => void;
   onDetectedLocalUrl: (leafId: number, url: string) => void;
   onExit: (leafId: number, code: number) => void;
-  onTediOpen?: (leafId: number, input: TediOpenInput) => void;
-  onTediSpawnTab?: (leafId: number, input: TediSpawnTabInput) => void;
+  onTerviaOpen?: (leafId: number, input: TerviaOpenInput) => void;
+  onTerviaSpawnTab?: (leafId: number, input: TerviaSpawnTabInput) => void;
   onSshStatus?: (leafId: number, status: SshStatus) => void;
   onAiCliStatus?: (leafId: number, status: AiCliStatus) => void;
   /**
@@ -71,8 +74,8 @@ export function PaneStack({
   onCwd,
   onDetectedLocalUrl,
   onExit,
-  onTediOpen,
-  onTediSpawnTab,
+  onTerviaOpen,
+  onTerviaSpawnTab,
   onSshStatus,
   onAiCliStatus,
   onPtyId,
@@ -110,8 +113,8 @@ export function PaneStack({
     onCwd,
     onDetectedLocalUrl,
     onExit,
-    onTediOpen,
-    onTediSpawnTab,
+    onTerviaOpen,
+    onTerviaSpawnTab,
     onSshStatus,
     onAiCliStatus,
     onPtyId,
@@ -125,8 +128,8 @@ export function PaneStack({
     onCwd,
     onDetectedLocalUrl,
     onExit,
-    onTediOpen,
-    onTediSpawnTab,
+    onTerviaOpen,
+    onTerviaSpawnTab,
     onSshStatus,
     onAiCliStatus,
     onPtyId,
@@ -145,8 +148,8 @@ export function PaneStack({
         onCwd: (cwd) => cbRef.current.onCwd(leafId, cwd),
         onDetectedLocalUrl: (url) => cbRef.current.onDetectedLocalUrl(leafId, url),
         onExit: (code) => cbRef.current.onExit(leafId, code),
-        onTediOpen: (input) => cbRef.current.onTediOpen?.(leafId, input),
-        onTediSpawnTab: (input) => cbRef.current.onTediSpawnTab?.(leafId, input),
+        onTerviaOpen: (input) => cbRef.current.onTerviaOpen?.(leafId, input),
+        onTerviaSpawnTab: (input) => cbRef.current.onTerviaSpawnTab?.(leafId, input),
         onSshStatus: (status) => cbRef.current.onSshStatus?.(leafId, status),
         onAiCliStatus: (status) => cbRef.current.onAiCliStatus?.(leafId, status),
         onPtyId: (ptyId) => cbRef.current.onPtyId?.(leafId, ptyId),

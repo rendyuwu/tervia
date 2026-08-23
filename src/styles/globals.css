@@ -72,14 +72,14 @@
   --color-card: var(--card);
   --color-foreground: var(--foreground);
   --color-background: var(--background);
-  --color-diff-added: var(--tedi-diff-added);
-  --color-diff-removed: var(--tedi-diff-removed);
-  --color-info: var(--tedi-info);
-  --color-icon-working: var(--tedi-icon-working);
-  --color-icon-idle: var(--tedi-icon-idle);
-  --color-icon-blocked: var(--tedi-icon-blocked);
-  --color-icon-done: var(--tedi-icon-done);
-  --color-icon-branch: var(--tedi-icon-branch);
+  --color-diff-added: var(--tervia-diff-added);
+  --color-diff-removed: var(--tervia-diff-removed);
+  --color-info: var(--tervia-info);
+  --color-icon-working: var(--tervia-icon-working);
+  --color-icon-idle: var(--tervia-icon-idle);
+  --color-icon-blocked: var(--tervia-icon-blocked);
+  --color-icon-done: var(--tervia-icon-done);
+  --color-icon-branch: var(--tervia-icon-branch);
   /* Smooth "breathing" pulse for the active AI CLI (working / blocking) icon.
    * Gentler and more continuous than Tailwind's default animate-pulse. */
   --animate-ai-breathe: ai-breathe 1.8s ease-in-out infinite;
@@ -108,7 +108,7 @@
 /* Toast auto-dismiss countdown (src/components/ui/toast.tsx). The bar drains
  * over the toast's own durationMs, passed inline; hovering freezes it with
  * animation-play-state, in step with the JS dismiss timer. */
-@keyframes tedi-toast-drain {
+@keyframes tervia-toast-drain {
   from {
     transform: scaleX(1);
   }
@@ -121,101 +121,101 @@
   /* AI CLI status colors. Themable via Settings > Theme. Defaults match the
    * pre-existing emerald/yellow/red pill the codebase shipped with so the
    * out-of-box look is unchanged. */
-  --tedi-icon-idle: #059669;
-  --tedi-icon-working: #ca8a04;
-  --tedi-icon-blocked: #dc2626;
+  --tervia-icon-idle: #059669;
+  --tervia-icon-working: #ca8a04;
+  --tervia-icon-blocked: #dc2626;
   /* "done" (finished, unacknowledged): blue, distinct from the green idle. */
-  --tedi-icon-done: #2563eb;
+  --tervia-icon-done: #2563eb;
   /* Git branch glyph wherever a branch NAME is shown. Violet so a branch reads
    * as a branch at a glance and never as an AI/CLI status colour. */
-  --tedi-icon-branch: #7c3aed;
+  --tervia-icon-branch: #7c3aed;
   /* Semantic diff colors (git +/-, SCM status). Themable. Kept distinct
    * from --destructive so destructive remains an actionable-danger token
    * and diff removed stays a "kind of change" indicator. */
-  --tedi-diff-added: #16a34a;
-  --tedi-diff-removed: #dc2626;
+  --tervia-diff-added: #16a34a;
+  --tervia-diff-removed: #dc2626;
   /* Semantic "info" / neutral status color (toasts, renamed/copied SCM
    * rows, SSH info pills). Themable. */
-  --tedi-info: #0284c7;
+  --tervia-info: #0284c7;
   /* Solid base colour for the terminal/editor canvas and the glass surface
    * tint. `customTheme.applyBackground` sets it to the theme's background
-   * colour; the glass layer mixes it with `--tedi-app-opacity`. */
-  --tedi-canvas-bg: #ffffff;
+   * colour; the glass layer mixes it with `--tervia-app-opacity`. */
+  --tervia-canvas-bg: #ffffff;
   /* Whole-app transparency (0..1). 1 = solid (default), 0 = fully see-through.
    * The single opacity control: `appOpacity.ts` writes it + toggles
-   * `data-tedi-glass`, consumed by the `html[data-tedi-glass="on"]` rules and
+   * `data-tervia-glass`, consumed by the `html[data-tervia-glass="on"]` rules and
    * the terminal canvas. */
-  --tedi-app-opacity: 1;
+  --tervia-app-opacity: 1;
   /* Tab focus / active stripe color per tab kind. Themable via Settings
    * > Theme. Defaults mirror the hard-coded palette `TabBar.tsx` used
    * before the tokens existed. */
-  --tedi-tab-terminal: #10b981;
-  --tedi-tab-ssh: #0ea5e9;
-  --tedi-tab-editor: #0057fe;
-  --tedi-tab-browser: #06b6d4;
-  --tedi-tab-ai-diff: #8b5cf6;
-  --tedi-tab-git-diff: #f59e0b;
+  --tervia-tab-terminal: #10b981;
+  --tervia-tab-ssh: #0ea5e9;
+  --tervia-tab-editor: #0057fe;
+  --tervia-tab-browser: #06b6d4;
+  --tervia-tab-ai-diff: #8b5cf6;
+  --tervia-tab-git-diff: #f59e0b;
   /* Drag-to-resize divider between split panes. Themable via Settings. */
-  --tedi-resize-handle: #e5e7eb;
+  --tervia-resize-handle: #e5e7eb;
   /* ANSI 16 palette for the terminal. Themable per preset. Light-mode
    * defaults are slightly muted; dark variants below brighten them. */
-  --tedi-ansi-black: #3f3f46;
-  --tedi-ansi-red: #dc2626;
-  --tedi-ansi-green: #16a34a;
-  --tedi-ansi-yellow: #ca8a04;
-  --tedi-ansi-blue: #2563eb;
-  --tedi-ansi-magenta: #9333ea;
-  --tedi-ansi-cyan: #0891b2;
-  --tedi-ansi-white: #e4e4e7;
-  --tedi-ansi-bright-black: #71717a;
-  --tedi-ansi-bright-red: #ef4444;
-  --tedi-ansi-bright-green: #22c55e;
-  --tedi-ansi-bright-yellow: #eab308;
-  --tedi-ansi-bright-blue: #3b82f6;
-  --tedi-ansi-bright-magenta: #a855f7;
-  --tedi-ansi-bright-cyan: #06b6d4;
-  --tedi-ansi-bright-white: #fafafa;
-  /* Terminal-owned palette. The terminal reads ONLY these `--tedi-term-*`
+  --tervia-ansi-black: #3f3f46;
+  --tervia-ansi-red: #dc2626;
+  --tervia-ansi-green: #16a34a;
+  --tervia-ansi-yellow: #ca8a04;
+  --tervia-ansi-blue: #2563eb;
+  --tervia-ansi-magenta: #9333ea;
+  --tervia-ansi-cyan: #0891b2;
+  --tervia-ansi-white: #e4e4e7;
+  --tervia-ansi-bright-black: #71717a;
+  --tervia-ansi-bright-red: #ef4444;
+  --tervia-ansi-bright-green: #22c55e;
+  --tervia-ansi-bright-yellow: #eab308;
+  --tervia-ansi-bright-blue: #3b82f6;
+  --tervia-ansi-bright-magenta: #a855f7;
+  --tervia-ansi-bright-cyan: #06b6d4;
+  --tervia-ansi-bright-white: #fafafa;
+  /* Terminal-owned palette. The terminal reads ONLY these `--tervia-term-*`
    * vars (via `buildTerminalTheme`), independently of the app chrome. They
    * default to the app tokens so `terminalThemeMode: "follow-app"` is
    * pixel-identical with zero JS; `applyTerminalTheme("custom", …)` overrides
    * them so the terminal can be themed on its own. Mode-agnostic (one palette
    * for light + dark), so they reference per-mode app vars and resolve at the
    * xterm probe. See `modules/settings/terminalPalette.ts`. */
-  --tedi-term-bg: var(--tedi-canvas-bg);
-  --tedi-term-fg: var(--foreground);
-  --tedi-term-cursor: var(--foreground);
-  --tedi-term-selection: var(--accent);
-  --tedi-term-ansi-black: var(--tedi-ansi-black);
-  --tedi-term-ansi-red: var(--tedi-ansi-red);
-  --tedi-term-ansi-green: var(--tedi-ansi-green);
-  --tedi-term-ansi-yellow: var(--tedi-ansi-yellow);
-  --tedi-term-ansi-blue: var(--tedi-ansi-blue);
-  --tedi-term-ansi-magenta: var(--tedi-ansi-magenta);
-  --tedi-term-ansi-cyan: var(--tedi-ansi-cyan);
-  --tedi-term-ansi-white: var(--tedi-ansi-white);
-  --tedi-term-ansi-bright-black: var(--tedi-ansi-bright-black);
-  --tedi-term-ansi-bright-red: var(--tedi-ansi-bright-red);
-  --tedi-term-ansi-bright-green: var(--tedi-ansi-bright-green);
-  --tedi-term-ansi-bright-yellow: var(--tedi-ansi-bright-yellow);
-  --tedi-term-ansi-bright-blue: var(--tedi-ansi-bright-blue);
-  --tedi-term-ansi-bright-magenta: var(--tedi-ansi-bright-magenta);
-  --tedi-term-ansi-bright-cyan: var(--tedi-ansi-bright-cyan);
-  --tedi-term-ansi-bright-white: var(--tedi-ansi-bright-white);
+  --tervia-term-bg: var(--tervia-canvas-bg);
+  --tervia-term-fg: var(--foreground);
+  --tervia-term-cursor: var(--foreground);
+  --tervia-term-selection: var(--accent);
+  --tervia-term-ansi-black: var(--tervia-ansi-black);
+  --tervia-term-ansi-red: var(--tervia-ansi-red);
+  --tervia-term-ansi-green: var(--tervia-ansi-green);
+  --tervia-term-ansi-yellow: var(--tervia-ansi-yellow);
+  --tervia-term-ansi-blue: var(--tervia-ansi-blue);
+  --tervia-term-ansi-magenta: var(--tervia-ansi-magenta);
+  --tervia-term-ansi-cyan: var(--tervia-ansi-cyan);
+  --tervia-term-ansi-white: var(--tervia-ansi-white);
+  --tervia-term-ansi-bright-black: var(--tervia-ansi-bright-black);
+  --tervia-term-ansi-bright-red: var(--tervia-ansi-bright-red);
+  --tervia-term-ansi-bright-green: var(--tervia-ansi-bright-green);
+  --tervia-term-ansi-bright-yellow: var(--tervia-ansi-bright-yellow);
+  --tervia-term-ansi-bright-blue: var(--tervia-ansi-bright-blue);
+  --tervia-term-ansi-bright-magenta: var(--tervia-ansi-bright-magenta);
+  --tervia-term-ansi-bright-cyan: var(--tervia-ansi-bright-cyan);
+  --tervia-term-ansi-bright-white: var(--tervia-ansi-bright-white);
   /* Editor-owned diff tint. The diff views belong to the EDITOR theme domain;
    * their inline +/- tint follows `editorTheme`, not the app theme. Defaults to
    * the app diff colors so first paint is unchanged; `applyEditorDiffColors`
    * (modules/editor/lib/diffColors.ts) snaps them to the editor theme's pair. */
-  --tedi-editor-diff-added: var(--tedi-diff-added);
-  --tedi-editor-diff-removed: var(--tedi-diff-removed);
+  --tervia-editor-diff-added: var(--tervia-diff-added);
+  --tervia-editor-diff-removed: var(--tervia-diff-removed);
   /* Content font: the shared monospace family the code editor renders with
    * (the terminal reads the same choice via its own xterm option), plus the
    * editor base font size. Set by the font picker (Settings -> General); these
    * defaults cover the first paint before prefs hydrate. */
-  --tedi-mono-font:
+  --tervia-mono-font:
     "JetBrainsMono Nerd Font Mono", "JetBrains Mono", SFMono-Regular, Menlo, Consolas,
     "Liberation Mono", monospace;
-  --tedi-editor-font-size: 13px;
+  --tervia-editor-font-size: 13px;
   --background: oklch(1 0 0);
   --foreground: oklch(0.148 0.004 228.8);
   --card: #f6f7f9;
@@ -250,49 +250,49 @@
   --sidebar-ring: #0057fe;
 }
 
-/* VSCode Dark+ (Default Dark Modern) palette, re-tinted to the TEDI logo blue.
+/* VSCode Dark+ (Default Dark Modern) palette, re-tinted to the Tervia logo blue.
  * Editor bg #1E1E1E, sidebar/activity-bar #181818, panel border #2B2B2B,
  * focus/brand #0057FE (logo blue), fg #CCCCCC. Hex kept as-is (sRGB) so the
  * result matches VSCode's pixel feel rather than drifting through OKLCH. */
 .dark {
   /* Brighter defaults for the AI CLI status icons under dark mode. */
-  --tedi-icon-idle: #34d399;
-  --tedi-icon-working: #facc15;
-  --tedi-icon-blocked: #f87171;
-  --tedi-icon-done: #60a5fa;
-  --tedi-icon-branch: #a78bfa;
+  --tervia-icon-idle: #34d399;
+  --tervia-icon-working: #facc15;
+  --tervia-icon-blocked: #f87171;
+  --tervia-icon-done: #60a5fa;
+  --tervia-icon-branch: #a78bfa;
   /* Brighter diff + info colors for dark mode. */
-  --tedi-diff-added: #4ade80;
-  --tedi-diff-removed: #f87171;
-  --tedi-info: #38bdf8;
+  --tervia-diff-added: #4ade80;
+  --tervia-diff-removed: #f87171;
+  --tervia-info: #38bdf8;
   /* Dark base for the terminal/editor canvas. */
-  --tedi-canvas-bg: #1a1a1a;
+  --tervia-canvas-bg: #1a1a1a;
   /* Slightly brighter tab stripes for dark mode. */
-  --tedi-tab-terminal: #34d399;
-  --tedi-tab-ssh: #38bdf8;
-  --tedi-tab-editor: #5b8bff;
-  --tedi-tab-browser: #22d3ee;
-  --tedi-tab-ai-diff: #a78bfa;
-  --tedi-tab-git-diff: #fbbf24;
-  --tedi-resize-handle: #2b2b2b;
+  --tervia-tab-terminal: #34d399;
+  --tervia-tab-ssh: #38bdf8;
+  --tervia-tab-editor: #5b8bff;
+  --tervia-tab-browser: #22d3ee;
+  --tervia-tab-ai-diff: #a78bfa;
+  --tervia-tab-git-diff: #fbbf24;
+  --tervia-resize-handle: #2b2b2b;
   /* Brighter ANSI palette for dark mode (matches the previous hardcoded
    * Tailwind defaults the codebase shipped with). */
-  --tedi-ansi-black: #18181b;
-  --tedi-ansi-red: #ef4444;
-  --tedi-ansi-green: #22c55e;
-  --tedi-ansi-yellow: #eab308;
-  --tedi-ansi-blue: #3b82f6;
-  --tedi-ansi-magenta: #a855f7;
-  --tedi-ansi-cyan: #06b6d4;
-  --tedi-ansi-white: #e4e4e7;
-  --tedi-ansi-bright-black: #52525b;
-  --tedi-ansi-bright-red: #f87171;
-  --tedi-ansi-bright-green: #4ade80;
-  --tedi-ansi-bright-yellow: #facc15;
-  --tedi-ansi-bright-blue: #60a5fa;
-  --tedi-ansi-bright-magenta: #c084fc;
-  --tedi-ansi-bright-cyan: #22d3ee;
-  --tedi-ansi-bright-white: #fafafa;
+  --tervia-ansi-black: #18181b;
+  --tervia-ansi-red: #ef4444;
+  --tervia-ansi-green: #22c55e;
+  --tervia-ansi-yellow: #eab308;
+  --tervia-ansi-blue: #3b82f6;
+  --tervia-ansi-magenta: #a855f7;
+  --tervia-ansi-cyan: #06b6d4;
+  --tervia-ansi-white: #e4e4e7;
+  --tervia-ansi-bright-black: #52525b;
+  --tervia-ansi-bright-red: #f87171;
+  --tervia-ansi-bright-green: #4ade80;
+  --tervia-ansi-bright-yellow: #facc15;
+  --tervia-ansi-bright-blue: #60a5fa;
+  --tervia-ansi-bright-magenta: #c084fc;
+  --tervia-ansi-bright-cyan: #22d3ee;
+  --tervia-ansi-bright-white: #fafafa;
   --background: #1a1a1a;
   --foreground: #cccccc;
   --card: #2b2b2b;
@@ -349,15 +349,15 @@
  * A theme's own value wins, and normalizeCustomTheme is what guarantees the
  * contrast floor (modules/settings/buttonFace.ts) - this is only a last resort. */
 :root {
-  --tedi-button-face: color-mix(in srgb, var(--foreground) 18%, transparent);
-  --tedi-button-face-foreground: var(--foreground);
+  --tervia-button-face: color-mix(in srgb, var(--foreground) 18%, transparent);
+  --tervia-button-face-foreground: var(--foreground);
 }
 
 /* Hover derived from the face, so it is lighter on a dark theme and darker on a
  * light one without either saying so - and a theme (or an extension) that sets
  * the face gets a matching hover for free. */
 :root {
-  --tedi-button-face-hover: color-mix(in srgb, var(--tedi-button-face) 86%, var(--foreground));
+  --tervia-button-face-hover: color-mix(in srgb, var(--tervia-button-face) 86%, var(--foreground));
 }
 
 @layer base {
@@ -412,34 +412,34 @@
 }
 
 /* Editor + terminal canvas transparency under the single "App opacity"
- * glass mode (`data-tedi-glass`). Only `.cm-editor` carries the alpha tint;
+ * glass mode (`data-tervia-glass`). Only `.cm-editor` carries the alpha tint;
  * inner scrollers, content, and gutters go fully transparent so the layers
  * don't stack. The `@uiw` themes set `.cm-editor` background via a class with
  * specificity (0,2,0); this selector is (0,2,1) and `!important` wins. */
-html[data-tedi-glass="on"] .cm-editor {
+html[data-tervia-glass="on"] .cm-editor {
   background-color: color-mix(
     in srgb,
-    var(--tedi-canvas-bg) calc(var(--tedi-app-opacity) * 100%),
+    var(--tervia-canvas-bg) calc(var(--tervia-app-opacity) * 100%),
     transparent
   ) !important;
 }
-html[data-tedi-glass="on"] .cm-scroller,
-html[data-tedi-glass="on"] .cm-content,
-html[data-tedi-glass="on"] .cm-gutters {
+html[data-tervia-glass="on"] .cm-scroller,
+html[data-tervia-glass="on"] .cm-content,
+html[data-tervia-glass="on"] .cm-gutters {
   background-color: transparent !important;
 }
-html[data-tedi-glass="on"] .cm-activeLine,
-html[data-tedi-glass="on"] .cm-activeLineGutter {
-  background-color: color-mix(in srgb, var(--tedi-canvas-bg) 18%, transparent) !important;
+html[data-tervia-glass="on"] .cm-activeLine,
+html[data-tervia-glass="on"] .cm-activeLineGutter {
+  background-color: color-mix(in srgb, var(--tervia-canvas-bg) 18%, transparent) !important;
 }
 /* xterm WebGL renderer needs `allowTransparency: true` (set in
  * `useTerminalSession.ts`) so the canvas itself accepts an rgba clear
  * color. The DOM wrappers around the canvas go fully transparent; the
  * actual tint is computed in `buildTerminalTheme()` and passed as
  * `theme.background = rgba(...)`. */
-html[data-tedi-glass="on"] .xterm,
-html[data-tedi-glass="on"] .xterm .xterm-screen,
-html[data-tedi-glass="on"] .xterm .xterm-viewport {
+html[data-tervia-glass="on"] .xterm,
+html[data-tervia-glass="on"] .xterm .xterm-screen,
+html[data-tervia-glass="on"] .xterm .xterm-viewport {
   background-color: transparent !important;
 }
 
@@ -482,7 +482,7 @@ html[data-chrome="borderless"] #debug-root {
  * The OS window is already transparent (src-tauri/src/lib.rs builds it with
  * `transparent: true`); the app only looks solid because surfaces paint
  * opaque colours. When the Theme → Background "Opacity" slider lowers
- * `--tedi-app-opacity` below 1, `appOpacity.ts` sets `data-tedi-glass="on"`
+ * `--tervia-app-opacity` below 1, `appOpacity.ts` sets `data-tervia-glass="on"`
  * and we fade surfaces toward whatever sits behind the window: the wallpaper
  * image when one is set, else the desktop. That covers the shell, sidebar,
  * header, tabs, status bar, panels, popovers / dropdowns / menus, the editor's
@@ -493,8 +493,8 @@ html[data-chrome="borderless"] #debug-root {
  * tint, and the terminal rgba) follows the slider all the way to fully
  * transparent. Every text/icon-bearing chrome surface is FLOORED so it never
  * drops below a readable backing: cards/sidebar/secondary/muted ride
- * `--tedi-glass-surface` (0.5..1), the header rides `--tedi-glass-header`
- * (0.5..1), and floating menus ride `--tedi-glass-menu` (0.82..1). So text,
+ * `--tervia-glass-surface` (0.5..1), the header rides `--tervia-glass-header`
+ * (0.5..1), and floating menus ride `--tervia-glass-menu` (0.82..1). So text,
  * icons, and buttons stay clearly visible at any opacity.
  *
  * `!important` beats the inline `--background` / `--card` a custom theme sets
@@ -502,7 +502,7 @@ html[data-chrome="borderless"] #debug-root {
  * `--sidebar-accent` (active tab, selected rows, terminal selection), and
  * `--primary` / `--destructive` (buttons stay crisp). Main window only; the
  * settings window opts out for readability (see `appOpacity.ts`). */
-html[data-tedi-glass="on"] {
+html[data-tervia-glass="on"] {
   /* Text- and icon-bearing chrome (cards, sidebar, secondary, muted) keeps a
    * legibility FLOOR so labels, icons, and buttons stay clearly visible over
    * the wallpaper even at the low end of the slider. The 0..1 slider maps to
@@ -510,16 +510,16 @@ html[data-tedi-glass="on"] {
    * header uses); the canvas itself (--background, editor/terminal) still goes
    * fully see-through below, so the "dissolve into the wallpaper" look is
    * preserved for the content panes while chrome never becomes unreadable. */
-  --tedi-glass-surface: color-mix(
+  --tervia-glass-surface: color-mix(
     in srgb,
-    var(--tedi-canvas-bg) calc((var(--tedi-app-opacity) * 0.5 + 0.5) * 100%),
+    var(--tervia-canvas-bg) calc((var(--tervia-app-opacity) * 0.5 + 0.5) * 100%),
     transparent
   );
   /* Header is the drag handle: a slightly stronger floor (alpha maps 0..1 ->
    * 0.5..1) so the top bar stays clearly grabbable, while still fading. */
-  --tedi-glass-header: color-mix(
+  --tervia-glass-header: color-mix(
     in srgb,
-    var(--tedi-canvas-bg) calc((var(--tedi-app-opacity) * 0.5 + 0.5) * 100%),
+    var(--tervia-canvas-bg) calc((var(--tervia-app-opacity) * 0.5 + 0.5) * 100%),
     transparent
   );
   /* Floating menus (dropdowns, context menus, popovers, tooltips, command
@@ -527,32 +527,32 @@ html[data-tedi-glass="on"] {
    * banned on Windows/WebView2, see note below), so they get the strongest
    * floor (alpha maps 0..1 -> 0.82..1). They still fade with the slider but
    * never below a clearly readable level. */
-  --tedi-glass-menu: color-mix(
+  --tervia-glass-menu: color-mix(
     in srgb,
-    var(--tedi-canvas-bg) calc((var(--tedi-app-opacity) * 0.18 + 0.82) * 100%),
+    var(--tervia-canvas-bg) calc((var(--tervia-app-opacity) * 0.18 + 0.82) * 100%),
     transparent
   );
   /* The app canvas (shell, pane gaps, editor/terminal frames) follows the
    * slider DIRECTLY instead of snapping to fully transparent the moment glass
    * turns on. Same formula as the editor canvas (.cm-editor) below, so a 98%
    * slide reads as ~98% opaque and only the low end dissolves toward the
-   * wallpaper. Chrome stays floored separately via --tedi-glass-surface, so it
+   * wallpaper. Chrome stays floored separately via --tervia-glass-surface, so it
    * is always at least as opaque as the canvas. */
   --background: color-mix(
     in srgb,
-    var(--tedi-canvas-bg) calc(var(--tedi-app-opacity) * 100%),
+    var(--tervia-canvas-bg) calc(var(--tervia-app-opacity) * 100%),
     transparent
   ) !important;
-  /* Panels keep a floored translucent backing (see --tedi-glass-surface) so
+  /* Panels keep a floored translucent backing (see --tervia-glass-surface) so
    * chrome and the editor/terminal text stay readable while still showing
-   * what's behind. Floating menus ride the stronger --tedi-glass-menu floor.
-   * The editor (.cm-editor) and terminal canvas use the raw --tedi-app-opacity
+   * what's behind. Floating menus ride the stronger --tervia-glass-menu floor.
+   * The editor (.cm-editor) and terminal canvas use the raw --tervia-app-opacity
    * for their own rgba tint (see rules above + JS). */
-  --card: var(--tedi-glass-surface) !important;
-  --popover: var(--tedi-glass-menu) !important;
-  --secondary: var(--tedi-glass-surface) !important;
-  --muted: var(--tedi-glass-surface) !important;
-  --sidebar: var(--tedi-glass-surface) !important;
+  --card: var(--tervia-glass-surface) !important;
+  --popover: var(--tervia-glass-menu) !important;
+  --secondary: var(--tervia-glass-surface) !important;
+  --muted: var(--tervia-glass-surface) !important;
+  --sidebar: var(--tervia-glass-surface) !important;
 }
 /* High-traffic main-window panels that paint with a FRACTIONAL utility
  * (e.g. `bg-card/60`) would multiply a second alpha on top of the already
@@ -560,22 +560,22 @@ html[data-tedi-glass="on"] {
  * Pin them to the full floored surface under glass so the slider is the single
  * source of truth. Solid (non-glass) themes keep their original fractional
  * tint because this rule is gated on the glass attribute. */
-html[data-tedi-glass="on"] .tedi-glass-panel {
-  background-color: var(--tedi-glass-surface) !important;
+html[data-tervia-glass="on"] .tervia-glass-panel {
+  background-color: var(--tervia-glass-surface) !important;
 }
 /* Top header bar: more opaque than the rest (still follows the slider) so it
  * reads as a solid title/drag bar. `bg-card` makes it inherit the translucent
  * `--card` above, so override it back to the boosted header tint. */
-html[data-tedi-glass="on"] [data-tedi-header] {
-  background-color: var(--tedi-glass-header) !important;
+html[data-tervia-glass="on"] [data-tervia-header] {
+  background-color: var(--tervia-glass-header) !important;
 }
 /* Bottom status bar (the only `<footer>` in the app shell): it paints
  * `bg-card/60`, which under glass would multiply a 0.6 alpha on top of the
  * already floored `--card`, fading its cwd / git / zoom / AI text far faster
  * than the slider implies. Pin it to the floored header tint so it reads as a
  * solid-enough bar like the header, never below a readable floor. */
-html[data-tedi-glass="on"] footer {
-  background-color: var(--tedi-glass-header) !important;
+html[data-tervia-glass="on"] footer {
+  background-color: var(--tervia-glass-header) !important;
 }
 
 /* SQL Explorer (first-party extension) renders into a `.tsql-host` container
@@ -583,26 +583,26 @@ html[data-tedi-glass="on"] footer {
  * under glass for the editor/terminal canvas. That made the WHOLE panel (schema
  * tree, grid rows, query box, gaps) dissolve into the wallpaper instead of
  * staying a readable surface like the file-tree sidebar does. Floor the host to
- * the chrome surface (`--tedi-glass-surface`, the same 0.5..1 floor that
+ * the chrome surface (`--tervia-glass-surface`, the same 0.5..1 floor that
  * cards/sidebar ride) so the tool stays translucent but legible: data + tree
  * keep a readable backing while the panel still shows the wallpaper through it.
  * The chrome bars below ride `--card` (also floored) and stack on top for the
  * usual header/body depth. */
-html[data-tedi-glass="on"] .tsql-host {
-  background: var(--tedi-glass-surface) !important;
+html[data-tervia-glass="on"] .tsql-host {
+  background: var(--tervia-glass-surface) !important;
 }
 /* SQL Explorer's STICKY bars (table header, result toolbar, schema-tree head)
  * paint `--card`; under glass that lets the rows / tree scrolling beneath them
  * bleed through. Pin those sticky bars to the SOLID canvas colour so they read
  * as clean header bars (the rows/tree themselves stay glass). The hover tint
  * mixes against the same solid. Non-sticky SQL surfaces keep translucent `--card`. */
-html[data-tedi-glass="on"] .tsql-grid thead th,
-html[data-tedi-glass="on"] .tsql-meta--sticky,
-html[data-tedi-glass="on"] .tsql-tree-head {
-  background: var(--tedi-canvas-bg) !important;
+html[data-tervia-glass="on"] .tsql-grid thead th,
+html[data-tervia-glass="on"] .tsql-meta--sticky,
+html[data-tervia-glass="on"] .tsql-tree-head {
+  background: var(--tervia-canvas-bg) !important;
 }
-html[data-tedi-glass="on"] .tsql-grid thead th.tsql-grid-th:hover {
-  background: color-mix(in srgb, var(--foreground) 6%, var(--tedi-canvas-bg)) !important;
+html[data-tervia-glass="on"] .tsql-grid thead th.tsql-grid-th:hover {
+  background: color-mix(in srgb, var(--foreground) 6%, var(--tervia-canvas-bg)) !important;
 }
 /* The markdown-table sticky header (AI chat + editor preview, and the popped-out
  * "open in pane" viewer that actually scrolls) paints `!bg-muted`. Same problem
@@ -610,15 +610,15 @@ html[data-tedi-glass="on"] .tsql-grid thead th.tsql-grid-th:hover {
  * scrolling tbody rows bleed through the sticky thead. Pin it to the SOLID
  * canvas colour. Specificity (0,2,1)+!important beats the Tailwind
  * `[&_[data-streamdown=table-header]]:!bg-muted` utility. */
-html[data-tedi-glass="on"] [data-streamdown="table-header"] {
-  background: var(--tedi-canvas-bg) !important;
+html[data-tervia-glass="on"] [data-streamdown="table-header"] {
+  background: var(--tervia-canvas-bg) !important;
 }
 /* The floating connection-form modal also hard-codes the `--background` canvas,
  * so under glass it went fully see-through while floating OVER the tree/grid,
  * colliding the form fields with the rows behind it. Floor it to the
  * floating-menu surface (`--popover`, same as `.tsql-dialog`) so the form that
  * the user has to read and type into stays legible. */
-html[data-tedi-glass="on"] .tsql-conn-modal {
+html[data-tervia-glass="on"] .tsql-conn-modal {
   background: var(--popover) !important;
 }
 /* The conversation "jump to message" pin is sticky over the scrolling message
@@ -630,8 +630,8 @@ html[data-tedi-glass="on"] .tsql-conn-modal {
  * above) so the jump label is always readable; drop its backdrop blur (dark
  * fill on Windows). It is a single sticky row, so solid costs no transparency
  * the user cares about. */
-html[data-tedi-glass="on"] .tedi-chat-pin {
-  background-color: var(--tedi-canvas-bg) !important;
+html[data-tervia-glass="on"] .tervia-chat-pin {
+  background-color: var(--tervia-canvas-bg) !important;
   backdrop-filter: none !important;
 }
 /* No `backdrop-filter` under glass: over a transparent window WebView2
@@ -645,9 +645,9 @@ html[data-tedi-glass="on"] .tedi-chat-pin {
  * "Blur" slider (it blurs the image layer directly), so the transparency stays
  * clean and predictable on every platform. Scrims keep their dark tint (just
  * without the blur), which still dims fine. */
-html[data-tedi-glass="on"] *,
-html[data-tedi-glass="on"] *::before,
-html[data-tedi-glass="on"] *::after {
+html[data-tervia-glass="on"] *,
+html[data-tervia-glass="on"] *::before,
+html[data-tervia-glass="on"] *::after {
   backdrop-filter: none !important;
   -webkit-backdrop-filter: none !important;
 }
@@ -785,13 +785,13 @@ html[data-chrome="borderless"] *::-webkit-scrollbar-corner {
  * Driven by the CSS Custom Highlight API: <MarkdownFindBar> registers DOM
  * Ranges under `md-find` (every match) and `md-find-current` (the focused
  * one). No DOM mutation, so Streamdown's rendered output stays untouched.
- * Reuses `--tedi-icon-working` (the same gold/amber the terminal + xterm
+ * Reuses `--tervia-icon-working` (the same gold/amber the terminal + xterm
  * search use for the active match) so find UX reads consistently. */
 ::highlight(md-find) {
-  background-color: color-mix(in srgb, var(--tedi-icon-working, #d18616) 36%, transparent);
+  background-color: color-mix(in srgb, var(--tervia-icon-working, #d18616) 36%, transparent);
 }
 ::highlight(md-find-current) {
-  background-color: var(--tedi-icon-working, #d18616);
+  background-color: var(--tervia-icon-working, #d18616);
   /* `--background` is the contrasting foreground against the gold highlight in
      every theme (dark text in dark mode, light text in light mode), the same
      trick the AI Send button uses with `text-background`. Was a fixed #1a1a1a

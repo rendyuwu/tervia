@@ -11,7 +11,7 @@
  * The memory is the lesser half. Chromium caps live WebGL contexts at ~16, so
  * enough panes start evicting each other's contexts; an evicted pane fires
  * `webglcontextlost` and, after `MAX_CONTEXT_LOSS_RELOADS` retries, settles on
- * the DOM renderer permanently. That is the "TEDI got sluggish and stayed
+ * the DOM renderer permanently. That is the "Tervia got sluggish and stayed
  * sluggish" failure, and it is silent.
  *
  * Five call sites can turn the renderer on (first attach, wallpaper sync,
@@ -91,14 +91,14 @@ for (const key of ["webglEnabled", "visible", "attached"] as const) {
 }
 
 console.log("\nwallpaper still vetoes, and does not eat the visibility gate");
-// `wallpaperActive` reads `document.documentElement.dataset.tediGlass`, and
+// `wallpaperActive` reads `document.documentElement.dataset.terviaGlass`, and
 // short-circuits to false when there is no document at all (as here).
 (globalThis as { document?: unknown }).document = {
-  documentElement: { dataset: { tediGlass: "on" } },
+  documentElement: { dataset: { terviaGlass: "on" } },
 };
 assert(shouldUseWebgl(session()) === false, "glass wallpaper on vetoes a visible pane");
 (globalThis as { document?: unknown }).document = {
-  documentElement: { dataset: { tediGlass: "off" } },
+  documentElement: { dataset: { terviaGlass: "off" } },
 };
 assert(shouldUseWebgl(session()) === true, "glass wallpaper off lets it back");
 assert(

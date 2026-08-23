@@ -113,7 +113,7 @@ export const REATTACH_REPAINT_CHECK_MS = 300;
 export const REATTACH_REPAINT_NUDGE_GAP_MS = 50;
 
 /**
- * Delay after a program leaves the alternate screen (CSI ?1049l) before TEDI
+ * Delay after a program leaves the alternate screen (CSI ?1049l) before Tervia
  * repairs the pane. Long enough for a renderer relaunch (Claude Code's `/tui`
  * fullscreen<->default toggle re-execs the CLI in place) to land its first
  * classic-renderer frame, short enough to feel instant. See
@@ -154,13 +154,13 @@ export function effectiveTerminalFontSize(base: number, zoom: number): number {
 
 /**
  * True when the terminal canvas should be semi-transparent, i.e. the single
- * "App opacity" control is active (`data-tedi-glass`). Drives the switch to
+ * "App opacity" control is active (`data-tervia-glass`). Drives the switch to
  * the DOM renderer + an rgba background (the WebGL renderer dims foreground
  * glyphs when the background has alpha < 1, xterm.js #4054).
  */
 export function wallpaperActive(): boolean {
   if (typeof document === "undefined") return false;
-  return document.documentElement.dataset.tediGlass === "on";
+  return document.documentElement.dataset.terviaGlass === "on";
 }
 
 export function describeError(e: unknown): string {

@@ -34,12 +34,12 @@ const update = (taskId: string, input: Record<string, unknown>) => ({
   input: { taskId, ...input },
 });
 
-console.log("\n1. normPath: the join between a TEDI terminal and a Claude session");
+console.log("\n1. normPath: the join between a Tervia terminal and a Claude session");
 {
   // The session file stores a backslashed Windows path; OSC 7 reports forward
   // slashes. If these two don't meet, every card silently shows no todos.
-  const fromSession = "D:\\Ilham\\Project\\laragon\\www\\TEDI - terax-ai";
-  const fromOsc7 = "D:/Ilham/Project/laragon/www/TEDI - terax-ai";
+  const fromSession = "D:\\Ilham\\Project\\laragon\\www\\Tervia - terax-ai";
+  const fromOsc7 = "D:/Ilham/Project/laragon/www/Tervia - terax-ai";
   ok("backslashed and slashed forms match", normPath(fromSession) === normPath(fromOsc7));
   ok("drive-letter case is ignored", normPath("C:/Foo") === normPath("c:/foo"));
   ok("a trailing slash is ignored", normPath("/a/b/") === normPath("/a/b"));
@@ -51,8 +51,8 @@ console.log("\n2. projectSlug: the only way to reach a session's log");
   // Both checked against the real directory names in ~/.claude/projects.
   ok(
     "a Windows path with spaces and dashes",
-    projectSlug("D:\\Ilham\\Project\\laragon\\www\\TEDI - terax-ai") ===
-      "D--Ilham-Project-laragon-www-TEDI---terax-ai",
+    projectSlug("D:\\Ilham\\Project\\laragon\\www\\Tervia - terax-ai") ===
+      "D--Ilham-Project-laragon-www-Tervia---terax-ai",
   );
   ok(
     "an already-dashed folder keeps its dashes",

@@ -372,7 +372,7 @@ function SortableSection({
       ref={setNodeRef}
       className={cn(
         "relative h-full overflow-hidden",
-        chrome && "bg-background tedi-glass-panel rounded-md border",
+        chrome && "bg-background tervia-glass-panel rounded-md border",
         isDragging && "opacity-40",
       )}
     >

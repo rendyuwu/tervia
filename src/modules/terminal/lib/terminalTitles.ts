@@ -28,7 +28,7 @@ function stripLeadingStatusGlyph(s: string): string {
 /**
  * Per-leaf terminal title, taken from the program's OSC 0/2 window-title escape
  * (captured via xterm `onTitleChange`). A running agent (Claude Code, Codex, …)
- * or a TUI (vim, lazygit, …) sets this; TEDI surfaces it next to the folder name
+ * or a TUI (vim, lazygit, …) sets this; Tervia surfaces it next to the folder name
  * in the Workspaces panel's terminal list. Keyed by pane-leaf id.
  *
  * Reactive store rather than the `onAiCliStatus` callback chain: the only

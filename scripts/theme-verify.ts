@@ -2,16 +2,16 @@
  * Self-check for the theme system.
  * Run: `npx tsx scripts/theme-verify.ts`.
  *
- * The failure this exists for is silent and was real: `--tedi-icon-done` was
+ * The failure this exists for is silent and was real: `--tervia-icon-done` was
  * added to globals.css with a hard-coded blue and no `ThemeColors` key, so the
  * "finished" badge stayed blue under EVERY preset and no error was raised
  * anywhere. Any themable colour var must be reachable from a theme, and any
  * theme key must be editable in Settings, or it silently stops being a theme.
  *
  * Checks:
- *   - every `--tedi-*` COLOUR var declared in globals.css is written by either
+ *   - every `--tervia-*` COLOUR var declared in globals.css is written by either
  *     the app theme (COLOR_VAR_MAP) or the terminal palette,
- *   - every `--tedi-*` var a theme WRITES is read by some CSS/component, so a
+ *   - every `--tervia-*` var a theme WRITES is read by some CSS/component, so a
  *     colour picker in Settings can never be a knob that moves nothing
  *     (the button token was exactly that until the neutral button started
  *     reading it),
@@ -58,29 +58,31 @@ const mapBody = /const COLOR_VAR_MAP[\s\S]*?\n};/.exec(customThemeSrc)?.[0] ?? "
 const appVars = new Set([...mapBody.matchAll(/"(--[a-z0-9-]+)"/g)].map((m) => m[1]));
 check("COLOR_VAR_MAP parsed", appVars.size > 30, appVars.size);
 
-const termVars = new Set([...terminalSrc.matchAll(/"(--tedi-term-[a-z0-9-]+)"/g)].map((m) => m[1]));
+const termVars = new Set(
+  [...terminalSrc.matchAll(/"(--tervia-term-[a-z0-9-]+)"/g)].map((m) => m[1]),
+);
 check("terminal palette vars parsed", termVars.size === 20, termVars.size);
 
 // Vars that are NOT colours a theme should own: layout/typography knobs and
 // values derived at runtime from other tokens.
 const NON_THEMABLE = new Set([
-  "--tedi-app-opacity",
-  "--tedi-canvas-bg", // written by applyCustomTheme from `background`
-  "--tedi-editor-font-size",
-  "--tedi-mono-font",
-  "--tedi-glass-surface",
-  "--tedi-glass-header",
-  "--tedi-glass-menu",
+  "--tervia-app-opacity",
+  "--tervia-canvas-bg", // written by applyCustomTheme from `background`
+  "--tervia-editor-font-size",
+  "--tervia-mono-font",
+  "--tervia-glass-surface",
+  "--tervia-glass-header",
+  "--tervia-glass-menu",
   // Follow the EDITOR theme, not the app theme (see modules/editor/lib/diffColors.ts).
-  "--tedi-editor-diff-added",
-  "--tedi-editor-diff-removed",
-  // Derived in globals.css from --tedi-button-face, so it tracks whatever the
+  "--tervia-editor-diff-added",
+  "--tervia-editor-diff-removed",
+  // Derived in globals.css from --tervia-button-face, so it tracks whatever the
   // theme sets without needing a knob of its own. Giving it one would let a
   // theme pick a hover that is darker than the rest state on a dark theme.
-  "--tedi-button-face-hover",
+  "--tervia-button-face-hover",
 ]);
 
-const declared = new Set([...css.matchAll(/^\s*(--tedi-[a-z0-9-]+)\s*:/gm)].map((m) => m[1]));
+const declared = new Set([...css.matchAll(/^\s*(--tervia-[a-z0-9-]+)\s*:/gm)].map((m) => m[1]));
 check("globals.css vars parsed", declared.size > 40, declared.size);
 
 for (const v of declared) {
@@ -90,10 +92,10 @@ for (const v of declared) {
 
 // The reverse direction, and the other half of the same bug: a theme token that
 // nothing reads is a dead knob - the Settings colour picker changes it and the
-// UI never moves. `--tedi-button-face`'s predecessor was exactly that.
+// UI never moves. `--tervia-button-face`'s predecessor was exactly that.
 const sources = collectSources(join(root, "src"));
 for (const v of appVars) {
-  if (!v.startsWith("--tedi-")) continue;
+  if (!v.startsWith("--tervia-")) continue;
   check(
     `${v} is read by something`,
     sources.some((s) => s.body.includes(v)),
