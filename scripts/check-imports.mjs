@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Enforces the module import discipline documented in TEDI.md and CONTRIBUTING.md:
+// Enforces the module import discipline documented in TERVIA.md and CONTRIBUTING.md:
 //
 //   "Imports: always @/..., never relative across modules."
 //
@@ -33,7 +33,7 @@ function walk(dir) {
   return out;
 }
 
-/** The module directory that owns `file`, e.g. .../src/modules/ai. */
+/** The module directory that owns `file`, e.g. .../src/modules/ssh. */
 function moduleDirOf(file) {
   const rel = relative(MODULES_DIR, file); // e.g. ai/lib/agent.ts
   const seg = rel.split(sep)[0];

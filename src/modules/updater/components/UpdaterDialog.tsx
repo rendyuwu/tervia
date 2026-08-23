@@ -22,14 +22,12 @@ type Props = {
   onRetry?: () => void;
 };
 
-type DistroKey = "arch" | "debian" | "fedora";
+type DistroKey = "debian" | "fedora";
 
 function distroCommand(key: DistroKey, version: string): string {
   switch (key) {
-    case "arch":
-      return "yay -S terax-bin";
     case "debian":
-      return `sudo apt install ./TERVIA_${version}_amd64.deb`;
+      return `sudo apt install ./Tervia_${version}_amd64.deb`;
     case "fedora":
       return `sudo dnf install ./Tervia-${version}-1.x86_64.rpm`;
     default: {
@@ -40,7 +38,6 @@ function distroCommand(key: DistroKey, version: string): string {
 }
 
 const DISTROS: { key: DistroKey; label: string }[] = [
-  { key: "arch", label: "Arch" },
   { key: "debian", label: "Debian / Ubuntu" },
   { key: "fedora", label: "Fedora / RHEL" },
 ];
@@ -54,7 +51,7 @@ export function UpdaterDialog({
   onRetry,
 }: Props) {
   const [copied, setCopied] = useState(false);
-  const [distro, setDistro] = useState<DistroKey>("arch");
+  const [distro, setDistro] = useState<DistroKey>("debian");
   const manualVersion = state.kind === "manual-available" ? state.version : "";
   const activeCommand = distroCommand(distro, manualVersion);
 

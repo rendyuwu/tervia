@@ -39,10 +39,10 @@ Thumbs.db
 .omo
 .agents
 # Per-workspace app state (window layout, restored tabs, saved pane trees).
-# Listed explicitly: it was only being ignored as a side effect of the `*.tedi`
-# theme-file pattern further down, so renaming that pattern would have started
-# committing local session state.
-.tedi/
+# Listed explicitly rather than relying on the `*.tervia` theme-file pattern
+# further down, so a change to that pattern cannot start committing local
+# session state.
+.tervia/
 .local/
 
 # Recovered WinSCP credentials — local only, never commit
@@ -62,4 +62,4 @@ todo.md
 REMOTE-ACCESS-SPEC.md
 FEATURE-STUDY.md
 # Exported theme files are personal / test artifacts, not repo content.
-*.tedi
+*.tervia

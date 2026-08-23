@@ -2,7 +2,7 @@
 
 Thanks for wanting to help. Issues, PRs, and ideas are all welcome.
 
-New here? Skim [ARCHITECTURE.md](ARCHITECTURE.md) for the lay of the land, then browse the [good first issues](https://github.com/IlhamriSKY/TEDI/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22) for a curated on-ramp.
+New here? Skim [ARCHITECTURE.md](ARCHITECTURE.md) for the lay of the land, then browse the [good first issues](https://github.com/rendyuwu/tervia/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22) for a curated on-ramp.
 
 ## Quick start
 
@@ -11,7 +11,7 @@ pnpm install
 pnpm tauri:dev
 ```
 
-`pnpm tauri:dev` uses an isolated dev data dir (its own bundle id), so you never touch your production TEDI's settings, workspaces, or extensions. Use plain `pnpm tauri dev` only when you intentionally want to share prod data.
+`pnpm tauri:dev` uses an isolated dev data dir (its own bundle id), so you never touch your production Tervia's settings, workspaces, or saved connections. Use plain `pnpm tauri dev` only when you intentionally want to share prod data.
 
 Prereqs: Rust (stable), Node 20.19+ or 22.12+ (CI builds on Node 24; a `.nvmrc` pins it - run `nvm use`), pnpm, plus your platform's [Tauri prerequisites](https://tauri.app/start/prerequisites/).
 
@@ -66,15 +66,15 @@ If an issue already exists for what you want to do, comment "I'll take this" bef
 ## What we want
 
 - **Bug fixes** - always.
-- **Features** - open an issue first if it's non-trivial. We'd rather discuss the approach than reject a finished PR.
+- **Features** - open an issue first if it's non-trivial. We'd rather discuss the approach than reject a finished PR. Tervia's scope is deliberately narrow: remote machines, and the local workspace needed to work on them. An AI feature, an extension API, or an in-app browser is out of scope by construction, not by oversight - all three were removed on purpose.
 - **Docs / typos / small UX fixes** - just send the PR.
-- **New AI providers** - add an entry to the `PROVIDERS` and `MODELS` arrays in `src/modules/ai/config.ts` (and the `ProviderId` union). Keep BYOK; no hardcoded keys.
+- **SSH, port forwarding, SFTP** - the product. Bug reports here get looked at first.
 - **Themes / icon packs** - yes, but keep the bundle size in check.
 
 ## What we don't want
 
 - Telemetry, analytics, or anything that phones home.
-- Hardcoded API keys or accounts. TEDI stays BYOK.
+- Hardcoded credentials, accounts, or a default server to sync against.
 - Large dependencies for small wins. Binary size is not a hard limit, but resident memory is: prefer what does not add a background thread, a poll loop, or an unbounded buffer.
 - Sweeping refactors with no functional change.
 
@@ -133,7 +133,7 @@ docs(readme): clarify Linux install on Arch
 ```
 
 Types: `feat`, `fix`, `chore`, `docs`, `perf`, `refactor`, `test`, `build`, `ci`.
-Common scopes: `terminal`, `editor`, `explorer`, `pty`, `ai`, `settings`, `tabs`, `shortcuts`, `agents`, `ui`.
+Common scopes: `ssh`, `sftp`, `terminal`, `editor`, `explorer`, `pty`, `settings`, `tabs`, `shortcuts`, `updater`, `ui`.
 
 Within a PR, individual commit messages can be whatever - they get squashed.
 
@@ -164,21 +164,26 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the full picture (the two-process mod
 
 ```
 src-tauri/        Rust backend (every #[tauri::command] is registered in src/lib.rs)
-  src/modules/    pty, pty_daemon, fs, shell, git, ssh, extensions (+ cli*.rs,
-                  format.rs, preview.rs, secrets.rs, net.rs)
-  tedi-cli/       Windows console-subsystem `tedi` launcher
+  src/modules/    ssh, pty, pty_daemon, fs, shell, git (+ cli.rs, cli_paint.rs,
+                  backup.rs, secrets.rs, net.rs, format.rs, ids.rs, events.rs,
+                  clipboard.rs, appimage.rs, lockext.rs)
+  tervia-cli/     Windows console-subsystem `tervia` launcher
 src/
   app/App.tsx     Top-level coordinator (cross-module wiring, not feature logic)
   settings/       Settings UI (a SEPARATE Tauri webview; distinct from src/modules/settings/)
-  components/      shadcn/ui + Vercel AI Elements (generated; don't hand-edit)
+  components/     shadcn/ui (generated; don't hand-edit)
   lib/            Shared helpers
-  modules/        19 self-contained features:
-                  terminal, editor, explorer, panes, tabs, workspaces, header,
-                  statusbar, shortcuts, commandPalette, settings, theme, ai, scm,
-                  ssh, browser, scheduler, updater, extensions
+  modules/        16 self-contained features:
+                  ssh, terminal, editor, explorer, panes, tabs, workspaces,
+                  header, statusbar, rightPanel, shortcuts, commandPalette,
+                  settings, theme, scm, updater
 ```
 
-For the exhaustive per-file reference (every command, every gotcha) see [TEDI.md](TEDI.md).
+`scm` is a remnant: the Source Control panel is gone, but `api.ts`, `types.ts`
+and `branch.ts` stay because the explorer's git decorations and the workspaces
+branch display import them. Don't grow it back into a panel.
+
+For the exhaustive per-file reference (every command, every gotcha) see [TERVIA.md](TERVIA.md).
 
 ## Security issues
 
