@@ -1,6 +1,7 @@
-// Unified pane tree. Leaves are terminal, editor, or board.
+// Unified pane tree. Leaves are terminal, editor, rdp, or board.
 // `kind: "leaf"` stays for back-compat; the discriminator is `leafKind`.
 
+import type { RdpSizeMode } from "@/modules/rdp/connections";
 import type { AiCliKind } from "./aiCliStatus";
 
 export type PaneId = number;
@@ -114,7 +115,36 @@ export type BoardLeafState = {
   customTitle?: string;
 };
 
-export type LeafState = TerminalLeafState | EditorLeafState | BoardLeafState;
+/**
+ * One RDP session, rendered on a canvas in the pane.
+ *
+ * Holds a REFERENCE to a saved connection, not a copy of its fields: the host,
+ * port, credentials and desktop size all live on the row, so an edit to the
+ * connection is picked up by the next connect instead of being frozen into
+ * every leaf that ever dialled it. It also means the leaf carries no secret and
+ * nothing host-shaped for the serializer to persist.
+ *
+ * There is deliberately no live-session id here, and no `savedPtyId` analogue.
+ * An RDP session cannot be reattached the way a PTY can - there is no byte
+ * stream to replay and the server treats a dropped connection as a
+ * *disconnected* session - so restoring one means dialling again, exactly as
+ * restoring an SSH leaf does.
+ */
+export type RdpLeafState = {
+  leafKind: "rdp";
+  /** Id of the saved connection in `rdp/connections.ts`. */
+  rdpConnectionId: string;
+  /**
+   * How this pane's desktop resolution is chosen. Only `"preset"` exists today,
+   * and it is carried on the leaf anyway so that adding `"fit"` later is a new
+   * branch in the pane rather than a migration of every saved workspace.
+   */
+  sizeMode: RdpSizeMode;
+  /** User-chosen tab name; see {@link TerminalLeafState.customTitle}. */
+  customTitle?: string;
+};
+
+export type LeafState = TerminalLeafState | EditorLeafState | RdpLeafState | BoardLeafState;
 
 export type PaneLeaf = { kind: "leaf"; id: PaneId } & LeafState;
 
@@ -352,6 +382,11 @@ export function updateEditorLeaf(
  * Clone a leaf's state (without its id) for a live move/extract, so the leaf's
  * attached PTY / editor session travels with it. Drops the
  * serialization-only `ptyId`/`savedPtyId` (the live session re-stamps them).
+ *
+ * An RDP leaf is the one kind whose live session does NOT travel: the clone
+ * gets a fresh leaf ID and `RdpPane` keys its session off that, so a
+ * move/extract redials. That is the same behaviour a restore has, for the same
+ * reason - there is nothing to reattach to.
  */
 export function cloneLeafState(leaf: PaneLeaf): LeafState {
   if (leaf.leafKind === "terminal") {
@@ -375,6 +410,13 @@ export function cloneLeafState(leaf: PaneLeaf): LeafState {
       sshConnectionId: leaf.sshConnectionId,
       sshSessionId: leaf.sshSessionId,
       sshHostLabel: leaf.sshHostLabel,
+    };
+  }
+  if (leaf.leafKind === "rdp") {
+    return {
+      leafKind: "rdp",
+      rdpConnectionId: leaf.rdpConnectionId,
+      sizeMode: leaf.sizeMode,
     };
   }
   // Board: no state of its own - the columns are rebuilt from the live tab tree.

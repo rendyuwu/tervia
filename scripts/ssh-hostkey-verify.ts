@@ -16,6 +16,16 @@
  * runs BEFORE the backend is told (a failing IPC must not lose the trust), and
  * a prompt is attributed to the right saved connection, since one connect can
  * be dialling a whole ProxyJump chain and the prompt only names a host.
+ *
+ * Third property, added with the RDP certificate prompt, which shares this
+ * queue: a prompt that goes away because its OWNER went away must be ANSWERED,
+ * not merely dequeued. RDP's prompt is emitted from inside the TLS handshake, so
+ * `rdp_open` has not returned and no session id exists yet - `rdp_close` has
+ * nothing to look up. Until an answer arrives the socket, the in-flight
+ * handshake and a blocked thread are held for the backend's full 120-second
+ * confirm timeout, and the pane that would have answered has already unmounted.
+ * `abandon` is that answer; `dismiss` is the older, silent drop that must not be
+ * used where the handshake could still be waiting.
  */
 import { hostKeyOwners, useHostKeyPrompt } from "../src/modules/ssh/hostKeyPrompt";
 import type { SshHostKeyPrompt } from "../src/modules/ssh/bridge";
@@ -123,6 +133,72 @@ const store = () => useHostKeyPrompt.getState();
   store().dismiss("p3");
   assert(pinned === 0, "dismissing a dead prompt never pins");
   check("and leaves an empty queue", store().queue.length, 0);
+}
+
+console.log("\n[abandon] a prompt whose owner went away must be ANSWERED, not just dropped");
+
+// The distinction that matters: `dismiss` leaves the backend parked (it is only
+// correct for a handshake already known to be dead), while `abandon` rejects.
+// For RDP the difference is a held socket and thread for 120 seconds on every
+// tab closed while the certificate dialog is up.
+{
+  const answers: [string, boolean][] = [];
+  const spy = (promptId: string, accept: boolean) => {
+    answers.push([promptId, accept]);
+    return Promise.resolve();
+  };
+
+  store().enqueue({ ...prompt("a1"), confirm: spy });
+  store().abandon("a1");
+  check("abandoning answers the backend", answers, [["a1", false]]);
+  check("and dequeues", store().queue.length, 0);
+
+  // Rejection, never acceptance: an unattended certificate must not be trusted,
+  // which is the entire reason the prompt exists.
+  assert(
+    answers.every(([, accept]) => accept === false),
+    "the answer is always a rejection",
+  );
+
+  // A prompt is answered ONCE. A teardown cannot know whether the user got there
+  // first, so it calls this unconditionally - and a second answer racing in
+  // behind a "Trust" would be a rejection landing after an acceptance.
+  answers.length = 0;
+  let pinned = 0;
+  store().enqueue({ ...prompt("a2"), confirm: spy }, () => pinned++);
+  store().resolve("a2", true);
+  store().abandon("a2");
+  check("an already-answered prompt is not answered again", answers, [["a2", true]]);
+  check("and the accept hook ran exactly once", pinned, 1);
+
+  // Safe to call for an id the queue never held, which is what lets a teardown
+  // fire it without tracking whether a prompt was ever raised.
+  answers.length = 0;
+  store().abandon("never-queued");
+  check("an unknown id answers nothing", answers, []);
+
+  // The prompt carries its own confirm command, so an RDP certificate is never
+  // answered with `ssh_confirm_host_key`. Two protocols share this queue; the
+  // wrong command would return an error and leave the handshake parked.
+  answers.length = 0;
+  const rdpAnswers: string[] = [];
+  store().enqueue({
+    ...prompt("a3"),
+    certificate: { subject: "CN=win-01", issuer: "CN=win-01" },
+    confirm: (id) => {
+      rdpAnswers.push(id);
+      return Promise.resolve();
+    },
+  });
+  store().enqueue({ ...prompt("a4"), confirm: spy });
+  store().abandon("a3");
+  store().abandon("a4");
+  check(
+    "each prompt is answered by its own command",
+    [rdpAnswers, answers],
+    [["a3"], [["a4", false]]],
+  );
+  check("and the queue is empty", store().queue.length, 0);
 }
 
 console.log(failed === 0 ? "\nAll ssh-hostkey checks passed." : `\n${failed} check(s) FAILED.`);

@@ -1,5 +1,5 @@
 /**
- * Workspace serialization audit. Four properties, all silent when broken:
+ * Workspace serialization audit. Five properties, all silent when broken:
  *
  * 1. A remote (SFTP) editor leaf must never round-trip through its SESSION.
  *    `sshSessionId` is a live russh number: dead after a restart, and since the
@@ -19,6 +19,14 @@
  *    added in BOTH directions - and the failure is a name that quietly reverts
  *    to the folder basename on the next launch. Clearing a name must remove the
  *    key rather than persist `""`, which would restore as a blank tab.
+ * 5. An RDP leaf must round-trip its connection id AND its size mode, and must
+ *    restore with NO session identity of any kind. The id is the only thing
+ *    that can find the host, the credentials and the desktop size again, and a
+ *    leaf that loses it comes back as a pane that can never connect; the size
+ *    mode is persisted from day one purely so adding `"fit"` later needs no
+ *    migration, which is worthless if the serializer drops it. Together these
+ *    are property 4's whitelist problem on a kind where the symptom is a dead
+ *    pane rather than a wrong name.
  *
  * Run: `npx tsx scripts/workspace-serialize-verify.ts`.
  *
@@ -76,6 +84,11 @@ function savedRemoteEditor(leafId: number, path: string): PaneNode {
     sshSessionId: 7,
     sshHostLabel: "u@h:22",
   };
+}
+/** An RDP leaf: a reference to a saved connection and how it sizes itself.
+ *  Nothing else - no host, no credential, no session. */
+function rdp(leafId: number, rdpConnectionId: string): PaneNode {
+  return { kind: "leaf", id: leafId, leafKind: "rdp", rdpConnectionId, sizeMode: "preset" };
 }
 function split(dir: "row" | "col", children: PaneNode[], sizes?: number[]): PaneNode {
   return { kind: "split", id: id(), dir, children, ...(sizes ? { sizes } : {}) };
@@ -426,6 +439,67 @@ console.log("\n[active index] savedActiveTabIndex must match what serializeTabs 
     "an un-renamed leaf persists no name key",
     plain.kind === "leaf" && "customTitle" in plain,
     false,
+  );
+}
+
+console.log("\n[rdp] an rdp leaf must round-trip its connection id and size mode");
+
+// 5. The whole of an RDP leaf's restorable identity is `rdpConnectionId` +
+//    `sizeMode`. Dropping either is silent: the layout still restores, and the
+//    pane is simply one that cannot connect (or one that will size itself wrong
+//    once a second size mode exists).
+{
+  const t = tab(split("row", [term(1300), rdp(1301, "r-win-build")]), 1301);
+  const s = serializeTabs([t]);
+  check("an rdp leaf is saved beside its sibling", shape(s[0]), "split(terminal,rdp)");
+  check("the rdp leaf is the active one", activeIdx(s[0]), 1);
+
+  const savedLeaf = (() => {
+    const tree = pane(s[0]).paneTree;
+    if (tree.kind !== "split") throw new Error("expected a split");
+    return tree.children[1];
+  })();
+  check(
+    "the connection id is persisted",
+    savedLeaf.kind === "leaf" && savedLeaf.leafKind === "rdp" && savedLeaf.rdpConnectionId,
+    "r-win-build",
+  );
+  check(
+    "the size mode is persisted",
+    savedLeaf.kind === "leaf" && savedLeaf.leafKind === "rdp" && savedLeaf.sizeMode,
+    "preset",
+  );
+  // An RDP session cannot be reattached, so there must be nothing here that
+  // looks like one: a persisted session number would be dead on the next launch
+  // and, since the counter restarts at 1, liable to name a different host - the
+  // exact failure `sshSessionId` was pruned for in property 1.
+  check(
+    "and nothing session-shaped is persisted with it",
+    savedLeaf.kind === "leaf" && Object.keys(savedLeaf).sort(),
+    ["kind", "leafKind", "rdpConnectionId", "sizeMode"],
+  );
+
+  const restored = savedToTab(pane(s[0]), () => id());
+  const liveLeaf =
+    restored.paneTree.kind === "split" ? restored.paneTree.children[1] : restored.paneTree;
+  check(
+    "and both come back on restore",
+    liveLeaf.kind === "leaf" && liveLeaf.leafKind === "rdp"
+      ? [liveLeaf.rdpConnectionId, liveLeaf.sizeMode]
+      : null,
+    ["r-win-build", "preset"],
+  );
+
+  // A rename has to survive on this kind too, same whitelist, same symptom.
+  const named = tab(
+    { ...(rdp(1302, "r-dc-01") as object), customTitle: "domain controller" } as PaneNode,
+    1302,
+  );
+  const savedNamed = pane(serializeTabs([named])[0]).paneTree;
+  check(
+    "a renamed rdp leaf keeps its name",
+    savedNamed.kind === "leaf" && savedNamed.customTitle,
+    "domain controller",
   );
 }
 

@@ -1,6 +1,7 @@
 import { basename } from "@/lib/path";
 import { findLeaf, type PaneLeaf } from "@/modules/terminal/lib/panes";
 import { type SshConnection } from "@/modules/ssh/connections";
+import { type RdpConnection } from "@/modules/rdp/connections";
 import { type PaneTab, type Tab } from "./tabTypes";
 
 /**
@@ -12,6 +13,9 @@ import { type PaneTab, type Tab } from "./tabTypes";
  */
 export function leafKindTag(leaf: PaneLeaf): string | null {
   if (leaf.leafKind === "terminal" && leaf.sshConnectionId) return "ssh";
+  // Same reasoning as `ssh`: the name is a machine, and which protocol you are
+  // holding it open with is not something a rename should be able to drop.
+  if (leaf.leafKind === "rdp") return "rdp";
   return null;
 }
 
@@ -25,10 +29,11 @@ export function leafRenameSeed(
   leaf: PaneLeaf,
   sshHosts?: Map<string, SshConnection>,
   fallbackCwd?: string,
+  rdpHosts?: Map<string, RdpConnection>,
 ): string {
   if (leaf.customTitle) return leaf.customTitle;
   const tag = leafKindTag(leaf);
-  const label = leafLabel(leaf, sshHosts, fallbackCwd);
+  const label = leafLabel(leaf, sshHosts, fallbackCwd, rdpHosts);
   if (!tag) return label;
   // A leaf whose connection was deleted reads as a bare "ssh": that is all tag
   // and no name, so seed it empty rather than handing back the tag to be
@@ -47,12 +52,15 @@ export function leafRenameSeed(
  * `sshHosts` resolves an SSH leaf to `ssh:<name>`; a caller with no connection
  * map (`tab.title`, which is recomputed before the map is even loaded) gets the
  * bare "ssh" interim label. `fallbackCwd` is the owning tab's cwd, used only
- * when the leaf itself carries none.
+ * when the leaf itself carries none. `rdpHosts` does the same job for an RDP
+ * leaf, and is last because it is the newest: a caller that has no use for it
+ * (nothing but RDP leaves reads it) can keep the three-argument call.
  */
 export function leafLabel(
   leaf: PaneLeaf,
   sshHosts?: Map<string, SshConnection>,
   fallbackCwd?: string,
+  rdpHosts?: Map<string, RdpConnection>,
 ): string {
   // A user-set name wins over every derived one. Renaming exists precisely
   // because "the folder this opened in" is often not what the tab should say,
@@ -64,6 +72,14 @@ export function leafLabel(
   }
   if (leaf.leafKind === "editor") return basename(leaf.path);
   if (leaf.leafKind === "board") return "Board";
+  // RDP leaves: `rdp:<name>` off the saved connection, falling back to its
+  // host, then to a bare "rdp" for a deleted connection or a caller with no
+  // map. Exactly the SSH ladder, because the failure modes are the same.
+  if (leaf.leafKind === "rdp") {
+    const conn = rdpHosts?.get(leaf.rdpConnectionId);
+    if (!conn) return "rdp";
+    return `rdp:${conn.name.trim() || conn.host}`;
+  }
   // SSH leaves: show "ssh:<name>" when the saved connection has a name, else
   // fall back to the host/IP. Bare "ssh" if the connection was deleted.
   if (leaf.sshConnectionId) {
@@ -97,7 +113,8 @@ export function syncPaneMirror(tab: PaneTab): PaneTab {
     next.dirty = leaf.dirty;
     next.preview = leaf.preview;
   } else {
-    // preview leaf: no terminal/editor mirrors.
+    // RDP or board leaf: neither has a cwd or a file, so the top-level mirrors
+    // are cleared rather than left holding the previous active leaf's.
     delete next.cwd;
     delete next.path;
     delete next.dirty;
@@ -112,12 +129,17 @@ export function activeLeaf(tab: Tab): PaneLeaf | null {
   return findLeaf(tab.paneTree, tab.activeLeafId);
 }
 
-export function activeLeafKind(tab: Tab): "terminal" | "editor" | null {
+export function activeLeafKind(tab: Tab): "terminal" | "editor" | "rdp" | null {
   const leaf = activeLeaf(tab);
   if (!leaf) return null;
-  // Board leaves aren't one of the terminal/editor kinds the chrome derivations
-  // branch on; report null so callers fall to their defaults instead of every
-  // one having to special-case them.
+  // Board leaves aren't one of the kinds the chrome derivations branch on;
+  // report null so callers fall to their defaults instead of every one having to
+  // special-case them.
+  //
+  // RDP is reported, unlike board, for one reason: a focused RDP pane owns the
+  // keyboard the way a focused terminal does, and App's shortcut `isDisabled`
+  // gate needs to know that or every bare-Ctrl chord would fire an app action
+  // instead of reaching the remote desktop.
   return leaf.leafKind === "board" ? null : leaf.leafKind;
 }
 

@@ -8,6 +8,7 @@ import type {
 } from "@/modules/terminal/lib/useTerminalSession";
 import type { SshConnectionBinding, SshStatus } from "@/modules/ssh/status";
 import { useSshHosts } from "@/modules/ssh/connections";
+import { useRdpHosts } from "@/modules/rdp/connections";
 import type { AiCliStatus } from "@/modules/terminal/lib/aiCliStatus";
 import type { SearchAddon } from "@xterm/addon-search";
 import { useEffect, useMemo, useRef } from "react";
@@ -103,6 +104,10 @@ export function PaneStack({
   // label. Read here (not per-leaf), from the same hook the tab strip and the
   // Workspaces panel use, so all three read identically.
   const sshHosts = useSshHosts();
+  // Same job for an RDP leaf's `rdp:<host>` label, read from the same place the
+  // tab strip and the Workspaces panel read it so all three agree after a
+  // rename.
+  const rdpHosts = useRdpHosts();
 
   // Stable refs for per-leaf callbacks. Re-creating bundles would tear down PTY/editor state.
   // Bundles are only invoked from post-commit PTY/editor/async callbacks, so a render-time ref
@@ -219,6 +224,7 @@ export function PaneStack({
               onFocusEntry={onFocusLeaf}
               onSplitSizes={onSplitSizes}
               sshHosts={sshHosts}
+              rdpHosts={rdpHosts}
               sshStatuses={sshStatuses}
               aiCliStatuses={aiCliStatuses}
               sshBindingByConnection={sshBindingByConnection}

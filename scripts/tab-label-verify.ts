@@ -25,6 +25,7 @@ import { savedToTab } from "../src/modules/workspaces/serialize";
 import type { SavedPaneNode, SavedTab } from "../src/modules/workspaces/store";
 import type { PaneLeaf, PaneNode } from "../src/modules/terminal/lib/panes";
 import type { SshConnection } from "../src/modules/ssh/connections";
+import type { RdpConnection } from "../src/modules/rdp/connections";
 import type { Tab } from "../src/modules/tabs";
 
 let failures = 0;
@@ -46,11 +47,34 @@ const HOST: SshConnection = {
 };
 const hosts = new Map<string, SshConnection>([[HOST.id, HOST]]);
 
+const RDP_HOST: RdpConnection = {
+  id: "r1",
+  name: "win-build-01",
+  host: "10.0.0.20",
+  port: 3389,
+  username: "Administrator",
+  desktopWidth: 1920,
+  desktopHeight: 1080,
+  sizeMode: "preset",
+  hasPassword: true,
+};
+const rdpHosts = new Map<string, RdpConnection>([[RDP_HOST.id, RDP_HOST]]);
+
 let nextId = 1;
 const id = () => nextId++;
 
 function term(cwd?: string, extra: Partial<PaneLeaf> = {}): PaneNode {
   return { kind: "leaf", id: id(), leafKind: "terminal", cwd, ...extra } as PaneNode;
+}
+function rdpLeaf(extra: Partial<PaneLeaf> = {}): PaneLeaf {
+  return {
+    kind: "leaf",
+    id: id(),
+    leafKind: "rdp",
+    rdpConnectionId: "r1",
+    sizeMode: "preset",
+    ...extra,
+  } as PaneLeaf;
 }
 function paneTab(tree: PaneNode, activeLeafId: number): Tab {
   return { id: id(), kind: "pane", title: "", paneTree: tree, activeLeafId } as Tab;
@@ -77,6 +101,27 @@ console.log("\nleaf labels");
 
   const editor = { kind: "leaf", id: id(), leafKind: "editor", path: "/a/b/main.rs" } as PaneLeaf;
   check("an editor reads its file name", leafLabel(editor) === "main.rs");
+
+  // RDP takes the SAME ladder as SSH, and for the same reason: the label names
+  // a machine, so it has to resolve through the connection map, fall back to
+  // the host, and degrade to a bare tag rather than an empty tab. Note the map
+  // is the FOURTH argument - passing it as `sshHosts` compiles (both are
+  // Maps keyed by string) and would silently label every RDP pane "rdp".
+  const remote = rdpLeaf();
+  check(
+    "an RDP leaf reads rdp:<connection name>",
+    leafLabel(remote, hosts, undefined, rdpHosts) === "rdp:win-build-01",
+  );
+  const unnamedRdp = new Map<string, RdpConnection>([["r1", { ...RDP_HOST, name: "  " }]]);
+  check(
+    "an unnamed RDP connection falls back to the host",
+    leafLabel(remote, hosts, undefined, unnamedRdp) === "rdp:10.0.0.20",
+  );
+  check(
+    "a deleted RDP connection reads a bare rdp",
+    leafLabel(remote, hosts, undefined, new Map()) === "rdp",
+  );
+  check("no RDP map at all is the same as unresolved", leafLabel(remote) === "rdp");
 }
 
 console.log("\na user-set name outranks every derived one");
@@ -102,6 +147,13 @@ console.log("\nbut the KIND tag is not the user's to rename away");
   } as PaneLeaf;
   check("a renamed SSH pane keeps its ssh tag", leafLabel(ssh, hosts) === "ssh:build");
   check("even with no host map to resolve", leafLabel(ssh) === "ssh:build");
+
+  const remote = rdpLeaf({ customTitle: "build" });
+  check(
+    "a renamed RDP pane keeps its rdp tag",
+    leafLabel(remote, hosts, undefined, rdpHosts) === "rdp:build",
+  );
+  check("even with no RDP map to resolve", leafLabel(remote) === "rdp:build");
 }
 
 console.log("\nthe rename field is seeded WITHOUT the tag");
@@ -109,7 +161,10 @@ console.log("\nthe rename field is seeded WITHOUT the tag");
   const ssh = term(undefined, { sshConnectionId: "c1" }) as PaneLeaf;
   // The bug this pins: both rename surfaces seeded from `label`, so keeping the
   // name and pressing Enter stored "ssh:prod-db" and the tab read ssh:ssh:...
-  check("an un-renamed SSH pane seeds the host name only", leafRenameSeed(ssh, hosts) === "prod-db");
+  check(
+    "an un-renamed SSH pane seeds the host name only",
+    leafRenameSeed(ssh, hosts) === "prod-db",
+  );
   check(
     "and re-committing it unchanged is idempotent",
     leafLabel({ ...ssh, customTitle: leafRenameSeed(ssh, hosts) } as PaneLeaf, hosts) ===
@@ -126,18 +181,52 @@ console.log("\nthe rename field is seeded WITHOUT the tag");
   // A deleted connection reads as a bare "ssh": all tag, no name. Seeding that
   // back would let a plain Enter commit the tag itself as the name.
   check("a bare ssh leaf seeds empty, not its own tag", leafRenameSeed(ssh, new Map()) === "");
+
+  const remote = rdpLeaf();
+  check(
+    "an un-renamed RDP pane seeds the host name only",
+    leafRenameSeed(remote, hosts, undefined, rdpHosts) === "win-build-01",
+  );
+  check(
+    "and re-committing it unchanged is idempotent",
+    leafLabel(
+      { ...remote, customTitle: leafRenameSeed(remote, hosts, undefined, rdpHosts) } as PaneLeaf,
+      hosts,
+      undefined,
+      rdpHosts,
+    ) === leafLabel(remote, hosts, undefined, rdpHosts),
+  );
+  check(
+    "a bare rdp leaf seeds empty, not its own tag",
+    leafRenameSeed(remote, hosts, undefined, new Map()) === "",
+  );
 }
 
 console.log("\nthe tab strip reads the same function");
 {
   const leaf = term("/srv/app", { customTitle: "build" }) as PaneLeaf;
   const sshLeaf = term(undefined, { sshConnectionId: "c1" }) as PaneLeaf;
-  const tab = paneTab({ kind: "split", id: id(), dir: "row", children: [leaf, sshLeaf] }, leaf.id);
-  const entries = buildEntries([tab], hosts);
+  const remote = rdpLeaf();
+  const tab = paneTab(
+    { kind: "split", id: id(), dir: "row", children: [leaf, sshLeaf, remote] },
+    leaf.id,
+  );
+  const entries = buildEntries([tab], hosts, undefined, undefined, rdpHosts);
   check(
     "buildEntries labels match leafLabel for the same leaves",
     entries.map((e) => e.label).join("|") ===
-      [leafLabel(leaf, hosts), leafLabel(sshLeaf, hosts)].join("|"),
+      [
+        leafLabel(leaf, hosts),
+        leafLabel(sshLeaf, hosts),
+        leafLabel(remote, hosts, undefined, rdpHosts),
+      ].join("|"),
+  );
+  // The drift this pins: `buildEntries` takes the RDP map as its FIFTH
+  // argument, so a caller that forgets it (the Workspaces panel did, until it
+  // was threaded through) shows "rdp" where the tab strip shows the host name.
+  check(
+    "and an entry built WITHOUT the rdp map degrades rather than lying",
+    buildEntries([tab], hosts).find((e) => e.label.startsWith("rdp"))?.label === "rdp",
   );
   check(
     "and the renamed one is flagged renamed",

@@ -20,6 +20,7 @@ import { EntryIcon } from "@/modules/tabs/components/EntryIcon";
 import { InlineInput } from "@/modules/explorer/InlineInput";
 import { useGitBranch } from "@/modules/scm/branch";
 import { useSshHosts, type SshConnection } from "@/modules/ssh/connections";
+import { useRdpHosts, type RdpConnection } from "@/modules/rdp/connections";
 import { statusLabel, statusLabelClass, type SshStatus } from "@/modules/ssh/status";
 import { aiCliLabel, type AiCliStatus } from "@/modules/terminal/lib/aiCliStatus";
 import { useAiCliStatuses } from "@/modules/terminal/lib/aiCliStatusStore";
@@ -134,8 +135,9 @@ function liveRows(
   sshStatuses: Map<number, SshStatus> | undefined,
   aiStatuses: Map<number, AiCliStatus>,
   titles: Record<number, string>,
+  rdpHosts: Map<string, RdpConnection>,
 ): EntryRow[] {
-  return buildEntries(tabs, sshHosts, sshStatuses, aiStatuses).map((entry) => ({
+  return buildEntries(tabs, sshHosts, sshStatuses, aiStatuses, rdpHosts).map((entry) => ({
     entry,
     title: entry.kind === "pane-leaf" ? titles[entry.leafId] : undefined,
     live: true,
@@ -149,12 +151,19 @@ function liveRows(
  * counter - they are display-only, and staying out of the live id space stops
  * them ever matching `activeLeafId` and false-highlighting a row.
  */
-function savedRows(tabs: SavedTab[], sshHosts: Map<string, SshConnection>): EntryRow[] {
+function savedRows(
+  tabs: SavedTab[],
+  sshHosts: Map<string, SshConnection>,
+  rdpHosts: Map<string, RdpConnection>,
+): EntryRow[] {
   let next = -1;
   const allocId = () => next--;
   const entries = buildEntries(
     tabs.map((t) => savedToTab(t, allocId)),
     sshHosts,
+    undefined,
+    undefined,
+    rdpHosts,
   );
   const titles = savedTitles(tabs);
   return entries.map((entry, i) => ({ entry, title: titles[i], live: false }));
@@ -253,6 +262,10 @@ function WorkspacesPanelInner({
   const statuses = useAiCliStatuses((s) => s.statuses);
   // Saved hosts, so an SSH pane reads `ssh:<name>` here as it does in the strip.
   const sshHosts = useSshHosts();
+  // Same for an RDP pane's `rdp:<name>`. Without it this panel would show a
+  // bare "rdp" for a pane the tab strip names properly - exactly the drift
+  // `tab-label-verify` exists to catch.
+  const rdpHosts = useRdpHosts();
   // The strip's entry builder takes a Map; the store keeps a Record so a status
   // push rewrites one key instead of the whole map.
   const aiStatuses = useMemo(
@@ -265,11 +278,11 @@ function WorkspacesPanelInner({
   // persisted snapshot, which carries no live status.
   const rowsFor = (w: Workspace): EntryRow[] => {
     if (w.id === activeId && liveTabs)
-      return liveRows(liveTabs, sshHosts, sshStatuses, aiStatuses, titles);
+      return liveRows(liveTabs, sshHosts, sshStatuses, aiStatuses, titles, rdpHosts);
     const cached = cachedTabsByWorkspace?.current.get(w.id);
     if (cached && cached.tabs.length > 0)
-      return liveRows(cached.tabs, sshHosts, sshStatuses, aiStatuses, titles);
-    return savedRows(w.tabs, sshHosts);
+      return liveRows(cached.tabs, sshHosts, sshStatuses, aiStatuses, titles, rdpHosts);
+    return savedRows(w.tabs, sshHosts, rdpHosts);
   };
 
   const handleDragEnd = (ev: DragEndEvent) => {

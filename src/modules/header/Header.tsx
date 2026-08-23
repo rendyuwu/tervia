@@ -10,7 +10,9 @@ import { SearchInline, type SearchInlineHandle, type SearchTarget } from "./Sear
 import type { Tab } from "@/modules/tabs";
 import { TabBar } from "@/modules/tabs";
 import { SshMenu } from "@/modules/ssh/SshMenu";
+import { RdpMenu } from "@/modules/rdp/RdpMenu";
 import type { SshConnection } from "@/modules/ssh/connections";
+import type { RdpConnection } from "@/modules/rdp/connections";
 import type { SshStatus } from "@/modules/ssh/status";
 import type { AiCliStatus } from "@/modules/terminal/lib/aiCliStatus";
 import { FolderOpen, PanelLeft, Settings } from "lucide-react";
@@ -43,6 +45,13 @@ type Props = {
   onOpenSettings: () => void;
   /** Open a saved SSH host as a new terminal tab. */
   onConnectSsh: (conn: SshConnection) => void;
+  /** Open a saved RDP host as a new pane tab. */
+  onConnectRdp: (conn: RdpConnection) => void;
+  /** The RDP list's open state lives in App: the list IS the connection picker,
+   *  and the command palette's "Connect RDP..." has to be able to raise it
+   *  without a trigger to click. */
+  rdpMenuOpen: boolean;
+  onRdpMenuOpenChange: (open: boolean) => void;
   /** Move a leaf into `targetTabId` as a split. Caller toasts on full. */
   onMoveLeafToGroup: (leafId: number, targetTabId: number) => void;
   /** Pop `leafId` out into a new top-level tab. Returns "invalid" if not in a multi-leaf split. */
@@ -104,6 +113,9 @@ function HeaderImpl({
   canSplit,
   onOpenSettings,
   onConnectSsh,
+  onConnectRdp,
+  rdpMenuOpen,
+  onRdpMenuOpenChange,
   onMoveLeafToGroup,
   onMoveLeafToNewTab,
   onRotateLeafSplit,
@@ -192,6 +204,7 @@ function HeaderImpl({
         <span className="bg-border mx-1 h-5 w-px shrink-0" />
 
         <SshMenu onConnect={onConnectSsh} />
+        <RdpMenu onConnect={onConnectRdp} open={rdpMenuOpen} onOpenChange={onRdpMenuOpenChange} />
         {settingsButton}
 
         {USE_CUSTOM_WINDOW_CONTROLS && (

@@ -16,9 +16,8 @@ type AuxTabsDeps = {
 };
 
 /**
- * The non-terminal tab openers, extracted from `useTabs` unchanged. Bodies and
- * dependency arrays are identical to the originals; `useTabs` spreads the
- * returned callbacks into its return object.
+ * The non-terminal tab openers. `useTabs` spreads the returned callbacks into
+ * its return object.
  */
 export function useAuxTabs({ setTabs, setActiveId, nextIdRef, tabsRef }: AuxTabsDeps) {
   /**
@@ -53,5 +52,43 @@ export function useAuxTabs({ setTabs, setActiveId, nextIdRef, tabsRef }: AuxTabs
     return tabId;
   }, []);
 
-  return { openBoardTab };
+  /**
+   * Open a saved RDP host in a new pane tab.
+   *
+   * An RDP session is a pane LEAF like a terminal or an editor, so an "RDP tab"
+   * is a pane tab whose tree is a single rdp leaf - splittable, draggable, and
+   * carrying the ordinary pane header rather than a second hand-rolled copy of
+   * it. Mirrors `newSshTab`.
+   *
+   * Deliberately NOT single-instance: two panes onto the same host are two
+   * separate RDP logins, which is a thing people do (one for a console, one for
+   * a tool), and unlike the Board there is no shared state for them to fight
+   * over. `title` is only the interim tab name - `syncPaneMirror` immediately
+   * recomputes it through `leafLabel`, which resolves the connection properly.
+   */
+  const newRdpTab = useCallback((rdpConnectionId: string, title: string) => {
+    const tabId = nextIdRef.current++;
+    const leafId = nextIdRef.current++;
+    const leaf: PaneLeaf = {
+      kind: "leaf",
+      id: leafId,
+      leafKind: "rdp",
+      rdpConnectionId,
+      sizeMode: "preset",
+    };
+    setTabs((curr) => [
+      ...curr,
+      syncPaneMirror({
+        id: tabId,
+        kind: "pane",
+        title,
+        paneTree: leaf,
+        activeLeafId: leafId,
+      }),
+    ]);
+    setActiveId(tabId);
+    return tabId;
+  }, []);
+
+  return { openBoardTab, newRdpTab };
 }

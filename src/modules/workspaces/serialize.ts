@@ -74,6 +74,18 @@ function leafToSaved(leaf: PaneLeaf): SavedPaneNode {
       ...(leaf.customTitle ? { customTitle: leaf.customTitle } : {}),
     };
   }
+  if (leaf.leafKind === "rdp") {
+    // A reference and a size mode, nothing else. There is no live session id to
+    // persist: an RDP session cannot be reattached, so the restored leaf dials
+    // again - the same UX a restored SSH leaf has, for the same reason.
+    return {
+      kind: "leaf",
+      leafKind: "rdp",
+      rdpConnectionId: leaf.rdpConnectionId,
+      sizeMode: leaf.sizeMode,
+      ...(leaf.customTitle ? { customTitle: leaf.customTitle } : {}),
+    };
+  }
   // Board: restorable from nothing but its own existence, since the columns are
   // rebuilt from the live tab tree.
   return {
@@ -227,6 +239,22 @@ function savedToNode(node: SavedPaneNode, allocId: () => number, outLeafIds: num
         // unbound remote path can never reach the local filesystem.
         ...(node.sshConnectionId ? { sshConnectionId: node.sshConnectionId } : {}),
         ...(node.sshHostLabel ? { sshHostLabel: node.sshHostLabel } : {}),
+        ...(node.customTitle ? { customTitle: node.customTitle } : {}),
+      };
+    }
+    if (node.leafKind === "rdp") {
+      // Reconnects fresh. There is nothing to reattach to, so the pane dials
+      // the saved connection on mount - the same thing a restored SSH leaf
+      // does, and the reason no session id was persisted.
+      return {
+        kind: "leaf",
+        id,
+        leafKind: "rdp",
+        rdpConnectionId: node.rdpConnectionId,
+        // Older snapshots cannot exist (the field shipped with the kind), but
+        // a hand-edited or downgraded file can still be missing it, and the
+        // fallback is the only mode there is.
+        sizeMode: node.sizeMode ?? "preset",
         ...(node.customTitle ? { customTitle: node.customTitle } : {}),
       };
     }

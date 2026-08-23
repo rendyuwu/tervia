@@ -94,6 +94,7 @@ export default function App() {
     newTab,
     newPaneGroupTab,
     newSshTab,
+    newRdpTab,
     openFileTab,
     pinTab,
     openBoardTab,
@@ -169,6 +170,12 @@ export default function App() {
   const searchInlineRef = useRef<SearchInlineHandle | null>(null);
 
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
+
+  // The header's RDP connection list. Owned here rather than inside `RdpMenu`
+  // because it is the connection PICKER, and the command palette's
+  // "Connect RDP..." has to raise it - a palette command cannot click a
+  // dropdown trigger.
+  const [rdpMenuOpen, setRdpMenuOpen] = useState(false);
 
   const [editingSshConn, setEditingSshConn] = useState<SshConnection | null>(null);
   const [sshEditorOpen, setSshEditorOpen] = useState(false);
@@ -547,6 +554,7 @@ export default function App() {
         requestCloseLeaf,
         setNewEditorOpen,
         setAgentDialogOpen,
+        setRdpMenuOpen,
         searchInlineRef,
         editorRefs,
         terminalRefs,
@@ -586,8 +594,14 @@ export default function App() {
       // app chords keep Shift/Meta or add a second modifier (Ctrl+Shift+C copy,
       // Ctrl+Shift+X close, Ctrl+Alt+P, Shift+Alt+F) and stay active; Ctrl+Tab /
       // Ctrl+digit / zoom are not control codes either.
+      //
+      // A focused RDP pane is gated the same way and for the same reason: the
+      // remote desktop owns its own Ctrl and Alt chords, so Ctrl+W has to reach
+      // Windows rather than close the pane showing it. (Ctrl+Alt+Del is the one
+      // chord no gate can deliver - the OS eats it - which is why the pane
+      // header has a button for it.)
       id !== "pane.splitRight" &&
-      activeLeafKindCurrent === "terminal" &&
+      (activeLeafKindCurrent === "terminal" || activeLeafKindCurrent === "rdp") &&
       (isTerminalControlChord(e) || isTerminalMetaChord(e)),
   });
 
@@ -616,6 +630,7 @@ export default function App() {
     handleHeaderPinLeaf,
     handleHeaderOpenSettings,
     handleHeaderConnectSsh,
+    handleHeaderConnectRdp,
     headerCanSplit,
   } = useHeaderActions({
     activePaneTab,
@@ -626,6 +641,7 @@ export default function App() {
     focusPane,
     pinTab,
     newSshTab,
+    newRdpTab,
   });
 
   // Activate a tab and focus a specific leaf inside it. Backs the Workspaces
@@ -659,6 +675,9 @@ export default function App() {
             canSplit={headerCanSplit}
             onOpenSettings={handleHeaderOpenSettings}
             onConnectSsh={handleHeaderConnectSsh}
+            onConnectRdp={handleHeaderConnectRdp}
+            rdpMenuOpen={rdpMenuOpen}
+            onRdpMenuOpenChange={setRdpMenuOpen}
             onMoveLeafToGroup={moveLeafToGroup}
             onMoveLeafToNewTab={moveLeafToNewTab}
             onRotateLeafSplit={rotateLeafSplit}

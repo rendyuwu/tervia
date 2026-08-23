@@ -33,13 +33,17 @@ export interface ShortcutHandlerDeps {
   requestCloseLeaf: (leafId: number) => void;
   setNewEditorOpen: (open: boolean) => void;
   setAgentDialogOpen: (open: boolean) => void;
+  /** Raise the header's RDP connection list. Backs the palette's
+   *  "Connect RDP..." - the list IS the picker, and a palette command has no
+   *  trigger to click. */
+  setRdpMenuOpen: (open: boolean) => void;
   searchInlineRef: RefObject<SearchInlineHandle | null>;
   editorRefs: RefObject<Map<number, EditorPaneHandle>>;
   terminalRefs: RefObject<Map<number, TerminalPaneHandle>>;
   tabsRef: RefObject<Tab[]>;
   activeId: number;
   activeLeafIdInTab: number | null;
-  activeLeafKindCurrent: "terminal" | "editor" | null;
+  activeLeafKindCurrent: "terminal" | "editor" | "rdp" | null;
   commandPaletteOpen: () => void;
 }
 
@@ -55,6 +59,7 @@ export function buildShortcutHandlers(deps: ShortcutHandlerDeps): ShortcutHandle
     requestCloseLeaf,
     setNewEditorOpen,
     setAgentDialogOpen,
+    setRdpMenuOpen,
     searchInlineRef,
     editorRefs,
     terminalRefs,
@@ -69,6 +74,7 @@ export function buildShortcutHandlers(deps: ShortcutHandlerDeps): ShortcutHandle
     "tab.new": openNewTab,
     "tab.newEditor": () => setNewEditorOpen(true),
     "tab.newAgent": () => setAgentDialogOpen(true),
+    "rdp.connect": () => setRdpMenuOpen(true),
     "tab.close": handleCloseTabOrPane,
     "tab.next": () => cycleTab(1),
     "tab.prev": () => cycleTab(-1),

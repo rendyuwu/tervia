@@ -94,7 +94,7 @@ export function useTabs(initial?: { cwd?: string; title?: string }) {
   // Non-pane tab openers. Extracted into a sub-hook for size; the callbacks
   // close over the same setters/refs and are spread into this hook's return
   // object below with identical keys.
-  const { openBoardTab } = useAuxTabs({
+  const { openBoardTab, newRdpTab } = useAuxTabs({
     setTabs,
     setActiveId,
     nextIdRef,
@@ -964,6 +964,7 @@ export function useTabs(initial?: { cwd?: string; title?: string }) {
     newTab,
     newPaneGroupTab,
     newSshTab,
+    newRdpTab,
     openFileTab,
     pinTab,
     openBoardTab,
