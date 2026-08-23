@@ -34,7 +34,6 @@ export function useHeaderActions({
   handleHeaderSelectEntry: (tabId: number, leafId: number | null) => void;
   handleHeaderCloseEntry: (tabId: number, leafId: number | null) => void;
   handleHeaderPinLeaf: (tabId: number, leafId: number) => void;
-  handleHeaderOpenExtensions: () => void;
   handleHeaderOpenSettings: () => void;
   handleHeaderConnectSsh: (conn: SshConnection, opts?: { private?: boolean }) => void;
   headerCanSplit: boolean;
@@ -69,7 +68,6 @@ export function useHeaderActions({
     },
     [focusPane, pinTab],
   );
-  const handleHeaderOpenExtensions = useCallback(() => void openSettingsWindow("extensions"), []);
   const handleHeaderOpenSettings = useCallback(() => void openSettingsWindow(), []);
   const handleHeaderConnectSsh = useCallback(
     (conn: SshConnection, opts?: { private?: boolean }) => newSshTab(conn.id, conn.name, opts),
@@ -85,7 +83,6 @@ export function useHeaderActions({
     handleHeaderSelectEntry,
     handleHeaderCloseEntry,
     handleHeaderPinLeaf,
-    handleHeaderOpenExtensions,
     handleHeaderOpenSettings,
     handleHeaderConnectSsh,
     headerCanSplit,
