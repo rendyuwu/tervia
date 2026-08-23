@@ -340,14 +340,14 @@ impl SshSession {
         }
         if let Some(h) = self.handle.lock().await.take() {
             let _ = h
-                .disconnect(Disconnect::ByApplication, "tedi: client closed", "")
+                .disconnect(Disconnect::ByApplication, "tervia: client closed", "")
                 .await;
         }
         // Tear the jump chain down from innermost to outermost, after the
         // target handle that rode on top of it is already gone.
         for h in self.jump_handles.lock().await.drain(..).rev() {
             let _ = h
-                .disconnect(Disconnect::ByApplication, "tedi: client closed", "")
+                .disconnect(Disconnect::ByApplication, "tervia: client closed", "")
                 .await;
         }
         if let Some(j) = self.pump.lock().await.take() {
@@ -1076,7 +1076,7 @@ pub async fn connect(
         // in the inert terminal so the user knows why it accepts no input.
         let fingerprint = report.lock().await.seen.clone().unwrap_or_default();
         let _ = on_event.send(SshEvent::Connected { fingerprint });
-        const SFTP_ONLY_NOTICE: &[u8] = b"\r\n\x1b[33m[tedi] This server allows file transfer (SFTP) only - no interactive shell. The terminal is disabled; use the remote file browser.\x1b[0m\r\n";
+        const SFTP_ONLY_NOTICE: &[u8] = b"\r\n\x1b[33m[tervia] This server allows file transfer (SFTP) only - no interactive shell. The terminal is disabled; use the remote file browser.\x1b[0m\r\n";
         let _ = on_event.send(SshEvent::Data {
             data: B64.encode(SFTP_ONLY_NOTICE),
         });
@@ -1114,7 +1114,7 @@ pub async fn connect(
     // stays on home. Leading space keeps it out of bash history when
     // HISTCONTROL=ignorespace. Trailing `clear` wipes the snippet's echo
     // and the motd, which is acceptable for a clean prompt.
-    const OSC7_BOOTSTRAP: &[u8] = b" { if [ -n \"$ZSH_VERSION\" ]; then __tedi_o7(){ printf '\\e]7;file://%s%s\\e\\\\' \"${HOST:-$HOSTNAME}\" \"$PWD\"; }; typeset -ag precmd_functions; precmd_functions+=(__tedi_o7); elif [ -n \"$BASH_VERSION\" ]; then __tedi_o7(){ printf '\\e]7;file://%s%s\\e\\\\' \"$HOSTNAME\" \"$PWD\"; }; case \":${PROMPT_COMMAND:-}:\" in *\":__tedi_o7:\"*) ;; *) PROMPT_COMMAND=\"__tedi_o7${PROMPT_COMMAND:+;$PROMPT_COMMAND}\";; esac; fi; __tedi_o7 2>/dev/null; } 2>/dev/null; { clear 2>/dev/null || printf '\\033c'; }\r";
+    const OSC7_BOOTSTRAP: &[u8] = b" { if [ -n \"$ZSH_VERSION\" ]; then __tervia_o7(){ printf '\\e]7;file://%s%s\\e\\\\' \"${HOST:-$HOSTNAME}\" \"$PWD\"; }; typeset -ag precmd_functions; precmd_functions+=(__tervia_o7); elif [ -n \"$BASH_VERSION\" ]; then __tervia_o7(){ printf '\\e]7;file://%s%s\\e\\\\' \"$HOSTNAME\" \"$PWD\"; }; case \":${PROMPT_COMMAND:-}:\" in *\":__tervia_o7:\"*) ;; *) PROMPT_COMMAND=\"__tervia_o7${PROMPT_COMMAND:+;$PROMPT_COMMAND}\";; esac; fi; __tervia_o7 2>/dev/null; } 2>/dev/null; { clear 2>/dev/null || printf '\\033c'; }\r";
     let _ = channel.data(OSC7_BOOTSTRAP).await;
 
     let fingerprint = report.lock().await.seen.clone().unwrap_or_default();

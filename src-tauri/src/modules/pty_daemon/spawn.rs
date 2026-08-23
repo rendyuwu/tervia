@@ -49,7 +49,7 @@ fn spawn_daemon_from(exe: &Path) -> io::Result<()> {
     let log_path = super::paths::daemon_log_path();
     // Rotate once when the log grows large so append-mode across many daemon
     // runs can't grow it without bound. Best-effort: keep a single previous
-    // file (`tedi-ptyd.log.old`).
+    // file (`tervia-ptyd.log.old`).
     const MAX_LOG_BYTES: u64 = 8 * 1024 * 1024;
     if let Ok(meta) = std::fs::metadata(&log_path) {
         if meta.len() > MAX_LOG_BYTES {
@@ -90,6 +90,6 @@ fn spawn_daemon_from(exe: &Path) -> io::Result<()> {
     // We intentionally don't keep the `Child` handle: dropping it does not
     // kill the process (Rust's Drop doesn't wait/kill by default), and the
     // pgroup detachment above has already cut the lifecycle tie.
-    log::info!("spawned tedi-ptyd pid={}", child.id());
+    log::info!("spawned tervia-ptyd pid={}", child.id());
     Ok(())
 }

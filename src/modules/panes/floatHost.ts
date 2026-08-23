@@ -32,7 +32,7 @@ let destroyedListenerStarted = false;
 function ensureDestroyedListener(): void {
   if (destroyedListenerStarted) return;
   destroyedListenerStarted = true;
-  void listen<string>("tedi://float-destroyed", (e) => {
+  void listen<string>("tervia://float-destroyed", (e) => {
     const m = /^float-(\d+)$/.exec(e.payload);
     if (m) hosts.get(Number(m[1]))?.();
   });

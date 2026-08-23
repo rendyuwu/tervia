@@ -65,10 +65,10 @@ export const SPAWN_GRACE_MS = 3_000;
 // path. Local spawns normally complete in <300ms.
 export const SPAWN_TIMEOUT_MS = 15_000;
 
-/** PTY lifecycle debug toggle. Default on; set `localStorage.TEDI_DEBUG_PTY = "0"` to silence. */
+/** PTY lifecycle debug toggle. Default on; set `localStorage.TERVIA_DEBUG_PTY = "0"` to silence. */
 export function isDebugPty(): boolean {
   try {
-    return localStorage.getItem("TEDI_DEBUG_PTY") !== "0";
+    return localStorage.getItem("TERVIA_DEBUG_PTY") !== "0";
   } catch {
     return true;
   }

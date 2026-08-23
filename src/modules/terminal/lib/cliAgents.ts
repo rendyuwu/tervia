@@ -2,7 +2,7 @@
  * The AI CLI agents offered by the tab strip's `+` -> Agent picker, and the
  * user's edits to them.
  *
- * Two things are user-editable and persisted (`tedi-cli-agents.json`, shared
+ * Two things are user-editable and persisted (`tervia-cli-agents.json`, shared
  * across windows via a Tauri event like `agentsStore`):
  *   - a built-in's `command`, because the binary is often renamed or wrapped
  *     (`claude` -> `claude-start`), and its `pinned` flag;
@@ -69,10 +69,10 @@ export function agentToolKind(agent: CliAgent): AiCliKind | null {
 
 // ---- persistence ----
 
-const STORE_PATH = "tedi-cli-agents.json";
+const STORE_PATH = "tervia-cli-agents.json";
 const KEY_CUSTOM = "customCliAgents";
 const KEY_OVERRIDES = "builtinCliAgentOverrides";
-const CHANGED_EVENT = "tedi://cli-agents-changed";
+const CHANGED_EVENT = "tervia://cli-agents-changed";
 
 const store = new LazyStore(STORE_PATH, { defaults: {}, autoSave: 200 });
 

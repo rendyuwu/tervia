@@ -425,7 +425,7 @@ pub fn pty_close(state: tauri::State<PtyState>, id: u32) -> Result<(), String> {
                 // refusing to disappear from the React tree because
                 // subsequent IPC stalls behind it.
                 if let Err(spawn_err) = thread::Builder::new()
-                    .name(format!("tedi-pty-drop-{id}"))
+                    .name(format!("tervia-pty-drop-{id}"))
                     .spawn({
                         let s = s.clone();
                         move || {

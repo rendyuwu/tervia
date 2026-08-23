@@ -62,7 +62,7 @@ export function openPtyForSession(s: Session, cwd: string | undefined): Promise<
   // die with the SSH session, and a reconnect re-enters here with an empty map.
   const sshUrlForwards = new Map<number, Promise<number>>();
 
-  // Diagnostic counters for the live-PTY-but-empty-pane case. Toggle via TEDI_DEBUG_PTY.
+  // Diagnostic counters for the live-PTY-but-empty-pane case. Toggle via TERVIA_DEBUG_PTY.
   const debug = isDebugPty();
   let firstByteLogged = false;
   let totalBytes = 0;

@@ -12,11 +12,11 @@ import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { isSecondaryWindow } from "@/lib/platform";
 import { APP_OPACITY_DEFAULT, clampOpacity } from "./store";
 
-const FAST_PATH_KEY = "tedi-app-opacity-shadow";
+const FAST_PATH_KEY = "tervia-app-opacity-shadow";
 // Transient live-drag channel: the settings slider broadcasts each step so the
 // main window fades in real time WITHOUT touching the stored value (which the
 // slider is bound to — writing it mid-drag makes the thumb fight the drag).
-const PREVIEW_EVENT = "tedi://app-opacity-preview";
+const PREVIEW_EVENT = "tervia://app-opacity-preview";
 // At/above this the canvas is effectively opaque, so the glass layer is off.
 const GLASS_EPSILON = 0.999;
 
@@ -51,7 +51,7 @@ function applyOpacityCss(value: number): void {
   else delete root.dataset.tediGlass;
   // Surfaces follow the CSS var instantly; nudge the terminal canvases too
   // (their rgba background is JS-rendered). Listener is rAF-throttled.
-  window.dispatchEvent(new Event("tedi:canvas-opacity"));
+  window.dispatchEvent(new Event("tervia:canvas-opacity"));
 }
 
 export function applyAppOpacity(opacity: number): void {

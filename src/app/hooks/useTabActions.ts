@@ -199,7 +199,7 @@ export function useTabActions({
       if (!activeLeafIsSsh) {
         setPickedRoot(normalized);
         try {
-          localStorage.setItem("tedi.workspaceRoot", normalized);
+          localStorage.setItem("tervia.workspaceRoot", normalized);
         } catch {
           // Storage unavailable. Skip persistence.
         }

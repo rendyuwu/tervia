@@ -62,8 +62,8 @@ export function SshBackupDialog({ open, onOpenChange, mode }: Props) {
         // keychain refusal should surface without first making the user pick a
         // filename for a file that was never going to be written.
         const target = await saveFileDialog({
-          defaultPath: `tedi-ssh-connections.${BACKUP_EXTENSION}`,
-          filters: [{ name: "TEDI SSH backup", extensions: [BACKUP_EXTENSION] }],
+          defaultPath: `tervia-ssh-connections.${BACKUP_EXTENSION}`,
+          filters: [{ name: "Tervia SSH backup", extensions: [BACKUP_EXTENSION] }],
         });
         if (!target) {
           setBusy(false);

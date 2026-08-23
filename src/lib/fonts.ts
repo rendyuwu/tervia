@@ -132,8 +132,8 @@ export function buildContentFontFamily(id: string): string {
 const MONO_FONT_VAR = "--tedi-mono-font";
 const EDITOR_FONT_SIZE_VAR = "--tedi-editor-font-size";
 const EDITOR_LIGATURES_VAR = "--tedi-editor-ligatures";
-const MONO_FONT_SHADOW = "tedi-mono-font-shadow";
-const EDITOR_FONT_SIZE_SHADOW = "tedi-editor-font-size-shadow";
+const MONO_FONT_SHADOW = "tervia-mono-font-shadow";
+const EDITOR_FONT_SIZE_SHADOW = "tervia-editor-font-size-shadow";
 
 /** Apply the chosen content font to the editor (`--tedi-mono-font`). The
  *  terminal reads its own `fontFamily` option in `useTerminalSession`. */

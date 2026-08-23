@@ -172,11 +172,11 @@ export type CustomTheme = {
 const THEME_FILE_VERSION = 1;
 
 type ThemeFileV1 = {
-  $schema?: "tedi-theme";
+  $schema?: "tervia-theme";
   version: typeof THEME_FILE_VERSION;
 } & CustomTheme;
 
-const BG_ELEMENT_ID = "tedi-bg-layer";
+const BG_ELEMENT_ID = "tervia-bg-layer";
 
 /**
  * Mapping of `ThemeColors` keys to the CSS variables they drive.
@@ -242,7 +242,7 @@ const COLOR_VAR_MAP: Record<keyof ThemeColors, readonly string[]> = {
   ansiBrightWhite: ["--tedi-ansi-bright-white"],
 };
 
-const FAST_PATH_KEY = "tedi-custom-theme-shadow";
+const FAST_PATH_KEY = "tervia-custom-theme-shadow";
 
 function readShadow(): CustomTheme | null {
   if (typeof window === "undefined") return null;
@@ -499,7 +499,7 @@ export function applyBackground(bg: ThemeBackground): void {
  * already has it cached. No store write happens while dragging; the committed
  * value persists on release via the normal `customTheme` path.
  */
-const WALLPAPER_PREVIEW_EVENT = "tedi://wallpaper-preview";
+const WALLPAPER_PREVIEW_EVENT = "tervia://wallpaper-preview";
 
 export type WallpaperPreview = {
   blur: number;
@@ -767,14 +767,14 @@ function clampRange(value: unknown, min: number, max: number, fallback: number):
 }
 
 /**
- * Validate an imported `.tedi` payload. Throws with a user-readable message
+ * Validate an imported `.tervia` payload. Throws with a user-readable message
  * when the structure is bad. Lenient with missing/extra keys: fills in
  * defaults from the supplied `fallback` for any field that's absent.
  */
 export function parseThemeFile(raw: unknown, fallback: CustomTheme): CustomTheme {
   if (!raw || typeof raw !== "object") throw new Error("Theme file is not a JSON object");
   // Delegate variant + legacy-`colors` + bg field plumbing to the shared
-  // normalizer so .tedi parsing stays in lock-step with the runtime store
+  // normalizer so .tervia parsing stays in lock-step with the runtime store
   // hydration path. Only override `name` (defaults to "Custom" when blank).
   const merged = normalizeCustomTheme(raw, fallback);
   const obj = raw as Record<string, unknown>;
@@ -790,10 +790,10 @@ function filterStrings(obj: Partial<ThemeColors>): Partial<ThemeColors> {
   return out;
 }
 
-/** Serialise a theme for `.tedi` export. */
+/** Serialise a theme for `.tervia` export. */
 export function serializeThemeFile(theme: CustomTheme): string {
   const payload: ThemeFileV1 = {
-    $schema: "tedi-theme",
+    $schema: "tervia-theme",
     version: THEME_FILE_VERSION,
     ...theme,
   };

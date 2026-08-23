@@ -1,5 +1,5 @@
 /**
- * Self-check for the `.tedi-ssh` connection backup parser.
+ * Self-check for the `.tervia-ssh` connection backup parser.
  * Run: `npx tsx scripts/ssh-backup-verify.ts`.
  *
  * Importing a backup is a TRUST BOUNDARY: the file arrives from a USB stick or
@@ -75,14 +75,14 @@ const conn = (over: Record<string, unknown> = {}) => ({
 });
 
 console.log("[envelope] a file that is not a backup must be rejected outright");
-throws("a plain object", () => parseBackupFile({}), "not a TEDI SSH backup");
-throws("null", () => parseBackupFile(null), "not a TEDI SSH backup");
-throws("an array", () => parseBackupFile([]), "not a TEDI SSH backup");
-throws("a theme file", () => parseBackupFile({ kind: "tedi-theme" }), "not a TEDI SSH backup");
+throws("a plain object", () => parseBackupFile({}), "not a Tervia SSH backup");
+throws("null", () => parseBackupFile(null), "not a Tervia SSH backup");
+throws("an array", () => parseBackupFile([]), "not a Tervia SSH backup");
+throws("a theme file", () => parseBackupFile({ kind: "tervia-theme" }), "not a Tervia SSH backup");
 throws("no version", () => parseBackupFile(envelope({ version: "1" })), "version");
 // A newer TEDI may add fields this build would silently drop, so refuse rather
 // than import a partial connection.
-throws("a newer format", () => parseBackupFile(envelope({ version: 99 })), "newer TEDI");
+throws("a newer format", () => parseBackupFile(envelope({ version: 99 })), "newer Tervia");
 throws("no connections list", () => parseBackupFile(envelope({ connections: {} })), "connections");
 throws("no secrets block", () => parseBackupFile(envelope({ secrets: undefined })), "credentials");
 throws(

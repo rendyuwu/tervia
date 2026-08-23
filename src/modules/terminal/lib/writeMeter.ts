@@ -29,7 +29,7 @@ export const STALL_CAP = 512 * 1024;
  * held buffer goes and the screen is reset instead of half-updated.
  */
 export const STALL_NOTICE =
-  "\x1bc\x1b[2m[tedi: dropped output while the window was hidden]\x1b[0m\r\n";
+  "\x1bc\x1b[2m[tervia: dropped output while the window was hidden]\x1b[0m\r\n";
 
 export type WriteMeter = {
   /** Feed PTY bytes: written through while the parser keeps up, held otherwise. */

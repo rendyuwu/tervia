@@ -48,7 +48,7 @@ pub fn purge_allocator() {
 /// thing it must never do is share a thread with anything that draws.
 fn spawn_allocator_purge_thread() {
     let _ = std::thread::Builder::new()
-        .name("tedi-alloc-purge".into())
+        .name("tervia-alloc-purge".into())
         .spawn(|| loop {
             std::thread::sleep(ALLOCATOR_PURGE_INTERVAL);
             purge_allocator();
@@ -323,7 +323,7 @@ async fn open_float_window(
         let label_for_event = label.clone();
         window.on_window_event(move |event| {
             if matches!(event, tauri::WindowEvent::Destroyed) {
-                let _ = app_for_event.emit("tedi://float-destroyed", &label_for_event);
+                let _ = app_for_event.emit("tervia://float-destroyed", &label_for_event);
             }
         });
     }
@@ -421,13 +421,13 @@ fn configure_linux_rendering() {
     match wayland_dmabuf_fallback_reason() {
         Some(reason) => {
             eprintln!(
-                "tedi: Wayland session, {reason}; disabling WebKitGTK DMA-BUF renderer \
+                "tervia: Wayland session, {reason}; disabling WebKitGTK DMA-BUF renderer \
                  (override: WEBKIT_DISABLE_DMABUF_RENDERER=0)"
             );
             unsafe { std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1") };
         }
         None => eprintln!(
-            "tedi: Wayland session on a known-good compositor; keeping WebKitGTK DMA-BUF renderer \
+            "tervia: Wayland session on a known-good compositor; keeping WebKitGTK DMA-BUF renderer \
              (set WEBKIT_DISABLE_DMABUF_RENDERER=1 if the window stays blank)"
         ),
     }
