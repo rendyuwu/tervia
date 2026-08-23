@@ -19,7 +19,7 @@
  *   - useTabSideEffects        - live per-workspace tab counts
  * Layout: AppSidebar / WorkspaceArea / AppRightSlot / AppDialogs.
  *
- * See ARCHITECTURE.md for the two-process model and TEDI.md for full detail.
+ * See ARCHITECTURE.md for the two-process model and TERVIA.md for full detail.
  */
 import { pathToFileUrl } from "@/lib/path";
 import { openUrl } from "@tauri-apps/plugin-opener";

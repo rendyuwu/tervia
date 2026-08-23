@@ -1,1 +1,1 @@
-TEDI.md
+TERVIA.md

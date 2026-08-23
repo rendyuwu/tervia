@@ -17,7 +17,7 @@ import { SettingsCard } from "../components/SettingsCard";
 import { Download, Globe, RefreshCw } from "lucide-react";
 
 const REPO_URL = "https://github.com/rendyuwu/tervia";
-const UPSTREAM_URL = "https://github.com/crynta/terax-ai";
+const UPSTREAM_URL = "https://github.com/IlhamriSKY/TEDI";
 const SITE_URL = "https://tervia.rendy.dev";
 
 const PLATFORM_LABEL: Record<string, string> = {
@@ -146,7 +146,7 @@ export function AboutSection() {
               className="hover:text-foreground inline-flex cursor-pointer items-center gap-1.5 rounded-md text-[12px] underline-offset-2 hover:underline"
             >
               <BrandIcon brand="github" size={12} />
-              crynta/terax-ai
+              IlhamriSKY/TEDI
             </button>
           </dd>
         </dl>

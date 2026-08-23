@@ -9,7 +9,7 @@
 // blocks a release.
 import { readFileSync } from "node:fs";
 
-const REPO = "https://github.com/IlhamriSKY/Tervia";
+const REPO = "https://github.com/rendyuwu/tervia";
 
 const version = (process.argv[2] ?? "").replace(/^v/, "").trim();
 if (!version) {

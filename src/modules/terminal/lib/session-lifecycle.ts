@@ -98,10 +98,10 @@ function trackCommandInput(session: Session, data: string): void {
 // bind idempotent.
 const opacityWin =
   typeof window !== "undefined"
-    ? (window as Window & { __tediCanvasOpacityBound?: boolean })
+    ? (window as Window & { __terviaCanvasOpacityBound?: boolean })
     : null;
-if (opacityWin && !opacityWin.__tediCanvasOpacityBound) {
-  opacityWin.__tediCanvasOpacityBound = true;
+if (opacityWin && !opacityWin.__terviaCanvasOpacityBound) {
+  opacityWin.__terviaCanvasOpacityBound = true;
   let scheduled = false;
   window.addEventListener("tervia:canvas-opacity", () => {
     if (scheduled) return;
