@@ -5,14 +5,45 @@ on:
     branches: [main]
   push:
     branches: [main]
+  # Lets a bundle be built on demand from any branch, without opening a PR.
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# Read-only and, deliberately, secret-free: this workflow must run unchanged on
+# pull requests opened from forks, which receive no secrets at all. The bundle
+# job below mints a throwaway updater key rather than reaching for the real one.
+permissions:
+  contents: read
+
+env:
+  # One list for every job that compiles Rust, so `cargo check` and the bundle
+  # build never disagree about what is installed.
+  #
+  # libdbus-1-dev is for `tao` (Tauri's windowing layer) on Linux. The two
+  # libxcb entries were originally added for `xcap`, the browser-screenshot
+  # capture removed in Phase 2c; nothing in the tree is known to link libxcb
+  # any more (x11rb is pure Rust, x11-dl dlopens), but they are kept until a
+  # green build proves them unnecessary. patchelf is required by the AppImage
+  # bundler.
+  LINUX_DEPS: >-
+    libwebkit2gtk-4.1-dev
+    libgtk-3-dev
+    librsvg2-dev
+    libssl-dev
+    libdbus-1-dev
+    libxcb1-dev
+    libxcb-randr0-dev
+    patchelf
+
 jobs:
   frontend:
     runs-on: ubuntu-latest
+    # Every job carries a bound because the GitHub default is 360 minutes, and a
+    # hung step otherwise burns all six hours before anyone is told it stalled.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -40,22 +71,15 @@ jobs:
 
   rust:
     runs-on: ubuntu-22.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
+      # The script pins the apt mirror and gives apt a timeout; without those a
+      # stalled Azure mirror hangs this step indefinitely.
       - name: Install Linux build dependencies
-        # libdbus-1-dev / libxcb1-dev / libxcb-randr0-dev are for `xcap` (the
-        # browser-screenshot capture on Linux), which links dbus + xcb (randr).
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
-            libgtk-3-dev \
-            librsvg2-dev \
-            libssl-dev \
-            libdbus-1-dev \
-            libxcb1-dev \
-            libxcb-randr0-dev
+        timeout-minutes: 10
+        run: bash .github/scripts/install-linux-deps.sh ${{ env.LINUX_DEPS }}
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -79,10 +103,157 @@ jobs:
       # is #[ignore]d, so the default run stays offline and fast. Deliberately no
       # count here: it drifted (27 -> 41 -> 43) every time tests were added.
       #
-      # NOTE: this job is Linux-only, so it never compiles the macOS or Windows
-      # `cfg` branches - those are first built by release.yml's matrix, i.e. at
-      # tag time. A macOS-only compile error therefore surfaces during a release,
-      # not on the PR that introduced it.
+      # This job is Linux-only. The macOS and Windows `cfg` branches are first
+      # compiled by the bundle matrix below, which is the reason that matrix runs
+      # on pull requests at all rather than only at tag time.
       - name: cargo test
         working-directory: src-tauri
         run: cargo test --locked
+
+  # Produces the installers a reviewer downloads to smoke-test a branch, so that
+  # verifying SSH / port forwarding / SFTP / backup export never requires a local
+  # release build. Artifacts land under the run's "Artifacts" section as
+  # `tervia-<platform>.zip`.
+  bundle:
+    name: bundle (${{ matrix.id }})
+    needs: [frontend, rust]
+    runs-on: ${{ matrix.platform }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: linux-x64
+            platform: ubuntu-22.04
+            rust-target: ""
+            args: ""
+            bundle-root: src-tauri/target/release/bundle
+          - id: windows-x64
+            platform: windows-latest
+            rust-target: ""
+            args: ""
+            bundle-root: src-tauri/target/release/bundle
+          - id: macos-arm64
+            platform: macos-latest
+            rust-target: aarch64-apple-darwin
+            args: --target aarch64-apple-darwin
+            bundle-root: src-tauri/target/aarch64-apple-darwin/release/bundle
+          - id: macos-x64
+            platform: macos-latest
+            rust-target: x86_64-apple-darwin
+            args: --target x86_64-apple-darwin
+            bundle-root: src-tauri/target/x86_64-apple-darwin/release/bundle
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        timeout-minutes: 10
+        run: bash .github/scripts/install-linux-deps.sh ${{ env.LINUX_DEPS }}
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-target }}
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ./src-tauri -> target
+          key: bundle-${{ matrix.id }}
+          cache-on-failure: true
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Same step release.yml runs, and for the same reason: the NSIS hook in
+      # `installer.nsh` `File`s `src-tauri/target/release/tedi.exe` into the
+      # install dir beside the GUI binary, and tauri-action only builds the
+      # binary named by `default-run`. Without this the Windows installer build
+      # fails outright, so the PR bundle would not match the released one.
+      - name: Build tedi console launcher (Windows only)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        working-directory: src-tauri
+        run: cargo build --release -p tedi-cli
+
+      # REQUIRED — do not "simplify" this step away. With
+      # `createUpdaterArtifacts: true` and a pubkey set, a bundle build with no
+      # signing key is a hard failure ("A public key has been found, but no
+      # private key"), not a silent skip. CI must also never hold the production
+      # key (fork PRs get no secrets), so mint a throwaway keypair per job and
+      # rewrite the config's pubkey to match it. Nothing signed here is
+      # publishable: an artifact from this workflow will refuse to self-update
+      # against the real release feed, which is the intended behaviour for a
+      # test build. release.yml uses the real key.
+      - name: Generate ephemeral updater signing key
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Git Bash on Windows hands us a backslashed RUNNER_TEMP; normalise it.
+          tmp="$(cygpath -u "$RUNNER_TEMP" 2>/dev/null || printf '%s' "$RUNNER_TEMP")"
+          pnpm exec tauri signer generate --ci --force -w "$tmp/update.key"
+
+          pub="$(cat "$tmp/update.key.pub")"
+          [ -n "$pub" ] || { printf '::error::Ephemeral updater public key is empty.\n' >&2; exit 1; }
+
+          jq --arg pub "$pub" '.plugins.updater.pubkey = $pub' \
+            src-tauri/tauri.conf.json > src-tauri/tauri.conf.json.patched
+          mv src-tauri/tauri.conf.json.patched src-tauri/tauri.conf.json
+
+          # Tauri accepts either a path or the key itself in this variable; the
+          # key is a single base64 line, so passing the contents sidesteps every
+          # cross-platform path-quoting problem.
+          {
+            printf 'TAURI_SIGNING_PRIVATE_KEY<<EPHEMERAL_UPDATER_KEY\n'
+            cat "$tmp/update.key"
+            printf '\nEPHEMERAL_UPDATER_KEY\n'
+          } >> "$GITHUB_ENV"
+
+      # No release inputs => tauri-action builds the bundles and stops. It never
+      # touches the GitHub Releases API, so no token is needed.
+      - name: Build bundles
+        uses: tauri-apps/tauri-action@v0
+        env:
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+          # Ad-hoc sign on macOS, matching release.yml. Without it the .app is
+          # unsigned and refuses to launch on Apple silicon; with it the reviewer
+          # still has to clear the quarantine bit (`xattr -cr`) after download.
+          APPLE_SIGNING_IDENTITY: ${{ runner.os == 'macOS' && '-' || '' }}
+        with:
+          args: ${{ matrix.args }}
+
+      - name: Verify expected bundles exist
+        shell: bash
+        run: bash .github/scripts/verify-bundles.sh "${{ matrix.bundle-root }}" "${{ matrix.id }}"
+
+      # The *.sig files ride along on purpose: they are the only proof the
+      # updater artifacts were actually signed, so a signing regression shows up
+      # on the PR instead of at tag time.
+      - name: Upload bundles
+        uses: actions/upload-artifact@v4
+        with:
+          name: tervia-${{ matrix.id }}
+          path: |
+            ${{ matrix.bundle-root }}/appimage/*.AppImage
+            ${{ matrix.bundle-root }}/appimage/*.AppImage.sig
+            ${{ matrix.bundle-root }}/deb/*.deb
+            ${{ matrix.bundle-root }}/rpm/*.rpm
+            ${{ matrix.bundle-root }}/nsis/*-setup.exe
+            ${{ matrix.bundle-root }}/nsis/*-setup.exe.sig
+            ${{ matrix.bundle-root }}/dmg/*.dmg
+            ${{ matrix.bundle-root }}/macos/*.app.tar.gz
+            ${{ matrix.bundle-root }}/macos/*.app.tar.gz.sig
+          if-no-files-found: error
+          retention-days: 7
+          # The payload is already-compressed installers; re-deflating them costs
+          # minutes and saves nothing.
+          compression-level: 0
