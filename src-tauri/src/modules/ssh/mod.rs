@@ -228,35 +228,59 @@ fn pkcs1_cipher(text: &str) -> KeyFormat {
     KeyFormat::Other { encrypted: false }
 }
 
-fn classify(text: &str) -> KeyFormat {
+/// Classifies `text`, and also hands back the slice of it the winning marker
+/// actually starts at. That slice - not the full paste - is what the caller
+/// must feed to the real parser: `ssh_key::PrivateKey::from_openssh` (behind
+/// `KeyFormat::OpenSsh`) only understands one encapsulated PEM message and
+/// takes the label of whichever `-----BEGIN ...-----` line it meets first, so
+/// if an earlier public-key block's own label rides along, the *real* key's
+/// closing `-----END-----` no longer matches it and a good private key comes
+/// back unreadable. Trimming the paste down to "the winning marker onward"
+/// avoids that regardless of what came before it.
+fn classify(text: &str) -> (KeyFormat, &str) {
     // A private-key marker anywhere in the paste wins, even over a public-key
-    // line earlier in the text: a user pasting both halves out of one file
-    // listing should get the private key, not a "that is a public key" bounce.
-    for line in text.lines().map(str::trim) {
-        if line.starts_with("PuTTY-User-Key-File-") {
-            let encrypted = text.lines().any(|l| {
+    // marker earlier in the text - bare `.pub` line or PEM block alike: a user
+    // pasting both halves out of one file listing, or a PEM-reencoded public
+    // half (`ssh-keygen -e`) pasted above their real key, should get the
+    // private key, not a "that is a public key" bounce. So a public-key label
+    // only sets a pending verdict and keeps scanning; every other label is
+    // still a dead end the moment it is seen, same as before.
+    let mut pending_public = false;
+    // Walked one line at a time via `split_once`, rather than `text.lines()`,
+    // so `rest` stays a real slice of `text` running from the current line to
+    // the paste's end - exactly what a winning marker further down needs to
+    // hand back, with no byte-index arithmetic of our own.
+    let mut rest = text;
+    while !rest.is_empty() {
+        let (line, after) = rest.split_once('\n').unwrap_or((rest, ""));
+        let trimmed = line.trim();
+        if trimmed.starts_with("PuTTY-User-Key-File-") {
+            let encrypted = rest.lines().any(|l| {
                 l.trim()
                     .strip_prefix("Encryption:")
                     .is_some_and(|v| v.trim() != "none")
             });
-            return KeyFormat::Other { encrypted };
+            return (KeyFormat::Other { encrypted }, rest);
         }
-        let Some(label) = line
+        if let Some(label) = trimmed
             .strip_prefix("-----BEGIN ")
             .and_then(|l| l.strip_suffix("-----"))
-        else {
-            continue;
-        };
-        return match label {
-            "OPENSSH PRIVATE KEY" => KeyFormat::OpenSsh,
-            "DSA PRIVATE KEY" => KeyFormat::Dsa,
-            "EC PRIVATE KEY" => KeyFormat::Sec1,
-            "ENCRYPTED PRIVATE KEY" => KeyFormat::Other { encrypted: true },
-            "PRIVATE KEY" => KeyFormat::Other { encrypted: false },
-            "RSA PRIVATE KEY" => pkcs1_cipher(text),
-            "PUBLIC KEY" | "RSA PUBLIC KEY" | "SSH2 PUBLIC KEY" => KeyFormat::PublicKey,
-            _ => KeyFormat::Unknown,
-        };
+        {
+            match label {
+                "OPENSSH PRIVATE KEY" => return (KeyFormat::OpenSsh, rest),
+                "DSA PRIVATE KEY" => return (KeyFormat::Dsa, rest),
+                "EC PRIVATE KEY" => return (KeyFormat::Sec1, rest),
+                "ENCRYPTED PRIVATE KEY" => return (KeyFormat::Other { encrypted: true }, rest),
+                "PRIVATE KEY" => return (KeyFormat::Other { encrypted: false }, rest),
+                "RSA PRIVATE KEY" => return (pkcs1_cipher(rest), rest),
+                "PUBLIC KEY" | "RSA PUBLIC KEY" | "SSH2 PUBLIC KEY" => pending_public = true,
+                _ => return (KeyFormat::Unknown, rest),
+            }
+        }
+        rest = after;
+    }
+    if pending_public {
+        return (KeyFormat::PublicKey, text);
     }
 
     // No BEGIN marker and no PuTTY header anywhere: the only shapes left are
@@ -264,14 +288,14 @@ fn classify(text: &str) -> KeyFormat {
     // (which spells its delimiters with four dashes and spaces, not
     // `-----BEGIN `), and both are only ever public keys.
     let Some(first) = text.lines().map(str::trim).find(|l| !l.is_empty()) else {
-        return KeyFormat::Unknown;
+        return (KeyFormat::Unknown, text);
     };
     if PUBLIC_KEY_PREFIXES.iter().any(|p| first.starts_with(p))
         || first.starts_with("---- BEGIN SSH2 PUBLIC KEY ----")
     {
-        return KeyFormat::PublicKey;
+        return (KeyFormat::PublicKey, text);
     }
-    KeyFormat::Unknown
+    (KeyFormat::Unknown, text)
 }
 
 /// Everything `SshKeyInfo` can say about a key. Also runs on a still-encrypted
@@ -360,7 +384,11 @@ fn ssh_key_inspect_inner(pem: &str, passphrase: Option<&str>) -> Result<SshKeyIn
     }
     let pass = passphrase.filter(|p| !p.is_empty());
 
-    let encrypted = match classify(text) {
+    // `key_text` is `text` trimmed down to "the winning marker onward" - see
+    // `classify`'s own doc comment for why the two can differ and why the
+    // parse below must use `key_text`, not `text`.
+    let (format, key_text) = classify(text);
+    let encrypted = match format {
         KeyFormat::PublicKey => return Err(ERR_PUBLIC_KEY.into()),
         KeyFormat::Dsa => return Err(ERR_DSA.into()),
         KeyFormat::Sec1 => return Err(ERR_SEC1.into()),
@@ -369,7 +397,8 @@ fn ssh_key_inspect_inner(pem: &str, passphrase: Option<&str>) -> Result<SshKeyIn
         // openssh-key-v1 declares its cipher inside the container and parses
         // either way, so here the parse is what decides `encrypted`.
         KeyFormat::OpenSsh => {
-            let key = PrivateKey::from_openssh(text).map_err(|_| ERR_OPENSSH_BODY.to_string())?;
+            let key =
+                PrivateKey::from_openssh(key_text).map_err(|_| ERR_OPENSSH_BODY.to_string())?;
             if !key.is_encrypted() {
                 return Ok(key_info(&key, false));
             }
@@ -391,7 +420,7 @@ fn ssh_key_inspect_inner(pem: &str, passphrase: Option<&str>) -> Result<SshKeyIn
     if encrypted && pass.is_none() {
         return Ok(needs_passphrase());
     }
-    match russh::keys::decode_secret_key(text, pass) {
+    match russh::keys::decode_secret_key(key_text, pass) {
         Ok(key) => Ok(key_info(&key, encrypted)),
         // Backstop for a container that did not announce its encryption in a
         // header spelling `classify` recognises.
@@ -801,6 +830,40 @@ wjku8Bjzhc/ZHJ8MP4SAn9x5GySFuup/SKJ+E=
 AAAAC3NzaC1lZDI1NTE5AAAAIIV04PSMQuoltd8pxWSst9WNSgq6TbtLy8n97mOwx0fC locked@localhost
 ";
 
+    /// `ssh-keygen -e -m PKCS8` (or `openssl pkey -pubout`) over an unrelated
+    /// Ed25519 key: SubjectPublicKeyInfo, the PEM shape a user gets from
+    /// re-encoding their `.pub` file, not just the bare `ssh-ed25519 ...` line.
+    const PEM_PUBLIC_KEY: &str = "\
+-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEAbs85KIUTamLr4OvfDmLEO74OpTXKm6pyFFCLdlLhYd4=
+-----END PUBLIC KEY-----
+";
+
+    /// `openssl rsa -in key.pem -RSAPublicKey_out`: PKCS#1's own public form,
+    /// distinct from the SubjectPublicKeyInfo one above.
+    const PEM_RSA_PUBLIC_KEY: &str = "\
+-----BEGIN RSA PUBLIC KEY-----
+MIIBCgKCAQEAx1AI3he4sbMMg+T8xX7bwAdu2DWL6hQVhETToDeqJcWEORq/NDk0
+tjQNeoXC/RCerKA8XycykuF3Zezyr/+1qHhhUeOl2S+so65R9IH+LCzbp2sZFqG+
+qhEOb19emMcmlO7z1pmCfYx0dxuBqOJjIMS+tKr84+enWSaHyHet/aoMjUOXTJTO
+nqtJeMrRZZM7htLsycZ2bLkykuOfSfN0axbymKPz2EpOZ7O124PxzMfZIFSbaQjf
+zab6fud4hufXIrVuI6/hXANa/NxXQe1NG1YdFGy6O58Uh09hWxphRR66AJCWMfwf
+1O6JanFfHZGdO8dHMevhjJOoDl1LjjNY+wIDAQAB
+-----END RSA PUBLIC KEY-----
+";
+
+    /// The five-dash `-----BEGIN SSH2 PUBLIC KEY-----` spelling `classify`
+    /// matches in its main scan - distinct from the real RFC 4716 delimiter
+    /// (`---- BEGIN SSH2 PUBLIC KEY ----`, four dashes with a space) that only
+    /// the no-BEGIN-marker fallback recognises. Body content is never parsed
+    /// for a `PublicKey` verdict, so any base64-shaped filler is fine.
+    const PEM_SSH2_PUBLIC_KEY: &str = "\
+-----BEGIN SSH2 PUBLIC KEY-----
+Comment: \"locked@localhost\"
+AAAAC3NzaC1lZDI1NTE5AAAAIIV04PSMQuoltd8pxWSst9WNSgq6TbtLy8n97mOwx0fC
+-----END SSH2 PUBLIC KEY-----
+";
+
     /// `openssl pkcs8 -topk8 -v2 aes-256-cbc` over an Ed25519 key. PKCS#8 seals
     /// the public half too, which is what makes it the `parsed: false` case.
     const LOCKED_PKCS8: &str = "\
@@ -1056,6 +1119,44 @@ Ym9ndXMgYm9keSwgbmV2ZXIgcmVhY2hlZA==
             info.fingerprint.as_deref(),
             Some("SHA256:dbLm8WcA5UjVznFwZUkhFoL/umm2mBsxo6H46sYI3yc")
         );
+    }
+
+    /// The PEM-block counterpart to the test above. The comment on `classify`
+    /// claims a private-key marker anywhere in the paste wins "even over a
+    /// public-key line earlier in the text", but the old scan returned on the
+    /// first `-----BEGIN ...-----` it saw - so a PEM public-key block (say,
+    /// from `ssh-keygen -e -m PKCS8`) pasted ahead of the real private key
+    /// still bounced with the public-key message, never reaching the private
+    /// key below it. This is the gap the bare-`.pub`-line test above does not
+    /// cover.
+    #[test]
+    fn pem_public_key_block_does_not_shadow_a_following_private_key() {
+        let err = ssh_key_inspect_inner(PEM_PUBLIC_KEY, None)
+            .expect_err("a lone PEM public key is not a key");
+        assert!(err.contains("public key"), "{err}");
+
+        let pasted_both = format!("{PEM_PUBLIC_KEY}{LOCKED_ED25519}");
+        let info = ssh_key_inspect_inner(&pasted_both, None)
+            .expect("the private key after the PEM public block must still parse");
+        assert!(info.parsed);
+        assert!(info.encrypted);
+        assert_eq!(info.key_type.as_deref(), Some("ssh-ed25519"));
+        assert_eq!(
+            info.fingerprint.as_deref(),
+            Some("SHA256:dbLm8WcA5UjVznFwZUkhFoL/umm2mBsxo6H46sYI3yc")
+        );
+    }
+
+    /// Every PEM public-key label `classify` recognises - not just the one
+    /// used above - must still be refused with the public-key message when it
+    /// really is the only thing pasted.
+    #[test]
+    fn every_pem_public_key_label_alone_gets_the_public_key_message() {
+        for pem in [PEM_PUBLIC_KEY, PEM_RSA_PUBLIC_KEY, PEM_SSH2_PUBLIC_KEY] {
+            let err =
+                ssh_key_inspect_inner(pem, None).expect_err("a PEM public-key block is not a key");
+            assert!(err.contains("public key"), "{pem}: {err}");
+        }
     }
 
     /// Both dead ends read "truncated or altered" in similar words, and
