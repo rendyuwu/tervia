@@ -229,24 +229,18 @@ fn pkcs1_cipher(text: &str) -> KeyFormat {
 }
 
 fn classify(text: &str) -> KeyFormat {
-    let Some(first) = text.lines().map(str::trim).find(|l| !l.is_empty()) else {
-        return KeyFormat::Unknown;
-    };
-    if PUBLIC_KEY_PREFIXES.iter().any(|p| first.starts_with(p))
-        // RFC 4716 spells its delimiters with four dashes and spaces.
-        || first.starts_with("---- BEGIN SSH2 PUBLIC KEY ----")
-    {
-        return KeyFormat::PublicKey;
-    }
-    if first.starts_with("PuTTY-User-Key-File-") {
-        let encrypted = text.lines().any(|l| {
-            l.trim()
-                .strip_prefix("Encryption:")
-                .is_some_and(|v| v.trim() != "none")
-        });
-        return KeyFormat::Other { encrypted };
-    }
+    // A private-key marker anywhere in the paste wins, even over a public-key
+    // line earlier in the text: a user pasting both halves out of one file
+    // listing should get the private key, not a "that is a public key" bounce.
     for line in text.lines().map(str::trim) {
+        if line.starts_with("PuTTY-User-Key-File-") {
+            let encrypted = text.lines().any(|l| {
+                l.trim()
+                    .strip_prefix("Encryption:")
+                    .is_some_and(|v| v.trim() != "none")
+            });
+            return KeyFormat::Other { encrypted };
+        }
         let Some(label) = line
             .strip_prefix("-----BEGIN ")
             .and_then(|l| l.strip_suffix("-----"))
@@ -263,6 +257,19 @@ fn classify(text: &str) -> KeyFormat {
             "PUBLIC KEY" | "RSA PUBLIC KEY" | "SSH2 PUBLIC KEY" => KeyFormat::PublicKey,
             _ => KeyFormat::Unknown,
         };
+    }
+
+    // No BEGIN marker and no PuTTY header anywhere: the only shapes left are
+    // a bare `.pub` / authorized_keys line and the RFC 4716 public format
+    // (which spells its delimiters with four dashes and spaces, not
+    // `-----BEGIN `), and both are only ever public keys.
+    let Some(first) = text.lines().map(str::trim).find(|l| !l.is_empty()) else {
+        return KeyFormat::Unknown;
+    };
+    if PUBLIC_KEY_PREFIXES.iter().any(|p| first.starts_with(p))
+        || first.starts_with("---- BEGIN SSH2 PUBLIC KEY ----")
+    {
+        return KeyFormat::PublicKey;
     }
     KeyFormat::Unknown
 }
@@ -320,6 +327,8 @@ const ERR_UNREADABLE: &str =
     "ssh: could not read this private key - the block looks truncated, altered, or uses an \
      unsupported cipher";
 const ERR_WRONG_PASSPHRASE: &str = "ssh: wrong passphrase for this private key";
+const ERR_PASSPHRASE_OR_CORRUPT: &str =
+    "ssh: wrong passphrase for this private key, or the encrypted block is truncated or corrupt";
 
 /// Describe a private key the user just pasted or picked, without connecting.
 /// Backs the vault's key editor, which stores the algorithm, fingerprint and
@@ -387,9 +396,14 @@ fn ssh_key_inspect_inner(pem: &str, passphrase: Option<&str>) -> Result<SshKeyIn
         // Backstop for a container that did not announce its encryption in a
         // header spelling `classify` recognises.
         Err(russh::keys::Error::KeyIsEncrypted) if pass.is_none() => Ok(needs_passphrase()),
-        // Only reachable with a passphrase supplied, so it is the one thing
-        // left to blame.
-        Err(_) if encrypted => Err(ERR_WRONG_PASSPHRASE.into()),
+        // PKCS#8's own truncation does surface as a distinct DER error, but
+        // PKCS#1 under AES-128-CBC - the other format that reaches this
+        // branch - fails a truncated body and a wrong passphrase identically
+        // (both trip the same padding error). `encrypted` alone cannot tell
+        // which format this was, so splitting on the crate's error variant
+        // would be right for one and confidently wrong for the other. Name
+        // both possibilities instead of picking.
+        Err(_) if encrypted => Err(ERR_PASSPHRASE_OR_CORRUPT.into()),
         Err(_) => Err(ERR_UNREADABLE.into()),
     }
 }
@@ -751,7 +765,10 @@ pub async fn ssh_git(
 
 #[cfg(test)]
 mod tests {
-    use super::{last_line, shell_quote, ssh_key_inspect_inner};
+    use super::{
+        last_line, shell_quote, ssh_key_inspect_inner, ERR_OPENSSH_BODY, ERR_PASSPHRASE_OR_CORRUPT,
+        ERR_UNREADABLE, ERR_WRONG_PASSPHRASE,
+    };
 
     /// `ssh-keygen -t ed25519 -N '' -C tervia-test@localhost`.
     const PLAIN_ED25519: &str = "\
@@ -792,6 +809,31 @@ MIGbMFcGCSqGSIb3DQEFDTBKMCkGCSqGSIb3DQEFDDAcBAgwfFRyLE9zWAICCAAw
 DAYIKoZIhvcNAgkFADAdBglghkgBZQMEASoEELjoxHK6zugwvcWrUOvS+BgEQL2v
 mK+rW02yV3neLVo54432BYqBtEx0YS330rlSCGuoCr/xtFkRhVmIomUdBkLAHLaW
 NFLh6spvancYRsI2aeg=
+-----END ENCRYPTED PRIVATE KEY-----
+";
+
+    /// Unlike `LOCKED_PKCS8` above, this one's passphrase is known, so a test
+    /// can prove a successful decrypt rather than only the locked state.
+    /// `openssl genpkey -algorithm ed25519 | openssl pkcs8 -topk8 -v2 \
+    /// aes-256-cbc -passout pass:"correct horse"`.
+    const PKCS8_WITH_PASSPHRASE: &str = "\
+-----BEGIN ENCRYPTED PRIVATE KEY-----
+MIGbMFcGCSqGSIb3DQEFDTBKMCkGCSqGSIb3DQEFDDAcBAikhE7BR4YNCAICCAAw
+DAYIKoZIhvcNAgkFADAdBglghkgBZQMEASoEEKIjpvTXc999fuVotdE2JkMEQMCP
+ofFkAiIlNcNnazc463ZNbpAlYoNR+P8z5ZoTM4HIZKbYN5Mv52sNyVzkTsRR+Gm5
+KNd5sJnk8aPMfCfuMgw=
+-----END ENCRYPTED PRIVATE KEY-----
+";
+
+    const PKCS8_PASSPHRASE: &str = "correct horse";
+
+    /// `PKCS8_WITH_PASSPHRASE` with its last body line cut - a paste stopped
+    /// short before the `-----END` marker.
+    const PKCS8_TRUNCATED: &str = "\
+-----BEGIN ENCRYPTED PRIVATE KEY-----
+MIGbMFcGCSqGSIb3DQEFDTBKMCkGCSqGSIb3DQEFDDAcBAikhE7BR4YNCAICCAAw
+DAYIKoZIhvcNAgkFADAdBglghkgBZQMEASoEEKIjpvTXc999fuVotdE2JkMEQMCP
+ofFkAiIlNcNnazc463ZNbpAlYoNR+P8z5ZoTM4HIZKbYN5Mv52sNyVzkTsRR+Gm5
 -----END ENCRYPTED PRIVATE KEY-----
 ";
 
@@ -968,6 +1010,74 @@ Ym9ndXMgYm9keSwgbmV2ZXIgcmVhY2hlZA==
         msgs.sort();
         msgs.dedup();
         assert_eq!(msgs.len(), total, "duplicate message: {msgs:?}");
+    }
+
+    /// The bug this guards: a truncated PKCS#8 block paired with the
+    /// *correct* passphrase used to be told "wrong passphrase" forever,
+    /// because `decode_secret_key` folds parsing and decrypting into one
+    /// call. The widened message must name truncation/corruption as a
+    /// possibility and must not collapse onto the plain wrong-passphrase
+    /// message used elsewhere.
+    #[test]
+    fn truncated_pkcs8_with_the_right_passphrase_names_truncation_too() {
+        // Sanity check: the untruncated key with its real passphrase parses,
+        // so the truncated case below is testing truncation, not a typo.
+        ssh_key_inspect_inner(PKCS8_WITH_PASSPHRASE, Some(PKCS8_PASSPHRASE))
+            .expect("full key with its real passphrase parses");
+
+        let err = ssh_key_inspect_inner(PKCS8_TRUNCATED, Some(PKCS8_PASSPHRASE))
+            .expect_err("a truncated block is still unreadable, even with the right passphrase");
+        assert!(
+            err.contains("truncated") || err.contains("corrupt"),
+            "{err}"
+        );
+        assert!(err.contains("passphrase"), "{err}");
+        assert_ne!(err, ERR_WRONG_PASSPHRASE);
+        assert_eq!(err, ERR_PASSPHRASE_OR_CORRUPT);
+    }
+
+    /// The other bug this guards: `classify` used to sniff only the first
+    /// line, so a public key pasted ahead of its own private key made the
+    /// private key unreachable. A private-key marker anywhere in the paste
+    /// must win - but a paste that really is only a public key must still be
+    /// refused, so both directions of the fix are checked here.
+    #[test]
+    fn public_key_line_does_not_shadow_a_following_private_key() {
+        let err = ssh_key_inspect_inner(LOCKED_PUB, None).expect_err("a lone .pub is not a key");
+        assert!(err.contains("public key"), "{err}");
+
+        let pasted_both = format!("{LOCKED_PUB}{LOCKED_ED25519}");
+        let info = ssh_key_inspect_inner(&pasted_both, None)
+            .expect("the private key after the public line must still parse");
+        assert!(info.parsed);
+        assert!(info.encrypted);
+        assert_eq!(info.key_type.as_deref(), Some("ssh-ed25519"));
+        assert_eq!(
+            info.fingerprint.as_deref(),
+            Some("SHA256:dbLm8WcA5UjVznFwZUkhFoL/umm2mBsxo6H46sYI3yc")
+        );
+    }
+
+    /// Both dead ends read "truncated or altered" in similar words, and
+    /// `every_dead_end_has_a_distinct_message` above never exercises this
+    /// pair: `ERR_OPENSSH_BODY` comes from `from_openssh` failing before any
+    /// passphrase is involved, `ERR_UNREADABLE` from `decode_secret_key`
+    /// failing on an unencrypted, non-OpenSSH format.
+    #[test]
+    fn openssh_body_and_unreadable_are_distinct_and_both_reachable() {
+        let openssh_err = ssh_key_inspect_inner(
+            "-----BEGIN OPENSSH PRIVATE KEY-----\nbm90IGEga2V5\n-----END OPENSSH PRIVATE KEY-----",
+            None,
+        )
+        .expect_err("garbage openssh-v1 body");
+        let unreadable_err = ssh_key_inspect_inner(
+            "-----BEGIN PRIVATE KEY-----\n!!!!\n-----END PRIVATE KEY-----",
+            None,
+        )
+        .expect_err("garbage pkcs8 body");
+        assert_eq!(openssh_err, ERR_OPENSSH_BODY);
+        assert_eq!(unreadable_err, ERR_UNREADABLE);
+        assert_ne!(openssh_err, unreadable_err);
     }
 
     /// The rc-noise guard: a chatty remote `~/.bashrc` prepends its own output
