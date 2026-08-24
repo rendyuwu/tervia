@@ -139,11 +139,21 @@ export type VaultIdentityBinding = { kind: "identity"; identityId: string };
  * SSH credentials one host owns alone. Flags only - the secrets themselves live
  * under `tervia-hosts :: <hostId>::<field>`.
  *
- * `hostId` is part of the binding rather than a second argument alongside it. It
- * used to be the latter, and every call site then had to keep the pair in sync by
- * hand: pass the wrong id and resolution reads a DIFFERENT host's accounts, with
- * no error anywhere - the wrong password, or none, at the handshake. In here the
- * pair cannot come apart.
+ * `hostId` is part of the binding rather than a second argument alongside it,
+ * which removes the RESOLVE-time mismatch entirely: no call site can hand the
+ * resolver one host's binding and another host's id.
+ *
+ * It does NOT remove the mismatch, it moves it to write time, where nothing in
+ * the type system catches it. The live hazard is a spread copy: a duplicate-host
+ * action written as `{ ...source, id: newId() }` carries `hostId` verbatim, so the
+ * copy's binding names the SOURCE host. Resolution then reads the source's
+ * accounts while the copy's own secrets sit under the new id, unread - rotating
+ * the source's password changes the copy's, and deleting the source deletes what
+ * the copy authenticates with. No error anywhere.
+ *
+ * So the pair is enforced on WRITE, by the host store, which must call
+ * {@link assertBindingOwner} on every upsert; a duplicate must rewrite `hostId`
+ * alongside `id`. This type is not the enforcement and cannot be.
  */
 export type SshInlineCredentials = {
   kind: "inline";
@@ -166,18 +176,50 @@ export type RdpInlineCredentials = {
   hasPassword: boolean;
 };
 
+/**
+ * How a host proves who it is: a shared identity, or credentials it owns itself.
+ *
+ * These live HERE, not in the host module, and the host module imports them:
+ * `resolve.ts` is what turns one of these into something the connect path can use,
+ * so it owns them. The inline arm is protocol-specific because the two protocols
+ * have genuinely different invariants - SSH needs an auth mode, RDP needs a domain.
+ *
+ * Two unions, and deliberately NO third one combining them: both inline arms carry
+ * `kind: "inline"`, so a combined union does not narrow - a `kind === "inline"`
+ * guard over it leaves `SshInlineCredentials | RdpInlineCredentials`, where `user`
+ * and `username` are each a type error. A host record holds one of each instead.
+ */
 export type SshCredentialBinding = VaultIdentityBinding | SshInlineCredentials;
 export type RdpCredentialBinding = VaultIdentityBinding | RdpInlineCredentials;
 
 /**
- * How a host proves who it is: a shared identity, or credentials it owns itself.
+ * Refuse a binding whose `hostId` names a host other than the one storing it.
  *
- * Lives HERE, not in the host module, and the host module imports it: `resolve.ts`
- * is what turns one of these into something the connect path can use, so it owns
- * the union. The inline arm is protocol-specific because the two protocols have
- * genuinely different invariants - SSH needs an auth mode, RDP needs a domain.
+ * The write-time half of the invariant {@link SshInlineCredentials} describes, and
+ * the only half there is: call this on EVERY host upsert, for every binding the
+ * record carries. Nothing else can catch a spread copy that took `hostId` along.
+ *
+ * `ownerId` is a required parameter for the reason {@link IdentityHostRefs} is:
+ * a caller allowed to omit it would skip the guard silently, and the guard is the
+ * only thing standing between a duplicated host and secrets it shares with the
+ * original without saying so. Both ids must be present - `"" === ""` would
+ * otherwise pass a half-built record straight through.
  */
-export type CredentialBinding = SshCredentialBinding | RdpCredentialBinding;
+export function assertBindingOwner(
+  binding: SshCredentialBinding | RdpCredentialBinding,
+  ownerId: string,
+): void {
+  if (binding.kind !== "inline") return;
+  if (!ownerId || !binding.hostId) {
+    throw new Error("vault: inline credentials need a host id on both sides to be checked");
+  }
+  if (binding.hostId !== ownerId) {
+    throw new Error(
+      `vault: inline credentials belong to host ${binding.hostId} but are being stored on ` +
+        `host ${ownerId} - a copy that did not rewrite hostId reads the ORIGINAL host's secrets`,
+    );
+  }
+}
 
 /** Something that holds a reference, named well enough for a refusal to be
  *  actionable rather than merely correct. */
@@ -186,9 +228,9 @@ export type VaultRef = { id: string; name: string };
 /**
  * The hosts that reference one identity.
  *
- * INJECTED, never imported. The host store does not exist yet, and once it does
- * it will import {@link CredentialBinding} from this module - so a vault -> hosts
- * import would close a cycle. The wiring is
+ * INJECTED, never imported. The host store does not exist yet, and once it does it
+ * will import {@link SshCredentialBinding} and {@link RdpCredentialBinding} from
+ * this module - so a vault -> hosts import would close a cycle. The wiring is
  * `(id) => listHosts().then((hosts) => hosts.filter(usesIdentity(id)).map(toRef))`.
  *
  * Required, never optional: a caller allowed to pass nothing would silently skip

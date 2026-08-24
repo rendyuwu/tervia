@@ -18,7 +18,7 @@ import {
   type VaultKey,
 } from "./types";
 
-// One module, one job: turn a `CredentialBinding` into what the connect path
+// One module, one job: turn a credential binding into what the connect path
 // needs.
 //
 // Two output shapes, because the two protocols have genuinely different
@@ -37,7 +37,7 @@ import {
 //
 // This module deliberately imports NOTHING from another feature module. The
 // dependency direction is vault <- hosts: `modules/hosts` imports the binding
-// union and the two output types from here, never the reverse. So the SSH
+// unions and the two output types from here, never the reverse. So the SSH
 // credential shape and the auth-mode mapping that fills it are DECLARED here
 // rather than borrowed from a connection store, which is also what lets them
 // outlive one.

@@ -86,20 +86,9 @@ function sameName(a: string, b: string): boolean {
 }
 
 export function createVaultStore(io: VaultIo): VaultStore {
-  // Serialize every mutation through one chain so concurrent callers cannot
-  // interleave a read-modify-write and lose an update. Same reasoning as the SSH
-  // and RDP stores, and the vault makes the race easy to hit: a page with inline
-  // edits fires one of these per field the user leaves.
-  let writeQueue: Promise<unknown> = Promise.resolve();
-  function enqueueWrite<T>(op: () => Promise<T>): Promise<T> {
-    const run = writeQueue.then(op, op);
-    // Keep the chain alive regardless of any single op's outcome.
-    writeQueue = run.then(
-      () => undefined,
-      () => undefined,
-    );
-    return run;
-  }
+  // Every mutation is serialized by the store port, not here: the queue only means
+  // anything if there is one of it per store FILE, so it belongs beside the file.
+  const enqueueWrite = <T>(op: () => Promise<T>): Promise<T> => io.store.enqueueWrite(op);
 
   async function listIdentities(): Promise<VaultIdentity[]> {
     const raw = await io.store.get<VaultIdentity[]>(VAULT_IDENTITIES_KEY);
@@ -147,6 +136,68 @@ export function createVaultStore(io: VaultIo): VaultStore {
     return true;
   }
 
+  /**
+   * A key's two secrets, with both accounts cleared again if either write throws.
+   *
+   * The hole this closes: `privateKey` lands, `passphrase` throws, and the PEM
+   * then sits at `<key.id>::privateKey` with no record naming it - the "bytes no
+   * code path can enumerate or delete" case the module header opens with, and
+   * literally unenumerable, since there is no `secrets_list` command. The required
+   * key name closed the blank-name route into that hole; this closes the failure
+   * route.
+   *
+   * Rolled back only for a record that did not exist before, which is what makes
+   * it safe: for an id the store has never seen there was nothing at these
+   * accounts to lose, and `secrets_delete` reports an absent account as success.
+   * For a record that DOES exist the accounts stay reachable through `deleteKey`,
+   * and clearing them would destroy a stored secret this layer cannot put back -
+   * it never reads one, so it holds no previous value. That case is metadata
+   * drift, already registered as VLT-22, not an orphan.
+   *
+   * A failing rollback is swallowed - the only swallow in this module. The caller
+   * is already rethrowing the write's own error, which is the one the user can act
+   * on, and a keychain that refused the write usually refuses this too. What
+   * survives that is VLT-23.
+   */
+  async function writeKeySecrets(
+    key: VaultKey,
+    secrets: { privateKey?: SecretInput; passphrase?: SecretInput },
+    existing: VaultKey | undefined,
+  ): Promise<VaultKey> {
+    try {
+      return {
+        ...key,
+        hasPrivateKey: await writeSecret(
+          io.secrets,
+          key.id,
+          KEY_PRIVATE_KEY_FIELD,
+          secrets.privateKey,
+          existing?.hasPrivateKey ?? false,
+        ),
+        hasPassphrase: await writeSecret(
+          io.secrets,
+          key.id,
+          KEY_PASSPHRASE_FIELD,
+          secrets.passphrase,
+          existing?.hasPassphrase ?? false,
+        ),
+      };
+    } catch (e) {
+      if (!existing) {
+        try {
+          await Promise.all(
+            VAULT_KEY_SECRET_FIELDS.map((field) =>
+              io.secrets.delete(VAULT_KEYRING_SERVICE, vaultAccount(key.id, field)),
+            ),
+          );
+        } catch {
+          // See above: replacing the real error with this one hides the reason.
+        }
+      }
+      throw e;
+    }
+  }
+
   async function upsertIdentity(
     identity: VaultIdentity,
     secrets: { password?: SecretInput },
@@ -166,6 +217,8 @@ export function createVaultStore(io: VaultIo): VaultStore {
       }
 
       const existing = identities.find((i) => i.id === identity.id);
+      // No rollback here, and none needed: an identity owns ONE secret, so a write
+      // that throws wrote nothing. The multi-write hole is `upsertKey`'s alone.
       const record: VaultIdentity = {
         ...identity,
         hasPassword: await writeSecret(
@@ -206,28 +259,17 @@ export function createVaultStore(io: VaultIo): VaultStore {
       const clash = keys.find((k) => k.id !== key.id && sameName(k.name, key.name));
       const warning = clash ? `another key is already named "${clash.name}"` : undefined;
 
-      const record: VaultKey = {
-        ...key,
-        hasPrivateKey: await writeSecret(
-          io.secrets,
-          key.id,
-          KEY_PRIVATE_KEY_FIELD,
-          secrets.privateKey,
-          existing?.hasPrivateKey ?? false,
-        ),
-        hasPassphrase: await writeSecret(
-          io.secrets,
-          key.id,
-          KEY_PASSPHRASE_FIELD,
-          secrets.passphrase,
-          existing?.hasPassphrase ?? false,
-        ),
-      };
+      const record = await writeKeySecrets(key, secrets, existing);
 
       const next = [...keys];
       const idx = next.findIndex((k) => k.id === key.id);
       if (idx >= 0) next[idx] = record;
       else next.push(record);
+      // A `persist` that throws is deliberately NOT rolled back. `LazyStore` runs
+      // with `autoSave`, so the record is already in the plugin's cache with a
+      // debounced retry behind it - deleting the secrets here would race that into
+      // a record whose flags name material that is gone, permanently, since the
+      // flags are never read back. Orphaned on a failure that never clears: VLT-23.
       await persist(VAULT_KEYS_KEY, next);
       return warning ? { record, warning } : { record };
     });

@@ -18,10 +18,11 @@ import type { FsReadResult } from "./ipc";
 // the keychain with no record naming it - bytes no code path can enumerate or
 // delete.
 //
-// The mitigation is a `.bak` snapshot after each good load plus a check before
-// the first read, and it needs no new Rust: `fs_read_file` and `fs_write_file`
-// already exist, and the latter goes through the app's own atomic
-// temp-plus-rename path.
+// The mitigation is a check before the first read plus a `.bak` snapshot after
+// each good SAVE - not after each good load, which would leave the session that
+// CREATES the file with no snapshot at all, since at first load there is nothing
+// to copy. It needs no new Rust: `fs_read_file` and `fs_write_file` already exist,
+// and the latter goes through the app's own atomic temp-plus-rename path.
 //
 // EVERY function here is total: it reports a filesystem it could not work with
 // instead of rejecting. A caller that caches the promise of this work - which is

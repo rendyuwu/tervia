@@ -51,12 +51,24 @@
  *    proved the file good can copy a torn file over the last good one, and a load
  *    that happens before recovery has already decided the file was worthless.
  *
+ * 8. AN INLINE BINDING NAMES THE HOST STORING IT. Carrying `hostId` inside the
+ *    binding removes the resolve-time mismatch and MOVES it to write time, where
+ *    nothing in the type system catches it: a spread copy is a well-typed way to
+ *    hand a duplicate the original's `hostId`, after which the copy authenticates
+ *    as the original and shares its secrets without saying so.
+ *
+ * 9. A SECRET IS NEVER LEFT WITH NO RECORD NAMING IT. `upsertKey` writes two
+ *    secrets before it persists, so a throw on the second used to leave the
+ *    private key at an account nothing would ever enumerate - there is no
+ *    `secrets_list` command, so "unreferenced" means unreachable.
+ *
  * The store, secrets, filesystem, plugin store and event bus are all injectable
  * ports, so all of this runs under plain node with no Tauri runtime and no
  * mocking library.
  */
 import {
   createRecoveredStore,
+  createWriteQueue,
   type KeyValueStore,
   type StoreBroadcast,
 } from "../src/lib/recoveredStore";
@@ -72,6 +84,7 @@ import type { SecretsIo, VaultStoreIo } from "../src/modules/vault/adapters";
 import { resolveRdpAuth, resolveSshAuth, type ResolveDeps } from "../src/modules/vault/resolve";
 import { createVaultStore } from "../src/modules/vault/store";
 import {
+  assertBindingOwner,
   VaultInUseError,
   type RdpInlineCredentials,
   type SshInlineCredentials,
@@ -124,8 +137,17 @@ async function rejects(
 
 type SecretCall = { op: "getAll" | "set" | "delete"; service: string; accounts: string[] };
 
+/** A step that throws, to reach the partial-failure paths. `setAccount` is the
+ *  keychain account whose write fails; `commit` fails the store persist. */
+type Fail = { setAccount?: string; commit?: string };
+
 function harness(
-  seed: { identities?: VaultIdentity[]; keys?: VaultKey[]; notice?: StoreRecovery } = {},
+  seed: {
+    identities?: VaultIdentity[];
+    keys?: VaultKey[];
+    notice?: StoreRecovery;
+    fail?: Fail;
+  } = {},
 ) {
   const data: Record<string, unknown> = {
     identities: seed.identities ?? [],
@@ -151,9 +173,13 @@ function harness(
       data[key] = value;
     },
     async commit(): Promise<void> {
+      if (seed.fail?.commit) throw new Error(seed.fail.commit);
       commits++;
       for (const l of listeners) l();
     },
+    // The REAL queue, so the serialization checks below exercise the shipped one
+    // rather than a copy of it living in this file.
+    enqueueWrite: createWriteQueue(),
     async onChanged(cb: () => void): Promise<() => void> {
       listeners.add(cb);
       return () => void listeners.delete(cb);
@@ -169,6 +195,7 @@ function harness(
     },
     async set(service, account, value) {
       calls.push({ op: "set", service, accounts: [account] });
+      if (seed.fail?.setAccount === account) throw new Error(`keychain refused ${account}`);
       kept.set(`${service}::${account}`, value);
     },
     async delete(service, account) {
@@ -460,6 +487,129 @@ console.log("\n[integrity] deleting something still in use is refused, and names
 }
 
 // ---------------------------------------------------------------------------
+console.log("\n[owner] an inline binding must name the host that is storing it");
+{
+  // Putting `hostId` inside the binding removes the RESOLVE-time mismatch and
+  // moves it to write time, where only this guard catches it. The type system
+  // cannot: a spread copy is a perfectly well-typed way to get it wrong.
+  assertBindingOwner(sshInline(), "h-9");
+  console.log("  ok: a binding stored on its own host passes");
+  assertBindingOwner({ kind: "identity", identityId: "i-1" }, "h-9");
+  console.log("  ok: a reference binding carries no hostId to check");
+
+  await rejects(
+    "a binding stored on a different host is refused, naming both",
+    async () => assertBindingOwner(sshInline(), "h-copy"),
+    ["h-9", "h-copy", "hostId"],
+  );
+  await rejects(
+    "the RDP arm is checked the same way",
+    async () => assertBindingOwner(rdpInline(), "h-43"),
+    ["h-42", "h-43"],
+  );
+
+  // Fails closed rather than vacuously: `"" === ""` would wave a half-built
+  // record straight through.
+  await rejects(
+    "a blank id on both sides is refused, not counted as a match",
+    async () => assertBindingOwner(sshInline({ hostId: "" }), ""),
+    ["host id on both sides"],
+  );
+  await rejects(
+    "and a blank hostId against a real owner too",
+    async () => assertBindingOwner(sshInline({ hostId: "" }), "h-9"),
+    ["host id on both sides"],
+  );
+  // The parameter is required, so a caller omitting it is a type error - but the
+  // guard is the last thing between a duplicate and the original's secrets, so it
+  // refuses at RUNTIME too rather than trusting the call site.
+  await rejects(
+    "an ownerId that is not there at all fails closed",
+    async () => assertBindingOwner(sshInline(), undefined as unknown as string),
+    ["host id on both sides"],
+  );
+  await rejects(
+    "and one that is not a string does too",
+    async () => assertBindingOwner(sshInline(), 9 as unknown as string),
+    ["h-9"],
+  );
+
+  // THE case this exists for. `{ ...source, id: newId() }` is how a duplicate-host
+  // action is written, and it carries `hostId` straight over.
+  const source = { id: "h-9", ssh: sshInline({ authMode: "password", hasPassword: true }) };
+  const copy = { ...source, id: "h-copy" };
+  await rejects(
+    "a spread copy that kept the source's hostId is refused on write",
+    async () => assertBindingOwner(copy.ssh, copy.id),
+    ["h-9", "h-copy"],
+  );
+  const fixed = { ...copy, ssh: { ...copy.ssh, hostId: copy.id } };
+  assertBindingOwner(fixed.ssh, fixed.id);
+  console.log("  ok: rewriting hostId alongside id is what makes the copy legal");
+
+  // And why it matters, measured rather than asserted: without the rewrite the
+  // copy authenticates as the SOURCE, so rotating one password changes both and
+  // deleting the source breaks the copy.
+  const h = harness();
+  h.kept.set("tervia-hosts::h-9::password", "source-pw");
+  h.kept.set("tervia-hosts::h-copy::password", "copy-pw");
+  check(
+    "an unrewritten hostId reads the source host's password",
+    (await resolveSshAuth(copy.ssh, h.deps())).password,
+    "source-pw",
+  );
+  check(
+    "where the rewritten one reads the copy's own",
+    (await resolveSshAuth(fixed.ssh, h.deps())).password,
+    "copy-pw",
+  );
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n[orphans] a key whose second secret fails to write leaves nothing behind");
+{
+  // `upsertKey` writes `privateKey`, then `passphrase`, then persists. A throw on
+  // the second write used to leave the PEM at `<id>::privateKey` with no record
+  // naming it - and there is no `secrets_list` command, so nothing could ever
+  // enumerate or delete it.
+  const h = harness({ fail: { setAccount: "k-1::passphrase" } });
+  await rejects(
+    "a passphrase write that fails takes the whole upsert with it",
+    () => h.vault.upsertKey(vaultKey(), { privateKey: "PEM", passphrase: "pp" }),
+    ["keychain refused"],
+  );
+  check("no record was persisted", (h.data.keys as VaultKey[]).length, 0);
+  check(
+    "and the private key written first was cleared again",
+    h.kept.has("tervia-vault::k-1::privateKey"),
+    false,
+  );
+
+  // An EXISTING record is deliberately left alone: its accounts stay reachable
+  // through `deleteKey`, and this layer never reads a secret back, so it has no
+  // previous value to restore - clearing them would destroy the stored key.
+  const stored = harness({
+    keys: [vaultKey({ hasPrivateKey: true })],
+    fail: { setAccount: "k-1::passphrase" },
+  });
+  stored.kept.set("tervia-vault::k-1::privateKey", "OLD-PEM");
+  await rejects(
+    "the same failure on an existing key still rejects",
+    () =>
+      stored.vault.upsertKey(vaultKey({ hasPrivateKey: true }), {
+        privateKey: "NEW",
+        passphrase: "pp",
+      }),
+    ["keychain refused"],
+  );
+  check(
+    "but does NOT clear material it cannot put back",
+    stored.kept.get("tervia-vault::k-1::privateKey"),
+    "NEW",
+  );
+}
+
+// ---------------------------------------------------------------------------
 console.log("\n[queue] concurrent writes are serialized, not interleaved");
 {
   // Two upserts in the same tick both read-modify-write the same list. Without
@@ -706,12 +856,23 @@ const SNAPSHOT = PRIMARY + SNAPSHOT_SUFFIX;
 const text = (content: string): StoreFileRead => ({ kind: "text", content });
 const label = (path: string) => (path.endsWith(SNAPSHOT_SUFFIX) ? "snapshot" : "primary");
 
-/** Faults the real filesystem produces and the old delete-then-copy could not
- *  survive: a data directory that will not resolve, and a write that is refused. */
-type FsFault = { dir?: string; write?: { suffix: string; message: string } };
+/**
+ * Faults the real filesystem produces and the old delete-then-copy could not
+ * survive: a data directory that will not resolve, and a write that is refused.
+ *
+ * `slowWrite` is the third one - a copy an antivirus or an indexer is sitting on,
+ * long enough that more commits land while it is in flight. One-shot, so the
+ * trailing pass that follows it is not held too.
+ */
+type FsFault = {
+  dir?: string;
+  write?: { suffix: string; message: string };
+  slowWrite?: { suffix: string; until: Promise<void> };
+};
 
 function memFs(files: Record<string, StoreFileRead>, fault: FsFault = {}, log: string[] = []) {
   const written: string[] = [];
+  let slow = fault.slowWrite;
   const io: StoreFileIo = {
     dir: async () => {
       if (fault.dir) throw new Error(fault.dir);
@@ -723,6 +884,11 @@ function memFs(files: Record<string, StoreFileRead>, fault: FsFault = {}, log: s
     },
     write: async (path, content) => {
       log.push(`write:${label(path)}`);
+      if (slow && path.endsWith(slow.suffix)) {
+        const gate = slow.until;
+        slow = undefined;
+        await gate;
+      }
       if (fault.write && path.endsWith(fault.write.suffix)) throw new Error(fault.write.message);
       written.push(path);
       files[path] = { kind: "text", content };
@@ -1011,8 +1177,17 @@ function bus() {
   // Snapshots coalesce. A page of inline edits fires one commit per field the
   // user leaves, and each one paying a full file copy is what the coalescing
   // avoids - without ever leaving the LAST commit uncovered.
+  //
+  // Each commit saves a DIFFERENT value, and the first copy is held open until
+  // all three have landed. Both matter: three identical saves pass for a snapshot
+  // taken anywhere in the burst, and a copy that completes before the last save
+  // does the same. Held and distinct, "skip while busy" leaves the `.bak` at k-1.
   const log: string[] = [];
-  const fs = memFs({}, {}, log);
+  let release = () => {};
+  const held = new Promise<void>((resolve) => {
+    release = () => resolve();
+  });
+  const fs = memFs({}, { slowWrite: { suffix: SNAPSHOT_SUFFIX, until: held } }, log);
   const kv = pluginStore(fs.files, log);
   const io = createRecoveredStore(SPEC, {
     store: kv.store,
@@ -1022,10 +1197,61 @@ function bus() {
 
   await io.ensureLoaded();
   await io.set("keys", [{ id: "k-1" }]);
-  await Promise.all([io.commit(), io.commit(), io.commit()]);
+  const first = io.commit();
+  await io.set("keys", [{ id: "k-2" }]);
+  const second = io.commit();
+  await io.set("keys", [{ id: "k-3" }]);
+  const third = io.commit();
+  release();
+  await Promise.all([first, second, third]);
+
   const copies = log.filter((e) => e === "write:snapshot").length;
-  assert(copies > 0 && copies < 3, `three concurrent commits cost ${copies} snapshot copies`);
-  check("and the state they saved is the state snapshotted", fs.files[SNAPSHOT], fs.files[PRIMARY]);
+  assert(copies > 0 && copies < 3, `three overlapping commits cost ${copies} snapshot copies`);
+  check("and the LAST commit is the one snapshotted", fs.files[SNAPSHOT], fs.files[PRIMARY]);
+  check(
+    "which is its own value, not the first's",
+    fs.files[SNAPSHOT],
+    text('{"keys":[{"id":"k-3"}]}'),
+  );
+}
+{
+  // A `.bak` write that fails while the primary write succeeds: a Windows path
+  // length the extra suffix crosses, a quota hit between the two writes. On a
+  // fresh profile the startup pass reports NOTHING - there is no primary to copy
+  // yet - so a commit is the first moment anything can say the net is missing.
+  const log: string[] = [];
+  const fault: FsFault = { write: { suffix: SNAPSHOT_SUFFIX, message: "path too long" } };
+  const fs = memFs({}, fault, log);
+  const kv = pluginStore(fs.files, log);
+  const io = createRecoveredStore(SPEC, {
+    store: kv.store,
+    files: fs.io,
+    broadcast: bus().broadcast,
+  });
+
+  check("a fresh profile's startup pass has nothing to report", await io.ensureLoaded(), null);
+  await io.set("keys", [{ id: "k-1" }]);
+  await io.commit();
+  const said = io.takeRecoveryNotice();
+  assert(!!said?.note?.includes("path too long"), "a commit whose snapshot fails says so");
+  check("without claiming a recovery it did not do", [said?.found, said?.recovered], ["ok", false]);
+
+  // Once, not once per commit: a page of inline edits against a directory that
+  // will not take a copy is one notice, not one per field the user leaves.
+  await io.commit();
+  await io.commit();
+  check("and the same failure is not re-reported", io.takeRecoveryNotice(), null);
+
+  // A pass that works clears the memo, so a fault that comes back is said again.
+  fault.write = undefined;
+  await io.commit();
+  check("a working snapshot reports nothing", io.takeRecoveryNotice(), null);
+  fault.write = { suffix: SNAPSHOT_SUFFIX, message: "path too long" };
+  await io.commit();
+  assert(
+    !!io.takeRecoveryNotice()?.note?.includes("path too long"),
+    "a fault that returns after a good pass is reported again",
+  );
 }
 {
   // P1-1, end to end. The replace used to be `fs_delete` then `fs_copy`, with the
