@@ -21,9 +21,12 @@
  * One russh session per saved connection, shared by every forward over it, so an
  * RDP session and an SFTP browser against one bastion cost one SSH connection
  * rather than two. The contract is one reference per SUCCESSFUL
- * `openForwardForConnection`, released by one `closeForwardForConnection` for the
- * same target - including when the call reused an existing forward, which is the
- * whole reason reuse takes a reference of its own.
+ * `openForwardForConnection`, released by one `closeForwardForConnection`
+ * carrying the `claim` that open handed back - including when the call reused an
+ * existing forward, which is the whole reason reuse takes a reference of its own.
+ * The claim, and not the target, is what a release names: the entries for a
+ * target are deleted and re-created when the bastion dies mid-life, and a
+ * key-bearing release cannot tell its own entry from its successor.
  *
  * Note what is NOT shared: a terminal tab against the same bastion opens its own
  * session in `terminal/lib/ssh-session.ts` and never touches this module's map,
@@ -47,6 +50,22 @@ export type SshForward = {
   sessionId: number;
   /** Loopback port the caller should connect to. */
   localPort: number;
+  /**
+   * Opaque token naming the forward ENTRY this call took its reference from.
+   * Hand it back to {@link closeForwardForConnection}; it is what makes a
+   * release identity-bearing instead of key-bearing.
+   *
+   * Why a key is not enough: `dropSession` deletes a connection's entries the
+   * moment the bastion dies, and the next consumer of the same target creates
+   * fresh ones under the same key. A release that only looked the key up could
+   * not tell "my entry is gone" from "a NEW entry exists here", so a pane
+   * whose `disconnected` lagged behind a dead bastion - a parked TCP connection
+   * only fails on a keepalive - would spend the reference of whoever re-opened
+   * the target and close a session that pane is still using. Tokens are
+   * monotonic and never reused, so a release against a spent generation is a
+   * no-op rather than someone else's teardown.
+   */
+  claim: number;
 };
 
 /** How a caller wants an unverified bastion handled, and how it hears about the
@@ -61,16 +80,85 @@ export type SshForwardOptions = {
    * the backend parked mid-handshake with nobody to answer, which is a held
    * socket and a blocked thread until its confirm timeout - the same failure the
    * RDP certificate prompt has to defend against.
+   *
+   * PER DIAL, not per caller: read by whichever caller starts the handshake, and
+   * a caller that JOINS an in-flight or established session inherits that dial's
+   * choice, because the handshake the flag would apply to has already begun.
+   * That is safe in both directions it can differ. Joining a dial that IS
+   * prompting means the question already has an audience, which is the only
+   * thing the refusal protects against; joining one that is not means the key
+   * was pinned and there is no question to ask. The flag is deliberately not
+   * re-checked on the reuse path, because "refuse" there would fail a caller
+   * that is riding a handshake already known to be answerable.
    */
   promptForHostKey?: boolean;
   /**
-   * Called with the id of every host-key prompt raised while opening, so the
-   * caller's teardown can ANSWER one the user never got to (see
+   * Called with the id of every host-key prompt raised by the dial this call
+   * rides, so the caller's teardown can ANSWER one the user never got to (see
    * `hostKeyPrompt.ts`'s `abandon`). A prompt left pending after the pane that
    * would have answered it has gone is the leak this exists to close.
+   *
+   * A caller that JOINS an in-flight dial is told too, including about a
+   * question raised before it joined that is still on screen - otherwise its
+   * teardown has nothing to abandon and it depends entirely on the caller that
+   * started the dial still being around to close the leak.
+   *
+   * The consequence, accepted deliberately: ANY of the callers riding one dial
+   * can now fail it for all of them by abandoning, since a rejected host key
+   * aborts the shared handshake. That is the fail-safe direction. Rejecting
+   * costs whoever is left one Reconnect, which re-dials and re-asks; a prompt
+   * nobody answers costs a held socket, a handshake parked for the backend's
+   * full confirm timeout and - because the verifier blocks - a displaced runtime
+   * thread. The alternative, rejecting only when the LAST interested caller
+   * lets go, needs a liveness signal this module does not have: the reference of
+   * a caller waiting on the prompt is held by the very `openSsh` the prompt is
+   * blocking, so the refcount cannot tell "still on screen" from "blocked on
+   * this question", and a rule built on it would deadlock the handshake it was
+   * meant to protect.
    */
   onHostKeyPrompt?: (promptId: string) => void;
 };
+
+/**
+ * Host-key questions one dial has raised, and the callers riding it that want
+ * to hear about them.
+ *
+ * Fanned out rather than handed to `dialSession`'s own caller, because a dial is
+ * shared: the reuse branch of {@link sessionFor} hands back a handshake someone
+ * else started, and a joiner that never learned the prompt ids cannot answer
+ * one on its way out.
+ */
+type PromptFanout = {
+  /** Ids this dial has raised, in order, so a late joiner can be caught up. */
+  raised: string[];
+  /** One listener per caller riding this dial. */
+  listeners: Set<(promptId: string) => void>;
+};
+
+/** Tell every caller riding this dial about a new question. */
+function announcePrompt(fanout: PromptFanout, promptId: string): void {
+  fanout.raised.push(promptId);
+  for (const listener of fanout.listeners) listener(promptId);
+}
+
+/**
+ * Register a caller riding this dial, and catch it up on anything still
+ * unanswered.
+ *
+ * Filtered against the live queue rather than replayed wholesale: an id the user
+ * has already answered is not a prompt the joiner needs to abandon, and handing
+ * it one would have its teardown fire a rejection at a decision that is already
+ * made (harmless - `abandon` no-ops off the queue - but it would read as though
+ * the joiner could undo it).
+ */
+function watchPrompts(fanout: PromptFanout, listener?: (promptId: string) => void): void {
+  if (!listener) return;
+  fanout.listeners.add(listener);
+  const queued = useHostKeyPrompt.getState().queue;
+  for (const promptId of fanout.raised) {
+    if (queued.some((p) => p.promptId === promptId)) listener(promptId);
+  }
+}
 
 /**
  * Live sessions opened by this module, keyed by saved-connection id, so several
@@ -85,7 +173,10 @@ export type SshForwardOptions = {
  * session is closed when it arrives, rather than outliving the pane that asked
  * for it.
  */
-const sessions = new Map<string, { session: Promise<SshSession>; refs: number }>();
+const sessions = new Map<
+  string,
+  { session: Promise<SshSession>; refs: number; prompts: PromptFanout }
+>();
 /**
  * Forwards already open on a session, keyed by `connId|host|port`, so a second
  * consumer of the same target reuses its port instead of binding another.
@@ -97,8 +188,17 @@ const sessions = new Map<string, { session: Promise<SshSession>; refs: number }>
  * the forward is still bound on the backend for as long as the session lives, so
  * reusing it later is both free and correct, and `ssh_forward_open` has no
  * counterpart to close one on its own.
+ *
+ * Each entry also carries a `claim`, the generation a consumer must hand back to
+ * release: an entry can be DELETED and re-created under the same key when the
+ * bastion dies mid-life, and a key-bearing release cannot tell the two apart.
+ * See {@link SshForward.claim}.
  */
-const forwards = new Map<string, { forward: Promise<SshForward>; refs: number }>();
+const forwards = new Map<string, { forward: Promise<SshForward>; refs: number; claim: number }>();
+
+/** Source of {@link SshForward.claim}: monotonic and never reused, so a token
+ *  from a deleted entry can never match a live one. */
+let nextClaim = 1;
 
 function forwardKey(connectionId: string, remoteHost: string, remotePort: number): string {
   return `${connectionId}|${remoteHost}|${remotePort}`;
@@ -118,11 +218,26 @@ function sessionFor(connectionId: string, opts: SshForwardOptions): Promise<SshS
     live.refs += 1;
     // An in-flight dial is awaited rather than duplicated, so the second caller
     // rides the first one's handshake - including its host-key prompt, which is
-    // already on screen and whose answer serves both.
+    // already on screen and whose answer serves both. It is told the prompt ids
+    // either way: the joiner's teardown has to be able to answer a question
+    // raised by a dial it did not start. See `onHostKeyPrompt`.
+    watchPrompts(live.prompts, opts.onHostKeyPrompt);
     return live.session;
   }
-  const pending = dialSession(connectionId, opts);
-  sessions.set(connectionId, { session: pending, refs: 1 });
+  // Built before the dial rather than inside it, so a prompt raised during the
+  // handshake always has somewhere to land - and so the reuse branch above can
+  // subscribe to a dial that has not finished.
+  const prompts: PromptFanout = { raised: [], listeners: new Set() };
+  watchPrompts(prompts, opts.onHostKeyPrompt);
+  const pending = dialSession(connectionId, opts, prompts);
+  sessions.set(connectionId, { session: pending, refs: 1, prompts });
+  // Host keys are verified once, during the handshake, so a settled dial can
+  // raise no more questions. Dropping the listeners then keeps a long-lived
+  // bastion session from retaining one closure per pane that ever rode it.
+  void pending.then(
+    () => prompts.listeners.clear(),
+    () => prompts.listeners.clear(),
+  );
   return pending.catch((e: unknown) => {
     // The dial failed (or its host-key question was rejected). Forget it so the
     // next request tries again, but only if this is still the entry we put
@@ -135,7 +250,11 @@ function sessionFor(connectionId: string, opts: SshForwardOptions): Promise<SshS
 
 /** The dial itself. Only ever called by {@link sessionFor}, which owns the
  *  bookkeeping around it. */
-async function dialSession(connectionId: string, opts: SshForwardOptions): Promise<SshSession> {
+async function dialSession(
+  connectionId: string,
+  opts: SshForwardOptions,
+  prompts: PromptFanout,
+): Promise<SshSession> {
   const list = await listConnections();
   const conn = list.find((c) => c.id === connectionId);
   if (!conn) throw new Error(`ssh: connection "${connectionId}" not found`);
@@ -189,7 +308,9 @@ async function dialSession(connectionId: string, opts: SshForwardOptions): Promi
           { host: conn.host, connectionId: conn.id },
           jumps,
         );
-        opts.onHostKeyPrompt?.(prompt.promptId);
+        // Fanned out to every caller riding this dial, not just the one whose
+        // options started it.
+        announcePrompt(prompts, prompt.promptId);
         useHostKeyPrompt.getState().enqueue(prompt, () => {
           for (const id of owners) void pinFingerprint(id, prompt.fingerprint).catch(() => {});
         });
@@ -236,7 +357,7 @@ export function openForwardForConnection(
    * a bind that fails has to release as many as it took, while the map entry is
    * dropped by whichever of them gets there first.
    */
-  const claim = (pending: Promise<SshForward>): Promise<SshForward> =>
+  const claimed = (pending: Promise<SshForward>): Promise<SshForward> =>
     pending.catch((e: unknown) => {
       if (forwards.get(key)?.forward === pending) forwards.delete(key);
       // The session may still be fine (a refused target, say), so only give up
@@ -253,7 +374,15 @@ export function openForwardForConnection(
     // the number of consumers, not by the number of ports bound.
     liveSession.refs += 1;
     existing.refs += 1;
-    return claim(existing.forward);
+    // Subscribed HERE as well as in `sessionFor`, because this branch never
+    // reaches it: two panes restored onto the SAME target in one tick is the
+    // commonest joiner there is, and it is the one that would otherwise learn
+    // no prompt ids at all.
+    watchPrompts(liveSession.prompts, opts.onHostKeyPrompt);
+    // The SAME claim both consumers see, because it names the entry rather than
+    // the caller: the resolved forward is shared, and so is the generation it
+    // carries.
+    return claimed(existing.forward);
   }
   // A forward whose session is gone is a dead port number. `dropSession` clears
   // these, so this only fires if the two maps ever disagreed.
@@ -264,13 +393,14 @@ export function openForwardForConnection(
   // miss, both bind a port, and the second entry would replace the first -
   // leaving the first consumer's reference with no entry left to release it.
   const session = sessionFor(connectionId, opts);
+  const claim = nextClaim++;
   const pending = (async () => {
     const live = await session;
     const localPort = await openSshForward(live.id, 0, host, remotePort);
-    return { sessionId: live.id, localPort };
+    return { sessionId: live.id, localPort, claim };
   })();
-  forwards.set(key, { forward: pending, refs: 1 });
-  return claim(pending);
+  forwards.set(key, { forward: pending, refs: 1, claim });
+  return claimed(pending);
 }
 
 /** Drop one reference to a connection's session, closing it when the last
@@ -291,21 +421,33 @@ function releaseSession(connectionId: string): void {
 }
 
 /**
- * Release the tunnel a caller opened. Safe to call for an unknown target, and
- * for one whose references are already spent - so a teardown can fire it without
- * tracking whether the open succeeded.
+ * Release the tunnel a caller opened, naming the entry it took its reference
+ * from with the `claim` its {@link SshForward} carried.
+ *
+ * Safe to call for an unknown target, for one whose references are already
+ * spent, and for one that has since been re-created by somebody else - so a
+ * teardown can fire it without tracking whether the open succeeded or whether
+ * the bastion died in between.
  */
 export async function closeForwardForConnection(
   connectionId: string,
   remoteHost: string,
   remotePort: number,
+  claim: number,
 ): Promise<void> {
   const entry = forwards.get(forwardKey(connectionId, remoteHost.trim(), remotePort));
+  if (!entry) return;
+  // A different generation under the same key means this caller's entry was
+  // deleted (the bastion dropped, `dropSession` cleared it) and somebody else
+  // re-opened the target since. Its reference belongs to them; spending it here
+  // would tear down a session they are still using, which is the whole reason
+  // the release names an entry rather than a target.
+  if (entry.claim !== claim) return;
   // Refs at zero means every consumer of this target has let go already. The
   // entry stays (the port is still bound while the session lives), but there is
   // no reference left here to spend, and spending someone else's would close a
   // session another target is still using.
-  if (!entry || entry.refs === 0) return;
+  if (entry.refs === 0) return;
   entry.refs -= 1;
   releaseSession(connectionId);
 }

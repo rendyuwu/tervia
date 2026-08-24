@@ -127,6 +127,19 @@ export function RdpConnectionDialog({ open, onOpenChange, editing, onSaved }: Pr
   // state because the only reader is the unmount teardown below, and it must see
   // the latest value without a re-render.
   const pendingPrompts = useRef<Set<string>>(new Set());
+  /**
+   * The row this dialog is showing RIGHT NOW, for a probe that outlives it.
+   *
+   * A Test probe can run for a lot longer than the dialog stays on one row: the
+   * dialog is mounted persistently once latched and the trust prompt is global,
+   * so cancelling the dialog neither cancels the probe nor hides its question.
+   * The `editing` captured in a probe's closures is the row it STARTED on, which
+   * is the right target for `pinFingerprint`; this ref is what that has to be
+   * compared against before touching component state, which by then may belong
+   * to a different row entirely.
+   */
+  const editingIdRef = useRef<string | null>(null);
+  editingIdRef.current = editing?.id ?? null;
 
   // A Test probe that raised a trust question has a backend parked INSIDE a
   // handshake: for the certificate, `rdp_open` has not returned, so no session
@@ -247,6 +260,16 @@ export function RdpConnectionDialog({ open, onOpenChange, editing, onSaved }: Pr
       raised.add(promptId);
       pendingPrompts.current.add(promptId);
     };
+    // The row this probe is about. Every write to component state below is
+    // gated on the dialog still being on it, because the state is per-dialog
+    // while the probe is per-row: open row A, Test, cancel the dialog, open row
+    // B, then answer A's prompt, and an ungated `setPinnedFingerprint` writes
+    // A's certificate into B's pin state - which Save then persists onto B. It
+    // fails closed (B's next connect aborts as a mismatch) but it is still a
+    // pinned certificate on a row the user never tested, and the same staleness
+    // shows A's `test` result line under B's form.
+    const probeRow = editing?.id ?? null;
+    const onProbeRow = () => editingIdRef.current === probeRow;
     let dial: RdpDialTarget | null = null;
     try {
       // The tunnel first, and deliberately outside the timer below: dialling the
@@ -319,7 +342,12 @@ export function RdpConnectionDialog({ open, onOpenChange, editing, onSaved }: Pr
                   // to be forgotten, which is why testing a new server and
                   // then saving it asked the very same question twice.
                   () => {
-                    setPinnedFingerprint(prompt.fingerprint);
+                    // The saved row is written unconditionally - `editing` is
+                    // the row that was tested, so the pin lands where it
+                    // belongs however long the answer took. Only the FORM
+                    // state is gated, because that belongs to whatever row is
+                    // on screen now.
+                    if (onProbeRow()) setPinnedFingerprint(prompt.fingerprint);
                     if (editing) {
                       void pinFingerprint(editing.id, prompt.fingerprint).catch(() => {});
                     }
@@ -363,15 +391,19 @@ export function RdpConnectionDialog({ open, onOpenChange, editing, onSaved }: Pr
             });
         },
       );
-      setTest({
-        kind: "ok",
-        fingerprint: result.fingerprint,
-        width: result.width,
-        height: result.height,
-        durationMs: Math.round(performance.now() - started),
-      });
+      if (onProbeRow()) {
+        setTest({
+          kind: "ok",
+          fingerprint: result.fingerprint,
+          width: result.width,
+          height: result.height,
+          durationMs: Math.round(performance.now() - started),
+        });
+      }
     } catch (e) {
-      setTest({ kind: "fail", message: e instanceof Error ? e.message : String(e) });
+      if (onProbeRow()) {
+        setTest({ kind: "fail", message: e instanceof Error ? e.message : String(e) });
+      }
     } finally {
       // A prompt still pending when the probe ended - rejected, timed out, or
       // the user walked away - is answered, not merely dropped. Dropping it

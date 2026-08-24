@@ -391,6 +391,19 @@ export function RdpPane({ leafId, connectionId, visible, focused = true }: Props
   const pendingRef = useRef<RdpInputEvent[]>([]);
   const flushHandle = useRef<number | null>(null);
   const heldKeys = useRef<Set<number>>(new Set());
+  /**
+   * Characters sent as `unicodeDown` with no `keyUp` yet - a dead key, IME
+   * output, or a layout position `scancodes.ts` cannot name.
+   *
+   * A third set and not a special case: these keys never reach `heldKeys`
+   * (they have no scancode to put there), so without their own record
+   * `releaseAll` sees nothing held and sends no marker at all. The stranded
+   * character then stays pressed in the backend's own record, and because
+   * `Database::apply` suppresses no-op transitions its next real press emits
+   * nothing either - a key that has gone permanently dead rather than merely
+   * stuck. Keyed by character because that is what the wire carries.
+   */
+  const heldUnicode = useRef<Set<string>>(new Set());
   const heldButtons = useRef<Set<number>>(new Set());
 
   const flushInput = useCallback(() => {
@@ -440,8 +453,19 @@ export function RdpPane({ leafId, connectionId, visible, focused = true }: Props
   /** Release everything held. Sent as one marker the backend expands against
    *  its own record of what is down, because only it knows. */
   const releaseAll = useCallback(() => {
-    if (heldKeys.current.size === 0 && heldButtons.current.size === 0) return;
+    // Every set, or the marker is skipped for a key the pane really is holding.
+    // The backend's own `release_all` drains its unicode state alongside its
+    // scancodes, so a held character is released the moment the marker arrives;
+    // it was only ever the marker that went missing.
+    if (
+      heldKeys.current.size === 0 &&
+      heldUnicode.current.size === 0 &&
+      heldButtons.current.size === 0
+    ) {
+      return;
+    }
     heldKeys.current.clear();
+    heldUnicode.current.clear();
     heldButtons.current.clear();
     queueInputNow({ kind: "releaseAll" });
   }, [queueInputNow]);
@@ -536,6 +560,7 @@ export function RdpPane({ leafId, connectionId, visible, focused = true }: Props
     queuedBytes.current = 0;
     desyncedRef.current = false;
     heldKeys.current.clear();
+    heldUnicode.current.clear();
     heldButtons.current.clear();
 
     void (async () => {
@@ -585,7 +610,22 @@ export function RdpPane({ leafId, connectionId, visible, focused = true }: Props
               void markConnected(row.id, fingerprint).catch(() => {});
             },
             onCertPrompt: (prompt) => {
-              if (!alive) return;
+              // REJECT rather than return. `promptId` is recorded on the line
+              // below, so a prompt that lands once this attempt is dead is
+              // recorded nowhere and the teardown's `abandon` has no id to
+              // answer - and the window for it is the TCP connect plus the TLS
+              // handshake, seconds wide, with "closed the tab while it said
+              // Connecting…" as the ordinary way in. Behind an unanswered
+              // prompt the backend's verifier is parked on its full confirm
+              // timeout, holding the socket, the in-flight handshake and (the
+              // verifier blocks) a displaced runtime thread; `rdp_open` has not
+              // returned, so there is no session id and `close()` cannot help.
+              // This is the same rejection the teardown would have sent, and
+              // the only thing that releases them.
+              if (!alive) {
+                void confirmRdpCert(prompt.promptId, false).catch(() => {});
+                return;
+              }
               promptId = prompt.promptId;
               useHostKeyPrompt.getState().enqueue(
                 {
@@ -719,6 +759,12 @@ export function RdpPane({ leafId, connectionId, visible, focused = true }: Props
         // backend takes one Unicode scalar, and an astral character is two
         // UTF-16 units.
         if (e.key.length > 0 && [...e.key].length === 1) {
+          // Recorded so blur releases it. A shifted release can report a
+          // different `key` than its press, which leaves a stale entry here -
+          // harmless, because it only means the marker is sent when nothing is
+          // held, and the backend's `release_all` is what actually decides what
+          // comes up.
+          heldUnicode.current.add(e.key);
           queueInput({ kind: "unicodeDown", ch: e.key });
         }
       }}
@@ -732,6 +778,7 @@ export function RdpPane({ leafId, connectionId, visible, focused = true }: Props
           return;
         }
         if (e.key.length > 0 && [...e.key].length === 1) {
+          heldUnicode.current.delete(e.key);
           queueInput({ kind: "unicodeUp", ch: e.key });
         }
       }}

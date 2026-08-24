@@ -78,7 +78,12 @@ export async function openRdpDialTarget(
     release: () => {
       if (released) return;
       released = true;
-      void closeForwardForConnection(sshConnectionId, conn.host, conn.port).catch(() => {});
+      // `forward.claim` names the entry this dial took its reference from, so a
+      // release that arrives after the bastion died and somebody else re-opened
+      // the same target is a no-op instead of spending their reference.
+      void closeForwardForConnection(sshConnectionId, conn.host, conn.port, forward.claim).catch(
+        () => {},
+      );
     },
   };
 }
