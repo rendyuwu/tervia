@@ -1,5 +1,6 @@
 import { openSettingsWindow } from "@/modules/settings/openSettingsWindow";
 import { type SshConnection } from "@/modules/ssh/connections";
+import { type RdpConnection } from "@/modules/rdp/connections";
 import { MAX_PANES_PER_TAB, type PaneTab } from "@/modules/tabs";
 import { leafIds } from "@/modules/terminal";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -11,7 +12,7 @@ type Params = {
   detectedBrowserUrl: string | null;
   handleClose: (id: number) => void;
   requestCloseLeaf: (leafId: number) => void;
-} & Pick<TabsApi, "setActiveId" | "focusPane" | "pinTab" | "newSshTab">;
+} & Pick<TabsApi, "setActiveId" | "focusPane" | "pinTab" | "newSshTab" | "newRdpTab">;
 
 /**
  * Stable handlers for the memoised `<Header/>`. Each was previously an inline
@@ -29,6 +30,7 @@ export function useHeaderActions({
   focusPane,
   pinTab,
   newSshTab,
+  newRdpTab,
 }: Params): {
   handleOpenDetectedPreview: () => void;
   handleHeaderSelectEntry: (tabId: number, leafId: number | null) => void;
@@ -36,6 +38,7 @@ export function useHeaderActions({
   handleHeaderPinLeaf: (tabId: number, leafId: number) => void;
   handleHeaderOpenSettings: () => void;
   handleHeaderConnectSsh: (conn: SshConnection) => void;
+  handleHeaderConnectRdp: (conn: RdpConnection) => void;
   headerCanSplit: boolean;
 } {
   // The pane header's globe pill: hand the detected dev-server url to the OS
@@ -73,6 +76,13 @@ export function useHeaderActions({
     (conn: SshConnection) => newSshTab(conn.id, conn.name),
     [newSshTab],
   );
+  // The name is only the interim tab title: `syncPaneMirror` recomputes it
+  // through `leafLabel`, which resolves the connection to `rdp:<name>` and
+  // keeps following it across a rename.
+  const handleHeaderConnectRdp = useCallback(
+    (conn: RdpConnection) => newRdpTab(conn.id, conn.name),
+    [newRdpTab],
+  );
   const headerCanSplit = useMemo(
     () => activePaneTab !== null && leafIds(activePaneTab.paneTree).length < MAX_PANES_PER_TAB,
     [activePaneTab],
@@ -85,6 +95,7 @@ export function useHeaderActions({
     handleHeaderPinLeaf,
     handleHeaderOpenSettings,
     handleHeaderConnectSsh,
+    handleHeaderConnectRdp,
     headerCanSplit,
   };
 }

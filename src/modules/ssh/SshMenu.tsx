@@ -29,8 +29,9 @@ import {
   type SshConnection,
 } from "./connections";
 import type { BackupMode } from "./SshBackupDialog";
+import { useRdpHosts } from "@/modules/rdp/connections";
 import type { FsReadResult } from "@/lib/ipc";
-import { BACKUP_EXTENSION } from "./backupFile";
+import { BACKUP_EXTENSION, BACKUP_EXTENSION_V1 } from "./backupFile";
 import { invoke } from "@tauri-apps/api/core";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 // `CopyPlus`, not `Copy`: plain Copy already means copy-to-clipboard everywhere
@@ -77,6 +78,10 @@ export function SshMenu({ onConnect }: Props) {
   const [backup, setBackup] = useState<BackupMode | null>(null);
   const [backupOpen, setBackupOpen] = useState(false);
   const [pickError, setPickError] = useState<string | null>(null);
+  // Only for the export item's enabled state: one backup covers both protocols,
+  // so this menu has to know whether any RDP host exists even though it never
+  // lists one.
+  const rdpHosts = useRdpHosts();
 
   useEffect(() => {
     void listConnections().then(setConns);
@@ -135,7 +140,13 @@ export function SshMenu({ onConnect }: Props) {
     try {
       const selected = await openFileDialog({
         multiple: false,
-        filters: [{ name: "Tervia SSH backup", extensions: [BACKUP_EXTENSION, "json"] }],
+        filters: [
+          {
+            name: "Tervia backup",
+            // The v1 extension stays offered: those files still import.
+            extensions: [BACKUP_EXTENSION, BACKUP_EXTENSION_V1, "json"],
+          },
+        ],
       });
       const path = typeof selected === "string" ? selected : null;
       if (!path) return;
@@ -232,9 +243,11 @@ export function SshMenu({ onConnect }: Props) {
             <span>Add new connection…</span>
           </DropdownMenuItem>
           <DropdownMenuSeparator />
+          {/* The backup covers RDP too, so an empty SSH list is not an empty
+              export - only both being empty is. */}
           <DropdownMenuItem
             onSelect={openExport}
-            disabled={conns !== null && conns.length === 0}
+            disabled={conns !== null && conns.length === 0 && rdpHosts.size === 0}
             className="gap-2 text-[12px]"
           >
             <Download size={13} strokeWidth={1.75} />

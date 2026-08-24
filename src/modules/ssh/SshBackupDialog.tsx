@@ -57,20 +57,22 @@ export function SshBackupDialog({ open, onOpenChange, mode }: Props) {
     setBusy(true);
     try {
       if (isExport) {
-        const { text, count } = await buildBackup(passphrase);
+        const { text, sshCount, rdpCount } = await buildBackup(passphrase);
         // Built BEFORE the save dialog on purpose: "no saved connections" or a
         // keychain refusal should surface without first making the user pick a
         // filename for a file that was never going to be written.
         const target = await saveFileDialog({
-          defaultPath: `tervia-ssh-connections.${BACKUP_EXTENSION}`,
-          filters: [{ name: "Tervia SSH backup", extensions: [BACKUP_EXTENSION] }],
+          defaultPath: `tervia-connections.${BACKUP_EXTENSION}`,
+          filters: [{ name: "Tervia backup", extensions: [BACKUP_EXTENSION] }],
         });
         if (!target) {
           setBusy(false);
           return;
         }
         await invoke<void>("fs_write_file", { path: target, content: text });
-        setDone(`Exported ${count} connection${count === 1 ? "" : "s"} to ${target}`);
+        setDone(
+          `Exported ${plural(sshCount, "SSH host")} and ${plural(rdpCount, "RDP host")} to ${target}`,
+        );
       } else {
         const result = await applyBackup(mode.text, passphrase);
         setDone(summarize(result));
@@ -86,12 +88,10 @@ export function SshBackupDialog({ open, onOpenChange, mode }: Props) {
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
-          <DialogTitle>
-            {isExport ? "Export SSH connections" : "Import SSH connections"}
-          </DialogTitle>
+          <DialogTitle>{isExport ? "Export connections" : "Import connections"}</DialogTitle>
           <DialogDescription>
             {isExport
-              ? "Writes every saved host and its stored credentials to one encrypted file. Keep the passphrase: without it the file cannot be read, and there is no recovery."
+              ? "Writes every saved SSH and RDP host, and its stored credentials, to one encrypted file. Keep the passphrase: without it the file cannot be read, and there is no recovery."
               : "Merges the hosts in the file into your saved connections, matching on connection id. Nothing is deleted."}
           </DialogDescription>
         </DialogHeader>
@@ -143,8 +143,9 @@ export function SshBackupDialog({ open, onOpenChange, mode }: Props) {
 
           {isExport ? (
             <p className="text-muted-foreground text-[10.5px]">
-              The file contains your SSH passwords and private keys, encrypted with this passphrase
-              (PBKDF2-SHA256, AES-256-GCM). Treat it like a key file.
+              The whole file is encrypted with this passphrase (PBKDF2-SHA256, AES-256-GCM) -
+              hostnames included, not only the SSH passwords, private keys and RDP passwords. Treat
+              it like a key file.
             </p>
           ) : null}
 
@@ -168,9 +169,25 @@ export function SshBackupDialog({ open, onOpenChange, mode }: Props) {
   );
 }
 
+function plural(n: number, noun: string): string {
+  return `${n} ${noun}${n === 1 ? "" : "s"}`;
+}
+
 function summarize(r: ImportResult): string {
-  const parts = [`${r.added} added`, `${r.replaced} updated`];
+  const added = r.ssh.added + r.rdp.added;
+  const replaced = r.ssh.replaced + r.rdp.replaced;
+  const withoutSecrets = r.ssh.withoutSecrets + r.rdp.withoutSecrets;
+  const parts = [`${added} added`, `${replaced} updated`];
   if (r.skipped > 0) parts.push(`${r.skipped} skipped as unreadable`);
-  if (r.withoutSecrets > 0) parts.push(`${r.withoutSecrets} without stored credentials`);
-  return `Imported: ${parts.join(", ")}.`;
+  if (withoutSecrets > 0) parts.push(`${withoutSecrets} without stored credentials`);
+  // The per-protocol split only earns its space when both are present; a
+  // v1 file or an SSH-only export would otherwise report "0 RDP".
+  const split =
+    r.rdp.added + r.rdp.replaced > 0 && r.ssh.added + r.ssh.replaced > 0
+      ? ` (${plural(r.ssh.added + r.ssh.replaced, "SSH host")}, ${plural(
+          r.rdp.added + r.rdp.replaced,
+          "RDP host",
+        )})`
+      : "";
+  return `Imported: ${parts.join(", ")}${split}.`;
 }

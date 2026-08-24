@@ -31,6 +31,7 @@ export type ShortcutId =
   | "terminal.copy"
   | "terminal.paste"
   | "terminal.close"
+  | "rdp.connect"
   | "commandPalette.open";
 
 export type ShortcutGroup =
@@ -275,6 +276,21 @@ export const SHORTCUTS: Shortcut[] = [
     label: "Close focused terminal",
     group: "Terminal",
     defaultBindings: [{ ctrl: true, shift: true, key: "x" }],
+  },
+  {
+    // Opens the header's RDP connection list, which is the picker: pick a saved
+    // host to connect, or add one.
+    //
+    // NO default binding, deliberately. Every free Mod+letter is either a shell
+    // control code a focused terminal owns or already spoken for, and this is a
+    // command you reach for occasionally rather than a chord worth spending one
+    // of those on. It still lists in Settings > Shortcuts for a user to bind,
+    // and the palette can run it regardless (`runCommand` goes through the
+    // registry, not the keyboard).
+    id: "rdp.connect",
+    label: "Connect RDP...",
+    group: "General",
+    defaultBindings: [],
   },
 ];
 

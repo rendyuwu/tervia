@@ -18,6 +18,15 @@ const PRIVATE_KEY_FIELD = "privateKey";
 const KEY_PASSPHRASE_FIELD = "keyPassphrase";
 
 /**
+ * Every keychain field one SSH connection can own, in one list so a caller that
+ * has to enumerate them cannot miss one. `backup.ts` is that caller: an export
+ * builds a keychain reference per field, and a field left out of the list would
+ * simply not travel - a private key that silently stays behind on the old
+ * machine.
+ */
+export const SSH_SECRET_FIELDS = [PASSWORD_FIELD, PRIVATE_KEY_FIELD, KEY_PASSPHRASE_FIELD] as const;
+
+/**
  * How a connection proves who it is.
  * - `password`: sent to the server, stored in the OS keychain.
  * - `key`: the private key itself lives in the keychain and is handed to the
@@ -131,7 +140,9 @@ function enqueueWrite<T>(op: () => Promise<T>): Promise<T> {
   return run;
 }
 
-function keyringAccount(id: string, field: string): string {
+/** Keychain account for one field of one connection. Exported because the
+ *  backup builds references instead of reading values. */
+export function keyringAccount(id: string, field: string): string {
   return `${id}::${field}`;
 }
 

@@ -4,6 +4,7 @@ import { DragChip } from "@/components/DragChip";
 import { leafIds } from "@/modules/terminal/lib/panes";
 import { MAX_PANES_PER_TAB } from "./lib/useTabs";
 import { useSshHosts } from "@/modules/ssh/connections";
+import { useRdpHosts } from "@/modules/rdp/connections";
 import { type SshStatus } from "@/modules/ssh/status";
 import { type AiCliStatus } from "@/modules/terminal/lib/aiCliStatus";
 import { useExplorerIconsReady } from "@/modules/explorer/lib/iconResolver";
@@ -139,10 +140,12 @@ export function TabBar({
   const [activeDragId, setActiveDragId] = useState<string | null>(null);
   // Resolves a leaf's `sshConnectionId` for the `ssh:<name>` label + tooltip.
   const sshHosts = useSshHosts();
+  // Same, for an RDP leaf's `rdp:<name>`.
+  const rdpHosts = useRdpHosts();
 
   const entries = useMemo(
-    () => buildEntries(tabs, sshHosts, sshStatuses, aiCliStatuses),
-    [tabs, sshHosts, sshStatuses, aiCliStatuses],
+    () => buildEntries(tabs, sshHosts, sshStatuses, aiCliStatuses, rdpHosts),
+    [tabs, sshHosts, sshStatuses, aiCliStatuses, rdpHosts],
   );
 
   /** Snapshot of pane tabs for the Move to Group menu. Full tabs are listed but disabled so the menu stays stable. */

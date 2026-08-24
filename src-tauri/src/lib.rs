@@ -63,7 +63,9 @@ pub mod modules;
 /// stay in sync without a duplicate version constant.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-use modules::{backup, cli, clipboard, format, fs, git, net, pty, pty_daemon, secrets, shell, ssh};
+use modules::{
+    backup, cli, clipboard, format, fs, git, net, pty, pty_daemon, rdp, secrets, shell, ssh,
+};
 use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_window_state::StateFlags;
 
@@ -614,6 +616,7 @@ pub fn run() {
         .manage(shell::ShellState::default())
         .manage(secrets::SecretsState::default())
         .manage(ssh::SshState::default())
+        .manage(rdp::RdpState::default())
         .invoke_handler(tauri::generate_handler![
             pty::pty_open,
             pty::pty_attach,
@@ -668,8 +671,11 @@ pub fn run() {
             secrets::secrets_set,
             secrets::secrets_delete,
             secrets::secrets_get_all,
-            backup::backup_seal,
             backup::backup_open,
+            backup::backup_seal_payload,
+            backup::backup_open_payload,
+            backup::backup_apply_secrets,
+            backup::backup_release,
             clipboard::clipboard_read_text,
             net::http_ping,
             net::port_is_open,
@@ -695,6 +701,13 @@ pub fn run() {
             ssh::sftp::ssh_sftp_create_dir,
             ssh::sftp::ssh_sftp_rename,
             ssh::sftp::ssh_sftp_delete,
+            rdp::rdp_open,
+            rdp::rdp_input,
+            rdp::rdp_close,
+            rdp::rdp_list_sessions,
+            rdp::rdp_attach,
+            rdp::rdp_snapshot,
+            rdp::rdp_confirm_cert,
         ])
         .on_window_event(|window, event| {
             // Mirror main-window minimize/restore onto the settings child.
@@ -866,6 +879,12 @@ mod ui_thread_guard {
     /// sync: they write one small frame and do not await the reply, and moving
     /// them to `spawn_blocking` would let keystrokes transpose. See
     /// `PtyClient::send_oneway`.
+    ///
+    /// `rdp_confirm_cert` is the exact analogue of `ssh_confirm_host_key`: it
+    /// takes a `std::sync::Mutex` over a small map, removes one entry and fires
+    /// a channel send that never blocks (the receiver is unbounded). The party
+    /// that *does* block is the TLS verifier on the RDP runtime, which is a
+    /// different thread entirely.
     const ALLOWED_SYNC_COMMANDS: &[&str] = &[
         "cli_classify_path",
         "cli_initial_target",
@@ -875,6 +894,7 @@ mod ui_thread_guard {
         "pty_close",
         "pty_resize",
         "pty_write",
+        "rdp_confirm_cert",
         "shell_bg_kill",
         "shell_bg_list",
         "shell_bg_logs",

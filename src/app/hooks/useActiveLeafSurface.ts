@@ -16,7 +16,7 @@ type Params = {
   detectedUrls: RefObject<Map<number, string>>;
   activeId: number;
   activeLeafIdInTab: number | null;
-  activeLeafKindCurrent: "terminal" | "editor" | null;
+  activeLeafKindCurrent: "terminal" | "editor" | "rdp" | null;
   isTerminalLike: boolean;
   setActiveSearchAddon: Dispatch<SetStateAction<SearchAddon | null>>;
   setActiveEditorHandle: Dispatch<SetStateAction<EditorPaneHandle | null>>;

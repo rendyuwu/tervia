@@ -22,7 +22,7 @@ type Params = {
   tabsRef: RefObject<Tab[]>;
   terminalRefs: RefObject<Map<number, TerminalPaneHandle>>;
   activeLeafIdInTab: number | null;
-  activeLeafKindCurrent: "terminal" | "editor" | null;
+  activeLeafKindCurrent: "terminal" | "editor" | "rdp" | null;
   /** True when the active leaf is a connected SSH terminal. A breadcrumb `cd`
    *  then targets the remote shell only; it must NOT repoint the local
    *  workspace root at a remote path (which breaks the local explorer and

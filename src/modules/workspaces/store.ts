@@ -87,6 +87,30 @@ export type SavedBrowserLeaf = {
 };
 
 /**
+ * An RDP pane. Holds a reference to a saved connection and nothing else: the
+ * host, credentials and desktop size all live on the connection row, so there
+ * is no secret and nothing host-shaped in the workspace file.
+ *
+ * There is deliberately no session id to restore. An RDP session cannot be
+ * reattached the way a local PTY can - `ptyId` has no counterpart here - so the
+ * leaf comes back and dials again, which is exactly how a restored SSH leaf
+ * behaves.
+ */
+export type SavedRdpLeaf = {
+  kind: "leaf";
+  leafKind: "rdp";
+  /** Id of a saved connection in `rdp/connections.ts`. A leaf whose connection
+   *  has since been deleted restores anyway and reports it in the pane, rather
+   *  than vanishing from the layout without explanation. */
+  rdpConnectionId: string;
+  /** Persisted from day one even though `"preset"` is the only value, so adding
+   *  `"fit"` needs no migration of everyone's saved workspaces. */
+  sizeMode: "preset";
+  /** User-chosen tab name from the tab's right-click "Rename". */
+  customTitle?: string;
+};
+
+/**
  * The workspace Board pane. Holds nothing: its columns are rebuilt from the
  * live tab tree, so existence is the whole of its saved state. That is what
  * lets a pane tab containing one be persisted normally.
@@ -101,6 +125,7 @@ export type SavedBoardLeaf = {
 export type SavedPaneNode =
   | SavedTerminalLeaf
   | SavedEditorLeaf
+  | SavedRdpLeaf
   | SavedBrowserLeaf
   | SavedBoardLeaf
   | {

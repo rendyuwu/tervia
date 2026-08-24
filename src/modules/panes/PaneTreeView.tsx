@@ -45,6 +45,9 @@ import { cn } from "@/lib/utils";
 import { type EditorPaneHandle } from "@/modules/editor";
 import { useExplorerIconsReady } from "@/modules/explorer/lib/iconResolver";
 import { WorkspaceBoard } from "@/modules/workspaces/WorkspaceBoard";
+import { RdpPane } from "@/modules/rdp/RdpPane";
+import { fireRdpPaneAction } from "@/modules/rdp/paneActions";
+import type { RdpConnection } from "@/modules/rdp/connections";
 import { TerminalPane, type TerminalPaneHandle } from "@/modules/terminal";
 import type { SearchAddon } from "@xterm/addon-search";
 import type { PaneEdge, PaneLeaf, PaneNode } from "@/modules/terminal/lib/panes";
@@ -69,6 +72,7 @@ import {
   FileCode,
   Globe,
   GripVertical,
+  Keyboard,
   Settings,
   SquareArrowOutUpRight,
   WrapText,
@@ -111,6 +115,14 @@ function floatParamsFor(node: PaneLeaf, title: string): FloatLeafParams | null {
   // the main-window pane stays mounted (it owns the tab tree the float has no
   // copy of) and pushes its cards over.
   if (node.leafKind === "board") return { leafId: node.id, kind: "board", title };
+  // RDP is deliberately not floatable, and `rdp` is deliberately absent from
+  // `FloatKind`. Neither of the two float strategies fits: it cannot MIRROR
+  // (that would fan every frame batch to a second webview, and one batch can be
+  // a whole framebuffer), and it cannot HAND OFF (a session belongs to the
+  // channel that opened it, so the float would have to dial its own - a second
+  // login on the same desktop, which is not what popping a pane out means).
+  // Returning null here hides the float button; adding a `FloatKind` member
+  // without a `floatPane` branch is what would crash.
   return null;
 }
 
@@ -159,6 +171,8 @@ type Props = {
   onSplitSizes?: (splitId: number, sizes: number[]) => void;
   /** Saved SSH connections, keyed by id. Resolves a leaf's `ssh:<host>` label. */
   sshHosts?: Map<string, SshConnection>;
+  /** Saved RDP connections, keyed by id. Resolves a leaf's `rdp:<host>` label. */
+  rdpHosts?: Map<string, RdpConnection>;
   /** Live SSH status per terminal leaf id. Colors the SSH header label. */
   sshStatuses?: Map<number, SshStatus>;
   /** Live AI CLI status per terminal leaf id. Tints the header icon (idle/working/blocking). */
@@ -215,6 +229,7 @@ function ThemeSwatch({ palette }: { palette: TerminalPalette }) {
 
 type PaneMetaValue = {
   sshHosts?: Map<string, SshConnection>;
+  rdpHosts?: Map<string, RdpConnection>;
   sshStatuses?: Map<number, SshStatus>;
   aiCliStatuses?: Map<number, AiCliStatus>;
   sshBindingByConnection?: Map<string, SshConnectionBinding>;
@@ -420,6 +435,21 @@ const LeafBody = memo(function LeafBody({
       </ErrorBoundary>
     );
   }
+  if (node.leafKind === "rdp") {
+    // `resetKeys` on the connection id as well as the leaf id: re-pointing a
+    // leaf at another host is a new session, so a boundary tripped by the old
+    // one must not hold the new one hostage.
+    return (
+      <ErrorBoundary label="rdp pane" resetKeys={[node.id, node.rdpConnectionId]}>
+        <RdpPane
+          leafId={node.id}
+          connectionId={node.rdpConnectionId}
+          visible={tabVisible}
+          focused={focused}
+        />
+      </ErrorBoundary>
+    );
+  }
   // Editor - while floating it's handed off to the float window; unmount here so
   // two live CodeMirror views can't race and save-stomp the same file (the parent
   // overlays a "floating" indicator in its place).
@@ -501,6 +531,7 @@ function PaneLeafFrame({
   } = use(PaneDndContext);
   const {
     sshHosts,
+    rdpHosts,
     sshStatuses,
     aiCliStatuses,
     sshBindingByConnection,
@@ -543,7 +574,7 @@ function PaneLeafFrame({
   const termTitle = useTerminalTitles((s) =>
     node.leafKind === "terminal" ? s.titles[node.id] : undefined,
   );
-  const baseLabel = leafLabel(node, sshHosts);
+  const baseLabel = leafLabel(node, sshHosts, undefined, rdpHosts);
   const showTitle =
     node.leafKind === "terminal" &&
     !!termTitle &&
@@ -783,6 +814,27 @@ function PaneLeafFrame({
                 </button>
               </IconTooltip>
             )}
+            {/* Ctrl+Alt+Del, as a button, because the real chord never arrives:
+                on Windows it is a Secure Attention Sequence the OS consumes
+                before any application sees it, and elsewhere the browser does
+                not report it either. Without this there is no way to reach the
+                lock screen or Task Manager on the remote desktop, which is
+                most of what an RDP session is opened for. */}
+            {node.leafKind === "rdp" && (
+              <IconTooltip label="Send Ctrl+Alt+Del" side="bottom">
+                <button
+                  type="button"
+                  aria-label="Send Ctrl+Alt+Del to the remote desktop"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    fireRdpPaneAction(node.id, "ctrlAltDel");
+                  }}
+                  className="text-muted-foreground/70 hover:bg-muted hover:text-foreground flex size-5 shrink-0 items-center justify-center rounded transition-colors"
+                >
+                  <Keyboard size={12} strokeWidth={2} />
+                </button>
+              </IconTooltip>
+            )}
             {/* Per-pane terminal theme, moved out of the right-click menu into a
                 gear dropdown that sits between the float + close buttons. */}
             {node.leafKind === "terminal" && onSetTerminalTheme && (
@@ -983,6 +1035,7 @@ export function PaneTreeView({
   onOpenPreview,
   onSplitSizes,
   sshHosts,
+  rdpHosts,
   sshStatuses,
   aiCliStatuses,
   sshBindingByConnection,
@@ -1075,6 +1128,7 @@ export function PaneTreeView({
   const metaValue = useMemo<PaneMetaValue>(
     () => ({
       sshHosts,
+      rdpHosts,
       sshStatuses,
       aiCliStatuses,
       sshBindingByConnection,
@@ -1084,6 +1138,7 @@ export function PaneTreeView({
     }),
     [
       sshHosts,
+      rdpHosts,
       sshStatuses,
       aiCliStatuses,
       sshBindingByConnection,

@@ -107,7 +107,15 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 url = "2"
 # Default features pull in aws-lc-rs which needs NASM at build time on
 # Windows. Use ring instead - pure-Rust + assembly, no toolchain hassle.
-russh = { version = "0.60", default-features = false, features = ["ring", "flate2", "rsa"] }
+#
+# Pinned exactly, and the pin is load-bearing - see the IronRDP block below for
+# the full story. Short version: russh 0.60.1 states its RustCrypto
+# requirements as prerelease-floored carets (`ecdsa ^0.17.0-rc.16`), which is
+# the only shape that can co-resolve with the exact `=` pins picky carries.
+# 0.60.3 turned every one of those carets into an `=` pin and 0.61+ moved to
+# plain `^0.17`; both conflict with picky, so neither can share a tree with the
+# RDP dependency set.
+russh = { version = "=0.60.1", default-features = false, features = ["ring", "flate2", "rsa"] }
 russh-sftp = "2.1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "net"] }
 # PBKDF2 + AES-256-GCM + CSPRNG for the passphrase-encrypted SSH connection
@@ -127,6 +135,89 @@ uuid = { version = "1", features = ["v4", "serde"] }
 # sockets and Windows named pipes behind one API so the daemon protocol does
 # not need parallel transport implementations.
 interprocess = { version = "2.2", features = ["tokio"] }
+# RDP. The API-boundary crates rather than the `ironrdp-client` convenience
+# crate: `RdpClient::run()` owns the whole connect sequence, which leaves
+# nowhere to hook certificate TOFU, and it emits whole frames instead of dirty
+# rectangles.
+#
+# Every version here is an exact pin, and NOT because newer is untested. The
+# latest set (connector 0.10 / session 0.11 / graphics 0.9 / input 0.7 /
+# tokio 0.10) cannot coexist with russh at all:
+#
+#   ironrdp-connector 0.10.0 requires `picky =7.0.0-rc.25`
+#   picky 7.0.0-rc.25    requires `ecdsa =0.17.0-rc.22`, `pkcs8` via a chain
+#                                 that resolves pkcs5 to 0.8.0 final
+#   russh 0.60.x         calls `pkcs5::pbes2::Parameters::pbkdf2_sha256_aes256cbc`,
+#                                 renamed to `generate_*` in pkcs5 0.8.0 -> does
+#                                 not compile
+#   russh 0.61/0.62      use the new pkcs5 name but require `ecdsa ^0.17`, which
+#                                 excludes prereleases -> hard resolver conflict
+#                                 with picky's `=0.17.0-rc.22`
+#
+# connector 0.9.0 pins `picky =7.0.0-rc.23` instead, whose RustCrypto pins
+# (`ecdsa =0.17.0-rc.17`, `pkcs8 =0.11.0-rc.11`) sit inside russh 0.60.1's
+# caret floors and leave pkcs5 at 0.8.0-rc.13, so russh still compiles. That is
+# the whole reason for staying one minor behind. session 0.10.0 / graphics
+# 0.8.1 / input 0.6.0 / tokio 0.9.0 are simply the versions that pair with
+# connector 0.9 on ironrdp-pdu 0.8 + ironrdp-core 0.2.
+#
+# The escape route is upstream, not local: picky 7.0.0-rc.26 already relaxes
+# those pins to `ed25519-dalek ^3` / `p256 ^0.14`. When an ironrdp-connector
+# release pins rc.26 or later, this whole block and the russh pin can move
+# forward together.
+ironrdp-connector = "=0.9.0"
+ironrdp-session = "=0.10.0"
+ironrdp-tokio = "=0.9.0"
+# `rustls-ring` and not `rustls`: the latter aliases `rustls-aws-lc-rs`, which
+# needs NASM at build time on Windows. Same reason russh is pinned to ring.
+ironrdp-tls = { version = "0.2", default-features = false, features = [
+	"rustls-ring",
+] }
+ironrdp-graphics = "=0.8.1"
+ironrdp-input = "=0.6.0"
+# Already in the tree as transitive dependencies of the four crates above, at
+# exactly these versions - promoted to direct entries because nothing
+# re-exports them and the RDP module names their types. `ironrdp-pdu` for
+# `Action` (the discriminant `Framed::read_pdu` hands back), `InclusiveRectangle`
+# and the `Rectangle` trait that gives it `width()`/`height()`; `ironrdp-core`
+# for `WriteBuf`, which appears in every `Sequence::step` signature. The `=`
+# pins are the versions connector 0.9 / session 0.10 resolve to; a different
+# version would make the rectangle types distinct and stop compiling.
+ironrdp-pdu = "=0.8.0"
+ironrdp-core = { version = "=0.2.1", features = ["alloc"] }
+# TCP keepalive with a usable idle time on the RDP socket. Already in the tree
+# via tokio/hyper at exactly this version, so this is a promotion, not a new
+# crate. Needed because tokio only exposes `TcpSocket::set_keepalive(bool)`,
+# which turns SO_KEEPALIVE on at the OS default idle - two hours on Linux - and
+# an RDP session that has silently lost its network needs to notice in seconds,
+# not after lunch. `TCP_KEEPIDLE`/`TCP_KEEPINTVL` need socket2. See
+# `KEEPALIVE_IDLE` in `modules/rdp/session.rs`; the SSH module solves the same
+# problem with russh's own `keepalive_interval`.
+socket2 = "0.6"
+# Leaf-certificate parsing for the RDP certificate TOFU check: the SHA-256
+# fingerprint's subject/issuer labels, and the `x509_cert::Certificate` that
+# `ironrdp_tls::extract_tls_server_public_key` takes (CredSSP binds to the
+# server's SubjectPublicKey, not to the whole certificate). Already in the tree
+# with the same feature set as `ironrdp-tls`'s own dependency, so this adds no
+# new compilation.
+x509-cert = { version = "0.2", default-features = false, features = ["std"] }
+# Direct entries so the custom `ServerCertVerifier` doing certificate TOFU can
+# be injected into the `TlsConnector`. `ironrdp-tls` hardcodes
+# `NoCertificateVerification` with no callback seam, so owning the connector is
+# the only way to validate the server certificate during the handshake rather
+# than after it. Default features off on both: rustls defaults to the
+# aws-lc-rs provider.
+tokio-rustls = { version = "0.26", default-features = false, features = [
+	"ring",
+	"logging",
+	"tls12",
+] }
+rustls = { version = "0.23", default-features = false, features = [
+	"ring",
+	"logging",
+	"std",
+	"tls12",
+] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "3.6", default-features = false, features = [

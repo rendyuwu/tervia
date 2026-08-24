@@ -25,7 +25,7 @@ Apache-2.0 (see [NOTICE](NOTICE)).
 | Editor / UI      | CodeMirror 6, shadcn/ui (`radix-luma` / `mist`, lucide icons), Tailwind v4    |
 | Bundle id        | `dev.rendy.tervia` (dev profile: `dev.rendy.tervia.dev`)                      |
 | Crates           | `tervia` / lib `tervia_lib`; GUI binary `TerviaApp`                           |
-| Keychain service | `tervia-ssh` (SSH secrets)                                                    |
+| Keychain service | `tervia-ssh` (SSH secrets), `tervia-rdp` (RDP passwords)                      |
 | Package manager  | pnpm                                                                          |
 | Platforms        | macOS, Linux, Windows                                                         |
 | Frontend check   | `pnpm exec tsc --noEmit`, `pnpm run lint:imports`                             |
@@ -37,15 +37,18 @@ Apache-2.0 (see [NOTICE](NOTICE)).
 
 **Persisted state** (all under the bundle id's app-data dir, via
 `tauri-plugin-store`): `tervia-settings.json`, `tervia-workspaces.json`,
-`tervia-ssh-connections.json`, `tervia-cli-agents.json`. Rust -> webview events
-are `tervia:`-prefixed; intra-frontend store-change events are `tervia://`.
-Export formats: `.tervia-ssh` (encrypted connection backup, JSON kind
-`tervia-ssh-connections`) and `.tervia` (theme, `$schema: "tervia-theme"`).
+`tervia-ssh-connections.json`, `tervia-rdp-connections.json`,
+`tervia-cli-agents.json`. Rust -> webview events are `tervia:`-prefixed;
+intra-frontend store-change events are `tervia://`. Export formats:
+`.tervia-backup` (fully encrypted SSH + RDP connection backup, JSON kind
+`tervia-connections`, format v2) and `.tervia` (theme,
+`$schema: "tervia-theme"`). The v1 `.tervia-ssh` backup (kind
+`tervia-ssh-connections`, SSH only, plaintext inventory) is still read.
 
-**Not built yet.** RDP sessions and end-to-end encrypted sync of saved machines
-and keys are planned, not present. Nothing in the tree implements either; the
-`.tervia-ssh` passphrase-encrypted export is the current answer to moving
-connections between machines, and it is a manual file, not sync.
+**Not built yet.** End-to-end encrypted sync of saved machines and keys is
+planned, not present. The `.tervia-backup` passphrase-encrypted export is the
+current answer to moving connections between machines, and it is a manual file,
+not sync.
 
 ## Mental model
 
@@ -68,8 +71,8 @@ Six invariants (rationale in
    with `pointer-events-none invisible`, so PTYs and SSH sessions keep
    streaming.
 5. **Secrets live only in the OS keychain / DPAPI / a 0600 file** (`secrets_*`
-   commands, service `tervia-ssh`). Never in the settings store, the workspace
-   store, or `localStorage`.
+   commands, services `tervia-ssh` and `tervia-rdp`). Never in the settings
+   store, the workspace store, or `localStorage`.
 6. **App.tsx coordinates, it does not implement.** It owns cross-module wiring;
    feature logic lives in `src/modules/<area>/` and the per-concern hooks in
    `src/app/hooks/`.
@@ -277,8 +280,15 @@ macOS/Linux rely on `Drop for Session -> killer.kill()`.
 - `tunnel.ts` opens headless forwards for callers that want a TCP tunnel rather
   than a terminal. It refuses a connection with no pinned server key, because a
   first connect needs a human and nothing here can show the dialog.
-- `backup.ts` / `backupFile.ts` export and import `.tervia-ssh`, sealed by
-  `backup_seal`. `SshBackupDialog` and `SshMenu` are the UI.
+- `backup.ts` / `backupFile.ts` export and import `.tervia-backup` (format v2):
+  one sealed blob over both inventories and every credential, so the file leaks
+  no hostnames. Credentials never enter the webview on this path — the export
+  sends keychain references to `backup_seal_payload`, and the import gets
+  metadata back from `backup_open_payload` while `backup_apply_secrets` writes
+  the secrets from Rust. v1 `.tervia-ssh` files still import, and that path is
+  the one exception: their sealed block is the credential map itself.
+  `SshBackupDialog` and `SshMenu` are the UI for both protocols; `RdpMenu`
+  deliberately has no second copy.
 - `status.ts` models the per-leaf handshake state including per-hop progress;
   `SshRoutePill` renders the chain in the status bar. `hostKeyPrompt.ts` queues
   first-connect confirmations and pins the fingerprint at the moment of trust.
@@ -410,9 +420,10 @@ never blocks persistence. Not supported in builtin mode:
 - `tauri.conf.json` sets `"removeUnusedCommands": true`. A command with no
   frontend `invoke` call site can be stripped from a release build. Today
   `secrets_get_all`, `http_stream`, `http_abort`, `shell_bg_spawn_direct`,
-  `ssh_list_sessions` and `ssh_attach` have no caller in `src/`. The
-  `.tervia-ssh` export does not use `secrets_get_all`; it reads each
-  connection's secrets individually through `getConnectionSecrets`.
+  `ssh_list_sessions` and `ssh_attach` have no caller in `src/`. Note the
+  backup export does not read secrets from JS at all — it passes keychain
+  references to `backup_seal_payload` — so `secrets_get_all` has no caller by
+  design, not by omission.
 - The plugin store writes non-atomically, so `shell_init.rs` retries its
   `tervia-settings.json` read a couple of times before giving up; a spawn can
   otherwise land between the truncate and the rewrite.
