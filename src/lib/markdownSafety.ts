@@ -48,11 +48,7 @@ export const safeUrlTransform: UrlTransform = (url, key, node) => {
 
   // A real scheme is present: allow only the safe ones, block the rest
   // (javascript:, vbscript:, file:, custom schemes, ...).
-  if (
-    lower.startsWith("http://") ||
-    lower.startsWith("https://") ||
-    lower.startsWith("mailto:")
-  ) {
+  if (lower.startsWith("http://") || lower.startsWith("https://") || lower.startsWith("mailto:")) {
     return sanitized;
   }
   return "";
