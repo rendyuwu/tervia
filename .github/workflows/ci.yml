@@ -67,11 +67,22 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
-      - name: Type-check
-        run: pnpm exec tsc --noEmit
-
+      # Steps below are ordered cheapest-first, so a fast failure (a
+      # formatting nit, say) doesn't wait behind the slowest check.
       - name: Check module import discipline
         run: pnpm run lint:imports
+
+      - name: Type-check scripts
+        run: pnpm run typecheck:scripts
+
+      - name: Check formatting
+        run: pnpm run format:check
+
+      - name: Verify
+        run: pnpm run verify
+
+      - name: Type-check
+        run: pnpm exec tsc --noEmit
 
       - name: Build frontend
         run: pnpm build
