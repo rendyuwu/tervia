@@ -988,9 +988,14 @@ mod tests {
         assert_eq!(&bytes[16..24], &[0, 0, 0, 0, 6, 0, 3, 0]);
         assert_eq!(bytes.len(), HEADER_LEN + RECT_LEN + data.len());
         // Same bytes as the framebuffer, alpha aside.
+        // `as_chunks` rather than `chunks_exact(4)`: clippy's
+        // `chunks_exact_to_as_chunks` fires on a constant chunk size, and CI
+        // runs a newer clippy than any one developer's toolchain.
         assert!(bytes[HEADER_LEN + RECT_LEN..]
-            .chunks_exact(4)
-            .zip(data.chunks_exact(4))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(data.as_chunks::<4>().0.iter())
             .all(|(got, want)| got[..3] == want[..3] && got[3] == 0xFF));
     }
 
