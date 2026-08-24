@@ -24,10 +24,11 @@
     "tauri": "tauri",
     "tauri:dev": "tauri dev --config src-tauri/tauri.dev.conf.json",
     "typecheck": "tsc --noEmit",
+    "typecheck:scripts": "tsc -p tsconfig.scripts.json --noEmit",
     "lint:imports": "node scripts/check-imports.mjs",
     "verify": "node scripts/verify-all.mjs",
-    "format": "prettier --write \"src/**/*.{ts,tsx,js,jsx,css,json,md}\" \"*.{ts,tsx,js,jsx,css,json,md,html}\"",
-    "format:check": "prettier --check \"src/**/*.{ts,tsx,js,jsx,css,json,md}\" \"*.{ts,tsx,js,jsx,css,json,md,html}\"",
+    "format": "prettier --write \"src/**/*.{ts,tsx,js,jsx,css,json,md}\" \"scripts/**/*.{ts,mjs}\" \"*.{ts,tsx,js,jsx,css,json,md,html}\"",
+    "format:check": "prettier --check \"src/**/*.{ts,tsx,js,jsx,css,json,md}\" \"scripts/**/*.{ts,mjs}\" \"*.{ts,tsx,js,jsx,css,json,md,html}\"",
     "lint:rust": "cd src-tauri && cargo fmt --all -- --check && cargo clippy --all-targets -- -D warnings",
     "fmt:rust": "cd src-tauri && cargo fmt --all",
     "doctor": "npx react-doctor@latest"

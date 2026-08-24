@@ -187,6 +187,14 @@ console.log("\nthe nudge stays inside the floor and bails on a dead/replaced ses
 // Deep-imported ESM build: the bare `@xterm/xterm` specifier resolves to the CJS
 // `main` here and yields no named `Terminal`. This needs the REAL implementation,
 // not a stand-in, since the whole point is to pin xterm's own resize behaviour.
+// The package ships no declaration file for this deep path (TS7016), and since
+// the specifier DOES resolve to a real file, TS also refuses a local
+// `declare module` augmentation for it (TS2665: "resolves to an untyped module
+// ... which cannot be augmented" - only a global ambient .d.ts may do that, and
+// this script owns no such file). The line below is genuinely untypeable short
+// of adding one; the cast on the next line is what actually gives `Terminal`
+// its real type.
+// @ts-expect-error TS7016 - no declaration file ships for this deep subpath
 const { Terminal } = (await import("@xterm/xterm/lib/xterm.mjs")) as unknown as {
   Terminal: new (opts: Record<string, unknown>) => ProbeTerm;
 };

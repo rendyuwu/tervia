@@ -157,11 +157,7 @@ check(
 );
 throws("no connections list", () => parseBackupFile(v1({ connections: {} })), "connections");
 throws("no secrets block", () => parseBackupFile(v1({ secrets: undefined })), "credentials");
-throws(
-  "half a secrets block",
-  () => parseBackupFile(v1({ secrets: { kdf: "x" } })),
-  "credentials",
-);
+throws("half a secrets block", () => parseBackupFile(v1({ secrets: { kdf: "x" } })), "credentials");
 
 console.log("\n[ports] what would otherwise reach TcpStream::connect");
 check("22 is fine", sanitizeConnection(conn())?.port, 22);
@@ -260,11 +256,7 @@ check(
   sanitizeRdpConnection(rdp({ desktopWidth: 99999 }))?.desktopWidth,
   1600,
 );
-check(
-  "and a non-number",
-  sanitizeRdpConnection(rdp({ desktopHeight: "900" }))?.desktopHeight,
-  900,
-);
+check("and a non-number", sanitizeRdpConnection(rdp({ desktopHeight: "900" }))?.desktopHeight, 900);
 // Only one mode exists today. A file written by a later build must resolve to
 // the mode THIS build can render, not to a string the pane cannot switch on.
 check(
@@ -345,11 +337,10 @@ console.log("\n[v1 list handling] bad entries are skipped and counted, not fatal
 const mixed = parseBackupFile(
   v1({ connections: [conn(), conn({ id: "c-2", port: 0 }), null, conn({ id: "c-3" })] }),
 );
-check(
-  "two good entries survive",
-  mixed.version === 1 ? mixed.connections.map((c) => c.id) : null,
-  ["c-1", "c-3"],
-);
+check("two good entries survive", mixed.version === 1 ? mixed.connections.map((c) => c.id) : null, [
+  "c-1",
+  "c-3",
+]);
 check("two bad entries counted", mixed.version === 1 ? mixed.skipped : null, 2);
 // A duplicate id would import twice and the second would silently win.
 const dupes = parseBackupFile(v1({ connections: [conn(), conn({ name: "other" })] }));
@@ -362,8 +353,16 @@ const payload = sanitizePayload({
   connections: [conn(), conn({ id: "c-2", port: 0 }), conn({ id: "c-3" }), conn()],
   rdpConnections: [rdp(), rdp({ id: "r-2", host: "" }), rdp()],
 });
-check("good SSH rows survive", payload.connections.map((c) => c.id), ["c-1", "c-3"]);
-check("good RDP rows survive", payload.rdpConnections.map((c) => c.id), ["r-1"]);
+check(
+  "good SSH rows survive",
+  payload.connections.map((c) => c.id),
+  ["c-1", "c-3"],
+);
+check(
+  "good RDP rows survive",
+  payload.rdpConnections.map((c) => c.id),
+  ["r-1"],
+);
 // Two bad SSH entries (port 0, duplicate id) and two bad RDP ones (no host,
 // duplicate id): the count is across both inventories.
 check("skipped counts both protocols", payload.skipped, 4);

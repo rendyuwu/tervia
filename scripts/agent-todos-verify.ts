@@ -56,8 +56,7 @@ console.log("\n2. projectSlug: the only way to reach a session's log");
   );
   ok(
     "an already-dashed folder keeps its dashes",
-    projectSlug("D:\\Projects\\laragon\\www\\SIASKA-NEW") ===
-      "D--Projects-laragon-www-SIASKA-NEW",
+    projectSlug("D:\\Projects\\laragon\\www\\SIASKA-NEW") === "D--Projects-laragon-www-SIASKA-NEW",
   );
   ok("case is preserved", projectSlug("C:\\Users\\IT STAFF") === "C--Users-IT-STAFF");
 }

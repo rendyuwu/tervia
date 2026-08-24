@@ -410,7 +410,20 @@ console.log("\n[active index] savedActiveTabIndex must match what serializeTabs 
     split("row", [
       named(term(1200, "/w/api"), "backend"),
       named(editor(1201, "/w/api/main.rs"), "entrypoint"),
-      named({ kind: "leaf", id: 1202, leafKind: "browser", url: "https://x.dev" }, "docs"),
+      // `browser` is a saved-only, legacy leaf kind (removed as a live pane in
+      // v0.4.22+) - it can never occur in a real `PaneNode`, so the cast, not a
+      // widened type, is what's honest here. Same shape as the `scm` legacy-tab
+      // cast below: a defunct kind, simulated to prove the serializer still
+      // whitelists its `customTitle` rather than dropping it.
+      named(
+        {
+          kind: "leaf",
+          id: 1202,
+          leafKind: "browser",
+          url: "https://x.dev",
+        } as unknown as PaneNode,
+        "docs",
+      ),
     ]),
     1200,
   );
@@ -425,7 +438,7 @@ console.log("\n[active index] savedActiveTabIndex must match what serializeTabs 
     "docs",
   ]);
 
-  const restored = savedToTab(pane(serializeTabs([t])[0]), () => id());
+  const restored = savedToTab(serializeTabs([t])[0], () => id());
   const liveNames =
     restored.paneTree.kind === "split"
       ? restored.paneTree.children.map((c) => (c.kind === "leaf" ? c.customTitle : undefined))
@@ -479,7 +492,7 @@ console.log("\n[rdp] an rdp leaf must round-trip its connection id and size mode
     ["kind", "leafKind", "rdpConnectionId", "sizeMode"],
   );
 
-  const restored = savedToTab(pane(s[0]), () => id());
+  const restored = savedToTab(s[0], () => id());
   const liveLeaf =
     restored.paneTree.kind === "split" ? restored.paneTree.children[1] : restored.paneTree;
   check(
