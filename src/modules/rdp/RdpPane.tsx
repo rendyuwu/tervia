@@ -9,14 +9,8 @@ import {
   type RdpInputEvent,
   type RdpSession,
 } from "./bridge";
-import {
-  listConnections,
-  markConnected,
-  pinFingerprint,
-  rdpKeyringAccount,
-  RDP_KEYRING_SERVICE,
-  type RdpConnection,
-} from "./connections";
+import { listConnections, markConnected, pinFingerprint, type RdpConnection } from "./connections";
+import { openRdpDialTarget, rdpOpenInput, type RdpDialTarget } from "./dial";
 import type { RdpFrameBatch } from "./frame";
 import { fitViewport, toRemotePoint, wheelRotation, type RdpViewport } from "./lib/viewport";
 import { onRdpPaneAction, type RdpPaneAction } from "./paneActions";
@@ -87,7 +81,10 @@ type Props = {
 };
 
 type Status =
-  | { kind: "connecting" }
+  /** `viaTunnel` only changes the copy: an SSH tunnel has to be dialled, and
+   *  authenticated, before the RDP connect can even start, so a first connect
+   *  through a bastion can sit here through TWO trust prompts. */
+  | { kind: "connecting"; viaTunnel?: boolean }
   | { kind: "connected" }
   | { kind: "error"; message: string }
   | { kind: "closed"; reason: string };
@@ -507,6 +504,26 @@ export function RdpPane({ leafId, connectionId, visible, focused = true }: Props
     let alive = true;
     let session: RdpSession | null = null;
     let promptId: string | null = null;
+    /**
+     * The tunnel this connect is riding, once it is open. Held here rather than
+     * in a ref because it belongs to THIS attempt: the teardown that releases it
+     * is the same one that closes the session.
+     */
+    let dial: RdpDialTarget | null = null;
+    /**
+     * Host-key prompts the tunnel raised. A tunnelled first connect can ask TWO
+     * trust questions - the bastion's host key, then the RDP certificate - and
+     * every one of them has a backend parked mid-handshake behind it, so every
+     * one has to be answered on the way out. A set because a ProxyJump chain
+     * asks once per unpinned hop.
+     */
+    const sshPromptIds = new Set<string>();
+    /** Idempotent, and safe on a path that cannot know whether the tunnel ever
+     *  opened - which is every teardown that beats the `await` below. */
+    const releaseDial = () => {
+      dial?.release();
+      dial = null;
+    };
     // An `error` event while connected is not necessarily fatal (the backend
     // follows a fatal one with `disconnected`), so it is remembered rather than
     // shown: the reason a session dropped is far more useful than the bare
@@ -540,24 +557,25 @@ export function RdpPane({ leafId, connectionId, visible, focused = true }: Props
         return;
       }
       try {
+        if (row.tunnel) setStatus({ kind: "connecting", viaTunnel: true });
+        // The tunnel first, and it can block for a long time: dialling the
+        // bastion, and a first connect to it waits on the host-key dialog.
+        const target = await openRdpDialTarget(row, {
+          onHostKeyPrompt: (id) => sshPromptIds.add(id),
+        });
+        // Teardown can win this race, and a tunnel nobody claims is a bastion
+        // session held open with no consumer left to release it.
+        if (!alive) {
+          target.release();
+          return;
+        }
+        dial = target;
         const opened = await openRdp(
-          {
-            host: row.host,
-            port: row.port,
-            username: row.username,
-            domain: row.domain,
-            // A REFERENCE, never the secret. The host process reads the
-            // keychain itself and hands the plaintext straight into CredSSP;
-            // it does not exist on this side of the IPC at any point.
-            credential: {
-              kind: "keychain",
-              service: RDP_KEYRING_SERVICE,
-              account: rdpKeyringAccount(row.id),
-            },
-            width: row.desktopWidth,
-            height: row.desktopHeight,
-            expectedCertFingerprint: row.certFingerprint,
-          },
+          // Every field except the address comes from the row, so a tunnelled
+          // connect differs from a direct one in the address and nothing else -
+          // the pinned certificate included, which is what stops an ephemeral
+          // local port from looking like a new machine every time.
+          rdpOpenInput(row, target),
           {
             onConnected: (width, height, fingerprint) => {
               if (!alive) return;
@@ -573,7 +591,12 @@ export function RdpPane({ leafId, connectionId, visible, focused = true }: Props
                 {
                   promptId: prompt.promptId,
                   fingerprint: prompt.fingerprint,
-                  host: prompt.host,
+                  // The row's host, not the backend's: through a tunnel the
+                  // backend dialled `127.0.0.1`, and "First connection to
+                  // 127.0.0.1" names the wrong end of the tunnel for a
+                  // question about a remote machine's certificate. Identical
+                  // for a direct dial, where the backend echoes this host.
+                  host: row.host,
                   certificate: { subject: prompt.subject, issuer: prompt.issuer },
                   confirm: confirmRdpCert,
                 },
@@ -598,6 +621,11 @@ export function RdpPane({ leafId, connectionId, visible, focused = true }: Props
               if (!alive) return;
               sessionRef.current = null;
               setStatus({ kind: "closed", reason: lastError || reason });
+              // Nothing is riding the tunnel any more, and the pane stays
+              // mounted on its "ended" overlay for as long as the user leaves
+              // it there. Holding a bastion session open behind a dead RDP
+              // session is pure cost; Reconnect opens a fresh one.
+              releaseDial();
             },
             onError: (message) => {
               if (!alive) return;
@@ -615,6 +643,10 @@ export function RdpPane({ leafId, connectionId, visible, focused = true }: Props
         session = opened;
         sessionRef.current = opened;
       } catch (e) {
+        // Covers the tunnel's own failures too - a refused bastion, a rejected
+        // host key, a target the jump host cannot reach - so the message a user
+        // sees for "no route to 3389" is the SSH one that explains it.
+        releaseDial();
         if (alive)
           setStatus({ kind: "error", message: e instanceof Error ? e.message : String(e) });
       }
@@ -637,7 +669,16 @@ export function RdpPane({ leafId, connectionId, visible, focused = true }: Props
       // `abandon` no-ops when the user already answered, so this is safe to run
       // unconditionally on a path that cannot know whether they did.
       if (promptId) useHostKeyPrompt.getState().abandon(promptId);
+      // The tunnel's own trust question has exactly the same shape one step
+      // earlier: the bastion's handshake is parked, `openSsh` has not returned,
+      // and this pane was the only thing that would have answered.
+      for (const id of sshPromptIds) useHostKeyPrompt.getState().abandon(id);
+      sshPromptIds.clear();
       void session?.close().catch(() => {});
+      // The tunnel outlives nothing: a forward opened for a pane that unmounted
+      // before `rdp_open` returned is released by the `!alive` check above, and
+      // one that got as far as a live session is released here.
+      releaseDial();
       // Drop references to Tauri's frame buffers rather than holding them until
       // the next GC. A queued keyframe is a whole framebuffer - 33 MB at 4K.
       pendingBatches.current = [];
@@ -787,7 +828,11 @@ function StatusOverlay({
           className="text-icon-working animate-pulse opacity-80"
         />
         <span className="text-icon-working max-w-72 animate-pulse leading-relaxed">
-          Connecting to <span className="font-medium">{hostLabel || "the remote desktop"}</span>…
+          Connecting to <span className="font-medium">{hostLabel || "the remote desktop"}</span>
+          {/* Named because it is the slow half and the one that can stop for a
+              trust prompt: the bastion is dialled and authenticated before the
+              RDP connect starts at all. */}
+          {status.viaTunnel ? " through its SSH tunnel" : null}…
         </span>
       </div>
     );

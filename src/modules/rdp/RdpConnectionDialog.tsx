@@ -19,10 +19,15 @@ import {
 import { Input } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
+import {
+  listConnections as listSshConnections,
+  type SshConnection,
+} from "@/modules/ssh/connections";
 import { useHostKeyPrompt } from "@/modules/ssh/hostKeyPrompt";
 import { ChevronDown } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { confirmRdpCert, openRdp, type RdpCredential } from "./bridge";
+import { openRdpDialTarget, type RdpDialTarget } from "./dial";
 import {
   clearFingerprint,
   newConnectionId,
@@ -73,6 +78,9 @@ type Draft = {
   password: string;
   /** An `RDP_SIZE_PRESETS` id. */
   presetId: string;
+  /** Saved SSH connection to tunnel through, or "" to dial `host:port`
+   *  directly. */
+  tunnelSshConnectionId: string;
 };
 
 const EMPTY_DRAFT: Draft = {
@@ -83,6 +91,7 @@ const EMPTY_DRAFT: Draft = {
   domain: "",
   password: "",
   presetId: RDP_DEFAULT_PRESET.id,
+  tunnelSshConnectionId: "",
 };
 
 type TestState =
@@ -102,29 +111,36 @@ export function RdpConnectionDialog({ open, onOpenChange, editing, onSaved }: Pr
   const [error, setError] = useState<string | null>(null);
   const [test, setTest] = useState<TestState>({ kind: "idle" });
   const [sizePickerOpen, setSizePickerOpen] = useState(false);
+  // Saved SSH hosts, offered as tunnels. The whole list: any host that can reach
+  // the target's 3389 works, and it is usually not the target itself - a Linux
+  // jump box on the same network needs nothing installed on the Windows side.
+  const [sshConns, setSshConns] = useState<SshConnection[]>([]);
+  const [tunnelPickerOpen, setTunnelPickerOpen] = useState(false);
   // The certificate this connection trusts as of right now: seeded from the
   // saved pin, cleared by Forget, set by accepting one during Test. The single
   // source of truth for what Test verifies against AND what Save writes, so a
   // certificate accepted here cannot be lost and a forgotten one cannot come
   // back from the stale `editing` prop.
   const [pinnedFingerprint, setPinnedFingerprint] = useState<string | null>(null);
-  // The certificate prompt a Test probe currently has outstanding, if any.
-  // A ref rather than state because the only reader is the unmount teardown
-  // below, and it must see the latest value without a re-render.
-  const pendingCertPrompt = useRef<string | null>(null);
+  // Trust prompts a Test probe currently has outstanding: the RDP certificate,
+  // and the SSH host key of a tunnel it had to dial first. A ref rather than
+  // state because the only reader is the unmount teardown below, and it must see
+  // the latest value without a re-render.
+  const pendingPrompts = useRef<Set<string>>(new Set());
 
-  // A Test probe that raised a certificate question has the backend parked
-  // INSIDE the TLS handshake: `rdp_open` has not returned, so no session id
-  // exists and there is nothing to close. If this dialog goes away with the
-  // question unanswered - the window navigates, the header unmounts, a lazy
-  // boundary re-mounts - the socket and a blocked thread are held for the full
+  // A Test probe that raised a trust question has a backend parked INSIDE a
+  // handshake: for the certificate, `rdp_open` has not returned, so no session
+  // id exists and there is nothing to close; for the tunnel's host key it is
+  // `ssh_open` one step earlier. If this dialog goes away with the question
+  // unanswered - the window navigates, the header unmounts, a lazy boundary
+  // re-mounts - the socket and a blocked thread are held for the full
   // 120-second confirm timeout. Rejecting on the way out is what releases them,
   // and it no-ops if the user already answered.
   useEffect(
     () => () => {
-      const outstanding = pendingCertPrompt.current;
-      pendingCertPrompt.current = null;
-      if (outstanding) useHostKeyPrompt.getState().abandon(outstanding);
+      const outstanding = [...pendingPrompts.current];
+      pendingPrompts.current.clear();
+      for (const id of outstanding) useHostKeyPrompt.getState().abandon(id);
     },
     [],
   );
@@ -134,6 +150,17 @@ export function RdpConnectionDialog({ open, onOpenChange, editing, onSaved }: Pr
     setError(null);
     setSaving(false);
     setTest({ kind: "idle" });
+    void listSshConnections().then((cs) => {
+      setSshConns(cs);
+      // A tunnel whose SSH connection was deleted is a dangling id that fails
+      // every connect with "connection not found". Drop it so the picker and the
+      // next save both say what will actually happen: a direct dial.
+      setDraft((d) =>
+        d.tunnelSshConnectionId && !cs.some((c) => c.id === d.tunnelSshConnectionId)
+          ? { ...d, tunnelSshConnectionId: "" }
+          : d,
+      );
+    });
     if (!editing) {
       setDraft(EMPTY_DRAFT);
       setPinnedFingerprint(null);
@@ -151,11 +178,13 @@ export function RdpConnectionDialog({ open, onOpenChange, editing, onSaved }: Pr
       // A row written by a build offering a size this one does not falls back
       // to the default rather than showing an empty picker.
       presetId: presetIdFor(editing.desktopWidth, editing.desktopHeight) || RDP_DEFAULT_PRESET.id,
+      tunnelSshConnectionId: editing.tunnel?.sshConnectionId ?? "",
     });
     setPinnedFingerprint(editing.certFingerprint ?? null);
   }, [open, editing]);
 
   const preset = presetById(draft.presetId) ?? RDP_DEFAULT_PRESET;
+  const selectedTunnel = sshConns.find((c) => c.id === draft.tunnelSshConnectionId);
 
   const forgetPinnedCert = async () => {
     if (!editing) return;
@@ -208,13 +237,35 @@ export function RdpConnectionDialog({ open, onOpenChange, editing, onSaved }: Pr
     setError(null);
     setTest({ kind: "running" });
     const port = Number.parseInt(draft.port, 10);
-    const started = performance.now();
-    // A host with no pinned certificate makes the backend pause the handshake
-    // on a first-connect prompt; it is routed to the shared confirmation dialog
-    // and the id remembered so it can be withdrawn if the probe ends without an
-    // answer.
-    let testPromptId: string | null = null;
+    const host = draft.host.trim();
+    // Trust questions this probe raises, in the order they can arrive: the
+    // tunnel's SSH host key, then the RDP certificate. Each leaves a backend
+    // parked mid-handshake, so each is withdrawn if the probe ends without an
+    // answer. Mirrored onto the ref so the unmount teardown can do the same.
+    const raised = new Set<string>();
+    const remember = (promptId: string) => {
+      raised.add(promptId);
+      pendingPrompts.current.add(promptId);
+    };
+    let dial: RdpDialTarget | null = null;
     try {
+      // The tunnel first, and deliberately outside the timer below: dialling the
+      // bastion can stop for a host-key dialog, and a probe that can only ever
+      // time out while a human reads a fingerprint is worse than no probe.
+      const target = await openRdpDialTarget(
+        {
+          host,
+          port,
+          tunnel: draft.tunnelSshConnectionId
+            ? { sshConnectionId: draft.tunnelSshConnectionId }
+            : undefined,
+        },
+        { onHostKeyPrompt: remember },
+      );
+      dial = target;
+      // Measured from here, so the number reported is the RDP handshake and not
+      // however long the tunnel (or the user) took.
+      const started = performance.now();
       let resolved = false;
       const result = await new Promise<{ fingerprint: string; width: number; height: number }>(
         (resolve, reject) => {
@@ -225,8 +276,11 @@ export function RdpConnectionDialog({ open, onOpenChange, editing, onSaved }: Pr
           }, TEST_TIMEOUT_MS);
           openRdp(
             {
-              host: draft.host.trim(),
-              port,
+              // The tunnel's local end when there is one, so Test exercises the
+              // transport a real connect will use rather than a direct dial the
+              // saved row would never make.
+              host: target.host,
+              port: target.port,
               username: draft.username.trim(),
               domain: draft.domain.trim() || undefined,
               credential,
@@ -239,10 +293,10 @@ export function RdpConnectionDialog({ open, onOpenChange, editing, onSaved }: Pr
             },
             {
               onCertPrompt: (prompt) => {
-                testPromptId = prompt.promptId;
-                // Also on the ref, so the unmount teardown can answer it if the
-                // dialog disappears before this probe finishes.
-                pendingCertPrompt.current = prompt.promptId;
+                // Recorded for the `finally` below AND on the ref, so the
+                // unmount teardown can answer it if the dialog disappears
+                // before this probe finishes.
+                remember(prompt.promptId);
                 // Stop the deadline: the handshake is paused waiting on a
                 // human, which can take arbitrarily long, and no credential
                 // has been sent. Without this a first-connect Test could only
@@ -252,7 +306,10 @@ export function RdpConnectionDialog({ open, onOpenChange, editing, onSaved }: Pr
                   {
                     promptId: prompt.promptId,
                     fingerprint: prompt.fingerprint,
-                    host: prompt.host,
+                    // The typed host, not the backend's: through a tunnel the
+                    // backend dialled `127.0.0.1`, which names the wrong end of
+                    // it for a question about a remote machine's certificate.
+                    host,
                     certificate: { subject: prompt.subject, issuer: prompt.issuer },
                     confirm: confirmRdpCert,
                   },
@@ -323,8 +380,14 @@ export function RdpConnectionDialog({ open, onOpenChange, editing, onSaved }: Pr
       // thread; and a dead prompt left at the head of the shared queue also
       // shadows every later connect's dialog. `abandon` fixes both, and no-ops
       // when the user already answered.
-      if (testPromptId) useHostKeyPrompt.getState().abandon(testPromptId);
-      pendingCertPrompt.current = null;
+      for (const id of raised) {
+        useHostKeyPrompt.getState().abandon(id);
+        pendingPrompts.current.delete(id);
+      }
+      // The probe is over either way, so the tunnel goes with it: a Test that
+      // left a bastion session open would hold one for as long as the app runs,
+      // since nothing else has a handle on it.
+      dial?.release();
     }
   };
 
@@ -367,6 +430,13 @@ export function RdpConnectionDialog({ open, onOpenChange, editing, onSaved }: Pr
         // certificate accepted during Test would be dropped and one just
         // cleared with Forget would come back.
         certFingerprint: (keepPin && pinnedFingerprint) || undefined,
+        // Explicit, because the form now owns this field: leaving it to the
+        // spread would make "None (direct)" unselectable on a row that already
+        // had a tunnel. `undefined` rather than an empty object, so a direct
+        // connection is the absence of a tunnel and not an empty one.
+        tunnel: draft.tunnelSshConnectionId
+          ? { sshConnectionId: draft.tunnelSshConnectionId }
+          : undefined,
       };
       // `undefined`, not `""`, when the field was left blank: an empty string
       // would DELETE the stored password, so an edit that only renamed the host
@@ -520,6 +590,94 @@ export function RdpConnectionDialog({ open, onOpenChange, editing, onSaved }: Pr
               The desktop is negotiated at this size and the pane letterboxes it, so a pane that is
               not the same shape shows bars rather than cropping. Resizing the desktop to follow the
               pane is a later change.
+            </span>
+          </Field>
+
+          <Field label="SSH tunnel (optional)">
+            {/* NOT `modal`, for the same reason the size picker above is not. */}
+            <Popover open={tunnelPickerOpen} onOpenChange={setTunnelPickerOpen}>
+              <PopoverTrigger asChild>
+                <Button
+                  type="button"
+                  variant="outline"
+                  role="combobox"
+                  aria-expanded={tunnelPickerOpen}
+                  className="h-8 w-full justify-between px-2.5 text-[12px] font-normal"
+                >
+                  <span className={cn("truncate", !selectedTunnel && "text-muted-foreground")}>
+                    {selectedTunnel
+                      ? `${selectedTunnel.name} (${selectedTunnel.user}@${selectedTunnel.host}:${selectedTunnel.port})`
+                      : "None (dial the host directly)"}
+                  </span>
+                  <ChevronDown size={13} strokeWidth={2} className="ml-2 shrink-0 opacity-60" />
+                </Button>
+              </PopoverTrigger>
+              <PopoverContent
+                align="start"
+                sideOffset={6}
+                className="w-[var(--radix-popover-trigger-width)] gap-0 overflow-hidden rounded-2xl p-0"
+              >
+                <Command className="rounded-2xl">
+                  <CommandInput placeholder="Search saved SSH hosts…" className="text-[12px]" />
+                  <CommandList className="max-h-56">
+                    <CommandEmpty className="py-4 text-[11px]">
+                      No saved SSH host found.
+                    </CommandEmpty>
+                    <CommandGroup>
+                      <CommandItem
+                        value="none direct connection"
+                        data-checked={!draft.tunnelSshConnectionId ? "true" : undefined}
+                        onSelect={() => {
+                          setDraft((d) => ({ ...d, tunnelSshConnectionId: "" }));
+                          setTunnelPickerOpen(false);
+                        }}
+                        className="gap-2 rounded-xl px-2.5 py-1.5 text-[12px]"
+                      >
+                        <span className="truncate">None (dial the host directly)</span>
+                      </CommandItem>
+                      {sshConns.map((c) => (
+                        <CommandItem
+                          key={c.id}
+                          // Searchable on name + user@host:port; the id keeps the
+                          // value unique so cmdk never collapses two like-named hosts.
+                          value={`${c.name} ${c.user}@${c.host}:${c.port} ${c.id}`}
+                          data-checked={draft.tunnelSshConnectionId === c.id ? "true" : undefined}
+                          onSelect={() => {
+                            setDraft((d) => ({ ...d, tunnelSshConnectionId: c.id }));
+                            setTunnelPickerOpen(false);
+                          }}
+                          className="gap-2 rounded-xl px-2.5 py-1.5 text-[12px]"
+                        >
+                          <span className="flex min-w-0 flex-col">
+                            <span className="truncate">{c.name}</span>
+                            <span className="text-muted-foreground truncate font-mono text-[10px]">
+                              {c.user}@{c.host}:{c.port}
+                            </span>
+                          </span>
+                        </CommandItem>
+                      ))}
+                    </CommandGroup>
+                  </CommandList>
+                </Command>
+              </PopoverContent>
+            </Popover>
+            <span className="text-muted-foreground text-[10.5px]">
+              {selectedTunnel ? (
+                <>
+                  Host and port above are resolved{" "}
+                  <span className="font-medium">from {selectedTunnel.name}</span>, not from this
+                  machine — so a Windows box with no public 3389 is reached at its private address.
+                  The SSH host needs nothing installed and does not have to be the Windows machine
+                  itself; anything that can reach its 3389 will do. Its own jump-host chain applies
+                  too.
+                </>
+              ) : (
+                <>
+                  Reach this host through a saved SSH connection instead of dialling it directly,
+                  for a machine whose 3389 is not exposed. The trusted certificate is the same
+                  either way.
+                </>
+              )}
             </span>
           </Field>
 
