@@ -20,13 +20,20 @@
  *    back. They exist so a list screen costs zero `secrets_get` calls; a
  *    read-back on the no-change path spends exactly what they were added to
  *    save, and the three-state convention (`undefined` = leave it alone) is what
- *    stops an edit that never touched a password field from wiping it.
+ *    stops an edit that never touched a password field from wiping it. Every
+ *    check here feeds the flags in DELIBERATELY WRONG, because handing the
+ *    previous record straight back cannot tell "the store read what is stored"
+ *    from "the store echoed its caller".
  *
- * 4. A TORN STORE FILE RECOVERS. tauri-plugin-store writes in place with no temp
- *    file and no fsync, and swallows the load error of a file it cannot parse -
- *    so a zeroed or nul-filled file comes back as an EMPTY store and the next
- *    autosave makes that permanent. For the vault that means a private key left
- *    in the keychain with no record naming it.
+ * 4. A TORN STORE FILE RECOVERS, AND A FILESYSTEM IN A BAD STATE DEGRADES.
+ *    tauri-plugin-store writes in place with no temp file and no fsync, and
+ *    swallows the load error of a file it cannot parse - so a zeroed or
+ *    nul-filled file comes back as an EMPTY store and the next autosave makes
+ *    that permanent. For the vault that means a private key left in the keychain
+ *    with no record naming it. Recovery therefore never rejects: the settle pass
+ *    runs once and its promise is cached, so a cached rejection would leave the
+ *    store unreadable for the rest of the process on exactly the profile where
+ *    the good snapshot is sitting next to the broken primary.
  *
  * 5. RDP RESOLVES TO A REFERENCE, never a value, for both binding kinds. The
  *    Phase 5 invariant is that an RDP password never enters the webview; here it
@@ -39,20 +46,35 @@
  *    reaches the handshake, and a mode that returns nothing connects with no
  *    credentials at all.
  *
- * The store and secrets access are injectable ports, so all of this runs under
- * plain node with no Tauri runtime and no mocking library.
+ * 7. THE SETTLE ORDERING: recover, then force the load, then snapshot. Two of
+ *    the three are useless in the wrong order - a snapshot taken before the load
+ *    proved the file good can copy a torn file over the last good one, and a load
+ *    that happens before recovery has already decided the file was worthless.
+ *
+ * The store, secrets, filesystem, plugin store and event bus are all injectable
+ * ports, so all of this runs under plain node with no Tauri runtime and no
+ * mocking library.
  */
+import {
+  createRecoveredStore,
+  type KeyValueStore,
+  type StoreBroadcast,
+} from "../src/lib/recoveredStore";
 import {
   recoverStoreFile,
   snapshotStoreFile,
+  SNAPSHOT_SUFFIX,
   type StoreFileIo,
   type StoreFileRead,
+  type StoreRecovery,
 } from "../src/lib/storeRecovery";
 import type { SecretsIo, VaultStoreIo } from "../src/modules/vault/adapters";
 import { resolveRdpAuth, resolveSshAuth, type ResolveDeps } from "../src/modules/vault/resolve";
 import { createVaultStore } from "../src/modules/vault/store";
 import {
   VaultInUseError,
+  type RdpInlineCredentials,
+  type SshInlineCredentials,
   type VaultIdentity,
   type VaultKey,
   type VaultRef,
@@ -102,7 +124,9 @@ async function rejects(
 
 type SecretCall = { op: "getAll" | "set" | "delete"; service: string; accounts: string[] };
 
-function harness(seed: { identities?: VaultIdentity[]; keys?: VaultKey[] } = {}) {
+function harness(
+  seed: { identities?: VaultIdentity[]; keys?: VaultKey[]; notice?: StoreRecovery } = {},
+) {
   const data: Record<string, unknown> = {
     identities: seed.identities ?? [],
     keys: seed.keys ?? [],
@@ -111,6 +135,13 @@ function harness(seed: { identities?: VaultIdentity[]; keys?: VaultKey[] } = {})
   const calls: SecretCall[] = [];
   const listeners = new Set<() => void>();
   let commits = 0;
+  let notice = seed.notice ?? null;
+
+  const takeNotice = (): StoreRecovery | null => {
+    const held = notice;
+    notice = null;
+    return held;
+  };
 
   const store: VaultStoreIo = {
     async get<T>(key: string): Promise<T | null> {
@@ -127,7 +158,8 @@ function harness(seed: { identities?: VaultIdentity[]; keys?: VaultKey[] } = {})
       listeners.add(cb);
       return () => void listeners.delete(cb);
     },
-    takeRecoveryNotice: () => null,
+    ensureLoaded: async () => takeNotice(),
+    takeRecoveryNotice: takeNotice,
   };
 
   const secrets: SecretsIo = {
@@ -179,6 +211,25 @@ const vaultKey = (over: Partial<VaultKey> = {}): VaultKey => ({
   hasPassphrase: false,
   ...over,
 });
+/** An inline SSH binding. `hostId` lives INSIDE it, so the pair "which host owns
+ *  these accounts" and "which accounts to read" cannot come apart. */
+const sshInline = (over: Partial<SshInlineCredentials> = {}): SshInlineCredentials => ({
+  kind: "inline",
+  hostId: "h-9",
+  user: "eve",
+  authMode: "agent",
+  hasPassword: false,
+  hasPrivateKey: false,
+  hasKeyPassphrase: false,
+  ...over,
+});
+const rdpInline = (over: Partial<RdpInlineCredentials> = {}): RdpInlineCredentials => ({
+  kind: "inline",
+  hostId: "h-42",
+  username: "admin",
+  hasPassword: true,
+  ...over,
+});
 
 // ---------------------------------------------------------------------------
 console.log("\n[ids] a new record gets an opaque, prefixed id");
@@ -207,10 +258,23 @@ console.log("\n[flags] presence flags track writes, and never read a secret back
   check("no secret was read to decide either flag", h.reads().length, 0);
 
   // The three-state convention: `undefined` must leave the stored secret alone
-  // AND keep the flag, without reading anything.
-  const untouched = await h.vault.upsertKey({ ...created.record, name: "renamed" }, {});
-  check("an edit that skips the fields keeps hasPrivateKey", untouched.record.hasPrivateKey, true);
-  check("and keeps hasPassphrase", untouched.record.hasPassphrase, true);
+  // AND keep the flag. The input carries both flags deliberately WRONG, so the
+  // check can distinguish reading the stored record from echoing the caller.
+  const untouched = await h.vault.upsertKey(
+    { ...created.record, name: "renamed", hasPrivateKey: false, hasPassphrase: false },
+    {},
+  );
+  check(
+    "an edit that skips the fields takes hasPrivateKey from the STORE",
+    untouched.record.hasPrivateKey,
+    true,
+  );
+  check("and hasPassphrase with it", untouched.record.hasPassphrase, true);
+  check(
+    "the corrected flag is what got persisted",
+    (await h.vault.findKey("k-1"))?.hasPrivateKey,
+    true,
+  );
   check("the secret is still there", h.kept.get("tervia-vault::k-1::privateKey"), "PEM-BODY");
   check("and still nothing was read back", h.reads().length, 0);
 
@@ -221,13 +285,25 @@ console.log("\n[flags] presence flags track writes, and never read a secret back
   check("without disturbing the private key", cleared.record.hasPrivateKey, true);
   check("still no read-back", h.reads().length, 0);
 
-  // A brand-new record with no input starts false rather than inheriting.
-  const fresh = await h.vault.upsertKey(vaultKey({ id: "k-2", name: "other" }), {});
+  // The same for the private key itself - the field whose loss actually costs
+  // something, and the one the passphrase case above does not cover.
+  const wiped = await h.vault.upsertKey(cleared.record, { privateKey: "   " });
+  check("a whitespace-only private key clears the flag", wiped.record.hasPrivateKey, false);
+  check("and removes the entry", h.kept.has("tervia-vault::k-1::privateKey"), false);
+  check("which the store agrees with", (await h.vault.findKey("k-1"))?.hasPrivateKey, false);
+
+  // A brand-new record starts from what is STORED, not from the flags the caller
+  // sent: a duplicated record must not claim secrets that were never copied.
+  const fresh = await h.vault.upsertKey(
+    vaultKey({ id: "k-2", name: "other", hasPrivateKey: true, hasPassphrase: true }),
+    {},
+  );
   check(
-    "a new key with no secrets has both flags false",
+    "a new key claiming secrets it has none of is forced to both flags false",
     [fresh.record.hasPrivateKey, fresh.record.hasPassphrase],
     [false, false],
   );
+  check("and no secret was invented for it", h.kept.has("tervia-vault::k-2::privateKey"), false);
 
   const ident = await h.vault.upsertIdentity(identity(), { password: "s3cret" });
   check("a written identity password sets hasPassword", ident.record.hasPassword, true);
@@ -236,15 +312,33 @@ console.log("\n[flags] presence flags track writes, and never read a secret back
     h.kept.get("tervia-vault::i-1::password"),
     "s3cret",
   );
-  const kept = await h.vault.upsertIdentity({ ...ident.record, name: "root @ prod (renamed)" }, {});
-  check("an identity edit that skips the password keeps the flag", kept.record.hasPassword, true);
+  const kept = await h.vault.upsertIdentity(
+    { ...ident.record, name: "root @ prod (renamed)", hasPassword: false },
+    {},
+  );
+  check(
+    "an identity edit that skips the password takes the flag from the STORE",
+    kept.record.hasPassword,
+    true,
+  );
+  check("and persists the corrected one", (await h.vault.findIdentity("i-1"))?.hasPassword, true);
   check("no read-back on the identity path either", h.reads().length, 0);
 }
 
 // ---------------------------------------------------------------------------
-console.log("\n[names] a duplicate key name is warned about, not refused");
+console.log("\n[names] a key must have one, and a duplicate is warned about not refused");
 {
   const h = harness();
+  // Required, unlike an identity's: a key is picked by name from a dropdown in
+  // every host that uses it, and two blank ones "collide" as `already named ""`.
+  await rejects(
+    "a whitespace-only key name is refused",
+    () => h.vault.upsertKey(vaultKey({ name: "  " }), { privateKey: "A" }),
+    ["needs a name"],
+  );
+  check("nothing was written", (h.data.keys as VaultKey[]).length, 0);
+  check("and no secret was stored for it either", h.kept.size, 0);
+
   const first = await h.vault.upsertKey(vaultKey(), { privateKey: "A" });
   check("the first key gets no warning", first.warning, undefined);
 
@@ -386,7 +480,33 @@ console.log("\n[queue] concurrent writes are serialized, not interleaved");
 }
 
 // ---------------------------------------------------------------------------
-console.log("\n[ssh] resolution hands back the authFields shape for every auth mode");
+console.log("\n[queue] a refused operation rejects alone and leaves the chain alive");
+{
+  // The queue chains every mutation onto the previous one. A rejection that
+  // propagated into the chain would take every LATER write with it - and the
+  // integrity guards mean a rejection is an ordinary event, not a rare one.
+  const h = harness();
+  await h.vault.upsertKey(vaultKey({ id: "k-1", name: "a" }), { privateKey: "A" });
+
+  const before = h.vault.upsertKey(vaultKey({ id: "k-2", name: "b" }), { privateKey: "B" });
+  const bad = h.vault.upsertIdentity(identity({ authMode: "key", keyId: "k-gone" }), {});
+  const after = h.vault.upsertKey(vaultKey({ id: "k-3", name: "c" }), { privateKey: "C" });
+
+  await before;
+  await rejects("the refused operation is the only one that rejects", () => bad, [
+    "does not exist",
+  ]);
+  await after;
+  check(
+    "the writes on both sides of it landed, in order",
+    (await h.vault.listKeys()).map((k) => k.id),
+    ["k-1", "k-2", "k-3"],
+  );
+  check("and the refusal wrote nothing", (h.data.identities as VaultIdentity[]).length, 0);
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n[ssh] resolution hands back the credential shape for every auth mode");
 {
   const h = harness();
   await h.vault.upsertKey(vaultKey(), { privateKey: "PRIVATE-PEM", passphrase: "pp" });
@@ -405,14 +525,14 @@ console.log("\n[ssh] resolution hands back the authFields shape for every auth m
   const before = h.reads().length;
   check(
     "an agent identity resolves to useAgent and nothing else",
-    await resolveSshAuth({ kind: "identity", identityId: "i-agent" }, "h-1", h.deps()),
+    await resolveSshAuth({ kind: "identity", identityId: "i-agent" }, h.deps()),
     { user: "carol", useAgent: true },
   );
   check("and reads no secret at all", h.reads().length - before, 0);
 
   check(
     "a password identity resolves to its own password",
-    await resolveSshAuth({ kind: "identity", identityId: "i-pw" }, "h-1", h.deps()),
+    await resolveSshAuth({ kind: "identity", identityId: "i-pw" }, h.deps()),
     { user: "alice", password: "alice-pw" },
   );
   check("from the identity's vault account, in one batch", h.lastRead(), {
@@ -425,7 +545,7 @@ console.log("\n[ssh] resolution hands back the authFields shape for every auth m
   // identity's, and the identity's username still wins.
   check(
     "a key identity resolves to the shared key's secrets",
-    await resolveSshAuth({ kind: "identity", identityId: "i-key" }, "h-1", h.deps()),
+    await resolveSshAuth({ kind: "identity", identityId: "i-key" }, h.deps()),
     { user: "bob", privateKey: "PRIVATE-PEM", privateKeyPassphrase: "pp" },
   );
   check("read from the KEY's accounts, in one batch", h.lastRead(), {
@@ -439,45 +559,23 @@ console.log("\n[ssh] resolution hands back the authFields shape for every auth m
   await h.vault.upsertIdentity(identity({ id: "i-empty", name: "empty", username: "dave" }), {});
   check(
     "an absent password resolves to undefined, not an empty string",
-    await resolveSshAuth({ kind: "identity", identityId: "i-empty" }, "h-1", h.deps()),
+    await resolveSshAuth({ kind: "identity", identityId: "i-empty" }, h.deps()),
     { user: "dave", password: undefined },
   );
 
-  // Inline bindings read the HOST's own accounts on the host service.
-  check(
-    "an inline agent binding needs no keychain",
-    await resolveSshAuth(
-      {
-        kind: "inline",
-        user: "eve",
-        authMode: "agent",
-        hasPassword: false,
-        hasPrivateKey: false,
-        hasKeyPassphrase: false,
-      },
-      "h-9",
-      h.deps(),
-    ),
-    { user: "eve", useAgent: true },
-  );
+  // Inline bindings read the HOST's own accounts on the host service, from the
+  // `hostId` the binding itself carries.
+  check("an inline agent binding needs no keychain", await resolveSshAuth(sshInline(), h.deps()), {
+    user: "eve",
+    useAgent: true,
+  });
 
   h.kept.set("tervia-hosts::h-9::password", "host-pw");
   h.kept.set("tervia-hosts::h-9::privateKey", "host-pem");
   h.kept.set("tervia-hosts::h-9::keyPassphrase", "host-pp");
   check(
     "an inline password binding reads the host's account",
-    await resolveSshAuth(
-      {
-        kind: "inline",
-        user: "eve",
-        authMode: "password",
-        hasPassword: true,
-        hasPrivateKey: false,
-        hasKeyPassphrase: false,
-      },
-      "h-9",
-      h.deps(),
-    ),
+    await resolveSshAuth(sshInline({ authMode: "password", hasPassword: true }), h.deps()),
     { user: "eve", password: "host-pw" },
   );
   check("on the hosts service", h.lastRead(), {
@@ -488,15 +586,7 @@ console.log("\n[ssh] resolution hands back the authFields shape for every auth m
   check(
     "an inline key binding reads the host's key material",
     await resolveSshAuth(
-      {
-        kind: "inline",
-        user: "eve",
-        authMode: "key",
-        hasPassword: false,
-        hasPrivateKey: true,
-        hasKeyPassphrase: true,
-      },
-      "h-9",
+      sshInline({ authMode: "key", hasPrivateKey: true, hasKeyPassphrase: true }),
       h.deps(),
     ),
     { user: "eve", privateKey: "host-pem", privateKeyPassphrase: "host-pp" },
@@ -507,11 +597,23 @@ console.log("\n[ssh] resolution hands back the authFields shape for every auth m
     accounts: ["h-9::privateKey", "h-9::keyPassphrase"],
   });
 
+  // The owner id travels INSIDE the binding, so a second host's binding reads a
+  // second host's accounts with nothing to keep in sync by hand.
+  h.kept.set("tervia-hosts::h-other::password", "other-pw");
+  check(
+    "another host's inline binding reads that host's account",
+    await resolveSshAuth(
+      sshInline({ hostId: "h-other", authMode: "password", hasPassword: true }),
+      h.deps(),
+    ),
+    { user: "eve", password: "other-pw" },
+  );
+
   // A binding left pointing at a deleted record must say so rather than connect
   // with nothing.
   await rejects(
     "a binding to a deleted identity refuses",
-    () => resolveSshAuth({ kind: "identity", identityId: "i-gone" }, "h-1", h.deps()),
+    () => resolveSshAuth({ kind: "identity", identityId: "i-gone" }, h.deps()),
     ["no longer exists"],
   );
   await h.vault.upsertIdentity(
@@ -521,7 +623,7 @@ console.log("\n[ssh] resolution hands back the authFields shape for every auth m
   (h.data.keys as VaultKey[]).length = 0;
   await rejects(
     "a key deleted out from under an identity refuses",
-    () => resolveSshAuth({ kind: "identity", identityId: "i-dangle" }, "h-1", h.deps()),
+    () => resolveSshAuth({ kind: "identity", identityId: "i-dangle" }, h.deps()),
     ["dangle", "no longer exists"],
   );
 }
@@ -542,7 +644,7 @@ console.log("\n[rdp] resolution hands back a keychain REFERENCE, never a value")
   const before = h.reads().length;
   check(
     "an identity binding references the VAULT service and the identity's account",
-    await resolveRdpAuth({ kind: "identity", identityId: "i-dc" }, "h-1", h.deps()),
+    await resolveRdpAuth({ kind: "identity", identityId: "i-dc" }, h.deps()),
     {
       username: "administrator",
       domain: "CORP",
@@ -550,12 +652,8 @@ console.log("\n[rdp] resolution hands back a keychain REFERENCE, never a value")
     },
   );
   check(
-    "an inline binding references the HOSTS service and the host's account",
-    await resolveRdpAuth(
-      { kind: "inline", username: "admin", domain: "WORKGROUP", hasPassword: true },
-      "h-42",
-      h.deps(),
-    ),
+    "an inline binding references the HOSTS service and its own host's account",
+    await resolveRdpAuth(rdpInline({ domain: "WORKGROUP" }), h.deps()),
     {
       username: "admin",
       domain: "WORKGROUP",
@@ -568,14 +666,12 @@ console.log("\n[rdp] resolution hands back a keychain REFERENCE, never a value")
 
   check(
     "a UPN identity omits domain rather than sending an empty one",
-    "domain" in
-      (await resolveRdpAuth({ kind: "identity", identityId: "i-local" }, "h-1", h.deps())),
+    "domain" in (await resolveRdpAuth({ kind: "identity", identityId: "i-local" }, h.deps())),
     false,
   );
   check(
     "an inline binding with no domain omits it too",
-    "domain" in
-      (await resolveRdpAuth({ kind: "inline", username: "u", hasPassword: true }, "h-7", h.deps())),
+    "domain" in (await resolveRdpAuth(rdpInline({ hostId: "h-7", username: "u" }), h.deps())),
     false,
   );
 
@@ -589,13 +685,13 @@ console.log("\n[rdp] resolution hands back a keychain REFERENCE, never a value")
   );
   check(
     "a key identity still resolves an RDP password reference",
-    (await resolveRdpAuth({ kind: "identity", identityId: "i-both" }, "h-1", h.deps())).credential,
+    (await resolveRdpAuth({ kind: "identity", identityId: "i-both" }, h.deps())).credential,
     { kind: "keychain", service: "tervia-vault", account: "i-both::password" },
   );
 
   await rejects(
     "a binding to a deleted identity refuses",
-    () => resolveRdpAuth({ kind: "identity", identityId: "i-gone" }, "h-1", h.deps()),
+    () => resolveRdpAuth({ kind: "identity", identityId: "i-gone" }, h.deps()),
     ["no longer exists"],
   );
 }
@@ -604,43 +700,57 @@ console.log("\n[rdp] resolution hands back a keychain REFERENCE, never a value")
 console.log("\n[recovery] a torn store file falls back to its snapshot");
 
 const GOOD = '{"identities":[{"id":"i-1"}],"keys":[]}';
+const STORE_FILE = "tervia-vault.json";
+const PRIMARY = `/data/${STORE_FILE}`;
+const SNAPSHOT = PRIMARY + SNAPSHOT_SUFFIX;
+const text = (content: string): StoreFileRead => ({ kind: "text", content });
+const label = (path: string) => (path.endsWith(SNAPSHOT_SUFFIX) ? "snapshot" : "primary");
 
-function memFs(files: Record<string, StoreFileRead>) {
-  const replaced: string[] = [];
+/** Faults the real filesystem produces and the old delete-then-copy could not
+ *  survive: a data directory that will not resolve, and a write that is refused. */
+type FsFault = { dir?: string; write?: { suffix: string; message: string } };
+
+function memFs(files: Record<string, StoreFileRead>, fault: FsFault = {}, log: string[] = []) {
+  const written: string[] = [];
   const io: StoreFileIo = {
-    dir: async () => "/data",
-    read: async (path) => files[path] ?? { kind: "missing" },
-    replace: async (from, to) => {
-      replaced.push(`${from} -> ${to}`);
-      files[to] = files[from];
+    dir: async () => {
+      if (fault.dir) throw new Error(fault.dir);
+      return "/data";
+    },
+    read: async (path) => {
+      log.push(`read:${label(path)}`);
+      return files[path] ?? { kind: "missing" };
+    },
+    write: async (path, content) => {
+      log.push(`write:${label(path)}`);
+      if (fault.write && path.endsWith(fault.write.suffix)) throw new Error(fault.write.message);
+      written.push(path);
+      files[path] = { kind: "text", content };
     },
   };
-  return { io, files, replaced };
+  return { io, files, written, log };
 }
-const text = (content: string): StoreFileRead => ({ kind: "text", content });
-const PRIMARY = "/data/tervia-vault.json";
-const SNAPSHOT = "/data/tervia-vault.json.bak";
 
 {
   const fs = memFs({ [PRIMARY]: text(GOOD), [SNAPSHOT]: text("{}") });
-  const r = await recoverStoreFile("tervia-vault.json", fs.io);
+  const r = await recoverStoreFile(STORE_FILE, fs.io);
   check("a good primary is left alone", [r.found, r.recovered, r.note], ["ok", false, undefined]);
-  check("and nothing is copied over it", fs.replaced, []);
+  check("and nothing is written over it", fs.written, []);
 }
 {
   // The reported failure mode: zero bytes after a power cut.
   const fs = memFs({ [PRIMARY]: text(""), [SNAPSHOT]: text(GOOD) });
-  const r = await recoverStoreFile("tervia-vault.json", fs.io);
+  const r = await recoverStoreFile(STORE_FILE, fs.io);
   check("a zeroed primary is restored", [r.found, r.recovered], ["empty", true]);
-  check("from the snapshot", fs.replaced, [`${SNAPSHOT} -> ${PRIMARY}`]);
-  check("and the primary now holds the snapshot's bytes", fs.files[PRIMARY], text(GOOD));
+  check("by writing the snapshot's bytes over it", fs.written, [PRIMARY]);
+  check("so the primary now holds them", fs.files[PRIMARY], text(GOOD));
   assert(!!r.note && r.note.includes("empty"), "the note says what was wrong");
 }
 {
   // The other reported failure mode: full-length and nul-filled. `fs_read_file`
   // reports that as binary, because its null-byte sniff refuses to decode it.
-  const fs = memFs({ [PRIMARY]: { kind: "unreadable" }, [SNAPSHOT]: text(GOOD) });
-  const r = await recoverStoreFile("tervia-vault.json", fs.io);
+  const fs = memFs({ [PRIMARY]: { kind: "binary" }, [SNAPSHOT]: text(GOOD) });
+  const r = await recoverStoreFile(STORE_FILE, fs.io);
   check("a nul-filled primary is restored", [r.found, r.recovered], ["nul", true]);
   check("from the snapshot", fs.files[PRIMARY], text(GOOD));
 }
@@ -648,48 +758,316 @@ const SNAPSHOT = "/data/tervia-vault.json.bak";
   // And the same file short enough to come back as decodable text: `trim()` does
   // not strip U+0000, so this must not read as merely empty.
   const fs = memFs({ [PRIMARY]: text("\0\0\0\0"), [SNAPSHOT]: text(GOOD) });
-  const r = await recoverStoreFile("tervia-vault.json", fs.io);
+  const r = await recoverStoreFile(STORE_FILE, fs.io);
   check("nul bytes that decode are still nul", [r.found, r.recovered], ["nul", true]);
 }
 {
   const fs = memFs({ [PRIMARY]: text('{"identities":['), [SNAPSHOT]: text(GOOD) });
-  const r = await recoverStoreFile("tervia-vault.json", fs.io);
+  const r = await recoverStoreFile(STORE_FILE, fs.io);
   check("a truncated primary is restored", [r.found, r.recovered], ["unparseable", true]);
 }
 {
   const fs = memFs({ [PRIMARY]: text("[1,2,3]"), [SNAPSHOT]: text(GOOD) });
-  const r = await recoverStoreFile("tervia-vault.json", fs.io);
+  const r = await recoverStoreFile(STORE_FILE, fs.io);
   check("valid JSON that is not an object is unparseable too", r.found, "unparseable");
 }
 {
   // A first run. Nothing has ever been written, so there is nothing to report -
   // a note here would be a toast on every fresh install.
   const fs = memFs({});
-  const r = await recoverStoreFile("tervia-vault.json", fs.io);
+  const r = await recoverStoreFile(STORE_FILE, fs.io);
   check("a first run is silent", [r.found, r.recovered, r.note], ["missing", false, undefined]);
-  check("and copies nothing", fs.replaced, []);
+  check("and writes nothing", fs.written, []);
 }
 {
   // Both gone. Unrecoverable, and the user is told rather than left with a store
   // that silently came up empty.
-  const fs = memFs({ [PRIMARY]: text(""), [SNAPSHOT]: { kind: "unreadable" } });
-  const r = await recoverStoreFile("tervia-vault.json", fs.io);
+  const fs = memFs({ [PRIMARY]: text(""), [SNAPSHOT]: { kind: "binary" } });
+  const r = await recoverStoreFile(STORE_FILE, fs.io);
   check("an unusable snapshot cannot recover", [r.found, r.recovered], ["empty", false]);
   assert(!!r.note && r.note.includes("snapshot"), "but it is reported");
-  check("and the primary is untouched", fs.replaced, []);
+  check("and the primary is untouched", fs.written, []);
 }
 {
   const fs = memFs({ [PRIMARY]: text(GOOD) });
-  await snapshotStoreFile("tervia-vault.json", fs.io);
-  check("a good primary is snapshotted", fs.files[SNAPSHOT], text(GOOD));
+  const s = await snapshotStoreFile(STORE_FILE, fs.io);
+  check("a good primary is snapshotted", [s.taken, fs.files[SNAPSHOT]], [true, text(GOOD)]);
 }
 {
   // The one thing a snapshot must never do: overwrite the last good copy with a
   // torn one, which would turn a recoverable crash into a total loss.
   const fs = memFs({ [PRIMARY]: text(""), [SNAPSHOT]: text(GOOD) });
-  await snapshotStoreFile("tervia-vault.json", fs.io);
+  const s = await snapshotStoreFile(STORE_FILE, fs.io);
   check("a torn primary is NOT snapshotted over the good one", fs.files[SNAPSHOT], text(GOOD));
-  check("nothing was copied", fs.replaced, []);
+  check("nothing was written, and it says it took nothing", [fs.written, s.taken], [[], false]);
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n[recovery] a filesystem in a bad state degrades, and never rejects");
+{
+  // The whole reason: the settle pass runs ONCE and its promise is cached, so a
+  // rejection here would leave the store unreadable and unwritable for the rest
+  // of the process - on the very profile where the good snapshot is right there.
+  const fs = memFs(
+    { [PRIMARY]: text(""), [SNAPSHOT]: text(GOOD) },
+    { write: { suffix: ".json", message: "os error 13: permission denied" } },
+  );
+  const r = await recoverStoreFile(STORE_FILE, fs.io);
+  check(
+    "a restore that cannot be written is not claimed as one",
+    [r.found, r.recovered],
+    ["empty", false],
+  );
+  assert(
+    !!r.note && r.note.includes("could not be restored") && r.note.includes("permission denied"),
+    "and it reports the reason instead of rejecting",
+  );
+}
+{
+  const fs = memFs(
+    { [PRIMARY]: text(GOOD) },
+    { write: { suffix: SNAPSHOT_SUFFIX, message: "no space left" } },
+  );
+  const s = await snapshotStoreFile(STORE_FILE, fs.io);
+  check("a snapshot that cannot be written says it took nothing", s.taken, false);
+  assert(!!s.note && s.note.includes("no space left"), "and names the reason");
+}
+{
+  const fs = memFs({}, { dir: "app data dir unavailable" });
+  const r = await recoverStoreFile(STORE_FILE, fs.io);
+  check(
+    "an unusable data directory is reported, not thrown",
+    [r.found, r.recovered],
+    ["unreachable", false],
+  );
+  const s = await snapshotStoreFile(STORE_FILE, fs.io);
+  check("and a snapshot against it degrades the same way", s.taken, false);
+  assert(!!s.note, "with a note a caller can show");
+}
+{
+  // Over `fs_read_file`'s 10 MB limit. The plugin has no such limit and reads it
+  // fine, so this is NOT corruption: restoring a snapshot over it, or copying it
+  // onto the good snapshot, would each destroy real data.
+  const fs = memFs({ [PRIMARY]: { kind: "toolarge" }, [SNAPSHOT]: text(GOOD) });
+  const r = await recoverStoreFile(STORE_FILE, fs.io);
+  check(
+    "a too-large primary is left exactly as it is",
+    [r.found, r.recovered],
+    ["toolarge", false],
+  );
+  check("nothing is written over it", fs.written, []);
+  assert(!!r.note && !r.note.includes("nul"), "and the note does not call it corruption");
+  const s = await snapshotStoreFile(STORE_FILE, fs.io);
+  check(
+    "nor is it copied onto the good snapshot",
+    [s.taken, fs.files[SNAPSHOT]],
+    [false, text(GOOD)],
+  );
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n[settle] the shared store wrapper recovers, then loads, then snapshots");
+
+const SPEC = {
+  path: STORE_FILE,
+  loadKey: "identities",
+  changedEvent: "tervia://vault-changed",
+};
+
+/**
+ * A `KeyValueStore` that behaves the way `LazyStore` does in the two respects
+ * that matter here: it loads from the file on first touch and SWALLOWS a load
+ * error (which is exactly why recovery has to run before it), and `save()` puts
+ * the cache on disk (so a snapshot taken after a commit has something to copy).
+ */
+function pluginStore(files: Record<string, StoreFileRead>, log: string[]) {
+  const data: Record<string, unknown> = {};
+  let loaded = false;
+  const store: KeyValueStore = {
+    async get<T>(key: string): Promise<T | undefined> {
+      log.push(`get:${key}`);
+      if (!loaded) {
+        loaded = true;
+        const read = files[PRIMARY];
+        if (read?.kind === "text") {
+          try {
+            Object.assign(data, JSON.parse(read.content) as Record<string, unknown>);
+          } catch {
+            // Comes up empty, silently, exactly as the plugin does.
+          }
+        }
+      }
+      return data[key] as T | undefined;
+    },
+    async set(key, value) {
+      log.push(`set:${key}`);
+      data[key] = value;
+    },
+    async save() {
+      log.push("save");
+      files[PRIMARY] = { kind: "text", content: JSON.stringify(data) };
+    },
+  };
+  return { store, data };
+}
+
+function bus() {
+  const emitted: string[] = [];
+  const listeners = new Set<() => void>();
+  const broadcast: StoreBroadcast = {
+    async emit(event) {
+      emitted.push(event);
+      for (const l of listeners) l();
+    },
+    async listen(_event, cb) {
+      listeners.add(cb);
+      return () => void listeners.delete(cb);
+    },
+  };
+  return { broadcast, emitted };
+}
+
+{
+  const log: string[] = [];
+  const fs = memFs({ [PRIMARY]: text(""), [SNAPSHOT]: text(GOOD) }, {}, log);
+  const kv = pluginStore(fs.files, log);
+  const b = bus();
+  const io = createRecoveredStore(SPEC, { store: kv.store, files: fs.io, broadcast: b.broadcast });
+
+  const notice = await io.ensureLoaded();
+  // The whole property, as one sequence. Any other order loses data: loading
+  // before the restore hands the plugin an empty store it will then autosave,
+  // and snapshotting before the load can copy a torn file over the last good one.
+  check("recover, then force the load, then snapshot", log, [
+    "read:primary",
+    "read:snapshot",
+    "write:primary",
+    "get:identities",
+    "read:primary",
+    "write:snapshot",
+  ]);
+  const settled = log.length;
+  assert(!!notice && notice.recovered, "ensureLoaded hands back the recovery");
+  check("naming what happened", notice?.found, "empty");
+  check("and it is a one-shot: the second call has nothing", await io.ensureLoaded(), null);
+  check("which also did not re-run the pass", log.length, settled);
+  check("as does takeRecoveryNotice, which shares the slot", io.takeRecoveryNotice(), null);
+  check("the load saw the RESTORED contents", await io.get("identities"), [{ id: "i-1" }]);
+}
+{
+  // A first run must be silent: a note here is a toast on every fresh install.
+  const fs = memFs({});
+  const kv = pluginStore(fs.files, []);
+  const io = createRecoveredStore(SPEC, {
+    store: kv.store,
+    files: fs.io,
+    broadcast: bus().broadcast,
+  });
+  check("a first run reports nothing", await io.ensureLoaded(), null);
+}
+{
+  // P2-12: `commit` is on the public port, so a commit before any read must still
+  // recover first - otherwise `save()` writes the plugin's empty defaults over a
+  // torn but perfectly recoverable file.
+  const log: string[] = [];
+  const fs = memFs({ [PRIMARY]: text(""), [SNAPSHOT]: text(GOOD) }, {}, log);
+  const kv = pluginStore(fs.files, log);
+  const b = bus();
+  const io = createRecoveredStore(SPEC, { store: kv.store, files: fs.io, broadcast: b.broadcast });
+
+  await io.commit();
+  assert(
+    log.indexOf("write:primary") < log.indexOf("save"),
+    "a commit before any read still restores before it saves",
+  );
+  check("and the identities survived the commit", kv.data.identities, [{ id: "i-1" }]);
+  check("with the other windows told once", b.emitted, [SPEC.changedEvent]);
+}
+{
+  // The session that CREATES the store must end up with a snapshot. At load time
+  // there is no file to copy, so the first successful commit is the earliest a
+  // private key can be protected at all - and until it was, a power cut on a
+  // fresh install left the key in the keychain with nothing naming it.
+  const log: string[] = [];
+  const fs = memFs({}, {}, log);
+  const kv = pluginStore(fs.files, log);
+  const io = createRecoveredStore(SPEC, {
+    store: kv.store,
+    files: fs.io,
+    broadcast: bus().broadcast,
+  });
+
+  await io.ensureLoaded();
+  check("a fresh profile starts with no snapshot to take", fs.files[SNAPSHOT], undefined);
+  await io.set("keys", [{ id: "k-1", name: "id_ed25519" }]);
+  await io.commit();
+  check(
+    "and the first commit leaves one behind",
+    fs.files[SNAPSHOT],
+    text('{"keys":[{"id":"k-1","name":"id_ed25519"}]}'),
+  );
+}
+{
+  // Snapshots coalesce. A page of inline edits fires one commit per field the
+  // user leaves, and each one paying a full file copy is what the coalescing
+  // avoids - without ever leaving the LAST commit uncovered.
+  const log: string[] = [];
+  const fs = memFs({}, {}, log);
+  const kv = pluginStore(fs.files, log);
+  const io = createRecoveredStore(SPEC, {
+    store: kv.store,
+    files: fs.io,
+    broadcast: bus().broadcast,
+  });
+
+  await io.ensureLoaded();
+  await io.set("keys", [{ id: "k-1" }]);
+  await Promise.all([io.commit(), io.commit(), io.commit()]);
+  const copies = log.filter((e) => e === "write:snapshot").length;
+  assert(copies > 0 && copies < 3, `three concurrent commits cost ${copies} snapshot copies`);
+  check("and the state they saved is the state snapshotted", fs.files[SNAPSHOT], fs.files[PRIMARY]);
+}
+{
+  // P1-1, end to end. The replace used to be `fs_delete` then `fs_copy`, with the
+  // delete swallowed - so a held handle or a read-only directory produced an
+  // `already exists` error, the settle promise cached THAT rejection, and every
+  // later get and set re-awaited it. The vault was then unlistable and unwritable
+  // for the rest of the process, on a profile whose good `.bak` was right there.
+  const log: string[] = [];
+  const fs = memFs(
+    { [PRIMARY]: text(""), [SNAPSHOT]: text(GOOD) },
+    { write: { suffix: ".json", message: "os error 13: permission denied" } },
+    log,
+  );
+  const kv = pluginStore(fs.files, log);
+  const b = bus();
+  const io = createRecoveredStore(SPEC, { store: kv.store, files: fs.io, broadcast: b.broadcast });
+
+  const notice = await io.ensureLoaded();
+  assert(
+    !!notice && !notice.recovered && !!notice.note?.includes("could not be restored"),
+    "a restore that fails is reported as a failure, not thrown",
+  );
+  check("the store is still readable afterwards", await io.get("identities"), null);
+  await io.set("identities", [{ id: "i-late" }]);
+  await io.commit();
+  check("and still writable", kv.data.identities, [{ id: "i-late" }]);
+  check("with the broadcast still firing", b.emitted, [SPEC.changedEvent]);
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n[recovery] the store layer hands the startup notice through");
+{
+  const h = harness({
+    notice: { found: "empty", recovered: true, note: "restored from the snapshot" },
+  });
+  check(
+    "ensureLoaded reaches the port",
+    (await h.vault.ensureLoaded())?.note,
+    "restored from the snapshot",
+  );
+  check("and only fires once", await h.vault.ensureLoaded(), null);
+  check("sharing one slot with takeRecoveryNotice", h.vault.takeRecoveryNotice(), null);
 }
 
 if (failed > 0) throw new Error(`vault-resolve-verify: ${failed} FAILED`);

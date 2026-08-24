@@ -1,8 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
-import { emit, listen } from "@tauri-apps/api/event";
-import { LazyStore } from "@tauri-apps/plugin-store";
 
-import { recoverStoreFile, snapshotStoreFile, type StoreRecovery } from "@/lib/storeRecovery";
+import { createRecoveredStore, type RecoveredStoreIo } from "@/lib/recoveredStore";
 
 import { VAULT_IDENTITIES_KEY, VAULT_STORE_PATH } from "./types";
 
@@ -17,22 +15,15 @@ import { VAULT_IDENTITIES_KEY, VAULT_STORE_PATH } from "./types";
 
 const VAULT_CHANGED_EVENT = "tervia://vault-changed";
 
-/** Persistence for the vault, narrowed to what the store layer uses. */
-export type VaultStoreIo = {
-  get<T>(key: string): Promise<T | null>;
-  set(key: string, value: unknown): Promise<void>;
-  /** Flush and tell every window. One call because the two always happen
-   *  together, and a write that skips the broadcast leaves a stale list in the
-   *  other window. */
-  commit(): Promise<void>;
-  onChanged(cb: () => void): Promise<() => void>;
-  /**
-   * A crash recovery that happened on the first load, returned ONCE so a caller
-   * can toast it exactly once. `src/lib` cannot import a toast, so the notice
-   * travels instead of the dependency.
-   */
-  takeRecoveryNotice(): StoreRecovery | null;
-};
+/**
+ * Persistence for the vault: the shared recovered-store port, unaliased in
+ * behaviour and renamed only so this module's own vocabulary stays local.
+ *
+ * The ordering it enforces - recover, then force the load, then snapshot - is
+ * the part `modules/hosts` and `modules/forwards` must not re-implement, so the
+ * vault takes the shape rather than a copy of it.
+ */
+export type VaultStoreIo = RecoveredStoreIo;
 
 /**
  * Keychain access.
@@ -50,47 +41,13 @@ export type SecretsIo = {
 
 export type VaultIo = { store: VaultStoreIo; secrets: SecretsIo };
 
-/**
- * The real store, with crash recovery in front of it.
- *
- * Recovery has to happen before the plugin is touched at all, and the snapshot
- * right after the load that proved the file good - see `@/lib/storeRecovery` for
- * what a torn write does otherwise.
- */
+/** The real vault store, with crash recovery in front of it. */
 export function createTauriVaultStoreIo(): VaultStoreIo {
-  const store = new LazyStore(VAULT_STORE_PATH, { defaults: {}, autoSave: 200 });
-  let notice: StoreRecovery | null = null;
-  let ready: Promise<void> | undefined;
-
-  const settle = (): Promise<void> =>
-    (ready ??= (async () => {
-      const recovery = await recoverStoreFile(VAULT_STORE_PATH);
-      if (recovery.note) notice = recovery;
-      // Force the plugin's load while the file is known good, then snapshot what
-      // it loaded from.
-      await store.get(VAULT_IDENTITIES_KEY);
-      await snapshotStoreFile(VAULT_STORE_PATH);
-    })());
-
-  return {
-    async get<T>(key: string): Promise<T | null> {
-      await settle();
-      return (await store.get<T>(key)) ?? null;
-    },
-    async set(key: string, value: unknown): Promise<void> {
-      await settle();
-      await store.set(key, value);
-    },
-    async commit(): Promise<void> {
-      await Promise.all([store.save(), emit(VAULT_CHANGED_EVENT)]);
-    },
-    onChanged: (cb) => listen(VAULT_CHANGED_EVENT, () => cb()),
-    takeRecoveryNotice(): StoreRecovery | null {
-      const held = notice;
-      notice = null;
-      return held;
-    },
-  };
+  return createRecoveredStore({
+    path: VAULT_STORE_PATH,
+    loadKey: VAULT_IDENTITIES_KEY,
+    changedEvent: VAULT_CHANGED_EVENT,
+  });
 }
 
 export const tauriSecretsIo: SecretsIo = {
@@ -100,11 +57,12 @@ export const tauriSecretsIo: SecretsIo = {
       : invoke<(string | null)[]>("secrets_get_all", { service, accounts }),
   set: (service, account, value) =>
     invoke<void>("secrets_set", { service, account, password: value }),
-  delete: async (service, account) => {
-    try {
-      await invoke<void>("secrets_delete", { service, account });
-    } catch {
-      // Already absent.
-    }
-  },
+  // Deliberately unguarded. `secrets_delete` already reports an absent account as
+  // success on every platform - a `HashMap::remove` that removed nothing on
+  // Linux and Windows, `keyring::Error::NoEntry` mapped to `Ok` on macOS - so
+  // anything that reaches here is a REAL failure: a read-only data directory, a
+  // DPAPI error, a full disk. Swallowing it would report the clear as done and
+  // flip the presence flag to false with the secret still on disk, where nothing
+  // would ever name it again.
+  delete: (service, account) => invoke<void>("secrets_delete", { service, account }),
 };

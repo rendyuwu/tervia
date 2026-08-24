@@ -30,8 +30,8 @@ export const KEY_PRIVATE_KEY_FIELD = "privateKey";
 export const KEY_PASSPHRASE_FIELD = "passphrase";
 
 /**
- * Host-owned SSH fields, spelled the way `ssh/connections.ts` spells them
- * (`keyPassphrase`, not the vault's `passphrase`).
+ * Host-owned SSH fields. Note the passphrase: `keyPassphrase` here, plain
+ * `passphrase` on a vault key.
  *
  * The two differ on purpose: an account is named after the presence flag that
  * tracks it, so `hasKeyPassphrase` -> `keyPassphrase` on a host and
@@ -61,10 +61,10 @@ export const VAULT_IDENTITY_SECRET_FIELDS = [IDENTITY_PASSWORD_FIELD] as const;
 export const VAULT_KEY_SECRET_FIELDS = [KEY_PRIVATE_KEY_FIELD, KEY_PASSPHRASE_FIELD] as const;
 
 /**
- * `<id>::<field>`, the app-wide keychain account shape (`ssh/connections.ts`,
- * `rdp/connections.ts`). Exported because `resolve.ts` hands the RDP path a
- * REFERENCE instead of a value, so the string itself travels; `secrets_get_all`
- * batching also depends on nothing more than the account list being enumerable.
+ * `<id>::<field>`, the app-wide keychain account shape. Exported because
+ * `resolve.ts` hands the RDP path a REFERENCE instead of a value, so the string
+ * itself travels; `secrets_get_all` batching also depends on nothing more than
+ * the account list being enumerable.
  */
 export function vaultAccount(id: string, field: string): string {
   return `${id}::${field}`;
@@ -73,9 +73,17 @@ export function vaultAccount(id: string, field: string): string {
 /**
  * How an identity proves who it is.
  *
- * Structurally identical to the SSH store's `SshAuthMode`, and asserted equal to
- * it by the `authFields` call in `resolve.ts` - if the two ever diverge, that
- * call stops compiling. RDP only ever uses a password.
+ * The same three modes the SSH connection store names, and kept in step BY HAND:
+ * nothing here imports from `modules/ssh` and nothing there imports from here, so
+ * NO compiler check spans the two. Claiming one would be worse than admitting
+ * there isn't one.
+ *
+ * What is checked is narrower and entirely local: every switch over this union in
+ * `resolve.ts` ends in a `never` assignment, so adding a mode HERE fails to
+ * compile until each mapping handles it. A mode added on the SSH side alone is
+ * invisible to `tsc` and has to be caught in review.
+ *
+ * RDP only ever uses a password.
  */
 export type VaultAuthMode = "password" | "key" | "agent";
 
@@ -130,9 +138,17 @@ export type VaultIdentityBinding = { kind: "identity"; identityId: string };
 /**
  * SSH credentials one host owns alone. Flags only - the secrets themselves live
  * under `tervia-hosts :: <hostId>::<field>`.
+ *
+ * `hostId` is part of the binding rather than a second argument alongside it. It
+ * used to be the latter, and every call site then had to keep the pair in sync by
+ * hand: pass the wrong id and resolution reads a DIFFERENT host's accounts, with
+ * no error anywhere - the wrong password, or none, at the handshake. In here the
+ * pair cannot come apart.
  */
 export type SshInlineCredentials = {
   kind: "inline";
+  /** The host these accounts belong to. See the note above. */
+  hostId: string;
   user: string;
   authMode: VaultAuthMode;
   hasPassword: boolean;
@@ -140,9 +156,11 @@ export type SshInlineCredentials = {
   hasKeyPassphrase: boolean;
 };
 
-/** RDP credentials one host owns alone. */
+/** RDP credentials one host owns alone. Carries its `hostId` for the same reason
+ *  {@link SshInlineCredentials} does. */
 export type RdpInlineCredentials = {
   kind: "inline";
+  hostId: string;
   username: string;
   domain?: string;
   hasPassword: boolean;

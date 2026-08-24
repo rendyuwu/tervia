@@ -76,10 +76,9 @@ export type SshSecretValues = {
  *
  * Owned here, and exported, because this is the one place that knows how a
  * binding becomes a credential; every consumer imports the shape rather than
- * re-spelling it. That mapping used to be written out at four call sites
- * (terminal session, tunnel, jump-hop resolution, the dialog's Test button), so a
- * new auth mode meant finding all four - and any that was missed would silently
- * connect with no credentials at all.
+ * re-spelling it. Spelling it out per call site is what this replaces: a new auth
+ * mode then means finding every one of them, and any that is missed silently
+ * connects with no credentials at all.
  */
 export type SshCredentialValues = {
   useAgent?: boolean;
@@ -102,6 +101,10 @@ export type ResolvedSshAuth = SshCredentialValues & { user: string };
  * Everything empty becomes `undefined` rather than `""`, so a missing secret
  * fails the backend's explicit "no credentials" guard instead of attempting an
  * empty password or an unparseable key.
+ *
+ * The `never` default is the guarantee {@link VaultAuthMode} points at: a fourth
+ * mode added to that union stops this file compiling until it is handled here,
+ * rather than falling off the end and returning `undefined`.
  */
 export function sshCredentialValues(
   authMode: VaultAuthMode,
@@ -119,6 +122,10 @@ export function sshCredentialValues(
       };
     case "password":
       return { password: secrets.password || undefined };
+    default: {
+      const unhandled: never = authMode;
+      throw new Error(`vault: unhandled auth mode ${String(unhandled)}`);
+    }
   }
 }
 
@@ -156,17 +163,26 @@ type SshFields = typeof HOST_SSH_FIELDS | typeof VAULT_SSH_FIELDS;
 type SshAccounts = Partial<Record<keyof SshSecretValues, string>>;
 
 /**
+ * Who owns the accounts one resolution reads.
+ *
+ * Two ids because in the vault case they are two records: the password belongs to
+ * the identity, the key material to the shared `VaultKey`. `key` is optional
+ * because a `password` or `agent` identity names no key at all - and an id that
+ * is merely NOT A KEY must not be passed in its place, which is how a resolution
+ * ends up reading `<identityId>::privateKey` and finding nothing.
+ */
+type SshAccountOwner = { password: string; key?: string };
+
+/**
  * Which accounts one auth mode reads.
  *
  * `agent` reads none: the local ssh-agent signs the handshake, so there is no
- * secret to fetch and no IPC to spend. `password` and `key` read from different
- * OWNERS in the vault case - the password belongs to the identity, the key
- * material to the shared `VaultKey` - which is why the two ids arrive separately.
+ * secret to fetch and no IPC to spend.
  */
 function sshAccountsFor(
   mode: VaultAuthMode,
   fields: SshFields,
-  owner: { password: string; key: string },
+  owner: SshAccountOwner,
 ): SshAccounts {
   switch (mode) {
     case "agent":
@@ -174,10 +190,20 @@ function sshAccountsFor(
     case "password":
       return { password: vaultAccount(owner.password, fields.password) };
     case "key":
+      if (!owner.key) {
+        // Refuse rather than build `undefined::privateKey`, which reads back as
+        // "no key stored" and fails the handshake talking about credentials the
+        // user did enter.
+        throw new Error("vault: key auth resolved with no key to read it from");
+      }
       return {
         privateKey: vaultAccount(owner.key, fields.privateKey),
         keyPassphrase: vaultAccount(owner.key, fields.keyPassphrase),
       };
+    default: {
+      const unhandled: never = mode;
+      throw new Error(`vault: unhandled auth mode ${String(unhandled)}`);
+    }
   }
 }
 
@@ -208,14 +234,18 @@ async function readSshSecrets(
 /**
  * Resolve an identity, refusing the states that would fail at the handshake with
  * a message about something the user never touched.
+ *
+ * `keyId` is absent for any mode that does not use one. It is deliberately not
+ * filled with the identity's own id: that reads like a key id at every call site
+ * downstream, and the day one of them uses it, it points at the wrong record.
  */
 async function resolveIdentity(
   deps: ResolveDeps,
   identityId: string,
-): Promise<{ identity: VaultIdentity; keyId: string }> {
+): Promise<{ identity: VaultIdentity; keyId?: string }> {
   const identity = await deps.vault.findIdentity(identityId);
   if (!identity) throw new Error(`vault: identity ${identityId} no longer exists`);
-  if (identity.authMode !== "key") return { identity, keyId: identity.id };
+  if (identity.authMode !== "key") return { identity };
   if (!identity.keyId) {
     throw new Error(`vault: identity "${identity.name}" uses key auth but names no key`);
   }
@@ -226,20 +256,14 @@ async function resolveIdentity(
   return { identity, keyId: key.id };
 }
 
-/**
- * `hostId` is explicit rather than inferred: an inline binding's secrets live at
- * `<hostId>::<field>`, and a resolver that guessed which host owned the binding
- * it was handed would guess wrong exactly once.
- */
 export async function resolveSshAuth(
   binding: SshCredentialBinding,
-  hostId: string,
   deps: ResolveDeps = defaultResolveDeps,
 ): Promise<ResolvedSshAuth> {
   if (binding.kind === "inline") {
     const accounts = sshAccountsFor(binding.authMode, HOST_SSH_FIELDS, {
-      password: hostId,
-      key: hostId,
+      password: binding.hostId,
+      key: binding.hostId,
     });
     const secrets = await readSshSecrets(deps.secrets, HOST_KEYRING_SERVICE, accounts);
     return { user: binding.user, ...sshCredentialValues(binding.authMode, secrets) };
@@ -265,7 +289,6 @@ export async function resolveSshAuth(
  */
 export async function resolveRdpAuth(
   binding: RdpCredentialBinding,
-  hostId: string,
   deps: ResolveDeps = defaultResolveDeps,
 ): Promise<ResolvedRdpAuth> {
   if (binding.kind === "inline") {
@@ -275,7 +298,7 @@ export async function resolveRdpAuth(
       credential: {
         kind: "keychain",
         service: HOST_KEYRING_SERVICE,
-        account: vaultAccount(hostId, HOST_RDP_PASSWORD_FIELD),
+        account: vaultAccount(binding.hostId, HOST_RDP_PASSWORD_FIELD),
       },
     };
   }

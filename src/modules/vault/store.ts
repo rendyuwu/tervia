@@ -54,11 +54,23 @@ export type VaultStore = {
   deleteIdentity(id: string, hostRefs: IdentityHostRefs): Promise<void>;
   deleteKey(id: string): Promise<void>;
   onVaultChanged(cb: () => void): Promise<() => void>;
+  /**
+   * Run the store's crash-recovery pass and first load, then hand back whatever
+   * the user should be told - once.
+   *
+   * The startup entry point, and the ONLY one that makes the notice
+   * deterministic: every other method awaits the same pass, so recovery always
+   * happens, but the notice is then only seen if something remembers to take it
+   * after a read has already occurred. That is how a `.bak` restore goes
+   * unreported.
+   */
+  ensureLoaded(): Promise<StoreRecovery | null>;
+  /** The recovery notice if a read has already triggered the pass. Prefer
+   *  {@link VaultStore.ensureLoaded}. */
   takeRecoveryNotice(): StoreRecovery | null;
 };
 
-/** Opaque id. Stays stable across renames so keychain accounts don't drift, in
- *  the shape `ssh/connections.ts` already produces. */
+/** Opaque id. Stays stable across renames so keychain accounts don't drift. */
 function newId(prefix: string): string {
   return `${prefix}-${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36)}`;
 }
@@ -99,6 +111,10 @@ export function createVaultStore(io: VaultIo): VaultStore {
     return Array.isArray(raw) ? raw : [];
   }
 
+  /** Every mutation lands through here. The commit is also what takes the `.bak`
+   *  snapshot, which is why the session that CREATES the vault has one: at first
+   *  load there is no file to snapshot yet, so the first successful write is the
+   *  earliest moment a private key can be protected at all. */
   async function persist(storeKey: string, list: unknown[]): Promise<void> {
     await io.store.set(storeKey, list);
     await io.store.commit();
@@ -107,13 +123,12 @@ export function createVaultStore(io: VaultIo): VaultStore {
   /**
    * Write one secret and report the presence flag that now belongs in the record.
    *
-   * `undefined` means "leave the stored secret alone" - the convention
-   * `rdp/connections.ts` relies on so an edit that never touched a password field
-   * cannot wipe it. The flag then comes from the EXISTING RECORD rather than from
-   * a keychain read-back, which is the one deliberate divergence from that store:
-   * the flags exist so a list screen never costs one `secrets_get` per row, and a
-   * no-change write reading the secret back would spend exactly what they were
-   * added to save.
+   * `undefined` means "leave the stored secret alone", the app-wide three-state
+   * convention: an edit that never touched a password field cannot wipe it. The
+   * flag then comes from the EXISTING RECORD rather than from a keychain
+   * read-back, and that part is deliberate - the flags exist so a list screen
+   * never costs one `secrets_get` per row, and a no-change write reading the
+   * secret back would spend exactly what they were added to save.
    */
   async function writeSecret(
     secrets: SecretsIo,
@@ -176,6 +191,12 @@ export function createVaultStore(io: VaultIo): VaultStore {
     secrets: { privateKey?: SecretInput; passphrase?: SecretInput },
   ): Promise<VaultUpsert<VaultKey>> {
     return enqueueWrite(async () => {
+      // Required, unlike an identity's name: a key is chosen by name from a
+      // dropdown in every host that uses it, so a blank one is unpickable. The
+      // collision warning below also degenerates without it - two nameless keys
+      // "collide" with `another key is already named ""`.
+      if (!key.name.trim()) throw new Error("vault: a key needs a name");
+
       const keys = await listKeys();
       const existing = keys.find((k) => k.id === key.id);
 
@@ -274,6 +295,7 @@ export function createVaultStore(io: VaultIo): VaultStore {
     deleteIdentity,
     deleteKey,
     onVaultChanged: (cb) => io.store.onChanged(cb),
+    ensureLoaded: () => io.store.ensureLoaded(),
     takeRecoveryNotice: () => io.store.takeRecoveryNotice(),
   };
 }
@@ -296,5 +318,6 @@ export const {
   deleteIdentity,
   deleteKey,
   onVaultChanged,
+  ensureLoaded,
   takeRecoveryNotice,
 } = vaultStore;
