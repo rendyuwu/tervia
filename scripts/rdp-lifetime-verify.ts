@@ -41,6 +41,13 @@
  *    `setPinnedFingerprint` writes A's certificate into B's form state, which
  *    Save then persists onto B. It fails closed (B's next connect aborts as a
  *    mismatch) but it is a pinned certificate on a row the user never tested.
+ *
+ * 4. THE `pagehide` BACKSTOP ANSWERS BOTH PROTOCOLS. `HostKeyPromptDialog` is
+ *    shared, so its backstop fires for an SSH host key as well as an RDP
+ *    certificate. That is deliberate - `ssh_open` waits on the same 120 seconds
+ *    holding the same mid-handshake socket - and it is pinned here because it
+ *    reads like an accident of sharing, so the obvious "tidy-up" is to scope it
+ *    back to certificates. This check makes that argue with the comment first.
  */
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -77,6 +84,7 @@ function between(src: string, from: string, to: string): string {
 
 const paneSrc = read("src/modules/rdp/RdpPane.tsx");
 const dialogSrc = read("src/modules/rdp/RdpConnectionDialog.tsx");
+const promptDialogSrc = read("src/modules/ssh/HostKeyPromptDialog.tsx");
 
 // ---------------------------------------------------------------------------
 console.log("[1] a certificate prompt raised after the teardown is ANSWERED");
@@ -229,6 +237,31 @@ console.log("\n[3] a Test probe cannot write to a row it no longer belongs to");
   check(
     "the probe's own 'running' state is not gated, being written before any await",
     !gated('setTest({ kind: "running" })'),
+  );
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n[4] the pagehide backstop answers BOTH protocols' prompts");
+{
+  const backstop = between(promptDialogSrc, "const abandonAll = () => {", "};");
+  check("the backstop was found", backstop.length > 50, backstop.length);
+  check(
+    "it walks the whole queue",
+    /for \(const p of \[\.\.\.pending\]\) abandon\(p\.promptId\);/.test(backstop),
+  );
+  // The decision this pins: an SSH host key is answered on the way out too, not
+  // only an RDP certificate. Scoping it to `certificate` would leave `ssh_open`
+  // parked on its own 120-second wait for the same reason, so a later narrowing
+  // has to argue with the comment above the effect rather than slip through.
+  check(
+    "and does not filter on the field that distinguishes the two",
+    !backstop.includes("certificate"),
+    backstop.trim(),
+  );
+  check(
+    "on pagehide rather than this component's unmount, which live panes survive",
+    /addEventListener\("pagehide", abandonAll\)/.test(promptDialogSrc) &&
+      !/return \(\) => abandonAll\(\)/.test(promptDialogSrc),
   );
 }
 

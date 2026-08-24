@@ -33,10 +33,21 @@ export function HostKeyPromptDialog() {
   const cert = current?.certificate;
 
   // The webview going away is the one exit from this dialog that no button
-  // covers, and for an RDP prompt it is the expensive one: the backend is parked
-  // inside the TLS handshake with no session id yet, so nothing else can release
-  // the socket and thread before the 120-second confirm timeout. Reject
-  // everything still queued on the way out.
+  // covers, and it parks a backend whichever protocol asked: `ssh_open` waits on
+  // `HOSTKEY_CONFIRM_TIMEOUT` and the RDP verifier on `CERT_CONFIRM_TIMEOUT`,
+  // both 120 seconds, both holding a socket mid-handshake with no session id yet
+  // for anything else to close. Reject everything still queued on the way out.
+  //
+  // DELIBERATELY BOTH PROTOCOLS, which is a behaviour change to SSH that arrived
+  // with this dialog being shared and was decided rather than inherited. The
+  // reasoning is that the failure is the same shape for both and rejecting is
+  // fail-safe either way - a rejected prompt costs the user one reconnect, an
+  // unanswered one costs a parked handshake. The costs are not identical, and it
+  // is the cheaper case that is SSH's: `ssh_open` waits on an async
+  // `tokio::time::timeout`, so it holds a task, while the RDP verifier blocks
+  // and needs `block_in_place` to hand its worker away, so it holds a displaced
+  // runtime thread as well. Scoping the backstop to certificate prompts would
+  // therefore save nothing worth the asymmetry.
   //
   // `pagehide` rather than `beforeunload`: it fires on navigation AND on the
   // page being discarded, and it does not need the event to be cancellable. The

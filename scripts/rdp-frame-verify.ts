@@ -284,9 +284,38 @@ console.log("\n[letterbox] the mapping is the exact inverse of the draw");
   );
   check(
     "a point in the bottom bar is not on the desktop",
-    toRemotePoint(vp, 1600, 900, 400, 525),
+    toRemotePoint(vp, 1600, 900, 400, 526),
     null,
   );
+
+  // The far EDGE is on the desktop, and it has to be: at scale 0.5 an integer
+  // pointer can only reach the even columns, so without the closed interval the
+  // last column and row - the bottom-right hot corner - are unreachable.
+  check("the bottom edge maps to the last row", toRemotePoint(vp, 1600, 900, 400, 525), {
+    x: 800,
+    y: 899,
+  });
+  check("the right edge maps to the last column", toRemotePoint(vp, 1600, 900, 800, 300), {
+    x: 1599,
+    y: 450,
+  });
+  check("and the far corner to both", toRemotePoint(vp, 1600, 900, 800, 525), { x: 1599, y: 899 });
+  // What an integer pointer reaches one pixel short of the edge, which is the
+  // second-to-last column - the gap the closed interval exists to close.
+  check("one pixel inside is NOT the last column", toRemotePoint(vp, 1600, 900, 799, 300), {
+    x: 1598,
+    y: 450,
+  });
+  // The allowance is the boundary point itself and nothing beyond it, so this
+  // is a closed interval rather than a general clamp.
+  check(
+    "one pixel past the edge is the letterbox again",
+    toRemotePoint(vp, 1600, 900, 801, 300),
+    null,
+  );
+  // No allowance at the near edge: 0 already addresses pixel 0, so a point
+  // before it is still outside.
+  check("one pixel before the left edge", toRemotePoint(vp, 1600, 900, -1, 300), null);
 
   // A pane taller than the desktop's aspect: bars left and right instead.
   const tall = fitViewport(600, 800, 1600, 900);

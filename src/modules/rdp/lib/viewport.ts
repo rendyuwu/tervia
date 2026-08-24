@@ -66,14 +66,25 @@ export function fitViewport(
  * Map a pane-relative CSS point to a remote-desktop pixel, or `null` when the
  * point is in the letterbox bars rather than on the desktop.
  *
- * `null` is the whole reason this returns an option: clamping instead would
- * report a click on the desktop edge for a click that was demonstrably outside
- * it, which is how a stray drag ends up dropping a file on the remote taskbar.
+ * `null` is the whole reason this returns an option: clamping an arbitrary
+ * letterbox point instead would report a click on the desktop edge for a click
+ * that was demonstrably beside it, which is how a stray drag ends up dropping a
+ * file on the remote taskbar.
  *
- * The result is clamped to the last addressable pixel, so a point exactly on
- * the right or bottom edge maps to `remote - 1` rather than one past it (RDP
- * mouse coordinates are u16 pixel indices, and the server does not bounds-check
- * them for us).
+ * The far boundary is the one exception, and it is deliberate: the accepted
+ * range is the CLOSED interval `[0, viewport.width]`, so a point exactly on the
+ * right or bottom edge maps to `remote - 1` rather than being rejected. Without
+ * that, the last remote column and row are unreachable whenever the desktop is
+ * downscaled and the pointer reports integer CSS pixels - at `scale` 0.5 the
+ * reachable set is the even columns, and the odd last one is where Windows
+ * keeps the bottom-right "show desktop" hot corner and a maximised window's
+ * scrollbar. One CSS pixel past a drawn edge is what a user aiming AT that edge
+ * actually produces, so treating it as the edge is both what they meant and
+ * what every other RDP client does. No allowance is needed at the near edge,
+ * where `0` already addresses pixel 0.
+ *
+ * The result is clamped on top of that, because RDP mouse coordinates are u16
+ * pixel indices and the server does not bounds-check them for us.
  */
 export function toRemotePoint(
   viewport: RdpViewport,
@@ -85,7 +96,8 @@ export function toRemotePoint(
   if (viewport.scale <= 0) return null;
   const dx = cssX - viewport.left;
   const dy = cssY - viewport.top;
-  if (dx < 0 || dy < 0 || dx >= viewport.width || dy >= viewport.height) return null;
+  // `>` and not `>=`: the far edge itself is on the desktop. See above.
+  if (dx < 0 || dy < 0 || dx > viewport.width || dy > viewport.height) return null;
   return {
     x: Math.min(remoteWidth - 1, Math.max(0, Math.floor(dx / viewport.scale))),
     y: Math.min(remoteHeight - 1, Math.max(0, Math.floor(dy / viewport.scale))),
