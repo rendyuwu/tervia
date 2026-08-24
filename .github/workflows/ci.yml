@@ -101,20 +101,31 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          components: clippy, rustfmt
 
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: ./src-tauri -> target
           cache-on-failure: true
 
+      # Cheapest gate first: formatting needs no compilation, so a stray nit
+      # fails in seconds instead of waiting behind the clippy/test builds below.
+      - name: cargo fmt
+        working-directory: src-tauri
+        run: cargo fmt --all -- --check
+
       - name: cargo check
         working-directory: src-tauri
         run: cargo check --all-targets --locked
 
+      # --workspace so this also lints tervia-cli (the Windows console-launcher
+      # stub in tervia-cli/), not just the GUI package. Plain `cargo clippy`
+      # would silently skip it: `default-members = ["."]` in Cargo.toml scopes
+      # unqualified invocations to the GUI package alone, on purpose, so the
+      # bundler's own `cargo build` stays fast.
       - name: cargo clippy
         working-directory: src-tauri
-        run: cargo clippy --all-targets --locked -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       # Runs the backend unit tests, including pubkey_constant_decodes which
       # guards the embedded updater pubkey. The network-hitting live updater test
@@ -124,9 +135,13 @@ jobs:
       # This job is Linux-only. The macOS and Windows `cfg` branches are first
       # compiled by the bundle matrix below, which is the reason that matrix runs
       # on pull requests at all rather than only at tag time.
+      #
+      # --workspace for the same reason as cargo clippy above: without it,
+      # tervia-cli's tests (none today, but the binary itself still needs to
+      # build) are silently excluded.
       - name: cargo test
         working-directory: src-tauri
-        run: cargo test --locked
+        run: cargo test --workspace --locked
 
   # Produces the installers a reviewer downloads to smoke-test a branch, so that
   # verifying SSH / port forwarding / SFTP / backup export never requires a local
