@@ -71,6 +71,32 @@ export function listSshAgentKeys(): Promise<SshAgentKey[]> {
   return invoke<SshAgentKey[]>("ssh_agent_keys");
 }
 
+/** What a private key can be described as without connecting anywhere. */
+export type SshKeyInfo = {
+  /** `false` means the key is encrypted in a format that hides its public half
+   *  (PKCS#8, PuTTY, PEM): prompt for the passphrase and call again. Every
+   *  other field is null until then. */
+  parsed: boolean;
+  encrypted: boolean;
+  /** Wire algorithm name, e.g. `ssh-ed25519`, `ecdsa-sha2-nistp256`. */
+  keyType: string | null;
+  /** `SHA256:...`, the same form `ssh-keygen -lf` prints. */
+  fingerprint: string | null;
+  /** The `.pub` line: `ssh-ed25519 AAAA... comment`. */
+  publicKey: string | null;
+  comment: string | null;
+};
+
+/** Describe a pasted or picked private key - algorithm, fingerprint, `.pub`
+ *  line - without dialing a host. An `openssh-key-v1` key answers all of it
+ *  even while encrypted, so `passphrase` is only needed for the other formats
+ *  (and to verify a passphrase early). Rejects with a message naming the
+ *  problem: a public key pasted by mistake, DSA, a SEC1 `EC PRIVATE KEY`, or a
+ *  wrong passphrase. */
+export function inspectSshKey(pem: string, passphrase?: string): Promise<SshKeyInfo> {
+  return invoke<SshKeyInfo>("ssh_key_inspect", { pem, passphrase: passphrase ?? null });
+}
+
 /** Prefix used by the Rust side for host-key-mismatch errors. Callers check for this to offer a "trust new key" prompt instead of auto-reconnecting. */
 export const HOST_KEY_MISMATCH_PREFIX = "ssh: host key mismatch:";
 

@@ -20,6 +20,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, OnceLock};
 
+use russh::keys::ssh_key::PrivateKey;
 use serde::{Deserialize, Serialize};
 use tauri::ipc::Channel;
 use tokio::runtime::Runtime;
@@ -147,6 +148,250 @@ pub async fn ssh_agent_keys() -> Result<Vec<SshAgentKey>, String> {
         })
         .await
         .map_err(|e| format!("ssh agent task join failed: {e}"))?
+}
+
+/// What a pasted private key can be described as without dialing anything.
+/// Filled by `ssh_key_inspect` so a saved key carries its algorithm and
+/// fingerprint from the moment it is imported.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SshKeyInfo {
+    /// `false` means the caller must ask for a passphrase and call again: the
+    /// key is readable, but its container hides everything below.
+    pub parsed: bool,
+    pub encrypted: bool,
+    /// Wire algorithm name, e.g. `ssh-ed25519`, `ecdsa-sha2-nistp256`.
+    pub key_type: Option<String>,
+    /// `SHA256:...`, the same form `ssh-keygen -lf` prints.
+    pub fingerprint: Option<String>,
+    /// The `.pub` line: `ssh-ed25519 AAAA... comment`, minus the comment when
+    /// that is not readable (see below).
+    pub public_key: Option<String>,
+    /// Absent for an encrypted `openssh-key-v1` key inspected without its
+    /// passphrase: that container keeps the public half in cleartext but seals
+    /// the comment inside the private section. Pass the passphrase to get it.
+    pub comment: Option<String>,
+}
+
+/// Header-level shape of pasted key text, decided before any parse attempt.
+/// Four of these variants are dead ends inside russh, and without this step
+/// every one of them surfaces as the same `Could not read key`, which tells the
+/// user nothing about which of their key files to try next.
+#[derive(Debug)]
+enum KeyFormat {
+    /// `openssh-key-v1`. The container keeps the public half in cleartext next
+    /// to the encrypted private section, so metadata needs no passphrase.
+    OpenSsh,
+    /// Any other container russh accepts: PKCS#1, PKCS#8, PuTTY `.ppk`.
+    /// `encrypted` comes from the header (`ENCRYPTED PRIVATE KEY`, `DEK-Info:`,
+    /// PuTTY's `Encryption:`); these formats seal the public half away too, so
+    /// `true` means nothing at all is knowable until the passphrase arrives.
+    Other {
+        encrypted: bool,
+    },
+    /// A `.pub` / `authorized_keys` line, or a PEM public block.
+    PublicKey,
+    /// russh has no DSA branch and our build leaves its `dsa` feature off.
+    Dsa,
+    /// SEC1. russh matches the label but routes it to the PKCS#8 decoder,
+    /// which is a different encoding, so it fails with a misleading error.
+    Sec1,
+    /// PKCS#1 under a PEM cipher russh does not implement (only AES-128-CBC is
+    /// wired up; AES-256 and 3DES fall through to the DER decoder).
+    UnsupportedPemCipher,
+    Unknown,
+}
+
+/// Algorithm names as they appear at the start of a `.pub` line.
+const PUBLIC_KEY_PREFIXES: &[&str] = &[
+    "ssh-rsa",
+    "ssh-dss",
+    "ssh-ed25519",
+    "ssh-ed448",
+    "ecdsa-sha2-",
+    "sk-ssh-ed25519",
+    "sk-ecdsa-sha2-",
+];
+
+/// A PKCS#1 block sealed with a PEM cipher names it in a `DEK-Info:` header.
+/// russh only builds a decryptor for AES-128-CBC.
+fn pkcs1_cipher(text: &str) -> KeyFormat {
+    for line in text.lines().map(str::trim) {
+        if let Some(cipher) = line.strip_prefix("DEK-Info:") {
+            return if cipher.trim_start().starts_with("AES-128-CBC,") {
+                KeyFormat::Other { encrypted: true }
+            } else {
+                KeyFormat::UnsupportedPemCipher
+            };
+        }
+    }
+    KeyFormat::Other { encrypted: false }
+}
+
+fn classify(text: &str) -> KeyFormat {
+    let Some(first) = text.lines().map(str::trim).find(|l| !l.is_empty()) else {
+        return KeyFormat::Unknown;
+    };
+    if PUBLIC_KEY_PREFIXES.iter().any(|p| first.starts_with(p))
+        // RFC 4716 spells its delimiters with four dashes and spaces.
+        || first.starts_with("---- BEGIN SSH2 PUBLIC KEY ----")
+    {
+        return KeyFormat::PublicKey;
+    }
+    if first.starts_with("PuTTY-User-Key-File-") {
+        let encrypted = text.lines().any(|l| {
+            l.trim()
+                .strip_prefix("Encryption:")
+                .is_some_and(|v| v.trim() != "none")
+        });
+        return KeyFormat::Other { encrypted };
+    }
+    for line in text.lines().map(str::trim) {
+        let Some(label) = line
+            .strip_prefix("-----BEGIN ")
+            .and_then(|l| l.strip_suffix("-----"))
+        else {
+            continue;
+        };
+        return match label {
+            "OPENSSH PRIVATE KEY" => KeyFormat::OpenSsh,
+            "DSA PRIVATE KEY" => KeyFormat::Dsa,
+            "EC PRIVATE KEY" => KeyFormat::Sec1,
+            "ENCRYPTED PRIVATE KEY" => KeyFormat::Other { encrypted: true },
+            "PRIVATE KEY" => KeyFormat::Other { encrypted: false },
+            "RSA PRIVATE KEY" => pkcs1_cipher(text),
+            "PUBLIC KEY" | "RSA PUBLIC KEY" | "SSH2 PUBLIC KEY" => KeyFormat::PublicKey,
+            _ => KeyFormat::Unknown,
+        };
+    }
+    KeyFormat::Unknown
+}
+
+/// Everything `SshKeyInfo` can say about a key. Also runs on a still-encrypted
+/// `openssh-key-v1` handle, where the public half is cleartext.
+fn key_info(key: &PrivateKey, encrypted: bool) -> SshKeyInfo {
+    let comment = key.comment().trim();
+    SshKeyInfo {
+        parsed: true,
+        encrypted,
+        key_type: Some(key.algorithm().to_string()),
+        fingerprint: Some(key.fingerprint(russh::keys::HashAlg::Sha256).to_string()),
+        public_key: key.public_key().to_openssh().ok(),
+        comment: (!comment.is_empty()).then(|| comment.to_string()),
+    }
+}
+
+/// The container sealed the public half away, so nothing is knowable yet. Not
+/// an `Err`: the caller prompts for the passphrase and calls again.
+fn needs_passphrase() -> SshKeyInfo {
+    SshKeyInfo {
+        parsed: false,
+        encrypted: true,
+        key_type: None,
+        fingerprint: None,
+        public_key: None,
+        comment: None,
+    }
+}
+
+// One message per dead end. russh answers every unreadable key with the same
+// `Could not read key` and a wrong passphrase with a raw `Unpad Error`, neither
+// of which tells the user which of their key files to reach for next. None of
+// these ever interpolate the key body or the passphrase.
+const ERR_EMPTY: &str = "ssh: no key text - paste a private key or pick a key file";
+const ERR_PUBLIC_KEY: &str =
+    "ssh: that is a public key. Paste the private key instead - the same file, without the \
+     .pub suffix";
+const ERR_DSA: &str =
+    "ssh: DSA keys are not supported (OpenSSH disables them too). Generate an Ed25519 key: \
+     ssh-keygen -t ed25519";
+const ERR_SEC1: &str =
+    "ssh: this is a SEC1 \"EC PRIVATE KEY\" file, which Tervia cannot read. Rewrite it in \
+     OpenSSH format: ssh-keygen -p -f <keyfile>";
+const ERR_PEM_CIPHER: &str =
+    "ssh: this PEM key is sealed with a cipher Tervia cannot read (only AES-128-CBC). Rewrite \
+     it in OpenSSH format: ssh-keygen -p -f <keyfile>";
+const ERR_UNKNOWN: &str =
+    "ssh: unrecognised key format. Expected a \"-----BEGIN ... PRIVATE KEY-----\" block or a \
+     PuTTY .ppk; the text may also be truncated";
+const ERR_OPENSSH_BODY: &str =
+    "ssh: could not read this OpenSSH private key - the block looks truncated or altered";
+const ERR_UNREADABLE: &str =
+    "ssh: could not read this private key - the block looks truncated, altered, or uses an \
+     unsupported cipher";
+const ERR_WRONG_PASSPHRASE: &str = "ssh: wrong passphrase for this private key";
+
+/// Describe a private key the user just pasted or picked, without connecting.
+/// Backs the vault's key editor, which stores the algorithm, fingerprint and
+/// `.pub` line next to the secret so a saved key stays identifiable later.
+///
+/// Rust rather than the frontend for two reasons: nothing in the JS tree parses
+/// an SSH key, and `crypto.subtle` is undefined at the bundled app's
+/// `http://tauri.localhost` origin (it is secure-context only), so a JS
+/// implementation would work under `tauri dev` and fail only in the release
+/// bundle - the most expensive place to find out.
+///
+/// Async because unlocking a key runs bcrypt-pbkdf, and the round count comes
+/// from the key file's own header: a hand-edited key can make that take as long
+/// as it likes, which on a sync command is a frozen WebView2 window.
+#[tauri::command]
+pub async fn ssh_key_inspect(
+    pem: String,
+    passphrase: Option<String>,
+) -> Result<SshKeyInfo, String> {
+    tauri::async_runtime::spawn_blocking(move || ssh_key_inspect_inner(&pem, passphrase.as_deref()))
+        .await
+        .map_err(|e| format!("ssh_key_inspect join error: {e}"))?
+}
+
+fn ssh_key_inspect_inner(pem: &str, passphrase: Option<&str>) -> Result<SshKeyInfo, String> {
+    let text = pem.trim();
+    if text.is_empty() {
+        return Err(ERR_EMPTY.into());
+    }
+    let pass = passphrase.filter(|p| !p.is_empty());
+
+    let encrypted = match classify(text) {
+        KeyFormat::PublicKey => return Err(ERR_PUBLIC_KEY.into()),
+        KeyFormat::Dsa => return Err(ERR_DSA.into()),
+        KeyFormat::Sec1 => return Err(ERR_SEC1.into()),
+        KeyFormat::UnsupportedPemCipher => return Err(ERR_PEM_CIPHER.into()),
+        KeyFormat::Unknown => return Err(ERR_UNKNOWN.into()),
+        // openssh-key-v1 declares its cipher inside the container and parses
+        // either way, so here the parse is what decides `encrypted`.
+        KeyFormat::OpenSsh => {
+            let key = PrivateKey::from_openssh(text).map_err(|_| ERR_OPENSSH_BODY.to_string())?;
+            if !key.is_encrypted() {
+                return Ok(key_info(&key, false));
+            }
+            return match pass {
+                // Decrypting proves the passphrase before dial time, and is
+                // also the only route to the comment: the container keeps the
+                // public half in cleartext but seals the comment away with the
+                // private one.
+                Some(pass) => key
+                    .decrypt(pass)
+                    .map(|open| key_info(&open, true))
+                    .map_err(|_| ERR_WRONG_PASSPHRASE.to_string()),
+                None => Ok(key_info(&key, true)),
+            };
+        }
+        KeyFormat::Other { encrypted } => encrypted,
+    };
+
+    if encrypted && pass.is_none() {
+        return Ok(needs_passphrase());
+    }
+    match russh::keys::decode_secret_key(text, pass) {
+        Ok(key) => Ok(key_info(&key, encrypted)),
+        // Backstop for a container that did not announce its encryption in a
+        // header spelling `classify` recognises.
+        Err(russh::keys::Error::KeyIsEncrypted) if pass.is_none() => Ok(needs_passphrase()),
+        // Only reachable with a passphrase supplied, so it is the one thing
+        // left to blame.
+        Err(_) if encrypted => Err(ERR_WRONG_PASSPHRASE.into()),
+        Err(_) => Err(ERR_UNREADABLE.into()),
+    }
 }
 
 #[tauri::command]
@@ -506,7 +751,224 @@ pub async fn ssh_git(
 
 #[cfg(test)]
 mod tests {
-    use super::{last_line, shell_quote};
+    use super::{last_line, shell_quote, ssh_key_inspect_inner};
+
+    /// `ssh-keygen -t ed25519 -N '' -C tervia-test@localhost`.
+    const PLAIN_ED25519: &str = "\
+-----BEGIN OPENSSH PRIVATE KEY-----
+b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
+QyNTUxOQAAACCpiSS98IJopmYjIYYYws9TOgU3Ea4xkeK/EOt/MFC7DgAAAJgXJ7ZJFye2
+SQAAAAtzc2gtZWQyNTUxOQAAACCpiSS98IJopmYjIYYYws9TOgU3Ea4xkeK/EOt/MFC7Dg
+AAAEDH4z8V4hBdxn69onazIThdJ8CfUxtV6E2q/d90hwg0NamJJL3wgmimZiMhhhjCz1M6
+BTcRrjGR4r8Q638wULsOAAAAFXRlcnZpYS10ZXN0QGxvY2FsaG9zdA==
+-----END OPENSSH PRIVATE KEY-----
+";
+
+    /// Same generator, `-N 'correct horse' -C locked@localhost`. Sealed with
+    /// aes256-ctr + bcrypt, i.e. what `ssh-keygen` writes today.
+    const LOCKED_ED25519: &str = "\
+-----BEGIN OPENSSH PRIVATE KEY-----
+b3BlbnNzaC1rZXktdjEAAAAACmFlczI1Ni1jdHIAAAAGYmNyeXB0AAAAGAAAABCwylXWi+
+kiYmMux9+mAHW7AAAAGAAAAAEAAAAzAAAAC3NzaC1lZDI1NTE5AAAAIIV04PSMQuoltd8p
+xWSst9WNSgq6TbtLy8n97mOwx0fCAAAAoPWSFxWm0Yr2fDdXJIGaXhv574j3UhPQn3/aPd
+fS9FItOIt5N/GdGWGlAmky6lVGOYgGn4/UvCO9fqbbPjiviHZTu+RLlfn1sJQMW8v/5Y9T
+qnNmSdmyWZ6SzYQKSVg3Zs20dzS/AZE8Q6O6vMvTR75vPl9ROvzNQZo9bkPuuuwW+A3tth
+wjku8Bjzhc/ZHJ8MP4SAn9x5GySFuup/SKJ+E=
+-----END OPENSSH PRIVATE KEY-----
+";
+
+    const LOCKED_PASSPHRASE: &str = "correct horse";
+
+    /// The `.pub` half of `LOCKED_ED25519`, as the file on disk holds it.
+    const LOCKED_PUB: &str = "ssh-ed25519 \
+AAAAC3NzaC1lZDI1NTE5AAAAIIV04PSMQuoltd8pxWSst9WNSgq6TbtLy8n97mOwx0fC locked@localhost
+";
+
+    /// `openssl pkcs8 -topk8 -v2 aes-256-cbc` over an Ed25519 key. PKCS#8 seals
+    /// the public half too, which is what makes it the `parsed: false` case.
+    const LOCKED_PKCS8: &str = "\
+-----BEGIN ENCRYPTED PRIVATE KEY-----
+MIGbMFcGCSqGSIb3DQEFDTBKMCkGCSqGSIb3DQEFDDAcBAgwfFRyLE9zWAICCAAw
+DAYIKoZIhvcNAgkFADAdBglghkgBZQMEASoEELjoxHK6zugwvcWrUOvS+BgEQL2v
+mK+rW02yV3neLVo54432BYqBtEx0YS330rlSCGuoCr/xtFkRhVmIomUdBkLAHLaW
+NFLh6spvancYRsI2aeg=
+-----END ENCRYPTED PRIVATE KEY-----
+";
+
+    /// `openssl ecparam -name prime256v1 -genkey`: SEC1, not PKCS#8.
+    const SEC1_EC: &str = "\
+-----BEGIN EC PRIVATE KEY-----
+MHcCAQEEIF+Z87dQ+QZ7HKVouBriKFkmgwSQkFmU07SO7mw0mP4/oAoGCCqGSM49
+AwEHoUQDQgAErb3d6eqMzYQ2LKS02m6gajVJ/Rioqr8Ua03ulJiJUsWO7xqYtppl
+j5UVz/3hnNtMPH5LS8Ch+X/SqvjoyTix5A==
+-----END EC PRIVATE KEY-----
+";
+
+    /// `openssl dsaparam -genkey 1024` then `openssl pkey -traditional`.
+    const DSA_KEY: &str = "\
+-----BEGIN DSA PRIVATE KEY-----
+MIIBygIBAAKBgQCwOgKbIx8T+tWvMkuiqFapRCtwsOA2/ZlI+GeZQNxSPtCgNnTu
+5glKxTjc05dmpX/oMMRVLJ0hcw/wHNeg7M3GW2zTEgMNTfF9t06s8X20tgFbuH9a
+TqSb7ysMX/VERF+//dQuDIi454V1BWAaClUHekFtxhjbxHdpi/6tAIImbQIdALJV
+3k0qGonFe97i3IRYsLSqXJVsEBdM2NDIhLECgYAJWCRBRT01gP57qNyTV8RoZMnb
+4370twOlDyW2AIrc92QODU1UGIvcQIR0QddGAPRogxRZdHXJiH01pux3DAqfjebv
+5WT5HN7sxTqz3aOCMmkPwpKlt7QwGgRPY1QKPgT9hPtEGg6Sr2HpKMS3W6Qmriw2
+e2zta+WiCVDqhYd9lwKBgF3FTTUClJ2mWFPNxp+b7fnv00wbiCU5jxCuUB2kJPhg
+D/yuNSIgX20n7qqEjVIcmmPKBpATO6l2qAfULsdHtXTuDXapAg2cNSax1VnIVnwy
+uBL9s7PvVY1A2gLfCEIMmm1TgQev0OKPkH9IU/SKbA3aD+sHLEKMzZAoA7kw+7Lm
+AhwCeWeDtuExuzPD2Rg81xs9YHAnUA1ZGBDZniIh
+-----END DSA PRIVATE KEY-----
+";
+
+    /// Header-only fixture: the cipher name in `DEK-Info` is rejected before
+    /// anything reads the body, so the body here is deliberately not a key.
+    const PEM_3DES: &str = "\
+-----BEGIN RSA PRIVATE KEY-----
+Proc-Type: 4,ENCRYPTED
+DEK-Info: DES-EDE3-CBC,9F2A1B3C4D5E6F70
+
+Ym9ndXMgYm9keSwgbmV2ZXIgcmVhY2hlZA==
+-----END RSA PRIVATE KEY-----
+";
+
+    #[test]
+    fn plain_openssh_key_reports_type_fingerprint_and_public_key() {
+        let info = ssh_key_inspect_inner(PLAIN_ED25519, None).expect("plain key parses");
+        assert!(info.parsed);
+        assert!(!info.encrypted);
+        assert_eq!(info.key_type.as_deref(), Some("ssh-ed25519"));
+        assert_eq!(
+            info.fingerprint.as_deref(),
+            Some("SHA256:pIbp0wpphTpwY1ZzG103sjQDjaI+c8CicInkWVfKNiQ")
+        );
+        assert_eq!(info.comment.as_deref(), Some("tervia-test@localhost"));
+        let pub_key = info.public_key.expect("public key rendered");
+        assert!(pub_key.starts_with("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5"));
+        assert!(pub_key.ends_with("tervia-test@localhost"));
+    }
+
+    /// The load-bearing behaviour: `openssh-key-v1` stores the public half in
+    /// cleartext, so type, fingerprint and `.pub` line all read out of an
+    /// encrypted key. That is what lets the vault import one without unlocking
+    /// it. The comment is the exception - it sits inside the encrypted section.
+    #[test]
+    fn locked_openssh_key_reports_metadata_without_a_passphrase() {
+        let info = ssh_key_inspect_inner(LOCKED_ED25519, None).expect("locked key still parses");
+        assert!(info.parsed);
+        assert!(info.encrypted);
+        assert_eq!(info.key_type.as_deref(), Some("ssh-ed25519"));
+        assert_eq!(
+            info.fingerprint.as_deref(),
+            Some("SHA256:dbLm8WcA5UjVznFwZUkhFoL/umm2mBsxo6H46sYI3yc")
+        );
+        assert_eq!(info.comment, None);
+        // Same key material as the `.pub` file on disk, just without its
+        // trailing comment.
+        let expected = LOCKED_PUB.trim().replace(" locked@localhost", "");
+        assert_eq!(info.public_key.as_deref(), Some(expected.as_str()));
+    }
+
+    /// With the passphrase the comment comes back too, so an import that starts
+    /// locked and then unlocks ends up with the full record.
+    #[test]
+    fn locked_openssh_key_accepts_the_right_passphrase() {
+        let info = ssh_key_inspect_inner(LOCKED_ED25519, Some(LOCKED_PASSPHRASE))
+            .expect("right passphrase unlocks");
+        assert!(info.parsed);
+        assert!(info.encrypted);
+        assert_eq!(info.key_type.as_deref(), Some("ssh-ed25519"));
+        assert_eq!(
+            info.fingerprint.as_deref(),
+            Some("SHA256:dbLm8WcA5UjVznFwZUkhFoL/umm2mBsxo6H46sYI3yc")
+        );
+        assert_eq!(info.comment.as_deref(), Some("locked@localhost"));
+        assert_eq!(info.public_key.as_deref(), Some(LOCKED_PUB.trim()));
+    }
+
+    /// russh surfaces a bad passphrase as a bare `Unpad Error`. Say what is
+    /// actually wrong, and do not echo the secret that was tried.
+    #[test]
+    fn wrong_passphrase_says_so_and_leaks_nothing() {
+        let err = ssh_key_inspect_inner(LOCKED_ED25519, Some("hunter2"))
+            .expect_err("wrong passphrase is an error");
+        assert!(err.contains("passphrase"), "{err}");
+        assert!(!err.contains("Unpad"), "{err}");
+        assert!(!err.contains("hunter2"), "{err}");
+    }
+
+    /// PKCS#8 encrypts the public half along with everything else, so there is
+    /// nothing to report yet. `parsed: false` tells the editor to prompt rather
+    /// than to show a failure.
+    #[test]
+    fn locked_pkcs8_asks_for_a_passphrase_instead_of_failing() {
+        let info = ssh_key_inspect_inner(LOCKED_PKCS8, None).expect("not an error, just locked");
+        assert!(!info.parsed);
+        assert!(info.encrypted);
+        assert_eq!(info.key_type, None);
+        assert_eq!(info.fingerprint, None);
+        assert_eq!(info.public_key, None);
+    }
+
+    #[test]
+    fn public_key_paste_gets_its_own_message() {
+        let err = ssh_key_inspect_inner(LOCKED_PUB, None).expect_err("a .pub is not a key");
+        assert!(err.contains("public key"), "{err}");
+        assert!(err.contains(".pub"), "{err}");
+    }
+
+    #[test]
+    fn dsa_key_gets_its_own_message() {
+        let err = ssh_key_inspect_inner(DSA_KEY, None).expect_err("dsa is unsupported");
+        assert!(err.contains("DSA"), "{err}");
+    }
+
+    #[test]
+    fn sec1_ec_key_gets_its_own_message() {
+        let err = ssh_key_inspect_inner(SEC1_EC, None).expect_err("sec1 is unsupported");
+        assert!(err.contains("SEC1"), "{err}");
+        assert!(err.contains("ssh-keygen -p"), "{err}");
+    }
+
+    #[test]
+    fn unsupported_pem_cipher_gets_its_own_message() {
+        let err = ssh_key_inspect_inner(PEM_3DES, None).expect_err("only aes-128-cbc is wired up");
+        assert!(err.contains("AES-128-CBC"), "{err}");
+    }
+
+    /// Arbitrary pasted text reaches this command, and `panic = "abort"` turns
+    /// any panic into a process kill rather than a rejected promise.
+    #[test]
+    fn junk_input_errors_without_panicking() {
+        for junk in [
+            "",
+            "   \n\t\n ",
+            "hello",
+            "\u{1f600}\u{4e2d}\u{6587}",
+            "-----BEGIN OPENSSH PRIVATE KEY-----",
+            "-----BEGIN OPENSSH PRIVATE KEY-----\nbm90IGEga2V5\n-----END OPENSSH PRIVATE KEY-----",
+            "-----BEGIN PRIVATE KEY-----\n!!!!\n-----END PRIVATE KEY-----",
+            "PuTTY-User-Key-File-9: ssh-ed25519",
+        ] {
+            let Err(err) = ssh_key_inspect_inner(junk, None) else {
+                panic!("expected an error for {junk:?}");
+            };
+            assert!(err.starts_with("ssh: "), "{err}");
+        }
+    }
+
+    /// Distinct inputs must not collapse back onto one message - that
+    /// indistinguishability is the whole reason this command classifies.
+    #[test]
+    fn every_dead_end_has_a_distinct_message() {
+        let mut msgs: Vec<String> = [LOCKED_PUB, DSA_KEY, SEC1_EC, PEM_3DES, "junk", ""]
+            .iter()
+            .map(|k| ssh_key_inspect_inner(k, None).expect_err("dead end"))
+            .collect();
+        let total = msgs.len();
+        msgs.sort();
+        msgs.dedup();
+        assert_eq!(msgs.len(), total, "duplicate message: {msgs:?}");
+    }
 
     /// The rc-noise guard: a chatty remote `~/.bashrc` prepends its own output
     /// to every `ssh host cmd` capture, so the value we want is the last line.
