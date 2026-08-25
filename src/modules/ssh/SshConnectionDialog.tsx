@@ -105,6 +105,19 @@ export function SshConnectionDialog({ open, onOpenChange, editing, onSaved }: Pr
   const [allConns, setAllConns] = useState<SshHost[]>([]);
   const [jumpPickerOpen, setJumpPickerOpen] = useState(false);
 
+  // The identity a vault-bound row is bound to, or null when the row owns its
+  // credentials inline.
+  //
+  // This dialog has no identity picker - that arrives with the Vault page - so it
+  // edits everything EXCEPT the credential and hands the binding back untouched.
+  // Rebuilding an inline credential instead was not a lesser version of that, it
+  // was destructive: `getHostSshSecrets` returns nothing for a non-inline record,
+  // so the draft was blank, and saving a blank password is the store's CLEAR
+  // instruction - the row lost its binding and its secret in one save, while the
+  // identity's own secrets sat untouched somewhere else.
+  const boundIdentity =
+    editing && editing.credential.kind === "identity" ? editing.credential.identityId : null;
+
   // Reset and populate when the dialog opens. Secrets load async.
   useEffect(() => {
     if (!open) return;
@@ -129,9 +142,9 @@ export function SshConnectionDialog({ open, onOpenChange, editing, onSaved }: Pr
       setPinnedFingerprint(null);
       return;
     }
-    // Only the inline arm carries a user/auth mode to prefill; a vault-bound
-    // host has neither, and editing it here rebuilds an inline credential on
-    // save - this dialog has no identity picker yet.
+    // Only the inline arm carries a user/auth mode to prefill; a vault-bound host
+    // has neither, and the form below hides both rather than offering an empty
+    // one that a save would then write.
     const inline = editing.credential.kind === "inline" ? editing.credential : null;
     setDraft({
       name: editing.name,
@@ -145,6 +158,9 @@ export function SshConnectionDialog({ open, onOpenChange, editing, onSaved }: Pr
       proxyJumpId: editing.proxyJumpId ?? "",
     });
     setPinnedFingerprint(editing.lastFingerprint ?? null);
+    // Skipped for a vault-bound row: it owns no accounts, so this returns an
+    // empty batch, and asking makes the blank draft look like a read result.
+    if (!inline) return;
     void getHostSshSecrets(editing.id).then((s) => {
       setDraft((d) => ({
         ...d,
@@ -184,11 +200,13 @@ export function SshConnectionDialog({ open, onOpenChange, editing, onSaved }: Pr
     const port = Number.parseInt(draft.port, 10);
     if (!draft.name.trim()) return "Name is required";
     if (!draft.host.trim()) return "Host is required";
-    if (!draft.user.trim()) return "User is required";
+    // A vault-bound row has no user and no credential of its own to validate:
+    // both belong to the identity, and the form does not show either.
+    if (!boundIdentity && !draft.user.trim()) return "User is required";
     if (!Number.isInteger(port) || port <= 0 || port > 65535) return "Port must be 1–65535";
-    if (draft.authMode === "password" && !draft.password)
+    if (!boundIdentity && draft.authMode === "password" && !draft.password)
       return "Password is required for password auth";
-    if (draft.authMode === "key" && !draft.privateKey.trim())
+    if (!boundIdentity && draft.authMode === "key" && !draft.privateKey.trim())
       return "Private key body is required for key auth";
     // Agent mode has nothing to require here on purpose: the agent may be
     // started (or the key added) after this host is saved, so a down agent must
@@ -198,6 +216,14 @@ export function SshConnectionDialog({ open, onOpenChange, editing, onSaved }: Pr
   };
 
   const runTest = async () => {
+    // The button below is disabled for a vault-bound row; this is the guard that
+    // makes that a rule rather than a UI state. Testing one would need the
+    // identity's credentials, which means the resolver and the picker that goes
+    // with it - both the Vault page's work.
+    if (boundIdentity) {
+      setError("A host bound to a vault identity cannot be tested from here yet.");
+      return;
+    }
     const v = validateDraft();
     if (v) {
       setError(v);
@@ -387,18 +413,20 @@ export function SshConnectionDialog({ open, onOpenChange, editing, onSaved }: Pr
         name: draft.name.trim(),
         host,
         port,
-        // Always inline: this dialog has no identity picker yet, so editing a
-        // vault-bound host through it rebuilds an inline credential - flagged
-        // in the repoint report as a judgement call, not a hidden behavior.
-        credential: {
-          kind: "inline",
-          hostId: id,
-          user: draft.user.trim(),
-          authMode: draft.authMode,
-          hasPassword: false,
-          hasPrivateKey: false,
-          hasKeyPassphrase: false,
-        },
+        // A vault binding is handed back exactly as it came in. There is no
+        // identity picker here, so the only honest thing this form can do with a
+        // binding it cannot show is leave it alone.
+        credential: boundIdentity
+          ? { kind: "identity", identityId: boundIdentity }
+          : {
+              kind: "inline",
+              hostId: id,
+              user: draft.user.trim(),
+              authMode: draft.authMode,
+              hasPassword: false,
+              hasPrivateKey: false,
+              hasKeyPassphrase: false,
+            },
         // Written from the dialog's own pin state, not carried over by the
         // spread above: `editing` is a snapshot from when the dialog opened, so
         // a key trusted during Test would be dropped and a key just cleared with
@@ -406,11 +434,19 @@ export function SshConnectionDialog({ open, onOpenChange, editing, onSaved }: Pr
         lastFingerprint: (keepPin && pinnedFingerprint) || undefined,
         proxyJumpId: draft.proxyJumpId || undefined,
       };
-      await upsertHost(conn, {
-        password: draft.authMode === "password" ? draft.password : "",
-        privateKey: draft.authMode === "key" ? draft.privateKey : "",
-        keyPassphrase: draft.authMode === "key" ? draft.keyPassphrase : "",
-      });
+      // Nothing at all for a vault-bound row. `upsertHost` REFUSES a secret
+      // handed in with a vault binding, and the values below would be three empty
+      // strings - which is the store's CLEAR instruction, not a no-op.
+      await upsertHost(
+        conn,
+        boundIdentity
+          ? {}
+          : {
+              password: draft.authMode === "password" ? draft.password : "",
+              privateKey: draft.authMode === "key" ? draft.privateKey : "",
+              keyPassphrase: draft.authMode === "key" ? draft.keyPassphrase : "",
+            },
+      );
       onSaved?.(conn);
       onOpenChange(false);
     } catch (e) {
@@ -431,9 +467,11 @@ export function SshConnectionDialog({ open, onOpenChange, editing, onSaved }: Pr
         <DialogHeader>
           <DialogTitle>{editing ? "Edit SSH connection" : "New SSH connection"}</DialogTitle>
           <DialogDescription>
-            {draft.authMode === "agent"
-              ? "Nothing to store: the local ssh-agent holds the key and signs each handshake."
-              : "Credentials are stored in your OS keychain (Windows Credential Manager / macOS Keychain)."}
+            {boundIdentity
+              ? "This host authenticates with a shared vault identity, so its credential is not edited here."
+              : draft.authMode === "agent"
+                ? "Nothing to store: the local ssh-agent holds the key and signs each handshake."
+                : "Credentials are stored in your OS keychain (Windows Credential Manager / macOS Keychain)."}
           </DialogDescription>
         </DialogHeader>
 
@@ -472,95 +510,105 @@ export function SshConnectionDialog({ open, onOpenChange, editing, onSaved }: Pr
             </Field>
           </div>
 
-          <Field label="User">
-            <Input
-              value={draft.user}
-              onChange={(e) => setDraft({ ...draft, user: e.target.value })}
-              placeholder="users"
-              spellCheck={false}
-              className="h-8 font-mono text-[12px]"
-            />
-          </Field>
-
-          <Field label="Authentication">
-            <div className="flex gap-1">
-              <AuthTab
-                active={draft.authMode === "password"}
-                onClick={() => setDraft({ ...draft, authMode: "password" })}
-              >
-                Password
-              </AuthTab>
-              <AuthTab
-                active={draft.authMode === "key"}
-                onClick={() => setDraft({ ...draft, authMode: "key" })}
-              >
-                Private key
-              </AuthTab>
-              <AuthTab
-                active={draft.authMode === "agent"}
-                onClick={() => setDraft({ ...draft, authMode: "agent" })}
-              >
-                SSH agent
-              </AuthTab>
-            </div>
-          </Field>
-
-          {draft.authMode === "agent" ? (
-            <AgentPanel state={agent} onRecheck={() => void checkAgent()} />
-          ) : draft.authMode === "password" ? (
-            <Field label="Password">
-              <Input
-                type="password"
-                value={draft.password}
-                onChange={(e) => setDraft({ ...draft, password: e.target.value })}
-                className="h-8 font-mono text-[12px]"
-              />
-            </Field>
+          {/* The user and the credential are one block, because a vault binding
+              owns both: an identity carries the username as well as the secret,
+              so showing a user field for a bound row would offer to edit half of
+              something this dialog cannot edit at all. */}
+          {boundIdentity ? (
+            <VaultBindingPanel identityId={boundIdentity} />
           ) : (
             <>
-              <Field label="Private key (PEM / OpenSSH)">
-                <div className="flex flex-col gap-1">
-                  <Textarea
-                    value={draft.privateKey}
-                    onChange={(e) => setDraft({ ...draft, privateKey: e.target.value })}
-                    placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
-                    spellCheck={false}
-                    className="h-32 font-mono text-[11px]"
-                  />
-                  <div className="flex items-center justify-between gap-2">
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      className="h-7 px-2 text-[11px]"
-                      onClick={() => void pickKeyFile()}
-                    >
-                      Import from file…
-                    </Button>
-                    {imported.kind === "loaded" ? (
-                      <span className="text-muted-foreground truncate text-[10.5px]">
-                        Loaded {imported.path}
-                      </span>
-                    ) : imported.kind === "error" ? (
-                      <span className="text-destructive truncate text-[10.5px]">
-                        {imported.message}
-                      </span>
-                    ) : (
-                      <span className="text-muted-foreground text-[10.5px]">
-                        Paste, or import a .pem / key file
-                      </span>
-                    )}
-                  </div>
-                </div>
-              </Field>
-              <Field label="Key passphrase (optional)">
+              <Field label="User">
                 <Input
-                  type="password"
-                  value={draft.keyPassphrase}
-                  onChange={(e) => setDraft({ ...draft, keyPassphrase: e.target.value })}
+                  value={draft.user}
+                  onChange={(e) => setDraft({ ...draft, user: e.target.value })}
+                  placeholder="users"
+                  spellCheck={false}
                   className="h-8 font-mono text-[12px]"
                 />
               </Field>
+
+              <Field label="Authentication">
+                <div className="flex gap-1">
+                  <AuthTab
+                    active={draft.authMode === "password"}
+                    onClick={() => setDraft({ ...draft, authMode: "password" })}
+                  >
+                    Password
+                  </AuthTab>
+                  <AuthTab
+                    active={draft.authMode === "key"}
+                    onClick={() => setDraft({ ...draft, authMode: "key" })}
+                  >
+                    Private key
+                  </AuthTab>
+                  <AuthTab
+                    active={draft.authMode === "agent"}
+                    onClick={() => setDraft({ ...draft, authMode: "agent" })}
+                  >
+                    SSH agent
+                  </AuthTab>
+                </div>
+              </Field>
+
+              {draft.authMode === "agent" ? (
+                <AgentPanel state={agent} onRecheck={() => void checkAgent()} />
+              ) : draft.authMode === "password" ? (
+                <Field label="Password">
+                  <Input
+                    type="password"
+                    value={draft.password}
+                    onChange={(e) => setDraft({ ...draft, password: e.target.value })}
+                    className="h-8 font-mono text-[12px]"
+                  />
+                </Field>
+              ) : (
+                <>
+                  <Field label="Private key (PEM / OpenSSH)">
+                    <div className="flex flex-col gap-1">
+                      <Textarea
+                        value={draft.privateKey}
+                        onChange={(e) => setDraft({ ...draft, privateKey: e.target.value })}
+                        placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
+                        spellCheck={false}
+                        className="h-32 font-mono text-[11px]"
+                      />
+                      <div className="flex items-center justify-between gap-2">
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="h-7 px-2 text-[11px]"
+                          onClick={() => void pickKeyFile()}
+                        >
+                          Import from file…
+                        </Button>
+                        {imported.kind === "loaded" ? (
+                          <span className="text-muted-foreground truncate text-[10.5px]">
+                            Loaded {imported.path}
+                          </span>
+                        ) : imported.kind === "error" ? (
+                          <span className="text-destructive truncate text-[10.5px]">
+                            {imported.message}
+                          </span>
+                        ) : (
+                          <span className="text-muted-foreground text-[10.5px]">
+                            Paste, or import a .pem / key file
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  </Field>
+                  <Field label="Key passphrase (optional)">
+                    <Input
+                      type="password"
+                      value={draft.keyPassphrase}
+                      onChange={(e) => setDraft({ ...draft, keyPassphrase: e.target.value })}
+                      className="h-8 font-mono text-[12px]"
+                    />
+                  </Field>
+                </>
+              )}
             </>
           )}
 
@@ -699,7 +747,7 @@ export function SshConnectionDialog({ open, onOpenChange, editing, onSaved }: Pr
             variant="outline"
             size="sm"
             onClick={() => void runTest()}
-            disabled={test.kind === "running" || saving}
+            disabled={test.kind === "running" || saving || boundIdentity !== null}
           >
             {test.kind === "running" ? "Testing…" : "Test connection"}
           </Button>
@@ -725,6 +773,36 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
       <span className="text-muted-foreground text-[11px] font-medium tracking-tight">{label}</span>
       {children}
     </div>
+  );
+}
+
+/**
+ * What stands in for the user and credential fields when the row is bound to a
+ * shared vault identity.
+ *
+ * Read-only on purpose, and it says which parts of the form still work: the
+ * alternative was refusing to open the dialog at all, which would leave an
+ * imported host unable to be renamed or re-pointed until the identity picker
+ * ships. The identity is named by id rather than by name because resolving the
+ * name means a vault read, and a dialog that cannot edit the binding does not
+ * need to load it.
+ */
+function VaultBindingPanel({ identityId }: { identityId: string }) {
+  return (
+    <Field label="Credential">
+      {/* Same box as the two other read-only status blocks in this dialog. */}
+      <div className="border-border/60 bg-muted/30 flex flex-col gap-1 rounded-md border px-2 py-1.5">
+        <span className="text-[11px]">This host uses a shared vault identity.</span>
+        <span className="text-muted-foreground truncate font-mono text-[10.5px]" title={identityId}>
+          {identityId}
+        </span>
+      </div>
+      <span className="text-muted-foreground text-[10.5px]">
+        The user and the credential belong to the identity, so neither is editable here and Test
+        cannot run - choosing or changing an identity arrives with the Vault page. Everything else
+        on this form is editable, and saving leaves the binding exactly as it is.
+      </span>
+    </Field>
   );
 }
 

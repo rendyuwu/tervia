@@ -17,28 +17,31 @@ CodeMirror editor, a file explorer, split panes and tabs. Forked from
 [Crynta/Terax](https://github.com/crynta/terax-ai); both upstreams are
 Apache-2.0 (see [NOTICE](NOTICE)).
 
-|                  |                                                                               |
-| ---------------- | ----------------------------------------------------------------------------- |
-| Version          | 0.1.0                                                                         |
-| Repo / site      | `github.com/rendyuwu/tervia` / `https://tervia.rendy.dev`                     |
-| Stack            | Tauri 2 + Rust (`portable-pty`, `russh`) <-> React 19 + TS + xterm.js (WebGL) |
-| Editor / UI      | CodeMirror 6, shadcn/ui (`radix-luma` / `mist`, lucide icons), Tailwind v4    |
-| Bundle id        | `dev.rendy.tervia` (dev profile: `dev.rendy.tervia.dev`)                      |
-| Crates           | `tervia` / lib `tervia_lib`; GUI binary `TerviaApp`                           |
-| Keychain service | `tervia-ssh` (SSH secrets), `tervia-rdp` (RDP passwords)                      |
-| Package manager  | pnpm                                                                          |
-| Platforms        | macOS, Linux, Windows                                                         |
-| Frontend check   | `pnpm exec tsc --noEmit`, `pnpm run lint:imports`                             |
-| Rust check       | `cd src-tauri && cargo check && cargo clippy`                                 |
-| Behaviour checks | `pnpm run verify` (all `scripts/*-verify.ts`), `pnpm run verify ssh`          |
-| Build            | `pnpm tauri build`                                                            |
-| Dev              | `pnpm tauri:dev` (isolated `.dev` data dir) or `pnpm tauri dev` (see gotcha)  |
-| Auto-updater     | Enabled: signed updates via GitHub Releases, 6 h poll                         |
+|                  |                                                                                 |
+| ---------------- | ------------------------------------------------------------------------------- |
+| Version          | 0.1.0                                                                           |
+| Repo / site      | `github.com/rendyuwu/tervia` / `https://tervia.rendy.dev`                       |
+| Stack            | Tauri 2 + Rust (`portable-pty`, `russh`) <-> React 19 + TS + xterm.js (WebGL)   |
+| Editor / UI      | CodeMirror 6, shadcn/ui (`radix-luma` / `mist`, lucide icons), Tailwind v4      |
+| Bundle id        | `dev.rendy.tervia` (dev profile: `dev.rendy.tervia.dev`)                        |
+| Crates           | `tervia` / lib `tervia_lib`; GUI binary `TerviaApp`                             |
+| Keychain service | `tervia-hosts` (a host's own secrets), `tervia-vault` (shared identities, keys) |
+| Package manager  | pnpm                                                                            |
+| Platforms        | macOS, Linux, Windows                                                           |
+| Frontend check   | `pnpm exec tsc --noEmit`, `pnpm run lint:imports`                               |
+| Rust check       | `cd src-tauri && cargo check && cargo clippy`                                   |
+| Behaviour checks | `pnpm run verify` (all `scripts/*-verify.ts`), `pnpm run verify ssh`            |
+| Build            | `pnpm tauri build`                                                              |
+| Dev              | `pnpm tauri:dev` (isolated `.dev` data dir) or `pnpm tauri dev` (see gotcha)    |
+| Auto-updater     | Enabled: signed updates via GitHub Releases, 6 h poll                           |
 
 **Persisted state** (all under the bundle id's app-data dir, via
 `tauri-plugin-store`): `tervia-settings.json`, `tervia-workspaces.json`,
-`tervia-ssh-connections.json`, `tervia-rdp-connections.json`,
-`tervia-cli-agents.json`. Rust -> webview events are `tervia:`-prefixed;
+`tervia-hosts.json`, `tervia-vault.json`, `tervia-cli-agents.json`. The two old
+`tervia-ssh-connections.json` / `tervia-rdp-connections.json` files are no
+longer read; they are deliberately left on disk (there is no migration) and
+`hosts/legacyPurge.ts` clears the keychain accounts they named.
+Rust -> webview events are `tervia:`-prefixed;
 intra-frontend store-change events are `tervia://`. Export formats:
 `.tervia-backup` (fully encrypted SSH + RDP connection backup, JSON kind
 `tervia-connections`, format v2) and `.tervia` (theme,
@@ -58,7 +61,7 @@ Six invariants (rationale in
 1. **Two processes.** Frontend (`src/`, React webview) owns UI; backend
    (`src-tauri/`, Rust) owns every OS resource. The webview reaches the OS only
    via `invoke("cmd", args)`; streaming output returns over a Tauri `Channel`.
-   Every command is registered in `src-tauri/src/lib.rs` (`invoke_handler`, 80
+   Every command is registered in `src-tauri/src/lib.rs` (`invoke_handler`, 91
    commands) which is the whole backend API index.
 2. **Three webviews.** The main window, a separate Settings window
    (`src/settings/`), and per-pane float windows (`src/float/`). They share
@@ -71,8 +74,14 @@ Six invariants (rationale in
    with `pointer-events-none invisible`, so PTYs and SSH sessions keep
    streaming.
 5. **Secrets live only in the OS keychain / DPAPI / a 0600 file** (`secrets_*`
-   commands, services `tervia-ssh` and `tervia-rdp`). Never in the settings
-   store, the workspace store, or `localStorage`.
+   commands, services `tervia-hosts` and `tervia-vault`). Never in the settings
+   store, the workspace store, or `localStorage`. The stores hold metadata plus
+   `has*` presence flags, so listing a hundred hosts costs no `secrets_get`.
+   This makes secrets no _safer_ - on Linux a private key is in a mode-0600 JSON
+   file either way, and the SSH connect path still round-trips plaintext through
+   the webview on every connect and every ProxyJump hop
+   ([#11](https://github.com/rendyuwu/tervia/issues/11)). What a vault binding
+   buys is fewer copies of one secret.
 6. **App.tsx coordinates, it does not implement.** It owns cross-module wiring;
    feature logic lives in `src/modules/<area>/` and the per-concern hooks in
    `src/app/hooks/`.
@@ -81,10 +90,12 @@ Six invariants (rationale in
 
 ```
 src-tauri/                      Backend (Rust)
-  src/lib.rs                    invoke_handler (all 80 commands) + boot + CLI dispatch
+  src/lib.rs                    invoke_handler (all 91 commands) + boot + CLI dispatch
   src/main.rs                   thin shim
   src/modules/
-    ssh/{mod,session,sftp}.rs             russh sessions, ProxyJump, -L forwards, SFTP
+    ssh/{mod,session,sftp}.rs             russh sessions, ProxyJump, -L forwards, SFTP,
+                                          ssh_key_inspect
+    rdp/{mod,session,frame,tls}.rs        ironrdp sessions, certificate pinning, frames
     pty/{mod,session,shell_init,job,path_probe}.rs + scripts/   interactive PTYs
     pty_daemon/{mod,protocol,transport,paths,server,client,spawn}.rs   sidecar
     fs/{mod,tree,file,mutate,search,grep,atomic}.rs
@@ -106,31 +117,33 @@ src/                            Frontend (React webview), alias @/* -> src/*
   components/{BrandIcon,CliAgentIcon,LeafIcon,WindowControls,...}.tsx
   lib/                          shared helpers (cn, path, fonts, ipc, projectUrl, ...)
   styles/                       globals.css, shadcn-tailwind.css, theme tokens
-  modules/                      16 modules:
-    ssh/       terminal/    panes/      tabs/       workspaces/
-    editor/    explorer/    header/     statusbar/  rightPanel/
-    settings/  shortcuts/   commandPalette/  theme/  updater/  scm/
+  modules/                      19 modules:
+    hosts/     vault/       ssh/        rdp/        terminal/
+    panes/     tabs/        workspaces/ editor/     explorer/
+    header/    statusbar/   rightPanel/ settings/   shortcuts/
+    commandPalette/  theme/  updater/   scm/
 ```
 
 ## Backend (`src-tauri/src/modules/`)
 
-| Module         | Key commands / role                                                                                                                                                                                                                                                |
-| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `ssh/`         | The product. `ssh_open/write/resize/close/attach/list_sessions`, `ssh_confirm_host_key`, `ssh_agent_keys`, `ssh_forward_open`, `ssh_git_status`, `ssh_git`, `ssh_sftp_*` (see below).                                                                              |
-| `pty/`         | `pty_open/attach/write/resize/close/list_sessions/kill_all`, `terminal_probe_path`. Two backends: daemon (default) falls back to in-process.                                                                                                                       |
-| `pty_daemon/`  | Sidecar owning PTYs across GUI restarts (`--pty-daemon` flag, no Tauri commands).                                                                                                                                                                                  |
-| `fs/`          | `fs_read_dir/read_file/read_file_portion/canonicalize/write_file/create_file/create_dir/rename/copy/delete/search/grep/glob/grep_replace/replace_in_file`, `list_subdirs`.                                                                                         |
-| `shell/`       | `shell_run_command`, `shell_session_*`, `shell_bg_*`. One-shot and background commands, distinct from interactive PTYs.                                                                                                                                            |
-| `git/`         | `git_status/ignored/file_head/file_at/run/diff_full/log/commit_detail`. `git_run` is held to an allowlist of subcommands (`check_args`).                                                                                                                           |
-| `backup.rs`    | `backup_seal` / `backup_open`: PBKDF2-HMAC-SHA256 + AES-256-GCM over the SSH connection export. Lives host-side because `crypto.subtle` needs a secure context and the app origin is plain http.                                                                   |
-| `secrets.rs`   | `secrets_get/set/delete/get_all`. macOS Keychain; Windows DPAPI file (Credential Manager's 2560-byte blob cap is too small for an RSA key, with CredMan reads kept as a fallback); Linux 0600 file (no Secret Service daemon can be assumed for AppImage/deb/rpm). |
-| `format.rs`    | `fmt_run_external` direct-spawn external formatter (15 s default timeout, 8 MiB cap).                                                                                                                                                                              |
-| `net.rs`       | `http_ping`, `port_is_open`, `http_stream`, `http_abort`. SSRF guard blocks metadata / link-local addresses, re-applied on every redirect hop.                                                                                                                     |
-| `clipboard.rs` | `clipboard_read_text`: paste reads run host-side via arboard because WebKitGTK rejects `navigator.clipboard.readText()` under Tauri's default webview flags. Writes stay on the webview API.                                                                       |
-| `cli.rs`       | `cli_initial_target`, `cli_classify_path`, `cli_take_initial_update_request`, `cli_install_path_shim`, plus the pre-Tauri `--version` / `--help` / `--update` dispatch and the macOS `RunEvent::Opened` handler.                                                   |
-| `ids.rs`       | `BUNDLE_ID` and the no-`AppHandle` data-dir derivation used by the CLI and the daemon.                                                                                                                                                                             |
-| `lockext.rs`   | `lock_or_recover`: poison-safe `Mutex` acquisition for detached pump threads, where a poison panic would silently kill an output stream.                                                                                                                           |
-| `appimage.rs`  | Strips the AppImage runtime's `LD_LIBRARY_PATH` from spawned children so a system `git`/`php` links against the distro's libraries, not the bundle's.                                                                                                              |
+| Module         | Key commands / role                                                                                                                                                                                                                                                                       |
+| -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ssh/`         | The product. `ssh_open/write/resize/close/attach/list_sessions`, `ssh_confirm_host_key`, `ssh_agent_keys`, `ssh_forward_open`, `ssh_git_status`, `ssh_git`, `ssh_sftp_*` (see below), `ssh_key_inspect`.                                                                                  |
+| `rdp/`         | `rdp_open/input/close/attach/list_sessions/snapshot`, `rdp_confirm_cert`. Certificate pinning mirrors SSH's host-key flow; the password arrives as a keychain **reference**, never a value.                                                                                               |
+| `pty/`         | `pty_open/attach/write/resize/close/list_sessions/kill_all`, `terminal_probe_path`. Two backends: daemon (default) falls back to in-process.                                                                                                                                              |
+| `pty_daemon/`  | Sidecar owning PTYs across GUI restarts (`--pty-daemon` flag, no Tauri commands).                                                                                                                                                                                                         |
+| `fs/`          | `fs_read_dir/read_file/read_file_portion/canonicalize/write_file/create_file/create_dir/rename/copy/delete/search/grep/glob/grep_replace/replace_in_file`, `list_subdirs`.                                                                                                                |
+| `shell/`       | `shell_run_command`, `shell_session_*`, `shell_bg_*`. One-shot and background commands, distinct from interactive PTYs.                                                                                                                                                                   |
+| `git/`         | `git_status/ignored/file_head/file_at/run/diff_full/log/commit_detail`. `git_run` is held to an allowlist of subcommands (`check_args`).                                                                                                                                                  |
+| `backup.rs`    | `backup_seal_payload` / `backup_open_payload` / `backup_apply_secrets` / `backup_release`, plus `backup_open` for v1 reads: PBKDF2-HMAC-SHA256 + AES-256-GCM over the connection export. Lives host-side because `crypto.subtle` needs a secure context and the app origin is plain http. |
+| `secrets.rs`   | `secrets_get/set/delete/get_all`. macOS Keychain; Windows DPAPI file (Credential Manager's 2560-byte blob cap is too small for an RSA key, with CredMan reads kept as a fallback); Linux 0600 file (no Secret Service daemon can be assumed for AppImage/deb/rpm).                        |
+| `format.rs`    | `fmt_run_external` direct-spawn external formatter (15 s default timeout, 8 MiB cap).                                                                                                                                                                                                     |
+| `net.rs`       | `http_ping`, `port_is_open`, `http_stream`, `http_abort`. SSRF guard blocks metadata / link-local addresses, re-applied on every redirect hop.                                                                                                                                            |
+| `clipboard.rs` | `clipboard_read_text`: paste reads run host-side via arboard because WebKitGTK rejects `navigator.clipboard.readText()` under Tauri's default webview flags. Writes stay on the webview API.                                                                                              |
+| `cli.rs`       | `cli_initial_target`, `cli_classify_path`, `cli_take_initial_update_request`, `cli_install_path_shim`, plus the pre-Tauri `--version` / `--help` / `--update` dispatch and the macOS `RunEvent::Opened` handler.                                                                          |
+| `ids.rs`       | `BUNDLE_ID` and the no-`AppHandle` data-dir derivation used by the CLI and the daemon.                                                                                                                                                                                                    |
+| `lockext.rs`   | `lock_or_recover`: poison-safe `Mutex` acquisition for detached pump threads, where a poison panic would silently kill an output stream.                                                                                                                                                  |
+| `appimage.rs`  | Strips the AppImage runtime's `LD_LIBRARY_PATH` from spawned children so a system `git`/`php` links against the distro's libraries, not the bundle's.                                                                                                                                     |
 
 `lib.rs` also registers `open_settings_window` and `open_float_window`.
 
@@ -236,18 +249,21 @@ viewport. Idle 24 h self-shutdown (`TERVIA_PTYD_IDLE_SECS` overrides). Logs at
 
 macOS/Linux rely on `Drop for Session -> killer.kill()`.
 
-## Frontend (`src/modules/`, 16 modules)
+## Frontend (`src/modules/`, 19 modules)
 
 | Module            | Role                                                                                                                                                                                                         |
 | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `hosts/`          | The saved-machine store (`tervia-hosts.json`): one `Host` union for SSH and RDP, groups, jump-chain resolution, the one-shot legacy secret purge. Every integrity rule lives here, not in a dialog (below).  |
+| `vault/`          | Shared credentials nothing owns: `VaultIdentity` / `VaultKey` in `tervia-vault.json`, and `resolve.ts`, the one place a credential binding becomes something the connect path can use (below).               |
 | `ssh/`            | Connection manager, host-key dialog, SFTP explorer, encrypted backup, route pill (below).                                                                                                                    |
+| `rdp/`            | RDP pane and menu, the frame decoder, scancode mapping, and `dial.ts` (a tunnelled dial target with an idempotent `release()`).                                                                              |
 | `terminal/`       | One mounted xterm per leaf via `useTerminalSession`; pty-bridge and ssh-session backends behind one Session; OSC handlers; AI CLI detection; write metering; WebGL.                                          |
 | `panes/`          | Split-pane orchestration via `react-resizable-panels` (`PaneStack`, `PaneTreeView`) plus the float-window host and its event protocol.                                                                       |
 | `tabs/`           | Source of truth: `useTabs` (tab list + active id), `useWorkspaceCwd`, the `+` menu and the Agent spawn dialog.                                                                                               |
 | `workspaces/`     | Workspace persistence + switching (`store.ts`, `serialize.ts`) and the Workspaces panel / board.                                                                                                             |
 | `editor/`         | CodeMirror 6 (`EditorPane`), language modes, format-on-save, vim mode, minimap, prebuilt themes. Reads/writes remote files over SFTP when the leaf is SSH-bound.                                             |
 | `explorer/`       | File tree (Catppuccin icons), fuzzy search, project-wide grep + replace, keyboard nav, inline rename, git decorations.                                                                                       |
-| `header/`         | Top bar, inline search (`SearchInline` adapts terminal vs editor), the SSH menu, custom `WindowControls` (Linux/Windows).                                                                                    |
+| `header/`         | Top bar, inline search (`SearchInline` adapts terminal vs editor), the SSH and RDP menus, custom `WindowControls` (Linux/Windows).                                                                           |
 | `statusbar/`      | Bottom bar, cwd breadcrumb (SFTP-aware on an SSH pane), zoom, updater pill, `SshRoutePill`.                                                                                                                  |
 | `rightPanel/`     | Which sidebar sections are docked to the right column (`files`, `workspaces`) and their persisted placement.                                                                                                 |
 | `shortcuts/`      | Keymap catalog + `useGlobalShortcuts`; handlers wired in `app/lib/shortcutHandlers.ts` by id. Use `metaKey \|\| ctrlKey`.                                                                                    |
@@ -257,31 +273,88 @@ macOS/Linux rely on `Drop for Session -> killer.kill()`.
 | `updater/`        | In-app updater UI on `tauri-plugin-updater`; 6 h poll, listens for `tervia:trigger-update`.                                                                                                                  |
 | `scm/`            | Library only, no UI: `api.ts` wraps the `git_*` and `ssh_git*` commands, `branch.ts` the branch name, `types.ts` the payloads. Consumed by the explorer's git decorations and the Workspaces branch display. |
 
+### Saved machines (`src/modules/hosts/`)
+
+- `store.ts` owns the saved-machine list (`tervia-hosts.json`, keys `hosts` /
+  `groups` / `legacySecretsPurged`). One record per machine, discriminated on
+  `protocol`, so grouping and vault binding are built once instead of twice. It
+  holds metadata and `has*` flags only; a host's own secrets go to the keychain
+  under service `tervia-hosts`, account `<id>::<field>`. `agent` mode stores
+  nothing at all. Every mutation goes through one serialized `enqueueWrite`
+  chain, because a chained connect fires `markConnected` once per hop
+  near-simultaneously and a lost write would revert a host to a TOFU prompt.
+- **Every integrity rule lives in this layer, never in a dialog**, because a
+  dialog is never the only writer - an import, a duplicate, a palette entry and
+  the next window would each have to remember it. Three cost something specific
+  when forgotten: `assertBindingOwner` on every upsert (a spread-copied host
+  authenticates with the SOURCE's secrets, silently); a jump or tunnel target
+  must be an SSH host and the whole chain must not loop (checked at the write
+  _and_ at the connect, because neither covers a row an import put there); and no
+  account outlives the record naming it, which is why `upsertHost` releases what
+  the new record can no longer name **after** the record is on disk, and
+  `deleteHost` clears the host's accounts plus every row that pointed at it.
+- `types.ts` is the `Host` union (`SshHost | RdpHost`) plus the per-protocol
+  keychain field lists, so a caller that has to enumerate a host's accounts
+  cannot miss one. There is no `forwards` field: a forward rule is its own record.
+- `jumps.ts`: `jumpChain` is the pure walk (shared with the write guard),
+  `resolveJumpHops` puts a credential on each hop and reverses into the backend's
+  connect order. Cycle detection is seeded by the target's own id, and
+  `MAX_JUMP_HOPS` is 16 - `backupFile.ts` duplicates that number and the two have
+  to agree, because an over-long chain is refused by the store, not truncated.
+- `duplicateHost` copies SSH credentials but deliberately **not** the pinned
+  fingerprint (a copy exists to be pointed elsewhere, and carrying the key over
+  reads as a MITM on the next connect) and **not** an RDP password (there is no
+  `secrets_copy`, so copying one would mean reading it into the webview). It
+  rewrites the binding's `hostId` and runs read-and-write inside one queue entry.
+- `legacyPurge.ts` clears the accounts the two OLD connection stores left on
+  `tervia-ssh` and `tervia-rdp`, once, and is the only thing that can: there is no
+  `secrets_list`, so an account nothing references is unreachable rather than
+  untidy. It therefore imports nothing from `ssh/` or `rdp/` and reads the old
+  store files directly, so it still works after those modules are gone.
+- `useHosts()` / `useHostGroups()` are the subscribed reads, one per collection
+  rather than per surface: the store broadcasts on every commit, so a rename in
+  the Settings webview reaches the tab strip without either side knowing about the
+  other. `adapters.ts` is the injected IO port that lets the store layer run under
+  plain node in `scripts/hosts-store-verify.ts`.
+- Both stores sit behind `createRecoveredStore` (`src/lib/recoveredStore.ts`):
+  `tauri-plugin-store` saves with a plain `fs::write`, so a power cut can leave a
+  zero-byte or nul-filled file. It recovers from a `.bak`, then snapshots on every
+  commit, and hands back one notice for the UI to show once.
+
+### The vault (`src/modules/vault/`)
+
+- `store.ts` owns `tervia-vault.json`: a `VaultIdentity` is "who I log in as", a
+  `VaultKey` is a private key stored once and shared by every identity using it.
+  Secrets go to service `tervia-vault`. A delete is **refused** while something
+  still references the record (`VaultInUseError` names the holders) rather than
+  cascading, and `identityHostRefs` is the host store's answer to "who uses this".
+- `resolve.ts` is the **one** place a binding becomes something the connect path
+  can use, and the two protocols get deliberately different shapes.
+  `resolveRdpAuth` returns a keychain **reference** (`{service, account}`), which
+  is what keeps an RDP password out of the webview by construction;
+  `resolveSshAuth` returns values, because `openSsh` takes values -
+  [#11](https://github.com/rendyuwu/tervia/issues/11), pre-existing and not fixed
+  here. `sshCredentialValues(authMode, secrets)` is the mode-to-wire mapping
+  inside it: the same switch used to be spelled out at four call sites and a
+  missed one connected with no credentials at all. Empty values become `undefined`
+  so the backend's "no credentials" guard fires instead of an empty password.
+- `types.ts` holds the binding union both stores use, and `assertBindingOwner`.
+  An inline binding carries its own `hostId`, which removes the resolve-time
+  mismatch and moves it to write time - which is why the host store must call that
+  assertion on every upsert.
+- Key metadata comes from `ssh_key_inspect(pem, passphrase?)`, wrapped in
+  `ssh/bridge.ts`: type, comment, fingerprint and public half, all readable from
+  an **encrypted** OpenSSH key because that container keeps the public part in the
+  clear. It reports `parsed: false` rather than an error when only the passphrase
+  is missing, so a key editor can prompt instead of showing a failure.
+
 ### SSH (`src/modules/ssh/`)
 
-- `connections.ts` is the store of saved hosts (`tervia-ssh-connections.json`).
-  It holds metadata and `has*` flags only; password, private key and key
-  passphrase go to the keychain under service `tervia-ssh`, account
-  `<id>::<field>`. `agent` mode stores nothing at all. Every mutation goes
-  through one serialized `enqueueWrite` chain, because a chained connect fires
-  `markConnected` once per hop near-simultaneously and a lost write would revert
-  a host to a TOFU prompt.
-- `authFields(authMode, secrets)` is the **one** mode-to-wire mapping. It exists
-  because the same switch used to be spelled out at four call sites and a missed
-  one connected with no credentials at all. Empty values become `undefined` so
-  the backend's "no credentials" guard fires instead of an empty password.
-- `resolveJumpHops` walks `proxyJumpId` transitively into the backend's connect
-  order, with cycle detection seeded by the target's own id and a 16-hop cap. A
-  deleted jump host throws rather than silently dropping a tunnel;
-  `deleteConnection` cascade-clears any row pointing at the deleted id.
-- `duplicateConnection` copies credentials but deliberately **not** the pinned
-  fingerprint: a copy exists to be pointed elsewhere, and carrying the key over
-  would read as a MITM on the next connect.
 - `tunnel.ts` opens headless forwards for callers that want a TCP tunnel rather
   than a terminal. It refuses a connection with no pinned server key, because a
   first connect needs a human and nothing here can show the dialog.
 - `backup.ts` / `backupFile.ts` export and import `.tervia-backup` (format v2):
-  one sealed blob over both inventories and every credential, so the file leaks
+  one sealed blob over the whole inventory and every credential, so the file leaks
   no hostnames. Credentials never enter the webview on this path — the export
   sends keychain references to `backup_seal_payload`, and the import gets
   metadata back from `backup_open_payload` while `backup_apply_secrets` writes
@@ -289,6 +362,16 @@ macOS/Linux rely on `Drop for Session -> killer.kill()`.
   the one exception: their sealed block is the credential map itself.
   `SshBackupDialog` and `SshMenu` are the UI for both protocols; `RdpMenu`
   deliberately has no second copy.
+- An import is a **trust boundary**, and `backupFile.ts` is where every field is
+  re-checked. Two of its passes exist because the alternative is destructive
+  rather than merely wrong: the store releases every account a new record can no
+  longer NAME, so a row that arrives bound to a vault identity (owning none) or
+  on the other protocol (owning fewer) would delete the saved host's secrets with
+  nothing copied first. A vault binding is never applied - the row keeps whatever
+  this machine already had, or lands as a blank inline host - and a protocol flip
+  is refused. Records are written **before** the credentials so every account
+  belongs to a host that is already in the store, and one refused row is counted
+  in `ImportResult` rather than abandoning the rest of the file.
 - `status.ts` models the per-leaf handshake state including per-hop progress;
   `SshRoutePill` renders the chain in the status bar. `hostKeyPrompt.ts` queues
   first-connect confirmations and pins the fingerprint at the moment of trust.
@@ -386,11 +469,14 @@ never blocks persistence. Not supported in builtin mode:
   CI). Rust tests: `cargo test`. CI runs those plus `pnpm build` and a bundle
   matrix; it does **not** run `pnpm run verify` or `cargo fmt --check`, so run
   those locally (`pnpm run fmt:rust`, `pnpm run lint:rust`).
-- **`scripts/*-verify.ts`** are standalone `tsx` behaviour checks (SSH routing,
-  backup round-trip, forward URLs, host keys, workspace serialization, terminal
-  resize, theming, ...). `pnpm run verify <substring>` runs a subset; the whole
-  suite is ~15 s. Modules meant to be exercised here stay free of xterm/Tauri
-  imports at module scope so plain node can load them.
+- **`scripts/*-verify.ts`** are standalone `tsx` behaviour checks (the host store
+  and its guards, credential resolution, the legacy purge, SSH routing, backup
+  round-trip, forward URLs, host keys, workspace serialization, terminal resize,
+  theming, ...). `pnpm run verify <substring>` runs a subset; the whole suite is
+  ~15 s and `verify-all.mjs` globs the directory, so a new `*-verify.ts` is picked
+  up with no registration. Modules meant to be exercised here stay free of
+  xterm/Tauri imports at module scope so plain node can load them; a store layer
+  does it by taking its IO as an injected port instead.
 - **Dev profiles**: `pnpm tauri:dev` uses `tauri.dev.conf.json` (identifier
   `dev.rendy.tervia.dev`), so workspaces, stores, the PTY socket and logs all
   land in the `.dev` data dir and cannot stomp an installed release. Prefer it.
@@ -419,11 +505,11 @@ never blocks persistence. Not supported in builtin mode:
 
 - `tauri.conf.json` sets `"removeUnusedCommands": true`. A command with no
   frontend `invoke` call site can be stripped from a release build. Today
-  `secrets_get_all`, `http_stream`, `http_abort`, `shell_bg_spawn_direct`,
-  `ssh_list_sessions` and `ssh_attach` have no caller in `src/`. Note the
-  backup export does not read secrets from JS at all — it passes keychain
-  references to `backup_seal_payload` — so `secrets_get_all` has no caller by
-  design, not by omission.
+  `http_stream`, `http_abort`, `shell_bg_spawn_direct`, `ssh_list_sessions` and
+  `ssh_attach` have no caller in `src/`. `secrets_get_all` does now, through
+  `vault/adapters.ts`: it is the one-round-trip batch read a host's three SSH
+  accounts go through. Note it is `(service, accounts[])`, one service per call,
+  so a batch spanning host-owned and vault-owned secrets is two calls.
 - The plugin store writes non-atomically, so `shell_init.rs` retries its
   `tervia-settings.json` read a couple of times before giving up; a spawn can
   otherwise land between the truncate and the rewrite.

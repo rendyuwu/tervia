@@ -76,6 +76,12 @@ export function SshMenu({ onConnect }: Props) {
   }, [editorOpen]);
   const [editing, setEditing] = useState<SshHost | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<SshHost | null>(null);
+  // A failed delete is reported INSIDE the confirm dialog rather than through
+  // `pickError` like the duplicate path: by the time this can fail the menu is
+  // already closed, so a message down there would only appear the next time the
+  // user opened it. The dialog is the one surface still on screen.
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState(false);
   const [backup, setBackup] = useState<BackupMode | null>(null);
   const [backupOpen, setBackupOpen] = useState(false);
   const [pickError, setPickError] = useState<string | null>(null);
@@ -117,7 +123,14 @@ export function SshMenu({ onConnect }: Props) {
   const openDuplicate = async (c: SshHost) => {
     try {
       const copy = await duplicateHost(c.id);
-      if (!copy || !isSshHost(copy)) return;
+      // `null` means the source was gone by the time the queue reached it -
+      // deleted in another window. A copy of an SSH host that is not an SSH host
+      // cannot happen, and both read the same way from here, so neither returns
+      // in silence with the menu still open and nothing said.
+      if (!copy || !isSshHost(copy)) {
+        setPickError(`"${c.name}" could not be duplicated: it is no longer saved.`);
+        return;
+      }
       setEditing(copy);
       setEditorOpen(true);
       setMenuOpen(false);
@@ -128,7 +141,26 @@ export function SshMenu({ onConnect }: Props) {
 
   const askDelete = (c: SshHost) => {
     setConfirmDelete(c);
+    setDeleteError(null);
     setMenuOpen(false);
+  };
+
+  // `deleteHost` clears the host's keychain accounts and rewrites every row that
+  // pointed at it, so it has real failure modes - a locked keychain, a store it
+  // cannot write. Left unhandled it was an unhandled rejection: the dialog closed,
+  // the list reloaded the row straight back, and the user retried forever with no
+  // message. The dialog stays open on failure instead.
+  const runDelete = async (target: SshHost) => {
+    setDeleteError(null);
+    setDeleting(true);
+    try {
+      await deleteHost(target.id, noForwardRules);
+      setConfirmDelete(null);
+    } catch (e) {
+      setDeleteError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setDeleting(false);
+    }
   };
 
   const onPick = (c: SshHost) => {
@@ -301,7 +333,10 @@ export function SshMenu({ onConnect }: Props) {
       <AlertDialog
         open={confirmDelete !== null}
         onOpenChange={(open) => {
-          if (!open) setConfirmDelete(null);
+          if (!open) {
+            setConfirmDelete(null);
+            setDeleteError(null);
+          }
         }}
       >
         <AlertDialogContent>
@@ -313,17 +348,23 @@ export function SshMenu({ onConnect }: Props) {
                 : ""}
             </AlertDialogDescription>
           </AlertDialogHeader>
+          {deleteError ? (
+            <p className="text-destructive text-[11px]">Delete failed: {deleteError}</p>
+          ) : null}
           <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogCancel disabled={deleting}>Cancel</AlertDialogCancel>
             <AlertDialogAction
               variant="destructive"
-              onClick={async () => {
-                const target = confirmDelete;
-                setConfirmDelete(null);
-                if (target) await deleteHost(target.id, noForwardRules);
+              disabled={deleting}
+              // preventDefault, because Radix closes the dialog on click: the
+              // whole point is to still be here when the delete fails. Closing
+              // is `runDelete`'s job, on success only.
+              onClick={(e) => {
+                e.preventDefault();
+                if (confirmDelete) void runDelete(confirmDelete);
               }}
             >
-              Delete
+              {deleting ? "Deleting…" : "Delete"}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

@@ -180,8 +180,8 @@ export function RdpConnectionDialog({ open, onOpenChange, editing, onSaved }: Pr
       return;
     }
     // Only the inline arm carries a username/domain to prefill; a vault-bound
-    // host has neither, and editing it here rebuilds an inline credential on
-    // save - this dialog has no identity picker yet.
+    // host has neither, and the form below hides both rather than offering an
+    // empty one that a save would then write.
     const inline = editing.credential.kind === "inline" ? editing.credential : null;
     setDraft({
       name: editing.name,
@@ -206,6 +206,16 @@ export function RdpConnectionDialog({ open, onOpenChange, editing, onSaved }: Pr
   // unchanged, and that flag now lives under the inline arm only.
   const editingHasPassword =
     !!editing && editing.credential.kind === "inline" && editing.credential.hasPassword;
+  // The identity a vault-bound row is bound to, or null when the row owns its
+  // password itself.
+  //
+  // There is no identity picker here yet, so the form edits everything EXCEPT the
+  // credential and hands the binding back untouched. Rebuilding an inline
+  // credential instead detached the host from its identity AND cleared a password
+  // the form never showed: this dialog deliberately never loads one, so the field
+  // was blank, and `""` is the store's CLEAR instruction rather than "unchanged".
+  const boundIdentity =
+    editing && editing.credential.kind === "identity" ? editing.credential.identityId : null;
 
   const forgetPinnedCert = async () => {
     if (!editing) return;
@@ -219,10 +229,12 @@ export function RdpConnectionDialog({ open, onOpenChange, editing, onSaved }: Pr
     const port = Number.parseInt(draft.port, 10);
     if (!draft.name.trim()) return "Name is required";
     if (!draft.host.trim()) return "Host is required";
-    if (!draft.username.trim()) return "Username is required";
+    // A vault-bound row has no username and no password of its own to validate:
+    // both belong to the identity, and the form shows neither.
+    if (!boundIdentity && !draft.username.trim()) return "Username is required";
     if (!Number.isInteger(port) || port <= 0 || port > 65535) return "Port must be 1–65535";
     // Blank is only "unchanged" when there IS something to leave unchanged.
-    if (!draft.password && !editingHasPassword) return "Password is required";
+    if (!boundIdentity && !draft.password && !editingHasPassword) return "Password is required";
     return null;
   };
 
@@ -231,8 +243,15 @@ export function RdpConnectionDialog({ open, onOpenChange, editing, onSaved }: Pr
    *
    * A typed password has no keychain entry behind it yet, which is the entire
    * reason the inline form exists; anything else must go through the reference.
+   *
+   * A vault-bound row gets neither. Its password lives at
+   * `tervia-vault :: <identityId>::password`, which is a reference this dialog
+   * could build - but the username and domain come from the identity too, so a
+   * working Test needs the resolver and the picker that goes with it. Test is
+   * disabled instead of dialling with the wrong user.
    */
   const credentialForTest = (): RdpCredential | null => {
+    if (boundIdentity) return null;
     if (draft.password) return { kind: "inline", password: draft.password };
     if (editing && editingHasPassword) {
       return {
@@ -245,6 +264,12 @@ export function RdpConnectionDialog({ open, onOpenChange, editing, onSaved }: Pr
   };
 
   const runTest = async () => {
+    // The button below is disabled for a vault-bound row; this is the guard that
+    // makes that a rule rather than a UI state.
+    if (boundIdentity) {
+      setError("A host bound to a vault identity cannot be tested from here yet.");
+      return;
+    }
     const v = validateDraft();
     if (v) {
       setError(v);
@@ -455,16 +480,18 @@ export function RdpConnectionDialog({ open, onOpenChange, editing, onSaved }: Pr
         name: draft.name.trim(),
         host,
         port,
-        // Always inline: this dialog has no identity picker yet, so editing a
-        // vault-bound host through it rebuilds an inline credential - flagged
-        // in the repoint report as a judgement call, not a hidden behavior.
-        credential: {
-          kind: "inline",
-          hostId: id,
-          username: draft.username.trim(),
-          domain: draft.domain.trim() || undefined,
-          hasPassword: false,
-        },
+        // A vault binding is handed back exactly as it came in. There is no
+        // identity picker here, so the only honest thing this form can do with a
+        // binding it cannot show is leave it alone.
+        credential: boundIdentity
+          ? { kind: "identity", identityId: boundIdentity }
+          : {
+              kind: "inline",
+              hostId: id,
+              username: draft.username.trim(),
+              domain: draft.domain.trim() || undefined,
+              hasPassword: false,
+            },
         desktopWidth: preset.width,
         desktopHeight: preset.height,
         sizeMode: "preset",
@@ -481,8 +508,13 @@ export function RdpConnectionDialog({ open, onOpenChange, editing, onSaved }: Pr
       };
       // `undefined`, not `""`, when the field was left blank: an empty string
       // would DELETE the stored password, so an edit that only renamed the host
-      // would leave it unable to connect.
-      await upsertHost(conn, { password: draft.password ? draft.password : undefined });
+      // would leave it unable to connect. Nothing at all for a vault-bound row -
+      // `upsertHost` REFUSES a secret handed in with a vault binding, and the
+      // field it would come from is one the form never fills.
+      await upsertHost(
+        conn,
+        boundIdentity ? {} : { password: draft.password ? draft.password : undefined },
+      );
       onSaved?.(conn);
       onOpenChange(false);
     } catch (e) {
@@ -498,9 +530,15 @@ export function RdpConnectionDialog({ open, onOpenChange, editing, onSaved }: Pr
         <DialogHeader>
           <DialogTitle>{editing ? "Edit RDP connection" : "New RDP connection"}</DialogTitle>
           <DialogDescription>
-            The password is stored in your OS keychain (Windows Credential Manager / macOS Keychain)
-            and read by Tervia's host process when you connect — it is never handed back to the
-            interface.
+            {boundIdentity ? (
+              "This host authenticates with a shared vault identity, so its credential is not edited here."
+            ) : (
+              <>
+                The password is stored in your OS keychain (Windows Credential Manager / macOS
+                Keychain) and read by Tervia's host process when you connect — it is never handed
+                back to the interface.
+              </>
+            )}
           </DialogDescription>
         </DialogHeader>
 
@@ -539,45 +577,55 @@ export function RdpConnectionDialog({ open, onOpenChange, editing, onSaved }: Pr
             </Field>
           </div>
 
-          <div className="grid grid-cols-2 gap-2">
-            <Field label="Username">
-              <Input
-                value={draft.username}
-                onChange={(e) => setDraft({ ...draft, username: e.target.value })}
-                placeholder="Administrator"
-                spellCheck={false}
-                className="h-8 font-mono text-[12px]"
-              />
-            </Field>
-            <Field label="Domain (optional)">
-              <Input
-                value={draft.domain}
-                onChange={(e) => setDraft({ ...draft, domain: e.target.value })}
-                placeholder="CORP"
-                spellCheck={false}
-                className="h-8 font-mono text-[12px]"
-              />
-            </Field>
-          </div>
-          <span className="text-muted-foreground -mt-1.5 text-[10.5px]">
-            Leave the domain empty for a local account, or put a UPN (
-            <span className="font-mono">user@domain.example</span>) in the username instead.
-          </span>
+          {/* Username, domain and password are one block, because a vault
+              identity owns all three: offering to edit the username of a bound
+              row would be editing a third of something this dialog cannot
+              change. */}
+          {boundIdentity ? (
+            <VaultBindingPanel identityId={boundIdentity} />
+          ) : (
+            <>
+              <div className="grid grid-cols-2 gap-2">
+                <Field label="Username">
+                  <Input
+                    value={draft.username}
+                    onChange={(e) => setDraft({ ...draft, username: e.target.value })}
+                    placeholder="Administrator"
+                    spellCheck={false}
+                    className="h-8 font-mono text-[12px]"
+                  />
+                </Field>
+                <Field label="Domain (optional)">
+                  <Input
+                    value={draft.domain}
+                    onChange={(e) => setDraft({ ...draft, domain: e.target.value })}
+                    placeholder="CORP"
+                    spellCheck={false}
+                    className="h-8 font-mono text-[12px]"
+                  />
+                </Field>
+              </div>
+              <span className="text-muted-foreground -mt-1.5 text-[10.5px]">
+                Leave the domain empty for a local account, or put a UPN (
+                <span className="font-mono">user@domain.example</span>) in the username instead.
+              </span>
 
-          <Field label="Password">
-            <Input
-              type="password"
-              value={draft.password}
-              onChange={(e) => setDraft({ ...draft, password: e.target.value })}
-              placeholder={editingHasPassword ? "•••••••• (saved, leave blank to keep)" : ""}
-              className="h-8 font-mono text-[12px]"
-            />
-            <span className="text-muted-foreground text-[10.5px]">
-              {editingHasPassword
-                ? "A password is stored for this connection. It is not shown here; leave this blank to keep it, or type a new one to replace it."
-                : "Stored in the OS keychain, not in Tervia's settings file."}
-            </span>
-          </Field>
+              <Field label="Password">
+                <Input
+                  type="password"
+                  value={draft.password}
+                  onChange={(e) => setDraft({ ...draft, password: e.target.value })}
+                  placeholder={editingHasPassword ? "•••••••• (saved, leave blank to keep)" : ""}
+                  className="h-8 font-mono text-[12px]"
+                />
+                <span className="text-muted-foreground text-[10.5px]">
+                  {editingHasPassword
+                    ? "A password is stored for this connection. It is not shown here; leave this blank to keep it, or type a new one to replace it."
+                    : "Stored in the OS keychain, not in Tervia's settings file."}
+                </span>
+              </Field>
+            </>
+          )}
 
           <Field label="Desktop size">
             {/* NOT `modal`, for the same reason the SSH dialog's jump-host
@@ -777,7 +825,7 @@ export function RdpConnectionDialog({ open, onOpenChange, editing, onSaved }: Pr
             variant="outline"
             size="sm"
             onClick={() => void runTest()}
-            disabled={test.kind === "running" || saving}
+            disabled={test.kind === "running" || saving || boundIdentity !== null}
           >
             {test.kind === "running" ? "Testing…" : "Test connection"}
           </Button>
@@ -794,6 +842,35 @@ export function RdpConnectionDialog({ open, onOpenChange, editing, onSaved }: Pr
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  );
+}
+
+/**
+ * What stands in for the username, domain and password fields when the row is
+ * bound to a shared vault identity.
+ *
+ * Read-only, and it names which parts of the form still work: refusing to open
+ * the dialog at all would leave an imported host unable to be renamed, resized or
+ * re-pointed until the identity picker ships. The identity is named by id rather
+ * than by name because resolving the name means a vault read, and a dialog that
+ * cannot edit the binding does not need to load it.
+ */
+function VaultBindingPanel({ identityId }: { identityId: string }) {
+  return (
+    <Field label="Credential">
+      {/* Same box as the recorded-certificate block below. */}
+      <div className="border-border/60 bg-muted/30 flex flex-col gap-1 rounded-md border px-2 py-1.5">
+        <span className="text-[11px]">This host uses a shared vault identity.</span>
+        <span className="text-muted-foreground truncate font-mono text-[10.5px]" title={identityId}>
+          {identityId}
+        </span>
+      </div>
+      <span className="text-muted-foreground text-[10.5px]">
+        The username, domain and password belong to the identity, so none of them is editable here
+        and Test cannot run - choosing or changing an identity arrives with the Vault page.
+        Everything else on this form is editable, and saving leaves the binding exactly as it is.
+      </span>
+    </Field>
   );
 }
 

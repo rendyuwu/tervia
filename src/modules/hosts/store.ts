@@ -10,6 +10,7 @@ import {
   HOST_SSH_PASSWORD_FIELD,
   HOST_SSH_PRIVATE_KEY_FIELD,
   vaultAccount,
+  VaultInUseError,
   type IdentityHostRefs,
   type RdpCredentialBinding,
   type RdpInlineCredentials,
@@ -704,6 +705,25 @@ export function createHostsStore(io: HostsIo): HostsStore {
       const hosts = await listHosts();
       const host = hosts.find((h) => h.id === id);
 
+      // Refuse rather than cascade - the same discipline `modules/vault` applies
+      // to an in-use identity, and for the same reason. Left to cascade, an RDP
+      // host confined to this bastion becomes a DIRECT DIAL to `host:3389` with
+      // CredSSP the instant the bastion is gone: bounded where the row has a
+      // pinned certificate (a wrong machine fails the pin before the password is
+      // sent), unbounded where it does not, because a row that has never
+      // connected has no pin and the first-connect prompt it gets instead names
+      // `row.host` and reads as entirely normal. Checked before ANYTHING below is
+      // touched - including the forward-rule cleanup - so a refusal leaves the
+      // host, its secrets and every referencing row exactly as they were.
+      if (host) {
+        const holders = hosts
+          .filter((h): h is RdpHost => h.protocol === "rdp" && h.tunnel?.sshHostId === id)
+          .map(hostRef);
+        if (holders.length > 0) {
+          throw new VaultInUseError(`host "${host.name}"`, "host", holders);
+        }
+      }
+
       // First, awaited, and UNCONDITIONAL. A throw here leaves the host and its
       // rules both intact, which is recoverable; the other order leaves rules
       // naming a host that no longer exists. Unconditional because a rule can name
@@ -718,16 +738,27 @@ export function createHostsStore(io: HostsIo): HostsStore {
         secretFieldsFor(host).map((f) => io.secrets.delete(HOST_KEYRING_SERVICE, account(id, f))),
       );
 
-      // Clear what pointed at this host, so a delete cannot leave another row
+      // Clear the jump reference, so a delete cannot leave another SSH host
       // failing every connect with "a jump host in the chain no longer exists".
+      //
+      // This is the SAME class of consequence as the RDP tunnel case refused
+      // above - a host that reached its target through this bastion becomes a
+      // direct dial the instant the bastion is gone - and yet this half CASCADES
+      // instead of refusing. That is not an oversight to fix here: the old
+      // `deleteConnection` already cleared `proxyJumpId` this way before the two
+      // connection stores merged into this one, so this half is INHERITED rather
+      // than chosen, and changing it is a separate decision nobody has taken. A
+      // reader who finds one refusing and the other cascading should read this as
+      // the asymmetry it is, not as a bug in either.
+      //
+      // No RDP branch survives to this point: any RDP host with a `tunnel`
+      // naming `id` was already caught by the refusal above, so there is nothing
+      // left here for it to clear.
       const next = hosts
         .filter((h) => h.id !== id)
-        .map((h) => {
-          if (h.protocol === "ssh") {
-            return h.proxyJumpId === id ? { ...h, proxyJumpId: undefined } : h;
-          }
-          return h.tunnel?.sshHostId === id ? { ...h, tunnel: undefined } : h;
-        });
+        .map((h) =>
+          h.protocol === "ssh" && h.proxyJumpId === id ? { ...h, proxyJumpId: undefined } : h,
+        );
       await persist([[HOSTS_KEY, next]]);
     });
   }

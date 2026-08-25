@@ -24,9 +24,12 @@
  *
  * What does NOT travel yet: a vault-bound host's credential. The host record
  * itself is exported, but its identity and key live on the `tervia-vault`
- * service and are not in this payload - a format carrying them is 6g. Nothing
- * here makes a secret safer either way; what a vault binding buys is fewer
- * copies of one secret.
+ * service and are not in this payload - a format carrying them is 6g. So the
+ * BINDING does not travel either: an incoming `{kind:"identity"}` is a claim
+ * about the exporting machine's vault, and applying it here would delete the
+ * secrets of whatever is saved under that id. `resolveIdentityBindings` is where
+ * that is refused. Nothing here makes a secret safer either way; what a vault
+ * binding buys is fewer copies of one secret.
  */
 import { invoke } from "@tauri-apps/api/core";
 
@@ -63,6 +66,8 @@ import {
   mergeGroups,
   orderHostWrites,
   parseBackupFile,
+  refuseProtocolConflicts,
+  resolveIdentityBindings,
   sanitizePayload,
   sanitizeSecrets,
   type BackupFileV2,
@@ -71,14 +76,22 @@ import {
   type SecretRef,
 } from "./backupFile";
 
+function reason(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}
+
 /**
  * Keychain references for one host's every credential field.
  *
  * A vault-bound host contributes NONE: it owns no accounts of its own, so there
  * is nothing on the host service to read. Its identity's secrets are a separate
  * service and a later format.
+ *
+ * Exported for `scripts/ssh-backup-verify.ts`, which pins the producing half of
+ * the {@link SECRET_ALREADY_STORED} contract: what travels on an export is
+ * decided here, and a field this stops naming simply stops travelling.
  */
-function hostRefs(host: Host): SecretRef[] {
+export function hostRefs(host: Host): SecretRef[] {
   if (host.credential.kind !== "inline") return [];
   const fields = host.protocol === "ssh" ? HOST_SSH_SECRET_FIELDS : HOST_RDP_SECRET_FIELDS;
   return fields.map((field) => ({
@@ -138,22 +151,68 @@ export type ImportCounts = {
   added: number;
   /** Existing ids the backup overwrote. */
   replaced: number;
-  /** Hosts whose credentials did not travel. Agent-auth SSH hosts are NOT
-   *  counted: they have no secret by design, so reporting them as missing one
-   *  would read as a broken import. A vault-bound host IS counted - its
-   *  credential is real and this format does not carry it yet. */
+  /** Hosts whose credential did not travel: the ONE field their auth mode needs
+   *  was not among the ones this import wrote. Agent-auth SSH hosts are NOT
+   *  counted - they have no secret by design, so reporting them as missing one
+   *  would read as a broken import - and neither is a host that kept a vault
+   *  binding it already had here, whose credential never needed to travel.
+   *
+   *  Answered from what the import WROTE, so a row re-imported over a credential
+   *  this machine already holds is counted as well: the file carried none, even
+   *  though the host connects. The alternative is reading the record back, which
+   *  is a different question ("will this connect") and belongs to the list's
+   *  presence pips rather than to a report about a file. */
   withoutSecrets: number;
+  /** Hosts the store refused. The rest of the file still imported, and no
+   *  credential was written for a host whose record did not land. */
+  failed: number;
+};
+
+export type ImportGroupCounts = {
+  /** Groups written that did not exist here before. */
+  added: number;
+  /** Existing ids the backup overwrote, name and all. */
+  replaced: number;
+  /** Not written: this machine already held that NAME under another id, so the
+   *  file's hosts were repointed at the group holding it. */
+  merged: number;
+  /** Not written: this machine already held that ID under another name, so the
+   *  local label - and every local host wearing it - was left alone. */
+  keptNames: number;
+  /** Groups the store refused. */
+  failed: number;
 };
 
 export type ImportResult = {
   ssh: ImportCounts;
   rdp: ImportCounts;
+  groups: ImportGroupCounts;
   /** Entries dropped because they could not be a working host or a pickable
    *  group. */
   skipped: number;
+  /** Rows refused because the host already saved under that id speaks the other
+   *  protocol, and replacing it would delete secrets nothing copied first. See
+   *  `refuseProtocolConflicts`. */
+  protocolConflicts: number;
+  /** Rows whose vault binding could not be applied, because a backup carries no
+   *  vault. Each one either kept the credential already saved here or arrived as
+   *  a blank inline host - never as a vault-bound record over someone else's
+   *  secrets. See `resolveIdentityBindings`. */
+  vaultBindingsDropped: number;
+  /** One line per refusal, so a partial import can say what it could not do
+   *  rather than reporting a smaller number and no reason. */
+  problems: string[];
 };
 
-const NO_COUNTS: ImportCounts = { added: 0, replaced: 0, withoutSecrets: 0 };
+const NO_COUNTS: ImportCounts = { added: 0, replaced: 0, withoutSecrets: 0, failed: 0 };
+
+const NO_GROUP_COUNTS: ImportGroupCounts = {
+  added: 0,
+  replaced: 0,
+  merged: 0,
+  keptNames: 0,
+  failed: 0,
+};
 
 /**
  * Decrypt and merge a backup into the local store. Merging is by host id, which
@@ -197,8 +256,16 @@ export async function applyBackup(text: string, passphrase: string): Promise<Imp
  * so this stays coupled to `HostSecretInput`'s keys: a fourth account field is
  * unwritable until that type gains a key for it, which is where the omission
  * surfaces.
+ *
+ * Exported for `scripts/ssh-backup-verify.ts` alongside {@link hostRefs}: between
+ * them they are the whole producing half of the {@link SECRET_ALREADY_STORED}
+ * contract, and the consumer half is pinned in `hosts-store-verify.ts`.
  */
-function storedFields(host: Host, landed: Set<string>): HostSecretInput {
+export function storedFields(host: Host, landed: Set<string>): HostSecretInput {
+  // A vault-bound host owns no accounts, so it has nothing to claim - and
+  // `upsertHost` REFUSES a secret handed in with one rather than ignoring it, so
+  // a stray field here would abort the row instead of being harmless.
+  if (host.credential.kind !== "inline") return {};
   const has = (field: string): boolean => landed.has(`${host.id}::${field}`);
   if (host.protocol === "rdp") {
     return has(HOST_RDP_PASSWORD_FIELD) ? { password: SECRET_ALREADY_STORED } : {};
@@ -216,11 +283,24 @@ function storedFields(host: Host, landed: Set<string>): HostSecretInput {
  * Answered from what the host process actually WROTE, never from the record's
  * own presence flags: the flags in the file describe the exporting machine's
  * keychain, and `stored` is the only report of this one's.
+ *
+ * PER FIELD, which is what {@link storedFields} promises and what a per-host
+ * answer got wrong: a key-auth host whose passphrase travelled and whose private
+ * key did not cannot connect, and "some field landed" reported it as fine. So the
+ * question is asked of the ONE field the auth mode actually needs. A key
+ * passphrase is not that field - a key with no passphrase is ordinary.
+ *
+ * A binding that is not inline is NOT counted. After `resolveIdentityBindings` the
+ * only way a row is still vault-bound is that this machine already had it bound,
+ * so its credential is here and never needed to travel.
  */
-function arrivedWithoutSecret(host: Host, stored: HostSecretInput): boolean {
-  if (Object.keys(stored).length > 0) return false;
-  if (host.credential.kind !== "inline") return true;
-  return !(host.protocol === "ssh" && host.credential.authMode === "agent");
+export function arrivedWithoutSecret(host: Host, stored: HostSecretInput): boolean {
+  if (host.credential.kind !== "inline") return false;
+  if (host.protocol === "rdp") return stored.password === undefined;
+  const mode = host.credential.authMode;
+  if (mode === "agent") return false;
+  if (mode === "key") return stored.privateKey === undefined;
+  return stored.password === undefined;
 }
 
 /**
@@ -241,7 +321,7 @@ async function writeImported(
 /**
  * v2: the host process holds the credentials while this validates the metadata.
  *
- * Three orderings matter here, and each one is a failure the store now refuses
+ * Four orderings matter here, and each one is a failure the store now refuses
  * rather than tolerates:
  *
  *   GROUPS BEFORE HOSTS, so a host lands with a label that resolves. `groupId`
@@ -256,6 +336,19 @@ async function writeImported(
  *   HOSTS IN CHAIN ORDER, bastion first. The same guard is applied against what
  *   is on disk at that moment, so a host written before its jump host fails even
  *   though the file is internally consistent.
+ *
+ *   RECORDS BEFORE SECRETS, then the flags. `backup_apply_secrets` writes every
+ *   credential in ONE Rust call, so the two cannot be interleaved - but they can
+ *   be made to follow. References are built only from the rows whose record
+ *   ALREADY LANDED, which is what makes an orphan account impossible rather than
+ *   unlikely: every account written names a host that is in the store, so
+ *   `deleteHost` can still reach it. The old order wrote every credential first,
+ *   so a record write that threw left the rest of the file unimported AND its
+ *   credentials at accounts no record named - and nothing enumerates those (§9.7).
+ *
+ * Every write is contained to its own row. A refusal is counted and reported,
+ * never allowed to abandon the rows behind it: a 40-host file whose host 12 the
+ * store will not take must still import the other 39.
  */
 async function applyV2(payload: SealedBlob, passphrase: string): Promise<ImportResult> {
   const opened = await invoke<{ handle: number; payload: string }>("backup_open_payload", {
@@ -275,9 +368,34 @@ async function applyV2(payload: SealedBlob, passphrase: string): Promise<ImportR
 
     const [existingHosts, existingGroups] = await Promise.all([listHosts(), listGroups()]);
     const existingIds = new Set(existingHosts.map((h) => h.id));
+    const problems: string[] = [];
 
-    const merged = mergeGroups(parsed.groups, existingGroups, parsed.hosts);
-    for (const group of merged.groups) await upsertGroup(group);
+    // The credential passes come FIRST, before anything reads a row's protocol or
+    // binding: both of them decide what a row is allowed to BECOME, and both
+    // exist because the alternative deletes a saved host's secrets.
+    const kinds = refuseProtocolConflicts(parsed.hosts, existingHosts);
+    const bound = resolveIdentityBindings(kinds.hosts, existingHosts);
+
+    const merged = mergeGroups(parsed.groups, existingGroups, bound.hosts);
+    const groupIds = new Set(existingGroups.map((g) => g.id));
+    const groups: ImportGroupCounts = {
+      ...NO_GROUP_COUNTS,
+      merged: merged.merged,
+      keptNames: merged.keptNames,
+    };
+    for (const group of merged.groups) {
+      try {
+        await upsertGroup(group);
+        if (groupIds.has(group.id)) groups.replaced++;
+        else groups.added++;
+      } catch (e) {
+        // Contained for the same reason a host write is: a label the store will
+        // not take must not cost the user the forty hosts behind it. The members
+        // render as ungrouped, which is visible and fixable.
+        groups.failed++;
+        problems.push(`group "${group.name}" could not be saved: ${reason(e)}`);
+      }
+    }
 
     // A jump host or a tunnel bastion may live in the file OR already be saved
     // here; both count as resolvable, which is why the saved list is passed in
@@ -288,11 +406,52 @@ async function applyV2(payload: SealedBlob, passphrase: string): Promise<ImportR
     );
     const incoming = orderHostWrites(cleared, existingHosts);
 
-    const refs: SecretRef[] = incoming.flatMap(hostRefs);
-    const written = await invoke<boolean[]>("backup_apply_secrets", {
-      handle: opened.handle,
-      refs,
-    });
+    const ssh: ImportCounts = { ...NO_COUNTS };
+    const rdp: ImportCounts = { ...NO_COUNTS };
+
+    // PASS ONE: the records, with no credential at all. A row that fails here is
+    // counted and skipped, and crucially contributes no reference below - so
+    // nothing is ever written to an account whose host is not in the store.
+    const saved: Host[] = [];
+    for (const host of incoming) {
+      const counts = host.protocol === "ssh" ? ssh : rdp;
+      try {
+        await writeImported(host, {}, existingIds, counts);
+        saved.push(host);
+      } catch (e) {
+        counts.failed++;
+        problems.push(`"${host.name}" could not be saved: ${reason(e)}`);
+      }
+    }
+
+    // The ids that arrived vault-bound. A file that declared a row's credential to
+    // live in a vault does not also get to write a host-owned secret for it: the
+    // two claims contradict each other, and honouring the second would let a
+    // hand-made payload replace the credential this machine already has on a row
+    // whose binding was just refused. So a downgraded row gets no reference either,
+    // and the flags it keeps are the ones already on disk.
+    const arrivedBound = new Set(
+      parsed.hosts.filter((h) => h.credential.kind === "identity").map((h) => h.id),
+    );
+    const refs: SecretRef[] = saved.filter((h) => !arrivedBound.has(h.id)).flatMap(hostRefs);
+    let written: boolean[] = [];
+    try {
+      // Skipped entirely when there is nothing to ask for, which is the whole
+      // file when every row is agent-auth or kept a vault binding.
+      if (refs.length > 0) {
+        written = await invoke<boolean[]>("backup_apply_secrets", {
+          handle: opened.handle,
+          refs,
+        });
+      }
+    } catch (e) {
+      // Reported rather than rethrown: the records are already saved, so throwing
+      // here would report a whole import as failed after writing all of it. The
+      // flags stay false, which is the safe direction - an SSH host resolves by
+      // auth mode and never reads one, and an RDP host refuses to connect until
+      // the password is re-entered, rather than claiming one that is not there.
+      problems.push(`no stored credentials could be written to the keychain: ${reason(e)}`);
+    }
     // Which ACCOUNT each credential landed at. A short or missing array is
     // treated as "nothing written" rather than trusted by index, so a protocol
     // change cannot make this claim a credential exists. Keyed by
@@ -303,16 +462,33 @@ async function applyV2(payload: SealedBlob, passphrase: string): Promise<ImportR
       if (written[i] === true) landed.add(`${r.id}::${r.field}`);
     });
 
-    const ssh: ImportCounts = { ...NO_COUNTS };
-    const rdp: ImportCounts = { ...NO_COUNTS };
-    for (const host of incoming) {
+    // PASS TWO: the presence flags for what actually landed. A refusal here is
+    // NOT a failed host - the record is saved and the credential is at an account
+    // that record names, so it is reachable and the next edit fixes the flag.
+    for (const host of saved) {
       const counts = host.protocol === "ssh" ? ssh : rdp;
       const stored = storedFields(host, landed);
       if (arrivedWithoutSecret(host, stored)) counts.withoutSecrets++;
-      await writeImported(host, stored, existingIds, counts);
+      if (Object.keys(stored).length === 0) continue;
+      try {
+        await upsertHost(host, stored);
+      } catch (e) {
+        problems.push(
+          `"${host.name}" was saved, but its stored credentials could not be ` +
+            `recorded on it: ${reason(e)}`,
+        );
+      }
     }
 
-    return { ssh, rdp, skipped: parsed.skipped };
+    return {
+      ssh,
+      rdp,
+      groups,
+      skipped: parsed.skipped,
+      protocolConflicts: kinds.conflicts,
+      vaultBindingsDropped: bound.dropped,
+      problems,
+    };
   } finally {
     // The handle holds decrypted credentials, so it is released on every path
     // out - including the one where validation threw. A failure to release is
@@ -353,9 +529,13 @@ async function applyV1(
 
   const existingHosts = await listHosts();
   const existingIds = new Set(existingHosts.map((h) => h.id));
-  // The same two passes and the same ordering as v2, for the same reason: the
-  // store's reference guard does not care which format the row came out of.
-  const incoming = orderHostWrites(clearDanglingJumps(hosts, existingHosts), existingHosts);
+  const problems: string[] = [];
+  // The same passes and the same ordering as v2, for the same reason: the store's
+  // guards do not care which format the row came out of. `resolveIdentityBindings`
+  // is the one that is not needed - a v1 row has no `credential` to read, so
+  // `sanitizeLegacyHost` can only produce an inline one.
+  const kinds = refuseProtocolConflicts(hosts, existingHosts);
+  const incoming = orderHostWrites(clearDanglingJumps(kinds.hosts, existingHosts), existingHosts);
 
   const ssh: ImportCounts = { ...NO_COUNTS };
   for (const host of incoming) {
@@ -371,9 +551,27 @@ async function applyV1(
       ...(s?.privateKey ? { privateKey: s.privateKey } : {}),
       ...(s?.keyPassphrase ? { keyPassphrase: s.keyPassphrase } : {}),
     };
-    if (arrivedWithoutSecret(host, stored)) ssh.withoutSecrets++;
-    await writeImported(host, stored, existingIds, ssh);
+    // One write per row here, not two: the credential is in hand, so `upsertHost`
+    // writes the secrets and the record together and rolls the secrets back itself
+    // when the row is new. What this adds is the containment - a refused row must
+    // not abandon the rows behind it.
+    try {
+      await writeImported(host, stored, existingIds, ssh);
+      if (arrivedWithoutSecret(host, stored)) ssh.withoutSecrets++;
+    } catch (e) {
+      ssh.failed++;
+      problems.push(`"${host.name}" could not be saved: ${reason(e)}`);
+    }
   }
 
-  return { ssh, rdp: { ...NO_COUNTS }, skipped };
+  return {
+    ssh,
+    rdp: { ...NO_COUNTS },
+    groups: { ...NO_GROUP_COUNTS },
+    skipped,
+    protocolConflicts: kinds.conflicts,
+    // A v1 file cannot carry a binding of any kind, let alone a vault one.
+    vaultBindingsDropped: 0,
+    problems,
+  };
 }

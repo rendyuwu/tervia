@@ -64,8 +64,10 @@ export type LegacyPurgeResult = {
   skipped: boolean;
   /** Accounts `secrets_delete` accepted, as `service::account`. Never a value. */
   cleared: string[];
-  /** Accounts that could not be cleared, each with its reason. The marker is NOT
-   *  written when this is non-empty, so the next launch tries again. */
+  /** Anything that stopped this from being a complete pass, each with its reason:
+   *  an account `secrets_delete` refused, an old store file that could not be
+   *  read, the data directory, or the marker itself. The marker is NOT written
+   *  when this is non-empty, so the next launch tries again. */
   failed: string[];
   /** Set when the marker itself could not be written, which only costs a repeat
    *  pass - every delete here is idempotent. */
@@ -147,10 +149,12 @@ export async function purgeLegacySecrets(io: LegacyPurgeIo): Promise<LegacyPurge
       return { skipped: true, cleared, failed };
     }
   } catch (e) {
-    // The marker is unreadable, so run the purge rather than skip it: repeating
-    // idempotent deletes is free, and skipping them is permanent.
+    // The marker is unreadable, so FALL THROUGH into the purge rather than skip
+    // it: repeating idempotent deletes is free, and skipping them is permanent.
+    // The entry stays in `failed` so this run cannot earn the marker either - a
+    // pass that could not tell whether it had already run must not record that it
+    // has - which is exactly the retry the comment asks for.
     failed.push(`${LEGACY_PURGE_KEY} could not be read: ${reason(e)}`);
-    return { skipped: false, cleared, failed };
   }
 
   let dir: string;

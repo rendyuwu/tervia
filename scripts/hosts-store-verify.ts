@@ -99,7 +99,7 @@ import {
 } from "../src/modules/hosts/types";
 import type { SecretsIo } from "../src/modules/vault/adapters";
 import type { ResolveDeps } from "../src/modules/vault/resolve";
-import type { VaultIdentity, VaultKey } from "../src/modules/vault/types";
+import { VaultInUseError, type VaultIdentity, type VaultKey } from "../src/modules/vault/types";
 
 let failed = 0;
 function check(label: string, got: unknown, want: unknown): void {
@@ -1077,10 +1077,14 @@ console.log("\n[vault] a vault-bound host owns no accounts");
 // ---------------------------------------------------------------------------
 console.log("\n[delete] a deleted host takes its accounts and every reference to it");
 {
+  // The RDP-tunnel half of this used to live in this block too: a third host,
+  // `h-tun`, tunnelling through `h-jump` and coming back with its `tunnel`
+  // cleared rather than deleted. That assertion tested the CASCADE this phase
+  // replaces with a refusal - see "[delete] refused while an RDP host tunnels
+  // through it" below - so it moved rather than staying here to fail.
   const h = harness();
   await h.hosts.upsertHost(sshHost({ id: "h-jump" }), { password: "jumppw" });
   await h.hosts.upsertHost(sshHost({ id: "h-via", proxyJumpId: "h-jump" }));
-  await h.hosts.upsertHost(rdpHost({ id: "h-tun", tunnel: { sshHostId: "h-jump" } }));
   await h.hosts.upsertHost(sshHost({ id: "h-other", proxyJumpId: "h-via" }));
 
   const cleaned: string[] = [];
@@ -1094,12 +1098,6 @@ console.log("\n[delete] a deleted host takes its accounts and every reference to
     [via?.id, via?.protocol === "ssh" ? via.proxyJumpId : "?"],
     ["h-via", undefined],
   );
-  const tun = await h.hosts.findHost("h-tun");
-  check(
-    "the RDP host that tunnelled through it is cleared, not deleted",
-    [tun?.id, tun?.protocol === "rdp" ? tun.tunnel : "?"],
-    ["h-tun", undefined],
-  );
   const other = await h.hosts.findHost("h-other");
   check(
     "a reference to a DIFFERENT host is left alone",
@@ -1107,7 +1105,7 @@ console.log("\n[delete] a deleted host takes its accounts and every reference to
     "h-via",
   );
   check("the forward-rule cleanup was told which host went", cleaned, ["h-jump"]);
-  check("three hosts remain", (await h.hosts.listHosts()).length, 3);
+  check("two hosts remain", (await h.hosts.listHosts()).length, 2);
 
   // Fail closed: the rules and the host must not come apart.
   await h.hosts.upsertHost(sshHost({ id: "h-keep" }), { password: "keeppw" });
@@ -1140,6 +1138,88 @@ console.log("\n[delete] a deleted host takes its accounts and every reference to
   // The named stand-in is the only legal way to say "there are no rules here yet".
   await h.hosts.deleteHost("h-nope", noForwardRules);
   check("and the no-op stand-in is accepted", JSON.stringify(h.rows()), rowsBefore);
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n[delete] refused while an RDP host tunnels through it, not cascaded");
+{
+  // The cascade this replaces: left to clear silently, an RDP host confined to
+  // this bastion becomes a DIRECT DIAL to `host:3389` with CredSSP the instant
+  // the bastion is gone. Bounded where the row has a pinned certificate - a
+  // wrong machine fails the pin before the password is sent - but a row that
+  // has never connected has no pin, and the first-connect prompt it gets
+  // instead names `row.host` and reads as entirely normal. Refuse, the same
+  // discipline `modules/vault` applies to an in-use identity.
+  const h = harness();
+  await h.hosts.upsertHost(sshHost({ id: "h-bastion", name: "the bastion" }), {
+    password: "bastionpw",
+  });
+  await h.hosts.upsertHost(
+    rdpHost({ id: "h-rdp-1", name: "office desktop", tunnel: { sshHostId: "h-bastion" } }),
+  );
+
+  const cleaned: string[] = [];
+  await rejects(
+    "deleting a host an RDP tunnel names is refused",
+    () => h.hosts.deleteHost("h-bastion", (hostId) => void cleaned.push(hostId)),
+    ["cannot delete", "the bastion", "1 host", "office desktop"],
+  );
+  check("the forward-rule cleanup never ran - the refusal comes before anything else", cleaned, []);
+  check("the host is still there", (await h.hosts.findHost("h-bastion"))?.id, "h-bastion");
+  check("its secret account is still there", h.kept.get(at("h-bastion", "password")), "bastionpw");
+  const stillTunnelled = await h.hosts.findHost("h-rdp-1");
+  check(
+    "the RDP host's tunnel is untouched",
+    stillTunnelled?.protocol === "rdp" ? stillTunnelled.tunnel : "?",
+    { sshHostId: "h-bastion" },
+  );
+
+  // The typed error carries the holders, so a dialog can offer to open them -
+  // the same shape `deleteIdentity` and `deleteKey` already refuse with.
+  try {
+    await h.hosts.deleteHost("h-bastion", noForwardRules);
+    assert(false, "the delete above should have thrown");
+  } catch (e) {
+    assert(e instanceof VaultInUseError, "the refusal is a VaultInUseError");
+    check("carrying the holder", (e as VaultInUseError).holders, [
+      { id: "h-rdp-1", name: "office desktop" },
+    ]);
+  }
+
+  // A second RDP host tunnelling through the same bastion - the refusal must
+  // name BOTH holders, not just the first one found.
+  await h.hosts.upsertHost(
+    rdpHost({ id: "h-rdp-2", name: "lab workstation", tunnel: { sshHostId: "h-bastion" } }),
+  );
+  await rejects(
+    "the refusal names every holder, not just one",
+    () => h.hosts.deleteHost("h-bastion", noForwardRules),
+    ["2 hosts", "office desktop", "lab workstation"],
+  );
+
+  // Clearing the tunnels first is how the user gets what a cascade used to do
+  // silently: an explicit, visible choice instead of one made for them.
+  await h.hosts.upsertHost(rdpHost({ id: "h-rdp-1", name: "office desktop" }));
+  await h.hosts.upsertHost(rdpHost({ id: "h-rdp-2", name: "lab workstation" }));
+  await h.hosts.deleteHost("h-bastion", noForwardRules);
+  check(
+    "the delete succeeds once every tunnel naming it is cleared",
+    await h.hosts.findHost("h-bastion"),
+    undefined,
+  );
+
+  // A jump reference is unaffected by this refusal - only a `tunnel` blocks a
+  // delete, so an SSH host jumping through a host with no tunnel holder still
+  // cascades exactly as the block above tests.
+  await h.hosts.upsertHost(sshHost({ id: "h-solo" }), { password: "solopw" });
+  await h.hosts.upsertHost(sshHost({ id: "h-via-solo", proxyJumpId: "h-solo" }));
+  await h.hosts.deleteHost("h-solo", noForwardRules);
+  const viaSolo = await h.hosts.findHost("h-via-solo");
+  check(
+    "a jump-only reference never blocks a delete",
+    viaSolo?.protocol === "ssh" ? viaSolo.proxyJumpId : "?",
+    undefined,
+  );
 }
 
 // ---------------------------------------------------------------------------

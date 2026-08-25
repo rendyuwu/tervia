@@ -28,12 +28,27 @@
  * its bastion fails. And `assertBindingOwner` refuses a credential whose
  * `hostId` names someone else.
  *
+ * Two more are DESTRUCTIVE when they are missing, which is a different class
+ * again: `upsertHost` releases every account the new record can no longer NAME,
+ * so a row that arrives vault-bound (owning none) or on the other protocol
+ * (owning fewer) deletes the saved host's secrets, with nothing copied first and
+ * no `secrets_list` to find what is left (§9.7).
+ *
+ * `hostRefs` and `storedFields` are reached from `backup.ts` rather than from
+ * `backupFile.ts`, and they are the producing half of the `SECRET_ALREADY_STORED`
+ * contract: one decides what travels, the other decides which flags the store is
+ * told to claim. The consuming half is pinned in `hosts-store-verify.ts`. Nothing
+ * here calls `invoke`, so importing that module is safe under plain node.
+ *
  * The crypto itself, and the v2 payload assembly that keeps credentials out of
  * the webview, are checked on the Rust side (`modules/backup.rs` tests: round
  * trip, wrong passphrase, tampered ciphertext, nonce reuse, group merge/split,
  * the parked-handle lifecycle).
  */
-import { hostFingerprint, type Host } from "../src/modules/hosts/types";
+import { jumpChain, MAX_JUMP_HOPS } from "../src/modules/hosts/jumps";
+import { SECRET_ALREADY_STORED } from "../src/modules/hosts/store";
+import { hostFingerprint, type Host, type RdpHost, type SshHost } from "../src/modules/hosts/types";
+import { arrivedWithoutSecret, hostRefs, storedFields } from "../src/modules/ssh/backup";
 import {
   BACKUP_KIND,
   BACKUP_KIND_V1,
@@ -42,6 +57,8 @@ import {
   mergeGroups,
   orderHostWrites,
   parseBackupFile,
+  refuseProtocolConflicts,
+  resolveIdentityBindings,
   sanitizeGroup,
   sanitizeHost,
   sanitizeLegacyHost,
@@ -150,6 +167,20 @@ const legacy = (over: Record<string, unknown> = {}) => ({
 function host(raw: unknown): Host {
   const h = sanitizeHost(raw);
   if (!h) throw new Error(`fixture is not a valid host: ${JSON.stringify(raw)}`);
+  return h;
+}
+
+/** The same, narrowed to one arm, for the checks that have to build a SAVED
+ *  record by hand: presence flags are forced false by the parser, so a fixture
+ *  standing in for "already in this machine's keychain" cannot come from it. */
+function sshHost(raw: unknown): SshHost {
+  const h = host(raw);
+  if (h.protocol !== "ssh") throw new Error(`fixture is not an SSH host: ${JSON.stringify(raw)}`);
+  return h;
+}
+function rdpHost(raw: unknown): RdpHost {
+  const h = host(raw);
+  if (h.protocol !== "rdp") throw new Error(`fixture is not an RDP host: ${JSON.stringify(raw)}`);
   return h;
 }
 
@@ -298,8 +329,10 @@ check("a v1 row's binding is owned by the row too", sanitizeLegacyHost(legacy())
   hasPrivateKey: false,
   hasKeyPassphrase: false,
 });
+// The PARSER preserves it, so the pass below can see what the file asked for.
+// Nothing applies it - see [vault bindings].
 check(
-  "a vault binding survives, so a host bound to a shared identity still imports",
+  "a vault binding survives the parser, so the row is not lost before it is judged",
   host(ssh({ credential: { kind: "identity", identityId: "i-1" } })).credential,
   { kind: "identity", identityId: "i-1" },
 );
@@ -434,7 +467,11 @@ check(
   [1600, 900],
 );
 check("so does an absurd one", sizeOf(rdp({ desktopWidth: 99999 })), [1600, 900]);
-check("and a non-number", sizeOf(rdp({ desktopHeight: "900" })), [1600, 900]);
+// The fixture's own height is deliberately NOT the fallback: `"800"` expecting 900
+// proves the string was rejected and replaced, where `"900"` expecting 900 agreed
+// with the fallback and with itself. The kept width proves the row was not
+// wholesale defaulted on the way through.
+check("and a non-number", sizeOf(rdp({ desktopWidth: 1280, desktopHeight: "800" })), [1280, 900]);
 // Only one mode exists today. A file written by a later build must resolve to
 // the mode THIS build can render, not to a string the pane cannot switch on.
 check(
@@ -530,6 +567,39 @@ check(
   "h-16",
 );
 
+// THE BOUNDARY, and it is checked against `jumpChain` rather than against a
+// literal. `MAX_JUMP_CHAIN` in the parser and `MAX_JUMP_HOPS` in the store are two
+// numbers that have to agree, and only one of them is in this module: a chain the
+// parser leaves in place is re-walked by `upsertHost`, which REFUSES an over-long
+// one rather than truncating it, so a drift of one hop does not save a long chain -
+// it abandons the rest of the file. A 20-chain and a 5-chain both pass either way.
+const hops = (n: number): Host[] =>
+  Array.from({ length: n + 1 }, (_, i) =>
+    host(ssh({ id: `h-${i}`, ...(i < n ? { proxyJumpId: `h-${i + 1}` } : {}) })),
+  );
+const atCap = hops(MAX_JUMP_HOPS);
+const pastCap = hops(MAX_JUMP_HOPS + 1);
+check(
+  "a chain of exactly the cap is left in place",
+  jumpOf(clearDanglingJumps(atCap, [])[0]),
+  "h-1",
+);
+check(
+  "and the store walks exactly that chain",
+  jumpChain("h-1", "h-0", atCap).length,
+  MAX_JUMP_HOPS,
+);
+check(
+  "one hop past the cap is cleared, not truncated",
+  jumpOf(clearDanglingJumps(pastCap, [])[0]),
+  null,
+);
+throws(
+  "and the store would have thrown on it, which is what the clearing is for",
+  () => jumpChain("h-1", "h-0", pastCap),
+  "too long",
+);
+
 console.log("\n[write order] the store judges a chain against DISK, so the bastion goes first");
 const chain = [
   host(ssh({ id: "h-a", proxyJumpId: "h-b" })),
@@ -580,6 +650,248 @@ check(
   2,
 );
 
+console.log("\n[vault bindings] a backup carries no vault, so one must never be APPLIED");
+// The failure this closes. `h-7` is a saved inline host holding the only copy of a
+// passphrased key. A file says `h-7` is `{kind:"identity"}`; a vault-bound record
+// owns no accounts, so `upsertHost` makes all three of that host's fields stale
+// and deletes them - nothing copied them, `i-1` does not exist here, and there is
+// no `secrets_list`. The import reported `withoutSecrets: 1`, which reads as "the
+// credential did not travel" rather than "the credential is gone".
+const savedKeyHost: SshHost = {
+  ...sshHost(ssh({ id: "h-7" })),
+  credential: {
+    kind: "inline",
+    hostId: "h-7",
+    user: "deploy",
+    authMode: "key",
+    hasPassword: false,
+    hasPrivateKey: true,
+    hasKeyPassphrase: true,
+  },
+};
+const overSaved = resolveIdentityBindings(
+  [host(ssh({ id: "h-7", credential: { kind: "identity", identityId: "i-1" } }))],
+  [savedKeyHost],
+);
+check(
+  "landing on a saved inline host keeps that host's own credential, flags and all",
+  overSaved.hosts[0].credential,
+  savedKeyHost.credential,
+);
+check("and says so, rather than reporting a missing secret", overSaved.dropped, 1);
+// The binding kind is what makes the delete happen, so the check that matters is
+// that it did not change: same kind on both sides means nothing is stale.
+check(
+  "so the record still names the accounts it named before the import",
+  overSaved.hosts[0].credential.kind,
+  "inline",
+);
+const fresh = resolveIdentityBindings(
+  [host(ssh({ id: "h-new", credential: { kind: "identity", identityId: "i-1" } }))],
+  [],
+);
+check(
+  "a host that is NOT saved here arrives as a blank inline row instead of vanishing",
+  sshInline(fresh.hosts[0]),
+  {
+    kind: "inline",
+    hostId: "h-new",
+    user: "",
+    authMode: "password",
+    hasPassword: false,
+    hasPrivateKey: false,
+    hasKeyPassphrase: false,
+  },
+);
+check(
+  "its name and address still come through",
+  [fresh.hosts[0].name, fresh.hosts[0].port],
+  ["prod", 22],
+);
+check("and it is counted", fresh.dropped, 1);
+// A machine re-importing its own backup: the saved binding IS what the file asked
+// for, so nothing was refused and there is nothing to report.
+const roundTrip = resolveIdentityBindings(
+  [host(ssh({ id: "h-7", credential: { kind: "identity", identityId: "i-1" } }))],
+  [{ ...sshHost(ssh({ id: "h-7" })), credential: { kind: "identity", identityId: "i-1" } }],
+);
+check(
+  "a binding this machine already has is kept, and not counted",
+  [roundTrip.hosts[0].credential, roundTrip.dropped],
+  [{ kind: "identity", identityId: "i-1" }, 0],
+);
+check(
+  "a DIFFERENT identity does not repoint the saved host at one it may not have",
+  resolveIdentityBindings(
+    [host(ssh({ id: "h-7", credential: { kind: "identity", identityId: "i-2" } }))],
+    [{ ...sshHost(ssh({ id: "h-7" })), credential: { kind: "identity", identityId: "i-1" } }],
+  ).hosts[0].credential,
+  { kind: "identity", identityId: "i-1" },
+);
+const savedRdp: RdpHost = {
+  ...rdpHost(rdp({ id: "h-9" })),
+  credential: { kind: "inline", hostId: "h-9", username: "Administrator", hasPassword: true },
+};
+check(
+  "the RDP side behaves identically, which is where the password would have gone",
+  resolveIdentityBindings(
+    [host(rdp({ id: "h-9", credential: { kind: "identity", identityId: "i-1" } }))],
+    [savedRdp],
+  ).hosts[0].credential,
+  savedRdp.credential,
+);
+check(
+  "and a new RDP row arrives blank rather than bound",
+  rdpInline(
+    resolveIdentityBindings(
+      [host(rdp({ id: "h-fresh", credential: { kind: "identity", identityId: "i-1" } }))],
+      [],
+    ).hosts[0],
+  ),
+  { kind: "inline", hostId: "h-fresh", username: "", hasPassword: false },
+);
+const inlineOnly = resolveIdentityBindings([host(ssh()), host(rdp())], []);
+check(
+  "an inline row is passed through untouched and counted as nothing",
+  [inlineOnly.hosts.map((h) => h.credential.kind), inlineOnly.dropped],
+  [["inline", "inline"], 0],
+);
+
+console.log("\n[protocol conflicts] the other way a merge deletes a secret nothing copied");
+// `h-7` is the same saved SSH host, holding the same private key; this time the
+// file says it is an RDP host. An RDP record cannot NAME `privateKey` or
+// `keyPassphrase`, so `upsertHost` releases both - and unlike the vault case there
+// is not even a binding change to notice. Refused, because there is no version of
+// the row that is both.
+const flipped = refuseProtocolConflicts([host(rdp({ id: "h-7" }))], [savedKeyHost]);
+check("an SSH host is not replaced by an RDP row", flipped.hosts, []);
+check("and the refusal is counted", flipped.conflicts, 1);
+check(
+  "the flip that loses nothing is refused too: a saved host does not change kind",
+  refuseProtocolConflicts([host(ssh({ id: "h-9" }))], [rdpHost(rdp({ id: "h-9" }))]).hosts.length,
+  0,
+);
+check(
+  "an id this machine has never seen is not a conflict",
+  refuseProtocolConflicts([host(rdp({ id: "h-brand-new" }))], [savedKeyHost]).hosts.length,
+  1,
+);
+check(
+  "and neither is the same protocol, which is every ordinary re-import",
+  refuseProtocolConflicts([host(ssh({ id: "h-7" }))], [savedKeyHost]).conflicts,
+  0,
+);
+
+console.log("\n[secret refs] what an export sends, and what an import claims was stored");
+// One ref per field a host COULD own, including the ones with nothing behind them:
+// the host process answers `false` for a ref that resolves to nothing, which keeps
+// "what exists" in the one place that can answer it.
+check(
+  "an inline SSH host contributes one ref per field",
+  hostRefs(host(ssh())).map((r) => r.field),
+  ["password", "privateKey", "keyPassphrase"],
+);
+check("addressed at the host service, under <id>::<field>", hostRefs(host(ssh()))[1], {
+  group: "hostSecrets",
+  id: "h-1",
+  field: "privateKey",
+  service: "tervia-hosts",
+  account: "h-1::privateKey",
+});
+check(
+  "an inline RDP host contributes exactly one, because it owns exactly one account",
+  hostRefs(host(rdp())).map((r) => r.field),
+  ["password"],
+);
+check(
+  "an agent-auth host still contributes all three: what exists is Rust's answer",
+  hostRefs(
+    host(ssh({ credential: { kind: "inline", hostId: "h-1", user: "r", authMode: "agent" } })),
+  ).length,
+  3,
+);
+// A vault-bound host owns nothing on this service, so an export that named its
+// accounts would be naming somebody else's, and an import that wrote them would
+// put bytes where nothing reads them.
+const vaultBound = host(ssh({ id: "h-v", credential: { kind: "identity", identityId: "i-1" } }));
+check("a vault-bound host contributes none", hostRefs(vaultBound).length, 0);
+
+/** Which fields were claimed as ALREADY STORED, by name. Read this way rather
+ *  than compared as an object because `JSON.stringify` drops a symbol value, so a
+ *  direct comparison would pass against `{}`. */
+const claimed = (h: Host, landed: string[]): string[] =>
+  Object.entries(storedFields(h, new Set(landed)))
+    .filter(([, v]) => v === SECRET_ALREADY_STORED)
+    .map(([k]) => k);
+
+check(
+  "every field that landed is claimed",
+  claimed(host(ssh()), ["h-1::password", "h-1::privateKey", "h-1::keyPassphrase"]),
+  ["password", "privateKey", "keyPassphrase"],
+);
+// PER FIELD, which is the whole point: the store takes an untouched field's flag
+// from the stored record, and for a host it has never seen that is false over a
+// live secret - which `RdpPane` pre-flights and refuses to connect on.
+check(
+  "and only those, so a partial arrival is reported partially",
+  claimed(host(ssh()), ["h-1::privateKey"]),
+  ["privateKey"],
+);
+check("nothing landed, nothing claimed", claimed(host(ssh()), []), []);
+check("the RDP row claims its one field", claimed(host(rdp()), ["h-9::password"]), ["password"]);
+// `HOST_SSH_PRIVATE_KEY_FIELD` and the RDP password field share an id space now,
+// so the guard is the protocol arm rather than the account name.
+check(
+  "an RDP row claims nothing from an SSH field, even at its own id",
+  claimed(host(rdp()), ["h-9::privateKey", "h-9::keyPassphrase"]),
+  [],
+);
+check(
+  "a vault-bound host claims nothing, which is what stops upsertHost refusing the row",
+  claimed(vaultBound, ["h-v::password"]),
+  [],
+);
+check(
+  "and what is claimed is the symbol, never a string a file could carry",
+  Object.values(storedFields(host(ssh()), new Set(["h-1::password"]))).map((v) => typeof v),
+  ["symbol"],
+);
+
+console.log("\n[without secrets] counted per FIELD, against the mode that needs it");
+const missing = (raw: unknown, landed: string[]): boolean => {
+  const h = host(raw);
+  return arrivedWithoutSecret(h, storedFields(h, new Set(landed)));
+};
+const keyAuth = ssh({ credential: { kind: "inline", hostId: "h-1", user: "r", authMode: "key" } });
+const agentAuth = ssh({
+  credential: { kind: "inline", hostId: "h-1", user: "r", authMode: "agent" },
+});
+check("password auth with no password is counted", missing(ssh(), []), true);
+check("password auth with one is not", missing(ssh(), ["h-1::password"]), false);
+// The case a per-host answer got wrong: something landed, so it reported fine,
+// and the host cannot connect because the thing that landed was the passphrase.
+check(
+  "key auth whose passphrase arrived and whose KEY did not is counted",
+  missing(keyAuth, ["h-1::keyPassphrase"]),
+  true,
+);
+check("key auth with the key is not", missing(keyAuth, ["h-1::privateKey"]), false);
+check(
+  "and a key with no passphrase is ordinary, not missing one",
+  missing(keyAuth, ["h-1::privateKey"]),
+  false,
+);
+// Agent auth stores nothing by design, so reporting it as missing a credential
+// would read as a broken import.
+check("agent auth is never counted", missing(agentAuth, []), false);
+check("an RDP host with no password is counted", missing(rdp(), []), true);
+check("and with one is not", missing(rdp(), ["h-9::password"]), false);
+check(
+  "a host that kept a vault binding is not counted: its credential is already here",
+  arrivedWithoutSecret(vaultBound, {}),
+  false,
+);
+
 console.log("\n[groups] merged by id, but a name is unique so a collision has to resolve");
 check("a good group survives", sanitizeGroup({ id: "g-1", name: "prod" }), {
   id: "g-1",
@@ -607,12 +919,48 @@ check(
   collide.hosts[0].groupId,
   "g-local",
 );
+check("and the merge is counted, so it is not silent", [collide.merged, collide.keptNames], [1, 0]);
 check(
   "the same id under the same name is an ordinary replace",
   mergeGroups([{ id: "g-1", name: "prod" }], [{ id: "g-1", name: "prod" }], []).groups.map(
     (g) => g.id,
   ),
   ["g-1"],
+);
+// The other collision, and it resolves the other way. `upsertGroup` would take
+// this write - same id, so no uniqueness to violate - and relabel every local host
+// in the group: a file where `g-9` is "prod" turns six local staging boxes into
+// prod boxes, in a list whose whole job is telling those two apart.
+const renamed = mergeGroups(
+  [{ id: "g-9", name: "prod" }],
+  [{ id: "g-9", name: "staging" }],
+  [host(ssh({ groupId: "g-9" }))],
+);
+check("an incoming rename of a saved group is not written", renamed.groups, []);
+check("the local label is kept, and counted", [renamed.keptNames, renamed.merged], [1, 0]);
+check("its hosts need no repoint, because the id never changed", renamed.hosts[0].groupId, "g-9");
+check(
+  "a rename that is only whitespace or case is not one, so the row still writes",
+  mergeGroups([{ id: "g-9", name: " PROD " }], [{ id: "g-9", name: "prod" }], []).groups.map(
+    (g) => g.name,
+  ),
+  [" PROD "],
+);
+// The id check runs FIRST: the local group already holds its own name, so a
+// skipped row must not be remapped onto whichever group happens to hold the name
+// it wanted. The id is the stronger identity - hosts merge by it.
+const bothCollide = mergeGroups(
+  [{ id: "g-9", name: "prod" }],
+  [
+    { id: "g-9", name: "staging" },
+    { id: "g-5", name: "prod" },
+  ],
+  [host(ssh({ groupId: "g-9" }))],
+);
+check(
+  "an id collision beats a name collision, so the host keeps its own group",
+  [bothCollide.groups, bothCollide.hosts[0].groupId, bothCollide.keptNames],
+  [[], "g-9", 1],
 );
 const twoIncoming = mergeGroups(
   [
@@ -735,13 +1083,28 @@ check("every host survives", [real.hosts.length, real.groups.length], [4, 1]);
 check("nothing skipped", real.skipped, 0);
 check("the jump chain is intact", jumpOf(real.hosts[1]), "h-bastion");
 check("the RDP tunnel points at the imported bastion", tunnelOf(real.hosts[2]), "h-bastion");
-check("the vault-bound host keeps its binding", real.hosts[3].credential.kind, "identity");
+check(
+  "the parser leaves the vault-bound host's binding to be judged",
+  real.hosts[3].credential.kind,
+  "identity",
+);
+// The whole pipeline in the order `applyV2` runs it, on a fresh machine: nothing
+// is saved here, so the vault-bound row lands inline and blank rather than binding
+// to an identity this machine does not have.
+const pipeline = ((): Host[] => {
+  const kinds = refuseProtocolConflicts(real.hosts, []);
+  const bound = resolveIdentityBindings(kinds.hosts, []);
+  return orderHostWrites(clearDanglingTunnels(clearDanglingJumps(bound.hosts, []), []), []);
+})();
 check(
   "and the write order puts the bastion ahead of both things that need it",
-  orderHostWrites(clearDanglingTunnels(clearDanglingJumps(real.hosts, []), []), []).map(
-    (h) => h.id,
-  ),
+  pipeline.map((h) => h.id),
   ["h-bastion", "h-db", "h-win", "h-vault"],
+);
+check(
+  "with every row inline by the time it reaches the store",
+  pipeline.map((h) => h.credential.kind),
+  ["inline", "inline", "inline", "inline"],
 );
 
 console.log("\n[auth mode] every mode survives an import and maps to the right wire fields");

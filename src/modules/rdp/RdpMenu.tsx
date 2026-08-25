@@ -72,6 +72,11 @@ export function RdpMenu({ onConnect, open, onOpenChange }: Props) {
   }, [editorOpen]);
   const [editing, setEditing] = useState<RdpHost | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<RdpHost | null>(null);
+  // Reported inside the confirm dialog, exactly as SshMenu does: the menu is
+  // already closed by the time a delete can fail, so that is the only surface
+  // still on screen.
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   useEffect(() => {
     const load = () => void listHosts().then((list) => setConns(list.filter(isRdpHost)));
@@ -96,7 +101,26 @@ export function RdpMenu({ onConnect, open, onOpenChange }: Props) {
 
   const askDelete = (c: RdpHost) => {
     setConfirmDelete(c);
+    setDeleteError(null);
     onOpenChange(false);
+  };
+
+  // `deleteHost` clears the host's keychain account and rewrites every row that
+  // pointed at it, so it has real failure modes - a locked keychain, a store it
+  // cannot write. Left unhandled it was an unhandled rejection: the dialog closed,
+  // the list reloaded the row straight back, and the user retried forever with no
+  // message. The dialog stays open on failure instead.
+  const runDelete = async (target: RdpHost) => {
+    setDeleteError(null);
+    setDeleting(true);
+    try {
+      await deleteHost(target.id, noForwardRules);
+      setConfirmDelete(null);
+    } catch (e) {
+      setDeleteError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setDeleting(false);
+    }
   };
 
   const onPick = (c: RdpHost) => {
@@ -188,7 +212,10 @@ export function RdpMenu({ onConnect, open, onOpenChange }: Props) {
       <AlertDialog
         open={confirmDelete !== null}
         onOpenChange={(o) => {
-          if (!o) setConfirmDelete(null);
+          if (!o) {
+            setConfirmDelete(null);
+            setDeleteError(null);
+          }
         }}
       >
         <AlertDialogContent>
@@ -200,17 +227,23 @@ export function RdpMenu({ onConnect, open, onOpenChange }: Props) {
                 : ""}
             </AlertDialogDescription>
           </AlertDialogHeader>
+          {deleteError ? (
+            <p className="text-destructive text-[11px]">Delete failed: {deleteError}</p>
+          ) : null}
           <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogCancel disabled={deleting}>Cancel</AlertDialogCancel>
             <AlertDialogAction
               variant="destructive"
-              onClick={async () => {
-                const target = confirmDelete;
-                setConfirmDelete(null);
-                if (target) await deleteHost(target.id, noForwardRules);
+              disabled={deleting}
+              // preventDefault, because Radix closes the dialog on click: the
+              // whole point is to still be here when the delete fails. Closing
+              // is `runDelete`'s job, on success only.
+              onClick={(e) => {
+                e.preventDefault();
+                if (confirmDelete) void runDelete(confirmDelete);
               }}
             >
-              Delete
+              {deleting ? "Deleting…" : "Delete"}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

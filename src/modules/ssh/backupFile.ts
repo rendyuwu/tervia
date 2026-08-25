@@ -9,6 +9,14 @@
  * inline binding naming another host would authenticate with THAT host's
  * secrets.
  *
+ * Two of the checks are DESTRUCTIVE when they are missing rather than merely
+ * wrong, because `upsertHost` releases every keychain account the new record can
+ * no longer NAME: a row that arrives bound to a vault identity names none, and a
+ * row that arrives on the other protocol names fewer. Landing either one over a
+ * saved host deletes that host's secrets with nothing copied anywhere first, and
+ * there is no `secrets_list` to find what is left (§9.7). See
+ * {@link resolveIdentityBindings} and {@link refuseProtocolConflicts}.
+ *
  * TWO FORMATS, and the difference is where the boundary sits:
  *
  * - **v1** (`.tervia-ssh`, kind `tervia-ssh-connections`) is SSH only, and its
@@ -43,6 +51,7 @@ import type {
   RdpCredentialBinding,
   SshCredentialBinding,
   VaultAuthMode,
+  VaultIdentityBinding,
 } from "@/modules/vault/types";
 
 export const BACKUP_KIND = "tervia-connections";
@@ -200,6 +209,12 @@ function baseOf(raw: Record<string, unknown>): HostBase | null {
  * An unreadable binding falls back to inline with a blank user rather than
  * dropping the row. That is what the old stores did with a blank `user` field,
  * and a host you can see and fix beats one that vanished without explanation.
+ * {@link resolveIdentityBindings} reuses that fallback by passing `undefined`
+ * here, so "an inline binding with nothing in it" has one spelling.
+ *
+ * The identity arm below is preserved rather than applied. It is read here so the
+ * later pass can see what the file ASKED for; a backup carries no vault, so
+ * nothing downstream may act on that request.
  */
 function sshBinding(raw: unknown, hostId: string): SshCredentialBinding {
   if (isRecord(raw) && raw.kind === "identity") {
@@ -507,18 +522,124 @@ export function orderHostWrites(incoming: Host[], existing: Host[]): Host[] {
 }
 
 /**
+ * Drop every row whose id names a saved host of the OTHER protocol.
+ *
+ * Both rows are well-formed, so this is not validation: it is the one merge the
+ * store cannot perform without losing a secret. `upsertHost` releases the
+ * accounts the new record can no longer NAME, and an SSH row replaced by an RDP
+ * one can name neither `privateKey` nor `keyPassphrase`, so both are deleted -
+ * nothing copied them anywhere, nothing can enumerate what is left, and the row
+ * that survives cannot connect with what it lost. The flip the other way loses
+ * nothing (`password` is a field both protocols own) and is refused anyway: a
+ * saved host silently becoming a different kind of machine is not what merging by
+ * id promised.
+ *
+ * REFUSED rather than repaired, because there is no version of the row that is
+ * both the file's and the saved one's. Deleting the saved host first is a
+ * decision only its owner can make.
+ */
+export function refuseProtocolConflicts(
+  incoming: Host[],
+  existing: Host[],
+): { hosts: Host[]; conflicts: number } {
+  const byId = new Map(existing.map((h) => [h.id, h]));
+  const hosts = incoming.filter((h) => (byId.get(h.id)?.protocol ?? h.protocol) === h.protocol);
+  return { hosts, conflicts: incoming.length - hosts.length };
+}
+
+/** Whether the binding already saved here IS the one the file asked for, so
+ *  keeping it costs the user nothing and there is nothing to report. */
+function isSameIdentity(
+  saved: SshCredentialBinding | RdpCredentialBinding,
+  wanted: VaultIdentityBinding,
+): boolean {
+  return saved.kind === "identity" && saved.identityId === wanted.identityId;
+}
+
+/**
+ * Never apply a vault binding, because this format carries no vault.
+ *
+ * A v2 payload holds hosts and groups and nothing else - no identities, no keys -
+ * so an incoming `{kind:"identity"}` is a claim about the EXPORTING machine's
+ * vault, in the same class as a `hasPassword` flag from the file. Unlike a flag it
+ * is destructive: a vault-bound record owns no host accounts, so landing one over
+ * a saved INLINE host makes every field that host owned stale and `upsertHost`
+ * deletes all of them - password, private key and key passphrase. Nothing was
+ * copied first, the identity it names does not exist here, and there is no
+ * `secrets_list`, so those bytes are unreachable rather than untidy (§9.7).
+ *
+ * Two outcomes, decided by what is already saved under that id:
+ *
+ *   THE HOST IS ALREADY SAVED -> its own credential is KEPT, byte for byte. The
+ *   file updates the metadata and says nothing about the credential, which is what
+ *   `undefined` means everywhere else in this store. A machine re-importing its
+ *   own backup keeps its vault binding this way, and the destructive path stops
+ *   being unlikely and becomes unreachable: the binding KIND never changes across
+ *   the write, so `releaseStaleAccounts` has nothing stale to release.
+ *
+ *   THE HOST IS NEW -> the binding is downgraded to the same blank inline one an
+ *   unreadable binding falls back to. That is the state every host is in before
+ *   someone types a password: in the list, editable, one dialog away from working.
+ *   Refusing the row instead would throw away a good name, address, jump chain and
+ *   pinned host key over a credential the file never carried.
+ *
+ * `dropped` counts only the rows where the file's binding was NOT honoured, so a
+ * round trip of one machine's own backup reports zero.
+ *
+ * Run AFTER {@link refuseProtocolConflicts}: a saved record found here is then
+ * known to speak this row's protocol, so its binding fits this row's arm.
+ */
+export function resolveIdentityBindings(
+  incoming: Host[],
+  existing: Host[],
+): { hosts: Host[]; dropped: number } {
+  const byId = new Map(existing.map((h) => [h.id, h]));
+  let dropped = 0;
+  const hosts = incoming.map((h): Host => {
+    // Read off `h` once: narrowing `h.protocol` below re-widens `h.credential`,
+    // so the identity arm has to be captured before the protocol guard.
+    const wanted = h.credential;
+    if (wanted.kind !== "identity") return h;
+    const saved = byId.get(h.id);
+    if (h.protocol === "ssh") {
+      // `undefined` rather than a raw object: `sshBinding` owns the blank
+      // fallback, so there is one spelling of "an inline binding with nothing in
+      // it" rather than two that can drift.
+      const keep = saved?.protocol === "ssh" ? saved.credential : sshBinding(undefined, h.id);
+      if (!isSameIdentity(keep, wanted)) dropped++;
+      return { ...h, credential: keep };
+    }
+    const keep = saved?.protocol === "rdp" ? saved.credential : rdpBinding(undefined, h.id);
+    if (!isSameIdentity(keep, wanted)) dropped++;
+    return { ...h, credential: keep };
+  });
+  return { hosts, dropped };
+}
+
+/**
  * Merge the file's groups into the saved ones, and repoint the incoming hosts at
  * whatever group they end up in.
  *
- * Merging is by id, like hosts. The wrinkle is that a group also has to have a
- * UNIQUE NAME: `upsertGroup` refuses a second "prod", so a file whose "prod"
- * carries a different id than the local one would abort the import over a label.
- * A name already taken therefore RESOLVES to the group holding it, and the hosts
- * that named the incoming group are repointed. That is the merge the uniqueness
- * rule implies - two groups cannot share a name, so "prod" IS the group.
+ * Merging is by id, like hosts, and the two collisions that follow from that pull
+ * in opposite directions.
  *
- * The same pass covers two incoming groups colliding with each OTHER, which
- * would throw on the second write for the same reason.
+ * A NAME ALREADY TAKEN under a different id resolves to the group holding it, and
+ * the hosts that named the incoming group are repointed. A group has to have a
+ * unique name - `upsertGroup` refuses a second "prod" - so a file whose "prod"
+ * carries a different id than the local one would otherwise abort the import over
+ * a label. That is the merge the uniqueness rule implies: two groups cannot share
+ * a name, so "prod" IS the group. The same branch covers two incoming groups
+ * colliding with each OTHER, which would throw on the second write.
+ *
+ * AN ID ALREADY TAKEN under a different name is left alone, and that is the one
+ * place the file does NOT win. `upsertGroup` would accept the write - same id, so
+ * no uniqueness to violate - and relabel every local host in that group: a file
+ * where `g-9` is "prod" turns six local staging boxes into prod boxes, in a list
+ * whose whole job is telling those two apart. Nothing is lost by keeping the local
+ * label, since the id is unchanged and every host still resolves; a rename the
+ * user did want costs them one edit, and `keptNames` is what says so out loud.
+ * A changed `order` on such a group does not apply either - the row is skipped
+ * whole rather than half-merged.
  *
  * Returned together because applying one half without the other is the bug: a
  * repoint nobody applies leaves the host naming a group that was never written.
@@ -527,15 +648,24 @@ export function mergeGroups(
   incoming: HostGroup[],
   existing: HostGroup[],
   hosts: Host[],
-): { groups: HostGroup[]; hosts: Host[] } {
+): { groups: HostGroup[]; hosts: Host[]; merged: number; keptNames: number } {
   // The store's own comparison, so `" prod"` and `"PROD"` are the collision they
   // look like. Duplicated because that helper is private to `hosts/store.ts`.
   const key = (name: string): string => name.trim().toLowerCase();
   const owner = new Map(existing.map((g) => [key(g.name), g.id]));
+  const savedName = new Map(existing.map((g) => [g.id, g.name]));
   const groups: HostGroup[] = [];
   const remap = new Map<string, string>();
+  let keptNames = 0;
 
   for (const group of incoming) {
+    // The id check comes FIRST, and skipping registers nothing in `owner`: the
+    // local group already holds its own name there, under its own id.
+    const saved = savedName.get(group.id);
+    if (saved !== undefined && key(saved) !== key(group.name)) {
+      keptNames++;
+      continue;
+    }
     const held = owner.get(key(group.name));
     if (held !== undefined && held !== group.id) {
       remap.set(group.id, held);
@@ -545,9 +675,12 @@ export function mergeGroups(
     groups.push(group);
   }
 
-  if (remap.size === 0) return { groups, hosts };
+  const merged = remap.size;
+  if (merged === 0) return { groups, hosts, merged, keptNames };
   return {
     groups,
+    merged,
+    keptNames,
     hosts: hosts.map((h) => {
       const to = h.groupId ? remap.get(h.groupId) : undefined;
       return to ? { ...h, groupId: to } : h;
