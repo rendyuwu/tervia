@@ -17,8 +17,8 @@
 //!   backend is what Brave/Chromium fall back to; mode 0600 provides the
 //!   isolation the secret-service collection would have.
 //!
-//! The frontend talks to `secrets_get`, `secrets_set`, `secrets_delete`, and
-//! `secrets_get_all` with no platform branching in JS.
+//! The frontend talks to `secrets_get`, `secrets_set`, `secrets_delete`,
+//! `secrets_get_all` and `secrets_copy` with no platform branching in JS.
 //!
 //! All commands take `&AppHandle` so the data directory is resolved once via
 //! Tauri's path API.
@@ -224,11 +224,11 @@ fn legacy_keyring_delete(service: &str, account: &str) {
 ///
 /// The single implementation behind both [`secrets_get`] (the IPC surface the
 /// frontend uses) and the in-process callers that must NOT round-trip a
-/// plaintext through the webview - today `rdp::rdp_open`, which resolves a
-/// credential reference and hands the password straight to CredSSP. Two copies
-/// of this would drift, and the Windows Credential Manager fallback below is
-/// exactly the kind of thing that silently stops being applied in the copy
-/// nobody edits.
+/// plaintext through the webview: `rdp::rdp_open`, which resolves a credential
+/// reference and hands the password straight to CredSSP, and [`secrets_copy`],
+/// which moves one between accounts. Two copies of this would drift, and the
+/// Windows Credential Manager fallback below is exactly the kind of thing that
+/// silently stops being applied in the copy nobody edits.
 ///
 /// Blocking: a small file read plus one DPAPI call on Windows, a Keychain call
 /// on macOS. `secrets_get` has always done this inline in its async body; the
@@ -283,8 +283,9 @@ pub async fn secrets_get(
 /// in-process callers that must NOT round-trip a plaintext through the webview
 /// need the identical write path, and the Windows Credential Manager cleanup
 /// below is exactly the kind of step that quietly stops happening in a second
-/// copy. Today the in-process caller is `backup::backup_apply_secrets`, which
-/// takes credentials straight out of a decrypted backup into the keychain.
+/// copy. The in-process callers are `backup::backup_apply_secrets`, which takes
+/// credentials straight out of a decrypted backup into the keychain, and
+/// [`secrets_copy`].
 ///
 /// Blocking, on the same terms as [`read_secret`].
 pub(crate) fn write_secret(
@@ -404,5 +405,76 @@ pub async fn secrets_get_all(
                     .and_then(|e| e.get_password().ok())
             })
             .collect())
+    }
+}
+
+/// Whether a copy would be from an entry to itself.
+///
+/// BOTH halves, which is the whole reason this is named rather than inline.
+/// Converting an inline host credential to a vault identity copies
+/// `<id>::password` from `tervia-hosts` to `tervia-vault` - the same account
+/// name on a different service - so an account-only comparison would report
+/// that copy as already done and leave the vault entry empty.
+fn same_entry(from: (&str, &str), to: (&str, &str)) -> bool {
+    from == to
+}
+
+/// Copy one secret from one account to another WITHOUT its plaintext entering
+/// the webview.
+///
+/// Deliberately cross-service, which is why it takes four arguments rather than
+/// the three a same-service copy would need. Duplicating a host moves
+/// `tervia-hosts :: <src>::password` to `tervia-hosts :: <copy>::password`;
+/// converting an inline credential to a vault identity moves
+/// `tervia-hosts :: <host>::password` to `tervia-vault :: <identity>::password`.
+/// Neither may read the value back first, and for an RDP password that is a
+/// Phase 5 invariant rather than a preference - it is the reason a duplicated
+/// RDP host used to get no password at all.
+///
+/// `Ok(false)` means there was nothing at the source and NOTHING was written.
+/// That distinction is load-bearing rather than tidy: an account holding the
+/// empty string is indistinguishable from a real one to every `has*` flag in the
+/// app, so inventing one here would leave a record advertising a credential the
+/// user never set, on a layer that never reads a secret back to correct itself.
+/// The caller reads the boolean as "does the destination own this secret now",
+/// which is exactly the flag it has to persist.
+///
+/// Source and destination being the same entry skips only the WRITE, not the
+/// read: the answer still has to say whether anything is there, and writing a
+/// value back over itself costs a whole-store rewrite on Linux and Windows for
+/// no change.
+#[tauri::command]
+pub async fn secrets_copy(
+    app: AppHandle,
+    state: tauri::State<'_, SecretsState>,
+    from_service: String,
+    from_account: String,
+    to_service: String,
+    to_account: String,
+) -> Result<bool, String> {
+    let Some(value) = read_secret(&app, &state, &from_service, &from_account)? else {
+        return Ok(false);
+    };
+    if !same_entry((&from_service, &from_account), (&to_service, &to_account)) {
+        write_secret(&app, &state, &to_service, &to_account, &value)?;
+    }
+    Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::same_entry;
+
+    // The only part of `secrets_copy` reachable without an `AppHandle`, and the
+    // part with a wrong version that compiles: comparing accounts alone. Under
+    // that version 6e's convert-to-vault - same account name, different service
+    // - reports success and writes nothing.
+    #[test]
+    fn same_entry_compares_the_service_as_well_as_the_account() {
+        let src = ("tervia-hosts", "h-1::password");
+        assert!(same_entry(src, ("tervia-hosts", "h-1::password")));
+        assert!(!same_entry(src, ("tervia-vault", "h-1::password")));
+        assert!(!same_entry(src, ("tervia-hosts", "h-2::password")));
+        assert!(!same_entry(src, ("tervia-hosts", "h-1::privateKey")));
     }
 }

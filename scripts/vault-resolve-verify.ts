@@ -135,7 +135,7 @@ async function rejects(
 // proves it does not batch-read one either.
 // ---------------------------------------------------------------------------
 
-type SecretCall = { op: "getAll" | "set" | "delete"; service: string; accounts: string[] };
+type SecretCall = { op: "getAll" | "set" | "delete" | "copy"; service: string; accounts: string[] };
 
 /** A step that throws, to reach the partial-failure paths. `setAccount` is the
  *  keychain account whose write fails; `commit` fails the store persist. */
@@ -201,6 +201,20 @@ function harness(
     async delete(service, account) {
       calls.push({ op: "delete", service, accounts: [account] });
       kept.delete(`${service}::${account}`);
+    },
+    // A REAL copy against `kept`, not a stub that answers `true`: nothing in this
+    // file copies today, and a fake that lied would make whatever does first
+    // pass without moving a byte.
+    async copy(from, to) {
+      calls.push({
+        op: "copy",
+        service: from.service,
+        accounts: [from.account, to.account],
+      });
+      const value = kept.get(`${from.service}::${from.account}`);
+      if (value === undefined) return false;
+      kept.set(`${to.service}::${to.account}`, value);
+      return true;
     },
   };
 

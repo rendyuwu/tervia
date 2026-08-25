@@ -91,6 +91,13 @@ function harness(opts: { getThrows?: boolean; setThrows?: boolean } = {}): Harne
     delete: async (service, account) => {
       deleted.push(`${service}::${account}`);
     },
+    // The purge deletes by ACCOUNT NAME and never learns a value, so a copy
+    // reaching here is a defect rather than a case to model. It throws for the
+    // same reason `files.write` would: a fake that answered `false` would let a
+    // future purge start moving secrets around and still pass every check below.
+    copy: async () => {
+      throw new Error("legacy-purge-verify: the purge must never copy a secret");
+    },
   };
 
   return { io, files, secrets, deleted };

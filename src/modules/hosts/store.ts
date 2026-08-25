@@ -179,9 +179,16 @@ function newId(prefix: string): string {
   return `${prefix}-${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36)}`;
 }
 
+/**
+ * One field of {@link HostSecretInput}, which is also the name of the keychain
+ * account that field writes to - an account is named after the presence flag
+ * tracking it, so the mapping is mechanical rather than memorised.
+ */
+type HostSecretField = keyof HostSecretInput;
+
 /** The accounts one host can own, which is a function of its protocol. Empty for
  *  a vault-bound host: it owns none. */
-function secretFieldsFor(host: Host): readonly string[] {
+function secretFieldsFor(host: Host): readonly HostSecretField[] {
   if (host.credential.kind !== "inline") return [];
   return host.protocol === "ssh" ? HOST_SSH_SECRET_FIELDS : HOST_RDP_SECRET_FIELDS;
 }
@@ -359,20 +366,39 @@ export function createHostsStore(io: HostsIo): HostsStore {
   }
 
   /**
-   * Only the fields the source actually stores, as write instructions.
+   * Copy every account the SOURCE owns onto the accounts `copyId` will own, and
+   * report what actually arrived.
    *
-   * `secrets_get_all` reports an absent account as `null`, and `null` is
-   * {@link HostSecretInput}'s CLEAR instruction - so handing the batch straight
-   * through made duplicating a secret-less host issue three `secrets_delete` calls
-   * against accounts the copy has never had. `undefined` is the "leave it alone"
-   * state, which for a brand-new id resolves to the same all-false flags with no
-   * IPC at all.
+   * The report is the point, and it is why this returns write instructions rather
+   * than nothing. A copy's `has*` flags may only describe what `secrets_copy`
+   * found: the source record's flags arrive for free through the `rebound` spread,
+   * and if the source claims a secret the keychain no longer holds, propagating
+   * that claim writes a flag that is wrong forever - this layer never reads a
+   * secret back, so nothing can ever correct it. §5.4 is the same failure with a
+   * different cause. So a field that copied comes back as
+   * {@link SECRET_ALREADY_STORED} - present, nothing left to write - and a field
+   * that did not is OMITTED, which for an id the store has never seen resolves to
+   * `false` with no further IPC.
+   *
+   * NO VALUE PASSES THROUGH HERE. `secrets_copy` reads and writes in-process,
+   * which is what lets an RDP password travel at all: the old code could only
+   * read SSH secrets back through JS, so the RDP half of a duplicate silently got
+   * no password.
+   *
+   * SEQUENTIAL rather than `Promise.all`, unlike the delete fan-outs above: on
+   * Linux and Windows one write is a read-modify-write of the whole secret file,
+   * so concurrent writes can drop one. A vault-bound source owns no accounts, so
+   * this is an empty loop and no IPC.
    */
-  function storedOnly(values: SshSecretValues): HostSecretInput {
+  async function copyHostSecrets(source: Host, copyId: string): Promise<HostSecretInput> {
     const out: HostSecretInput = {};
-    if (values.password != null) out.password = values.password;
-    if (values.privateKey != null) out.privateKey = values.privateKey;
-    if (values.keyPassphrase != null) out.keyPassphrase = values.keyPassphrase;
+    for (const field of secretFieldsFor(source)) {
+      const copied = await io.secrets.copy(
+        { service: HOST_KEYRING_SERVICE, account: account(source.id, field) },
+        { service: HOST_KEYRING_SERVICE, account: account(copyId, field) },
+      );
+      if (copied) out[field] = SECRET_ALREADY_STORED;
+    }
     return out;
   }
 
@@ -644,7 +670,7 @@ export function createHostsStore(io: HostsIo): HostsStore {
    * Copy a saved host under a new id, for the case it exists for: the same
    * credential against a different address, without retyping anything.
    *
-   * Three things the copy does NOT inherit.
+   * Two things the copy does NOT inherit.
    *
    * The BINDING'S OWNER: `rebound` points it at the copy's own id. Skipping that
    * is the spread-copy bug, and `assertBindingOwner` in `upsertHost` is what
@@ -653,13 +679,15 @@ export function createHostsStore(io: HostsIo): HostsStore {
    * The PINNED SERVER KEY: it belongs to the machine that presented it, and a
    * copy exists to be pointed somewhere else. Carrying it over would fail the
    * next connect as a key MISMATCH, which reads as an attack rather than as a
-   * copy. The copy takes one first-connect prompt instead.
+   * copy. The copy takes one first-connect prompt instead. Both fields are
+   * dropped, since which of the two holds the pin is a function of the protocol.
    *
-   * An RDP PASSWORD: there is no `secrets_copy` command, so duplicating one would
-   * mean reading it into the webview, which is exactly the Phase 5 invariant. The
-   * copy is saved with `hasPassword: false` and the password is re-entered once.
-   * SSH secrets do travel, because SSH plaintext already round-trips through JS on
-   * every connect (issues/11) - the copy adds no exposure that a connect does not.
+   * The SECRETS DO travel, both protocols, and never through JS: `secrets_copy`
+   * moves each account in-process. An RDP password used to be the exception -
+   * there was no such command, so copying one would have meant reading it into
+   * the webview, and the copy was saved with `hasPassword: false` instead. A
+   * VAULT-BOUND source owns no accounts, so there is nothing to copy and the
+   * binding is SHARED rather than duplicated, which is the point of a vault entry.
    *
    * ONE queue entry covers the read AND the write, through the un-queued
    * `writeHost`. Calling `upsertHost` from inside the queue would deadlock - an op
@@ -674,29 +702,42 @@ export function createHostsStore(io: HostsIo): HostsStore {
       if (!source) return null;
       const copyId = newId("h");
       const name = `${source.name} (copy)`;
+      const copy: Host =
+        source.protocol === "ssh"
+          ? {
+              ...source,
+              id: copyId,
+              name,
+              credential: rebound(source.credential, copyId),
+              lastConnectedAt: undefined,
+              lastFingerprint: undefined,
+            }
+          : {
+              ...source,
+              id: copyId,
+              name,
+              credential: rebound(source.credential, copyId),
+              lastConnectedAt: undefined,
+              certFingerprint: undefined,
+            };
 
-      if (source.protocol === "ssh") {
-        const copy: SshHost = {
-          ...source,
-          id: copyId,
-          name,
-          credential: rebound(source.credential, copyId),
-          lastConnectedAt: undefined,
-          lastFingerprint: undefined,
-        };
-        const secrets = source.credential.kind === "inline" ? await readSshSecrets(source.id) : {};
-        return writeHost(copy, storedOnly(secrets));
+      // SECRETS FIRST, RECORD SECOND, and the order is not interchangeable.
+      // Copying is additive: it touches only accounts under an id no record names
+      // yet, so a failure between here and `persist` leaves bytes at an
+      // unreferenced account - VLT-23's orphan class, and nothing that is WRONG,
+      // just unreachable. The other order leaves a saved record claiming secrets
+      // that are not there, which this layer can never correct because it never
+      // reads one back. `rollbackNewHost` clears what a partial copy did land,
+      // which is safe for exactly one reason: `copyId` is brand new, so there was
+      // nothing at these accounts to lose.
+      let secrets: HostSecretInput;
+      try {
+        secrets = await copyHostSecrets(source, copyId);
+      } catch (e) {
+        await rollbackNewHost(copy);
+        throw e;
       }
-
-      const copy: RdpHost = {
-        ...source,
-        id: copyId,
-        name,
-        credential: rebound(source.credential, copyId),
-        lastConnectedAt: undefined,
-        certFingerprint: undefined,
-      };
-      return writeHost(copy, {});
+      return writeHost(copy, secrets);
     });
   }
 
@@ -706,18 +747,34 @@ export function createHostsStore(io: HostsIo): HostsStore {
       const host = hosts.find((h) => h.id === id);
 
       // Refuse rather than cascade - the same discipline `modules/vault` applies
-      // to an in-use identity, and for the same reason. Left to cascade, an RDP
-      // host confined to this bastion becomes a DIRECT DIAL to `host:3389` with
-      // CredSSP the instant the bastion is gone: bounded where the row has a
-      // pinned certificate (a wrong machine fails the pin before the password is
-      // sent), unbounded where it does not, because a row that has never
-      // connected has no pin and the first-connect prompt it gets instead names
-      // `row.host` and reads as entirely normal. Checked before ANYTHING below is
-      // touched - including the forward-rule cleanup - so a refusal leaves the
-      // host, its secrets and every referencing row exactly as they were.
+      // to an in-use identity, and for the same reason: a cascade turns one
+      // confirmed delete into a silent change to a host the user was not looking
+      // at.
+      //
+      // Both kinds of holder, an RDP `tunnel.sshHostId` and an SSH
+      // `proxyJumpId`, because the consequence is the same one: the host that
+      // rode this one goes on connecting and changes ROUTE, with nothing on
+      // screen changing at all. An RDP row confined to this bastion becomes a
+      // direct dial to `host:3389` with CredSSP; an SSH row that reached its
+      // target through it becomes a direct dial to `host:22`. What makes the SSH
+      // half silent rather than merely quiet is the pin: `lastFingerprint` is
+      // keyed per HOST ID, so the same machine reached directly presents the same
+      // host key, matches the pin the row already had, and raises no TOFU
+      // question whatsoever. A row that never connected has no pin, and the
+      // first-connect prompt it gets instead names `row.host` and reads as
+      // entirely normal.
+      //
+      // ONE refusal listing every holder, not a tunnel check and then a jump
+      // check: a user who clears the tunnels and is then refused a second time
+      // about jump hosts reads the first refusal as a lie about what was in the
+      // way.
+      //
+      // Checked before ANYTHING below is touched - including the forward-rule
+      // cleanup - so a refusal leaves the host, its secrets and every referencing
+      // row exactly as they were.
       if (host) {
         const holders = hosts
-          .filter((h): h is RdpHost => h.protocol === "rdp" && h.tunnel?.sshHostId === id)
+          .filter((h) => (h.protocol === "rdp" ? h.tunnel?.sshHostId === id : h.proxyJumpId === id))
           .map(hostRef);
         if (holders.length > 0) {
           throw new VaultInUseError(`host "${host.name}"`, "host", holders);
@@ -738,28 +795,11 @@ export function createHostsStore(io: HostsIo): HostsStore {
         secretFieldsFor(host).map((f) => io.secrets.delete(HOST_KEYRING_SERVICE, account(id, f))),
       );
 
-      // Clear the jump reference, so a delete cannot leave another SSH host
-      // failing every connect with "a jump host in the chain no longer exists".
-      //
-      // This is the SAME class of consequence as the RDP tunnel case refused
-      // above - a host that reached its target through this bastion becomes a
-      // direct dial the instant the bastion is gone - and yet this half CASCADES
-      // instead of refusing. That is not an oversight to fix here: the old
-      // `deleteConnection` already cleared `proxyJumpId` this way before the two
-      // connection stores merged into this one, so this half is INHERITED rather
-      // than chosen, and changing it is a separate decision nobody has taken. A
-      // reader who finds one refusing and the other cascading should read this as
-      // the asymmetry it is, not as a bug in either.
-      //
-      // No RDP branch survives to this point: any RDP host with a `tunnel`
-      // naming `id` was already caught by the refusal above, so there is nothing
-      // left here for it to clear.
-      const next = hosts
-        .filter((h) => h.id !== id)
-        .map((h) =>
-          h.protocol === "ssh" && h.proxyJumpId === id ? { ...h, proxyJumpId: undefined } : h,
-        );
-      await persist([[HOSTS_KEY, next]]);
+      // Drop the row and nothing else. No surviving row can be naming `id`: both
+      // kinds of reference were refused above, so there is nothing left here to
+      // rewrite. Anything that rewrote a neighbour at this point would be
+      // reintroducing the cascade the refusal replaced.
+      await persist([[HOSTS_KEY, hosts.filter((h) => h.id !== id)]]);
     });
   }
 

@@ -27,11 +27,15 @@
  *    Carried over, the next connect fails as a key MISMATCH - which reads to the
  *    user as an attack rather than as a copy.
  *
- * 4. DELETING A HOST CLEARS WHAT POINTED AT IT. A dangling `proxyJumpId` fails
- *    every later connect with "a jump host in the chain no longer exists", on a
- *    host the user was not looking at when they deleted. A dangling
- *    `tunnel.sshHostId` is the same failure for RDP. Forward rules go the same
- *    way, through an injected cleanup that FAILS CLOSED.
+ * 4. DELETING A HOST IS REFUSED WHILE ANOTHER HOST RIDES IT, never cascaded, and
+ *    a `proxyJumpId` counts exactly as much as a `tunnel.sshHostId`. Cleared
+ *    silently, the referencing host goes on connecting and changes ROUTE with
+ *    nothing on screen changing: the pin is keyed per host id, so the same
+ *    machine reached directly presents the same host key and raises no TOFU
+ *    question at all. ONE refusal lists every holder, because a user who clears
+ *    the tunnels and is then refused again about jump hosts reads the first
+ *    refusal as a lie. Forward rules are the exception and are cleaned up, through
+ *    an injected cleanup that FAILS CLOSED.
  *
  * 5. DELETING A GROUP DOES NOT DELETE ITS MEMBERS. The one place a cascade is
  *    right is the label, not the rows: a group is not an owner.
@@ -56,9 +60,12 @@
  *    once by `legacyPurge.ts`, which is the only thing that can ever name them
  *    after those modules are deleted.
  *
- * 8. AN RDP PASSWORD NEVER ENTERS THE WEBVIEW. There is no read-back for one -
- *    not for the editor, and not for a duplicate, which is why a duplicated RDP
- *    host is saved with `hasPassword: false` and the password re-entered once.
+ * 8. AN RDP PASSWORD NEVER ENTERS THE WEBVIEW. There is no read-back for one, not
+ *    even for the editor. A DUPLICATE still carries it, because `secrets_copy`
+ *    moves it account-to-account in-process - and the copy's flags then describe
+ *    what the copy reported, never what the source record claimed, since a claim
+ *    over an account the keychain no longer holds is wrong forever on a layer
+ *    that never reads one back.
  *
  * 9. THE UNION NARROWS ON `protocol`. `credential` sits on each arm rather than
  *    on the base precisely so one guard narrows both, and `user` (SSH) against
@@ -143,10 +150,23 @@ async function rejects(
 // what proves it does not batch-read one either.
 // ---------------------------------------------------------------------------
 
-type SecretCall = { op: "getAll" | "set" | "delete"; service: string; accounts: string[] };
+type SecretCall = {
+  op: "getAll" | "set" | "delete" | "copy";
+  service: string;
+  accounts: string[];
+  /** `copy` only, and separate because a copy can CROSS services: 6e moves a host
+   *  password onto `tervia-vault`. */
+  toService?: string;
+};
 
 /** A step that throws, to reach the partial-failure paths. */
-type Fail = { setAccount?: string; deleteAccount?: string; commit?: string; dir?: string };
+type Fail = {
+  setAccount?: string;
+  deleteAccount?: string;
+  copyAccount?: string;
+  commit?: string;
+  dir?: string;
+};
 
 /** Extra microtask ticks inside `secrets.set`, so a read racing a write has a
  *  DETERMINISTIC loser. Used only by the duplicate-inside-the-queue check: an
@@ -227,6 +247,27 @@ function harness(
       }
       kept.delete(`${service}::${account}`);
     },
+    // A REAL copy against `kept`, and deliberately NOT a stub that answers
+    // `true`. Every duplicate check below asserts that the copy's flags describe
+    // what actually arrived, and a fake that reported success without moving a
+    // byte would make all of them vacuous. A missing source writes NOTHING -
+    // not the empty string, which every `has*` flag in the app reads as a real
+    // secret.
+    async copy(from, to) {
+      calls.push({
+        op: "copy",
+        service: from.service,
+        accounts: [from.account, to.account],
+        toService: to.service,
+      });
+      if (seed.fail?.copyAccount === from.account) {
+        throw new Error(`keychain refused to copy ${from.account}`);
+      }
+      const value = kept.get(`${from.service}::${from.account}`);
+      if (value === undefined) return false;
+      kept.set(`${to.service}::${to.account}`, value);
+      return true;
+    },
   };
 
   // The two OLD store files, read straight off the filesystem by the legacy
@@ -268,6 +309,12 @@ function harness(
     commits: () => commits,
     reads: () => calls.filter((c) => c.op === "getAll"),
     deletes: () => calls.filter((c) => c.op === "delete").map((c) => c.accounts[0]),
+    /** Every copy, FULLY QUALIFIED on both sides - a copy landing on the wrong
+     *  service is the failure `same_entry` in `secrets.rs` guards against. */
+    copies: () =>
+      calls
+        .filter((c) => c.op === "copy")
+        .map((c) => `${c.service}::${c.accounts[0]} -> ${c.toService}::${c.accounts[1]}`),
     rows: () => data[HOSTS_KEY] as Host[],
     groupRows: () => data[HOST_GROUPS_KEY] as HostGroup[],
   };
@@ -449,6 +496,7 @@ console.log("\n[duplicate] a copy owns its own secrets and inherits no pin");
     { password: "hunter2", keyPassphrase: "letmein" },
   );
 
+  const before = h.calls.length;
   const copy = await h.hosts.duplicateHost("h-1");
   assert(copy !== null && copy.id !== "h-1", "the copy gets a new id");
   if (copy === null || copy.protocol !== "ssh") {
@@ -481,6 +529,22 @@ console.log("\n[duplicate] a copy owns its own secrets and inherits no pin");
   );
   check("and the source's accounts untouched", h.kept.get(at("h-1", "password")), "hunter2");
 
+  // HOW they travelled, not just that they did. Every account the source owns is
+  // attempted, on the same service both ways, by `secrets_copy` - which reads and
+  // writes in-process, so no value passes through here. The old code did a
+  // `secrets_get_all` on the source instead, and that read is what a duplicate
+  // must no longer cost: the RDP half could not do it at all, and got no password.
+  check("each account moved by name, in field order", h.copies(), [
+    `${HOSTS_SERVICE}::h-1::password -> ${HOSTS_SERVICE}::${copy.id}::password`,
+    `${HOSTS_SERVICE}::h-1::privateKey -> ${HOSTS_SERVICE}::${copy.id}::privateKey`,
+    `${HOSTS_SERVICE}::h-1::keyPassphrase -> ${HOSTS_SERVICE}::${copy.id}::keyPassphrase`,
+  ]);
+  check(
+    "and a copy is the ONLY thing the duplicate asked the keychain for - no read, no set",
+    h.calls.slice(before).map((c) => c.op),
+    ["copy", "copy", "copy"],
+  );
+
   // Rotating one must not rotate the other - the whole point of rebinding.
   await h.hosts.upsertHost(copy, { password: "rotated" });
   check("rotating the copy leaves the source alone", h.kept.get(at("h-1", "password")), "hunter2");
@@ -490,8 +554,13 @@ console.log("\n[duplicate] a copy owns its own secrets and inherits no pin");
 }
 
 // ---------------------------------------------------------------------------
-console.log("\n[duplicate] an RDP password does not travel, and no read-back exists for one");
+console.log("\n[duplicate] an RDP password DOES travel, still without a read-back");
 {
+  // Accepted gap 3 of the 6c handoff, closed. There was no `secrets_copy`, so
+  // carrying an RDP password would have meant reading it into the webview - the
+  // Phase 5 invariant - and the copy was saved with `hasPassword: false` instead.
+  // `RdpPane` pre-flights that flag and refuses to connect, so a duplicated RDP
+  // host was unconnectable until the password was re-entered by hand.
   const h = harness();
   await h.hosts.upsertHost(rdpHost({ id: "h-2", certFingerprint: "SHA256:CERT" }), {
     password: "s3cret",
@@ -504,28 +573,57 @@ console.log("\n[duplicate] an RDP password does not travel, and no read-back exi
   }
   check("the pinned certificate is not inherited", copy.certFingerprint, undefined);
   check(
-    "the copy claims no password",
-    copy.credential.kind === "inline" ? copy.credential.hasPassword : null,
-    false,
+    "the password reached the copy's OWN account",
+    h.kept.get(at(copy.id, "password")),
+    "s3cret",
   );
-  check("and none was stored for it", h.kept.has(at(copy.id, "password")), false);
+  check(
+    "the copy claims it",
+    copy.credential.kind === "inline" ? copy.credential.hasPassword : null,
+    true,
+  );
+  // Off a FRESH read: a check that reads what `duplicateHost` returned cannot
+  // tell a persisted flag from an echoed one.
+  const stored = await h.hosts.findHost(copy.id);
+  check(
+    "and that is what got PERSISTED, so RdpPane's pre-flight lets it dial",
+    stored && stored.credential.kind === "inline" ? stored.credential.hasPassword : null,
+    true,
+  );
   check("the source keeps its own", h.kept.get(at("h-2", "password")), "s3cret");
+  // An RDP row owns exactly ONE account, so exactly one copy - key material has
+  // no account on this arm to copy from or to.
+  check("it moved by account name, and only the one account exists", h.copies(), [
+    `${HOSTS_SERVICE}::h-2::password -> ${HOSTS_SERVICE}::${copy.id}::password`,
+  ]);
   check("no keychain read happened to duplicate it", h.reads().length, before);
   check("and the editor path offers none either", await h.hosts.getHostSshSecrets("h-2"), {});
   check("still no read", h.reads().length, before);
+
+  // Rebinding is what keeps the two apart afterwards: rotating one must not
+  // rotate the other, which is the whole reason the copy owns its own account
+  // rather than sharing the source's.
+  await h.hosts.upsertHost(copy, { password: "rotated" });
+  check("rotating the copy leaves the source alone", h.kept.get(at("h-2", "password")), "s3cret");
+  check("and changes the copy", h.kept.get(at(copy.id, "password")), "rotated");
 }
 
 // ---------------------------------------------------------------------------
 console.log("\n[duplicate] a copy of a secret-less host writes nothing to the keychain");
 {
-  // `secrets_get_all` reports an absent account as `null`, and `null` is the CLEAR
-  // instruction - so passing the batch straight through issued three
-  // `secrets_delete` calls against accounts the copy never had.
+  // A field that copied nothing must be OMITTED from the write instructions, not
+  // handed on as a value: the CLEAR instruction is a blank string, and mapping
+  // "found nothing" onto it would issue three `secrets_delete` calls against
+  // accounts the copy has never had. (The same shape as the old defect here,
+  // where `secrets_get_all` reported an absent account as `null` and `null` is
+  // the clear instruction.)
   const h = harness({ hosts: [sshHost({ id: "h-1" })] });
   const copy = await h.hosts.duplicateHost("h-1");
   check("the copy saved", copy?.id !== "h-1" && copy !== null, true);
+  check("every account was still ATTEMPTED, so none is missed by accident", h.copies().length, 3);
   check("with no delete issued for it", h.deletes(), []);
   check("and no write either", h.calls.filter((c) => c.op === "set").length, 0);
+  check("nor anything landing in the keychain", h.kept.size, 0);
   check(
     "so its flags are all false, from the store rather than from a read-back",
     copy?.credential.kind === "inline" && copy.protocol === "ssh"
@@ -550,6 +648,129 @@ console.log("\n[duplicate] a vault-bound copy shares the identity instead of the
   check("the binding is carried as-is", copy?.credential, { kind: "identity", identityId: "i-1" });
   check("and no host account was written", h.kept.size, 0);
   check("nor read", h.reads().length, 0);
+  // Not "a copy that found nothing" - a copy that was never attempted. A
+  // vault-bound host owns no accounts, so the identity's secrets stay in ONE
+  // place and both hosts dereference it. Copying them onto host accounts is the
+  // opposite of what a vault entry is for.
+  check("and nothing was copied - the identity is SHARED, not duplicated", h.copies(), []);
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n[duplicate] a copy's flags describe what the COPY got, not what the source claimed");
+{
+  // The source's record claims a password its account no longer holds - which is
+  // VLT-22's exact shape, a `.bak` restore rolling metadata back over a rotation
+  // while `secrets.rs` stayed current. The source's flags arrive on the copy for
+  // free through the `rebound` spread, and propagating that claim writes a flag
+  // that is wrong FOREVER: this layer never reads a secret back, so nothing can
+  // correct it, and `RdpPane`'s pre-flight and every export key on it. §5.4 is the
+  // same failure with a different cause.
+  const flags = (host: Host | undefined): unknown =>
+    host && host.protocol === "ssh" && host.credential.kind === "inline"
+      ? [
+          host.credential.hasPassword,
+          host.credential.hasPrivateKey,
+          host.credential.hasKeyPassphrase,
+        ]
+      : null;
+  const h = harness({
+    hosts: [
+      sshHost({
+        id: "h-1",
+        credential: {
+          kind: "inline",
+          hostId: "h-1",
+          user: "root",
+          authMode: "password",
+          // Claimed, and only ONE of the two is really there.
+          hasPassword: true,
+          hasPrivateKey: true,
+          hasKeyPassphrase: false,
+        },
+      }),
+    ],
+    kept: { [at("h-1", "privateKey")]: "PEM" },
+  });
+
+  const copy = await h.hosts.duplicateHost("h-1");
+  if (copy === null) throw new Error("hosts-store-verify: the duplicate came back null");
+  check("the claim the keychain could not honour comes back FALSE", flags(copy), [
+    false,
+    true,
+    false,
+  ]);
+  check("and that is what got PERSISTED", flags(await h.hosts.findHost(copy.id)), [
+    false,
+    true,
+    false,
+  ]);
+  check(
+    "nothing was invented at the empty account - not even a blank string",
+    h.kept.has(at(copy.id, "password")),
+    false,
+  );
+  check("while the key that WAS there travelled", h.kept.get(at(copy.id, "privateKey")), "PEM");
+  // The copy is what gets fixed, not the source: this operation has no business
+  // rewriting a record the user did not ask it to touch, and doing so would need a
+  // read-back to be honest about anyway.
+  check(
+    "the source's own wrong claim is left exactly as it was",
+    flags(await h.hosts.findHost("h-1")),
+    [true, true, false],
+  );
+  check("and no flag was decided by reading a secret", h.reads(), []);
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n[duplicate] a copy that cannot carry a secret writes no record at all");
+{
+  // Secrets FIRST, record SECOND, and the order is not interchangeable. Copying
+  // is additive - it touches only accounts under an id no record names yet - so a
+  // failure here leaves bytes at an unreferenced account, which is VLT-23's
+  // orphan class and nothing that is WRONG, just unreachable. The other order
+  // leaves a saved record claiming secrets that are not there, permanently.
+  const h = harness({
+    hosts: [
+      sshHost({
+        id: "h-1",
+        credential: {
+          kind: "inline",
+          hostId: "h-1",
+          user: "root",
+          authMode: "key",
+          hasPassword: true,
+          hasPrivateKey: true,
+          hasKeyPassphrase: false,
+        },
+      }),
+    ],
+    kept: { [at("h-1", "password")]: "pw", [at("h-1", "privateKey")]: "PEM" },
+    fail: { copyAccount: "h-1::privateKey" },
+  });
+
+  await rejects(
+    "a copy the keychain refuses is reported, not swallowed",
+    () => h.hosts.duplicateHost("h-1"),
+    ["refused to copy", "privateKey"],
+  );
+  check(
+    "and NO record was written for the copy",
+    (await h.hosts.listHosts()).map((x) => x.id),
+    ["h-1"],
+  );
+  // The partial copy is rolled back, which is safe for exactly one reason: the
+  // copy's id is brand new, so there was nothing at these accounts to lose. There
+  // is no `secrets_list`, so anything left here is unreachable rather than untidy.
+  check(
+    "the account that DID copy is cleared again, leaving only the source's two",
+    [...h.kept.keys()].sort(),
+    [at("h-1", "password"), at("h-1", "privateKey")].sort(),
+  );
+  check(
+    "and the source is byte-for-byte untouched",
+    [h.kept.get(at("h-1", "password")), h.kept.get(at("h-1", "privateKey"))],
+    ["pw", "PEM"],
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -1075,50 +1296,58 @@ console.log("\n[vault] a vault-bound host owns no accounts");
 }
 
 // ---------------------------------------------------------------------------
-console.log("\n[delete] a deleted host takes its accounts and every reference to it");
+console.log("\n[delete] an unreferenced host takes its accounts with it");
 {
-  // The RDP-tunnel half of this used to live in this block too: a third host,
-  // `h-tun`, tunnelling through `h-jump` and coming back with its `tunnel`
-  // cleared rather than deleted. That assertion tested the CASCADE this phase
-  // replaces with a refusal - see "[delete] refused while an RDP host tunnels
-  // through it" below - so it moved rather than staying here to fail.
+  // What is left of a delete once both cascades are refusals. Nothing rides
+  // `h-gone`, so it goes, and every account it owned goes by NAME - there is no
+  // `secrets_list`, so an account left behind is unreachable rather than untidy.
+  // The two refusal cases are the next two blocks.
   const h = harness();
-  await h.hosts.upsertHost(sshHost({ id: "h-jump" }), { password: "jumppw" });
-  await h.hosts.upsertHost(sshHost({ id: "h-via", proxyJumpId: "h-jump" }));
-  await h.hosts.upsertHost(sshHost({ id: "h-other", proxyJumpId: "h-via" }));
+  await h.hosts.upsertHost(sshHost({ id: "h-keep" }), { password: "keeppw" });
+  await h.hosts.upsertHost(sshHost({ id: "h-gone" }), { password: "gonepw", privateKey: "PEM" });
+  await h.hosts.upsertHost(sshHost({ id: "h-via", proxyJumpId: "h-keep" }));
 
   const cleaned: string[] = [];
-  await h.hosts.deleteHost("h-jump", (hostId) => void cleaned.push(hostId));
+  await h.hosts.deleteHost("h-gone", (hostId) => void cleaned.push(hostId));
 
-  check("the row is gone", await h.hosts.findHost("h-jump"), undefined);
-  check("its account is gone", h.kept.has(at("h-jump", "password")), false);
+  check("the row is gone", await h.hosts.findHost("h-gone"), undefined);
+  check(
+    "and so is every account it owned",
+    [h.kept.has(at("h-gone", "password")), h.kept.has(at("h-gone", "privateKey"))],
+    [false, false],
+  );
+  check(
+    "each one cleared by name, including the field it never filled",
+    h
+      .deletes()
+      .filter((a) => a.startsWith("h-gone::"))
+      .sort(),
+    ["h-gone::keyPassphrase", "h-gone::password", "h-gone::privateKey"],
+  );
   const via = await h.hosts.findHost("h-via");
   check(
-    "the host that jumped through it is cleared, not deleted",
-    [via?.id, via?.protocol === "ssh" ? via.proxyJumpId : "?"],
-    ["h-via", undefined],
-  );
-  const other = await h.hosts.findHost("h-other");
-  check(
     "a reference to a DIFFERENT host is left alone",
-    other?.protocol === "ssh" ? other.proxyJumpId : "?",
-    "h-via",
+    via?.protocol === "ssh" ? via.proxyJumpId : "?",
+    "h-keep",
   );
-  check("the forward-rule cleanup was told which host went", cleaned, ["h-jump"]);
+  check("and that host keeps its own secret", h.kept.get(at("h-keep", "password")), "keeppw");
+  check("the forward-rule cleanup was told which host went", cleaned, ["h-gone"]);
   check("two hosts remain", (await h.hosts.listHosts()).length, 2);
 
-  // Fail closed: the rules and the host must not come apart.
-  await h.hosts.upsertHost(sshHost({ id: "h-keep" }), { password: "keeppw" });
+  // Fail closed: the rules and the host must not come apart. `h-closed` is
+  // deliberately unreferenced, or the refusal below would be the reference guard
+  // firing first and this check would prove nothing about the cleanup.
+  await h.hosts.upsertHost(sshHost({ id: "h-closed" }), { password: "closedpw" });
   await rejects(
     "a cleanup that throws aborts the delete",
     () =>
-      h.hosts.deleteHost("h-keep", () => {
+      h.hosts.deleteHost("h-closed", () => {
         throw new Error("forwards: the rule store is unreadable");
       }),
     ["rule store is unreadable"],
   );
-  assert((await h.hosts.findHost("h-keep")) !== undefined, "the host is still there");
-  check("and so is its account", h.kept.get(at("h-keep", "password")), "keeppw");
+  assert((await h.hosts.findHost("h-closed")) !== undefined, "the host is still there");
+  check("and so is its account", h.kept.get(at("h-closed", "password")), "closedpw");
 
   // A `Promise<void>` resolving to `undefined` is `void`'s definition, so the only
   // thing worth asserting about a no-op is that the store did not move.
@@ -1207,17 +1436,135 @@ console.log("\n[delete] refused while an RDP host tunnels through it, not cascad
     await h.hosts.findHost("h-bastion"),
     undefined,
   );
+  check("and its account goes with it", h.kept.has(at("h-bastion", "password")), false);
+}
 
-  // A jump reference is unaffected by this refusal - only a `tunnel` blocks a
-  // delete, so an SSH host jumping through a host with no tunnel holder still
-  // cascades exactly as the block above tests.
-  await h.hosts.upsertHost(sshHost({ id: "h-solo" }), { password: "solopw" });
-  await h.hosts.upsertHost(sshHost({ id: "h-via-solo", proxyJumpId: "h-solo" }));
-  await h.hosts.deleteHost("h-solo", noForwardRules);
-  const viaSolo = await h.hosts.findHost("h-via-solo");
+// ---------------------------------------------------------------------------
+console.log("\n[delete] refused while another host JUMPS through it, not cascaded");
+{
+  // Settled in 6d, reversing what `deleteConnection` did before the two stores
+  // merged. A cleared `proxyJumpId` is a SILENT DIRECT DIAL: the row goes on
+  // connecting and changes ROUTE, and the pin is what makes it silent rather than
+  // merely quiet - `lastFingerprint` is keyed per HOST ID, so the same machine
+  // reached directly presents the same host key, matches the pin the row already
+  // had, and raises no TOFU question at all. Nothing on screen changes. Traffic
+  // that was confined to a bastion now crosses whatever is between here and there.
+  const h = harness();
+  await h.hosts.upsertHost(sshHost({ id: "h-bastion", name: "the bastion" }), {
+    password: "bastionpw",
+    privateKey: "bastion-PEM",
+  });
+  await h.hosts.upsertHost(
+    sshHost({
+      id: "h-behind",
+      name: "db behind it",
+      proxyJumpId: "h-bastion",
+      lastFingerprint: "SHA256:UNCHANGED",
+    }),
+  );
+
+  const cleaned: string[] = [];
+  await rejects(
+    "deleting a host another host jumps through is refused",
+    () => h.hosts.deleteHost("h-bastion", (hostId) => void cleaned.push(hostId)),
+    ["cannot delete", "the bastion", "1 host", "db behind it"],
+  );
+  check("the forward-rule cleanup never ran - the refusal comes before anything else", cleaned, []);
+
+  // A refusal must leave every side exactly as it was, which for the keychain
+  // half means not even an attempt: the store cannot put a secret back.
+  check("the host is still there", (await h.hosts.findHost("h-bastion"))?.id, "h-bastion");
   check(
-    "a jump-only reference never blocks a delete",
-    viaSolo?.protocol === "ssh" ? viaSolo.proxyJumpId : "?",
+    "with every one of its accounts intact",
+    [h.kept.get(at("h-bastion", "password")), h.kept.get(at("h-bastion", "privateKey"))],
+    ["bastionpw", "bastion-PEM"],
+  );
+  check("and no delete was even attempted", h.deletes(), []);
+  const behind = await h.hosts.findHost("h-behind");
+  check(
+    "the referencing row keeps BOTH its jump host and the pin that would have gone quiet",
+    behind?.protocol === "ssh" ? [behind.proxyJumpId, behind.lastFingerprint] : "?",
+    ["h-bastion", "SHA256:UNCHANGED"],
+  );
+
+  // The typed error, so a dialog can offer to open the holders - the same shape
+  // `deleteIdentity` and `deleteKey` already refuse with.
+  try {
+    await h.hosts.deleteHost("h-bastion", noForwardRules);
+    assert(false, "the delete above should have thrown");
+  } catch (e) {
+    assert(e instanceof VaultInUseError, "the refusal is a VaultInUseError");
+    check("carrying the holder", (e as VaultInUseError).holders, [
+      { id: "h-behind", name: "db behind it" },
+    ]);
+  }
+
+  // Clearing the jump first is how the user gets what the cascade used to do for
+  // them: an explicit, visible choice instead of one made silently.
+  await h.hosts.upsertHost(sshHost({ id: "h-behind", name: "db behind it" }));
+  await h.hosts.deleteHost("h-bastion", noForwardRules);
+  check(
+    "the delete succeeds once the jump is cleared",
+    await h.hosts.findHost("h-bastion"),
+    undefined,
+  );
+  check("taking its accounts with it", h.kept.size, 0);
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n[delete] a jump holder and a tunnel holder are ONE refusal, not two");
+{
+  // Two checks in sequence would be worse than one: a user who clears the
+  // tunnels, hits a second refusal about jump hosts, and has to go round again
+  // reads the FIRST refusal as a lie about what was in the way. One check, one
+  // message, every holder named.
+  const h = harness();
+  await h.hosts.upsertHost(sshHost({ id: "h-bastion", name: "the bastion" }), { password: "pw" });
+  await h.hosts.upsertHost(
+    sshHost({ id: "h-jumper", name: "db behind it", proxyJumpId: "h-bastion" }),
+  );
+  await h.hosts.upsertHost(
+    rdpHost({ id: "h-tunneller", name: "office desktop", tunnel: { sshHostId: "h-bastion" } }),
+  );
+
+  await rejects(
+    "one refusal names both kinds of holder",
+    () => h.hosts.deleteHost("h-bastion", noForwardRules),
+    ["cannot delete", "the bastion", "2 hosts", "db behind it", "office desktop"],
+  );
+  // The needles above cannot prove there were only two, or that a second call
+  // says the same thing. `holders` can.
+  try {
+    await h.hosts.deleteHost("h-bastion", noForwardRules);
+    assert(false, "the delete above should have thrown");
+  } catch (e) {
+    check("and carries exactly those two, in row order", (e as VaultInUseError).holders, [
+      { id: "h-jumper", name: "db behind it" },
+      { id: "h-tunneller", name: "office desktop" },
+    ]);
+  }
+
+  // The half-cleared state is where a two-check version misleads: clearing the
+  // tunnel must still refuse, and must now name only what is actually left.
+  await h.hosts.upsertHost(rdpHost({ id: "h-tunneller", name: "office desktop" }));
+  try {
+    await h.hosts.deleteHost("h-bastion", noForwardRules);
+    assert(false, "clearing only the tunnel should still refuse");
+  } catch (e) {
+    check(
+      "clearing the tunnel alone leaves the jump holder, and only that",
+      (e as VaultInUseError).holders,
+      [{ id: "h-jumper", name: "db behind it" }],
+    );
+  }
+  check("the host survived both refusals", (await h.hosts.findHost("h-bastion"))?.id, "h-bastion");
+  check("and so did its secret", h.kept.get(at("h-bastion", "password")), "pw");
+
+  await h.hosts.upsertHost(sshHost({ id: "h-jumper", name: "db behind it" }));
+  await h.hosts.deleteHost("h-bastion", noForwardRules);
+  check(
+    "clearing the second one is what finally lets it go",
+    await h.hosts.findHost("h-bastion"),
     undefined,
   );
 }
