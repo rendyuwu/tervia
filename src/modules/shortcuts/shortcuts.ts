@@ -278,8 +278,9 @@ export const SHORTCUTS: Shortcut[] = [
     defaultBindings: [{ ctrl: true, shift: true, key: "x" }],
   },
   {
-    // Opens the header's RDP connection list, which is the picker: pick a saved
-    // host to connect, or add one.
+    // Opens the Hosts page (6d): pick a saved host to connect, or add one. Used
+    // to raise the header's RDP connection list before that dropdown was
+    // deleted; the id is kept so a user's custom binding survives the repoint.
     //
     // NO default binding, deliberately. Every free Mod+letter is either a shell
     // control code a focused terminal owns or already spoken for, and this is a
@@ -288,7 +289,7 @@ export const SHORTCUTS: Shortcut[] = [
     // and the palette can run it regardless (`runCommand` goes through the
     // registry, not the keyboard).
     id: "rdp.connect",
-    label: "Connect RDP...",
+    label: "Open Hosts...",
     group: "General",
     defaultBindings: [],
   },

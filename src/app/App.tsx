@@ -54,7 +54,7 @@ import {
 import { useCliAgentsStore } from "@/modules/terminal/lib/cliAgents";
 import { ThemeProvider } from "@/modules/theme";
 import { purgeLegacySecrets } from "@/modules/hosts/store";
-import { type SshHost } from "@/modules/hosts/types";
+import { isRdpHost, isSshHost, type Host } from "@/modules/hosts/types";
 import { useWorkspacesStore } from "@/modules/workspaces";
 import type { SearchAddon } from "@xterm/addon-search";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -173,21 +173,6 @@ export default function App() {
   const searchInlineRef = useRef<SearchInlineHandle | null>(null);
 
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
-
-  // The header's RDP connection list. Owned here rather than inside `RdpMenu`
-  // because it is the connection PICKER, and the command palette's
-  // "Connect RDP..." has to raise it - a palette command cannot click a
-  // dropdown trigger.
-  const [rdpMenuOpen, setRdpMenuOpen] = useState(false);
-
-  const [editingSshConn, setEditingSshConn] = useState<SshHost | null>(null);
-  const [sshEditorOpen, setSshEditorOpen] = useState(false);
-  // Latches the first time each lazy dialog opens. Stays true; see the
-  // dialog mount sites for why.
-  const [sshEditorMounted, setSshEditorMounted] = useState(false);
-  useEffect(() => {
-    if (sshEditorOpen) setSshEditorMounted(true);
-  }, [sshEditorOpen]);
 
   // `+` -> Agent...: the CLI-agent picker. Mount-once like the editor dialog so
   // the chunk loads on first open and Radix's exit animation still plays.
@@ -591,7 +576,7 @@ export default function App() {
         requestCloseLeaf,
         setNewEditorOpen,
         setAgentDialogOpen,
-        setRdpMenuOpen,
+        openPageTab,
         searchInlineRef,
         editorRefs,
         terminalRefs,
@@ -613,6 +598,7 @@ export default function App() {
       focusNextPaneInTab,
       toggleSidebar,
       commandPaletteHandler,
+      openPageTab,
     ],
   );
 
@@ -680,6 +666,24 @@ export default function App() {
     newRdpTab,
   });
 
+  // Single dispatcher for a saved host of either protocol, routed by
+  // `host.protocol` rather than a narrowing cast: a merged host list can
+  // return either arm for a given id, and `isSshHost`/`isRdpHost` are what
+  // keep a stray RDP row from being read as an SSH one or vice versa. Backs
+  // BOTH the header quick-connect and the page-leaf body (via PaneTreeView's
+  // context) - one path, not two copies of the same routing.
+  const handleConnectHost = useCallback(
+    (host: Host) => {
+      if (isSshHost(host)) handleHeaderConnectSsh(host);
+      else if (isRdpHost(host)) handleHeaderConnectRdp(host);
+    },
+    [handleHeaderConnectSsh, handleHeaderConnectRdp],
+  );
+
+  const handleOpenHostsPage = useCallback(() => {
+    openPageTab("hosts");
+  }, [openPageTab]);
+
   // Activate a tab and focus a specific leaf inside it. Backs the Workspaces
   // panel's terminal list (jump straight to a running terminal).
   const focusLeafInTab = useCallback(
@@ -710,10 +714,8 @@ export default function App() {
             onSplit={splitActivePaneInActiveTab}
             canSplit={headerCanSplit}
             onOpenSettings={handleHeaderOpenSettings}
-            onConnectSsh={handleHeaderConnectSsh}
-            onConnectRdp={handleHeaderConnectRdp}
-            rdpMenuOpen={rdpMenuOpen}
-            onRdpMenuOpenChange={setRdpMenuOpen}
+            onConnectHost={handleConnectHost}
+            onOpenHostsPage={handleOpenHostsPage}
             onMoveLeafToGroup={moveLeafToGroup}
             onMoveLeafToNewTab={moveLeafToNewTab}
             onRotateLeafSplit={rotateLeafSplit}
@@ -774,6 +776,7 @@ export default function App() {
                 aiCliStatuses={aiCliStatuses}
                 sshBindingByConnection={sshBindingByConnection}
                 onReconnectSsh={handleReconnectSshForEditor}
+                onConnectHost={handleConnectHost}
                 mdPreviewLeafIds={mdPreviewLeafIds}
                 onToggleMdPreview={toggleMdPreviewForLeaf}
                 detectedBrowserUrl={detectedBrowserUrl}
@@ -848,11 +851,6 @@ export default function App() {
             explorerRoot={explorerRoot}
             home={home}
             openFileTab={openFileTab}
-            sshEditorMounted={sshEditorMounted}
-            sshEditorOpen={sshEditorOpen}
-            setSshEditorOpen={setSshEditorOpen}
-            editingSshConn={editingSshConn}
-            setEditingSshConn={setEditingSshConn}
             pendingClose={pendingClose}
             cancelClose={cancelClose}
             confirmClose={confirmClose}

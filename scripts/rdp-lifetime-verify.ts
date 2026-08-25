@@ -34,13 +34,16 @@
  *    when a redial resets state - which also fails for a FOURTH set added later
  *    and forgotten.
  *
- * 3. A TEST PROBE CANNOT WRITE TO A ROW IT NO LONGER BELONGS TO. The RDP dialog
- *    is mounted persistently once latched and the trust prompt is global, so
+ * 3. A TEST PROBE CANNOT WRITE TO A ROW IT NO LONGER BELONGS TO. The merged host
+ *    editor (`HostEditorDialog`, 6d - this used to be `RdpConnectionDialog`) is
+ *    mounted persistently once latched and the trust prompt is global, so
  *    closing the dialog neither cancels a probe nor hides its question: row A ->
  *    Test -> cancel -> open row B -> answer, and an ungated
- *    `setPinnedFingerprint` writes A's certificate into B's form state, which
- *    Save then persists onto B. It fails closed (B's next connect aborts as a
- *    mismatch) but it is a pinned certificate on a row the user never tested.
+ *    `setPinnedFingerprint` writes A's certificate (or SSH host key) into B's
+ *    form state, which Save then persists onto B. It fails closed (B's next
+ *    connect aborts as a mismatch) but it is a pinned key on a row the user
+ *    never tested. The merge widened this from an RDP-only check to both
+ *    protocols, since one `runTest` and one `onTrusted` now serve them both.
  *
  * 4. THE `pagehide` BACKSTOP ANSWERS BOTH PROTOCOLS. `HostKeyPromptDialog` is
  *    shared, so its backstop fires for an SSH host key as well as an RDP
@@ -83,7 +86,7 @@ function between(src: string, from: string, to: string): string {
 }
 
 const paneSrc = read("src/modules/rdp/RdpPane.tsx");
-const dialogSrc = read("src/modules/rdp/RdpConnectionDialog.tsx");
+const editorSrc = read("src/modules/hosts/HostEditorDialog.tsx");
 const promptDialogSrc = read("src/modules/ssh/HostKeyPromptDialog.tsx");
 
 // ---------------------------------------------------------------------------
@@ -199,36 +202,44 @@ console.log("\n[2] every held set the pane keeps is released on blur");
 console.log("\n[3] a Test probe cannot write to a row it no longer belongs to");
 {
   check(
-    "the dialog tracks the row it is showing right now",
-    /editingIdRef\.current = editing\?\.id \?\? null;/.test(dialogSrc),
+    "the editor tracks the target it is showing right now",
+    /applied\.current = token;/.test(editorSrc),
   );
 
-  const runTest = between(dialogSrc, "const runTest = async () => {", "const save = async () => {");
+  const runTest = between(editorSrc, "const runTest = async () => {", "const save = async () => {");
   check("runTest was found", runTest.length > 500, runTest.length);
+  check("a probe captures the token it started on", /const probeToken = token;/.test(runTest));
   check(
-    "a probe captures the row it started on",
-    /const probeRow = editing\?\.id \?\? null;/.test(runTest),
-  );
-  check(
-    "and compares it against the row on screen, not against its own capture",
-    /editingIdRef\.current === probeRow/.test(runTest),
+    "and compares it against the target on screen, not against its own capture",
+    /applied\.current === probeToken/.test(runTest),
   );
 
-  /** Is this write gated on the dialog still being on the probe's row? */
+  /**
+   * Is this write gated by its OWN immediately-preceding `onProbeRow()` guard -
+   * same statement, not merely "somewhere earlier in the function"? The naive
+   * "look back N chars" check false-positived here: `onTrusted`'s two writes
+   * sit right next to each other, so a wide-enough lookback from the SECOND
+   * (deliberately ungated) one still sees the FIRST write's guard and calls it
+   * gated. Stopping at the nearest statement terminator is what tells them
+   * apart.
+   */
   const gated = (needle: string): boolean => {
     const at = runTest.indexOf(needle);
     if (at < 0) return false;
-    return runTest.slice(Math.max(0, at - 90), at).includes("onProbeRow()");
+    const guardAt = runTest.lastIndexOf("onProbeRow()", at);
+    if (guardAt < 0) return false;
+    return !runTest.slice(guardAt, at).includes(";");
   };
   check(
-    "accepting a certificate writes the form's pin only while the row matches",
-    gated("setPinnedFingerprint(prompt.fingerprint)"),
+    "accepting a certificate or host key writes the form's pin only while the target matches",
+    gated("setPinnedFingerprint(fingerprint)"),
   );
-  // The saved row is the opposite case and must NOT be gated: `editing` is the
-  // row that was tested, so the pin belongs there however long the answer took.
+  // The saved row is the opposite case and must NOT be gated: `probeHostId` is
+  // the row that was tested, so the pin belongs there however long the answer
+  // took.
   check(
     "but the SAVED row is pinned unconditionally, since that is the row tested",
-    !gated("pinFingerprint(editing.id, prompt.fingerprint)"),
+    !gated("pinFingerprint(probeHostId, fingerprint)"),
   );
   check("a successful result is gated", gated('kind: "ok"'));
   check("and so is a failure", gated('kind: "fail"'));

@@ -8,6 +8,7 @@ import type {
 } from "@/modules/terminal/lib/useTerminalSession";
 import type { SshConnectionBinding, SshStatus } from "@/modules/ssh/status";
 import { useHosts } from "@/modules/hosts/useHosts";
+import type { Host } from "@/modules/hosts/types";
 import type { AiCliStatus } from "@/modules/terminal/lib/aiCliStatus";
 import type { SearchAddon } from "@xterm/addon-search";
 import { useEffect, useMemo, useRef } from "react";
@@ -64,6 +65,10 @@ type Props = {
   /** Open an SSH session for a saved connection, from a remote editor pane that
    *  has no live session to bind to. */
   onReconnectSsh?: (connectionId: string, title: string) => void;
+  /** Connect a saved host through App's connect path, routed by
+   *  `host.protocol`. Passed straight through to `PaneTreeView`'s context - a
+   *  page leaf body is the first consumer, not this file. */
+  onConnectHost?: (host: Host) => void;
 };
 
 export function PaneStack({
@@ -95,6 +100,7 @@ export function PaneStack({
   aiCliStatuses,
   sshBindingByConnection,
   onReconnectSsh,
+  onConnectHost,
 }: Props) {
   // Memoize the filter so the prune effect below sees a stable identity.
   const paneTabs = useMemo(() => tabs.filter((t): t is PaneTab => t.kind === "pane"), [tabs]);
@@ -224,6 +230,7 @@ export function PaneStack({
               aiCliStatuses={aiCliStatuses}
               sshBindingByConnection={sshBindingByConnection}
               onReconnectSsh={onReconnectSsh}
+              onConnectHost={onConnectHost}
             />
           </div>
         );

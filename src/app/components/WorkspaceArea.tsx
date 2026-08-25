@@ -4,6 +4,7 @@ import { PaneStack } from "@/modules/panes";
 import { type AiCliStatus } from "@/modules/terminal/lib/aiCliStatus";
 import { type SshConnectionBinding, type SshStatus } from "@/modules/ssh/status";
 import { type PaneTab, type Tab } from "@/modules/tabs";
+import type { Host } from "@/modules/hosts/types";
 import type { SearchAddon } from "@xterm/addon-search";
 import { type TabsApi } from "../hooks/tabsApi";
 import { type usePaneHandles } from "../hooks/usePaneHandles";
@@ -26,6 +27,10 @@ type Props = {
   sshBindingByConnection: Map<string, SshConnectionBinding>;
   /** Open an SSH session for a saved connection (remote editor reconnect). */
   onReconnectSsh: (connectionId: string, title: string) => void;
+  /** Connect a saved host through App's connect path, routed by
+   *  `host.protocol`. Passed straight through to `PaneStack`; a page leaf
+   *  body is the first consumer, not this file. */
+  onConnectHost?: (host: Host) => void;
   mdPreviewLeafIds: ReadonlySet<number>;
   /** Flip a markdown editor leaf between source and preview, from its pane header. */
   onToggleMdPreview: (leafId: number) => void;
@@ -55,6 +60,7 @@ export function WorkspaceArea({
   aiCliStatuses,
   sshBindingByConnection,
   onReconnectSsh,
+  onConnectHost,
   mdPreviewLeafIds,
   onToggleMdPreview,
   detectedBrowserUrl,
@@ -109,6 +115,7 @@ export function WorkspaceArea({
               aiCliStatuses={aiCliStatuses}
               sshBindingByConnection={sshBindingByConnection}
               onReconnectSsh={onReconnectSsh}
+              onConnectHost={onConnectHost}
             />
           </div>
           {/* The Board is a pane LEAF, not an overlay surface: it renders

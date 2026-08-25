@@ -8,7 +8,6 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { type SshHost } from "@/modules/hosts/types";
 import { HostKeyPromptDialog } from "@/modules/ssh/HostKeyPromptDialog";
 import { lazy, Suspense, type Dispatch, type SetStateAction } from "react";
 import { type QuitGuard } from "../hooks/useQuitGuard";
@@ -18,9 +17,6 @@ import { type PaneLayout } from "@/modules/terminal";
 // Dialogs mount only while `open` is true.
 const NewEditorDialog = lazy(() =>
   import("@/modules/editor/NewEditorDialog").then((m) => ({ default: m.NewEditorDialog })),
-);
-const SshConnectionDialog = lazy(() =>
-  import("@/modules/ssh/SshConnectionDialog").then((m) => ({ default: m.SshConnectionDialog })),
 );
 const AgentSpawnDialog = lazy(() =>
   import("@/modules/tabs/components/AgentSpawnDialog").then((m) => ({
@@ -40,11 +36,6 @@ type Props = {
   explorerRoot: string | null;
   home: string | null;
   openFileTab: (path: string) => void;
-  sshEditorMounted: boolean;
-  sshEditorOpen: boolean;
-  setSshEditorOpen: Dispatch<SetStateAction<boolean>>;
-  editingSshConn: SshHost | null;
-  setEditingSshConn: Dispatch<SetStateAction<SshHost | null>>;
   pendingClose: PendingClose | null;
   cancelClose: () => void;
   confirmClose: () => void;
@@ -53,10 +44,17 @@ type Props = {
 
 /**
  * The dialog/overlay JSX cluster lifted out of App's render tree: the
- * ask-from-selection popup, the lazy NewEditor / SSH dialogs, and the
+ * ask-from-selection popup, the lazy NewEditor dialog, and the
  * close-confirmation AlertDialog. Every value/handler it uses arrives as an
  * explicit prop; the lazy() + Suspense wrappers and conditional mounting are
  * preserved verbatim.
+ *
+ * The SSH host editor used to mount here too, behind `sshEditorOpen` /
+ * `editingSshConn` state in App.tsx - but nothing ever set that state to open
+ * it (SshMenu opened its own copy of the dialog instead). 6d's merged editor
+ * replaces it: `HostEditorDialog` lives inside `HostsPage` itself and is
+ * raised by `requestHostEditor` (`modules/hosts/pendingEditor.ts`), which the
+ * header's quick-connect already calls.
  */
 export function AppDialogs({
   agentDialogMounted,
@@ -69,11 +67,6 @@ export function AppDialogs({
   explorerRoot,
   home,
   openFileTab,
-  sshEditorMounted,
-  sshEditorOpen,
-  setSshEditorOpen,
-  editingSshConn,
-  setEditingSshConn,
   pendingClose,
   cancelClose,
   confirmClose,
@@ -101,19 +94,6 @@ export function AppDialogs({
             onOpenChange={setNewEditorOpen}
             rootPath={explorerRoot ?? home}
             onCreated={(path) => openFileTab(path)}
-          />
-        </Suspense>
-      ) : null}
-
-      {sshEditorMounted ? (
-        <Suspense fallback={null}>
-          <SshConnectionDialog
-            open={sshEditorOpen}
-            onOpenChange={(o) => {
-              setSshEditorOpen(o);
-              if (!o) setEditingSshConn(null);
-            }}
-            editing={editingSshConn}
           />
         </Suspense>
       ) : null}

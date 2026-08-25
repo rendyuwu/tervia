@@ -14,6 +14,7 @@ import { type ShortcutHandlers } from "@/modules/shortcuts";
 import { type TerminalPaneHandle } from "@/modules/terminal";
 import { type EditorPaneHandle } from "@/modules/editor";
 import { type SearchInlineHandle } from "@/modules/header";
+import { type PageKind } from "@/modules/terminal/lib/panes";
 
 /**
  * Component-local identifiers from App that the keyboard-shortcut handler
@@ -32,10 +33,9 @@ export interface ShortcutHandlerDeps {
   requestCloseLeaf: (leafId: number) => void;
   setNewEditorOpen: (open: boolean) => void;
   setAgentDialogOpen: (open: boolean) => void;
-  /** Raise the header's RDP connection list. Backs the palette's
-   *  "Connect RDP..." - the list IS the picker, and a palette command has no
-   *  trigger to click. */
-  setRdpMenuOpen: (open: boolean) => void;
+  /** Open a rail page. Backs `rdp.connect` below, repointed at the Hosts page
+   *  now that connecting lives there instead of behind the RDP dropdown. */
+  openPageTab: (page: PageKind) => void;
   searchInlineRef: RefObject<SearchInlineHandle | null>;
   editorRefs: RefObject<Map<number, EditorPaneHandle>>;
   terminalRefs: RefObject<Map<number, TerminalPaneHandle>>;
@@ -57,7 +57,7 @@ export function buildShortcutHandlers(deps: ShortcutHandlerDeps): ShortcutHandle
     requestCloseLeaf,
     setNewEditorOpen,
     setAgentDialogOpen,
-    setRdpMenuOpen,
+    openPageTab,
     searchInlineRef,
     editorRefs,
     terminalRefs,
@@ -71,7 +71,8 @@ export function buildShortcutHandlers(deps: ShortcutHandlerDeps): ShortcutHandle
     "tab.new": openNewTab,
     "tab.newEditor": () => setNewEditorOpen(true),
     "tab.newAgent": () => setAgentDialogOpen(true),
-    "rdp.connect": () => setRdpMenuOpen(true),
+    // Used to raise the RDP dropdown; connecting now lives on the Hosts page.
+    "rdp.connect": () => openPageTab("hosts"),
     "tab.close": handleCloseTabOrPane,
     "tab.next": () => cycleTab(1),
     "tab.prev": () => cycleTab(-1),

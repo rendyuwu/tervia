@@ -64,6 +64,7 @@ import { statusLabelClass, type SshConnectionBinding, type SshStatus } from "@/m
 import { type PaneEntry } from "@/modules/tabs/lib/entries";
 import type { Tab } from "@/modules/tabs";
 import { leafLabel } from "@/modules/tabs/lib/tabHelpers";
+import { HostsPage } from "@/modules/hosts/HostsPage";
 import type { Host } from "@/modules/hosts/types";
 import { type AiCliStatus } from "@/modules/terminal/lib/aiCliStatus";
 import { useTerminalTitles } from "@/modules/terminal/lib/terminalTitles";
@@ -187,6 +188,9 @@ type Props = {
   boardTabs?: Tab[];
   /** Focus any leaf in any tab, for a board leaf's cards. */
   onFocusEntry?: (tabId: number, leafId: number) => void;
+  /** Connect a saved host through App's connect path, routed by
+   *  `host.protocol`. Backs the Hosts page leaf body's connect action (6d). */
+  onConnectHost?: (host: Host) => void;
 };
 
 type PaneDragState = {
@@ -242,6 +246,11 @@ type PaneMetaValue = {
   /** Focus any leaf in any tab. A board leaf's cards address panes outside
    *  their own tab, which the per-tab `onFocusLeaf` cannot express. */
   onFocusEntry?: (tabId: number, leafId: number) => void;
+  /** Connect a saved host through App's connect path, routed by
+   *  `host.protocol`. Read by `PageLeafBody`'s Hosts case (6d); it rides this
+   *  context rather than a prop on `PageLeafBody` alone because App's connect
+   *  handlers are workspace-wide, same reasoning as `onFocusEntry` above. */
+  onConnectHost?: (host: Host) => void;
 };
 
 // SSH host/status lives in its own context so status pushes re-render only the
@@ -275,12 +284,25 @@ function BoardLeafBody({ leafId }: { leafId: number }) {
 }
 
 /**
- * A page leaf's body. Placeholder for phase 6c - the real Hosts/Vault/
- * Port-Forwarding UIs (6d/6e/6f) replace this without touching anything
- * around it: the pane header, drag, close, split and persistence are already
- * wired to the leaf, not to what's rendered inside it.
+ * A page leaf's body. `hosts` renders the real page (6d); `vault` and
+ * `forwards` still fall through to the 6c placeholder below - they land in
+ * 6e/6f without touching anything around them, since the pane header, drag,
+ * close, split and persistence are already wired to the leaf, not to what's
+ * rendered inside it.
  */
 function PageLeafBody({ page }: { page: PageKind }) {
+  const { onConnectHost } = use(PaneMetaContext);
+  if (page === "hosts") {
+    return (
+      <HostsPage
+        // `onConnectHost` is optional only because `PaneMetaContext`'s default
+        // value (`{}`) has to type-check; App always supplies the real
+        // dispatcher, so this fallback is never a state a real user reaches -
+        // it exists for the context default, not as a supported no-op path.
+        onConnect={onConnectHost ?? (() => {})}
+      />
+    );
+  }
   const Icon = PAGE_ICONS[page];
   return (
     <div className="bg-background text-muted-foreground flex h-full w-full flex-col items-center justify-center gap-3 p-6 text-center">
@@ -1066,6 +1088,7 @@ export function PaneTreeView({
   onReconnectSsh,
   boardTabs,
   onFocusEntry,
+  onConnectHost,
 }: Props) {
   const leafList = useMemo(() => leaves(node), [node]);
   const leafCount = leafList.length;
@@ -1158,6 +1181,7 @@ export function PaneTreeView({
       onReconnectSsh,
       boardTabs,
       onFocusEntry,
+      onConnectHost,
     }),
     [
       hosts,
@@ -1167,6 +1191,7 @@ export function PaneTreeView({
       onReconnectSsh,
       boardTabs,
       onFocusEntry,
+      onConnectHost,
     ],
   );
 
