@@ -362,3 +362,22 @@ export function defaultHostsTab(allocId: () => number): Tab {
     activeLeafId: leafId,
   };
 }
+
+/**
+ * Live tabs for a workspace with no cached live-tab entry (i.e. it hasn't been
+ * visited yet this session): its saved tabs restored, or - if it has none - the
+ * Hosts page. The runtime counterpart of decision 9's startup fallback in
+ * `useWorkspacePersistence`, so switching to (or creating) an empty workspace
+ * lands on the same screen a fresh profile does instead of a local shell.
+ *
+ * Lives here rather than beside its `useWorkspaceSwitching` callers because it
+ * needs nothing from that hook, and here it is reachable from
+ * `workspace-serialize-verify` - which cannot import the hook, whose module
+ * pulls in `@xterm/xterm` (no `exports` map, so Node can't resolve `Terminal`
+ * outside a bundler). Only `tabs` is read; callers pass a whole workspace.
+ */
+export function tabsForWorkspaceEntry(entry: { tabs: SavedTab[] }, allocId: () => number): Tab[] {
+  return entry.tabs.length === 0
+    ? [defaultHostsTab(allocId)]
+    : entry.tabs.map((s) => savedToTab(s, allocId));
+}

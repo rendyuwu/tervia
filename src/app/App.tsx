@@ -595,7 +595,6 @@ export default function App() {
         searchInlineRef,
         editorRefs,
         terminalRefs,
-        tabsRef,
         activeId,
         activeLeafIdInTab,
         activeLeafKindCurrent,

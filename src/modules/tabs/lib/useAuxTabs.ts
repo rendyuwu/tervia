@@ -98,14 +98,28 @@ export function useAuxTabs({ setTabs, setActiveId, nextIdRef, tabsRef }: AuxTabs
    * logins with nothing to fight over.
    */
   const openPageTab = useCallback((page: PageKind) => {
-    const existing = tabsRef.current.find(
-      (t) =>
-        t.kind === "pane" &&
-        leaves(t.paneTree).some((l) => l.leafKind === "page" && l.page === page),
-    );
+    const existing = (() => {
+      for (const t of tabsRef.current) {
+        if (t.kind !== "pane") continue;
+        const leaf = leaves(t.paneTree).find((l) => l.leafKind === "page" && l.page === page);
+        if (leaf) return { tabId: t.id, leafId: leaf.id };
+      }
+      return null;
+    })();
     if (existing) {
-      setActiveId(existing.id);
-      return existing.id;
+      // Focus the page LEAF, not just its tab. The rail button carries a pressed
+      // state, so when the page shares a tab with a focused terminal, activating
+      // the tab alone would leave the button reading as engaged with the caret
+      // still in the terminal - a dead click on a permanent affordance.
+      setActiveId(existing.tabId);
+      setTabs((curr) =>
+        curr.map((t) =>
+          t.id === existing.tabId && t.kind === "pane" && t.activeLeafId !== existing.leafId
+            ? syncPaneMirror({ ...t, activeLeafId: existing.leafId })
+            : t,
+        ),
+      );
+      return existing.tabId;
     }
     const tabId = nextIdRef.current++;
     const leafId = nextIdRef.current++;

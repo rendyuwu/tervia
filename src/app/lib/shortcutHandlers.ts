@@ -11,14 +11,13 @@ import {
   CONTENT_ZOOM_STEP,
 } from "@/modules/settings/store";
 import { type ShortcutHandlers } from "@/modules/shortcuts";
-import { leaves, type TerminalPaneHandle } from "@/modules/terminal";
+import { type TerminalPaneHandle } from "@/modules/terminal";
 import { type EditorPaneHandle } from "@/modules/editor";
 import { type SearchInlineHandle } from "@/modules/header";
-import { type Tab } from "@/modules/tabs";
 
 /**
  * Component-local identifiers from App that the keyboard-shortcut handler
- * map closes over. Module-level dependencies (stores, constants, `leaves`,
+ * map closes over. Module-level dependencies (stores, constants,
  * openSettingsWindow) are imported directly above and are NOT threaded
  * through here. See App.tsx for the call site and its memo dep array.
  */
@@ -40,7 +39,6 @@ export interface ShortcutHandlerDeps {
   searchInlineRef: RefObject<SearchInlineHandle | null>;
   editorRefs: RefObject<Map<number, EditorPaneHandle>>;
   terminalRefs: RefObject<Map<number, TerminalPaneHandle>>;
-  tabsRef: RefObject<Tab[]>;
   activeId: number;
   activeLeafIdInTab: number | null;
   activeLeafKindCurrent: "terminal" | "editor" | "rdp" | null;
@@ -63,7 +61,6 @@ export function buildShortcutHandlers(deps: ShortcutHandlerDeps): ShortcutHandle
     searchInlineRef,
     editorRefs,
     terminalRefs,
-    tabsRef,
     activeId,
     activeLeafIdInTab,
     activeLeafKindCurrent,
@@ -158,18 +155,13 @@ export function buildShortcutHandlers(deps: ShortcutHandlerDeps): ShortcutHandle
         if (text) term.paste(text);
       });
     },
-    // Ctrl+Shift+X: close the focused terminal pane. Blocked when it's
-    // the last terminal in the workspace, mirroring the respawn rule in
-    // handleLeafExit. Routes through `requestCloseLeaf` so a busy terminal
-    // confirms before being killed.
+    // Ctrl+Shift+X: close the focused terminal pane, through `requestCloseLeaf`
+    // so a busy terminal confirms before being killed. Deliberately carries no
+    // count of its own: `closePaneByLeaf` is the single arbiter of whether a
+    // close is legal, which is what keeps this chord agreeing with the
+    // pane-header and tab-strip X buttons rather than refusing what they allow.
     "terminal.close": () => {
       if (activeLeafIdInTab === null || activeLeafKindCurrent !== "terminal") return;
-      let terminalLeafCount = 0;
-      for (const t of tabsRef.current) {
-        if (t.kind !== "pane") continue;
-        for (const l of leaves(t.paneTree)) if (l.leafKind === "terminal") terminalLeafCount++;
-      }
-      if (terminalLeafCount <= 1) return;
       requestCloseLeaf(activeLeafIdInTab);
     },
   };

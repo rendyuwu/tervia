@@ -1,5 +1,5 @@
 /**
- * Workspace serialization audit. Five properties, all silent when broken:
+ * Workspace serialization audit. Eight properties, all silent when broken:
  *
  * 1. A remote (SFTP) editor leaf must never round-trip through its SESSION.
  *    `sshSessionId` is a live russh number: dead after a restart, and since the
@@ -34,23 +34,28 @@
  * 7. Switching to (or creating) a workspace with no saved tabs must land on
  *    the Hosts page, matching the startup fallback (decision 9) instead of
  *    reverting to a local shell; a workspace that does have saved tabs must
- *    still restore them untouched. `useWorkspaceSwitching.ts`'s hook can't be
- *    executed here (see the comment at that check), so this pins the
- *    building blocks behaviourally and the actual wiring by source text.
+ *    still restore them untouched. And the fallback tab must itself survive a
+ *    restart, since it is snapshotted like any other tab.
+ * 8. Closing a leaf must be refused only when it is the last thing ON SCREEN,
+ *    never when it is merely the last TERMINAL. Since the default tab became a
+ *    Hosts page a workspace can hold zero terminals and still be full, so the
+ *    old proxy both resurrected a terminal the user had just exited and made
+ *    Ctrl+Shift+X a silent no-op.
  *
  * Run: `npx tsx scripts/workspace-serialize-verify.ts`.
  *
- * serialize.ts pulls in panes.ts (type-only imports) and the zustand title
- * store, so this runs under plain node with hand-built pane trees.
+ * serialize.ts and tabs/lib/entries.ts pull in panes.ts (type-only imports) and
+ * the zustand title store, so this runs under plain node with hand-built pane
+ * trees.
  */
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import {
   defaultHostsTab,
   serializeTabs,
   savedActiveTabIndex,
   savedToTab,
+  tabsForWorkspaceEntry,
 } from "../src/modules/workspaces/serialize";
+import { countTabEntries, isLastEntryInWorkspace } from "../src/modules/tabs/lib/entries";
 import {
   foldSshBinding,
   type SshConnectionBinding,
@@ -566,8 +571,35 @@ console.log("\n[page] a rail page leaf round-trips its page value, name and tree
   );
 }
 
+// Clearing a name must delete the key, not persist `""` - a blank string would
+// restore as a nameless tab. Tested on `page` and not only on `terminal`
+// because each kind spells its own `customTitle` spread, so the guard is
+// per-kind rather than shared.
+{
+  const cleared = tab({ ...(page(1404, "vault") as object), customTitle: "" } as PaneNode, 1404);
+  const savedCleared = onlyLeaf(serializeTabs([cleared])[0]);
+  check("a cleared page name persists no key", "customTitle" in savedCleared, false);
+}
+
 // Inside a split: the tree shape and divider ratios survive around a page
-// leaf exactly as they do around any other kind.
+// leaf exactly as they do around any other kind - BOTH directions, since a
+// column split is a separate code path in the pane tree.
+{
+  const t = tab(split("col", [page(1405, "forwards"), term(1406)], [35, 65]), 1405);
+  const s = serializeTabs([t]);
+  check("a page leaf is saved in a column split", shape(s[0]), "split(page,terminal)");
+  check("the column's divider ratios survive", sizes(s[0]), [35, 65]);
+  check("the page leaf is the active one", activeIdx(s[0]), 0);
+
+  const restored = savedToTab(s[0], () => id());
+  const tree = restored.paneTree;
+  check(
+    "and the column direction survives restore",
+    tree.kind === "split" ? [tree.dir, tree.children.length] : null,
+    ["col", 2],
+  );
+}
+
 {
   const t = tab(split("row", [term(1402), page(1403, "hosts")], [40, 60]), 1403);
   const s = serializeTabs([t]);
@@ -606,59 +638,108 @@ console.log(
   "\n[switch] switching to (or creating) an empty workspace opens Hosts, not a shell; a saved one restores untouched",
 );
 
-// `useWorkspaceSwitching.ts`'s `tabsForWorkspaceEntry` - decision 9's runtime
-// counterpart to `useWorkspacePersistence`'s startup fallback - can't be
-// imported here: that hook file also imports `disposeSession` from
-// `@/modules/terminal`, whose module imports `@xterm/xterm` at the top level,
-// and that package ships no `exports` map, so Node's CJS/ESM interop can't
-// resolve `Terminal` as a named export outside a bundler (Vite handles it;
-// tsx/node does not). These checks exercise the same `defaultHostsTab` /
-// `savedToTab` production functions the hook is built from; the source
-// check below pins the actual wiring at both of the hook's call sites.
+// `tabsForWorkspaceEntry` is decision 9's runtime counterpart to
+// `useWorkspacePersistence`'s startup fallback, and the single resolver both
+// `switchToWorkspace` and `closeWorkspace` go through. It lives in serialize.ts
+// (not beside those callers in `useWorkspaceSwitching`, whose module pulls in
+// `@xterm/xterm` and so cannot be imported outside a bundler) precisely so it
+// can be exercised here for real, rather than pinned by grepping the hook's
+// source - a test that reddens on a pure refactor and stays green on a
+// regression in the function itself.
 {
   let n = 1;
   const allocId = () => n++;
 
-  const emptyResult = [defaultHostsTab(allocId)];
-  check("an empty workspace's fallback is a single tab", emptyResult.length, 1);
+  const empty = tabsForWorkspaceEntry({ tabs: [] }, allocId);
+  check("an empty workspace's fallback is a single tab", empty.length, 1);
+  const emptyLeaf = empty[0].paneTree;
   check(
     "and it is a Hosts page leaf, not a terminal",
-    emptyResult[0].paneTree.kind === "leaf" ? emptyResult[0].paneTree.leafKind : null,
-    "page",
+    emptyLeaf.kind === "leaf" && emptyLeaf.leafKind === "page" ? emptyLeaf.page : null,
+    "hosts",
   );
 
   const saved = serializeTabs([tab(term(1701), 1701), tab(page(1702, "vault"), 1702)]);
-  const restored = saved.map((s) => savedToTab(s, allocId));
+  const restored = tabsForWorkspaceEntry({ tabs: saved }, allocId);
   check(
     "a workspace with saved tabs restores the same leaf kinds untouched",
     restored.map((t) => (t.paneTree.kind === "leaf" ? t.paneTree.leafKind : "split")),
     ["terminal", "page"],
   );
+  check("and the fallback is not prepended to them", restored.length, 2);
 }
 
-// Both `switchToWorkspace` and `closeWorkspace` must resolve an empty
-// workspace's live tabs through `tabsForWorkspaceEntry`, and that function
-// must route the empty case through `defaultHostsTab` - never back through
-// `defaultTabForEmptyWorkspace`, the local-shell fallback it replaced.
+// The fallback tab has to survive a restart like any other tab: it is
+// snapshotted on the first save, so a page leaf that failed to round-trip would
+// turn a fresh profile's only tab into an empty terminal on the next launch -
+// silently reintroducing exactly the shell that decision 9 replaced.
 {
-  const hookSrc = readFileSync(
-    fileURLToPath(new URL("../src/app/hooks/useWorkspaceSwitching.ts", import.meta.url)),
-    "utf8",
-  );
+  let n = 1;
+  const allocId = () => n++;
+  const s = serializeTabs([defaultHostsTab(allocId)]);
+  check("the fallback tab is persisted", s.length, 1);
+  const back = savedToTab(s[0], allocId);
+  const backLeaf = back.paneTree;
   check(
-    "the empty-workspace branch is wired to defaultHostsTab",
-    /entry\.tabs\.length === 0[\s\S]*?\?\s*\[defaultHostsTab\(allocId\)\][\s\S]*?:\s*entry\.tabs\.map/.test(
-      hookSrc,
-    ),
-    true,
+    "and comes back as the same Hosts page",
+    backLeaf.kind === "leaf" && backLeaf.leafKind === "page" ? backLeaf.page : null,
+    "hosts",
   );
+  check("with its title intact", back.title, "Hosts");
+}
+
+console.log(
+  "\n[close] a leaf is unclosable only when it is the last thing on screen, not the last terminal",
+);
+
+// 8. The proxy that broke in 6c. `isLastEntryInWorkspace` is what both close
+// paths ask: `handleLeafExit` respawns exactly here (and closes everywhere
+// else), and it is the one close `closePaneByLeaf` refuses. Answering "is this
+// the last TERMINAL" instead resurrected a shell the user had just `exit`ed
+// whenever a Hosts tab was the other thing on screen.
+{
+  const hostsTab = tab(page(1801, "hosts"), 1801);
+  const termTab = tab(term(1802), 1802);
+
+  check("a lone leaf is the last thing on screen", isLastEntryInWorkspace([termTab], 1802), true);
+  // The regression: one terminal, one Hosts page. Zero OTHER terminals, so the
+  // old guard respawned; but the window keeps the Hosts page, so it must close.
   check(
-    "the old local-shell fallback is gone from the switching hook",
-    hookSrc.includes("defaultTabForEmptyWorkspace"),
+    "the only terminal is closable when a page tab is also open",
+    isLastEntryInWorkspace([hostsTab, termTab], 1802),
     false,
   );
-  const callSites = hookSrc.match(/tabsForWorkspaceEntry\(next, allocId\)/g) ?? [];
-  check("both switchToWorkspace and closeWorkspace call the shared helper", callSites.length, 2);
+  check(
+    "and the page leaf beside it is closable too",
+    isLastEntryInWorkspace([hostsTab, termTab], 1801),
+    false,
+  );
+  // A lone page tab is the last thing on screen just as a lone terminal is:
+  // "last entry" is about the window emptying, not about which kind it holds.
+  check(
+    "a lone page leaf is the last thing on screen too",
+    isLastEntryInWorkspace([hostsTab], 1801),
+    true,
+  );
+  // Two panes in ONE tab: the tab list is length 1, so a tabs-only count would
+  // wrongly refuse this close.
+  const splitTab = tab(split("row", [term(1803), page(1804, "vault")]), 1803);
+  check(
+    "a pane in a split is never the last thing on screen",
+    isLastEntryInWorkspace([splitTab], 1803),
+    false,
+  );
+  // A leaf that is not on screen at all must not be mistaken for the last one,
+  // or a stale exit event would respawn a shell into a workspace it left.
+  check(
+    "an unknown leaf id is not the last thing on screen",
+    isLastEntryInWorkspace([termTab], 9999),
+    false,
+  );
+  // The oracle underneath, and the count the broken guard should have used: a
+  // Hosts tab plus a terminal is TWO things on screen, not one.
+  check("a page tab and a terminal tab are two entries", countTabEntries([hostsTab, termTab]), 2);
+  check("a two-pane split is two entries", countTabEntries([splitTab]), 2);
 }
 
 // `throw` (not process.exit) for a non-zero exit, matching the other verify scripts.

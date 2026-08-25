@@ -2,6 +2,7 @@ import { cn } from "@/lib/utils";
 import {
   type PageKind,
   type PaneLeaf,
+  hasLeaf,
   isRemoteEditorLeaf,
   leaves,
 } from "@/modules/terminal/lib/panes";
@@ -68,9 +69,10 @@ export type Entry = PaneEntry | StandaloneEntry;
 
 /**
  * Background color for the per-tab accent stripe. Emerald for local shell,
- * sky for SSH and RDP, brand blue for editor. Rendered as a `<span>` (not
- * `::after`) because the primitive `TabsTrigger` already uses `::after` with
- * equal specificity. Keep strings as full literals for Tailwind's JIT.
+ * sky for SSH and RDP, brand blue for editor, violet for the app's own surfaces
+ * (board, rail page). Rendered as a `<span>` (not `::after`) because the
+ * primitive `TabsTrigger` already uses `::after` with equal specificity. Keep
+ * strings as full literals for Tailwind's JIT.
  */
 export function tabAccentClass(e: Entry): string {
   if (e.kind === "pane-leaf") {
@@ -83,10 +85,16 @@ export function tabAccentClass(e: Entry): string {
     // theme presets: both are "a session on another machine", which is exactly
     // what the accent is distinguishing from a local shell and a file.
     if (e.leafKind === "rdp") return "bg-[color:var(--tervia-tab-ssh)]";
+    // A board and a rail page are none of the three things this accent tells
+    // apart - not a local shell, not a remote session, not a file - so they
+    // share the violet rather than falling through to the editor colour and
+    // reading as a file. Reused rather than given tokens of their own, which
+    // would mean editing all 20 theme presets.
+    if (e.leafKind === "board" || e.leafKind === "page") {
+      return "bg-[color:var(--tervia-tab-ai-diff)]";
+    }
     return "bg-[color:var(--tervia-tab-editor)]";
   }
-  // Board: reuses the violet accent rather than adding a token of its own to
-  // all 20 theme presets.
   return "bg-[color:var(--tervia-tab-ai-diff)]";
 }
 
@@ -166,4 +174,18 @@ export function countTabEntries(tabs: Tab[]): number {
   let n = 0;
   for (const t of tabs) n += t.kind === "pane" ? leaves(t.paneTree).length : 1;
   return n;
+}
+
+/**
+ * True when `leafId` is the only thing the workspace has on screen, so closing
+ * it would leave an empty window. This - not "is this the last TERMINAL" - is
+ * what a close path has to ask: since the default tab became a Hosts page, a
+ * workspace can hold zero terminals and still be full, and `exit` in the only
+ * terminal beside it must close the pane rather than resurrect it. It is also
+ * exactly the close `closePaneByLeaf` refuses, so asking here keeps the two in
+ * step instead of one path blocking what the other allows.
+ */
+export function isLastEntryInWorkspace(tabs: Tab[], leafId: number): boolean {
+  if (countTabEntries(tabs) !== 1) return false;
+  return tabs.some((t) => t.kind === "pane" && hasLeaf(t.paneTree, leafId));
 }

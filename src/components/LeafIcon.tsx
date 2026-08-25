@@ -30,7 +30,16 @@ export type LeafIconInfo = {
   page?: PageKind;
 };
 
-const PAGE_ICONS: Record<PageKind, LucideIcon> = {
+/**
+ * One glyph per rail page. Single source of truth, read by the activity rail,
+ * the tab strip / pane header (via `LeafIcon` below) and the page body itself -
+ * `Record<PageKind, …>` catches a MISSING page but nothing catches a divergent
+ * one, so three copies meant re-marking Vault in the rail and silently leaving
+ * the strip on the old glyph. Lives here rather than in `terminal/lib/panes.ts`
+ * beside `PAGE_LABELS` because no file under a `lib/` directory imports
+ * `lucide-react`, and this file already does.
+ */
+export const PAGE_ICONS: Record<PageKind, LucideIcon> = {
   hosts: Router,
   vault: Vault,
   forwards: ArrowLeftRight,

@@ -40,7 +40,7 @@ import { setLineWrap } from "@/modules/settings/store";
 import { shortcutHint } from "@/modules/shortcuts/shortcuts";
 import { IconTooltip } from "@/components/ui/icon-tooltip";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
-import { LeafIcon, type LeafIconInfo } from "@/components/LeafIcon";
+import { LeafIcon, PAGE_ICONS, type LeafIconInfo } from "@/components/LeafIcon";
 import { cn } from "@/lib/utils";
 import { type EditorPaneHandle } from "@/modules/editor";
 import { useExplorerIconsReady } from "@/modules/explorer/lib/iconResolver";
@@ -71,20 +71,16 @@ import { closeFloat, floatPane, pushBoardCards } from "./floatHost";
 import { useFloatStore } from "./floatStore";
 import type { FloatLeafParams } from "./floatProtocol";
 import {
-  ArrowLeftRight,
   BookOpen,
   Cloud,
   FileCode,
   Globe,
   GripVertical,
   Keyboard,
-  Router,
   Settings,
   SquareArrowOutUpRight,
-  Vault,
   WrapText,
   X,
-  type LucideIcon,
 } from "lucide-react";
 
 // Lazy so the ~1.5MB editor stack (CodeMirror + streamdown + markdown + katex)
@@ -277,12 +273,6 @@ function BoardLeafBody({ leafId }: { leafId: number }) {
     />
   );
 }
-
-const PAGE_ICONS: Record<PageKind, LucideIcon> = {
-  hosts: Router,
-  vault: Vault,
-  forwards: ArrowLeftRight,
-};
 
 /**
  * A page leaf's body. Placeholder for phase 6c - the real Hosts/Vault/

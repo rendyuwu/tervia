@@ -1,15 +1,10 @@
 import { leaves, disposeSession } from "@/modules/terminal";
 import { type Tab } from "@/modules/tabs";
-import {
-  defaultHostsTab,
-  savedActiveTabIndex,
-  savedToTab,
-  serializeTabs,
-  useWorkspacesStore,
-} from "@/modules/workspaces";
+import { savedActiveTabIndex, serializeTabs, useWorkspacesStore } from "@/modules/workspaces";
+// Deep import: `tabsForWorkspaceEntry` lives beside the serializer so the
+// workspace verify script can execute it (see its doc comment).
+import { tabsForWorkspaceEntry } from "@/modules/workspaces/serialize";
 import { useCallback, type RefObject } from "react";
-
-type Workspace = ReturnType<typeof useWorkspacesStore.getState>["workspaces"][number];
 
 type Params = {
   wsActiveId: string | null;
@@ -30,23 +25,6 @@ type Params = {
   liveTabsByWorkspace: RefObject<Map<string, { tabs: Tab[]; activeId: number | null }>>;
   skipNextSnapshotRef: RefObject<boolean>;
 };
-
-/**
- * Live tabs for a workspace with no cached live-tab entry (i.e. it hasn't
- * been visited yet this session): its saved tabs restored, or - if it has
- * none - the Hosts page. This is the runtime counterpart of decision 9's
- * startup fallback in `useWorkspacePersistence`, so switching to (or
- * creating) an empty workspace lands on the same screen a fresh profile
- * does, instead of a local shell.
- */
-export function tabsForWorkspaceEntry(
-  entry: Pick<Workspace, "tabs" | "activeTabIndex">,
-  allocId: () => number,
-): Tab[] {
-  return entry.tabs.length === 0
-    ? [defaultHostsTab(allocId)]
-    : entry.tabs.map((s) => savedToTab(s, allocId));
-}
 
 /**
  * Workspace switch / create / close orchestration. Bundles the three
