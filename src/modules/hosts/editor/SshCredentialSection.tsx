@@ -1,0 +1,332 @@
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
+import type { FsReadResult } from "@/lib/ipc";
+import { listSshAgentKeys, type SshAgentKey } from "@/modules/ssh/bridge";
+import { invoke } from "@tauri-apps/api/core";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { useCallback, useEffect, useState } from "react";
+
+import { Field, ToggleButton } from "./FormControls";
+import type { SshCredentialDraft } from "./types";
+
+// The SSH credential region, lifted out of `SshConnectionDialog` as it stood.
+//
+// Deliberately NOT merged with the RDP one and deliberately not tidied: the
+// three-state secret convention and the auth-mode branching are the part of these
+// two dialogs that costs a lost credential when it is got wrong, so the merge
+// moved them and changed nothing else. Factoring the two sections together is
+// separate work with its own review.
+//
+// What the plumbing did force: this component no longer owns the draft (the
+// dialog does, because the save path needs every field), so each write goes out
+// as a PATCH - which is also what tells the dialog that the user, rather than the
+// secret load, touched a field.
+
+/** What the local ssh-agent answered. Agent auth has no field to fill in, so
+ *  this IS the form validation for that mode: it says up front whether an agent
+ *  is running and holding a key, instead of failing at dial time. */
+type AgentState =
+  { kind: "checking" } | { kind: "ok"; keys: SshAgentKey[] } | { kind: "error"; message: string };
+
+type ImportState =
+  { kind: "idle" } | { kind: "loaded"; path: string } | { kind: "error"; message: string };
+
+export type SshCredentialSectionProps = {
+  /** The identity this host is bound to, or null when it owns its credentials
+   *  inline. A bound row shows a read-only panel and nothing editable. */
+  boundIdentity: string | null;
+  value: SshCredentialDraft;
+  onChange: (patch: Partial<SshCredentialDraft>) => void;
+};
+
+/**
+ * The credential half of the form's validation, kept beside the fields it is
+ * about. The shared half lives in the dialog.
+ */
+export function validateSshCredential(
+  draft: SshCredentialDraft,
+  boundIdentity: string | null,
+): string | null {
+  // A vault-bound row has no user and no credential of its own to validate:
+  // both belong to the identity, and the form does not show either.
+  if (boundIdentity) return null;
+  if (!draft.user.trim()) return "User is required";
+  if (draft.authMode === "password" && !draft.password)
+    return "Password is required for password auth";
+  if (draft.authMode === "key" && !draft.privateKey.trim())
+    return "Private key body is required for key auth";
+  // Agent mode has nothing to require here on purpose: the agent may be started
+  // (or the key added) after this host is saved, so a down agent must not block
+  // saving. The panel reports its state, and a connect attempt fails with the
+  // backend's message naming what to start.
+  return null;
+}
+
+export function SshCredentialSection({
+  boundIdentity,
+  value,
+  onChange,
+}: SshCredentialSectionProps) {
+  const [agent, setAgent] = useState<AgentState>({ kind: "checking" });
+  const [imported, setImported] = useState<ImportState>({ kind: "idle" });
+
+  // Ask the agent what it holds whenever this mode is on screen. Cheap enough to
+  // re-run on every open and every switch into the tab, which is also what makes
+  // "start the agent, then come back" show the right answer.
+  const checkAgent = useCallback(async () => {
+    setAgent({ kind: "checking" });
+    try {
+      setAgent({ kind: "ok", keys: await listSshAgentKeys() });
+    } catch (e) {
+      setAgent({ kind: "error", message: e instanceof Error ? e.message : String(e) });
+    }
+  }, []);
+
+  // The old dialog gated this on its own `open` prop. It no longer needs one: the
+  // dialog unmounts its content when it closes, so being mounted IS being open,
+  // and the reset that used to happen on open is now this component's own mount.
+  useEffect(() => {
+    if (value.authMode !== "agent") return;
+    void checkAgent();
+  }, [value.authMode, checkAgent]);
+
+  const pickKeyFile = async () => {
+    setImported({ kind: "idle" });
+    try {
+      const picked = await openDialog({
+        multiple: false,
+        directory: false,
+        title: "Pick SSH private key",
+        filters: [
+          {
+            // `.pub` is gone from this list: it is a PUBLIC key and russh has no
+            // branch that can ever read one as a private key, so offering it was
+            // an invitation to the single unhelpful "Could not read key". `.ppk`
+            // stays - russh enables the fork's `ppk` feature unconditionally and
+            // handles PuTTY v2 and v3.
+            name: "Private key (.pem, .key, .ppk)",
+            extensions: ["pem", "key", "ppk"],
+          },
+          // OpenSSH keys (id_rsa, id_ed25519, …) have no extension, so keep an
+          // all-files fallback the user can switch to.
+          { name: "All files", extensions: ["*"] },
+        ],
+      });
+      if (typeof picked !== "string") return;
+      const result = await invoke<FsReadResult>("fs_read_file", { path: picked });
+      if (result.kind !== "text") {
+        setImported({
+          kind: "error",
+          message:
+            result.kind === "toolarge"
+              ? "File too large to import"
+              : "Picked file is not a text key",
+        });
+        return;
+      }
+      onChange({ privateKey: result.content });
+      setImported({ kind: "loaded", path: picked });
+    } catch (e) {
+      setImported({
+        kind: "error",
+        message: e instanceof Error ? e.message : String(e),
+      });
+    }
+  };
+
+  // The user and the credential are one block, because a vault binding owns
+  // both: an identity carries the username as well as the secret, so showing a
+  // user field for a bound row would offer to edit half of something this dialog
+  // cannot edit at all.
+  if (boundIdentity) return <VaultBindingPanel identityId={boundIdentity} />;
+
+  return (
+    <>
+      <Field label="User">
+        <Input
+          value={value.user}
+          onChange={(e) => onChange({ user: e.target.value })}
+          placeholder="users"
+          spellCheck={false}
+          className="h-8 font-mono text-[12px]"
+        />
+      </Field>
+
+      <Field label="Authentication">
+        <div className="flex gap-1">
+          <ToggleButton
+            active={value.authMode === "password"}
+            onClick={() => onChange({ authMode: "password" })}
+          >
+            Password
+          </ToggleButton>
+          <ToggleButton
+            active={value.authMode === "key"}
+            onClick={() => onChange({ authMode: "key" })}
+          >
+            Private key
+          </ToggleButton>
+          <ToggleButton
+            active={value.authMode === "agent"}
+            onClick={() => onChange({ authMode: "agent" })}
+          >
+            SSH agent
+          </ToggleButton>
+        </div>
+      </Field>
+
+      {value.authMode === "agent" ? (
+        <AgentPanel state={agent} onRecheck={() => void checkAgent()} />
+      ) : value.authMode === "password" ? (
+        <Field label="Password">
+          <Input
+            type="password"
+            value={value.password}
+            onChange={(e) => onChange({ password: e.target.value })}
+            className="h-8 font-mono text-[12px]"
+          />
+        </Field>
+      ) : (
+        <>
+          <Field label="Private key (PEM / OpenSSH)">
+            <div className="flex flex-col gap-1">
+              <Textarea
+                value={value.privateKey}
+                onChange={(e) => onChange({ privateKey: e.target.value })}
+                placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
+                spellCheck={false}
+                className="h-32 font-mono text-[11px]"
+              />
+              <div className="flex items-center justify-between gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-7 px-2 text-[11px]"
+                  onClick={() => void pickKeyFile()}
+                >
+                  Import from file…
+                </Button>
+                {imported.kind === "loaded" ? (
+                  <span className="text-muted-foreground truncate text-[10.5px]">
+                    Loaded {imported.path}
+                  </span>
+                ) : imported.kind === "error" ? (
+                  <span className="text-destructive truncate text-[10.5px]">
+                    {imported.message}
+                  </span>
+                ) : (
+                  <span className="text-muted-foreground text-[10.5px]">
+                    Paste, or import a .pem / key file
+                  </span>
+                )}
+              </div>
+            </div>
+          </Field>
+          <Field label="Key passphrase (optional)">
+            <Input
+              type="password"
+              value={value.keyPassphrase}
+              onChange={(e) => onChange({ keyPassphrase: e.target.value })}
+              className="h-8 font-mono text-[12px]"
+            />
+          </Field>
+        </>
+      )}
+    </>
+  );
+}
+
+/**
+ * What stands in for the user and credential fields when the row is bound to a
+ * shared vault identity.
+ *
+ * Read-only on purpose, and it says which parts of the form still work: the
+ * alternative was refusing to open the dialog at all, which would leave an
+ * imported host unable to be renamed or re-pointed until the identity picker
+ * ships. The identity is named by id rather than by name because resolving the
+ * name means a vault read, and a dialog that cannot edit the binding does not
+ * need to load it.
+ */
+function VaultBindingPanel({ identityId }: { identityId: string }) {
+  return (
+    <Field label="Credential">
+      {/* Same box as the two other read-only status blocks in this editor. */}
+      <div className="border-border/60 bg-muted/30 flex flex-col gap-1 rounded-md border px-2 py-1.5">
+        <span className="text-[11px]">This host uses a shared vault identity.</span>
+        <span className="text-muted-foreground truncate font-mono text-[10.5px]" title={identityId}>
+          {identityId}
+        </span>
+      </div>
+      <span className="text-muted-foreground text-[10.5px]">
+        The user and the credential belong to the identity, so neither is editable here and Test
+        cannot run - choosing or changing an identity arrives with the Vault page. Everything else
+        on this form is editable, and saving leaves the binding exactly as it is.
+      </span>
+    </Field>
+  );
+}
+
+/**
+ * The whole of the agent auth "form": there is nothing to type, so the panel
+ * answers the only question that matters - is an agent running and does it hold
+ * a key. The error text comes from the backend, which names the exact service to
+ * start per platform.
+ */
+function AgentPanel({ state, onRecheck }: { state: AgentState; onRecheck: () => void }) {
+  return (
+    <Field label="SSH agent">
+      {/* Same box and same secondary button as "Recorded server key", so the
+          read-only status blocks in this editor look like one thing. */}
+      <div className="border-border/60 bg-muted/30 flex flex-col gap-1.5 rounded-md border px-2 py-1.5">
+        <div className="flex items-center justify-between gap-2">
+          {state.kind === "checking" ? (
+            <span className="text-muted-foreground text-[11px]">Checking ssh-agent…</span>
+          ) : state.kind === "error" ? (
+            <span className="text-destructive text-[11px]">{state.message}</span>
+          ) : state.keys.length === 0 ? (
+            <span className="text-[11px]">
+              Agent is running but holds no key. Add one with{" "}
+              <span className="font-mono">ssh-add</span>.
+            </span>
+          ) : (
+            <span className="text-[11px]">
+              {state.keys.length} key{state.keys.length === 1 ? "" : "s"} available
+            </span>
+          )}
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="h-6 shrink-0 px-2 text-[10.5px]"
+            onClick={onRecheck}
+            disabled={state.kind === "checking"}
+          >
+            Recheck
+          </Button>
+        </div>
+        {state.kind === "ok" && state.keys.length > 0 ? (
+          <ul className="flex flex-col gap-0.5">
+            {state.keys.map((k) => (
+              <li
+                key={k.fingerprint}
+                className="flex min-w-0 items-center gap-2 font-mono text-[10.5px]"
+                title={k.fingerprint}
+              >
+                <span className="text-muted-foreground shrink-0">{k.algorithm}</span>
+                <span className="truncate">{k.comment || k.fingerprint}</span>
+              </li>
+            ))}
+          </ul>
+        ) : null}
+      </div>
+      <span className="text-muted-foreground text-[10.5px]">
+        The key never leaves the agent: Tervia asks it to sign each handshake and stores nothing ·
+        the server must already have the matching public key · Windows uses the OpenSSH
+        Authentication Agent service or Pageant, elsewhere{" "}
+        <span className="font-mono">SSH_AUTH_SOCK</span>.
+      </span>
+    </Field>
+  );
+}
