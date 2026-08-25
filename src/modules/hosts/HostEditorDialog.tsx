@@ -23,6 +23,7 @@ import {
 } from "./editor/RdpCredentialSection";
 import { RdpOptions } from "./editor/RdpOptions";
 import { runRdpProbe } from "./editor/rdpProbe";
+import { SECRET_STORE_LOCATIONS } from "./editor/secretStoreCopy";
 import { SshCredentialSection, validateSshCredential } from "./editor/SshCredentialSection";
 import { SshOptions } from "./editor/SshOptions";
 import { runSshProbe } from "./editor/sshProbe";
@@ -149,7 +150,23 @@ export function HostEditorDialog({ target, onClose, onSaved }: HostEditorDialogP
   const [mode, setMode] = useState<"create" | "edit">("create");
   const [portTouched, setPortTouched] = useState(false);
   const [sshCred, setSshCred] = useState<SshCredentialDraft>(EMPTY_SSH_CRED);
-  const [sshTouched, setSshTouched] = useState<SshSecretTouched>(NO_SSH_SECRETS_TOUCHED);
+  /**
+   * Which SSH secret fields the USER has edited in this sitting.
+   *
+   * A ref rather than state, and that is load-bearing rather than an
+   * optimisation. The keychain seed below lands AFTER an await, and a `useState`
+   * value it read would be the one captured when the load started - all three
+   * false, forever, because the reset at the top of the same effect is what set
+   * them. So a field the user filled while the read was in flight would be
+   * overwritten by the seed and still count as touched, and the save would send
+   * the seed back over the rotation the user had just typed.
+   *
+   * ONE record, read by both the seed guard and the save, because two records of
+   * the same fact is how a guard and the thing it guards drift apart. Nothing
+   * renders from it, so state buys no render either. Always replaced, never
+   * mutated in place: the initial value is a shared module constant.
+   */
+  const sshTouched = useRef<SshSecretTouched>(NO_SSH_SECRETS_TOUCHED);
   const [proxyJumpId, setProxyJumpId] = useState("");
   const [rdpCred, setRdpCred] = useState<RdpCredentialDraft>(EMPTY_RDP_CRED);
   const [presetId, setPresetId] = useState(RDP_DEFAULT_PRESET.id);
@@ -207,7 +224,8 @@ export function HostEditorDialog({ target, onClose, onSaved }: HostEditorDialogP
     setError(null);
     setSaving(false);
     setTest({ kind: "idle" });
-    setSshTouched(NO_SSH_SECRETS_TOUCHED);
+    // Per row, or the last row's typing would suppress this one's seed.
+    sshTouched.current = NO_SSH_SECRETS_TOUCHED;
     setExisting(null);
     setReady(false);
     setMode(target.mode);
@@ -294,6 +312,14 @@ export function HostEditorDialog({ target, onClose, onSaved }: HostEditorDialogP
         setRdpCred(EMPTY_RDP_CRED);
         setPresetId(RDP_DEFAULT_PRESET.id);
         setTunnelSshHostId("");
+        // Interactive BEFORE the secret read, deliberately. Moving this below the
+        // await would close the race the seed below guards against, but it would
+        // hold the whole form - name, address, port, group - behind "Loading…" for
+        // however long the keychain takes, which on macOS is up to three OS access
+        // prompts, and would leave a failed read with nothing on screen but an
+        // error unless it re-armed in the catch as well. The seed yielding to a
+        // touched field fixes the same defect without making an unrelated edit
+        // wait on a secret it never looks at.
         setReady(true);
         // Skipped for a vault-bound row: it owns no accounts, so this returns an
         // empty batch, and asking makes the blank draft look like a read result.
@@ -301,11 +327,26 @@ export function HostEditorDialog({ target, onClose, onSaved }: HostEditorDialogP
         try {
           const secrets = await getHostSshSecrets(host.id);
           if (stale()) return;
+          // Per field, and only where the user has not typed. `stale()` is not
+          // enough on its own: it asks whether the form has moved to a DIFFERENT
+          // ROW, and typing does not move it. The form has been interactive since
+          // `setReady(true)` above, and this read is three sequential
+          // `keyring::Entry::get_password` calls on macOS, any of which can stop
+          // on an OS access prompt - so "the user typed a new password into a
+          // field this seed is about to fill" is an ordinary race, not a corner.
+          // Seeding over it would send the OLD secret back on save (the field
+          // counts as touched) and report success, silently losing the rotation.
+          //
+          // Read out here rather than inside the updater: the ref is already
+          // current at this point, and a keystroke arriving between this call and
+          // the updater running queues its own patch AFTER this one, so it wins
+          // anyway.
+          const typed = sshTouched.current;
           setSshCred((d) => ({
             ...d,
-            password: secrets.password ?? "",
-            privateKey: secrets.privateKey ?? "",
-            keyPassphrase: secrets.keyPassphrase ?? "",
+            password: typed.password ? d.password : (secrets.password ?? ""),
+            privateKey: typed.privateKey ? d.privateKey : (secrets.privateKey ?? ""),
+            keyPassphrase: typed.keyPassphrase ? d.keyPassphrase : (secrets.keyPassphrase ?? ""),
           }));
         } catch (e) {
           // Reported rather than swallowed, and the form stays usable: the three
@@ -369,14 +410,18 @@ export function HostEditorDialog({ target, onClose, onSaved }: HostEditorDialogP
    * above writes `setSshCred` directly and so marks nothing, while a keystroke or
    * a key import comes through here. An edit that never touched the password
    * field therefore cannot send one.
+   *
+   * It is also what the seed yields to, which is why the mark is taken here and
+   * not inside an updater: the seed reads it after its own await, so it has to be
+   * true the moment the keystroke happens rather than one render later.
    */
   const patchSshCred = (patch: Partial<SshCredentialDraft>) => {
     setSshCred((d) => ({ ...d, ...patch }));
-    setSshTouched((t) => ({
-      password: t.password || patch.password !== undefined,
-      privateKey: t.privateKey || patch.privateKey !== undefined,
-      keyPassphrase: t.keyPassphrase || patch.keyPassphrase !== undefined,
-    }));
+    sshTouched.current = {
+      password: sshTouched.current.password || patch.password !== undefined,
+      privateKey: sshTouched.current.privateKey || patch.privateKey !== undefined,
+      keyPassphrase: sshTouched.current.keyPassphrase || patch.keyPassphrase !== undefined,
+    };
   };
 
   const changeProtocol = (next: "ssh" | "rdp") => {
@@ -444,14 +489,29 @@ export function HostEditorDialog({ target, onClose, onSaved }: HostEditorDialogP
     // it is still a pin on a row the user never tested.
     const probeToken = token;
     const probeHostId = existing?.id;
+    // The address the SAVED record names, which is not necessarily the one this
+    // probe dials: the form is free to propose a new one, and until Save runs the
+    // record still points at the old machine.
+    const savedHost = existing?.host;
     const onProbeRow = () => applied.current === probeToken;
     const onTrusted = (fingerprint: string) => {
-      // The saved row is written unconditionally - `probeHostId` is the row that
-      // was tested, so the pin lands where it belongs however long the answer
-      // took. Only the FORM state is gated, because that belongs to whatever row
-      // is on screen now.
+      // The FORM's pin follows the row on screen. It is unsaved, it is visible in
+      // the recorded-key row, and Forget or Cancel disposes of it, so it may
+      // describe the address being proposed.
       if (onProbeRow()) setPinnedFingerprint(fingerprint);
-      if (probeHostId) void pinFingerprint(probeHostId, fingerprint).catch(() => {});
+      // The STORED pin may not. Nothing is persisted for a machine the record
+      // does not name: re-point the form at 10.0.0.2, Test, accept the
+      // certificate, then Cancel, and an ungated write has replaced the pin of a
+      // host still saved at 10.0.0.1 with a fingerprint from a different machine.
+      // The record's next real connect aborts as a MISMATCH, which reads as an
+      // attack rather than as a dialog the user cancelled - and the pin it
+      // destroyed cannot come back, because only that machine can present it.
+      //
+      // The same comparison `save`'s `keepPin` makes, and the port is deliberately
+      // no part of it: one server presents one key on every port it listens on.
+      if (probeHostId && savedHost === host) {
+        void pinFingerprint(probeHostId, fingerprint).catch(() => {});
+      }
     };
 
     try {
@@ -591,7 +651,7 @@ export function HostEditorDialog({ target, onClose, onSaved }: HostEditorDialogP
         // Nothing at all for a vault-bound row: `upsertHost` REFUSES a secret
         // handed in with a vault binding, and the fields it would come from are
         // ones this form never fills.
-        secrets = boundIdentity ? {} : sshSecretsForSave(sshCred, sshTouched);
+        secrets = boundIdentity ? {} : sshSecretsForSave(sshCred, sshTouched.current);
       } else {
         record = {
           ...base,
@@ -659,10 +719,10 @@ export function HostEditorDialog({ target, onClose, onSaved }: HostEditorDialogP
             {boundIdentity
               ? "This host authenticates with a shared vault identity, so its credential is not edited here."
               : protocol === "rdp"
-                ? "The password is stored in your OS keychain (Windows Credential Manager / macOS Keychain) and read by Tervia's host process when you connect — it is never handed back to the interface."
+                ? `The password is stored outside Tervia's settings file (${SECRET_STORE_LOCATIONS}) and read by Tervia's host process when you connect — it is never handed back to the interface.`
                 : sshCred.authMode === "agent"
                   ? "Nothing to store: the local ssh-agent holds the key and signs each handshake."
-                  : "Credentials are stored in your OS keychain (Windows Credential Manager / macOS Keychain)."}
+                  : `Credentials are stored outside Tervia's settings file: ${SECRET_STORE_LOCATIONS}.`}
           </DialogDescription>
         </DialogHeader>
 

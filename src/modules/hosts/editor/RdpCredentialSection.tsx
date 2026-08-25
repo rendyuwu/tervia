@@ -3,6 +3,7 @@ import type { RdpCredential } from "@/modules/rdp/bridge";
 import { HOST_KEYRING_SERVICE, HOST_RDP_PASSWORD_FIELD, vaultAccount } from "@/modules/vault/types";
 
 import { Field } from "./FormControls";
+import { SECRET_STORE_LOCATIONS } from "./secretStoreCopy";
 import type { RdpCredentialDraft } from "./types";
 
 // The RDP credential region, lifted out of `RdpConnectionDialog` as it stood, and
@@ -130,7 +131,7 @@ export function RdpCredentialSection({
         <span className="text-muted-foreground text-[10.5px]">
           {hasStoredPassword
             ? "A password is stored for this connection. It is not shown here; leave this blank to keep it, or type a new one to replace it."
-            : "Stored in the OS keychain, not in Tervia's settings file."}
+            : `Stored outside Tervia's settings file: ${SECRET_STORE_LOCATIONS}.`}
         </span>
       </Field>
     </>

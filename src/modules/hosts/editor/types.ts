@@ -44,6 +44,12 @@ export type RdpCredentialDraft = {
  * a password field and sent it back would be one failed keychain read away from
  * sending `""` instead - and `""` is the store's CLEAR instruction. See the save
  * path in `HostEditorDialog.tsx`.
+ *
+ * The second job it does there: the keychain seed YIELDS to it, so a password
+ * typed while the read was still in flight is not replaced by the stored one. That
+ * is why the editor holds this in a ref rather than state - the seed reads it
+ * after an await, and a state value read there is the one captured before the user
+ * could have typed anything.
  */
 export type SshSecretTouched = {
   password: boolean;

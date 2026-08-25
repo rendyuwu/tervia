@@ -431,13 +431,19 @@ fn same_entry(from: (&str, &str), to: (&str, &str)) -> bool {
 /// Phase 5 invariant rather than a preference - it is the reason a duplicated
 /// RDP host used to get no password at all.
 ///
-/// `Ok(false)` means there was nothing at the source and NOTHING was written.
-/// That distinction is load-bearing rather than tidy: an account holding the
-/// empty string is indistinguishable from a real one to every `has*` flag in the
-/// app, so inventing one here would leave a record advertising a credential the
-/// user never set, on a layer that never reads a secret back to correct itself.
-/// The caller reads the boolean as "does the destination own this secret now",
-/// which is exactly the flag it has to persist.
+/// `Ok(false)` means there was nothing at the source (absent, or an empty
+/// string, which is treated as absent) and NOTHING was written. `Ok(true)`
+/// means the source had a value and it now sits at the destination too.
+///
+/// The boolean answers "did the source have something to give", NOT "does the
+/// destination own a secret now". Those agree whenever the destination starts
+/// empty - `duplicateHost`'s destination is always a brand-new id - but a
+/// caller converting onto an id that may already hold a secret (6e's
+/// convert-to-vault, for one) cannot read `Ok(false)` as "nothing there
+/// anymore": this function never clears the destination. Its only writes are
+/// the one above and, on the legacy Windows Credential Manager fallback
+/// inside [`write_secret`], a delete of a *stale entry for the destination
+/// account*, never a clear triggered by an empty or missing source.
 ///
 /// Source and destination being the same entry skips only the WRITE, not the
 /// read: the answer still has to say whether anything is there, and writing a
@@ -455,6 +461,13 @@ pub async fn secrets_copy(
     let Some(value) = read_secret(&app, &state, &from_service, &from_account)? else {
         return Ok(false);
     };
+    // An empty string is treated the same as no entry at all: the JS layer
+    // never persists one (it trims and deletes on blank - see `writeSecret`
+    // in `hosts/store.ts` and `vault/store.ts`), so writing "" here would only
+    // manufacture a `hasPassword: true` over an account that holds nothing.
+    if value.is_empty() {
+        return Ok(false);
+    }
     if !same_entry((&from_service, &from_account), (&to_service, &to_account)) {
         write_secret(&app, &state, &to_service, &to_account, &value)?;
     }

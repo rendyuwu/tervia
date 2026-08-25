@@ -30,11 +30,13 @@ export type VaultMaps = {
   keys: ReadonlyMap<string, VaultKey>;
 };
 
-export function useVaultIdentities(): Map<string, VaultIdentity> {
+function useVaultIdentities(): Map<string, VaultIdentity> {
   const [identities, setIdentities] = useState<Map<string, VaultIdentity>>(() => new Map());
   useEffect(() => {
     const load = () =>
-      void listIdentities().then((list) => setIdentities(new Map(list.map((i) => [i.id, i]))));
+      void listIdentities()
+        .then((list) => setIdentities(new Map(list.map((i) => [i.id, i]))))
+        .catch((err: unknown) => console.error("vault: failed to load identities", err));
     load();
     const unsub = onVaultChanged(load);
     return () => {
@@ -44,10 +46,13 @@ export function useVaultIdentities(): Map<string, VaultIdentity> {
   return identities;
 }
 
-export function useVaultKeys(): Map<string, VaultKey> {
+function useVaultKeys(): Map<string, VaultKey> {
   const [keys, setKeys] = useState<Map<string, VaultKey>>(() => new Map());
   useEffect(() => {
-    const load = () => void listKeys().then((list) => setKeys(new Map(list.map((k) => [k.id, k]))));
+    const load = () =>
+      void listKeys()
+        .then((list) => setKeys(new Map(list.map((k) => [k.id, k]))))
+        .catch((err: unknown) => console.error("vault: failed to load keys", err));
     load();
     const unsub = onVaultChanged(load);
     return () => {
