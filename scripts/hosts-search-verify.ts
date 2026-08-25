@@ -5,24 +5,73 @@
  *
  * The whole point of ONE ranking function with two mount points is that the
  * page and the header can never show a different "top match" for the same
- * query. That guarantee lives entirely in the tie-break chain being TOTAL -
- * so the check that matters most here is not any single tier, it is that a
- * shuffled input produces the identical output order every time.
+ * query. That guarantee has two halves, and the tier checks are neither of them:
+ *
+ *   The tie-break chain is TOTAL, so a shuffled input produces the identical
+ *   output order every time. [totality] below.
+ *
+ *   Both mount points build their ROWS the same way. They did not - the header
+ *   resolved a username inline and the page resolved it through the vault - which
+ *   is the whole of [two surfaces] below and the reason `searchRows` moved into
+ *   `search.ts`. Sharing `rankHosts` alone was never enough: it cannot see a
+ *   difference in what it was handed.
  */
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
 import {
   inlineUsername,
   parseAdHocTarget,
   rankHosts,
+  searchRows,
   type HostSearchRow,
 } from "../src/modules/hosts/search";
-import type { RdpHost, SshHost } from "../src/modules/hosts/types";
+import type { HostGroup, RdpHost, SshHost } from "../src/modules/hosts/types";
+import type { VaultIdentity } from "../src/modules/vault/types";
+
+const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+const read = (p: string) => readFileSync(join(root, p), "utf8");
 
 let failed = 0;
+
+/**
+ * JSON with object keys SORTED, and `undefined` values kept.
+ *
+ * `JSON.stringify` was doing two things wrong here. It is key-ORDER sensitive,
+ * so reordering the fields of a returned object failed a check that no behaviour
+ * had changed. And it DROPS keys whose value is `undefined`, so comparing
+ * `parseAdHocTarget("host")` against `{ host: "host" }` left `user` and `port`
+ * completely unconstrained - the check passed whatever they were, including
+ * absent, which is the opposite of what `search.ts` promises.
+ *
+ * So: field order is deliberately NOT part of what `check` compares. Where key
+ * order genuinely is the contract - `parseAdHocTarget`'s fixed shape - the check
+ * asserts `Object.keys` directly instead of hoping a string comparison notices.
+ *
+ * ARRAY order is preserved, and that is the point of the distinction: for a
+ * ranked list the order IS the contract, and canonicalising it away would delete
+ * most of this file's content.
+ */
+function canonical(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+  if (typeof value === "object" && value !== null) {
+    const body = Object.entries(value as Record<string, unknown>)
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+      .map(([k, v]) => `${JSON.stringify(k)}:${canonical(v)}`)
+      .join(",");
+    return `{${body}}`;
+  }
+  return value === undefined ? "undefined" : JSON.stringify(value);
+}
+
 function check(label: string, got: unknown, want: unknown): void {
-  if (JSON.stringify(got) === JSON.stringify(want)) {
+  const g = canonical(got);
+  const w = canonical(want);
+  if (g === w) {
     console.log(`  ok: ${label}`);
   } else {
-    console.error(`  FAIL: ${label} = ${JSON.stringify(got)}, want ${JSON.stringify(want)}`);
+    console.error(`  FAIL: ${label} = ${g}, want ${w}`);
     failed++;
   }
 }
@@ -182,11 +231,101 @@ console.log("\n[tier 5] a match found only via username or only via group name s
     "box-two",
   ]);
 }
-ok(
-  "a vault-bound host (no inline username) still matches on name",
-  rankHosts([row(ssh("h-1", "identity-box", "10.0.0.1", { identity: true }))], "identity")
-    .length === 1,
-);
+// A vault-bound row carries no inline username. The version of this that was
+// here asserted `.length === 1` over a SINGLE-row input, which passes for any
+// implementation that does not drop every row - a `matchTier` hardwired to 5
+// passed it - and it never said that the absent username was what forced the
+// name match. Both halves are now stated against a list with a non-match and a
+// control in it.
+{
+  const bound = row(ssh("h-1", "identity-box", "10.0.0.1", { identity: true }));
+  const carries = row(ssh("h-2", "other-box", "10.0.0.2", { user: "svcacct" }));
+  const noMatch = row(ssh("h-3", "unrelated", "10.0.0.9"));
+  ok("a vault-bound row really has no inline username to match on", bound.username === undefined);
+  check(
+    "it still matches on its NAME, and only it does",
+    names(rankHosts([bound, carries, noMatch], "identity")),
+    ["identity-box"],
+  );
+  check(
+    "and a username-only query reaches the row that carries one, not this one",
+    names(rankHosts([bound, carries, noMatch], "svcacct")),
+    ["other-box"],
+  );
+}
+
+// --- case folding, in both directions ------------------------------------
+//
+// Every query in the tier blocks above is already lowercase, and `matchTier`
+// lowercases the fields itself - so `rankHosts`'s own `query.trim().toLowerCase()`
+// was removable with ZERO failures, and so were `matchTier`'s folds on `username`
+// and `groupName`, which nothing above ever fed a capital letter to. Each check
+// below is written to die if exactly one of those five folds is dropped: an
+// uppercase query against a lowercase field kills the query fold, a lowercase
+// query against a mixed-case field kills that field's fold, and each list carries
+// a non-matching row so a `matchTier` that stopped discriminating fails too.
+
+console.log("\n[case folding] an uppercase query and an uppercase field both fold");
+{
+  const noise = row(ssh("h-9", "unrelated", "10.0.0.9"));
+
+  // Uppercase QUERY, lowercase fields: only `rankHosts`'s own fold can match.
+  const lower = ssh("h-1", "prod-db", "10.0.0.1");
+  check(
+    "an UPPERCASE query matches a lowercase name",
+    names(rankHosts([row(lower), noise], "PROD-DB")),
+    ["prod-db"],
+  );
+  check("a MiXeD-case query matches it too", names(rankHosts([row(lower), noise], "Prod-Db")), [
+    "prod-db",
+  ]);
+
+  // Lowercase query, mixed-case NAME: only `matchTier`'s name fold can match.
+  const upperName = ssh("h-2", "ProdDB", "10.0.0.2");
+  check(
+    "a lowercase query matches a mixed-case name exactly (tier 1)",
+    names(rankHosts([row(upperName), noise], "proddb")),
+    ["ProdDB"],
+  );
+
+  // Mixed-case HOST, with a name that cannot match at all - isolates the host fold.
+  const upperHost = ssh("h-3", "gateway", "Prod.Example.COM");
+  check(
+    "a lowercase query matches a mixed-case host prefix (tier 3)",
+    names(rankHosts([row(upperHost), noise], "prod")),
+    ["gateway"],
+  );
+  check(
+    "and a mixed-case host's later word (tier 4)",
+    names(rankHosts([row(upperHost), noise], "example")),
+    ["gateway"],
+  );
+
+  // The two folds nothing above exercised at all.
+  const upperUser = row(ssh("h-4", "box-four", "10.0.0.4", { user: "Deploy" }));
+  const upperGroup = row(ssh("h-5", "box-five", "10.0.0.5"), { groupName: "Deploy-Team" });
+  check(
+    "a lowercase query matches a mixed-case USERNAME",
+    names(rankHosts([upperUser, noise], "deploy")),
+    ["box-four"],
+  );
+  check(
+    "a lowercase query matches a mixed-case GROUP NAME",
+    names(rankHosts([upperGroup, noise], "deploy")),
+    ["box-five"],
+  );
+  // Both ends at once, which needs the query fold and the field fold together.
+  check(
+    "an uppercase query matches a mixed-case username",
+    names(rankHosts([upperUser, noise], "DEPLOY")),
+    ["box-four"],
+  );
+  check(
+    "an uppercase query matches a mixed-case group name",
+    names(rankHosts([upperGroup, noise], "DEPLOY")),
+    ["box-five"],
+  );
+}
 
 // --- full tie-break chain, including the id tail ------------------------
 
@@ -241,14 +380,23 @@ console.log("\n[totality] the ordering does not depend on input order");
   // comparison here would not notice their relative order flipping.
   const ids = (rs: HostSearchRow[]) => rs.map((r) => r.host.id);
   const baseline = ids(rankHosts(rows, "db"));
-  // A handful of hand-picked permutations rather than a random shuffle, so a
-  // failure here is reproducible without a fixed seed.
+  // Hand-picked rather than a random shuffle, so a failure here is reproducible
+  // without a fixed seed. The IDENTITY permutation [0,1,2,3,4,5] was in this set
+  // and has been removed: it re-runs the baseline against itself, so it passes
+  // for every possible implementation and made a set of three real permutations
+  // read as four.
   const permutations = [
     [5, 4, 3, 2, 1, 0],
     [2, 0, 4, 1, 5, 3],
-    [0, 1, 2, 3, 4, 5],
     [3, 1, 4, 0, 5, 2],
+    [1, 0, 3, 2, 5, 4],
   ];
+  // Guards the guard. Re-adding an identity permutation would quietly make one
+  // of these vacuous again, and nothing else in the file would notice.
+  ok(
+    "no permutation is the identity",
+    permutations.every((order) => order.some((from, to) => from !== to)),
+  );
   let allMatch = true;
   for (const order of permutations) {
     const shuffled = order.map((i) => rows[i]);
@@ -311,21 +459,75 @@ check(
 
 // --- parseAdHocTarget: acceptance ---------------------------------------
 
+// Every absent field is spelled out as `undefined` rather than omitted. Omitting
+// it constrained nothing: the old comparison went through `JSON.stringify`, which
+// drops `undefined` keys, so `{host: "prod.example.com"}` accepted any `user` and
+// any `port` at all. `canonical` above keeps them, so they have to be stated.
 console.log("\n[parseAdHocTarget] accepted shapes");
-check("bare host", parseAdHocTarget("prod.example.com"), { host: "prod.example.com" });
-check("user@host", parseAdHocTarget("root@10.0.0.5"), { user: "root", host: "10.0.0.5" });
+check("bare host", parseAdHocTarget("prod.example.com"), {
+  user: undefined,
+  host: "prod.example.com",
+  port: undefined,
+});
+check("user@host", parseAdHocTarget("root@10.0.0.5"), {
+  user: "root",
+  host: "10.0.0.5",
+  port: undefined,
+});
 check("user@host:port", parseAdHocTarget("root@10.0.0.5:2222"), {
   user: "root",
   host: "10.0.0.5",
   port: 2222,
 });
-check("host:port with no user", parseAdHocTarget("10.0.0.5:22"), { host: "10.0.0.5", port: 22 });
+check("host:port with no user", parseAdHocTarget("10.0.0.5:22"), {
+  user: undefined,
+  host: "10.0.0.5",
+  port: 22,
+});
 check("surrounding whitespace is trimmed", parseAdHocTarget("  root@host  "), {
   user: "root",
   host: "host",
+  port: undefined,
 });
-check("port at the low boundary", parseAdHocTarget("host:1"), { host: "host", port: 1 });
-check("port at the high boundary", parseAdHocTarget("host:65535"), { host: "host", port: 65535 });
+check("port at the low boundary", parseAdHocTarget("host:1"), {
+  user: undefined,
+  host: "host",
+  port: 1,
+});
+check("port at the high boundary", parseAdHocTarget("host:65535"), {
+  user: undefined,
+  host: "host",
+  port: 65535,
+});
+
+// `search.ts:159` builds the result with `user` and `port` always assigned so
+// that the key order is fixed "for a caller that JSON-compares the result". This
+// script is that caller, and it is the only one - so if the property is not
+// asserted here it is asserted nowhere. `canonical` sorts keys on purpose, which
+// means it CANNOT see this; `Object.keys` is what can.
+console.log("\n[parseAdHocTarget] the key order is fixed, whichever branch ran");
+{
+  const branches = [
+    parseAdHocTarget("prod.example.com"), // no user, no port
+    parseAdHocTarget("root@10.0.0.5"), // user, no port
+    parseAdHocTarget("10.0.0.5:22"), // no user, port
+    parseAdHocTarget("root@10.0.0.5:2222"), // both
+  ];
+  check(
+    "all four branches return the same keys in the same order",
+    branches.map((r) => Object.keys(r ?? {})),
+    [
+      ["user", "host", "port"],
+      ["user", "host", "port"],
+      ["user", "host", "port"],
+      ["user", "host", "port"],
+    ],
+  );
+  // Present-but-undefined, not absent - the distinction `JSON.stringify` erased.
+  const bare = parseAdHocTarget("prod.example.com");
+  ok("a bare host has a `user` key holding undefined", bare !== null && "user" in bare);
+  ok("and a `port` key holding undefined", bare !== null && "port" in bare);
+}
 
 // --- parseAdHocTarget: every rejection case ------------------------------
 
@@ -350,12 +552,174 @@ check("bracketed IPv6 with user", parseAdHocTarget("root@[::1]:22"), null);
 // parse "[abc]" as a host - it is the bracket check's job to catch it.
 check("brackets with only a single colon", parseAdHocTarget("[abc]:22"), null);
 
+// --- the two surfaces build rows the SAME way ---------------------------
+//
+// This is the check the module's own opening comment claimed was structural and
+// was not. `rankHosts` was shared; the ROW BUILDING was not. The page resolved a
+// vault-bound host's username through the identity and the header used
+// `inlineUsername`, which is `undefined` for exactly those hosts - so a host
+// bound to an identity whose username is "deploy" matched on the page, matched
+// nothing in the header, and the header's empty state then offered to CREATE it,
+// because `parseAdHocTarget("deploy")` succeeds. A duplicate of a host the other
+// surface could see, one keystroke away.
+
+console.log("\n[two surfaces] one row builder, so the page and the header cannot disagree");
+{
+  const bound = ssh("h-1", "box-one", "10.0.0.1", { identity: true });
+  const identities = new Map<string, VaultIdentity>([
+    [
+      "vault-1",
+      {
+        id: "vault-1",
+        name: "Deploy account",
+        username: "deploy",
+        authMode: "password",
+        hasPassword: true,
+      },
+    ],
+  ]);
+  check(
+    "searchRows resolves a bound host's username off its identity",
+    searchRows([bound], [], { identities }).map((r) => r.username),
+    ["deploy"],
+  );
+  check(
+    "so the identity's username is a query that FINDS the host",
+    names(rankHosts(searchRows([bound], [], { identities }), "deploy")),
+    ["box-one"],
+  );
+  // The old header behaviour, kept as an executable statement of the bug: rows
+  // built from `inlineUsername` cannot match, and the query parses, so the empty
+  // state offered a create.
+  ok(
+    "rows built from inlineUsername alone find nothing - the defect, stated",
+    rankHosts([{ host: bound, username: inlineUsername(bound), groupName: undefined }], "deploy")
+      .length === 0,
+  );
+  ok(
+    "and 'deploy' parses as an ad-hoc target, which is what made that a create offer",
+    parseAdHocTarget("deploy") !== null,
+  );
+  // The other divergence the two loops had: the header tested `groupId` for
+  // truthiness and the page for `!== undefined`, so an empty-string group id
+  // resolved differently in each. One builder means one answer, and this pins
+  // which one.
+  const blankGroup: HostGroup = { id: "", name: "Blank" };
+  check(
+    "an empty-string groupId is looked up, not treated as absent",
+    searchRows([{ ...ssh("h-2", "box-two", "10.0.0.2"), groupId: "" }], [blankGroup], {
+      identities,
+    }).map((r) => r.groupName),
+    ["Blank"],
+  );
+}
+
+// The structural half. A behavioural check cannot see which builder a React
+// component calls - this script has no DOM and `HeaderQuickConnect.tsx` cannot be
+// imported under plain node - so it is asserted against the source text, the same
+// workaround handoff §5.12 records for `workspace-serialize-verify.ts`.
+console.log("\n[two surfaces] neither mount point assembles its own rows");
+{
+  const header = read("src/modules/header/HeaderQuickConnect.tsx");
+  const page = read("src/modules/hosts/HostsPage.tsx");
+  const derive = read("src/modules/hosts/page/derive.ts");
+  const search = read("src/modules/hosts/search.ts");
+  ok("the header builds its rows with searchRows", /\bsearchRows\(/.test(header));
+  ok("the Hosts page builds its rows with searchRows", /\bsearchRows\(/.test(page));
+  // A CALL, not the identifier: the comment in that file names `inlineUsername`
+  // when it explains the bug, and a check that cannot tell prose from code would
+  // fail on the explanation.
+  ok("the header never calls inlineUsername", !/\binlineUsername\s*\(/.test(header));
+  ok(
+    "searchRows and hostUsername are defined in search.ts",
+    /export function searchRows\(/.test(search) && /export function hostUsername\(/.test(search),
+  );
+  // derive.ts re-exports them for the page's single import site. A second
+  // DEFINITION there is how the two copies came back last time.
+  ok(
+    "page/derive.ts re-exports them rather than defining a second copy",
+    /export \{ hostUsername, searchRows \} from "\.\.\/search";/.test(derive) &&
+      !/export function (searchRows|hostUsername)\(/.test(derive),
+  );
+}
+
+// The header's Enter path depends on one invariant: while the input has focus,
+// the list is open. `PopoverAnchor` with no `PopoverTrigger` leaves Radix's
+// `triggerRef` null, so a click on the input itself counted as an interaction
+// OUTSIDE and dismissed the list - focused, closed, non-empty query - and Enter
+// then did nothing, because `handleKeyDown` hands the key to cmdk whose list has
+// unmounted. Source-text again, for the same reason as above.
+console.log("\n[header] a click on the input cannot close the input's own list");
+{
+  const header = read("src/modules/header/HeaderQuickConnect.tsx");
+  ok("the anchor element is captured in a ref", /ref=\{anchorRef\}/.test(header));
+  ok(
+    "and onInteractOutside treats a target inside it as inside",
+    /onInteractOutside=\{/.test(header) && /anchorRef\.current\?\.contains\(target\)/.test(header),
+  );
+}
+
 // --- gate: break the implementation and watch each check actually fail --
 //
-// Handoff §5.12: a check that has not been watched fail is not a check. The
-// table below is not part of the automated run - it is the record of doing
-// that by hand for every check above, kept here so the next reviewer does not
-// have to take it on faith. See the report sent alongside this file.
+// Handoff §5.12: a check that has not been watched fail is not a check. This is
+// the record for the checks added or repaired in THIS pass, and only those. It is
+// NOT a record for every check in the file - the original pass's mutation table
+// was never committed anywhere, and the comment that used to sit here promised a
+// table it did not contain, which is §5.12's own anti-pattern wearing §5.12's
+// clothes. Each row was run by editing the named file, running this script, and
+// restoring from a byte-exact copy verified with `diff`.
+//
+//   Mutation                                       Check it killed
+//   ------------------------------------------     -----------------------------
+//   search.ts rankHosts: drop `.toLowerCase()`     "an UPPERCASE query matches a
+//     from the trimmed query                        lowercase name" (+3 more)
+//   search.ts matchTier: drop `.toLowerCase()`     "a lowercase query matches a
+//     from `name`                                   mixed-case name exactly"
+//   search.ts matchTier: drop `.toLowerCase()`     "a lowercase query matches a
+//     from `host`                                   mixed-case host prefix" (+1)
+//   search.ts matchTier: drop `?.toLowerCase()`    "a lowercase query matches a
+//     from `username`                               mixed-case USERNAME" (+1)
+//   search.ts matchTier: drop `?.toLowerCase()`    "a lowercase query matches a
+//     from `groupName`                              mixed-case GROUP NAME" (+1)
+//   search.ts matchTier: `return 5` for every      "it still matches on its NAME,
+//     row (stop discriminating entirely)            and only it does" - the
+//                                                  `.length === 1` version of
+//                                                  that check PASSED under this
+//                                                  mutation, which is why it was
+//                                                  replaced
+//   search.ts parseAdHocTarget: build the          "all four branches return the
+//     result conditionally (`{host}`, then          same keys in the same order",
+//     assign `user`/`port` if defined)              plus all seven accepted-shape
+//                                                  checks. Under the old
+//                                                  `JSON.stringify` comparison
+//                                                  this mutation was invisible
+//   search.ts searchRows: resolve with             "searchRows resolves a bound
+//     `inlineUsername(host)` - the P1 defect        host's username off its
+//                                                  identity" (+1)
+//   search.ts searchRows: `host.groupId ? ... :    "an empty-string groupId is
+//     undefined` - the header's old loop            looked up, not treated as
+//                                                  absent"
+//   search.ts compareRows: `return 0` instead      "every permutation ranks
+//     of the `id` tie-break                         identically to the baseline"
+//                                                  fails while "no permutation is
+//                                                  the identity" still passes -
+//                                                  the identity permutation had
+//                                                  nothing to say about this
+//   HeaderQuickConnect: revert to its own          "the header builds its rows
+//     row-building loop                             with searchRows" and "the
+//                                                  header never calls
+//                                                  inlineUsername"
+//   HeaderQuickConnect: delete the                 "and onInteractOutside treats a
+//     `onInteractOutside` guard                     target inside it as inside"
+//   HeaderQuickConnect: delete `ref={anchorRef}`   "the anchor element is captured
+//     from the anchor                               in a ref"
+//   page/derive.ts: re-add a local `searchRows`    "page/derive.ts re-exports them
+//     definition beside the re-export               rather than defining a second
+//                                                  copy"
+//
+// Not run: "the Hosts page builds its rows with searchRows" would mean editing
+// `HostsPage.tsx`, which this pass does not own. The regex is the same one the
+// header check uses, against the same string, so it fails the same way.
 
 console.log(failed === 0 ? "\nAll hosts-search checks passed." : `\n${failed} check(s) FAILED.`);
 process.exit(failed === 0 ? 0 : 1);

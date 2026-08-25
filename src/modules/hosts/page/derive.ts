@@ -5,7 +5,7 @@ import type {
   VaultKey,
 } from "@/modules/vault/types";
 
-import { inlineUsername, rankHosts, type HostSearchRow } from "../search";
+import { rankHosts, type HostSearchRow } from "../search";
 import { isSshHost, type Host, type HostGroup } from "../types";
 
 // Everything the Hosts page derives from its three inputs - the host list, the
@@ -23,6 +23,15 @@ import { isSshHost, type Host, type HostGroup } from "../types";
 // §5.2), and the flags are maintained on write. A pip computed from a read-back
 // would also be wrong more often, not less - it would report "fine" for a
 // keychain that happens to be unlocked and "missing" for one that is not.
+//
+// Two of the page's derived values are NOT defined here. `hostUsername` and
+// `searchRows` live in `../search`, next to `rankHosts`, because the header
+// quick-connect needs the same two and reaching into `hosts/page/` from
+// `modules/header/` would be worse - and because building rows twice is what let
+// the two surfaces disagree about which hosts a query matches. They are
+// re-exported so this file stays the single import site for everything the page
+// derives; there is exactly one definition of each, in `../search`.
+export { hostUsername, searchRows } from "../search";
 
 /**
  * The vault as two maps, read synchronously.
@@ -155,34 +164,6 @@ export function identityName(
   return identity ? identity.name : UNKNOWN_IDENTITY_LABEL;
 }
 
-/** The username a row logs in as, wherever it lives: on the host for an inline
- *  binding, on the identity for a vault one. Search needs both, or a query that
- *  is somebody's username silently stops matching once a host moves into the
- *  vault. */
-export function hostUsername(
-  host: Host,
-  identities: VaultSnapshot["identities"],
-): string | undefined {
-  const cred = host.credential;
-  if (cred.kind === "inline") return inlineUsername(host);
-  return identities.get(cred.identityId)?.username;
-}
-
-/** Every host as a searchable row, with the two fields `rankHosts` cannot work
- *  out for itself resolved. */
-export function searchRows(
-  hosts: readonly Host[],
-  groups: readonly HostGroup[],
-  vault: VaultSnapshot,
-): HostSearchRow[] {
-  const groupNames = new Map(groups.map((g) => [g.id, g.name]));
-  return hosts.map((host) => ({
-    host,
-    username: hostUsername(host, vault.identities),
-    groupName: host.groupId === undefined ? undefined : groupNames.get(host.groupId),
-  }));
-}
-
 /**
  * The counts the group strip shows.
  *
@@ -245,11 +226,19 @@ export type HostsViewInput = {
 /**
  * The rows a render should draw: protocol, then group, then ranking.
  *
- * Ranking LAST is the point of the order. `rankHosts` assigns a tier per row and
- * sorts by it, so ranking first and filtering after would leave the tiers
- * describing rows that are no longer on screen - the top hit for a query could
- * be a row the protocol filter had already excluded, and the visible order would
- * be whatever survived rather than the best match among what survived.
+ * Ranking LAST is deliberate, but be precise about what it buys, because no
+ * output today can tell the two orders apart: a predicate and a stable TOTAL
+ * sort commute, so filtering a ranked list is order-identical to ranking a
+ * filtered one, and `rankHosts` returns rows rather than tiers so the tiers
+ * never reach a caller either. `scripts/hosts-page-verify.ts` says the same
+ * thing where it checks this.
+ *
+ * What the order buys is that it stays correct when the output stops being the
+ * whole list. The moment anything takes a top-N slice - a "best match" row, a
+ * capped dropdown - rank-then-filter slices before the filters run and can hand
+ * back fewer rows than N, or none, while matching rows sit below the cut. That
+ * is the regression this order is proof against, and it is cheaper to write it
+ * this way now than to notice later.
  */
 export function filterAndRank(input: HostsViewInput): HostSearchRow[] {
   const byProtocol = input.rows.filter(

@@ -38,11 +38,40 @@ import type {
 } from "../src/modules/vault/types";
 
 let failed = 0;
+
+/**
+ * JSON with object keys SORTED, and `undefined` values kept.
+ *
+ * `JSON.stringify` is key-ORDER sensitive, so reordering the fields `groupCounts`
+ * returns would have failed "no hosts and no groups is all zeroes" with no
+ * behaviour change at all - field order is not part of that contract and should
+ * not be part of the comparison. It also DROPS keys whose value is `undefined`,
+ * which is the difference between "reported nothing" and "reported nothing for
+ * this field", and this file cares about that difference in several places.
+ *
+ * ARRAY order is preserved: for a ranked or filtered list the order IS the
+ * contract. `scripts/hosts-search-verify.ts` carries the same helper for the same
+ * reason.
+ */
+function canonical(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+  if (typeof value === "object" && value !== null) {
+    const body = Object.entries(value as Record<string, unknown>)
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+      .map(([k, v]) => `${JSON.stringify(k)}:${canonical(v)}`)
+      .join(",");
+    return `{${body}}`;
+  }
+  return value === undefined ? "undefined" : JSON.stringify(value);
+}
+
 function check(label: string, got: unknown, want: unknown): void {
-  if (JSON.stringify(got) === JSON.stringify(want)) {
+  const g = canonical(got);
+  const w = canonical(want);
+  if (g === w) {
     console.log(`  ok: ${label}`);
   } else {
-    console.error(`  FAIL: ${label} = ${JSON.stringify(got)}, want ${JSON.stringify(want)}`);
+    console.error(`  FAIL: ${label} = ${g}, want ${w}`);
     failed++;
   }
 }
@@ -56,9 +85,17 @@ function ok(label: string, cond: boolean): void {
 
 // --- fixtures -----------------------------------------------------------
 //
-// Every builder returns a FRESH record. Nothing below holds a baseline as a live
-// object and compares a later mutation against it - one of the two ways a
-// vacuous check got through earlier in this phase.
+// Every builder returns a FRESH record, so no check can be reading a fixture an
+// earlier one mutated - one of the two ways a vacuous check got through earlier
+// in this phase (handoff §5.12).
+//
+// There is exactly one exception, and the earlier version of this comment claimed
+// there was none: `NO_VAULT` below is a module-level value held live across the
+// whole file. It is safe for two reasons, not one - it is an EMPTY vault, so
+// there is nothing in it to disagree about, and it is never used as a BASELINE
+// that a later result is compared against, which is the failure mode §5.12
+// actually names. Anything needing a populated vault calls `vault(...)` for its
+// own copy. The end-of-run guard below is what keeps the first reason true.
 
 const FULL_SSH_INLINE: SshInlineCredentials = {
   kind: "inline",
@@ -160,6 +197,8 @@ function vault(identities: VaultIdentity[] = [], keys: VaultKey[] = []): VaultSn
   };
 }
 
+/** The one shared, live fixture in this file. Empty, and asserted still empty at
+ *  the end of the run - see the guard just before the summary. */
 const NO_VAULT = vault();
 
 function group(id: string, name: string, order?: number): HostGroup {
@@ -411,13 +450,37 @@ check(
     identityName(sshBound("h-29", "i-gone"), v.identities),
     UNKNOWN_IDENTITY_LABEL,
   );
-  // The property that matters, stated as a comparison rather than as
-  // `LABEL !== undefined` - which is true of any string constant and would have
-  // passed against every possible implementation.
-  ok(
-    "a dangling binding does not read the same as an inline one",
-    identityName(sshBound("h-29b", "i-gone"), v.identities) !==
-      identityName(sshInline("h-29c"), v.identities),
+}
+// What used to sit here was `identityName(dangling) !== identityName(inline)`,
+// which the three checks above reduce to `"Unknown identity" !== undefined`: it
+// could not fail unless one of them had already failed. No restatement over those
+// same three inputs can do better, because those three checks pin all three
+// outputs exactly - so the only way to add content is to add INPUT. These are the
+// dangling cases nothing above covers: over RDP, and against a vault stocked with
+// near-misses. A lookup that fell back to the first entry, or matched on name
+// instead of id, is invisible to a one-identity fixture.
+{
+  const decoys = vault([
+    identity("i-1", { name: "root @ prod" }),
+    // Named exactly like the id that is missing, which is the trap a by-name
+    // lookup falls into.
+    identity("i-2", { name: "i-gone" }),
+  ]);
+  check(
+    "a dangling binding reports the label whatever else the vault holds",
+    [
+      identityName(sshBound("h-29b", "i-gone"), decoys.identities),
+      identityName(rdpBound("h-29c", "i-gone"), decoys.identities),
+    ],
+    [UNKNOWN_IDENTITY_LABEL, UNKNOWN_IDENTITY_LABEL],
+  );
+  check(
+    "and an inline binding still reports nothing, with the same vault in hand",
+    [
+      identityName(sshInline("h-29d"), decoys.identities),
+      identityName(rdpInline("h-29e"), decoys.identities),
+    ],
+    [undefined, undefined],
   );
 }
 
@@ -499,10 +562,49 @@ console.log("\n[groupCounts] every host lands somewhere, and total keeps countin
   check("byGroup counts per existing group", counts.byGroup, { "g-1": 2, "g-2": 1, "g-3": 0 });
   ok("an empty group gets its own zero rather than a missing key", "g-3" in counts.byGroup);
   ok("no key is created for a group that does not exist", !("g-deleted" in counts.byGroup));
-  // The invariant the chips depend on. Without the dangling-groupId fallback the
-  // chips sum to less than All and that row is reachable from no chip at all.
+}
+// The invariant the chips depend on: without the dangling-groupId fallback the
+// chips sum to less than All and that row is reachable from no chip at all.
+//
+// Checked over a fixture whose counts are pinned NOWHERE, which is the whole
+// point of the separate block. Asserted against the three literals above it read
+// `2 + 3 === 5` - arithmetic over numbers the file had already fixed three lines
+// earlier - so it could not fail on its own. Here the only way to know the
+// expected numbers is to run the function.
+{
+  const groups = [group("g-1", "A", 0), group("g-2", "B", 1), group("g-3", "C", 2)];
+  // Three ways to land: a real group, genuinely ungrouped, and naming a group
+  // that is gone. Deliberately uneven, and large enough that no reader is
+  // tempted to write the answers down.
+  const hosts = Array.from({ length: 41 }, (_, i) =>
+    i % 7 === 0
+      ? sshInline(`h-c${i}`, {}, "g-deleted")
+      : i % 5 === 0
+        ? sshInline(`h-c${i}`)
+        : sshInline(`h-c${i}`, {}, `g-${(i % 3) + 1}`),
+  );
+  const counts = groupCounts(hosts, groups);
   const summed = Object.values(counts.byGroup).reduce((a, b) => a + b, 0);
-  check("total === ungrouped + sum(byGroup)", counts.ungrouped + summed, counts.total);
+  ok("total === ungrouped + sum(byGroup)", counts.ungrouped + summed === counts.total);
+  ok("and total is every host, not just the placeable ones", counts.total === hosts.length);
+  // The other half of "every host lands somewhere": each chip's count is the
+  // number of cards clicking it shows, so the two must be derived consistently.
+  // `matchesGroupFilter` is the click; `groupCounts` is the label.
+  const known = new Set(groups.map((g) => g.id));
+  const viaFilter = groups.map(
+    (g) =>
+      hosts.filter((h) => matchesGroupFilter(h, { kind: "group", groupId: g.id }, known)).length,
+  );
+  check(
+    "every chip's label equals what clicking it keeps",
+    viaFilter,
+    groups.map((g) => counts.byGroup[g.id]),
+  );
+  ok(
+    "and the Ungrouped chip's label equals what it keeps",
+    hosts.filter((h) => matchesGroupFilter(h, { kind: "ungrouped" }, known)).length ===
+      counts.ungrouped,
+  );
 }
 check("no hosts and no groups is all zeroes", groupCounts([], []), {
   total: 0,
@@ -545,6 +647,13 @@ console.log("\n[matchesGroupFilter] agrees with the counts, dangling row include
 // run, that ranking is what orders the survivors, and that the order does not
 // depend on the input order - which is what a regression actually breaks (a
 // top-N slice taken before a filter, or a filter dropped entirely).
+//
+// `filterAndRank`'s own doc comment used to disagree with this, claiming the
+// alternative order would make "the visible order whatever survived rather than
+// the best match among what survived" - a difference the commuting argument says
+// cannot be exhibited. It now says what is written here. Two comments on one
+// function contradicting each other is worse than either being wrong alone,
+// because a reader has no way to tell which one was checked.
 
 console.log("\n[filterAndRank] all three filters run, and ranking orders what survives");
 {
@@ -651,13 +760,68 @@ console.log("\n[filterAndRank] all three filters run, and ranking orders what su
   ]);
 }
 
+// --- the one shared fixture is still what its name says -----------------
+//
+// Guards the exact failure §5.12 names, for the exact value that could suffer it.
+// If anything above had written into `NO_VAULT`, every "no vault" answer after
+// that point would have been computed against a vault that is not empty, while
+// its label still said it was. Its maps are typed `ReadonlyMap`, so this can only
+// be broken through a cast - which is precisely the edit worth catching.
+
+console.log("\n[fixtures] the one shared fixture was not mutated along the way");
+ok(
+  "NO_VAULT is still empty at the end of the run",
+  NO_VAULT.identities.size === 0 && NO_VAULT.keys.size === 0,
+);
+
 // --- gate: break the implementation and watch each check actually fail --
 //
-// Handoff §5.12: a check that has not been watched fail is not a check. Every
-// check above was run against a deliberately broken `derive.ts` before being
-// trusted - the mutation table is in the report sent alongside this file, not
-// here, because it is a record of a manual pass rather than something the suite
-// can assert.
+// Handoff §5.12: a check that has not been watched fail is not a check. The
+// record for the checks added or repaired in THIS pass is below. The original
+// pass's table is NOT here and is not anywhere in the repo - the comment that
+// used to sit here deferred to "the report sent alongside this file", which is
+// not a thing a future reader can open. Saying so plainly beats promising a
+// record that does not exist.
+//
+//   Mutation in src/modules/hosts/page/derive.ts    Check it killed
+//   -------------------------------------------     ----------------------------
+//   identityName: fall back to the first entry      "a dangling binding reports
+//     in the map instead of the unknown label        the label whatever else the
+//                                                   vault holds" (got
+//                                                   ["root @ prod","root @ prod"]).
+//                                                   The `!== undefined` version
+//                                                   of that check PASSED here: it
+//                                                   compared "root @ prod" to
+//                                                   `undefined` and was satisfied
+//   identityName: `return identity ? identity.name  same check, got
+//     : cred.identityId` - leak the missing id      ["i-gone","i-gone"]
+//   groupCounts: drop `known.has(host.groupId)`     "no key is created for a group
+//     from the byGroup guard, so a dangling row      that does not exist" and "and
+//     creates its own key                           the Ungrouped chip's label
+//                                                   equals what it keeps". NOT the
+//                                                   invariant - moving the row
+//                                                   between buckets keeps the sum
+//                                                   right, which is why the
+//                                                   invariant needs the next
+//                                                   mutation and not this one
+//   groupCounts: count a dangling row in            "total === ungrouped +
+//     NEITHER bucket (`else if (groupId ===          sum(byGroup)"
+//     undefined)`)
+//   matchesGroupFilter: make the `group` arm        "every chip's label equals
+//     also keep rows naming a gone group             what clicking it keeps" (got
+//                                                   [23,22,22], want [10,9,9])
+//   groupCounts: reorder the returned fields to     nothing, which is the point of
+//     `{ byGroup, ungrouped, total }`               `canonical`. Run against the
+//                                                   old `JSON.stringify` helper
+//                                                   the same mutation failed "no
+//                                                   hosts and no groups is all
+//                                                   zeroes" with no behaviour
+//                                                   change whatsoever
+//
+//   Mutation in this file                           Check it killed
+//   -------------------------------------------     ----------------------------
+//   `(NO_VAULT.identities as Map<...>).set(...)`    "NO_VAULT is still empty at
+//     once, partway down the file                    the end of the run"
 
 console.log(failed === 0 ? "\nAll hosts-page checks passed." : `\n${failed} check(s) FAILED.`);
 process.exit(failed === 0 ? 0 : 1);

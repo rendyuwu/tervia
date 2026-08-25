@@ -6,14 +6,10 @@ import { cn } from "@/lib/utils";
 import { TOOLBAR_HOVER } from "@/lib/toolbarButton";
 import { Command as CommandPrimitive } from "cmdk";
 import { useHosts, useHostGroups } from "@/modules/hosts/useHosts";
-import {
-  inlineUsername,
-  parseAdHocTarget,
-  rankHosts,
-  type HostSearchRow,
-} from "@/modules/hosts/search";
+import { parseAdHocTarget, rankHosts, searchRows } from "@/modules/hosts/search";
 import { requestHostEditor } from "@/modules/hosts/pendingEditor";
 import type { Host } from "@/modules/hosts/types";
+import { useVault } from "@/modules/vault/useVault";
 import { useCallback, useMemo, useRef, useState } from "react";
 import { Monitor, Plug, Server } from "lucide-react";
 
@@ -52,6 +48,11 @@ type Props = {
  * `handleKeyDown` only intervenes when the list is empty, where there is no
  * row for `cmdk` to select but there may be an ad-hoc target to open the
  * editor for instead.
+ *
+ * That delegation rests on an invariant the `onInteractOutside` handler below
+ * exists to hold: while the input has focus the list is open. Break it and Enter
+ * silently does nothing, because handing the key to `cmdk` when the list has
+ * unmounted hands it to no one.
  */
 export function HeaderQuickConnect({ compact, onConnectHost, onOpenHostsPage }: Props) {
   const [opened, setOpened] = useState(false);
@@ -59,6 +60,11 @@ export function HeaderQuickConnect({ compact, onConnectHost, onOpenHostsPage }: 
   const [query, setQuery] = useState("");
 
   const inputRef = useRef<HTMLInputElement>(null);
+  // The anchor element, so the popover can recognise a click on its own input as
+  // NOT an outside interaction. See the `onInteractOutside` comment below - Radix
+  // cannot work this out for itself here, because it asks the trigger and this
+  // popover has an anchor instead.
+  const anchorRef = useRef<HTMLDivElement>(null);
   // Mirrors SearchInline's pattern: the input isn't mounted yet on the same
   // render that expands from the collapsed icon, so focus is deferred to the
   // ref callback that fires once it commits.
@@ -72,15 +78,19 @@ export function HeaderQuickConnect({ compact, onConnectHost, onOpenHostsPage }: 
 
   const hosts = useHosts();
   const groups = useHostGroups();
+  // The vault, for `searchRows` to resolve a bound host's username with. This
+  // used to build its rows with `inlineUsername`, which is `undefined` for a
+  // vault-bound host, while the Hosts page resolved the identity - so a host
+  // bound to an identity named "deploy" matched on the page, matched NOTHING
+  // here, and the empty state then offered "Press Enter to add deploy as a new
+  // host" for a host that already exists. `useVault` is synchronous (two store
+  // maps, memoised), so there is no cost to reading it on this path.
+  const vault = useVault();
 
-  const rows = useMemo<HostSearchRow[]>(() => {
-    const groupNameById = new Map(groups.map((g) => [g.id, g.name]));
-    return Array.from(hosts.values()).map((host) => ({
-      host,
-      username: inlineUsername(host),
-      groupName: host.groupId ? groupNameById.get(host.groupId) : undefined,
-    }));
-  }, [hosts, groups]);
+  const rows = useMemo(
+    () => searchRows(Array.from(hosts.values()), groups, vault),
+    [hosts, groups, vault],
+  );
 
   const ranked = useMemo(() => rankHosts(rows, query), [rows, query]);
 
@@ -163,7 +173,7 @@ export function HeaderQuickConnect({ compact, onConnectHost, onOpenHostsPage }: 
     <CommandPrimitive shouldFilter={false} onKeyDown={handleKeyDown} className="contents">
       <Popover open={open} onOpenChange={setOpen}>
         <PopoverAnchor asChild>
-          <div className="relative h-7 w-40 shrink-0">
+          <div ref={anchorRef} className="relative h-7 w-40 shrink-0">
             <Plug
               size={13}
               strokeWidth={1.75}
@@ -198,6 +208,23 @@ export function HeaderQuickConnect({ compact, onConnectHost, onOpenHostsPage }: 
           // blur) so there is exactly one place that decides what it does,
           // instead of this dismiss firing alongside it.
           onEscapeKeyDown={(e) => e.preventDefault()}
+          // Radix decides what counts as "outside" by asking whether the target
+          // is inside the TRIGGER, and this popover has an `Anchor` and no
+          // trigger, so `context.triggerRef.current` is null and a click on the
+          // INPUT counted as outside. That dismissed the list while leaving the
+          // input focused, and because it was already focused no new `focus`
+          // event fired, so the `onFocus` re-open above never ran. The resulting
+          // state - focused, closed, non-empty query, non-empty `ranked` - made
+          // Enter do nothing at all: it takes the `ranked.length > 0` early
+          // return in `handleKeyDown`, cmdk consumes the key, and cmdk's own
+          // item lookup finds nothing because the list unmounted with the
+          // portal. Telling Radix where the anchor is fixes the cause. Gating
+          // Enter on `open` instead would only stop Enter being dead, and leave
+          // a click on the input closing the input's own dropdown.
+          onInteractOutside={(e) => {
+            const target = e.target;
+            if (target instanceof Node && anchorRef.current?.contains(target)) e.preventDefault();
+          }}
         >
           <CommandList>
             {ranked.length === 0 ? (
