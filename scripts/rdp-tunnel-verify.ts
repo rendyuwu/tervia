@@ -64,6 +64,9 @@
 
 export {};
 
+import type { SshHost } from "../src/modules/hosts/types";
+import type { VaultAuthMode } from "../src/modules/vault/types";
+
 // ---------------------------------------------------------------------------
 // Stand-in for the Tauri IPC bridge `@tauri-apps/api` calls into.
 // ---------------------------------------------------------------------------
@@ -73,9 +76,11 @@ const calls: Call[] = [];
 const callbacks = new Map<number, (payload: unknown) => void>();
 let nextCallbackId = 1;
 
-/** The SSH connection store's contents. Mutable: pinning a fingerprint writes
- *  through this, which is how prompt attribution is observed. */
-type Row = Record<string, unknown> & { id: string };
+/** The hosts store's contents. Every row here is an SSH host - `tunnel.ts` only
+ *  ever dials a bastion, and a saved id that names an RDP host is refused, not
+ *  cast. Mutable: pinning a fingerprint writes through this, which is how
+ *  prompt attribution is observed. */
+type Row = SshHost;
 let sshRows: Row[] = [];
 /** Keychain, keyed the way `keyringAccount` builds it. */
 let secrets: Record<string, string> = {};
@@ -109,8 +114,8 @@ async function handleInvoke(cmd: string, args: Record<string, unknown>): Promise
     case "plugin:store|save":
     case "plugin:event|emit":
       return undefined;
-    case "secrets_get":
-      return secrets[args.account as string] ?? null;
+    case "secrets_get_all":
+      return (args.accounts as string[]).map((a) => secrets[a] ?? null);
     case "ssh_open": {
       const channelId = (args.onEvent as { id: number }).id;
       const input = args.input as Record<string, unknown>;
@@ -146,7 +151,7 @@ const { closeForwardForConnection, openForwardForConnection } =
   await import("../src/modules/ssh/tunnel");
 const { openRdpDialTarget, rdpOpenInput } = await import("../src/modules/rdp/dial");
 const { useHostKeyPrompt } = await import("../src/modules/ssh/hostKeyPrompt");
-type RdpConnection = Parameters<typeof rdpOpenInput>[0];
+type RdpHostFixture = Parameters<typeof rdpOpenInput>[0];
 
 // ---------------------------------------------------------------------------
 
@@ -194,18 +199,45 @@ function lastOf(cmd: string): Call | undefined {
   return [...calls].reverse().find((c) => c.cmd === cmd);
 }
 
-function row(over: Partial<Row> & { id: string }): Row {
+type RowOverrides = Partial<Omit<SshHost, "id" | "protocol" | "credential">> & {
+  id: string;
+  user?: string;
+  authMode?: VaultAuthMode;
+  hasPassword?: boolean;
+  hasPrivateKey?: boolean;
+  hasKeyPassphrase?: boolean;
+};
+
+/** One saved SSH host. The credential's `hostId` always tracks the row's own
+ *  `id` - the store refuses a mismatch, and a fixture that got this wrong would
+ *  fail every scenario below for the wrong reason. */
+function row(over: RowOverrides): Row {
+  const {
+    id,
+    user = "ubuntu",
+    authMode = "agent",
+    hasPassword = false,
+    hasPrivateKey = false,
+    hasKeyPassphrase = false,
+    ...base
+  } = over;
   return {
-    name: over.id,
-    host: `${over.id}.example.com`,
+    protocol: "ssh",
+    name: id,
+    host: `${id}.example.com`,
     port: 22,
-    user: "ubuntu",
-    authMode: "agent",
-    hasPassword: false,
-    hasPrivateKey: false,
-    hasKeyPassphrase: false,
-    lastFingerprint: `SHA256:pin-${over.id}`,
-    ...over,
+    lastFingerprint: `SHA256:pin-${id}`,
+    ...base,
+    id,
+    credential: {
+      kind: "inline",
+      hostId: id,
+      user,
+      authMode,
+      hasPassword,
+      hasPrivateKey,
+      hasKeyPassphrase,
+    },
   };
 }
 
@@ -676,23 +708,28 @@ console.log("\n[trust] a caller that JOINS a dial learns its prompt ids too");
 // ---------------------------------------------------------------------------
 console.log("\n[dial] the tunnel changes the address and nothing else");
 
-const rdpRow: RdpConnection = {
+const rdpRow: RdpHostFixture = {
   id: "r-win",
   name: "win-build-01",
   host: "10.10.11.26",
   port: 3389,
-  username: "Administrator",
-  domain: "CORP",
+  protocol: "rdp",
+  credential: {
+    kind: "inline",
+    hostId: "r-win",
+    username: "Administrator",
+    domain: "CORP",
+    hasPassword: true,
+  },
   desktopWidth: 1280,
   desktopHeight: 800,
   sizeMode: "preset",
-  hasPassword: true,
   certFingerprint: "49:67:09:05",
 };
 
 {
-  const direct = rdpOpenInput(rdpRow, { host: rdpRow.host, port: rdpRow.port });
-  const tunnelled = rdpOpenInput(rdpRow, { host: "127.0.0.1", port: 45123 });
+  const direct = await rdpOpenInput(rdpRow, { host: rdpRow.host, port: rdpRow.port });
+  const tunnelled = await rdpOpenInput(rdpRow, { host: "127.0.0.1", port: 45123 });
   check("the address differs", [tunnelled.host, tunnelled.port], ["127.0.0.1", 45123]);
   check(
     "the pinned certificate does not",
@@ -706,7 +743,7 @@ const rdpRow: RdpConnection = {
   );
   check("the password travels as a keychain reference, never a value", direct.credential, {
     kind: "keychain",
-    service: "tervia-rdp",
+    service: "tervia-hosts",
     account: "r-win::password",
   });
 }
@@ -726,7 +763,7 @@ const rdpRow: RdpConnection = {
 
 {
   reset([row({ id: "c-bastion" })]);
-  const tunnelled = { ...rdpRow, tunnel: { sshConnectionId: "c-bastion" } };
+  const tunnelled = { ...rdpRow, tunnel: { sshHostId: "c-bastion" } };
   // Two panes on one host through one bastion - the shape the reuse defect
   // broke, seen from the RDP side.
   const one = await openRdpDialTarget(tunnelled);

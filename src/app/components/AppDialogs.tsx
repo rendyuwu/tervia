@@ -8,7 +8,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { type SshConnection } from "@/modules/ssh/connections";
+import { type SshHost } from "@/modules/hosts/types";
 import { HostKeyPromptDialog } from "@/modules/ssh/HostKeyPromptDialog";
 import { lazy, Suspense, type Dispatch, type SetStateAction } from "react";
 import { type QuitGuard } from "../hooks/useQuitGuard";
@@ -43,8 +43,8 @@ type Props = {
   sshEditorMounted: boolean;
   sshEditorOpen: boolean;
   setSshEditorOpen: Dispatch<SetStateAction<boolean>>;
-  editingSshConn: SshConnection | null;
-  setEditingSshConn: Dispatch<SetStateAction<SshConnection | null>>;
+  editingSshConn: SshHost | null;
+  setEditingSshConn: Dispatch<SetStateAction<SshHost | null>>;
   pendingClose: PendingClose | null;
   cancelClose: () => void;
   confirmClose: () => void;

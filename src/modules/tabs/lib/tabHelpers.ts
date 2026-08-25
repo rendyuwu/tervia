@@ -1,7 +1,6 @@
 import { basename } from "@/lib/path";
 import { findLeaf, type PaneLeaf } from "@/modules/terminal/lib/panes";
-import { type SshConnection } from "@/modules/ssh/connections";
-import { type RdpConnection } from "@/modules/rdp/connections";
+import { type Host } from "@/modules/hosts/types";
 import { type PaneTab, type Tab } from "./tabTypes";
 
 /**
@@ -27,13 +26,12 @@ export function leafKindTag(leaf: PaneLeaf): string | null {
  */
 export function leafRenameSeed(
   leaf: PaneLeaf,
-  sshHosts?: Map<string, SshConnection>,
+  hosts?: Map<string, Host>,
   fallbackCwd?: string,
-  rdpHosts?: Map<string, RdpConnection>,
 ): string {
   if (leaf.customTitle) return leaf.customTitle;
   const tag = leafKindTag(leaf);
-  const label = leafLabel(leaf, sshHosts, fallbackCwd, rdpHosts);
+  const label = leafLabel(leaf, hosts, fallbackCwd);
   if (!tag) return label;
   // A leaf whose connection was deleted reads as a bare "ssh": that is all tag
   // and no name, so seed it empty rather than handing back the tag to be
@@ -49,19 +47,12 @@ export function leafRenameSeed(
  * list. They all have to agree, or a renamed tab keeps showing its old folder
  * name somewhere.
  *
- * `sshHosts` resolves an SSH leaf to `ssh:<name>`; a caller with no connection
- * map (`tab.title`, which is recomputed before the map is even loaded) gets the
- * bare "ssh" interim label. `fallbackCwd` is the owning tab's cwd, used only
- * when the leaf itself carries none. `rdpHosts` does the same job for an RDP
- * leaf, and is last because it is the newest: a caller that has no use for it
- * (nothing but RDP leaves reads it) can keep the three-argument call.
+ * `hosts` resolves an SSH or RDP leaf to `ssh:<name>` / `rdp:<name>`; a caller
+ * with no host map (`tab.title`, which is recomputed before the map is even
+ * loaded) gets the bare "ssh"/"rdp" interim label. `fallbackCwd` is the owning
+ * tab's cwd, used only when the leaf itself carries none.
  */
-export function leafLabel(
-  leaf: PaneLeaf,
-  sshHosts?: Map<string, SshConnection>,
-  fallbackCwd?: string,
-  rdpHosts?: Map<string, RdpConnection>,
-): string {
+export function leafLabel(leaf: PaneLeaf, hosts?: Map<string, Host>, fallbackCwd?: string): string {
   // A user-set name wins over every derived one. Renaming exists precisely
   // because "the folder this opened in" is often not what the tab should say,
   // so nothing below may override it - except the KIND tag, which is not a
@@ -76,16 +67,16 @@ export function leafLabel(
   // host, then to a bare "rdp" for a deleted connection or a caller with no
   // map. Exactly the SSH ladder, because the failure modes are the same.
   if (leaf.leafKind === "rdp") {
-    const conn = rdpHosts?.get(leaf.rdpConnectionId);
-    if (!conn) return "rdp";
-    return `rdp:${conn.name.trim() || conn.host}`;
+    const host = hosts?.get(leaf.rdpConnectionId);
+    if (!host) return "rdp";
+    return `rdp:${host.name.trim() || host.host}`;
   }
   // SSH leaves: show "ssh:<name>" when the saved connection has a name, else
   // fall back to the host/IP. Bare "ssh" if the connection was deleted.
   if (leaf.sshConnectionId) {
-    const conn = sshHosts?.get(leaf.sshConnectionId);
-    if (!conn) return "ssh";
-    return `ssh:${conn.name.trim() || conn.host}`;
+    const host = hosts?.get(leaf.sshConnectionId);
+    if (!host) return "ssh";
+    return `ssh:${host.name.trim() || host.host}`;
   }
   for (const cwd of [leaf.cwd, fallbackCwd]) {
     const b = cwd ? basename(cwd) : "";

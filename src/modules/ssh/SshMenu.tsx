@@ -22,14 +22,15 @@ import { cn } from "@/lib/utils";
 import { DESTRUCTIVE_ACTION, TOOLBAR_EXPANDED, TOOLBAR_HOVER } from "@/lib/toolbarButton";
 import { lazy, Suspense, useEffect, useState } from "react";
 import {
-  deleteConnection,
-  duplicateConnection,
-  listConnections,
-  onConnectionsChanged,
-  type SshConnection,
-} from "./connections";
+  deleteHost,
+  duplicateHost,
+  listHosts,
+  noForwardRules,
+  onHostsChanged,
+} from "@/modules/hosts/store";
+import { isRdpHost, isSshHost, type SshHost } from "@/modules/hosts/types";
+import { useHosts } from "@/modules/hosts/useHosts";
 import type { BackupMode } from "./SshBackupDialog";
-import { useRdpHosts } from "@/modules/rdp/connections";
 import type { FsReadResult } from "@/lib/ipc";
 import { BACKUP_EXTENSION, BACKUP_EXTENSION_V1 } from "./backupFile";
 import { invoke } from "@tauri-apps/api/core";
@@ -60,11 +61,11 @@ const SshBackupDialog = lazy(() =>
 
 type Props = {
   /** Opens a saved host as a new terminal tab. */
-  onConnect: (conn: SshConnection) => void;
+  onConnect: (conn: SshHost) => void;
 };
 
 export function SshMenu({ onConnect }: Props) {
-  const [conns, setConns] = useState<SshConnection[] | null>(null);
+  const [conns, setConns] = useState<SshHost[] | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const [editorOpen, setEditorOpen] = useState(false);
   // Latches once the editor opens. Keeps the lazy dialog mounted so Radix's
@@ -73,19 +74,21 @@ export function SshMenu({ onConnect }: Props) {
   useEffect(() => {
     if (editorOpen) setEditorMounted(true);
   }, [editorOpen]);
-  const [editing, setEditing] = useState<SshConnection | null>(null);
-  const [confirmDelete, setConfirmDelete] = useState<SshConnection | null>(null);
+  const [editing, setEditing] = useState<SshHost | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<SshHost | null>(null);
   const [backup, setBackup] = useState<BackupMode | null>(null);
   const [backupOpen, setBackupOpen] = useState(false);
   const [pickError, setPickError] = useState<string | null>(null);
   // Only for the export item's enabled state: one backup covers both protocols,
   // so this menu has to know whether any RDP host exists even though it never
   // lists one.
-  const rdpHosts = useRdpHosts();
+  const hosts = useHosts();
+  const hasRdpHost = [...hosts.values()].some(isRdpHost);
 
   useEffect(() => {
-    void listConnections().then(setConns);
-    const unsub = onConnectionsChanged(() => void listConnections().then(setConns));
+    const load = () => void listHosts().then((list) => setConns(list.filter(isSshHost)));
+    load();
+    const unsub = onHostsChanged(load);
     return () => {
       void unsub.then((fn) => fn());
     };
@@ -97,7 +100,7 @@ export function SshMenu({ onConnect }: Props) {
     setMenuOpen(false);
   };
 
-  const openEdit = (c: SshConnection) => {
+  const openEdit = (c: SshHost) => {
     setEditing(c);
     setEditorOpen(true);
     setMenuOpen(false);
@@ -106,20 +109,29 @@ export function SshMenu({ onConnect }: Props) {
   // Copy, then open the copy: what a duplicate is for is changing the one field
   // that differs, usually the host or the port. The list refreshes itself off
   // the store's change event.
-  const openDuplicate = async (c: SshConnection) => {
-    const copy = await duplicateConnection(c.id);
-    if (!copy) return;
-    setEditing(copy);
-    setEditorOpen(true);
-    setMenuOpen(false);
+  //
+  // `duplicateHost` throws (not returns null) when the source's jump host is
+  // dangling or the chain is cyclic - `upsertHost`'s write guard runs on the
+  // copy too. Surfaced through `pickError` rather than left as an unhandled
+  // rejection.
+  const openDuplicate = async (c: SshHost) => {
+    try {
+      const copy = await duplicateHost(c.id);
+      if (!copy || !isSshHost(copy)) return;
+      setEditing(copy);
+      setEditorOpen(true);
+      setMenuOpen(false);
+    } catch (e) {
+      setPickError(e instanceof Error ? e.message : String(e));
+    }
   };
 
-  const askDelete = (c: SshConnection) => {
+  const askDelete = (c: SshHost) => {
     setConfirmDelete(c);
     setMenuOpen(false);
   };
 
-  const onPick = (c: SshConnection) => {
+  const onPick = (c: SshHost) => {
     setMenuOpen(false);
     onConnect(c);
   };
@@ -207,7 +219,8 @@ export function SshMenu({ onConnect }: Props) {
                 <span className="flex min-w-0 flex-col">
                   <span className="truncate">{c.name}</span>
                   <span className="text-muted-foreground truncate font-mono text-[10px]">
-                    {c.user}@{c.host}:{c.port}
+                    {c.credential.kind === "inline" ? `${c.credential.user}@` : ""}
+                    {c.host}:{c.port}
                   </span>
                 </span>
                 {/* Action buttons. preventDefault on click blocks the row's
@@ -247,7 +260,7 @@ export function SshMenu({ onConnect }: Props) {
               export - only both being empty is. */}
           <DropdownMenuItem
             onSelect={openExport}
-            disabled={conns !== null && conns.length === 0 && rdpHosts.size === 0}
+            disabled={conns !== null && conns.length === 0 && !hasRdpHost}
             className="gap-2 text-[12px]"
           >
             <Download size={13} strokeWidth={1.75} />
@@ -307,7 +320,7 @@ export function SshMenu({ onConnect }: Props) {
               onClick={async () => {
                 const target = confirmDelete;
                 setConfirmDelete(null);
-                if (target) await deleteConnection(target.id);
+                if (target) await deleteHost(target.id, noForwardRules);
               }}
             >
               Delete

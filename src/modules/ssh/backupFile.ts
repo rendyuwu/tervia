@@ -2,11 +2,12 @@
  * Shape and validation for the `.tervia-backup` connection backup.
  *
  * An import is a TRUST BOUNDARY: the file came off a USB stick or a chat, and
- * whatever survives this module is written straight into the connections store
- * and later dialled. So every field is re-checked here rather than trusted -
- * a bad port would be sent to `TcpStream::connect`, a bad `proxyJumpId` would
- * make every connect fail with "a jump host in the chain no longer exists",
- * and a non-array `forwards` would bind nothing while looking configured.
+ * whatever survives this module is written straight into the host store and
+ * later dialled. So every field is re-checked here rather than trusted - a bad
+ * port would be sent to `TcpStream::connect`, a bad `proxyJumpId` would make
+ * every connect fail with "a jump host in the chain no longer exists", and an
+ * inline binding naming another host would authenticate with THAT host's
+ * secrets.
  *
  * TWO FORMATS, and the difference is where the boundary sits:
  *
@@ -14,25 +15,51 @@
  *   `connections` array is PLAINTEXT beside a sealed credential block. So the
  *   whole file is validated at parse time, before anything is decrypted.
  * - **v2** (`.tervia-backup`, kind `tervia-connections`) seals everything -
- *   both inventories and every credential - in one blob, because a v1 export
+ *   the inventory and every credential - in one blob, because a v1 export
  *   leaks the machine inventory in plaintext while protecting only the
  *   passwords. That moves the boundary: `parseBackupFile` can only check the
- *   ENVELOPE, and {@link sanitizePayload} does the per-connection work after
- *   the host process has decrypted. Credentials never come back to JS at all
- *   in v2 - `backup_apply_secrets` writes them to the keychain from Rust.
+ *   ENVELOPE, and {@link sanitizePayload} does the per-host work after the host
+ *   process has decrypted. Credentials never come back to JS at all in v2 -
+ *   `backup_apply_secrets` writes them to the keychain from Rust.
  *
- * Only reading v1 is supported; every export is v2. Renaming the kind and the
- * extension was free because `release.yml` has never run, so the only v1 files
- * in existence are hand-made test ones.
+ * Only reading v1 is supported; every export is v2.
  *
- * Kept free of Tauri imports (both connection imports are type-only, so they
- * are erased at compile time) so `scripts/ssh-backup-verify.ts` can exercise
- * the parser under plain node.
+ * Kept free of the Tauri runtime so `scripts/ssh-backup-verify.ts` can exercise
+ * the parser under plain node. `@/modules/hosts/types` and
+ * `@/modules/vault/types` are both plain TypeScript with no IPC of their own,
+ * which is why the one value import below is safe; anything reaching a store or
+ * an `invoke` belongs in `backup.ts` instead.
  */
-import type { RdpConnection, RdpSizeMode } from "@/modules/rdp/connections";
-import type { SshConnection, SshAuthMode, SshPortForward } from "./connections";
+import {
+  RDP_DEFAULT_PRESET,
+  type Host,
+  type HostBase,
+  type HostGroup,
+  type RdpHost,
+  type RdpSizeMode,
+  type SshHost,
+} from "@/modules/hosts/types";
+import type {
+  RdpCredentialBinding,
+  SshCredentialBinding,
+  VaultAuthMode,
+} from "@/modules/vault/types";
 
 export const BACKUP_KIND = "tervia-connections";
+
+/**
+ * The format version - deliberately UNCHANGED while the payload shape beneath it
+ * changed completely.
+ *
+ * The shape changed under the same number ON PURPOSE. No installed build of this
+ * app exists, `release.yml` has never run on this repository and there is no
+ * tag, so the only v2 files in existence are hand-made test ones and a payload
+ * shape moving under a fixed number costs nothing today. Bumping to v3 here
+ * would drag in the rest of 6g with it - the five-collection payload that also
+ * carries identities, keys and forward rules, the dropped v1/v2 read path, and
+ * with it the deletion of the last route where plaintext credentials reach JS.
+ * 6g bumps this.
+ */
 export const BACKUP_VERSION = 2;
 export const BACKUP_EXTENSION = "tervia-backup";
 
@@ -41,11 +68,23 @@ export const BACKUP_KIND_V1 = "tervia-ssh-connections";
 export const BACKUP_EXTENSION_V1 = "tervia-ssh";
 
 /**
- * Top-level keys of the sealed payload that hold credentials rather than
- * inventory. Named here and passed to `backup_open_payload` so the host process
- * knows what to withhold from the metadata it hands back.
+ * The one top-level payload key that holds credentials rather than inventory.
+ *
+ * ONE group now, where there were two. The two old stores had a keychain service
+ * each (`tervia-ssh`, `tervia-rdp`) and an id space each, so a credential needed
+ * the protocol to address it; one host store on one service (`tervia-hosts`)
+ * with one id space does not.
+ *
+ * It must not collide with a payload key that carries inventory - `merge_secrets`
+ * in `modules/backup.rs` refuses to write into a group the payload already
+ * carries, precisely so a typo cannot replace the host list with a credential
+ * map. `hostSecrets` is neither `hosts` nor `groups`.
  */
-export const SECRET_GROUPS = ["secrets", "rdpSecrets"] as const;
+export const HOST_SECRET_GROUP = "hostSecrets";
+
+/** Named here and passed to `backup_open_payload` so the host process knows what
+ *  to withhold from the metadata it hands back. */
+export const SECRET_GROUPS = [HOST_SECRET_GROUP] as const;
 export type BackupSecretGroup = (typeof SECRET_GROUPS)[number];
 
 /**
@@ -93,17 +132,8 @@ export type BackupFileV2 = {
  * because the caller should care about the format.
  */
 export type ParsedBackup =
-  | { version: 1; connections: SshConnection[]; secrets: SealedBlob; skipped: number }
+  | { version: 1; hosts: SshHost[]; secrets: SealedBlob; skipped: number }
   | { version: 2; payload: SealedBlob };
-
-/**
- * Fallback desktop size for a row whose own is unusable. Mirrors
- * `RDP_DEFAULT_PRESET` in `@/modules/rdp/connections`, duplicated rather than
- * imported because that module pulls in the Tauri plugin store and this one has
- * to stay loadable under plain node.
- */
-const RDP_FALLBACK_WIDTH = 1600;
-const RDP_FALLBACK_HEIGHT = 900;
 
 const isRecord = (v: unknown): v is Record<string, unknown> =>
   typeof v === "object" && v !== null && !Array.isArray(v);
@@ -115,48 +145,30 @@ function port(v: unknown): number | null {
   return typeof v === "number" && Number.isInteger(v) && v >= 1 && v <= 65535 ? v : null;
 }
 
-function sanitizeForwards(v: unknown): SshPortForward[] | undefined {
-  if (!Array.isArray(v)) return undefined;
-  const out: SshPortForward[] = [];
-  for (const raw of v) {
-    if (!isRecord(raw)) continue;
-    // A local port of 0 is meaningful here (bind an ephemeral port), unlike a
-    // remote port, so it is allowed through as its own case.
-    const localRaw = raw.localPort;
-    const local =
-      typeof localRaw === "number" &&
-      Number.isInteger(localRaw) &&
-      localRaw >= 0 &&
-      localRaw <= 65535
-        ? localRaw
-        : null;
-    const remotePort = port(raw.remotePort);
-    const remoteHost = str(raw.remoteHost).trim();
-    if (local === null || remotePort === null || !remoteHost) continue;
-    out.push({ localPort: local, remoteHost, remotePort });
-  }
-  return out.length > 0 ? out : undefined;
+/** A desktop dimension, or null when it is not a size a canvas could hold. */
+function dimension(v: unknown): number | null {
+  return typeof v === "number" && Number.isInteger(v) && v >= 320 && v <= 16384 ? v : null;
+}
+
+/** An unknown mode - including one a later build writes - resolves to the mode
+ *  every code path here can handle. */
+function authMode(v: unknown): VaultAuthMode {
+  return v === "key" || v === "agent" ? v : "password";
 }
 
 /**
- * Validate one record. Returns null when the entry could not be a working
- * connection, so the caller can skip it and report the count instead of
- * importing something that fails at dial time.
+ * The fields both protocols share, or null when the row could not be a working
+ * host at all.
  */
-export function sanitizeConnection(raw: unknown): SshConnection | null {
-  if (!isRecord(raw)) return null;
+function baseOf(raw: Record<string, unknown>): HostBase | null {
   const id = str(raw.id).trim();
   const host = str(raw.host).trim();
   const p = port(raw.port);
   if (!id || !host || p === null) return null;
 
-  const authMode: SshAuthMode =
-    raw.authMode === "key" || raw.authMode === "agent" ? raw.authMode : "password";
+  const groupId = str(raw.groupId).trim();
   const description = str(raw.description).trim();
-  const proxyJumpId = str(raw.proxyJumpId).trim();
-  const lastFingerprint = str(raw.lastFingerprint).trim();
   const lastConnectedAt = raw.lastConnectedAt;
-  const forwards = sanitizeForwards(raw.forwards);
 
   return {
     id,
@@ -164,77 +176,172 @@ export function sanitizeConnection(raw: unknown): SshConnection | null {
     name: str(raw.name).trim() || host,
     host,
     port: p,
-    user: str(raw.user).trim(),
-    authMode,
-    // Recomputed by upsertConnection from what actually lands in the keychain;
-    // never trusted from the file, or the UI pips would lie.
-    hasPassword: false,
-    hasPrivateKey: false,
-    hasKeyPassphrase: false,
+    // A group that did not travel leaves the host rendering as ungrouped, which
+    // is visible and fixable, so the id rides along unchecked - the same call
+    // the store makes on every write. `mergeGroups` is what repoints it when the
+    // group exists here under a different id.
+    ...(groupId ? { groupId } : {}),
     ...(description ? { description } : {}),
     ...(typeof lastConnectedAt === "number" && Number.isFinite(lastConnectedAt)
       ? { lastConnectedAt }
       : {}),
+  };
+}
+
+/**
+ * One host's credential binding.
+ *
+ * `hostId` is FORCED to the row's own id and never read from the file, and that
+ * is not tidiness. `assertBindingOwner` refuses a mismatch, so a file whose
+ * binding named another host would abort the whole import; and if it did not,
+ * the imported host would resolve THAT host's keychain accounts - rotating one
+ * password would change the other, with no error anywhere.
+ *
+ * An unreadable binding falls back to inline with a blank user rather than
+ * dropping the row. That is what the old stores did with a blank `user` field,
+ * and a host you can see and fix beats one that vanished without explanation.
+ */
+function sshBinding(raw: unknown, hostId: string): SshCredentialBinding {
+  if (isRecord(raw) && raw.kind === "identity") {
+    const identityId = str(raw.identityId).trim();
+    if (identityId) return { kind: "identity", identityId };
+  }
+  const inline = isRecord(raw) ? raw : {};
+  return {
+    kind: "inline",
+    hostId,
+    user: str(inline.user).trim(),
+    authMode: authMode(inline.authMode),
+    // Never trusted from the file: a presence flag is a claim about THIS
+    // machine's keychain, and the file is describing another one.
+    hasPassword: false,
+    hasPrivateKey: false,
+    hasKeyPassphrase: false,
+  };
+}
+
+/** The RDP half. Same contract, same forced `hostId`. */
+function rdpBinding(raw: unknown, hostId: string): RdpCredentialBinding {
+  if (isRecord(raw) && raw.kind === "identity") {
+    const identityId = str(raw.identityId).trim();
+    if (identityId) return { kind: "identity", identityId };
+  }
+  const inline = isRecord(raw) ? raw : {};
+  const domain = str(inline.domain).trim();
+  return {
+    kind: "inline",
+    hostId,
+    username: str(inline.username).trim(),
+    ...(domain ? { domain } : {}),
+    hasPassword: false,
+  };
+}
+
+function sshArm(base: HostBase, raw: Record<string, unknown>): SshHost {
+  const proxyJumpId = str(raw.proxyJumpId).trim();
+  const lastFingerprint = str(raw.lastFingerprint).trim();
+  return {
+    ...base,
+    protocol: "ssh",
+    credential: sshBinding(raw.credential, base.id),
     // Kept deliberately: it is the pinned host key. Carrying it over means the
     // new machine keeps the same TOFU anchor instead of blindly accepting
     // whatever answers on the first connect.
     ...(lastFingerprint ? { lastFingerprint } : {}),
     ...(proxyJumpId ? { proxyJumpId } : {}),
-    ...(forwards ? { forwards } : {}),
   };
 }
 
-/** A desktop dimension, or null when it is not a size a canvas could hold. */
-function dimension(v: unknown): number | null {
-  return typeof v === "number" && Number.isInteger(v) && v >= 320 && v <= 16384 ? v : null;
-}
-
-/**
- * Validate one RDP record. Same contract as {@link sanitizeConnection}: null
- * means the entry could not be a working connection.
- *
- * Unlike the SSH side, a bad desktop size does NOT drop the row. It is the one
- * field a later build could legitimately widen (RDP-03 adds `"fit"`), and a
- * host is still perfectly dialable at a different resolution - so an unusable
- * size falls back instead of costing the user the connection.
- */
-export function sanitizeRdpConnection(raw: unknown): RdpConnection | null {
-  if (!isRecord(raw)) return null;
-  const id = str(raw.id).trim();
-  const host = str(raw.host).trim();
-  const p = port(raw.port);
-  if (!id || !host || p === null) return null;
-
-  const domain = str(raw.domain).trim();
-  const description = str(raw.description).trim();
+function rdpArm(base: HostBase, raw: Record<string, unknown>): RdpHost {
   const certFingerprint = str(raw.certFingerprint).trim();
-  const lastConnectedAt = raw.lastConnectedAt;
-  const tunnelId = isRecord(raw.tunnel) ? str(raw.tunnel.sshConnectionId).trim() : "";
+  const sshHostId = isRecord(raw.tunnel) ? str(raw.tunnel.sshHostId).trim() : "";
   // Only one member today, so anything else - including a mode a later build
   // writes - resolves to the mode this build can actually render.
   const sizeMode: RdpSizeMode = "preset";
 
   return {
-    id,
-    name: str(raw.name).trim() || host,
-    host,
-    port: p,
-    username: str(raw.username).trim(),
-    desktopWidth: dimension(raw.desktopWidth) ?? RDP_FALLBACK_WIDTH,
-    desktopHeight: dimension(raw.desktopHeight) ?? RDP_FALLBACK_HEIGHT,
+    ...base,
+    protocol: "rdp",
+    credential: rdpBinding(raw.credential, base.id),
+    // Unlike every other field, a bad desktop size does NOT drop the row. It is
+    // the one field a later build could legitimately widen (RDP-08 adds
+    // `"fit"`), and a host is still perfectly dialable at a different
+    // resolution - so an unusable size falls back instead of costing the user
+    // the connection.
+    desktopWidth: dimension(raw.desktopWidth) ?? RDP_DEFAULT_PRESET.width,
+    desktopHeight: dimension(raw.desktopHeight) ?? RDP_DEFAULT_PRESET.height,
     sizeMode,
-    // Recomputed from the keychain by upsertConnection, like the SSH flags.
-    hasPassword: false,
-    ...(domain ? { domain } : {}),
-    ...(description ? { description } : {}),
-    ...(typeof lastConnectedAt === "number" && Number.isFinite(lastConnectedAt)
-      ? { lastConnectedAt }
-      : {}),
     // The pinned certificate, carried for the same reason as SSH's host key:
     // the new machine keeps the TOFU anchor instead of accepting whatever
     // answers first.
     ...(certFingerprint ? { certFingerprint } : {}),
-    ...(tunnelId ? { tunnel: { sshConnectionId: tunnelId } } : {}),
+    ...(sshHostId ? { tunnel: { sshHostId } } : {}),
+  };
+}
+
+/**
+ * Validate one host record. Returns null when the entry could not be a working
+ * host, so the caller can skip it and report the count instead of importing
+ * something that fails at dial time.
+ */
+export function sanitizeHost(raw: unknown): Host | null {
+  if (!isRecord(raw)) return null;
+  const base = baseOf(raw);
+  if (!base) return null;
+  // No default protocol, and no guessing. An RDP row read as SSH would offer an
+  // SSH handshake to port 3389, and a row naming neither cannot be dialled
+  // either way - so it is skipped and counted, like any other unusable entry.
+  if (raw.protocol === "ssh") return sshArm(base, raw);
+  if (raw.protocol === "rdp") return rdpArm(base, raw);
+  return null;
+}
+
+/**
+ * Validate one group. Null when it could not be a pickable label: `upsertGroup`
+ * refuses a blank name, because a group is chosen by name from a dropdown.
+ */
+export function sanitizeGroup(raw: unknown): HostGroup | null {
+  if (!isRecord(raw)) return null;
+  const id = str(raw.id).trim();
+  const name = str(raw.name).trim();
+  if (!id || !name) return null;
+  const order = raw.order;
+  return {
+    id,
+    name,
+    ...(typeof order === "number" && Number.isFinite(order) ? { order } : {}),
+  };
+}
+
+/**
+ * Validate one record from a **v1** file, whose rows are the old SSH-only shape:
+ * `user` and `authMode` at the top level, no `protocol`, no `credential`.
+ *
+ * The result is an ordinary {@link SshHost} with an inline binding, so a v1
+ * import walks exactly the same write path as a v2 one. One v1 field cannot
+ * survive: `forwards`, because a forward rule is its own record now (decision 7)
+ * and the store has nowhere to put one. 6g drops this read path entirely.
+ */
+export function sanitizeLegacyHost(raw: unknown): SshHost | null {
+  if (!isRecord(raw)) return null;
+  const base = baseOf(raw);
+  if (!base) return null;
+  const proxyJumpId = str(raw.proxyJumpId).trim();
+  const lastFingerprint = str(raw.lastFingerprint).trim();
+  return {
+    ...base,
+    protocol: "ssh",
+    credential: {
+      kind: "inline",
+      hostId: base.id,
+      user: str(raw.user).trim(),
+      authMode: authMode(raw.authMode),
+      hasPassword: false,
+      hasPrivateKey: false,
+      hasKeyPassphrase: false,
+    },
+    ...(lastFingerprint ? { lastFingerprint } : {}),
+    ...(proxyJumpId ? { proxyJumpId } : {}),
   };
 }
 
@@ -252,35 +359,200 @@ function sanitizeSealed(raw: unknown): SealedBlob | null {
 }
 
 /**
- * Drop `proxyJumpId` references that point at nothing. `known` is every id that
- * will exist after the import (the file's own ids plus what is already saved).
- * A dangling jump id is not cosmetic: `resolveJumpHops` throws on it, so every
- * connect through that host would fail with a message about a host the user
- * never knowingly deleted.
+ * Hard cap on a jump chain, mirroring `MAX_JUMP_HOPS` in
+ * `@/modules/hosts/jumps`. Duplicated rather than imported for the reason the
+ * module header gives - that file reaches the vault resolver and the Tauri
+ * runtime with it - and the two numbers have to agree, because a longer chain is
+ * REFUSED by the store rather than truncated.
  */
-export function clearDanglingJumps(list: SshConnection[], known: Set<string>): SshConnection[] {
-  return list.map((c) =>
-    c.proxyJumpId && !known.has(c.proxyJumpId) ? { ...c, proxyJumpId: undefined } : c,
+const MAX_JUMP_CHAIN = 16;
+
+/** Every host that will exist after the import, the file's version winning over
+ *  the saved one. */
+function hostIndex(incoming: Host[], existing: Host[]): Map<string, Host> {
+  const byId = new Map(existing.map((h) => [h.id, h]));
+  for (const host of incoming) byId.set(host.id, host);
+  return byId;
+}
+
+/** The id a host reaches another host through, whichever field its protocol
+ *  keeps it in. */
+function referenceOf(host: Host): string | undefined {
+  return host.protocol === "ssh" ? host.proxyJumpId : host.tunnel?.sshHostId;
+}
+
+/**
+ * Whether `upsertHost` would ACCEPT this reference: every hop is a saved SSH
+ * host, the walk never returns to `selfId`, and the chain is within the cap.
+ *
+ * It mirrors four refusals that live in `hosts/jumps.ts` and `hosts/store.ts` -
+ * a missing hop, a hop that is not an SSH host, a cycle (including a host naming
+ * itself), an over-long chain. All four THROW there, which is what makes
+ * clearing them here load-bearing: an import that hands one over does not save a
+ * row with a dangling reference, it aborts and leaves the rest of the file
+ * unimported.
+ */
+function chainResolves(selfId: string, startId: string, byId: Map<string, Host>): boolean {
+  const visited = new Set<string>([selfId]);
+  let cursor: string | undefined = startId;
+  let hops = 0;
+  while (cursor) {
+    if (visited.has(cursor)) return false;
+    visited.add(cursor);
+    const hop = byId.get(cursor);
+    if (!hop || hop.protocol !== "ssh") return false;
+    if (++hops > MAX_JUMP_CHAIN) return false;
+    cursor = hop.proxyJumpId;
+  }
+  return true;
+}
+
+/**
+ * The ids on one chain from `startId`, stopping at the first id that is not
+ * there. Says nothing about whether the chain is usable - {@link chainResolves}
+ * answers that.
+ */
+function chainOf(startId: string, byId: Map<string, Host>): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  let cursor: string | undefined = startId;
+  while (cursor && !seen.has(cursor) && out.length <= MAX_JUMP_CHAIN) {
+    seen.add(cursor);
+    out.push(cursor);
+    const hop = byId.get(cursor);
+    cursor = hop ? referenceOf(hop) : undefined;
+  }
+  return out;
+}
+
+/**
+ * Drop every `proxyJumpId` the host store would refuse. `existing` is what is
+ * already saved here, because a jump host may live in the file OR on this
+ * machine and both count as resolvable.
+ *
+ * A dangling jump id is not cosmetic and never was: it used to save and then
+ * fail every connect through that host with a message about a host the user
+ * never knowingly deleted. It now fails the WRITE, which is worse for an import
+ * - one bad row abandons the rest of the file.
+ *
+ * Three refusals are new here because one merged store can express what two
+ * separate ones could not: a jump host that is an RDP row, a host that names
+ * ITSELF, and a cycle. A cycle clears the reference on every member rather than
+ * picking a survivor - there is no principled winner, and keeping one would mean
+ * this pass decided which of two hosts the user meant.
+ */
+export function clearDanglingJumps(incoming: Host[], existing: Host[]): Host[] {
+  const byId = hostIndex(incoming, existing);
+  return incoming.map((h) =>
+    h.protocol === "ssh" && h.proxyJumpId && !chainResolves(h.id, h.proxyJumpId, byId)
+      ? { ...h, proxyJumpId: undefined }
+      : h,
   );
 }
 
 /**
- * The RDP counterpart: drop a `tunnel` whose SSH connection did not come along.
- * `knownSsh` is every SSH id that will exist after the import.
+ * The RDP counterpart: drop a `tunnel` whose SSH host the store would refuse.
  *
- * Same failure as a dangling jump, one protocol over - a tunnelled RDP row
- * whose bastion is missing cannot resolve a local port, so every connect fails
- * on a host the user never touched. Dropping the tunnel leaves a row that
- * dials `host:port` directly, which is at least a connection the user can see
- * and fix.
+ * Same failure one protocol over - a tunnelled RDP row whose bastion is missing
+ * cannot resolve a local port. Dropping the tunnel leaves a row that dials
+ * `host:port` directly, which is at least a connection the user can see and fix.
+ *
+ * The bastion's OWN jump chain is walked too, not just the bastion: it is
+ * resolved on the same connect, so the store applies the same check.
  */
-export function clearDanglingTunnels(
-  list: RdpConnection[],
-  knownSsh: Set<string>,
-): RdpConnection[] {
-  return list.map((c) =>
-    c.tunnel && !knownSsh.has(c.tunnel.sshConnectionId) ? { ...c, tunnel: undefined } : c,
+export function clearDanglingTunnels(incoming: Host[], existing: Host[]): Host[] {
+  const byId = hostIndex(incoming, existing);
+  return incoming.map((h) =>
+    h.protocol === "rdp" && h.tunnel && !chainResolves(h.id, h.tunnel.sshHostId, byId)
+      ? { ...h, tunnel: undefined }
+      : h,
   );
+}
+
+/**
+ * The order the hosts have to be WRITTEN in: everything on a host's chain before
+ * the host that reaches through it.
+ *
+ * Not cosmetic either. `upsertHost` re-walks the whole chain on every write and
+ * judges it against WHAT IS ALREADY ON DISK, so writing a host before its
+ * bastion throws. The two old stores had no reference guard at all, which is why
+ * file order was good enough before and is not now.
+ *
+ * Run AFTER both clearing passes: this assumes every remaining reference
+ * resolves and no chain loops. The `walking` guard is belt-and-braces, so a
+ * cycle that somehow survived yields a bad order rather than a hang.
+ */
+export function orderHostWrites(incoming: Host[], existing: Host[]): Host[] {
+  const byId = hostIndex(incoming, existing);
+  const pending = new Map(incoming.map((h) => [h.id, h]));
+  const emitted = new Set<string>();
+  const walking = new Set<string>();
+  const out: Host[] = [];
+
+  const visit = (id: string): void => {
+    const host = pending.get(id);
+    if (!host || emitted.has(id) || walking.has(id)) return;
+    walking.add(id);
+    const reference = referenceOf(host);
+    // The WHOLE chain, not only the first hop: a host three hops out that is
+    // still unwritten fails the walk even when the direct target is on disk.
+    if (reference) for (const hop of chainOf(reference, byId)) visit(hop);
+    walking.delete(id);
+    emitted.add(id);
+    out.push(host);
+  };
+
+  for (const host of incoming) visit(host.id);
+  return out;
+}
+
+/**
+ * Merge the file's groups into the saved ones, and repoint the incoming hosts at
+ * whatever group they end up in.
+ *
+ * Merging is by id, like hosts. The wrinkle is that a group also has to have a
+ * UNIQUE NAME: `upsertGroup` refuses a second "prod", so a file whose "prod"
+ * carries a different id than the local one would abort the import over a label.
+ * A name already taken therefore RESOLVES to the group holding it, and the hosts
+ * that named the incoming group are repointed. That is the merge the uniqueness
+ * rule implies - two groups cannot share a name, so "prod" IS the group.
+ *
+ * The same pass covers two incoming groups colliding with each OTHER, which
+ * would throw on the second write for the same reason.
+ *
+ * Returned together because applying one half without the other is the bug: a
+ * repoint nobody applies leaves the host naming a group that was never written.
+ */
+export function mergeGroups(
+  incoming: HostGroup[],
+  existing: HostGroup[],
+  hosts: Host[],
+): { groups: HostGroup[]; hosts: Host[] } {
+  // The store's own comparison, so `" prod"` and `"PROD"` are the collision they
+  // look like. Duplicated because that helper is private to `hosts/store.ts`.
+  const key = (name: string): string => name.trim().toLowerCase();
+  const owner = new Map(existing.map((g) => [key(g.name), g.id]));
+  const groups: HostGroup[] = [];
+  const remap = new Map<string, string>();
+
+  for (const group of incoming) {
+    const held = owner.get(key(group.name));
+    if (held !== undefined && held !== group.id) {
+      remap.set(group.id, held);
+      continue;
+    }
+    owner.set(key(group.name), group.id);
+    groups.push(group);
+  }
+
+  if (remap.size === 0) return { groups, hosts };
+  return {
+    groups,
+    hosts: hosts.map((h) => {
+      const to = h.groupId ? remap.get(h.groupId) : undefined;
+      return to ? { ...h, groupId: to } : h;
+    }),
+  };
 }
 
 const NOT_A_BACKUP = "Not a Tervia connection backup file.";
@@ -324,77 +596,78 @@ export function parseBackupFile(raw: unknown): ParsedBackup {
   const secrets = sanitizeSealed(raw.secrets);
   if (!secrets) throw new Error("Backup file is missing its encrypted credentials block.");
 
-  const connections: SshConnection[] = [];
+  const hosts: SshHost[] = [];
   const seen = new Set<string>();
   let skipped = 0;
   for (const entry of raw.connections) {
-    const conn = sanitizeConnection(entry);
+    const host = sanitizeLegacyHost(entry);
     // A duplicate id would import twice and the second would silently win.
-    if (!conn || seen.has(conn.id)) {
+    if (!host || seen.has(host.id)) {
       skipped++;
       continue;
     }
-    seen.add(conn.id);
-    connections.push(conn);
+    seen.add(host.id);
+    hosts.push(host);
   }
 
-  return { version: 1, connections, secrets, skipped };
+  return { version: 1, hosts, secrets, skipped };
 }
 
 /**
- * Validate the decrypted v2 payload: both inventories, bad entries skipped and
- * counted. This is the v2 half of the trust boundary, and it runs on the same
- * data `parseBackupFile` checks for a v1 file - just after decryption instead of
- * before it.
+ * Validate the decrypted v2 payload: the hosts and their groups, bad entries
+ * skipped and counted. This is the v2 half of the trust boundary, and it runs on
+ * the same data `parseBackupFile` checks for a v1 file - just after decryption
+ * instead of before it.
  *
- * A missing inventory is not an error: a payload sealed by a build without one
- * of the two protocols is a legitimate file, so the absent list imports as
- * empty rather than failing.
+ * A missing collection is not an error: a payload sealed by a build without one
+ * of them is a legitimate file, so the absent list imports as empty rather than
+ * failing.
  */
 export function sanitizePayload(raw: unknown): {
-  connections: SshConnection[];
-  rdpConnections: RdpConnection[];
+  hosts: Host[];
+  groups: HostGroup[];
   skipped: number;
 } {
   if (!isRecord(raw)) throw new Error("The encrypted payload did not contain any connections.");
 
+  if (raw.hosts !== undefined && !Array.isArray(raw.hosts)) {
+    throw new Error("The encrypted payload's hosts are not a list.");
+  }
+  if (raw.groups !== undefined && !Array.isArray(raw.groups)) {
+    throw new Error("The encrypted payload's host groups are not a list.");
+  }
+
   let skipped = 0;
-  const connections: SshConnection[] = [];
-  const rdpConnections: RdpConnection[] = [];
 
-  if (raw.connections !== undefined && !Array.isArray(raw.connections)) {
-    throw new Error("The encrypted payload's SSH connections are not a list.");
-  }
-  if (raw.rdpConnections !== undefined && !Array.isArray(raw.rdpConnections)) {
-    throw new Error("The encrypted payload's RDP connections are not a list.");
-  }
-
-  const seenSsh = new Set<string>();
-  for (const entry of Array.isArray(raw.connections) ? raw.connections : []) {
-    const conn = sanitizeConnection(entry);
-    if (!conn || seenSsh.has(conn.id)) {
+  // Ids are ONE namespace now, across both protocols: one store, one keychain
+  // service, so two rows sharing an id are the same accounts and the same record
+  // slot. The two old stores could keep a `c-1` and an `r-1` apart; this dedupe
+  // is what stops the second row silently overwriting the first.
+  const hosts: Host[] = [];
+  const seenHosts = new Set<string>();
+  for (const entry of Array.isArray(raw.hosts) ? raw.hosts : []) {
+    const host = sanitizeHost(entry);
+    if (!host || seenHosts.has(host.id)) {
       skipped++;
       continue;
     }
-    seenSsh.add(conn.id);
-    connections.push(conn);
+    seenHosts.add(host.id);
+    hosts.push(host);
   }
 
-  // Ids are tracked per protocol, not globally: the two stores and the two
-  // keychain services are separate, so an SSH row and an RDP row sharing an id
-  // is odd but harmless, and rejecting one of them would lose a host.
-  const seenRdp = new Set<string>();
-  for (const entry of Array.isArray(raw.rdpConnections) ? raw.rdpConnections : []) {
-    const conn = sanitizeRdpConnection(entry);
-    if (!conn || seenRdp.has(conn.id)) {
+  const groups: HostGroup[] = [];
+  const seenGroups = new Set<string>();
+  for (const entry of Array.isArray(raw.groups) ? raw.groups : []) {
+    const group = sanitizeGroup(entry);
+    if (!group || seenGroups.has(group.id)) {
       skipped++;
       continue;
     }
-    seenRdp.add(conn.id);
-    rdpConnections.push(conn);
+    seenGroups.add(group.id);
+    groups.push(group);
   }
 
-  return { connections, rdpConnections, skipped };
+  return { hosts, groups, skipped };
 }
 
 /**

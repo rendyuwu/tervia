@@ -1,7 +1,6 @@
 import { cn } from "@/lib/utils";
 import { type PaneLeaf, isRemoteEditorLeaf, leaves } from "@/modules/terminal/lib/panes";
-import { type RdpConnection } from "@/modules/rdp/connections";
-import { type SshConnection } from "@/modules/ssh/connections";
+import { type Host } from "@/modules/hosts/types";
 import { statusLabelClass, type SshStatus } from "@/modules/ssh/status";
 import { type AiCliStatus } from "@/modules/terminal/lib/aiCliStatus";
 import type { Tab } from "./useTabs";
@@ -98,16 +97,15 @@ export function entryLabelClass(e: Entry): string {
 
 export function buildEntries(
   tabs: Tab[],
-  sshHosts: Map<string, SshConnection>,
+  hosts: Map<string, Host>,
   sshStatuses?: Map<number, SshStatus>,
   aiCliStatuses?: Map<number, AiCliStatus>,
-  rdpHosts?: Map<string, RdpConnection>,
 ): Entry[] {
   const out: Entry[] = [];
   for (const t of tabs) {
     if (t.kind === "pane") {
       for (const leaf of leaves(t.paneTree)) {
-        const label = leafLabel(leaf, sshHosts, t.cwd, rdpHosts);
+        const label = leafLabel(leaf, hosts, t.cwd);
         const sshConnectionId = leaf.leafKind === "terminal" ? leaf.sshConnectionId : undefined;
         // FIFO ordinal assigned at leaf creation. Preserved through drag,
         // reorder, move-to-group, and workspace restarts. It is the same
@@ -141,7 +139,7 @@ export function buildEntries(
           aiCliStatus: leaf.leafKind === "terminal" ? aiCliStatuses?.get(leaf.id) : undefined,
           remoteHost,
           renamed: leaf.customTitle !== undefined,
-          renameSeed: leafRenameSeed(leaf, sshHosts, t.cwd, rdpHosts),
+          renameSeed: leafRenameSeed(leaf, hosts, t.cwd),
         });
       }
     }

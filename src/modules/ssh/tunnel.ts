@@ -36,13 +36,10 @@
  */
 
 import { openSsh, openSshForward, type SshJumpHop, type SshSession } from "./bridge";
-import {
-  authFields,
-  getConnectionSecrets,
-  listConnections,
-  pinFingerprint,
-  resolveJumpHops,
-} from "./connections";
+import { listHosts, pinFingerprint } from "@/modules/hosts/store";
+import { resolveJumpHops } from "@/modules/hosts/jumps";
+import { isSshHost } from "@/modules/hosts/types";
+import { resolveSshAuth } from "@/modules/vault/resolve";
 import { hostKeyOwners, useHostKeyPrompt } from "./hostKeyPrompt";
 
 export type SshForward = {
@@ -255,9 +252,15 @@ async function dialSession(
   opts: SshForwardOptions,
   prompts: PromptFanout,
 ): Promise<SshSession> {
-  const list = await listConnections();
-  const conn = list.find((c) => c.id === connectionId);
-  if (!conn) throw new Error(`ssh: connection "${connectionId}" not found`);
+  const list = await listHosts();
+  const found = list.find((h) => h.id === connectionId);
+  if (!found) throw new Error(`ssh: connection "${connectionId}" not found`);
+  // A saved id can now name an RDP host. Refused rather than cast - there is
+  // nothing to tunnel through.
+  if (!isSshHost(found)) {
+    throw new Error(`ssh: "${found.name}" is an RDP host and cannot be tunnelled through`);
+  }
+  const conn = found;
   const jumps: SshJumpHop[] = await resolveJumpHops(conn.proxyJumpId, conn.id, list);
   if (!opts.promptForHostKey) {
     // Refused rather than dialled, for a caller with no way to ask. Every hop is
@@ -279,14 +282,14 @@ async function dialSession(
     }
   }
 
-  const secrets = await getConnectionSecrets(connectionId);
+  const { user, ...credentialValues } = await resolveSshAuth(conn.credential);
 
   return openSsh(
     {
       host: conn.host,
       port: conn.port,
-      user: conn.user,
-      ...authFields(conn.authMode, secrets),
+      user,
+      ...credentialValues,
       // Pinned whenever there is a pin. Unset only on the prompting path, which
       // is a deliberate first connect; a changed key still fails the handshake
       // rather than prompting, because a pin that exists is always sent.

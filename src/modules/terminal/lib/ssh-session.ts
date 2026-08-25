@@ -1,12 +1,7 @@
-import {
-  authFields,
-  getConnectionSecrets,
-  listConnections,
-  markConnected,
-  pinFingerprint,
-  resolveJumpHops,
-  type SshConnection,
-} from "@/modules/ssh/connections";
+import { listHosts, markConnected, pinFingerprint } from "@/modules/hosts/store";
+import { resolveJumpHops } from "@/modules/hosts/jumps";
+import { isSshHost, type SshHost } from "@/modules/hosts/types";
+import { resolveSshAuth } from "@/modules/vault/resolve";
 import {
   openSsh,
   openSshForward,
@@ -91,15 +86,21 @@ export async function openSshForSession(
   // everything watching - the terminal's Enter-to-retry stays disabled, and a
   // remote editor pane bound to this profile waits on a session that will never
   // arrive instead of offering to reconnect.
-  let conn: SshConnection;
-  let secrets: Awaited<ReturnType<typeof getConnectionSecrets>>;
+  let conn: SshHost;
+  let auth: Awaited<ReturnType<typeof resolveSshAuth>>;
   let jumps: SshJumpHop[];
   try {
-    const list = await listConnections();
-    const found = list.find((c) => c.id === sshConnectionId);
+    const list = await listHosts();
+    const found = list.find((h) => h.id === sshConnectionId);
     if (!found) throw new Error(`ssh: connection "${sshConnectionId}" not found`);
+    // A saved id can now name an RDP host - the two used to be different id
+    // spaces. Refused rather than cast: reading `proxyJumpId` off an RdpHost
+    // would be a type error, not a narrowing that happens to be safe.
+    if (!isSshHost(found)) {
+      throw new Error(`ssh: "${found.name}" is an RDP host and cannot open a terminal`);
+    }
     conn = found;
-    secrets = await getConnectionSecrets(sshConnectionId);
+    auth = await resolveSshAuth(conn.credential);
     // Resolve the ProxyJump chain (if this host tunnels through others). Done at
     // open time so each reconnect re-reads the current chain + jump secrets.
     jumps = await resolveJumpHops(conn.proxyJumpId, conn.id, list);
@@ -113,15 +114,17 @@ export async function openSshForSession(
   }
 
   // Rebuild the route for this attempt, so an edited chain is picked up on
-  // reconnect. Null for a direct connection - see `buildSshRoute`.
-  s.sshRoute = buildSshRoute(jumps, conn);
+  // reconnect. Null for a direct connection - see `buildSshRoute`. `conn` no
+  // longer carries a flat `user` (it moved under `credential`), so the target
+  // endpoint is built from the resolved auth instead.
+  s.sshRoute = buildSshRoute(jumps, { user: auth.user, host: conn.host, port: conn.port });
 
   // `sshReconnectAttempts` is bumped by `scheduleSshReconnect`. 0 means first open.
   const attempt = Math.max(1, s.sshReconnectAttempts);
   emitSshStatus(s, { kind: "connecting", attempt });
   writeSshBanner(
     s,
-    `\x1b[2m[tervia] connecting to ${conn.user}@${conn.host}:${conn.port}…\x1b[0m\r\n`,
+    `\x1b[2m[tervia] connecting to ${auth.user}@${conn.host}:${conn.port}…\x1b[0m\r\n`,
   );
 
   // Route the first of onExit/onError into the reconnect scheduler; russh can fire both.
@@ -177,12 +180,13 @@ export async function openSshForSession(
   let hostKeyPromptId: string | null = null;
   let sshSession: SshSession;
   try {
+    const { user, ...credentialValues } = auth;
     sshSession = await openSsh(
       {
         host: conn.host,
         port: conn.port,
-        user: conn.user,
-        ...authFields(conn.authMode, secrets),
+        user,
+        ...credentialValues,
         // Pin against the last recorded fingerprint. First connect is TOFU; later connects fail fast on mismatch.
         expectedFingerprint: conn.lastFingerprint || undefined,
         jumps,
@@ -269,24 +273,10 @@ export async function openSshForSession(
   resolvedSessionId = sshSession.id;
   emitConnectedIfReady();
 
-  // Saved `ssh -L` rules, re-opened on this fresh session (including every
-  // reconnect, since the old session's listeners died with it). Each one is
-  // fire-and-forget: a local port that is already taken is worth a line in the
-  // terminal, not a failed shell.
-  for (const f of conn.forwards ?? []) {
-    void openSshForward(sshSession.id, f.localPort, f.remoteHost, f.remotePort).then(
-      (bound) =>
-        writeSshBanner(
-          s,
-          `\x1b[2m[tervia] forwarding localhost:${bound} -> ${f.remoteHost}:${f.remotePort}\x1b[0m\r\n`,
-        ),
-      (e) =>
-        writeSshBanner(
-          s,
-          `\x1b[33m[tervia] port forward ${f.localPort} -> ${f.remoteHost}:${f.remotePort} failed: ${describeError(e)}\x1b[0m\r\n`,
-        ),
-    );
-  }
+  // Saved `ssh -L` rules used to be re-opened here on every fresh session.
+  // `Host` carries no `forwards` field any more - a forward rule is its own
+  // `ForwardRule` record (6f), started with `startWithHost` instead of being
+  // read off the connection on every reconnect.
 
   // Adapter so SSH looks like a PtySession to the rest of the file. SSH
   // sessions are not persisted via daemon UUIDs (`pty_attach` is local

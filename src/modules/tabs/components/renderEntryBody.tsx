@@ -12,7 +12,7 @@ import { TabsTrigger } from "@/components/ui/tabs";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import { MAX_PANES_PER_TAB } from "../lib/useTabs";
-import { type SshConnection } from "@/modules/ssh/connections";
+import { isSshHost, type Host } from "@/modules/hosts/types";
 import { hopDotClass, sshHopDetail, statusLabel } from "@/modules/ssh/status";
 import { aiCliLabel } from "@/modules/terminal/lib/aiCliStatus";
 import { X } from "lucide-react";
@@ -52,7 +52,7 @@ export type RenderEntryArgs = {
   onPinLeaf: (tabId: number, leafId: number) => void;
   onCloseEntry: (tabId: number, leafId: number | null) => void;
   onCloseEntriesAfter: (entry: Entry) => void;
-  sshHosts: Map<string, SshConnection>;
+  hosts: Map<string, Host>;
   onMoveLeafToGroup?: (leafId: number, targetTabId: number) => void;
   onMoveLeafToNewTab?: (leafId: number) => "ok" | "invalid";
   onRotateLeafSplit?: (leafId: number) => void;
@@ -85,7 +85,7 @@ export function renderEntryBody(args: RenderEntryArgs): ReactNode {
     onPinLeaf,
     onCloseEntry,
     onCloseEntriesAfter,
-    sshHosts,
+    hosts,
     onMoveLeafToGroup,
     onMoveLeafToNewTab,
     onRotateLeafSplit,
@@ -94,8 +94,9 @@ export function renderEntryBody(args: RenderEntryArgs): ReactNode {
     onSetRenaming,
     onRename,
   } = args;
-  const sshHost =
-    e.kind === "pane-leaf" && e.sshConnectionId ? sshHosts.get(e.sshConnectionId) : undefined;
+  const sshHostCandidate =
+    e.kind === "pane-leaf" && e.sshConnectionId ? hosts.get(e.sshConnectionId) : undefined;
+  const sshHost = sshHostCandidate && isSshHost(sshHostCandidate) ? sshHostCandidate : undefined;
   const isPaneLeaf = e.kind === "pane-leaf";
   // Declared before the trigger JSX below, which reads `renaming` to swap the
   // label for an edit field. Keeping them with the other right-click flags
@@ -322,7 +323,8 @@ export function renderEntryBody(args: RenderEntryArgs): ReactNode {
         <TooltipContent side="bottom">
           <div className="flex flex-col gap-0.5 text-[11px]">
             <span>
-              SSH · {sshHost!.user}@{sshHost!.host}:{sshHost!.port}
+              SSH · {sshHost!.credential.kind === "inline" ? `${sshHost!.credential.user}@` : ""}
+              {sshHost!.host}:{sshHost!.port}
             </span>
             {sshStatus ? (
               <span className="text-muted-foreground">{statusLabel(sshStatus)}</span>

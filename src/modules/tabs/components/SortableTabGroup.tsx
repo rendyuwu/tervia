@@ -1,6 +1,6 @@
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
-import { type SshConnection } from "@/modules/ssh/connections";
+import { type Host } from "@/modules/hosts/types";
 import { horizontalListSortingStrategy, SortableContext, useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { useMemo } from "react";
@@ -30,8 +30,8 @@ type SortableTabGroupProps = {
   onCloseEntry: (tabId: number, leafId: number | null) => void;
   /** Close every entry to the right of `entry`. Lives in TabBar for the flattened entry list. */
   onCloseEntriesAfter: (entry: Entry) => void;
-  /** Resolves SSH connection id to host metadata for tooltips. */
-  sshHosts: Map<string, SshConnection>;
+  /** Resolves a leaf's SSH/RDP host id to host metadata for tooltips. */
+  hosts: Map<string, Host>;
   /** Move a leaf into another pane tab. */
   onMoveLeafToGroup?: (leafId: number, targetTabId: number) => void;
   /** Extract a leaf into a new top-level pane tab. */
@@ -67,7 +67,7 @@ export function SortableTabGroup({
   onPinLeaf,
   onCloseEntry,
   onCloseEntriesAfter,
-  sshHosts,
+  hosts,
   onMoveLeafToGroup,
   onMoveLeafToNewTab,
   onRotateLeafSplit,
@@ -121,7 +121,7 @@ export function SortableTabGroup({
           onPinLeaf={onPinLeaf}
           onCloseEntry={onCloseEntry}
           onCloseEntriesAfter={onCloseEntriesAfter}
-          sshHosts={sshHosts}
+          hosts={hosts}
           onMoveLeafToGroup={onMoveLeafToGroup}
           onMoveLeafToNewTab={onMoveLeafToNewTab}
           onRotateLeafSplit={onRotateLeafSplit}
@@ -149,7 +149,7 @@ export function SortableTabGroup({
       onPinLeaf,
       onCloseEntry,
       onCloseEntriesAfter,
-      sshHosts,
+      hosts,
       onMoveLeafToGroup,
       onMoveLeafToNewTab,
       onRotateLeafSplit,

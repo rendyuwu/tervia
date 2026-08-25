@@ -24,7 +24,7 @@
 import { pathToFileUrl } from "@/lib/path";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { ResizableHandle, ResizablePanelGroup } from "@/components/ui/resizable";
-import { Toaster } from "@/components/ui/toast";
+import { toast, Toaster } from "@/components/ui/toast";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { type EditorPaneHandle } from "@/modules/editor";
 import { Header, type SearchInlineHandle } from "@/modules/header";
@@ -53,7 +53,8 @@ import {
 } from "@/modules/terminal";
 import { useCliAgentsStore } from "@/modules/terminal/lib/cliAgents";
 import { ThemeProvider } from "@/modules/theme";
-import { type SshConnection } from "@/modules/ssh/connections";
+import { purgeLegacySecrets } from "@/modules/hosts/store";
+import { type SshHost } from "@/modules/hosts/types";
 import { useWorkspacesStore } from "@/modules/workspaces";
 import type { SearchAddon } from "@xterm/addon-search";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -177,7 +178,7 @@ export default function App() {
   // dropdown trigger.
   const [rdpMenuOpen, setRdpMenuOpen] = useState(false);
 
-  const [editingSshConn, setEditingSshConn] = useState<SshConnection | null>(null);
+  const [editingSshConn, setEditingSshConn] = useState<SshHost | null>(null);
   const [sshEditorOpen, setSshEditorOpen] = useState(false);
   // Latches the first time each lazy dialog opens. Stays true; see the
   // dialog mount sites for why.
@@ -280,6 +281,41 @@ export default function App() {
   useEffect(() => {
     void hydrateCliAgents();
   }, [hydrateCliAgents]);
+
+  // -------- one-shot legacy secret purge --------
+  // The two old connection stores are gone, and with them the only code that
+  // could name `tervia-ssh :: <id>::*` or `tervia-rdp :: <id>::password`. There
+  // is no `secrets_list` command, so whatever they left in the macOS keychain,
+  // the Windows `secrets.bin` or the Linux mode-0600 JSON would otherwise be
+  // unreachable forever - private keys included. This clears it once and
+  // remembers that it did.
+  //
+  // Fired and forgotten deliberately: it runs after paint, gates nothing, and
+  // never rejects. A partial pass leaves the marker unwritten so the next launch
+  // tries again - and it is said out loud rather than swallowed, because the
+  // accounts it could not clear are exactly the ones nothing can name again.
+  useEffect(() => {
+    void purgeLegacySecrets()
+      .then((result) => {
+        if (result.failed.length > 0) {
+          const [first, ...rest] = result.failed;
+          const more = rest.length > 0 ? ` (+${rest.length} more)` : "";
+          toast(`Could not finish clearing old saved credentials: ${first}${more}`, {
+            variant: "error",
+          });
+        } else if (result.note) {
+          // Cleared, but the marker did not stick. Harmless - every delete is
+          // idempotent - and worth saying, since it repeats on every launch.
+          toast(result.note, { variant: "warning" });
+        }
+      })
+      .catch((e: unknown) => {
+        toast(
+          `Could not clear old saved credentials: ${e instanceof Error ? e.message : String(e)}`,
+          { variant: "error" },
+        );
+      });
+  }, []);
 
   // -------- workspaces wiring --------
   const wsHydrate = useWorkspacesStore((s) => s.hydrate);

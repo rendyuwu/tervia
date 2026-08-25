@@ -12,17 +12,17 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import type { FsReadResult } from "@/lib/ipc";
 import {
-  authFields,
   clearFingerprint,
-  getConnectionSecrets,
-  listConnections,
-  newConnectionId,
+  getHostSshSecrets,
+  listHosts,
+  newHostId,
   pinFingerprint,
-  resolveJumpHops,
-  upsertConnection,
-  type SshAuthMode,
-  type SshConnection,
-} from "@/modules/ssh/connections";
+  upsertHost,
+} from "@/modules/hosts/store";
+import { resolveJumpHops } from "@/modules/hosts/jumps";
+import { isSshHost, type SshHost } from "@/modules/hosts/types";
+import { sshCredentialValues } from "@/modules/vault/resolve";
+import type { VaultAuthMode } from "@/modules/vault/types";
 import { listSshAgentKeys, openSsh, type SshAgentKey } from "@/modules/ssh/bridge";
 import { useHostKeyPrompt } from "@/modules/ssh/hostKeyPrompt";
 import {
@@ -35,18 +35,17 @@ import {
 } from "@/components/ui/command";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
-import { DESTRUCTIVE_ACTION } from "@/lib/toolbarButton";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { useCallback, useEffect, useState } from "react";
-import { ChevronDown, X } from "lucide-react";
+import { ChevronDown } from "lucide-react";
 
 type Props = {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   /** Connection to edit, or `null` to create a new one. */
-  editing: SshConnection | null;
-  onSaved?: (conn: SshConnection) => void;
+  editing: SshHost | null;
+  onSaved?: (conn: SshHost) => void;
 };
 
 type Draft = {
@@ -54,14 +53,12 @@ type Draft = {
   host: string;
   port: string;
   user: string;
-  authMode: SshAuthMode;
+  authMode: VaultAuthMode;
   password: string;
   privateKey: string;
   keyPassphrase: string;
-  /** Saved-connection id of the jump host, or "" for a direct connection. */
+  /** Saved host id of the jump host, or "" for a direct connection. */
   proxyJumpId: string;
-  /** `ssh -L` rules. Ports stay strings so a half-typed field isn't NaN. */
-  forwards: { localPort: string; remoteHost: string; remotePort: string }[];
 };
 
 const EMPTY_DRAFT: Draft = {
@@ -74,13 +71,7 @@ const EMPTY_DRAFT: Draft = {
   privateKey: "",
   keyPassphrase: "",
   proxyJumpId: "",
-  forwards: [],
 };
-
-function isPort(v: string): boolean {
-  const n = Number.parseInt(v, 10);
-  return Number.isInteger(n) && n > 0 && n <= 65535 && String(n) === v.trim();
-}
 
 type TestState =
   | { kind: "idle" }
@@ -110,8 +101,8 @@ export function SshConnectionDialog({ open, onOpenChange, editing, onSaved }: Pr
   // Save writes - so a key trusted here cannot be lost, and a forgotten one
   // cannot come back from the stale `editing` prop.
   const [pinnedFingerprint, setPinnedFingerprint] = useState<string | null>(null);
-  // Other saved hosts, offered as jump-host (ProxyJump) options.
-  const [allConns, setAllConns] = useState<SshConnection[]>([]);
+  // Other saved SSH hosts, offered as jump-host (ProxyJump) options.
+  const [allConns, setAllConns] = useState<SshHost[]>([]);
   const [jumpPickerOpen, setJumpPickerOpen] = useState(false);
 
   // Reset and populate when the dialog opens. Secrets load async.
@@ -121,13 +112,16 @@ export function SshConnectionDialog({ open, onOpenChange, editing, onSaved }: Pr
     setSaving(false);
     setTest({ kind: "idle" });
     setImported({ kind: "idle" });
-    void listConnections().then((cs) => {
-      setAllConns(cs);
+    void listHosts().then((hs) => {
+      const sshHosts = hs.filter(isSshHost);
+      setAllConns(sshHosts);
       // If this connection's jump host was deleted, drop the dangling reference
       // so the <select> and a subsequent save reflect a direct connection
       // instead of silently keeping a dead id that fails every connect.
       setDraft((d) =>
-        d.proxyJumpId && !cs.some((c) => c.id === d.proxyJumpId) ? { ...d, proxyJumpId: "" } : d,
+        d.proxyJumpId && !sshHosts.some((h) => h.id === d.proxyJumpId)
+          ? { ...d, proxyJumpId: "" }
+          : d,
       );
     });
     if (!editing) {
@@ -135,24 +129,23 @@ export function SshConnectionDialog({ open, onOpenChange, editing, onSaved }: Pr
       setPinnedFingerprint(null);
       return;
     }
+    // Only the inline arm carries a user/auth mode to prefill; a vault-bound
+    // host has neither, and editing it here rebuilds an inline credential on
+    // save - this dialog has no identity picker yet.
+    const inline = editing.credential.kind === "inline" ? editing.credential : null;
     setDraft({
       name: editing.name,
       host: editing.host,
       port: String(editing.port),
-      user: editing.user,
-      authMode: editing.authMode,
+      user: inline?.user ?? "",
+      authMode: inline?.authMode ?? "password",
       password: "",
       privateKey: "",
       keyPassphrase: "",
       proxyJumpId: editing.proxyJumpId ?? "",
-      forwards: (editing.forwards ?? []).map((f) => ({
-        localPort: String(f.localPort),
-        remoteHost: f.remoteHost,
-        remotePort: String(f.remotePort),
-      })),
     });
     setPinnedFingerprint(editing.lastFingerprint ?? null);
-    void getConnectionSecrets(editing.id).then((s) => {
+    void getHostSshSecrets(editing.id).then((s) => {
       setDraft((d) => ({
         ...d,
         password: s.password ?? "",
@@ -201,11 +194,6 @@ export function SshConnectionDialog({ open, onOpenChange, editing, onSaved }: Pr
     // started (or the key added) after this host is saved, so a down agent must
     // not block saving. The panel reports its state, and a connect attempt fails
     // with the backend's message naming what to start.
-    for (const f of draft.forwards) {
-      if (!f.remoteHost.trim()) return "Port forward needs a destination host";
-      if (!isPort(f.localPort) || !isPort(f.remotePort))
-        return "Port forward ports must be 1–65535";
-    }
     return null;
   };
 
@@ -247,7 +235,7 @@ export function SshConnectionDialog({ open, onOpenChange, editing, onSaved }: Pr
             user: draft.user.trim(),
             // Same mapping the real connect uses, straight off the draft, so
             // Test can never authenticate differently from what Save produces.
-            ...authFields(draft.authMode, {
+            ...sshCredentialValues(draft.authMode, {
               password: draft.password,
               privateKey: draft.privateKey,
               keyPassphrase: draft.keyPassphrase,
@@ -380,7 +368,7 @@ export function SshConnectionDialog({ open, onOpenChange, editing, onSaved }: Pr
 
     setSaving(true);
     try {
-      const id = editing?.id ?? newConnectionId();
+      const id = editing?.id ?? newHostId();
       const host = draft.host.trim();
       // A pinned key belongs to the machine that presented it. Re-pointing this
       // connection at a different host makes it stale, and keeping it would fail
@@ -388,36 +376,37 @@ export function SshConnectionDialog({ open, onOpenChange, editing, onSaved }: Pr
       // as an edit. The port is not part of that: one sshd presents the same
       // host key on every port it listens on.
       const keepPin = !editing || editing.host === host;
-      const conn: SshConnection = {
+      const conn: SshHost = {
         // Spread the existing record first so an edit preserves fields the form
         // doesn't own (lastFingerprint, lastConnectedAt, description) instead of
         // wiping them - important now that editing is also how a jump host gets
         // attached to an already-pinned connection.
         ...(editing ?? {}),
         id,
+        protocol: "ssh",
         name: draft.name.trim(),
         host,
         port,
-        user: draft.user.trim(),
-        authMode: draft.authMode,
-        hasPassword: false,
-        hasPrivateKey: false,
-        hasKeyPassphrase: false,
+        // Always inline: this dialog has no identity picker yet, so editing a
+        // vault-bound host through it rebuilds an inline credential - flagged
+        // in the repoint report as a judgement call, not a hidden behavior.
+        credential: {
+          kind: "inline",
+          hostId: id,
+          user: draft.user.trim(),
+          authMode: draft.authMode,
+          hasPassword: false,
+          hasPrivateKey: false,
+          hasKeyPassphrase: false,
+        },
         // Written from the dialog's own pin state, not carried over by the
         // spread above: `editing` is a snapshot from when the dialog opened, so
         // a key trusted during Test would be dropped and a key just cleared with
         // "Forget" would come back.
         lastFingerprint: (keepPin && pinnedFingerprint) || undefined,
         proxyJumpId: draft.proxyJumpId || undefined,
-        forwards: draft.forwards.length
-          ? draft.forwards.map((f) => ({
-              localPort: Number.parseInt(f.localPort, 10),
-              remoteHost: f.remoteHost.trim(),
-              remotePort: Number.parseInt(f.remotePort, 10),
-            }))
-          : undefined,
       };
-      await upsertConnection(conn, {
+      await upsertHost(conn, {
         password: draft.authMode === "password" ? draft.password : "",
         privateKey: draft.authMode === "key" ? draft.privateKey : "",
         keyPassphrase: draft.authMode === "key" ? draft.keyPassphrase : "",
@@ -596,7 +585,11 @@ export function SshConnectionDialog({ open, onOpenChange, editing, onSaved }: Pr
                 >
                   <span className={cn("truncate", !selectedJump && "text-muted-foreground")}>
                     {selectedJump
-                      ? `${selectedJump.name} (${selectedJump.user}@${selectedJump.host}:${selectedJump.port})`
+                      ? `${selectedJump.name} (${
+                          selectedJump.credential.kind === "inline"
+                            ? `${selectedJump.credential.user}@`
+                            : ""
+                        }${selectedJump.host}:${selectedJump.port})`
                       : "None (direct connection)"}
                   </span>
                   <ChevronDown size={13} strokeWidth={2} className="ml-2 shrink-0 opacity-60" />
@@ -628,7 +621,7 @@ export function SshConnectionDialog({ open, onOpenChange, editing, onSaved }: Pr
                           key={c.id}
                           // Searchable on name + user@host:port; the id keeps the
                           // value unique so cmdk never collapses two like-named hosts.
-                          value={`${c.name} ${c.user}@${c.host}:${c.port} ${c.id}`}
+                          value={`${c.name} ${c.credential.kind === "inline" ? c.credential.user : ""}@${c.host}:${c.port} ${c.id}`}
                           data-checked={draft.proxyJumpId === c.id ? "true" : undefined}
                           onSelect={() => {
                             setDraft((d) => ({ ...d, proxyJumpId: c.id }));
@@ -639,7 +632,8 @@ export function SshConnectionDialog({ open, onOpenChange, editing, onSaved }: Pr
                           <span className="flex min-w-0 flex-col">
                             <span className="truncate">{c.name}</span>
                             <span className="text-muted-foreground truncate font-mono text-[10px]">
-                              {c.user}@{c.host}:{c.port}
+                              {c.credential.kind === "inline" ? `${c.credential.user}@` : ""}
+                              {c.host}:{c.port}
                             </span>
                           </span>
                         </CommandItem>
@@ -655,85 +649,10 @@ export function SshConnectionDialog({ open, onOpenChange, editing, onSaved }: Pr
             </span>
           </Field>
 
-          <Field label="Port forwarding (optional)">
-            <div className="flex flex-col gap-1.5">
-              {draft.forwards.map((f, i) => {
-                const patch = (next: Partial<(typeof draft.forwards)[number]>) =>
-                  setDraft((d) => ({
-                    ...d,
-                    forwards: d.forwards.map((row, j) => (j === i ? { ...row, ...next } : row)),
-                  }));
-                return (
-                  // Index key: rows have no id and are only ever appended or
-                  // removed as a whole, so React never has to match them up.
-                  <div
-                    key={i}
-                    className="grid grid-cols-[4.5rem_auto_1fr_4.5rem_auto] items-center gap-1.5"
-                  >
-                    <Input
-                      value={f.localPort}
-                      onChange={(e) => patch({ localPort: e.target.value })}
-                      placeholder="5432"
-                      inputMode="numeric"
-                      aria-label="Local port"
-                      className="h-8 font-mono text-[12px]"
-                    />
-                    <span className="text-muted-foreground text-[11px]">→</span>
-                    <Input
-                      value={f.remoteHost}
-                      onChange={(e) => patch({ remoteHost: e.target.value })}
-                      placeholder="127.0.0.1 or db.internal"
-                      spellCheck={false}
-                      aria-label="Destination host"
-                      className="h-8 font-mono text-[12px]"
-                    />
-                    <Input
-                      value={f.remotePort}
-                      onChange={(e) => patch({ remotePort: e.target.value })}
-                      placeholder="5432"
-                      inputMode="numeric"
-                      aria-label="Destination port"
-                      className="h-8 font-mono text-[12px]"
-                    />
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      className={cn(DESTRUCTIVE_ACTION, "h-8 px-2 text-[11px]")}
-                      aria-label="Remove port forward"
-                      onClick={() =>
-                        setDraft((d) => ({
-                          ...d,
-                          forwards: d.forwards.filter((_, j) => j !== i),
-                        }))
-                      }
-                    >
-                      <X size={13} strokeWidth={2} />
-                    </Button>
-                  </div>
-                );
-              })}
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                className="h-7 self-start px-2 text-[11px]"
-                onClick={() =>
-                  setDraft((d) => ({
-                    ...d,
-                    forwards: [...d.forwards, { localPort: "", remoteHost: "", remotePort: "" }],
-                  }))
-                }
-              >
-                Add forward
-              </Button>
-            </div>
-            <span className="text-muted-foreground text-[10.5px]">
-              Like <span className="font-mono">ssh -L</span>: binds the local port on 127.0.0.1 and
-              tunnels it to a host:port reachable <em>from the server</em>. Opened on every connect,
-              closed with the session.
-            </span>
-          </Field>
+          {/* Port forwarding used to be edited here, against `SshConnection.forwards`.
+              `Host` carries no such field - a forward rule is now its own
+              `ForwardRule` record (6f), edited on its own page rather than
+              buried in the per-host dialog. */}
 
           {editing ? (
             <Field label="Recorded server key">

@@ -9,7 +9,8 @@ import {
   type RdpInputEvent,
   type RdpSession,
 } from "./bridge";
-import { listConnections, markConnected, pinFingerprint, type RdpConnection } from "./connections";
+import { listHosts, markConnected, pinFingerprint } from "@/modules/hosts/store";
+import { isRdpHost, type RdpHost } from "@/modules/hosts/types";
 import { openRdpDialTarget, rdpOpenInput, type RdpDialTarget } from "./dial";
 import type { RdpFrameBatch } from "./frame";
 import { fitViewport, toRemotePoint, wheelRotation, type RdpViewport } from "./lib/viewport";
@@ -121,7 +122,7 @@ export function RdpPane({ leafId, connectionId, visible, focused = true }: Props
   const sessionRef = useRef<RdpSession | null>(null);
 
   const [status, setStatus] = useState<Status>({ kind: "connecting" });
-  const [conn, setConn] = useState<RdpConnection | null>(null);
+  const [conn, setConn] = useState<RdpHost | null>(null);
   // Bumping this redials. The dependency of the connect effect, so a reconnect
   // is one state write rather than a hand-rolled teardown.
   const [attempt, setAttempt] = useState(0);
@@ -564,17 +565,28 @@ export function RdpPane({ leafId, connectionId, visible, focused = true }: Props
     heldButtons.current.clear();
 
     void (async () => {
-      const row = (await listConnections()).find((c) => c.id === connectionId);
+      const found = (await listHosts()).find((h) => h.id === connectionId);
       if (!alive) return;
-      setConn(row ?? null);
-      if (!row) {
+      // A saved id can now name an SSH host - the two used to be different id
+      // spaces. Refused rather than cast: there is no RDP row to dial.
+      const row = found && isRdpHost(found) ? found : null;
+      setConn(row);
+      if (!found) {
         setStatus({
           kind: "error",
           message: "This saved RDP connection no longer exists. It may have been deleted.",
         });
         return;
       }
-      if (!row.hasPassword) {
+      if (!row) {
+        setStatus({ kind: "error", message: `"${found.name}" is not an RDP host.` });
+        return;
+      }
+      // `resolveRdpAuth` (inside `rdpOpenInput`) hands `rdp_open` the account
+      // reference unconditionally, so this pre-flight check only applies to an
+      // inline credential; a vault-bound identity's presence is not knowable
+      // without resolving it, and the connect attempt below reports it either way.
+      if (row.credential.kind === "inline" && !row.credential.hasPassword) {
         setStatus({
           kind: "error",
           message: `No password is stored for "${row.name}". Edit the connection and enter it.`,
@@ -600,7 +612,7 @@ export function RdpPane({ leafId, connectionId, visible, focused = true }: Props
           // connect differs from a direct one in the address and nothing else -
           // the pinned certificate included, which is what stops an ephemeral
           // local port from looking like a new machine every time.
-          rdpOpenInput(row, target),
+          await rdpOpenInput(row, target),
           {
             onConnected: (width, height, fingerprint) => {
               if (!alive) return;

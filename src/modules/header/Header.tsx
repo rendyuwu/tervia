@@ -11,8 +11,7 @@ import type { Tab } from "@/modules/tabs";
 import { TabBar } from "@/modules/tabs";
 import { SshMenu } from "@/modules/ssh/SshMenu";
 import { RdpMenu } from "@/modules/rdp/RdpMenu";
-import type { SshConnection } from "@/modules/ssh/connections";
-import type { RdpConnection } from "@/modules/rdp/connections";
+import type { RdpHost, SshHost } from "@/modules/hosts/types";
 import type { SshStatus } from "@/modules/ssh/status";
 import type { AiCliStatus } from "@/modules/terminal/lib/aiCliStatus";
 import { FolderOpen, PanelLeft, Settings } from "lucide-react";
@@ -44,9 +43,9 @@ type Props = {
   canSplit: boolean;
   onOpenSettings: () => void;
   /** Open a saved SSH host as a new terminal tab. */
-  onConnectSsh: (conn: SshConnection) => void;
+  onConnectSsh: (conn: SshHost) => void;
   /** Open a saved RDP host as a new pane tab. */
-  onConnectRdp: (conn: RdpConnection) => void;
+  onConnectRdp: (conn: RdpHost) => void;
   /** The RDP list's open state lives in App: the list IS the connection picker,
    *  and the command palette's "Connect RDP..." has to be able to raise it
    *  without a trigger to click. */

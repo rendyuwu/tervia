@@ -1,6 +1,7 @@
 import { closeForwardForConnection, openForwardForConnection } from "@/modules/ssh/tunnel";
+import { resolveRdpAuth } from "@/modules/vault/resolve";
+import type { RdpHost } from "@/modules/hosts/types";
 import type { RdpOpenInput } from "./bridge";
-import { rdpKeyringAccount, RDP_KEYRING_SERVICE, type RdpConnection } from "./connections";
 
 /**
  * Turning a saved RDP row into a dial: the address to connect to, and the
@@ -53,18 +54,18 @@ export type RdpDialTarget = {
  * consumer left to close it.
  */
 export async function openRdpDialTarget(
-  conn: Pick<RdpConnection, "host" | "port" | "tunnel">,
+  conn: Pick<RdpHost, "host" | "port" | "tunnel">,
   opts: {
     /** Ids of host-key prompts raised while opening the tunnel, so the caller's
      *  teardown can answer one the user never got to. */
     onHostKeyPrompt?: (promptId: string) => void;
   } = {},
 ): Promise<RdpDialTarget> {
-  const sshConnectionId = conn.tunnel?.sshConnectionId;
-  if (!sshConnectionId) {
+  const sshHostId = conn.tunnel?.sshHostId;
+  if (!sshHostId) {
     return { host: conn.host, port: conn.port, viaTunnel: false, release: () => {} };
   }
-  const forward = await openForwardForConnection(sshConnectionId, conn.host, conn.port, {
+  const forward = await openForwardForConnection(sshHostId, conn.host, conn.port, {
     // The RDP connect flow has a dialog on screen anyway, so an unverified
     // bastion asks instead of refusing. This is the ONLY caller that passes it.
     promptForHostKey: true,
@@ -81,7 +82,7 @@ export async function openRdpDialTarget(
       // `forward.claim` names the entry this dial took its reference from, so a
       // release that arrives after the bastion died and somebody else re-opened
       // the same target is a no-op instead of spending their reference.
-      void closeForwardForConnection(sshConnectionId, conn.host, conn.port, forward.claim).catch(
+      void closeForwardForConnection(sshHostId, conn.host, conn.port, forward.claim).catch(
         () => {},
       );
     },
@@ -98,23 +99,21 @@ export async function openRdpDialTarget(
  * local port is ephemeral and different on every connect - from re-asking the
  * certificate question forever.
  */
-export function rdpOpenInput(
-  row: RdpConnection,
+export async function rdpOpenInput(
+  row: RdpHost,
   target: { host: string; port: number },
-): RdpOpenInput {
+): Promise<RdpOpenInput> {
+  // `resolveRdpAuth` hands back a keychain REFERENCE, never the secret: the
+  // host process reads it itself and hands the plaintext straight into
+  // CredSSP, so it does not exist on this side of the IPC at any point. It
+  // also covers a vault-bound identity, which `row.credential` alone cannot.
+  const { username, domain, credential } = await resolveRdpAuth(row.credential);
   return {
     host: target.host,
     port: target.port,
-    username: row.username,
-    domain: row.domain,
-    // A REFERENCE, never the secret. The host process reads the keychain itself
-    // and hands the plaintext straight into CredSSP; it does not exist on this
-    // side of the IPC at any point.
-    credential: {
-      kind: "keychain",
-      service: RDP_KEYRING_SERVICE,
-      account: rdpKeyringAccount(row.id),
-    },
+    username,
+    domain,
+    credential,
     width: row.desktopWidth,
     height: row.desktopHeight,
     expectedCertFingerprint: row.certFingerprint,

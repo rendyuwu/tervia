@@ -62,10 +62,36 @@ import {
 //   is the same rule pointed at the two old connection stores.
 
 /**
+ * The secret is ALREADY at this host's account: record it as present and write
+ * nothing.
+ *
+ * The fourth state, and it exists for exactly one caller. A backup import has
+ * `backup_apply_secrets` write the credential to the keychain from Rust and get
+ * back only a `boolean[]` - the value never reaches JS, which for an RDP password
+ * is a Phase 5 invariant rather than a preference. Without this, the import can
+ * only pass `undefined`, and a host the store has never seen then takes its flags
+ * from an absent record: every flag false over a live secret. SSH survives that
+ * (`resolveSshAuth` resolves by auth mode and never reads a flag) but RDP does
+ * not - `RdpPane` pre-flights `hasPassword` and refuses to connect.
+ *
+ * A `Symbol` rather than a sentinel string, and that is the point rather than
+ * taste: `JSON.parse` cannot produce one, so no imported file, no store row and
+ * no IPC payload can reach this branch by carrying the right characters. A
+ * `"__already_stored"` could, and the caller that would hand it over is the one
+ * parsing an untrusted backup. Do not simplify it to a string.
+ */
+export const SECRET_ALREADY_STORED = Symbol("hosts.secretAlreadyStored");
+
+/** One field of {@link HostSecretInput}: the three-state convention plus
+ *  {@link SECRET_ALREADY_STORED}. */
+export type HostSecretValue = SecretInput | typeof SECRET_ALREADY_STORED;
+
+/**
  * Secrets to write alongside one host. Three-state per field, the app-wide
  * convention: a string writes it (or clears the account when blank), and
  * `undefined` leaves whatever is stored alone - so an edit that never touched the
- * password field cannot wipe it.
+ * password field cannot wipe it. {@link SECRET_ALREADY_STORED} is the fourth
+ * state, for a caller that put the secret there without holding it.
  *
  * ONE shape for both protocols rather than a union, because a union of
  * all-optional objects does not narrow: `{ password }` satisfies both arms, so a
@@ -75,9 +101,9 @@ import {
  * code path will ever read or delete.
  */
 export type HostSecretInput = {
-  password?: SecretInput;
-  privateKey?: SecretInput;
-  keyPassphrase?: SecretInput;
+  password?: HostSecretValue;
+  privateKey?: HostSecretValue;
+  keyPassphrase?: HostSecretValue;
 };
 
 /**
@@ -294,13 +320,19 @@ export function createHostsStore(io: HostsIo): HostsStore {
    * the flags exist so a list of a hundred hosts costs zero `secrets_get` calls,
    * and a no-change write reading the secret back would spend exactly what they
    * were added to save.
+   *
+   * {@link SECRET_ALREADY_STORED} is the one input that reports `true` without
+   * touching the keychain at all - no set, no delete, and no read either, which is
+   * what keeps it inside the no-read-back rule above rather than an exception to
+   * it. The caller has already put the value at this account.
    */
   async function writeSecret(
     hostId: string,
     field: string,
-    value: SecretInput,
+    value: HostSecretValue,
     current: boolean,
   ): Promise<boolean> {
+    if (value === SECRET_ALREADY_STORED) return true;
     if (value === undefined) return current;
     const trimmed = value?.trim() ?? "";
     if (!trimmed) {

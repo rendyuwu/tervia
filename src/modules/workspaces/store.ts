@@ -99,9 +99,9 @@ export type SavedBrowserLeaf = {
 export type SavedRdpLeaf = {
   kind: "leaf";
   leafKind: "rdp";
-  /** Id of a saved connection in `rdp/connections.ts`. A leaf whose connection
-   *  has since been deleted restores anyway and reports it in the pane, rather
-   *  than vanishing from the layout without explanation. */
+  /** Id of a saved host in `hosts/store.ts`. A leaf whose host has since been
+   *  deleted restores anyway and reports it in the pane, rather than vanishing
+   *  from the layout without explanation. */
   rdpConnectionId: string;
   /** Persisted from day one even though `"preset"` is the only value, so adding
    *  `"fit"` needs no migration of everyone's saved workspaces. */

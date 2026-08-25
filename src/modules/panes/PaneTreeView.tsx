@@ -47,7 +47,6 @@ import { useExplorerIconsReady } from "@/modules/explorer/lib/iconResolver";
 import { WorkspaceBoard } from "@/modules/workspaces/WorkspaceBoard";
 import { RdpPane } from "@/modules/rdp/RdpPane";
 import { fireRdpPaneAction } from "@/modules/rdp/paneActions";
-import type { RdpConnection } from "@/modules/rdp/connections";
 import { TerminalPane, type TerminalPaneHandle } from "@/modules/terminal";
 import type { SearchAddon } from "@xterm/addon-search";
 import type { PaneEdge, PaneLeaf, PaneNode } from "@/modules/terminal/lib/panes";
@@ -60,7 +59,7 @@ import { statusLabelClass, type SshConnectionBinding, type SshStatus } from "@/m
 import { type PaneEntry } from "@/modules/tabs/lib/entries";
 import type { Tab } from "@/modules/tabs";
 import { leafLabel } from "@/modules/tabs/lib/tabHelpers";
-import type { SshConnection } from "@/modules/ssh/connections";
+import type { Host } from "@/modules/hosts/types";
 import { type AiCliStatus } from "@/modules/terminal/lib/aiCliStatus";
 import { useTerminalTitles } from "@/modules/terminal/lib/terminalTitles";
 import { closeFloat, floatPane, pushBoardCards } from "./floatHost";
@@ -169,10 +168,8 @@ type Props = {
   onOpenPreview?: () => void;
   /** Persist a split node's per-child size percentages after a divider drag. */
   onSplitSizes?: (splitId: number, sizes: number[]) => void;
-  /** Saved SSH connections, keyed by id. Resolves a leaf's `ssh:<host>` label. */
-  sshHosts?: Map<string, SshConnection>;
-  /** Saved RDP connections, keyed by id. Resolves a leaf's `rdp:<host>` label. */
-  rdpHosts?: Map<string, RdpConnection>;
+  /** Saved hosts, keyed by id. Resolves a leaf's `ssh:<host>` / `rdp:<host>` label. */
+  hosts?: Map<string, Host>;
   /** Live SSH status per terminal leaf id. Colors the SSH header label. */
   sshStatuses?: Map<number, SshStatus>;
   /** Live AI CLI status per terminal leaf id. Tints the header icon (idle/working/blocking). */
@@ -228,8 +225,7 @@ function ThemeSwatch({ palette }: { palette: TerminalPalette }) {
 }
 
 type PaneMetaValue = {
-  sshHosts?: Map<string, SshConnection>;
-  rdpHosts?: Map<string, RdpConnection>;
+  hosts?: Map<string, Host>;
   sshStatuses?: Map<number, SshStatus>;
   aiCliStatuses?: Map<number, AiCliStatus>;
   sshBindingByConnection?: Map<string, SshConnectionBinding>;
@@ -530,8 +526,7 @@ function PaneLeafFrame({
     onOpenPreview,
   } = use(PaneDndContext);
   const {
-    sshHosts,
-    rdpHosts,
+    hosts,
     sshStatuses,
     aiCliStatuses,
     sshBindingByConnection,
@@ -574,7 +569,7 @@ function PaneLeafFrame({
   const termTitle = useTerminalTitles((s) =>
     node.leafKind === "terminal" ? s.titles[node.id] : undefined,
   );
-  const baseLabel = leafLabel(node, sshHosts, undefined, rdpHosts);
+  const baseLabel = leafLabel(node, hosts, undefined);
   const showTitle =
     node.leafKind === "terminal" &&
     !!termTitle &&
@@ -588,7 +583,7 @@ function PaneLeafFrame({
   const remoteSession = useMemo<RemoteEditorBinding | undefined>(() => {
     if (node.leafKind !== "editor" || !isRemoteEditorLeaf(node)) return undefined;
     const connId = node.sshConnectionId;
-    const conn = connId ? sshHosts?.get(connId) : undefined;
+    const conn = connId ? hosts?.get(connId) : undefined;
     const hostLabel = conn?.name.trim() || node.sshHostLabel || "remote";
     // Ad-hoc connection: no profile to re-resolve or reopen, so the session it
     // was opened with is all this leaf will ever have.
@@ -600,7 +595,7 @@ function PaneLeafFrame({
       hostLabel,
       onReconnect: onReconnectSsh ? () => onReconnectSsh(connId, hostLabel) : undefined,
     };
-  }, [node, sshHosts, sshBindingByConnection, onReconnectSsh]);
+  }, [node, hosts, sshBindingByConnection, onReconnectSsh]);
 
   // Float the pane into its own always-on-top window (terminals mirror live via
   // Tauri events; editors open the file).
@@ -1034,8 +1029,7 @@ export function PaneTreeView({
   detectedBrowserUrl,
   onOpenPreview,
   onSplitSizes,
-  sshHosts,
-  rdpHosts,
+  hosts,
   sshStatuses,
   aiCliStatuses,
   sshBindingByConnection,
@@ -1127,8 +1121,7 @@ export function PaneTreeView({
   );
   const metaValue = useMemo<PaneMetaValue>(
     () => ({
-      sshHosts,
-      rdpHosts,
+      hosts,
       sshStatuses,
       aiCliStatuses,
       sshBindingByConnection,
@@ -1137,8 +1130,7 @@ export function PaneTreeView({
       onFocusEntry,
     }),
     [
-      sshHosts,
-      rdpHosts,
+      hosts,
       sshStatuses,
       aiCliStatuses,
       sshBindingByConnection,

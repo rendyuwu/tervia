@@ -78,7 +78,11 @@ import { createWriteQueue } from "../src/lib/recoveredStore";
 import type { StoreFileIo, StoreFileRead, StoreRecovery } from "../src/lib/storeRecovery";
 import type { HostsStoreIo } from "../src/modules/hosts/adapters";
 import { MAX_JUMP_HOPS, resolveJumpHops } from "../src/modules/hosts/jumps";
-import { createHostsStore, noForwardRules } from "../src/modules/hosts/store";
+import {
+  createHostsStore,
+  noForwardRules,
+  SECRET_ALREADY_STORED,
+} from "../src/modules/hosts/store";
 import {
   hostFingerprint,
   isRdpHost,
@@ -1523,6 +1527,148 @@ console.log("\n[purge] one failed delete does not abort the sweep, and is not su
   const retry = await h.hosts.purgeLegacySecrets();
   check("so the next launch tries again", retry.skipped, false);
   check("and it is still not marked done", h.data[LEGACY_PURGE_KEY], undefined);
+}
+
+/** The three SSH presence flags, read off a record rather than asserted about
+ *  one, so a check can compare a fresh read against what `upsertHost` returned. */
+const sshFlags = (host: Host | undefined): unknown =>
+  host && host.protocol === "ssh" && host.credential.kind === "inline"
+    ? [host.credential.hasPassword, host.credential.hasPrivateKey, host.credential.hasKeyPassphrase]
+    : null;
+
+// ---------------------------------------------------------------------------
+console.log("\n[flags] SECRET_ALREADY_STORED records presence and writes nothing");
+{
+  // The backup import's exact state: `backup_apply_secrets` put the value at the
+  // account from Rust and handed JS a boolean, so this layer has a flag to set and
+  // no value to set it with. Passing `undefined` instead takes the flag from a
+  // record that does not exist yet - all false, over a live secret.
+  const h = harness({ kept: { [at("h-imp", "password")]: "written-by-rust" } });
+  const created = await h.hosts.upsertHost(
+    sshHost({
+      id: "h-imp",
+      credential: {
+        kind: "inline",
+        hostId: "h-imp",
+        user: "root",
+        authMode: "password",
+        // Fed in deliberately WRONG, so a pass here cannot be the store echoing
+        // its caller: the answer must come from the sentinel and from the absence
+        // of the other two, not from these.
+        hasPassword: false,
+        hasPrivateKey: true,
+        hasKeyPassphrase: true,
+      },
+    }),
+    { password: SECRET_ALREADY_STORED },
+  );
+
+  // Per FIELD, not per host: the declared one is true and the two silent ones are
+  // false. A per-host answer would claim a private key that is not there.
+  check("only the declared field's flag is set", sshFlags(created), [true, false, false]);
+  // Off a FRESH read, never off what `upsertHost` handed back - a check that reads
+  // the returned object cannot tell a persisted flag from an echoed one.
+  check("and that is what got PERSISTED", sshFlags(await h.hosts.findHost("h-imp")), [
+    true,
+    false,
+    false,
+  ]);
+  // The whole point of the sentinel: no set, no delete, and no READ either, so it
+  // stays inside the no-read-back rule rather than becoming an exception to it.
+  check("the keychain was not touched at all", h.calls, []);
+  check(
+    "and the value Rust wrote is exactly as it was",
+    h.kept.get(at("h-imp", "password")),
+    "written-by-rust",
+  );
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n[flags] the sentinel sits alongside a real value and a left-alone field");
+{
+  const h = harness();
+  const first = await h.hosts.upsertHost(sshHost({ id: "h-mix" }), { keyPassphrase: "pp" });
+  check("the passphrase is the only flag so far", sshFlags(first), [false, false, true]);
+
+  // Rust writes the private key straight to the account, the way the import does.
+  h.kept.set(at("h-mix", "privateKey"), "PEM-FROM-RUST");
+  const before = h.calls.length;
+  const mixed = await h.hosts.upsertHost(first, {
+    password: "typed-here",
+    privateKey: SECRET_ALREADY_STORED,
+    // keyPassphrase omitted: leave whatever is stored alone.
+  });
+  check("a value writes, a sentinel declares, an omission keeps", sshFlags(mixed), [
+    true,
+    true,
+    true,
+  ]);
+  check("and all three survive a fresh read", sshFlags(await h.hosts.findHost("h-mix")), [
+    true,
+    true,
+    true,
+  ]);
+  check("exactly one keychain call, for the one field that had a value", h.calls.slice(before), [
+    { op: "set", service: HOSTS_SERVICE, accounts: ["h-mix::password"] },
+  ]);
+  check(
+    "the sentinel's account is untouched",
+    h.kept.get(at("h-mix", "privateKey")),
+    "PEM-FROM-RUST",
+  );
+  check("and so is the omitted one", h.kept.get(at("h-mix", "keyPassphrase")), "pp");
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n[flags] an imported RDP host stays connectable - what the sentinel is for");
+{
+  // The bug this closes. `RdpPane` pre-flights the record before dialling:
+  // `credential.kind === "inline" && !credential.hasPassword` refuses with "No
+  // password is stored for X". Under `undefined` an import left that flag false
+  // over a password sitting in the keychain, so every imported inline RDP host was
+  // unconnectable while its credential was right there - the whole RDP half of a
+  // backup import.
+  const h = harness({ kept: { [at("h-win", "password")]: "written-by-rust" } });
+  await h.hosts.upsertHost(rdpHost({ id: "h-win" }), { password: SECRET_ALREADY_STORED });
+  const imported = await h.hosts.findHost("h-win");
+  const refused =
+    !imported || (imported.credential.kind === "inline" && !imported.credential.hasPassword);
+  assert(!refused, "RdpPane's pre-flight does not refuse the imported host");
+  check(
+    "because the PERSISTED record says the password is there",
+    imported && imported.credential.kind === "inline" ? imported.credential.hasPassword : null,
+    true,
+  );
+  check(
+    "the keychain still holds what Rust put there",
+    h.kept.get(at("h-win", "password")),
+    "written-by-rust",
+  );
+  check("and this layer made no keychain call to find out", h.calls, []);
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n[flags] the sentinel is still refused where there is no account for it");
+{
+  const h = harness();
+  // A vault-bound host owns no accounts, so "it is already at this host's account"
+  // is not a claim that can be true. Refused rather than accepted quietly, or the
+  // record would advertise a secret that lives on another service entirely.
+  await rejects(
+    "a vault-bound host refuses it, like any other secret",
+    () =>
+      h.hosts.upsertHost(
+        sshHost({ id: "h-v", credential: { kind: "identity", identityId: "i-1" } }),
+        { password: SECRET_ALREADY_STORED },
+      ),
+    ["owns no accounts", "password"],
+  );
+  await rejects(
+    "and an RDP row refuses key material whether it carries a value or the sentinel",
+    () => h.hosts.upsertHost(rdpHost({ id: "h-r" }), { privateKey: SECRET_ALREADY_STORED }),
+    ["rdp host", "no key material"],
+  );
+  check("neither refusal touched the keychain", h.calls, []);
 }
 
 if (failed > 0) throw new Error(`hosts-store-verify: ${failed} FAILED`);

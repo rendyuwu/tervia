@@ -20,28 +20,28 @@ import { Input } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
 import {
-  listConnections as listSshConnections,
-  type SshConnection,
-} from "@/modules/ssh/connections";
+  clearFingerprint,
+  listHosts,
+  newHostId,
+  pinFingerprint,
+  upsertHost,
+} from "@/modules/hosts/store";
+import {
+  isSshHost,
+  presetById,
+  presetIdFor,
+  type RdpHost,
+  type SshHost,
+  RDP_DEFAULT_PORT,
+  RDP_DEFAULT_PRESET,
+  RDP_SIZE_PRESETS,
+} from "@/modules/hosts/types";
+import { HOST_KEYRING_SERVICE, HOST_RDP_PASSWORD_FIELD, vaultAccount } from "@/modules/vault/types";
 import { useHostKeyPrompt } from "@/modules/ssh/hostKeyPrompt";
 import { ChevronDown } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { confirmRdpCert, openRdp, type RdpCredential } from "./bridge";
 import { openRdpDialTarget, type RdpDialTarget } from "./dial";
-import {
-  clearFingerprint,
-  newConnectionId,
-  pinFingerprint,
-  presetById,
-  presetIdFor,
-  rdpKeyringAccount,
-  upsertConnection,
-  RDP_DEFAULT_PORT,
-  RDP_DEFAULT_PRESET,
-  RDP_KEYRING_SERVICE,
-  RDP_SIZE_PRESETS,
-  type RdpConnection,
-} from "./connections";
 
 /**
  * Add / edit one saved RDP host. Same shape as `SshConnectionDialog` - a draft
@@ -64,8 +64,8 @@ type Props = {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   /** Connection to edit, or `null` to create a new one. */
-  editing: RdpConnection | null;
-  onSaved?: (conn: RdpConnection) => void;
+  editing: RdpHost | null;
+  onSaved?: (conn: RdpHost) => void;
 };
 
 type Draft = {
@@ -78,9 +78,8 @@ type Draft = {
   password: string;
   /** An `RDP_SIZE_PRESETS` id. */
   presetId: string;
-  /** Saved SSH connection to tunnel through, or "" to dial `host:port`
-   *  directly. */
-  tunnelSshConnectionId: string;
+  /** Saved SSH host to tunnel through, or "" to dial `host:port` directly. */
+  tunnelSshHostId: string;
 };
 
 const EMPTY_DRAFT: Draft = {
@@ -91,7 +90,7 @@ const EMPTY_DRAFT: Draft = {
   domain: "",
   password: "",
   presetId: RDP_DEFAULT_PRESET.id,
-  tunnelSshConnectionId: "",
+  tunnelSshHostId: "",
 };
 
 type TestState =
@@ -114,7 +113,7 @@ export function RdpConnectionDialog({ open, onOpenChange, editing, onSaved }: Pr
   // Saved SSH hosts, offered as tunnels. The whole list: any host that can reach
   // the target's 3389 works, and it is usually not the target itself - a Linux
   // jump box on the same network needs nothing installed on the Windows side.
-  const [sshConns, setSshConns] = useState<SshConnection[]>([]);
+  const [sshConns, setSshConns] = useState<SshHost[]>([]);
   const [tunnelPickerOpen, setTunnelPickerOpen] = useState(false);
   // The certificate this connection trusts as of right now: seeded from the
   // saved pin, cleared by Forget, set by accepting one during Test. The single
@@ -163,14 +162,15 @@ export function RdpConnectionDialog({ open, onOpenChange, editing, onSaved }: Pr
     setError(null);
     setSaving(false);
     setTest({ kind: "idle" });
-    void listSshConnections().then((cs) => {
-      setSshConns(cs);
-      // A tunnel whose SSH connection was deleted is a dangling id that fails
-      // every connect with "connection not found". Drop it so the picker and the
-      // next save both say what will actually happen: a direct dial.
+    void listHosts().then((hs) => {
+      const sshHosts = hs.filter(isSshHost);
+      setSshConns(sshHosts);
+      // A tunnel whose SSH host was deleted is a dangling id that fails every
+      // connect with "connection not found". Drop it so the picker and the next
+      // save both say what will actually happen: a direct dial.
       setDraft((d) =>
-        d.tunnelSshConnectionId && !cs.some((c) => c.id === d.tunnelSshConnectionId)
-          ? { ...d, tunnelSshConnectionId: "" }
+        d.tunnelSshHostId && !sshHosts.some((h) => h.id === d.tunnelSshHostId)
+          ? { ...d, tunnelSshHostId: "" }
           : d,
       );
     });
@@ -179,25 +179,33 @@ export function RdpConnectionDialog({ open, onOpenChange, editing, onSaved }: Pr
       setPinnedFingerprint(null);
       return;
     }
+    // Only the inline arm carries a username/domain to prefill; a vault-bound
+    // host has neither, and editing it here rebuilds an inline credential on
+    // save - this dialog has no identity picker yet.
+    const inline = editing.credential.kind === "inline" ? editing.credential : null;
     setDraft({
       name: editing.name,
       host: editing.host,
       port: String(editing.port),
-      username: editing.username,
-      domain: editing.domain ?? "",
+      username: inline?.username ?? "",
+      domain: inline?.domain ?? "",
       // Deliberately blank. See the module docs: the stored password is never
       // read back into the webview, so there is nothing to seed this with.
       password: "",
       // A row written by a build offering a size this one does not falls back
       // to the default rather than showing an empty picker.
       presetId: presetIdFor(editing.desktopWidth, editing.desktopHeight) || RDP_DEFAULT_PRESET.id,
-      tunnelSshConnectionId: editing.tunnel?.sshConnectionId ?? "",
+      tunnelSshHostId: editing.tunnel?.sshHostId ?? "",
     });
     setPinnedFingerprint(editing.certFingerprint ?? null);
   }, [open, editing]);
 
   const preset = presetById(draft.presetId) ?? RDP_DEFAULT_PRESET;
-  const selectedTunnel = sshConns.find((c) => c.id === draft.tunnelSshConnectionId);
+  const selectedTunnel = sshConns.find((c) => c.id === draft.tunnelSshHostId);
+  // Blank is only "unchanged" when there is something stored to leave
+  // unchanged, and that flag now lives under the inline arm only.
+  const editingHasPassword =
+    !!editing && editing.credential.kind === "inline" && editing.credential.hasPassword;
 
   const forgetPinnedCert = async () => {
     if (!editing) return;
@@ -214,7 +222,7 @@ export function RdpConnectionDialog({ open, onOpenChange, editing, onSaved }: Pr
     if (!draft.username.trim()) return "Username is required";
     if (!Number.isInteger(port) || port <= 0 || port > 65535) return "Port must be 1–65535";
     // Blank is only "unchanged" when there IS something to leave unchanged.
-    if (!draft.password && !editing?.hasPassword) return "Password is required";
+    if (!draft.password && !editingHasPassword) return "Password is required";
     return null;
   };
 
@@ -226,11 +234,11 @@ export function RdpConnectionDialog({ open, onOpenChange, editing, onSaved }: Pr
    */
   const credentialForTest = (): RdpCredential | null => {
     if (draft.password) return { kind: "inline", password: draft.password };
-    if (editing?.hasPassword) {
+    if (editing && editingHasPassword) {
       return {
         kind: "keychain",
-        service: RDP_KEYRING_SERVICE,
-        account: rdpKeyringAccount(editing.id),
+        service: HOST_KEYRING_SERVICE,
+        account: vaultAccount(editing.id, HOST_RDP_PASSWORD_FIELD),
       };
     }
     return null;
@@ -279,9 +287,7 @@ export function RdpConnectionDialog({ open, onOpenChange, editing, onSaved }: Pr
         {
           host,
           port,
-          tunnel: draft.tunnelSshConnectionId
-            ? { sshConnectionId: draft.tunnelSshConnectionId }
-            : undefined,
+          tunnel: draft.tunnelSshHostId ? { sshHostId: draft.tunnelSshHostId } : undefined,
         },
         { onHostKeyPrompt: remember },
       );
@@ -430,7 +436,7 @@ export function RdpConnectionDialog({ open, onOpenChange, editing, onSaved }: Pr
     const port = Number.parseInt(draft.port, 10);
     setSaving(true);
     try {
-      const id = editing?.id ?? newConnectionId();
+      const id = editing?.id ?? newHostId();
       const host = draft.host.trim();
       // A pinned certificate belongs to the machine that presented it.
       // Re-pointing this connection at a different HOST makes it stale, and
@@ -440,23 +446,28 @@ export function RdpConnectionDialog({ open, onOpenChange, editing, onSaved }: Pr
       // listens on, which is also what lets the same pin survive being reached
       // through a tunnel on an ephemeral port.
       const keepPin = !editing || editing.host === host;
-      const conn: RdpConnection = {
+      const conn: RdpHost = {
         // Spread the existing row first so an edit preserves fields the form
-        // does not own (lastConnectedAt, description, tunnel) rather than
-        // wiping them.
+        // does not own (lastConnectedAt, description) rather than wiping them.
         ...(editing ?? {}),
         id,
+        protocol: "rdp",
         name: draft.name.trim(),
         host,
         port,
-        username: draft.username.trim(),
-        domain: draft.domain.trim() || undefined,
+        // Always inline: this dialog has no identity picker yet, so editing a
+        // vault-bound host through it rebuilds an inline credential - flagged
+        // in the repoint report as a judgement call, not a hidden behavior.
+        credential: {
+          kind: "inline",
+          hostId: id,
+          username: draft.username.trim(),
+          domain: draft.domain.trim() || undefined,
+          hasPassword: false,
+        },
         desktopWidth: preset.width,
         desktopHeight: preset.height,
         sizeMode: "preset",
-        // Recomputed by `upsertConnection` from what actually reached the
-        // keyring, so the flag cannot drift from the keychain.
-        hasPassword: false,
         // Written from this dialog's own pin state, not carried over by the
         // spread: `editing` is a snapshot from when the dialog opened, so a
         // certificate accepted during Test would be dropped and one just
@@ -466,14 +477,12 @@ export function RdpConnectionDialog({ open, onOpenChange, editing, onSaved }: Pr
         // spread would make "None (direct)" unselectable on a row that already
         // had a tunnel. `undefined` rather than an empty object, so a direct
         // connection is the absence of a tunnel and not an empty one.
-        tunnel: draft.tunnelSshConnectionId
-          ? { sshConnectionId: draft.tunnelSshConnectionId }
-          : undefined,
+        tunnel: draft.tunnelSshHostId ? { sshHostId: draft.tunnelSshHostId } : undefined,
       };
       // `undefined`, not `""`, when the field was left blank: an empty string
       // would DELETE the stored password, so an edit that only renamed the host
       // would leave it unable to connect.
-      await upsertConnection(conn, draft.password ? draft.password : undefined);
+      await upsertHost(conn, { password: draft.password ? draft.password : undefined });
       onSaved?.(conn);
       onOpenChange(false);
     } catch (e) {
@@ -560,11 +569,11 @@ export function RdpConnectionDialog({ open, onOpenChange, editing, onSaved }: Pr
               type="password"
               value={draft.password}
               onChange={(e) => setDraft({ ...draft, password: e.target.value })}
-              placeholder={editing?.hasPassword ? "•••••••• (saved, leave blank to keep)" : ""}
+              placeholder={editingHasPassword ? "•••••••• (saved, leave blank to keep)" : ""}
               className="h-8 font-mono text-[12px]"
             />
             <span className="text-muted-foreground text-[10.5px]">
-              {editing?.hasPassword
+              {editingHasPassword
                 ? "A password is stored for this connection. It is not shown here; leave this blank to keep it, or type a new one to replace it."
                 : "Stored in the OS keychain, not in Tervia's settings file."}
             </span>
@@ -638,7 +647,11 @@ export function RdpConnectionDialog({ open, onOpenChange, editing, onSaved }: Pr
                 >
                   <span className={cn("truncate", !selectedTunnel && "text-muted-foreground")}>
                     {selectedTunnel
-                      ? `${selectedTunnel.name} (${selectedTunnel.user}@${selectedTunnel.host}:${selectedTunnel.port})`
+                      ? `${selectedTunnel.name} (${
+                          selectedTunnel.credential.kind === "inline"
+                            ? `${selectedTunnel.credential.user}@`
+                            : ""
+                        }${selectedTunnel.host}:${selectedTunnel.port})`
                       : "None (dial the host directly)"}
                   </span>
                   <ChevronDown size={13} strokeWidth={2} className="ml-2 shrink-0 opacity-60" />
@@ -658,9 +671,9 @@ export function RdpConnectionDialog({ open, onOpenChange, editing, onSaved }: Pr
                     <CommandGroup>
                       <CommandItem
                         value="none direct connection"
-                        data-checked={!draft.tunnelSshConnectionId ? "true" : undefined}
+                        data-checked={!draft.tunnelSshHostId ? "true" : undefined}
                         onSelect={() => {
-                          setDraft((d) => ({ ...d, tunnelSshConnectionId: "" }));
+                          setDraft((d) => ({ ...d, tunnelSshHostId: "" }));
                           setTunnelPickerOpen(false);
                         }}
                         className="gap-2 rounded-xl px-2.5 py-1.5 text-[12px]"
@@ -672,10 +685,10 @@ export function RdpConnectionDialog({ open, onOpenChange, editing, onSaved }: Pr
                           key={c.id}
                           // Searchable on name + user@host:port; the id keeps the
                           // value unique so cmdk never collapses two like-named hosts.
-                          value={`${c.name} ${c.user}@${c.host}:${c.port} ${c.id}`}
-                          data-checked={draft.tunnelSshConnectionId === c.id ? "true" : undefined}
+                          value={`${c.name} ${c.credential.kind === "inline" ? c.credential.user : ""}@${c.host}:${c.port} ${c.id}`}
+                          data-checked={draft.tunnelSshHostId === c.id ? "true" : undefined}
                           onSelect={() => {
-                            setDraft((d) => ({ ...d, tunnelSshConnectionId: c.id }));
+                            setDraft((d) => ({ ...d, tunnelSshHostId: c.id }));
                             setTunnelPickerOpen(false);
                           }}
                           className="gap-2 rounded-xl px-2.5 py-1.5 text-[12px]"
@@ -683,7 +696,8 @@ export function RdpConnectionDialog({ open, onOpenChange, editing, onSaved }: Pr
                           <span className="flex min-w-0 flex-col">
                             <span className="truncate">{c.name}</span>
                             <span className="text-muted-foreground truncate font-mono text-[10px]">
-                              {c.user}@{c.host}:{c.port}
+                              {c.credential.kind === "inline" ? `${c.credential.user}@` : ""}
+                              {c.host}:{c.port}
                             </span>
                           </span>
                         </CommandItem>

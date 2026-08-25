@@ -22,12 +22,8 @@ import { DESTRUCTIVE_ACTION, TOOLBAR_EXPANDED, TOOLBAR_HOVER } from "@/lib/toolb
 import { cn } from "@/lib/utils";
 import { Monitor, Pencil, Plus, Trash2, type LucideIcon } from "lucide-react";
 import { lazy, Suspense, useEffect, useState } from "react";
-import {
-  deleteConnection,
-  listConnections,
-  onConnectionsChanged,
-  type RdpConnection,
-} from "./connections";
+import { deleteHost, listHosts, noForwardRules, onHostsChanged } from "@/modules/hosts/store";
+import { isRdpHost, type RdpHost } from "@/modules/hosts/types";
 
 // Heavy-ish module (the whole dialog plus the combobox stack). Lazy until the
 // user opens the add/edit modal, exactly as SshMenu does with its own.
@@ -37,7 +33,7 @@ const RdpConnectionDialog = lazy(() =>
 
 type Props = {
   /** Opens a saved host as a new RDP pane tab. */
-  onConnect: (conn: RdpConnection) => void;
+  onConnect: (conn: RdpHost) => void;
   /**
    * Controlled open state. The dropdown IS the connection picker, and the
    * command palette has to be able to raise it ("Connect RDP…"), so the state
@@ -66,7 +62,7 @@ type Props = {
  * same dialog. They live in the SSH menu.
  */
 export function RdpMenu({ onConnect, open, onOpenChange }: Props) {
-  const [conns, setConns] = useState<RdpConnection[] | null>(null);
+  const [conns, setConns] = useState<RdpHost[] | null>(null);
   const [editorOpen, setEditorOpen] = useState(false);
   // Latches once the editor opens, so the lazy dialog stays mounted for Radix's
   // close animation. Mirrors the latch in SshMenu.
@@ -74,12 +70,13 @@ export function RdpMenu({ onConnect, open, onOpenChange }: Props) {
   useEffect(() => {
     if (editorOpen) setEditorMounted(true);
   }, [editorOpen]);
-  const [editing, setEditing] = useState<RdpConnection | null>(null);
-  const [confirmDelete, setConfirmDelete] = useState<RdpConnection | null>(null);
+  const [editing, setEditing] = useState<RdpHost | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<RdpHost | null>(null);
 
   useEffect(() => {
-    void listConnections().then(setConns);
-    const unsub = onConnectionsChanged(() => void listConnections().then(setConns));
+    const load = () => void listHosts().then((list) => setConns(list.filter(isRdpHost)));
+    load();
+    const unsub = onHostsChanged(load);
     return () => {
       void unsub.then((fn) => fn());
     };
@@ -91,18 +88,18 @@ export function RdpMenu({ onConnect, open, onOpenChange }: Props) {
     onOpenChange(false);
   };
 
-  const openEdit = (c: RdpConnection) => {
+  const openEdit = (c: RdpHost) => {
     setEditing(c);
     setEditorOpen(true);
     onOpenChange(false);
   };
 
-  const askDelete = (c: RdpConnection) => {
+  const askDelete = (c: RdpHost) => {
     setConfirmDelete(c);
     onOpenChange(false);
   };
 
-  const onPick = (c: RdpConnection) => {
+  const onPick = (c: RdpHost) => {
     onOpenChange(false);
     onConnect(c);
   };
@@ -149,8 +146,13 @@ export function RdpMenu({ onConnect, open, onOpenChange }: Props) {
                 <span className="flex min-w-0 flex-col">
                   <span className="truncate">{c.name}</span>
                   <span className="text-muted-foreground truncate font-mono text-[10px]">
-                    {c.domain ? `${c.domain}\\` : ""}
-                    {c.username}@{c.host}:{c.port}
+                    {c.credential.kind === "inline" ? (
+                      <>
+                        {c.credential.domain ? `${c.credential.domain}\\` : ""}
+                        {c.credential.username}@
+                      </>
+                    ) : null}
+                    {c.host}:{c.port}
                   </span>
                 </span>
                 <span className="ml-1 flex shrink-0 items-center gap-0.5">
@@ -205,7 +207,7 @@ export function RdpMenu({ onConnect, open, onOpenChange }: Props) {
               onClick={async () => {
                 const target = confirmDelete;
                 setConfirmDelete(null);
-                if (target) await deleteConnection(target.id);
+                if (target) await deleteHost(target.id, noForwardRules);
               }}
             >
               Delete

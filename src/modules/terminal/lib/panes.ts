@@ -1,7 +1,7 @@
 // Unified pane tree. Leaves are terminal, editor, rdp, or board.
 // `kind: "leaf"` stays for back-compat; the discriminator is `leafKind`.
 
-import type { RdpSizeMode } from "@/modules/rdp/connections";
+import type { RdpSizeMode } from "@/modules/hosts/types";
 import type { AiCliKind } from "./aiCliStatus";
 
 export type PaneId = number;
@@ -132,7 +132,7 @@ export type BoardLeafState = {
  */
 export type RdpLeafState = {
   leafKind: "rdp";
-  /** Id of the saved connection in `rdp/connections.ts`. */
+  /** Id of the saved RDP host in the hosts store (`modules/hosts/store.ts`). */
   rdpConnectionId: string;
   /**
    * How this pane's desktop resolution is chosen. Only `"preset"` exists today,

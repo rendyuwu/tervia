@@ -3,8 +3,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { DragChip } from "@/components/DragChip";
 import { leafIds } from "@/modules/terminal/lib/panes";
 import { MAX_PANES_PER_TAB } from "./lib/useTabs";
-import { useSshHosts } from "@/modules/ssh/connections";
-import { useRdpHosts } from "@/modules/rdp/connections";
+import { useHosts } from "@/modules/hosts/useHosts";
 import { type SshStatus } from "@/modules/ssh/status";
 import { type AiCliStatus } from "@/modules/terminal/lib/aiCliStatus";
 import { useExplorerIconsReady } from "@/modules/explorer/lib/iconResolver";
@@ -138,14 +137,13 @@ export function TabBar({
   useExplorerIconsReady();
   // dnd-kit drag id. `tab:<n>` for whole-group, `leaf:<n>` for in-group reorder. Prefix routes `handleDragEnd`.
   const [activeDragId, setActiveDragId] = useState<string | null>(null);
-  // Resolves a leaf's `sshConnectionId` for the `ssh:<name>` label + tooltip.
-  const sshHosts = useSshHosts();
-  // Same, for an RDP leaf's `rdp:<name>`.
-  const rdpHosts = useRdpHosts();
+  // Resolves a leaf's `sshConnectionId` / `rdpConnectionId` for the
+  // `ssh:<name>` / `rdp:<name>` label + tooltip.
+  const hosts = useHosts();
 
   const entries = useMemo(
-    () => buildEntries(tabs, sshHosts, sshStatuses, aiCliStatuses, rdpHosts),
-    [tabs, sshHosts, sshStatuses, aiCliStatuses, rdpHosts],
+    () => buildEntries(tabs, hosts, sshStatuses, aiCliStatuses),
+    [tabs, hosts, sshStatuses, aiCliStatuses],
   );
 
   /** Snapshot of pane tabs for the Move to Group menu. Full tabs are listed but disabled so the menu stays stable. */
@@ -409,7 +407,7 @@ export function TabBar({
                       onPinLeaf={onPinLeaf}
                       onCloseEntry={onCloseEntry}
                       onCloseEntriesAfter={closeEntriesAfter}
-                      sshHosts={sshHosts}
+                      hosts={hosts}
                       onMoveLeafToGroup={onMoveLeafToGroup}
                       onMoveLeafToNewTab={onMoveLeafToNewTab}
                       onRotateLeafSplit={onRotateLeafSplit}

@@ -7,8 +7,7 @@ import type {
   TerviaSpawnTabInput,
 } from "@/modules/terminal/lib/useTerminalSession";
 import type { SshConnectionBinding, SshStatus } from "@/modules/ssh/status";
-import { useSshHosts } from "@/modules/ssh/connections";
-import { useRdpHosts } from "@/modules/rdp/connections";
+import { useHosts } from "@/modules/hosts/useHosts";
 import type { AiCliStatus } from "@/modules/terminal/lib/aiCliStatus";
 import type { SearchAddon } from "@xterm/addon-search";
 import { useEffect, useMemo, useRef } from "react";
@@ -100,14 +99,11 @@ export function PaneStack({
   // Memoize the filter so the prune effect below sees a stable identity.
   const paneTabs = useMemo(() => tabs.filter((t): t is PaneTab => t.kind === "pane"), [tabs]);
 
-  // Resolve a leaf's `sshConnectionId` to a host for the `ssh:<host>` header
-  // label. Read here (not per-leaf), from the same hook the tab strip and the
-  // Workspaces panel use, so all three read identically.
-  const sshHosts = useSshHosts();
-  // Same job for an RDP leaf's `rdp:<host>` label, read from the same place the
-  // tab strip and the Workspaces panel read it so all three agree after a
-  // rename.
-  const rdpHosts = useRdpHosts();
+  // Resolve a leaf's `sshConnectionId` / `rdpConnectionId` to a host for the
+  // `ssh:<host>` / `rdp:<host>` header label. Read here (not per-leaf), from
+  // the same hook the tab strip and the Workspaces panel use, so all three
+  // read identically.
+  const hosts = useHosts();
 
   // Stable refs for per-leaf callbacks. Re-creating bundles would tear down PTY/editor state.
   // Bundles are only invoked from post-commit PTY/editor/async callbacks, so a render-time ref
@@ -223,8 +219,7 @@ export function PaneStack({
               // tab, which the per-tab wrapper below cannot address.
               onFocusEntry={onFocusLeaf}
               onSplitSizes={onSplitSizes}
-              sshHosts={sshHosts}
-              rdpHosts={rdpHosts}
+              hosts={hosts}
               sshStatuses={sshStatuses}
               aiCliStatuses={aiCliStatuses}
               sshBindingByConnection={sshBindingByConnection}
