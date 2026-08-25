@@ -290,7 +290,7 @@ function BoardLeafBody({ leafId }: { leafId: number }) {
  * close, split and persistence are already wired to the leaf, not to what's
  * rendered inside it.
  */
-function PageLeafBody({ page }: { page: PageKind }) {
+function PageLeafBody({ page, tabVisible }: { page: PageKind; tabVisible: boolean }) {
   const { onConnectHost } = use(PaneMetaContext);
   if (page === "hosts") {
     return (
@@ -300,6 +300,12 @@ function PageLeafBody({ page }: { page: PageKind }) {
         // dispatcher, so this fallback is never a state a real user reaches -
         // it exists for the context default, not as a supported no-op path.
         onConnect={onConnectHost ?? (() => {})}
+        // `PaneStack.tsx` keeps an inactive tab's leaves mounted (hidden via
+        // `visibility:hidden`, which a focus() call cannot reach), so this
+        // page's own mount-only focus effect would fire once and then never
+        // again for a tab restored into the background. Forwarded through so
+        // the page can re-fire it on becoming visible instead.
+        tabVisible={tabVisible}
       />
     );
   }
@@ -494,7 +500,7 @@ const LeafBody = memo(function LeafBody({
   if (node.leafKind === "page") {
     return (
       <ErrorBoundary label="page pane" resetKeys={[node.id, node.page]}>
-        <PageLeafBody page={node.page} />
+        <PageLeafBody page={node.page} tabVisible={tabVisible} />
       </ErrorBoundary>
     );
   }

@@ -38,14 +38,13 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { InputGroup, InputGroupAddon, InputGroupInput } from "@/components/ui/input-group";
-import { cn } from "@/lib/utils";
 import { VaultInUseError } from "@/modules/vault/types";
 import { useVault } from "@/modules/vault/useVault";
 import { ChevronDown, Monitor, Plus, Search, SquareTerminal, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { HostEditorDialog } from "./HostEditorDialog";
-import { GroupStrip } from "./page/GroupStrip";
+import { Chip, GroupStrip } from "./page/GroupStrip";
 import { HostCard } from "./page/HostCard";
 import { HostsBackupActions } from "./page/HostsBackupActions";
 import {
@@ -78,6 +77,11 @@ export type HostsPageProps = {
    *  for: a leaf body cannot call `useTabs`, so the callback arrives from the
    *  pane instead. */
   onConnect: (host: Host) => void;
+  /** Whether this page's tab is the one currently on screen. `PaneStack`
+   *  keeps an inactive tab's leaves mounted but `visibility:hidden`, which a
+   *  `.focus()` call cannot reach - so the search-input focus below has to
+   *  re-fire on becoming visible, not just once at mount. */
+  tabVisible: boolean;
 };
 
 // Module constants so their IDENTITY is stable. Both are `useMemo` dependencies
@@ -118,7 +122,24 @@ function deleteRefusalText(host: Host, e: unknown): string {
   );
 }
 
-export function HostsPage({ onConnect }: HostsPageProps): ReactNode {
+/**
+ * What the confirm dialog says about the keychain, branched on whether this
+ * row owns its own secrets.
+ *
+ * `secretFieldsFor` in `store.ts` returns `[]` for an `identity` binding, so
+ * `deleteHost` deletes nothing from the keychain in that case - the shared
+ * identity, and any other host bound to it, is untouched. Saying "removed
+ * from the keychain too" regardless would read as a promise that a
+ * shared-identity delete also wipes the credential, in the one direction
+ * that matters: a user could believe it is gone when it is not.
+ */
+function deleteKeychainNote(host: Host): string {
+  return host.credential.kind === "identity"
+    ? "Its shared vault identity is not affected - other hosts bound to it keep working."
+    : "Its saved credentials are removed from the keychain too.";
+}
+
+export function HostsPage({ onConnect, tabVisible }: HostsPageProps): ReactNode {
   const hostsById = useHosts();
   const groups = useHostGroups();
   const vault = useVault();
@@ -137,9 +158,16 @@ export function HostsPage({ onConnect }: HostsPageProps): ReactNode {
   // the caret already in it. That is also the first half of the no-virtualization
   // plan (§12.6): search-first keeps the steady-state DOM a filtered handful, and
   // the card's own `content-visibility` covers the unfiltered case.
+  //
+  // Keyed on `tabVisible`, not `[]`: `PaneStack` keeps a backgrounded tab's
+  // leaves mounted (`visibility:hidden`), so a mount-only effect fires once,
+  // while the tab is not even visible yet, and never again - a Hosts tab
+  // restored into the background loses this focus for good. Re-running on
+  // every true transition covers both the fresh-open case (already visible at
+  // mount) and every later switch back to an already-mounted tab.
   useEffect(() => {
-    searchRef.current?.focus();
-  }, []);
+    if (tabVisible) searchRef.current?.focus();
+  }, [tabVisible]);
 
   const hosts = useMemo(() => Array.from(hostsById.values()), [hostsById]);
   const knownGroupIds = useMemo(() => new Set(groups.map((g) => g.id)), [groups]);
@@ -163,6 +191,16 @@ export function HostsPage({ onConnect }: HostsPageProps): ReactNode {
   useEffect(() => {
     if (requested) setEditorTarget(requested);
   }, [requested]);
+
+  // Closing the Hosts TAB (Ctrl+W) unmounts this page directly - there is no
+  // dialog `onClose` in that path, so `closeEditor` below never runs and the
+  // pending request stays set. Reopening Hosts later remounts this component,
+  // re-reads that same stale request through the effect above, and pops the
+  // editor back open with whatever it was prefilled with. This is the other
+  // place the request has to be cleared, not a duplicate of `closeEditor`.
+  useEffect(() => {
+    return () => clearHostEditorRequest();
+  }, []);
 
   const closeEditor = useCallback(() => {
     setEditorTarget(null);
@@ -217,15 +255,29 @@ export function HostsPage({ onConnect }: HostsPageProps): ReactNode {
   const filtering = query.trim().length > 0 || protocol !== "all" || group.kind !== "all";
 
   return (
-    <div className="bg-background flex h-full w-full min-w-0 flex-col">
+    // `@container`: this page renders inside an independently resizable pane
+    // (the sidebar split, at minimum window width, can leave it well under
+    // 100px), not the viewport - so the header row and the grid below both
+    // size off THIS box, not `sm:`/`xl:` viewport breakpoints. See the header
+    // row and grid comments below for what that buys each of them.
+    <div className="bg-background @container flex h-full w-full min-w-0 flex-col">
       <div className="flex flex-col gap-2 border-b p-3">
+        {/* Every control below either has no hard-minimum floor, or collapses
+            past one on its own `@container` threshold, and the protocol group
+            wraps internally - so no single item here can be wider than the
+            box `flex-wrap` is trying to fit it into. `HostsBackupActions`'
+            two labelled buttons are the one exception this page cannot fix
+            from the outside (its own file, not wrapped/collapsible here); the
+            `overflow-x-auto` wrapper below contains THAT overflow to its own
+            strip instead of dragging the whole pane into a horizontal
+            scrollbar. */}
         <div className="flex flex-wrap items-center gap-2">
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Button size="sm" className="gap-1.5">
+              <Button size="sm" className="gap-1.5" aria-label="New host">
                 <Plus size={13} strokeWidth={2} />
-                New host
-                <ChevronDown size={13} strokeWidth={2} className="opacity-70" />
+                <span className="@max-[420px]:hidden">New host</span>
+                <ChevronDown size={13} strokeWidth={2} className="opacity-70 @max-[420px]:hidden" />
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="start">
@@ -244,30 +296,33 @@ export function HostsPage({ onConnect }: HostsPageProps): ReactNode {
             </DropdownMenuContent>
           </DropdownMenu>
 
-          <div className="flex items-center gap-1.5" role="group" aria-label="Protocol">
+          {/* `flex-wrap` + `min-w-0`: three chips read ~134px on one line with
+              no room to shrink (buttons don't shrink below their text), which
+              is wider than this page's box can go. Wrapping them onto their
+              own line(s) bounds this group by its WIDEST SINGLE chip
+              (~45px), not their sum - `Chip` is GroupStrip's, reused rather
+              than re-typed here (see the P2 note there). */}
+          <div
+            className="flex min-w-0 flex-wrap items-center gap-1.5"
+            role="group"
+            aria-label="Protocol"
+          >
             {PROTOCOL_FILTERS.map((option) => (
-              <button
+              <Chip
                 key={option.value}
-                type="button"
-                aria-pressed={protocol === option.value}
+                label={option.label}
+                selected={protocol === option.value}
                 onClick={() => setProtocol(option.value)}
-                // Deliberately the group strip's chip vocabulary rather than a
-                // second one: the two rows sit against each other and both mean
-                // "narrow the grid", so they should not look like different kinds
-                // of control.
-                className={cn(
-                  "rounded-full border px-2.5 py-1 text-xs font-medium transition-colors",
-                  protocol === option.value
-                    ? "bg-accent text-accent-foreground border-transparent"
-                    : "border-border text-muted-foreground hover:bg-muted/50",
-                )}
-              >
-                {option.label}
-              </button>
+              />
             ))}
           </div>
 
-          <InputGroup className="min-w-40 flex-1 basis-40">
+          {/* No unconditional floor: `min-w-40` was a 160px minimum this box
+              cannot always afford. `min-w-0` lets it shrink to whatever
+              `flex-1` leaves it (still typeable at any width), and the
+              160px comfort floor comes back only once the box has room to
+              spare for it. */}
+          <InputGroup className="min-w-0 flex-1 @[480px]:min-w-40">
             <InputGroupAddon>
               <Search />
             </InputGroupAddon>
@@ -297,7 +352,17 @@ export function HostsPage({ onConnect }: HostsPageProps): ReactNode {
             ) : null}
           </InputGroup>
 
-          <HostsBackupActions />
+          {/* `min-w-0` lets this shrink below its content's width (a plain
+              flex child otherwise floors at its min-content size); `overflow-
+              x-auto` is what a shrunk-past-content box then does with the
+              overflow - scrolls it locally instead of forcing this DIV wider,
+              which is what was dragging the whole pane's scrollbar out with
+              it. `HostsBackupActions` owns its own two buttons and neither
+              shrinks nor wraps them - out of this page's reach - so this is
+              the fix available from outside that file. */}
+          <div className="min-w-0 overflow-x-auto">
+            <HostsBackupActions />
+          </div>
         </div>
 
         {/* Above the scroll container on purpose: a refused delete names rows the
@@ -338,7 +403,19 @@ export function HostsPage({ onConnect }: HostsPageProps): ReactNode {
         {visible.length === 0 ? (
           <EmptyState filtering={filtering} hasHosts={hosts.length > 0} />
         ) : (
-          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
+          // `@[…]` container thresholds, not `sm:`/`xl:`/`2xl:` viewport ones -
+          // this grid's width comes from the sidebar drag and the pane split,
+          // not the window, so a wide window with a narrow pane used to render
+          // 3-4 columns at a few dozen px each (PaneTreeView.tsx:694 and
+          // ExplorerGrep.tsx:356 already do the same for the same reason).
+          // Thresholds are `columns * ~280px card + gaps`, not a copy of the
+          // old viewport numbers - those measured the wrong box. Applying
+          // `@container` on the page root above, not here, is what makes these
+          // resolve against the pane's own width rather than needing a second
+          // container ancestor of their own; it does not add containment to
+          // `HostCard` itself, so its own `content-visibility: auto` /
+          // `contain-intrinsic-size` (HostCard.tsx) are untouched.
+          <div className="grid grid-cols-1 gap-2 @[580px]:grid-cols-2 @[860px]:grid-cols-3 @[1140px]:grid-cols-4">
             {visible.map(({ host, groupName }) => (
               <HostCard
                 key={host.id}
@@ -375,7 +452,7 @@ export function HostsPage({ onConnect }: HostsPageProps): ReactNode {
           <AlertDialogHeader>
             <AlertDialogTitle>Delete host &quot;{pendingDelete?.name}&quot;?</AlertDialogTitle>
             <AlertDialogDescription>
-              Its saved credentials are removed from the keychain too. This cannot be undone.
+              {pendingDelete ? deleteKeychainNote(pendingDelete) : null} This cannot be undone.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

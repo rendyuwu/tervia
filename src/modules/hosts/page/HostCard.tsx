@@ -64,6 +64,11 @@ export function HostCard({
       role="group"
       aria-label={`${host.name}, ${host.protocol.toUpperCase()} host`}
       onClick={onSelect}
+      // Keyboard focus (Tab landing on the card, or bubbling up from a nested
+      // action button) selects too - before this only a click did, so the
+      // selected style was mouse-only and a keyboard user had no visible
+      // marker for where they were.
+      onFocus={onSelect}
       onDoubleClick={onConnect}
       onKeyDown={(e) => {
         // Only an Enter that lands on the card itself connects. Enter on a
@@ -118,26 +123,44 @@ export function HostCard({
           onClick={(e) => e.stopPropagation()}
           onDoubleClick={(e) => e.stopPropagation()}
         >
-          <CardAction icon={Play} label="Connect" onClick={onConnect} />
-          <CardAction icon={Pencil} label="Edit" onClick={onEdit} />
-          <CardAction icon={Copy} label="Duplicate" onClick={onDuplicate} />
-          <CardAction icon={Trash2} label="Delete" onClick={onDelete} destructive />
+          <CardAction icon={Play} label="Connect" hostName={host.name} onClick={onConnect} />
+          <CardAction icon={Pencil} label="Edit" hostName={host.name} onClick={onEdit} />
+          <CardAction icon={Copy} label="Duplicate" hostName={host.name} onClick={onDuplicate} />
+          <CardAction
+            icon={Trash2}
+            label="Delete"
+            hostName={host.name}
+            onClick={onDelete}
+            destructive
+          />
         </div>
       </div>
     </div>
   );
 }
 
-/** One row-action icon button. Local to this file - the four calls are its
- *  only callers. */
+/**
+ * One row-action icon button. Local to this file - the four calls are its
+ * only callers.
+ *
+ * `label` is the short, visible tooltip text ("Edit"); `aria-label` is that
+ * plus the host name ("Edit db-prod-1"). The dropdown menus this card
+ * replaced named the host in their row buttons for the same reason this one
+ * has to: at a hundred cards, a screen reader reading four hundred buttons
+ * all called "Edit" cannot tell them apart, and the card's own `role="group"`
+ * `aria-label` only announces the host once, on entry to the group - it does
+ * not repeat per button.
+ */
 function CardAction({
   icon: Icon,
   label,
+  hostName,
   onClick,
   destructive,
 }: {
   icon: LucideIcon;
   label: string;
+  hostName: string;
   onClick: () => void;
   destructive?: boolean;
 }) {
@@ -147,7 +170,7 @@ function CardAction({
         type="button"
         variant="ghost"
         size="icon-xs"
-        aria-label={label}
+        aria-label={`${label} ${hostName}`}
         onClick={onClick}
         className={cn(destructive && DESTRUCTIVE_ACTION)}
       >

@@ -76,19 +76,37 @@ export function HostsBackupActions(): ReactNode {
 
   return (
     <div className="flex items-center gap-2">
+      {/* Label hidden below the same `@container` threshold "New host" uses
+          (HostsPage.tsx) - this file has no `@container` of its own, so the
+          query resolves against the page root that already wraps it. `hidden`
+          drops the span from the flex layout entirely, so each button floors
+          at icon + `px-3` padding (~37px) instead of icon-plus-text. The
+          `aria-label` stays SEPARATE from that span (see `CardAction` in
+          HostCard.tsx for the same split): a hidden span still has an
+          accessible name via the DOM, but relying on that would make the
+          collapsed state's accessible name silently track whatever text the
+          span happens to hold, rather than being an explicit, always-present
+          label. */}
       <Button
         variant="outline"
         size="sm"
         onClick={openExport}
         disabled={hosts.size === 0}
+        aria-label="Export…"
         className="gap-1.5"
       >
         <Download size={13} strokeWidth={1.75} />
-        Export…
+        <span className="@max-[420px]:hidden">Export…</span>
       </Button>
-      <Button variant="outline" size="sm" onClick={() => void openImport()} className="gap-1.5">
+      <Button
+        variant="outline"
+        size="sm"
+        onClick={() => void openImport()}
+        aria-label="Import…"
+        className="gap-1.5"
+      >
         <Upload size={13} strokeWidth={1.75} />
-        Import…
+        <span className="@max-[420px]:hidden">Import…</span>
       </Button>
       {/* The one improvement over the menu this replaces: the menu closed
           itself before a failed pick could be reported, so the message had

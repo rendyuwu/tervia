@@ -193,14 +193,22 @@ export function GroupStrip({
   );
 }
 
-function Chip({
+/**
+ * A pill toggle: label, an optional tabular-nums count, pressed state.
+ *
+ * Exported because `HostsPage`'s protocol filter is the same control - narrow
+ * the grid by clicking a pill - with no count to show. `count` is optional
+ * rather than that page passing a fake one, so a caller with nothing to count
+ * doesn't have to lie about it.
+ */
+export function Chip({
   label,
   count,
   selected,
   onClick,
 }: {
   label: string;
-  count: number;
+  count?: number;
   selected: boolean;
   onClick: () => void;
 }) {
@@ -217,9 +225,11 @@ function Chip({
       )}
     >
       {label}
-      <span className={cn("tabular-nums", selected ? "opacity-80" : "text-muted-foreground/70")}>
-        {count}
-      </span>
+      {count !== undefined ? (
+        <span className={cn("tabular-nums", selected ? "opacity-80" : "text-muted-foreground/70")}>
+          {count}
+        </span>
+      ) : null}
     </button>
   );
 }
