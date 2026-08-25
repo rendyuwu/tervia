@@ -1,5 +1,10 @@
 import { cn } from "@/lib/utils";
-import { type PaneLeaf, isRemoteEditorLeaf, leaves } from "@/modules/terminal/lib/panes";
+import {
+  type PageKind,
+  type PaneLeaf,
+  isRemoteEditorLeaf,
+  leaves,
+} from "@/modules/terminal/lib/panes";
 import { type Host } from "@/modules/hosts/types";
 import { statusLabelClass, type SshStatus } from "@/modules/ssh/status";
 import { type AiCliStatus } from "@/modules/terminal/lib/aiCliStatus";
@@ -27,7 +32,7 @@ type EntryBase = {
 export type PaneEntry = EntryBase & {
   kind: "pane-leaf";
   leafId: number;
-  leafKind: "terminal" | "editor" | "rdp" | "board";
+  leafKind: "terminal" | "editor" | "rdp" | "board" | "page";
   /** 1-based FIFO badge number for terminal leaves - the same identifier the
    *  AI sees in `<env>`. */
   ordinal?: number;
@@ -45,6 +50,8 @@ export type PaneEntry = EntryBase & {
   aiCliStatus?: AiCliStatus;
   /** Set on editor leaves backed by SFTP. Flips the file icon to a remote variant. */
   remoteHost?: string;
+  /** Set on page leaves. Picks which glyph `EntryIcon` shows. */
+  page?: PageKind;
   /** True when `label` is a name the user typed rather than a derived one. Only
    *  drives whether the right-click menu offers "Reset name". */
   renamed?: boolean;
@@ -138,6 +145,7 @@ export function buildEntries(
           // AI CLI status on SSH leaves too. Detector runs on the byte stream regardless of PTY locality.
           aiCliStatus: leaf.leafKind === "terminal" ? aiCliStatuses?.get(leaf.id) : undefined,
           remoteHost,
+          page: leaf.leafKind === "page" ? leaf.page : undefined,
           renamed: leaf.customTitle !== undefined,
           renameSeed: leafRenameSeed(leaf, hosts, t.cwd),
         });

@@ -1,6 +1,6 @@
 import type { PaneTab, Tab } from "@/modules/tabs";
 import type { PaneLeaf, PaneNode } from "@/modules/terminal/lib/panes";
-import { leaves } from "@/modules/terminal/lib/panes";
+import { isPageKind, leaves, PAGE_LABELS } from "@/modules/terminal/lib/panes";
 import { useTerminalTitles } from "@/modules/terminal/lib/terminalTitles";
 import type { SavedPaneNode, SavedTab } from "./store";
 
@@ -86,11 +86,20 @@ function leafToSaved(leaf: PaneLeaf): SavedPaneNode {
       ...(leaf.customTitle ? { customTitle: leaf.customTitle } : {}),
     };
   }
-  // Board: restorable from nothing but its own existence, since the columns are
-  // rebuilt from the live tab tree.
+  if (leaf.leafKind === "board") {
+    // Board: restorable from nothing but its own existence, since the columns
+    // are rebuilt from the live tab tree.
+    return {
+      kind: "leaf",
+      leafKind: "board",
+      ...(leaf.customTitle ? { customTitle: leaf.customTitle } : {}),
+    };
+  }
+  // Page: restorable from nothing but which page it is - same as Board.
   return {
     kind: "leaf",
-    leafKind: "board",
+    leafKind: "page",
+    page: leaf.page,
     ...(leaf.customTitle ? { customTitle: leaf.customTitle } : {}),
   };
 }
@@ -266,10 +275,23 @@ function savedToNode(node: SavedPaneNode, allocId: () => number, outLeafIds: num
         ...(node.customTitle ? { customTitle: node.customTitle } : {}),
       };
     }
+    if (node.leafKind === "page") {
+      return {
+        kind: "leaf",
+        id,
+        leafKind: "page",
+        // A `page` value this build doesn't recognise (a newer build's page,
+        // or hand-edited state) falls back to Hosts rather than degrading the
+        // whole leaf - the same shape as RDP's `sizeMode ?? "preset"` below,
+        // not the "unknown leafKind" case (this IS a known, current kind).
+        page: isPageKind(node.page) ? node.page : "hosts",
+        ...(node.customTitle ? { customTitle: node.customTitle } : {}),
+      };
+    }
     // Unknown leafKind, including the `browser` leaves saved by builds up to
     // v0.4.22. Restore it as an empty terminal rather than dropping the node:
     // the tree's shape (and the split sizes saved alongside it) stays valid,
-    // and the user gets a usable pane where the page used to be.
+    // and the user gets a usable pane where the browser tab used to be.
     return {
       kind: "leaf",
       id,
@@ -319,18 +341,23 @@ export function savedToTab(saved: SavedTab, allocId: () => number): Tab {
   return tab;
 }
 
-/** Default pane tab with one terminal leaf. `terminalOrdinal` is omitted; `useTabs.replaceAllTabs` backfills it. */
-export function defaultTabForEmptyWorkspace(allocId: () => number, cwd: string | undefined): Tab {
+/**
+ * Startup fallback tab (decision 9): one pane tab holding a Hosts page leaf,
+ * used by `useWorkspacePersistence` in place of a local shell when there is
+ * nothing to restore - first run, an empty workspace, or a dev session that
+ * skips restore entirely.
+ */
+export function defaultHostsTab(allocId: () => number): Tab {
   const leafId = allocId();
   return {
     id: allocId(),
     kind: "pane",
-    title: "shell",
+    title: PAGE_LABELS.hosts,
     paneTree: {
       kind: "leaf",
       id: leafId,
-      leafKind: "terminal",
-      cwd,
+      leafKind: "page",
+      page: "hosts",
     },
     activeLeafId: leafId,
   };

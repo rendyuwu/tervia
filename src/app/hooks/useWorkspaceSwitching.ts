@@ -1,13 +1,15 @@
 import { leaves, disposeSession } from "@/modules/terminal";
 import { type Tab } from "@/modules/tabs";
 import {
-  defaultTabForEmptyWorkspace,
+  defaultHostsTab,
   savedActiveTabIndex,
   savedToTab,
   serializeTabs,
   useWorkspacesStore,
 } from "@/modules/workspaces";
 import { useCallback, type RefObject } from "react";
+
+type Workspace = ReturnType<typeof useWorkspacesStore.getState>["workspaces"][number];
 
 type Params = {
   wsActiveId: string | null;
@@ -24,11 +26,27 @@ type Params = {
   wsCreate: (name: string) => { id: string };
   wsRemove: (id: string) => void;
   allocId: () => number;
-  home: string | null;
   replaceAllTabs: (tabs: Tab[], activeId: number | null) => void;
   liveTabsByWorkspace: RefObject<Map<string, { tabs: Tab[]; activeId: number | null }>>;
   skipNextSnapshotRef: RefObject<boolean>;
 };
+
+/**
+ * Live tabs for a workspace with no cached live-tab entry (i.e. it hasn't
+ * been visited yet this session): its saved tabs restored, or - if it has
+ * none - the Hosts page. This is the runtime counterpart of decision 9's
+ * startup fallback in `useWorkspacePersistence`, so switching to (or
+ * creating) an empty workspace lands on the same screen a fresh profile
+ * does, instead of a local shell.
+ */
+export function tabsForWorkspaceEntry(
+  entry: Pick<Workspace, "tabs" | "activeTabIndex">,
+  allocId: () => number,
+): Tab[] {
+  return entry.tabs.length === 0
+    ? [defaultHostsTab(allocId)]
+    : entry.tabs.map((s) => savedToTab(s, allocId));
+}
 
 /**
  * Workspace switch / create / close orchestration. Bundles the three
@@ -47,7 +65,6 @@ export function useWorkspaceSwitching({
   wsCreate,
   wsRemove,
   allocId,
-  home,
   replaceAllTabs,
   liveTabsByWorkspace,
   skipNextSnapshotRef,
@@ -81,14 +98,11 @@ export function useWorkspaceSwitching({
       }
       const next = useWorkspacesStore.getState().workspaces.find((w) => w.id === workspaceId);
       if (!next) return;
-      const liveTabs: Tab[] =
-        next.tabs.length === 0
-          ? [defaultTabForEmptyWorkspace(allocId, home ?? undefined)]
-          : next.tabs.map((s) => savedToTab(s, allocId));
+      const liveTabs = tabsForWorkspaceEntry(next, allocId);
       const target = liveTabs[Math.min(next.activeTabIndex, liveTabs.length - 1)] ?? liveTabs[0];
       replaceAllTabs(liveTabs, target?.id ?? null);
     },
-    [wsActiveId, tabs, activeId, wsSaveTabs, wsSetActive, allocId, home, replaceAllTabs],
+    [wsActiveId, tabs, activeId, wsSaveTabs, wsSetActive, allocId, replaceAllTabs],
   );
 
   const createNewWorkspace = useCallback(() => {
@@ -133,14 +147,11 @@ export function useWorkspaceSwitching({
         replaceAllTabs(cached.tabs, cached.activeId);
         return;
       }
-      const liveTabs: Tab[] =
-        next.tabs.length === 0
-          ? [defaultTabForEmptyWorkspace(allocId, home ?? undefined)]
-          : next.tabs.map((s) => savedToTab(s, allocId));
+      const liveTabs = tabsForWorkspaceEntry(next, allocId);
       const target = liveTabs[Math.min(next.activeTabIndex, liveTabs.length - 1)] ?? liveTabs[0];
       replaceAllTabs(liveTabs, target?.id ?? null);
     },
-    [wsActiveId, wsRemove, allocId, home, replaceAllTabs],
+    [wsActiveId, wsRemove, allocId, replaceAllTabs],
   );
 
   return { switchToWorkspace, createNewWorkspace, closeWorkspace };

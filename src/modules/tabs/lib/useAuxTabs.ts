@@ -1,5 +1,5 @@
 import { useCallback, type Dispatch, type RefObject, type SetStateAction } from "react";
-import { leaves, type PaneLeaf } from "@/modules/terminal/lib/panes";
+import { leaves, PAGE_LABELS, type PageKind, type PaneLeaf } from "@/modules/terminal/lib/panes";
 import { type Tab } from "./tabTypes";
 import { syncPaneMirror } from "./tabHelpers";
 
@@ -90,5 +90,39 @@ export function useAuxTabs({ setTabs, setActiveId, nextIdRef, tabsRef }: AuxTabs
     return tabId;
   }, []);
 
-  return { openBoardTab, newRdpTab };
+  /**
+   * Open (or focus) a rail page. Single-instance PER PAGE KIND: two Hosts
+   * lists would be two copies of one store subscription fighting over the
+   * same selection state, with no upside - unlike `newRdpTab` below, which is
+   * deliberately not single-instance because two RDP panes are two genuine
+   * logins with nothing to fight over.
+   */
+  const openPageTab = useCallback((page: PageKind) => {
+    const existing = tabsRef.current.find(
+      (t) =>
+        t.kind === "pane" &&
+        leaves(t.paneTree).some((l) => l.leafKind === "page" && l.page === page),
+    );
+    if (existing) {
+      setActiveId(existing.id);
+      return existing.id;
+    }
+    const tabId = nextIdRef.current++;
+    const leafId = nextIdRef.current++;
+    const leaf: PaneLeaf = { kind: "leaf", id: leafId, leafKind: "page", page };
+    setTabs((curr) => [
+      ...curr,
+      syncPaneMirror({
+        id: tabId,
+        kind: "pane",
+        title: PAGE_LABELS[page],
+        paneTree: leaf,
+        activeLeafId: leafId,
+      }),
+    ]);
+    setActiveId(tabId);
+    return tabId;
+  }, []);
+
+  return { openBoardTab, newRdpTab, openPageTab };
 }

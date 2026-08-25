@@ -1,5 +1,6 @@
 import { LazyStore } from "@tauri-apps/plugin-store";
 import type { AiCliKind } from "@/modules/terminal/lib/aiCliStatus";
+import type { PageKind } from "@/modules/terminal/lib/panes";
 import { create } from "zustand";
 
 const STORE_PATH = "tervia-workspaces.json";
@@ -122,12 +123,25 @@ export type SavedBoardLeaf = {
   customTitle?: string;
 };
 
+/**
+ * A rail-opened page (Hosts, Vault, Port Forwarding). Holds nothing but which
+ * page it is: like the Board, existence is the whole of its saved state.
+ */
+export type SavedPageLeaf = {
+  kind: "leaf";
+  leafKind: "page";
+  page: PageKind;
+  /** User-chosen tab name from the tab's right-click "Rename". */
+  customTitle?: string;
+};
+
 export type SavedPaneNode =
   | SavedTerminalLeaf
   | SavedEditorLeaf
   | SavedRdpLeaf
   | SavedBrowserLeaf
   | SavedBoardLeaf
+  | SavedPageLeaf
   | {
       kind: "split";
       dir: "row" | "col";

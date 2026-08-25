@@ -1,4 +1,4 @@
-// Unified pane tree. Leaves are terminal, editor, rdp, or board.
+// Unified pane tree. Leaves are terminal, editor, rdp, board, or page.
 // `kind: "leaf"` stays for back-compat; the discriminator is `leafKind`.
 
 import type { RdpSizeMode } from "@/modules/hosts/types";
@@ -144,7 +144,41 @@ export type RdpLeafState = {
   customTitle?: string;
 };
 
-export type LeafState = TerminalLeafState | EditorLeafState | RdpLeafState | BoardLeafState;
+/** The three rail-opened pages. §2 decision 10: exactly these three this phase. */
+export type PageKind = "hosts" | "vault" | "forwards";
+
+export const PAGE_KINDS: readonly PageKind[] = ["hosts", "vault", "forwards"];
+
+export function isPageKind(value: string): value is PageKind {
+  return (PAGE_KINDS as readonly string[]).includes(value);
+}
+
+/**
+ * Single source for what to call a page, read by the rail buttons, the tab
+ * strip label (`leafLabel`), and the startup fallback tab - so the three
+ * cannot drift into naming the same leaf differently.
+ */
+export const PAGE_LABELS: Record<PageKind, string> = {
+  hosts: "Hosts",
+  vault: "Vault",
+  forwards: "Port Forwarding",
+};
+
+/**
+ * A page opened from the left rail (Hosts, Vault, Port Forwarding). Stateless
+ * beyond the discriminator, exactly like `BoardLeafState` - restorable from
+ * nothing but its own existence. The page bodies themselves are placeholders
+ * this phase; the real Hosts/Vault/Port-Forwarding UIs land in 6d/6e/6f.
+ */
+export type PageLeafState = {
+  leafKind: "page";
+  page: PageKind;
+  /** User-chosen tab name; see {@link TerminalLeafState.customTitle}. */
+  customTitle?: string;
+};
+
+export type LeafState =
+  TerminalLeafState | EditorLeafState | RdpLeafState | BoardLeafState | PageLeafState;
 
 export type PaneLeaf = { kind: "leaf"; id: PaneId } & LeafState;
 
@@ -419,8 +453,12 @@ export function cloneLeafState(leaf: PaneLeaf): LeafState {
       sizeMode: leaf.sizeMode,
     };
   }
-  // Board: no state of its own - the columns are rebuilt from the live tab tree.
-  return { leafKind: "board" };
+  if (leaf.leafKind === "board") {
+    // Board: no state of its own - the columns are rebuilt from the live tab tree.
+    return { leafKind: "board" };
+  }
+  // Page: nothing but which page it is - the body itself carries no state here.
+  return { leafKind: "page", page: leaf.page };
 }
 
 /**

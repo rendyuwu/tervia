@@ -1,5 +1,5 @@
 import { basename } from "@/lib/path";
-import { findLeaf, type PaneLeaf } from "@/modules/terminal/lib/panes";
+import { findLeaf, PAGE_LABELS, type PaneLeaf } from "@/modules/terminal/lib/panes";
 import { type Host } from "@/modules/hosts/types";
 import { type PaneTab, type Tab } from "./tabTypes";
 
@@ -63,6 +63,7 @@ export function leafLabel(leaf: PaneLeaf, hosts?: Map<string, Host>, fallbackCwd
   }
   if (leaf.leafKind === "editor") return basename(leaf.path);
   if (leaf.leafKind === "board") return "Board";
+  if (leaf.leafKind === "page") return PAGE_LABELS[leaf.page];
   // RDP leaves: `rdp:<name>` off the saved connection, falling back to its
   // host, then to a bare "rdp" for a deleted connection or a caller with no
   // map. Exactly the SSH ladder, because the failure modes are the same.
@@ -104,8 +105,8 @@ export function syncPaneMirror(tab: PaneTab): PaneTab {
     next.dirty = leaf.dirty;
     next.preview = leaf.preview;
   } else {
-    // RDP or board leaf: neither has a cwd or a file, so the top-level mirrors
-    // are cleared rather than left holding the previous active leaf's.
+    // RDP, board, or page leaf: none has a cwd or a file, so the top-level
+    // mirrors are cleared rather than left holding the previous active leaf's.
     delete next.cwd;
     delete next.path;
     delete next.dirty;
@@ -123,15 +124,15 @@ export function activeLeaf(tab: Tab): PaneLeaf | null {
 export function activeLeafKind(tab: Tab): "terminal" | "editor" | "rdp" | null {
   const leaf = activeLeaf(tab);
   if (!leaf) return null;
-  // Board leaves aren't one of the kinds the chrome derivations branch on;
-  // report null so callers fall to their defaults instead of every one having to
-  // special-case them.
+  // Board and page leaves aren't one of the kinds the chrome derivations
+  // branch on; report null so callers fall to their defaults instead of every
+  // one having to special-case them.
   //
-  // RDP is reported, unlike board, for one reason: a focused RDP pane owns the
-  // keyboard the way a focused terminal does, and App's shortcut `isDisabled`
-  // gate needs to know that or every bare-Ctrl chord would fire an app action
-  // instead of reaching the remote desktop.
-  return leaf.leafKind === "board" ? null : leaf.leafKind;
+  // RDP is reported, unlike board or page, for one reason: a focused RDP pane
+  // owns the keyboard the way a focused terminal does, and App's shortcut
+  // `isDisabled` gate needs to know that or every bare-Ctrl chord would fire
+  // an app action instead of reaching the remote desktop.
+  return leaf.leafKind === "board" || leaf.leafKind === "page" ? null : leaf.leafKind;
 }
 
 export function isTerminalLikeTab(tab: Tab): boolean {

@@ -85,6 +85,7 @@ import { AppDialogs } from "./components/AppDialogs";
 import { AppSidebar } from "./components/AppSidebar";
 import { WorkspaceArea } from "./components/WorkspaceArea";
 import { AppRightSlot } from "./components/AppRightSlot";
+import { ActivityRail } from "./components/ActivityRail";
 
 export default function App() {
   const isDevSession = import.meta.env.DEV;
@@ -99,6 +100,7 @@ export default function App() {
     openFileTab,
     pinTab,
     openBoardTab,
+    openPageTab,
     closeTab,
     selectByIndex,
     setLeafCwd,
@@ -357,7 +359,6 @@ export default function App() {
     wsCreate,
     wsRemove,
     allocId,
-    home,
     replaceAllTabs,
     liveTabsByWorkspace,
     skipNextSnapshotRef,
@@ -723,12 +724,16 @@ export default function App() {
             searchRef={searchInlineRef}
           />
 
-          {/* Bento tray: the deep `bg-sidebar` well holds the three body columns
-              as separate 1px-bordered cards, inset from the header/status bar and
-              gapped from each other (`p-1.5` + `gap-1.5`). Under glass the gaps
-              reveal the wallpaper, matching the floating-panels look. */}
-          <main className="bg-sidebar flex min-h-0 flex-1 flex-col">
-            <ResizablePanelGroup orientation="horizontal" className="min-h-0 flex-1 gap-1.5 p-1.5">
+          {/* Bento tray: the deep `bg-sidebar` well holds the rail plus the three
+              body columns as separate 1px-bordered cards, inset from the
+              header/status bar and gapped from each other (`p-1.5` + `gap-1.5`).
+              Under glass the gaps reveal the wallpaper, matching the
+              floating-panels look. The rail sits outside the ResizablePanelGroup
+              (a fixed-width strip, never part of the resizable/collapsible
+              layout) rather than inside AppSidebar. */}
+          <main className="bg-sidebar flex min-h-0 flex-1 gap-1.5 p-1.5">
+            <ActivityRail activeTab={activeTab} onOpenPage={openPageTab} />
+            <ResizablePanelGroup orientation="horizontal" className="min-h-0 flex-1 gap-1.5">
               <AppSidebar
                 sidebarRef={sidebarRef}
                 explorerRoot={explorerRoot}

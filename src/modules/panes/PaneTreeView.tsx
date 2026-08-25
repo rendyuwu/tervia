@@ -49,8 +49,13 @@ import { RdpPane } from "@/modules/rdp/RdpPane";
 import { fireRdpPaneAction } from "@/modules/rdp/paneActions";
 import { TerminalPane, type TerminalPaneHandle } from "@/modules/terminal";
 import type { SearchAddon } from "@xterm/addon-search";
-import type { PaneEdge, PaneLeaf, PaneNode } from "@/modules/terminal/lib/panes";
-import { editorPaneSession, isRemoteEditorLeaf, leaves } from "@/modules/terminal/lib/panes";
+import type { PaneEdge, PageKind, PaneLeaf, PaneNode } from "@/modules/terminal/lib/panes";
+import {
+  editorPaneSession,
+  isRemoteEditorLeaf,
+  leaves,
+  PAGE_LABELS,
+} from "@/modules/terminal/lib/panes";
 import type {
   TerviaOpenInput,
   TerviaSpawnTabInput,
@@ -66,16 +71,20 @@ import { closeFloat, floatPane, pushBoardCards } from "./floatHost";
 import { useFloatStore } from "./floatStore";
 import type { FloatLeafParams } from "./floatProtocol";
 import {
+  ArrowLeftRight,
   BookOpen,
   Cloud,
   FileCode,
   Globe,
   GripVertical,
   Keyboard,
+  Router,
   Settings,
   SquareArrowOutUpRight,
+  Vault,
   WrapText,
   X,
+  type LucideIcon,
 } from "lucide-react";
 
 // Lazy so the ~1.5MB editor stack (CodeMirror + streamdown + markdown + katex)
@@ -269,6 +278,29 @@ function BoardLeafBody({ leafId }: { leafId: number }) {
   );
 }
 
+const PAGE_ICONS: Record<PageKind, LucideIcon> = {
+  hosts: Router,
+  vault: Vault,
+  forwards: ArrowLeftRight,
+};
+
+/**
+ * A page leaf's body. Placeholder for phase 6c - the real Hosts/Vault/
+ * Port-Forwarding UIs (6d/6e/6f) replace this without touching anything
+ * around it: the pane header, drag, close, split and persistence are already
+ * wired to the leaf, not to what's rendered inside it.
+ */
+function PageLeafBody({ page }: { page: PageKind }) {
+  const Icon = PAGE_ICONS[page];
+  return (
+    <div className="bg-background text-muted-foreground flex h-full w-full flex-col items-center justify-center gap-3 p-6 text-center">
+      <Icon size={28} strokeWidth={1.5} className="opacity-50" />
+      <span className="text-foreground text-sm font-medium">{PAGE_LABELS[page]}</span>
+      <span className="max-w-72 text-[11px] leading-relaxed opacity-70">Coming soon.</span>
+    </div>
+  );
+}
+
 const DRAG_PREFIX = "pane-drag:";
 const DROP_PREFIX = "pane-drop:";
 
@@ -302,6 +334,7 @@ function leafIconInfo(node: PaneLeaf, aiCliStatuses?: Map<number, AiCliStatus>):
     editorFileName: node.leafKind === "editor" ? basename(node.path) : undefined,
     editorRemote: isRemoteEditorLeaf(node),
     aiCliStatus: node.leafKind === "terminal" ? (aiCliStatuses?.get(node.id) ?? null) : null,
+    page: node.leafKind === "page" ? node.page : undefined,
   };
 }
 
@@ -443,6 +476,13 @@ const LeafBody = memo(function LeafBody({
           visible={tabVisible}
           focused={focused}
         />
+      </ErrorBoundary>
+    );
+  }
+  if (node.leafKind === "page") {
+    return (
+      <ErrorBoundary label="page pane" resetKeys={[node.id, node.page]}>
+        <PageLeafBody page={node.page} />
       </ErrorBoundary>
     );
   }

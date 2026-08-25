@@ -1,5 +1,6 @@
 import { type Tab } from "@/modules/tabs";
 import {
+  defaultHostsTab,
   savedActiveTabIndex,
   savedToTab,
   serializeTabs,
@@ -60,28 +61,36 @@ export function useWorkspacePersistence({
   }, [wsHydrate]);
 
   // Once the workspace store hydrates, load the active workspace's saved
-  // tabs into live state. Skip if there are none (first run already covered
-  // by the default `useTabs` state).
+  // tabs into live state - or, per decision 9, land on the Hosts page when
+  // there is nothing to restore (first run, an empty workspace, or a dev
+  // session that skips restore below). `useTabs`' own initial state is an
+  // empty tab list precisely so this effect is the only place that decides;
+  // it runs exactly once (`hydratedWorkspaceRef`), synchronously within the
+  // render where `wsHydrated` first turns true, so nothing downstream (the
+  // daemon-session adopt poll, gated on the same flag) can observe the gap
+  // between "hydrated" and "tabs decided".
   const hydratedWorkspaceRef = useRef(false);
   useEffect(() => {
     if (!wsHydrated || hydratedWorkspaceRef.current) return;
+    hydratedWorkspaceRef.current = true;
+
+    const openHostsFallback = () => {
+      const tab = defaultHostsTab(allocId);
+      replaceAllTabs([tab], tab.id);
+    };
+
     if (!restoreTabsOnHydrate) {
-      hydratedWorkspaceRef.current = true;
+      openHostsFallback();
       return;
     }
     const active = wsList.find((w) => w.id === wsActiveId);
-    if (!active) {
-      hydratedWorkspaceRef.current = true;
-      return;
-    }
-    if (active.tabs.length === 0) {
-      hydratedWorkspaceRef.current = true;
+    if (!active || active.tabs.length === 0) {
+      openHostsFallback();
       return;
     }
     const liveTabs: Tab[] = active.tabs.map((s) => savedToTab(s, allocId));
     const target = liveTabs[Math.min(active.activeTabIndex, liveTabs.length - 1)];
     replaceAllTabs(liveTabs, target?.id ?? null);
-    hydratedWorkspaceRef.current = true;
   }, [wsHydrated, wsList, wsActiveId, replaceAllTabs, allocId]);
 
   // Auto-snapshot tabs whenever they change. Lightly debounced via the

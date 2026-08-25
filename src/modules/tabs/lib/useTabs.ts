@@ -59,29 +59,17 @@ function editorRemoteKey(l: Pick<EditorLeafState, "sshConnectionId" | "sshSessio
   return l.sshConnectionId ?? l.sshSessionId ?? null;
 }
 
-export function useTabs(initial?: { cwd?: string; title?: string }) {
-  const [tabs, setTabs] = useState<Tab[]>(() => {
-    const tabId = 1;
-    const leafId = 2;
-    const leaf: PaneLeaf = {
-      kind: "leaf",
-      id: leafId,
-      leafKind: "terminal",
-      cwd: initial?.cwd,
-      terminalOrdinal: 1,
-    };
-    return [
-      syncPaneMirror({
-        id: tabId,
-        kind: "pane",
-        title: initial?.title ?? "shell",
-        paneTree: leaf,
-        activeLeafId: leafId,
-      }),
-    ];
-  });
-  const [activeId, setActiveId] = useState(1);
-  const nextIdRef = useRef(3);
+export function useTabs() {
+  // Empty on mount, deliberately: workspace restore hasn't run yet, and a
+  // seeded terminal here would be indistinguishable from "nothing to
+  // restore" once it does. Decision 9's Hosts-page fallback (and the real
+  // restore) both apply AFTER restore resolves, in `useWorkspacePersistence`
+  // - never here, and never twice.
+  const [tabs, setTabs] = useState<Tab[]>(() => []);
+  // 0 matches no tab (ids allocated below start at 1), so nothing is
+  // "active" until restore populates the list.
+  const [activeId, setActiveId] = useState(0);
+  const nextIdRef = useRef(1);
   // Sync ref of `tabs` so callbacks can read the latest array without relying
   // on React's eager state computation (skipped when the fiber already has
   // other pending updates).
@@ -94,7 +82,7 @@ export function useTabs(initial?: { cwd?: string; title?: string }) {
   // Non-pane tab openers. Extracted into a sub-hook for size; the callbacks
   // close over the same setters/refs and are spread into this hook's return
   // object below with identical keys.
-  const { openBoardTab, newRdpTab } = useAuxTabs({
+  const { openBoardTab, newRdpTab, openPageTab } = useAuxTabs({
     setTabs,
     setActiveId,
     nextIdRef,
@@ -968,6 +956,7 @@ export function useTabs(initial?: { cwd?: string; title?: string }) {
     openFileTab,
     pinTab,
     openBoardTab,
+    openPageTab,
     closeTab,
     selectByIndex,
     setLeafCwd,

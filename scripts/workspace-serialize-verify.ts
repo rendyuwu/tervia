@@ -27,13 +27,26 @@
  *    migration, which is worthless if the serializer drops it. Together these
  *    are property 4's whitelist problem on a kind where the symptom is a dead
  *    pane rather than a wrong name.
+ * 6. A page leaf (Hosts/Vault/Port Forwarding, phase 6c) must round-trip its
+ *    `page` value and rename, inside a split exactly like any other kind, and
+ *    an unrecognised `page` value (a newer build's page, or hand-edited state)
+ *    must restore as Hosts rather than crash or drop the leaf.
+ * 7. Switching to (or creating) a workspace with no saved tabs must land on
+ *    the Hosts page, matching the startup fallback (decision 9) instead of
+ *    reverting to a local shell; a workspace that does have saved tabs must
+ *    still restore them untouched. `useWorkspaceSwitching.ts`'s hook can't be
+ *    executed here (see the comment at that check), so this pins the
+ *    building blocks behaviourally and the actual wiring by source text.
  *
  * Run: `npx tsx scripts/workspace-serialize-verify.ts`.
  *
  * serialize.ts pulls in panes.ts (type-only imports) and the zustand title
  * store, so this runs under plain node with hand-built pane trees.
  */
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import {
+  defaultHostsTab,
   serializeTabs,
   savedActiveTabIndex,
   savedToTab,
@@ -89,6 +102,10 @@ function savedRemoteEditor(leafId: number, path: string): PaneNode {
  *  Nothing else - no host, no credential, no session. */
 function rdp(leafId: number, rdpConnectionId: string): PaneNode {
   return { kind: "leaf", id: leafId, leafKind: "rdp", rdpConnectionId, sizeMode: "preset" };
+}
+/** A rail page leaf: nothing but which page it is. */
+function page(leafId: number, p: "hosts" | "vault" | "forwards"): PaneNode {
+  return { kind: "leaf", id: leafId, leafKind: "page", page: p };
 }
 function split(dir: "row" | "col", children: PaneNode[], sizes?: number[]): PaneNode {
   return { kind: "split", id: id(), dir, children, ...(sizes ? { sizes } : {}) };
@@ -514,6 +531,134 @@ console.log("\n[rdp] an rdp leaf must round-trip its connection id and size mode
     savedNamed.kind === "leaf" && savedNamed.customTitle,
     "domain controller",
   );
+}
+
+console.log("\n[page] a rail page leaf round-trips its page value, name and tree shape");
+
+// 6. A page leaf's whole restorable identity is which page it is.
+{
+  const t = tab(page(1400, "vault"), 1400);
+  const s = serializeTabs([t]);
+  const leaf = onlyLeaf(s[0]);
+  check("saved as a page leaf", leaf.leafKind, "page");
+  check("the page value is persisted", leaf.leafKind === "page" && leaf.page, "vault");
+
+  const restored = savedToTab(s[0], () => id());
+  const liveLeaf = restored.paneTree;
+  check(
+    "and comes back on restore",
+    liveLeaf.kind === "leaf" && liveLeaf.leafKind === "page" ? liveLeaf.page : null,
+    "vault",
+  );
+}
+
+// A rename has to survive on this kind too, same whitelist, same symptom.
+{
+  const named = tab(
+    { ...(page(1401, "forwards") as object), customTitle: "tunnels" } as PaneNode,
+    1401,
+  );
+  const savedNamed = onlyLeaf(serializeTabs([named])[0]);
+  check(
+    "a renamed page leaf keeps its name",
+    savedNamed.leafKind === "page" && savedNamed.customTitle,
+    "tunnels",
+  );
+}
+
+// Inside a split: the tree shape and divider ratios survive around a page
+// leaf exactly as they do around any other kind.
+{
+  const t = tab(split("row", [term(1402), page(1403, "hosts")], [40, 60]), 1403);
+  const s = serializeTabs([t]);
+  check("a page leaf is saved beside its sibling", shape(s[0]), "split(terminal,page)");
+  check("divider ratios survive", sizes(s[0]), [40, 60]);
+  check("the page leaf is still the active one", activeIdx(s[0]), 1);
+
+  const restored = savedToTab(s[0], () => id());
+  const tree = restored.paneTree;
+  check(
+    "and the split shape survives restore",
+    tree.kind === "split"
+      ? tree.children.map((c) => (c.kind === "leaf" ? c.leafKind : "split"))
+      : null,
+    ["terminal", "page"],
+  );
+}
+
+// An unrecognised `page` value (a newer build's page, or hand-edited state)
+// must not crash restore, and defaults to Hosts rather than degrading the
+// whole leaf to an empty terminal - the same shape as RDP's
+// `sizeMode ?? "preset"` fallback, since `page` is a leaf kind this build
+// DOES recognise, just with a value it doesn't.
+{
+  const corrupt = { kind: "leaf", leafKind: "page", page: "snippets" } as unknown as SavedPaneNode;
+  const restored = savedToTab({ kind: "pane", paneTree: corrupt, activeLeafIndex: 0 }, () => id());
+  const leaf = restored.paneTree;
+  check(
+    "an unknown page value falls back to hosts",
+    leaf.kind === "leaf" && leaf.leafKind === "page" ? leaf.page : null,
+    "hosts",
+  );
+}
+
+console.log(
+  "\n[switch] switching to (or creating) an empty workspace opens Hosts, not a shell; a saved one restores untouched",
+);
+
+// `useWorkspaceSwitching.ts`'s `tabsForWorkspaceEntry` - decision 9's runtime
+// counterpart to `useWorkspacePersistence`'s startup fallback - can't be
+// imported here: that hook file also imports `disposeSession` from
+// `@/modules/terminal`, whose module imports `@xterm/xterm` at the top level,
+// and that package ships no `exports` map, so Node's CJS/ESM interop can't
+// resolve `Terminal` as a named export outside a bundler (Vite handles it;
+// tsx/node does not). These checks exercise the same `defaultHostsTab` /
+// `savedToTab` production functions the hook is built from; the source
+// check below pins the actual wiring at both of the hook's call sites.
+{
+  let n = 1;
+  const allocId = () => n++;
+
+  const emptyResult = [defaultHostsTab(allocId)];
+  check("an empty workspace's fallback is a single tab", emptyResult.length, 1);
+  check(
+    "and it is a Hosts page leaf, not a terminal",
+    emptyResult[0].paneTree.kind === "leaf" ? emptyResult[0].paneTree.leafKind : null,
+    "page",
+  );
+
+  const saved = serializeTabs([tab(term(1701), 1701), tab(page(1702, "vault"), 1702)]);
+  const restored = saved.map((s) => savedToTab(s, allocId));
+  check(
+    "a workspace with saved tabs restores the same leaf kinds untouched",
+    restored.map((t) => (t.paneTree.kind === "leaf" ? t.paneTree.leafKind : "split")),
+    ["terminal", "page"],
+  );
+}
+
+// Both `switchToWorkspace` and `closeWorkspace` must resolve an empty
+// workspace's live tabs through `tabsForWorkspaceEntry`, and that function
+// must route the empty case through `defaultHostsTab` - never back through
+// `defaultTabForEmptyWorkspace`, the local-shell fallback it replaced.
+{
+  const hookSrc = readFileSync(
+    fileURLToPath(new URL("../src/app/hooks/useWorkspaceSwitching.ts", import.meta.url)),
+    "utf8",
+  );
+  check(
+    "the empty-workspace branch is wired to defaultHostsTab",
+    /entry\.tabs\.length === 0[\s\S]*?\?\s*\[defaultHostsTab\(allocId\)\][\s\S]*?:\s*entry\.tabs\.map/.test(
+      hookSrc,
+    ),
+    true,
+  );
+  check(
+    "the old local-shell fallback is gone from the switching hook",
+    hookSrc.includes("defaultTabForEmptyWorkspace"),
+    false,
+  );
+  const callSites = hookSrc.match(/tabsForWorkspaceEntry\(next, allocId\)/g) ?? [];
+  check("both switchToWorkspace and closeWorkspace call the shared helper", callSites.length, 2);
 }
 
 // `throw` (not process.exit) for a non-zero exit, matching the other verify scripts.

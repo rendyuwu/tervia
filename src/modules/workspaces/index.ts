@@ -3,7 +3,7 @@ export { useWorkspacesStore } from "./store";
 export {
   countSavedTabEntries,
   countSavedTerminalLeaves,
-  defaultTabForEmptyWorkspace,
+  defaultHostsTab,
   savedActiveTabIndex,
   savedToTab,
   serializeTabs,
