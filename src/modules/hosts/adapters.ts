@@ -1,4 +1,5 @@
 import { createRecoveredStore, type RecoveredStoreIo } from "@/lib/recoveredStore";
+import { tauriStoreFileIo, type StoreFileIo } from "@/lib/storeRecovery";
 import type { SecretsIo } from "@/modules/vault/adapters";
 
 import { HOSTS_KEY, HOSTS_STORE_PATH } from "./types";
@@ -25,7 +26,19 @@ const HOSTS_CHANGED_EVENT = "tervia://hosts-changed";
  */
 export type HostsStoreIo = RecoveredStoreIo;
 
-export type HostsIo = { store: HostsStoreIo; secrets: SecretsIo };
+/**
+ * Raw file reads, for the one thing in this module that cannot go through the
+ * plugin store: the legacy purge reads the two OLD store files directly, so it
+ * keeps working after the modules that own them are deleted (`legacyPurge.ts`).
+ *
+ * Optional with the real default, the way `recoverStoreFile` and `resolveJumpHops`
+ * take their ports - omitting it means "the real filesystem", never "skip a
+ * guard", so there is nothing here for a caller to silently opt out of.
+ */
+export type HostsIo = { store: HostsStoreIo; secrets: SecretsIo; files?: StoreFileIo };
+
+/** The file port every caller gets unless a test hands one in. */
+export const defaultHostFiles: StoreFileIo = tauriStoreFileIo;
 
 /** The real host store, with crash recovery in front of it. */
 export function createTauriHostsStoreIo(): HostsStoreIo {

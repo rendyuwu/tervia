@@ -18,7 +18,9 @@ import {
   type VaultRef,
 } from "@/modules/vault/types";
 
-import { createTauriHostsStoreIo, type HostsIo } from "./adapters";
+import { createTauriHostsStoreIo, defaultHostFiles, type HostsIo } from "./adapters";
+import { jumpChain } from "./jumps";
+import { purgeLegacySecrets as runLegacyPurge, type LegacyPurgeResult } from "./legacyPurge";
 import {
   HOSTS_KEY,
   HOST_GROUPS_KEY,
@@ -46,13 +48,18 @@ import {
 //   every case. `assertBindingOwner` on every upsert is the only thing that
 //   catches it.
 //
-//   A JUMP OR TUNNEL HOST IS AN SSH HOST. The two old stores could not express an
-//   RDP jump host. One merged store can, and it is meaningless.
+//   A JUMP OR TUNNEL HOST IS AN SSH HOST, AND THE CHAIN DOES NOT LOOP. The two
+//   old stores could not express an RDP jump host. One merged store can, and it is
+//   meaningless. The whole chain is walked, not just the first hop: a 2-cycle used
+//   to save on both sides and then fail every connect to either host.
 //
-//   NO ACCOUNT OUTLIVES THE RECORD NAMING IT. There is no `secrets_list`
-//   command, so an account nothing references is not merely untidy, it is
-//   unreachable (§9.7). A delete clears the host's accounts, and an upsert clears
-//   the ones the new record can no longer name.
+//   NO ACCOUNT OUTLIVES THE RECORD NAMING IT, AND NO RECORD OUTLIVES ITS ACCOUNT.
+//   There is no `secrets_list` command, so an account nothing references is not
+//   merely untidy, it is unreachable (§9.7). A delete clears the host's accounts,
+//   and an upsert clears the ones the new record can no longer name - AFTER the
+//   new record is on disk, never before, because nothing here can read a secret
+//   back to undo a release that a failed write leaves unjustified. `legacyPurge.ts`
+//   is the same rule pointed at the two old connection stores.
 
 /**
  * Secrets to write alongside one host. Three-state per field, the app-wide
@@ -126,6 +133,14 @@ export type HostsStore = {
   /** Run the crash-recovery pass and first load, then hand back whatever the
    *  user should be told - once. The startup entry point. */
   ensureLoaded(): Promise<StoreRecovery | null>;
+  /**
+   * Clear the keychain accounts the two OLD connection stores left behind, once.
+   *
+   * On the store's surface because the marker that makes it one-shot lives in the
+   * hosts store file, so it shares this store's queue rather than racing it. Safe
+   * on every launch, and it never rejects - see `legacyPurge.ts`.
+   */
+  purgeLegacySecrets(): Promise<LegacyPurgeResult>;
   /** The recovery notice if a read already triggered the pass. Prefer
    *  {@link HostsStore.ensureLoaded}. */
   takeRecoveryNotice(): StoreRecovery | null;
@@ -160,9 +175,7 @@ function rebound(
   return binding.kind === "inline" ? { ...binding, hostId } : binding;
 }
 
-/** The stored inline arm, or `undefined` when the stored record had none. The
- *  protocol check matters: an edit may change it, and flags read off the wrong
- *  arm would claim secrets that are not there. */
+/** The stored inline arm, or `undefined` when the stored record had none. */
 function storedSshInline(existing: Host | undefined): SshInlineCredentials | undefined {
   if (!existing || existing.protocol !== "ssh") return undefined;
   return existing.credential.kind === "inline" ? existing.credential : undefined;
@@ -171,6 +184,49 @@ function storedSshInline(existing: Host | undefined): SshInlineCredentials | und
 function storedRdpInline(existing: Host | undefined): RdpInlineCredentials | undefined {
   if (!existing || existing.protocol !== "rdp") return undefined;
   return existing.credential.kind === "inline" ? existing.credential : undefined;
+}
+
+/**
+ * What the STORED record says about ONE ACCOUNT, which is the only thing an
+ * untouched field may take its flag from.
+ *
+ * Keyed on the account FIELD rather than on the stored arm, because a field
+ * outlives a protocol change: `HOST_SSH_PASSWORD_FIELD` and
+ * `HOST_RDP_PASSWORD_FIELD` are both `"password"`, so a host flipped SSH -> RDP
+ * keeps the secret already sitting at `<hostId>::password` - see
+ * `releaseStaleAccounts`, which by design releases only what the new record
+ * cannot NAME.
+ *
+ * Reading the flag off the new protocol's arm alone is what made that a real
+ * hazard rather than untidiness: the stored arm was SSH, so an RDP row came back
+ * `hasPassword: false` while the password was still in the keychain - and
+ * `resolveRdpAuth` hands `rdp_open` that account reference UNCONDITIONALLY, so the
+ * backend authenticated with a secret the record denied. The record then warns
+ * "no secret" over a live one, and an export keyed on the flag omits a credential
+ * in use. The reverse flip is the same defect through `sshAccountsFor`, which
+ * also resolves by auth mode and never consults a flag.
+ *
+ * So the flag follows the ACCOUNT. `false` for a field the stored record did not
+ * own - a vault binding owns none, and an RDP row never owned key material, which
+ * is exactly when the account was released.
+ */
+function storedFlag(existing: Host | undefined, field: string): boolean {
+  if (!existing) return false;
+  if (existing.protocol === "rdp") {
+    return field === HOST_RDP_PASSWORD_FIELD && (storedRdpInline(existing)?.hasPassword ?? false);
+  }
+  const stored = storedSshInline(existing);
+  if (!stored) return false;
+  switch (field) {
+    case HOST_SSH_PASSWORD_FIELD:
+      return stored.hasPassword;
+    case HOST_SSH_PRIVATE_KEY_FIELD:
+      return stored.hasPrivateKey;
+    case HOST_SSH_KEY_PASSPHRASE_FIELD:
+      return stored.hasKeyPassphrase;
+    default:
+      return false;
+  }
 }
 
 /** One host with its pin replaced, whichever field this protocol keeps it in. */
@@ -206,10 +262,21 @@ export function createHostsStore(io: HostsIo): HostsStore {
     return Array.isArray(raw) ? raw : [];
   }
 
-  /** Every mutation lands through here. The commit is also what takes the `.bak`
-   *  snapshot, which is why the session that CREATES the file has one: at first
-   *  load there is nothing to copy, so the first successful write is the earliest
-   *  moment the host list is protected at all. */
+  /**
+   * Every mutation lands through here. The commit is also what takes the `.bak`
+   * snapshot, which is why the session that CREATES the file has one: at first
+   * load there is nothing to copy, so the first successful write is the earliest
+   * moment the host list is protected at all.
+   *
+   * NOT atomic across keys, and one caller passes two. `deleteGroup` sets the group
+   * list and the host list before this commits, so a throw on the second `set`
+   * leaves the first in the plugin's cache with the 200 ms autosave still behind it
+   * - persisting the group removal without clearing `groupId` on its members.
+   * Benign by design (a dangling `groupId` renders as ungrouped, which is what
+   * deleting the group was for) and named here because it is the one place the
+   * multi-key contract is weaker than it reads. A real fix is VLT-19's atomic store
+   * write, not a second commit here.
+   */
   async function persist(entries: [string, unknown][]): Promise<void> {
     for (const [key, value] of entries) await io.store.set(key, value);
     await io.store.commit();
@@ -258,6 +325,24 @@ export function createHostsStore(io: HostsIo): HostsStore {
     return { password, privateKey, keyPassphrase };
   }
 
+  /**
+   * Only the fields the source actually stores, as write instructions.
+   *
+   * `secrets_get_all` reports an absent account as `null`, and `null` is
+   * {@link HostSecretInput}'s CLEAR instruction - so handing the batch straight
+   * through made duplicating a secret-less host issue three `secrets_delete` calls
+   * against accounts the copy has never had. `undefined` is the "leave it alone"
+   * state, which for a brand-new id resolves to the same all-false flags with no
+   * IPC at all.
+   */
+  function storedOnly(values: SshSecretValues): HostSecretInput {
+    const out: HostSecretInput = {};
+    if (values.password != null) out.password = values.password;
+    if (values.privateKey != null) out.privateKey = values.privateKey;
+    if (values.keyPassphrase != null) out.keyPassphrase = values.keyPassphrase;
+    return out;
+  }
+
   /** A vault-bound host owns no accounts, so a secret handed in with one would
    *  land where nothing reads it. Refused rather than dropped: the caller thinks
    *  it saved a password. */
@@ -273,7 +358,7 @@ export function createHostsStore(io: HostsIo): HostsStore {
   }
 
   /**
-   * Clear the host-owned accounts the new record can no longer name.
+   * Clear the host-owned accounts the new record can no longer NAME.
    *
    * Covers a credential moving inline -> vault, and a row changing protocol.
    * Without it those accounts are not merely stale: nothing enumerates them
@@ -283,15 +368,35 @@ export function createHostsStore(io: HostsIo): HostsStore {
    * Only what the STORED record owned is touched, so a convert-to-vault following
    * §5.3's order - copy the secrets to the vault FIRST, then rewrite the binding -
    * loses nothing. A converter that rewrote the binding first would.
+   *
+   * A field BOTH protocols own survives a protocol change, and that is the
+   * behaviour rather than an oversight: nothing has been copied anywhere, so
+   * deleting it would destroy the only copy of a secret this layer cannot read
+   * back. `storedFlag` is what makes it honest, by carrying the flag across with
+   * the account.
+   *
+   * MUST run after the record is persisted - see the call site.
    */
   async function releaseStaleAccounts(host: Host, existing: Host | undefined): Promise<void> {
     if (!existing) return;
     const keeps = new Set(secretFieldsFor(host));
     const stale = secretFieldsFor(existing).filter((f) => !keeps.has(f));
     if (stale.length === 0) return;
-    await Promise.all(
-      stale.map((f) => io.secrets.delete(HOST_KEYRING_SERVICE, account(host.id, f))),
-    );
+    try {
+      await Promise.all(
+        stale.map((f) => io.secrets.delete(HOST_KEYRING_SERVICE, account(host.id, f))),
+      );
+    } catch (e) {
+      // Re-worded rather than rethrown, because the record IS saved and is
+      // accurate about what it owns: reporting the keychain's error alone would
+      // read as "your edit was not saved". Not swallowed either - what is left is
+      // bytes at an account nothing names, and no `secrets_list` can find them.
+      const why = e instanceof Error ? e.message : String(e);
+      throw new Error(
+        `hosts: "${host.name}" was saved, but ${stale.join(", ")} could not be cleared ` +
+          `from the keychain and is now unreachable: ${why}`,
+      );
+    }
   }
 
   /**
@@ -330,7 +435,6 @@ export function createHostsStore(io: HostsIo): HostsStore {
       assertNoHostSecrets(host, secrets);
       return binding;
     }
-    const stored = storedSshInline(existing);
     try {
       return {
         ...binding,
@@ -338,19 +442,19 @@ export function createHostsStore(io: HostsIo): HostsStore {
           host.id,
           HOST_SSH_PASSWORD_FIELD,
           secrets.password,
-          stored?.hasPassword ?? false,
+          storedFlag(existing, HOST_SSH_PASSWORD_FIELD),
         ),
         hasPrivateKey: await writeSecret(
           host.id,
           HOST_SSH_PRIVATE_KEY_FIELD,
           secrets.privateKey,
-          stored?.hasPrivateKey ?? false,
+          storedFlag(existing, HOST_SSH_PRIVATE_KEY_FIELD),
         ),
         hasKeyPassphrase: await writeSecret(
           host.id,
           HOST_SSH_KEY_PASSPHRASE_FIELD,
           secrets.keyPassphrase,
-          stored?.hasKeyPassphrase ?? false,
+          storedFlag(existing, HOST_SSH_KEY_PASSPHRASE_FIELD),
         ),
       };
     } catch (e) {
@@ -380,7 +484,7 @@ export function createHostsStore(io: HostsIo): HostsStore {
         host.id,
         HOST_RDP_PASSWORD_FIELD,
         secrets.password,
-        storedRdpInline(existing)?.hasPassword ?? false,
+        storedFlag(existing, HOST_RDP_PASSWORD_FIELD),
       ),
     };
   }
@@ -415,7 +519,16 @@ export function createHostsStore(io: HostsIo): HostsStore {
   function assertReferences(host: Host, hosts: Host[]): void {
     if (host.protocol === "ssh") {
       // Falsy is "no jump host", matching `resolveJumpHops`.
-      if (host.proxyJumpId) assertSshTarget(host, host.proxyJumpId, hosts, "jump host");
+      if (host.proxyJumpId) {
+        assertSshTarget(host, host.proxyJumpId, hosts, "jump host");
+        // The TRANSITIVE half. `assertSshTarget` catches the 1-cycle and the
+        // dangling id; only the walk catches A -> B -> A, which otherwise saves
+        // on both sides and then fails every connect to EITHER host with this
+        // same error - the asymmetry with the dangling-id refusal is what reads
+        // as a bug. Walked from the incoming record's own start id, so the row
+        // is judged by what it is about to become.
+        jumpChain(host.proxyJumpId, host.id, hosts);
+      }
       return;
     }
     if (!host.tunnel) return;
@@ -423,34 +536,57 @@ export function createHostsStore(io: HostsIo): HostsStore {
       throw new Error(`hosts: "${host.name}" has a tunnel that names no SSH host`);
     }
     assertSshTarget(host, host.tunnel.sshHostId, hosts, "tunnel host");
+    // A tunnel host carries its own jump chain, resolved on the same connect, so
+    // the same walk applies. An RDP host has no `proxyJumpId` and cannot appear
+    // in a chain, so seeding the walk with its id only ever helps.
+    jumpChain(host.tunnel.sshHostId, host.id, hosts);
   }
 
   async function upsertHost(host: Host, secrets: HostSecretInput = {}): Promise<Host> {
-    return enqueueWrite(async () => {
-      // The write-time half of the binding invariant, and the only half there is.
-      assertBindingOwner(host.credential, host.id);
+    return enqueueWrite(() => writeHost(host, secrets));
+  }
 
-      const hosts = await listHosts();
-      assertReferences(host, hosts);
-      const existing = hosts.find((h) => h.id === host.id);
-      await releaseStaleAccounts(host, existing);
+  /**
+   * The body of {@link upsertHost}, WITHOUT the queue.
+   *
+   * Private, and called un-queued from exactly one place: `duplicateHost`, which
+   * has to read the source and write the copy inside ONE queue entry or another
+   * window's rotation lands between the two. Nothing else may call it - a write
+   * outside the queue is the lost-update this store exists to prevent.
+   */
+  async function writeHost(host: Host, secrets: HostSecretInput): Promise<Host> {
+    // The write-time half of the binding invariant, and the only half there is.
+    assertBindingOwner(host.credential, host.id);
 
-      const record: Host =
-        host.protocol === "ssh"
-          ? { ...host, credential: await nextSshCredential(host, secrets, existing) }
-          : { ...host, credential: await nextRdpCredential(host, secrets, existing) };
+    const hosts = await listHosts();
+    assertReferences(host, hosts);
+    const existing = hosts.find((h) => h.id === host.id);
 
-      const next = [...hosts];
-      const idx = next.findIndex((h) => h.id === host.id);
-      if (idx >= 0) next[idx] = record;
-      else next.push(record);
-      // A `persist` that throws is deliberately NOT rolled back: `LazyStore` runs
-      // with autoSave, so the record is already in the plugin's cache with a
-      // debounced retry behind it, and clearing the secrets here would race that
-      // into a record whose flags name material that is gone.
-      await persist([[HOSTS_KEY, next]]);
-      return record;
-    });
+    const record: Host =
+      host.protocol === "ssh"
+        ? { ...host, credential: await nextSshCredential(host, secrets, existing) }
+        : { ...host, credential: await nextRdpCredential(host, secrets, existing) };
+
+    const next = [...hosts];
+    const idx = next.findIndex((h) => h.id === host.id);
+    if (idx >= 0) next[idx] = record;
+    else next.push(record);
+    // A `persist` that throws is deliberately NOT rolled back: `LazyStore` runs
+    // with autoSave, so the record is already in the plugin's cache with a
+    // debounced retry behind it, and clearing the secrets here would race that
+    // into a record whose flags name material that is gone.
+    await persist([[HOSTS_KEY, next]]);
+
+    // AFTER the rewrite, never before, which is §5.3's ordering: every step up to
+    // the rewrite is additive, so a `persist` that throws leaves the old record
+    // still naming secrets that are still there. Releasing first is the "step 5
+    // before step 4" the spec calls out - and a protocol change has NO copy step,
+    // so nothing preserves the secret anywhere and a throw at `persist` costs the
+    // user their only copy of a key while the stored record still claims it. What
+    // is left instead is the lesser evil the spec ranks below it: an orphan
+    // account after a good write.
+    await releaseStaleAccounts(host, existing);
+    return record;
   }
 
   async function upsertGroup(group: HostGroup): Promise<HostGroup> {
@@ -492,50 +628,59 @@ export function createHostsStore(io: HostsIo): HostsStore {
    * SSH secrets do travel, because SSH plaintext already round-trips through JS on
    * every connect (issues/11) - the copy adds no exposure that a connect does not.
    *
-   * Deliberately NOT wrapped in `enqueueWrite`: it awaits `upsertHost`, which
-   * enqueues, and an op waiting on a later entry in a serial queue never resolves.
+   * ONE queue entry covers the read AND the write, through the un-queued
+   * `writeHost`. Calling `upsertHost` from inside the queue would deadlock - an op
+   * waiting on a later entry in a serial queue never resolves - but reading
+   * outside it was its own bug: another window rotating the source's password
+   * between the read and the write left the copy holding the pre-rotation value
+   * and claiming `hasPassword: true`.
    */
   async function duplicateHost(id: string): Promise<Host | null> {
-    const source = (await listHosts()).find((h) => h.id === id);
-    if (!source) return null;
-    const copyId = newId("h");
-    const name = `${source.name} (copy)`;
+    return enqueueWrite(async () => {
+      const source = (await listHosts()).find((h) => h.id === id);
+      if (!source) return null;
+      const copyId = newId("h");
+      const name = `${source.name} (copy)`;
 
-    if (source.protocol === "ssh") {
-      const copy: SshHost = {
+      if (source.protocol === "ssh") {
+        const copy: SshHost = {
+          ...source,
+          id: copyId,
+          name,
+          credential: rebound(source.credential, copyId),
+          lastConnectedAt: undefined,
+          lastFingerprint: undefined,
+        };
+        const secrets = source.credential.kind === "inline" ? await readSshSecrets(source.id) : {};
+        return writeHost(copy, storedOnly(secrets));
+      }
+
+      const copy: RdpHost = {
         ...source,
         id: copyId,
         name,
         credential: rebound(source.credential, copyId),
         lastConnectedAt: undefined,
-        lastFingerprint: undefined,
+        certFingerprint: undefined,
       };
-      const secrets =
-        source.credential.kind === "inline" ? await readSshSecrets(source.id) : undefined;
-      return upsertHost(copy, secrets);
-    }
-
-    const copy: RdpHost = {
-      ...source,
-      id: copyId,
-      name,
-      credential: rebound(source.credential, copyId),
-      lastConnectedAt: undefined,
-      certFingerprint: undefined,
-    };
-    return upsertHost(copy);
+      return writeHost(copy, {});
+    });
   }
 
   async function deleteHost(id: string, forwards: ForwardRuleCleanup): Promise<void> {
     return enqueueWrite(async () => {
       const hosts = await listHosts();
       const host = hosts.find((h) => h.id === id);
-      if (!host) return;
 
-      // First, and awaited: a throw here leaves the host and its rules both
-      // intact, which is recoverable. The other order leaves rules naming a host
-      // that no longer exists.
+      // First, awaited, and UNCONDITIONAL. A throw here leaves the host and its
+      // rules both intact, which is recoverable; the other order leaves rules
+      // naming a host that no longer exists. Unconditional because a rule can name
+      // an id that is already gone - deleted in another window, or lost with a torn
+      // store file - and orphaning those rules is this sub-phase's job. Skipping
+      // the call for a missing host is what left exactly those rules behind, and it
+      // costs one no-op.
       await forwards(id);
+      if (!host) return;
 
       await Promise.all(
         secretFieldsFor(host).map((f) => io.secrets.delete(HOST_KEYRING_SERVICE, account(id, f))),
@@ -590,6 +735,19 @@ export function createHostsStore(io: HostsIo): HostsStore {
    * Read-modify-write one host through the serialized queue. `patch` returns the
    * next record, or null to write nothing. A missing id is a no-op: the host was
    * deleted mid-connect.
+   *
+   * PRIVATE, and that is the constraint rather than an implementation detail.
+   * `patch` is an arbitrary `(Host) => Host | null`, so a fourth caller written as
+   * `patchHost(id, (h) => ({ ...h, name }))` would be well-typed, would look like
+   * the cheap path next to a full `upsertHost`, and would skip `assertReferences`
+   * and the stale-account release entirely. The three callbacks that exist touch
+   * only `lastConnectedAt`, `lastFingerprint` and `certFingerprint`, which is why
+   * no credential is addressable through here today - a fact about those three
+   * closures, not about this signature.
+   *
+   * `assertBindingOwner` on what `patch` returns makes the credential half of that
+   * enforced rather than remembered, and costs nothing: every pin path hands back a
+   * byte-identical credential.
    */
   async function patchHost(id: string, patch: (current: Host) => Host | null): Promise<void> {
     return enqueueWrite(async () => {
@@ -598,6 +756,9 @@ export function createHostsStore(io: HostsIo): HostsStore {
       if (idx < 0) return;
       const next = patch(hosts[idx]);
       if (!next) return;
+      // Against `id`, not `next.id`: a patch that rewrote both would otherwise
+      // agree with itself while landing at this index.
+      assertBindingOwner(next.credential, id);
       const list = [...hosts];
       list[idx] = next;
       await persist([[HOSTS_KEY, list]]);
@@ -665,6 +826,12 @@ export function createHostsStore(io: HostsIo): HostsStore {
     onHostsChanged: (cb) => io.store.onChanged(cb),
     ensureLoaded: () => io.store.ensureLoaded(),
     takeRecoveryNotice: () => io.store.takeRecoveryNotice(),
+    purgeLegacySecrets: () =>
+      runLegacyPurge({
+        store: io.store,
+        secrets: io.secrets,
+        files: io.files ?? defaultHostFiles,
+      }),
   };
 }
 
@@ -694,4 +861,5 @@ export const {
   onHostsChanged,
   ensureLoaded,
   takeRecoveryNotice,
+  purgeLegacySecrets,
 } = hostsStore;

@@ -13,11 +13,14 @@
  *    anywhere. `assertBindingOwner` on every upsert is the only thing that
  *    catches it.
  *
- * 2. A JUMP OR TUNNEL HOST IS AN SSH HOST. Two stores could not express an RDP
- *    jump host; one merged store can, and there is nothing to jump through.
- *    Checked on the WRITE and again at RESOLVE, because neither covers the other:
- *    refusing only at the connect leaves a saved row that can never connect, and
- *    refusing only at the write says nothing about a row an import put there.
+ * 2. A JUMP OR TUNNEL HOST IS AN SSH HOST, AND THE CHAIN DOES NOT LOOP. Two
+ *    stores could not express an RDP jump host; one merged store can, and there is
+ *    nothing to jump through. Checked on the WRITE and again at RESOLVE, because
+ *    neither covers the other: refusing only at the connect leaves a saved row
+ *    that can never connect, and refusing only at the write says nothing about a
+ *    row an import put there. The write guard walks the WHOLE chain for the same
+ *    reason it refuses a dangling id - a 2-cycle that saves on both sides then
+ *    fails every connect to either host.
  *
  * 3. A DUPLICATE DOES NOT INHERIT THE PINNED SERVER KEY. It belongs to the
  *    machine that presented it, and a copy exists to be pointed somewhere else.
@@ -39,12 +42,19 @@
  *    edit that never touched a password field from wiping it. Every check here
  *    feeds the flags in DELIBERATELY WRONG, because handing the previous record
  *    straight back cannot tell "the store read what is stored" from "the store
- *    echoed its caller".
+ *    echoed its caller". A FLAG FOLLOWS ITS ACCOUNT, including across a protocol
+ *    change: `password` is the same account on both arms, and a record claiming
+ *    otherwise is a secret `resolveRdpAuth` hands the backend regardless.
  *
- * 7. NO ACCOUNT OUTLIVES THE RECORD NAMING IT. There is no `secrets_list`
- *    command, so an account nothing references is unreachable, not merely untidy.
- *    A delete clears the host's accounts; an upsert clears the ones the new
- *    record can no longer name; a partial write on a brand-new host rolls back.
+ * 7. NO ACCOUNT OUTLIVES THE RECORD NAMING IT, AND NO RECORD OUTLIVES ITS
+ *    ACCOUNT. There is no `secrets_list` command, so an account nothing
+ *    references is unreachable, not merely untidy. A delete clears the host's
+ *    accounts; an upsert clears the ones the new record can no longer name, but
+ *    only AFTER the new record is on disk (§5.3), because a protocol change has no
+ *    copy step and this layer cannot put a secret back; a partial write on a
+ *    brand-new host rolls back. The two OLD connection stores' accounts are swept
+ *    once by `legacyPurge.ts`, which is the only thing that can ever name them
+ *    after those modules are deleted.
  *
  * 8. AN RDP PASSWORD NEVER ENTERS THE WEBVIEW. There is no read-back for one -
  *    not for the editor, and not for a duplicate, which is why a duplicated RDP
@@ -57,13 +67,15 @@
  * 10. CONCURRENT READ-MODIFY-WRITES DO NOT LOSE AN UPDATE. A chained connect
  *     fires `markConnected` once per hop plus once for the target, so this is the
  *     ordinary case: a lost write silently reverts a freshly pinned key to a TOFU
- *     prompt on the next connect.
+ *     prompt on the next connect. `duplicateHost` reads its source inside the same
+ *     queue entry that writes the copy, or a rotation landing between the two
+ *     gives the copy a password nobody has any more.
  *
- * The store, secrets and event bus are injectable ports, so all of this runs
- * under plain node with no Tauri runtime and no mocking library.
+ * The store, secrets, files and event bus are injectable ports, so all of this
+ * runs under plain node with no Tauri runtime and no mocking library.
  */
 import { createWriteQueue } from "../src/lib/recoveredStore";
-import type { StoreRecovery } from "../src/lib/storeRecovery";
+import type { StoreFileIo, StoreFileRead, StoreRecovery } from "../src/lib/storeRecovery";
 import type { HostsStoreIo } from "../src/modules/hosts/adapters";
 import { MAX_JUMP_HOPS, resolveJumpHops } from "../src/modules/hosts/jumps";
 import { createHostsStore, noForwardRules } from "../src/modules/hosts/store";
@@ -73,6 +85,7 @@ import {
   isSshHost,
   HOSTS_KEY,
   HOST_GROUPS_KEY,
+  LEGACY_PURGE_KEY,
   presetById,
   presetIdFor,
   type Host,
@@ -129,7 +142,13 @@ async function rejects(
 type SecretCall = { op: "getAll" | "set" | "delete"; service: string; accounts: string[] };
 
 /** A step that throws, to reach the partial-failure paths. */
-type Fail = { setAccount?: string; commit?: string };
+type Fail = { setAccount?: string; deleteAccount?: string; commit?: string; dir?: string };
+
+/** Extra microtask ticks inside `secrets.set`, so a read racing a write has a
+ *  DETERMINISTIC loser. Used only by the duplicate-inside-the-queue check: an
+ *  un-queued read is indistinguishable from a queued one when both resolve in the
+ *  same tick. */
+const SLOW_SET_TICKS = 8;
 
 function harness(
   seed: {
@@ -140,6 +159,9 @@ function harness(
     kept?: Record<string, string>;
     notice?: StoreRecovery;
     fail?: Fail;
+    /** The OLD connection store files, by file name, as the file port sees them. */
+    legacy?: Record<string, StoreFileRead>;
+    slowSet?: boolean;
   } = {},
 ) {
   const data: Record<string, unknown> = {
@@ -189,15 +211,39 @@ function harness(
     async set(service, account, value) {
       calls.push({ op: "set", service, accounts: [account] });
       if (seed.fail?.setAccount === account) throw new Error(`keychain refused ${account}`);
+      if (seed.slowSet) {
+        for (let i = 0; i < SLOW_SET_TICKS; i++) await Promise.resolve();
+      }
       kept.set(`${service}::${account}`, value);
     },
     async delete(service, account) {
       calls.push({ op: "delete", service, accounts: [account] });
+      if (seed.fail?.deleteAccount === account) {
+        throw new Error(`keychain refused to delete ${account}`);
+      }
       kept.delete(`${service}::${account}`);
     },
   };
 
-  const hosts = createHostsStore({ store, secrets });
+  // The two OLD store files, read straight off the filesystem by the legacy
+  // purge. `write` throws: the purge must never touch a store file, only the
+  // keychain accounts those files name.
+  const fileReads: string[] = [];
+  const files: StoreFileIo = {
+    async dir() {
+      if (seed.fail?.dir) throw new Error(seed.fail.dir);
+      return "/data";
+    },
+    async read(path) {
+      fileReads.push(path);
+      return seed.legacy?.[path.slice(path.lastIndexOf("/") + 1)] ?? { kind: "missing" };
+    },
+    async write(path) {
+      throw new Error(`hosts-store-verify: nothing here may write ${path}`);
+    },
+  };
+
+  const hosts = createHostsStore({ store, secrets, files });
   // Just enough of a vault for `resolveSshAuth` to dereference an identity
   // binding. The real store satisfies the same two-method shape.
   const deps: ResolveDeps = {
@@ -214,10 +260,12 @@ function harness(
     kept,
     calls,
     data,
+    fileReads,
     commits: () => commits,
     reads: () => calls.filter((c) => c.op === "getAll"),
     deletes: () => calls.filter((c) => c.op === "delete").map((c) => c.accounts[0]),
     rows: () => data[HOSTS_KEY] as Host[],
+    groupRows: () => data[HOST_GROUPS_KEY] as HostGroup[],
   };
 }
 
@@ -464,6 +512,30 @@ console.log("\n[duplicate] an RDP password does not travel, and no read-back exi
 }
 
 // ---------------------------------------------------------------------------
+console.log("\n[duplicate] a copy of a secret-less host writes nothing to the keychain");
+{
+  // `secrets_get_all` reports an absent account as `null`, and `null` is the CLEAR
+  // instruction - so passing the batch straight through issued three
+  // `secrets_delete` calls against accounts the copy never had.
+  const h = harness({ hosts: [sshHost({ id: "h-1" })] });
+  const copy = await h.hosts.duplicateHost("h-1");
+  check("the copy saved", copy?.id !== "h-1" && copy !== null, true);
+  check("with no delete issued for it", h.deletes(), []);
+  check("and no write either", h.calls.filter((c) => c.op === "set").length, 0);
+  check(
+    "so its flags are all false, from the store rather than from a read-back",
+    copy?.credential.kind === "inline" && copy.protocol === "ssh"
+      ? [
+          copy.credential.hasPassword,
+          copy.credential.hasPrivateKey,
+          copy.credential.hasKeyPassphrase,
+        ]
+      : null,
+    [false, false, false],
+  );
+}
+
+// ---------------------------------------------------------------------------
 console.log("\n[duplicate] a vault-bound copy shares the identity instead of the secrets");
 {
   const h = harness();
@@ -548,7 +620,7 @@ console.log("\n[jumps] the chain resolves in connect order, once per hop");
     hops.map((x) => x.connectionId),
     ["j-entry", "j-mid"],
   );
-  check("an agent hop asks the keychain for nothing", hops[0], {
+  check("an agent hop is built with no credential in it at all", hops[0], {
     connectionId: "j-entry",
     host: "j-entry.example",
     port: 22,
@@ -562,7 +634,63 @@ console.log("\n[jumps] the chain resolves in connect order, once per hop");
     user: "vaulted",
     password: "from-the-vault",
   });
+  // The call LOG, not the hop shape: the agent hop's empty credential is what the
+  // check above proves, and this is what proves it cost no IPC. One read for the
+  // whole chain, against the vault, for the one hop that has an identity.
+  check(
+    "the only keychain read in the whole chain is the vault identity's",
+    h.reads().flatMap((c) => c.accounts.map((a) => `${c.service}::${a}`)),
+    ["tervia-vault::i-1::password"],
+  );
   check("no jump host is no hops", await resolveJumpHops(undefined, "h-target", all, h.deps), []);
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n[refs] a jump chain that closes a cycle is refused at WRITE time");
+{
+  // `assertSshTarget` catches the 1-cycle and the dangling id. Only the walk
+  // catches A -> B -> A, which otherwise saved on both sides and then failed every
+  // connect to EITHER host - the asymmetry with the dangling-id refusal is the bug.
+  const h = harness();
+  await h.hosts.upsertHost(agentHop("a"));
+  await h.hosts.upsertHost(agentHop("b", "a"));
+  await rejects(
+    "editing A to jump through B closes a 2-cycle and is refused",
+    () => h.hosts.upsertHost(agentHop("a", "b")),
+    ["cycle"],
+  );
+  const a = await h.hosts.findHost("a");
+  check(
+    "so A is still stored with no jump host",
+    a?.protocol === "ssh" ? a.proxyJumpId : "?",
+    undefined,
+  );
+
+  await h.hosts.upsertHost(agentHop("c", "b"));
+  await rejects("a three-host cycle is refused too", () => h.hosts.upsertHost(agentHop("a", "c")), [
+    "cycle",
+  ]);
+  check(
+    "while a longer straight chain still saves",
+    (await h.hosts.upsertHost(agentHop("d", "c"))).id,
+    "d",
+  );
+
+  // A cycle can no longer be CREATED, so the only way to meet one is a row an
+  // import or another window put there - which is why the resolve-time check stays
+  // as well. Seeded past the guard, the way an import would.
+  const imported = harness({ hosts: [agentHop("a", "b"), agentHop("b", "a")] });
+  await rejects(
+    "a jump into an already-cyclic chain is refused",
+    () => imported.hosts.upsertHost(sshHost({ id: "h-new", proxyJumpId: "a" })),
+    ["cycle"],
+  );
+  await rejects(
+    "and so is an RDP tunnel into one, which resolves the same chain",
+    () => imported.hosts.upsertHost(rdpHost({ id: "h-r", tunnel: { sshHostId: "a" } })),
+    ["cycle"],
+  );
+  check("neither row landed", imported.rows().length, 2);
 }
 
 // ---------------------------------------------------------------------------
@@ -769,13 +897,138 @@ console.log("\n[accounts] no secret outlives the record naming it");
     ["h-1::keyPassphrase", "h-1::password", "h-1::privateKey"],
   );
 
-  // A protocol change releases only what the new arm cannot name. `password` has
-  // the same account name on both, so it stays.
+  // A protocol change releases only what the new arm cannot NAME. `password` has
+  // the same account name on both, so it stays - and the FLAG has to stay with it.
+  // Reading the flag off the new arm alone reported `hasPassword: false` over a
+  // password still in the keychain, which `resolveRdpAuth` hands `rdp_open`
+  // UNCONDITIONALLY: the backend authenticates with a secret the record denies.
   const flipped = harness();
   await flipped.hosts.upsertHost(sshHost({ id: "h-1" }), { password: "pw", privateKey: "PEM" });
-  await flipped.hosts.upsertHost(rdpHost({ id: "h-1" }));
+  const asRdp = await flipped.hosts.upsertHost(rdpHost({ id: "h-1" }));
+  const rdpFlag = (host: Host | undefined): unknown =>
+    host && host.protocol === "rdp" && host.credential.kind === "inline"
+      ? host.credential.hasPassword
+      : null;
   check("the key material is released", flipped.kept.has(at("h-1", "privateKey")), false);
   check("the password is kept", flipped.kept.get(at("h-1", "password")), "pw");
+  check(
+    "and the flag AGREES with the keychain, on the record and as returned",
+    [
+      rdpFlag(asRdp),
+      rdpFlag(await flipped.hosts.findHost("h-1")),
+      flipped.kept.has(at("h-1", "password")),
+    ],
+    [true, true, true],
+  );
+
+  // The reverse flip is the same defect through `sshAccountsFor`, which resolves
+  // by auth mode and never consults a flag either. The input carries every flag
+  // deliberately wrong, so this cannot be the caller's own values echoed back.
+  const asSsh = await flipped.hosts.upsertHost(sshHost({ id: "h-1" }));
+  const sshFlags = (host: Host | undefined): unknown =>
+    host && host.protocol === "ssh" && host.credential.kind === "inline"
+      ? [
+          host.credential.hasPassword,
+          host.credential.hasPrivateKey,
+          host.credential.hasKeyPassphrase,
+        ]
+      : null;
+  check("flipping back keeps the password and its flag", sshFlags(asSsh), [true, false, false]);
+  check("which is still what is stored", flipped.kept.get(at("h-1", "password")), "pw");
+  check(
+    "and it claims no key material, which really is gone",
+    [flipped.kept.has(at("h-1", "privateKey")), flipped.kept.has(at("h-1", "keyPassphrase"))],
+    [false, false],
+  );
+  check("no flag was decided by reading a secret back", flipped.reads().length, 0);
+
+  // A binding moving to the vault DOES release `password`, so the flag it comes
+  // back with must be false - the "carry it across" rule is about the account
+  // surviving, not about the field name.
+  const vaulted = harness();
+  await vaulted.hosts.upsertHost(sshHost({ id: "h-1" }), { password: "pw" });
+  await vaulted.hosts.upsertHost(
+    sshHost({ id: "h-1", credential: { kind: "identity", identityId: "i-1" } }),
+  );
+  const detached = await vaulted.hosts.upsertHost(rdpHost({ id: "h-1" }));
+  check(
+    "a vault round-trip leaves no account and no flag",
+    [
+      vaulted.kept.size,
+      detached.credential.kind === "inline" ? detached.credential.hasPassword : null,
+    ],
+    [0, false],
+  );
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n[accounts] the release happens AFTER the record is written, never before");
+{
+  // The order is the whole point (§5.3). A protocol change has no copy step, so
+  // releasing first and then failing to persist destroys the user's only copy of a
+  // key while the stored record still claims it - and this layer never reads a
+  // secret, so it cannot put one back.
+  const torn = harness({
+    hosts: [
+      sshHost({
+        id: "h-1",
+        credential: {
+          kind: "inline",
+          hostId: "h-1",
+          user: "root",
+          authMode: "key",
+          hasPassword: false,
+          hasPrivateKey: true,
+          hasKeyPassphrase: true,
+        },
+      }),
+    ],
+    kept: { [at("h-1", "privateKey")]: "PEM-ONLY-COPY", [at("h-1", "keyPassphrase")]: "pp" },
+    fail: { commit: "the data directory is read-only" },
+  });
+  await rejects(
+    "a persist that throws on a protocol change is reported",
+    () => torn.hosts.upsertHost(rdpHost({ id: "h-1" })),
+    ["read-only"],
+  );
+  check(
+    "and the key material the stored record still names is untouched",
+    [torn.kept.get(at("h-1", "privateKey")), torn.kept.get(at("h-1", "keyPassphrase"))],
+    ["PEM-ONLY-COPY", "pp"],
+  );
+  check("no delete was even attempted", torn.deletes().length, 0);
+
+  // The residual worst case, which §5.3 ranks as the lesser evil: a good write
+  // followed by a release that fails. It must say the record WAS saved, or the
+  // user re-enters an edit that already landed.
+  const orphan = harness({
+    hosts: [
+      sshHost({
+        id: "h-1",
+        credential: {
+          kind: "inline",
+          hostId: "h-1",
+          user: "root",
+          authMode: "key",
+          hasPassword: false,
+          hasPrivateKey: true,
+          hasKeyPassphrase: false,
+        },
+      }),
+    ],
+    kept: { [at("h-1", "privateKey")]: "PEM" },
+    fail: { deleteAccount: "h-1::privateKey" },
+  });
+  await rejects(
+    "a release that fails after a good write names the orphan, not a failed save",
+    () => orphan.hosts.upsertHost(rdpHost({ id: "h-1" })),
+    ["was saved", "privateKey", "unreachable"],
+  );
+  check(
+    "and the record on disk is the NEW one",
+    (await orphan.hosts.findHost("h-1"))?.protocol,
+    "rdp",
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -865,24 +1118,44 @@ console.log("\n[delete] a deleted host takes its accounts and every reference to
   assert((await h.hosts.findHost("h-keep")) !== undefined, "the host is still there");
   check("and so is its account", h.kept.get(at("h-keep", "password")), "keeppw");
 
+  // A `Promise<void>` resolving to `undefined` is `void`'s definition, so the only
+  // thing worth asserting about a no-op is that the store did not move.
+  const rowsBefore = JSON.stringify(h.rows());
+  const callsBefore = h.calls.length;
+  const alsoCleaned: string[] = [];
+  await h.hosts.deleteHost("h-nope", (hostId) => void alsoCleaned.push(hostId));
   check(
-    "deleting a host that is already gone is a no-op",
-    await h.hosts.deleteHost("h-nope", noForwardRules),
-    undefined,
+    "deleting a host that is already gone changes no row",
+    JSON.stringify(h.rows()),
+    rowsBefore,
   );
+  check("and touches no keychain account", h.calls.length, callsBefore);
+  // Unconditional on purpose: a forward rule can name an id that is already gone,
+  // and orphaning those rules is this sub-phase's job.
+  check("but the forward-rule cleanup still runs for the id", alsoCleaned, ["h-nope"]);
+  // The named stand-in is the only legal way to say "there are no rules here yet".
+  await h.hosts.deleteHost("h-nope", noForwardRules);
+  check("and the no-op stand-in is accepted", JSON.stringify(h.rows()), rowsBefore);
 }
 
 // ---------------------------------------------------------------------------
 console.log("\n[groups] deleting a group clears the label and keeps the rows");
 {
   const h = harness();
-  const group = await h.hosts.upsertGroup({ id: "g-1", name: "Production", order: 0 });
+  await h.hosts.upsertGroup({ id: "g-1", name: "Production", order: 0 });
   await h.hosts.upsertGroup({ id: "g-2", name: "Staging" });
   await h.hosts.upsertHost(sshHost({ id: "h-1", groupId: "g-1" }), { password: "pw" });
   await h.hosts.upsertHost(rdpHost({ id: "h-2", groupId: "g-1" }));
   await h.hosts.upsertHost(sshHost({ id: "h-3", groupId: "g-2" }));
 
-  check("a group round-trips", await h.hosts.findGroup("g-1"), group);
+  // Against a LITERAL, not against what `upsertGroup` returned - that is the very
+  // object the store persisted, so comparing the two proves persistence happened
+  // and could not notice a mangled field.
+  check("a group round-trips field for field", await h.hosts.findGroup("g-1"), {
+    id: "g-1",
+    name: "Production",
+    order: 0,
+  });
   await rejects("a group needs a name", () => h.hosts.upsertGroup({ id: "g-3", name: "  " }), [
     "needs a name",
   ]);
@@ -910,7 +1183,15 @@ console.log("\n[groups] deleting a group clears the label and keeps the rows");
     (await h.hosts.listGroups()).map((g) => g.id),
     ["g-2"],
   );
-  check("deleting a group that is gone is a no-op", await h.hosts.deleteGroup("g-1"), undefined);
+  const groupsBefore = JSON.stringify(h.groupRows());
+  const rowsBefore = JSON.stringify(h.rows());
+  await h.hosts.deleteGroup("g-1");
+  check(
+    "deleting a group that is gone leaves the group list alone",
+    JSON.stringify(h.groupRows()),
+    groupsBefore,
+  );
+  check("and the host list with it", JSON.stringify(h.rows()), rowsBefore);
 }
 
 // ---------------------------------------------------------------------------
@@ -951,11 +1232,13 @@ console.log("\n[pins] one pin per host, in whichever field the protocol keeps it
   await h.hosts.clearFingerprint("h-2");
   check("clearing drops the RDP pin", await pin("h-2"), undefined);
   check("without dropping anything else", (await h.hosts.findHost("h-2"))?.protocol, "rdp");
-  check(
-    "pinning a host that is gone is a no-op",
-    await h.hosts.pinFingerprint("h-x", "SHA256:Z"),
-    undefined,
-  );
+  const rowsBefore = JSON.stringify(h.rows());
+  const callsBefore = h.calls.length;
+  await h.hosts.pinFingerprint("h-x", "SHA256:Z");
+  await h.hosts.markConnected("h-x", "SHA256:Z");
+  await h.hosts.clearFingerprint("h-x");
+  check("pinning a host that is gone writes no row", JSON.stringify(h.rows()), rowsBefore);
+  check("and makes no keychain call", h.calls.length, callsBefore);
 
   // `assertBindingOwner` is called on ONE path, `upsertHost`. That is only
   // sufficient while the pin paths cannot change a credential, so that is checked
@@ -1017,6 +1300,36 @@ console.log("\n[queue] concurrent read-modify-writes do not lose an update");
 }
 
 // ---------------------------------------------------------------------------
+console.log("\n[queue] duplicateHost reads the source INSIDE the queue");
+{
+  // The read used to sit outside it, so another window rotating the source's
+  // password between the read and the write left the copy holding the
+  // pre-rotation value while claiming `hasPassword: true` - a copy that
+  // authenticates with a password nobody has any more. `slowSet` makes the race
+  // deterministic: an un-queued read resolves while the rotation's `secrets_set`
+  // is still in flight.
+  const h = harness({ hosts: [sshHost({ id: "h-1" })], slowSet: true });
+  await h.hosts.upsertHost(sshHost({ id: "h-1" }), { password: "before" });
+
+  const rotate = h.hosts.upsertHost(sshHost({ id: "h-1" }), { password: "after" });
+  const dup = h.hosts.duplicateHost("h-1");
+  const [, copy] = await Promise.all([rotate, dup]);
+  if (copy === null) throw new Error("hosts-store-verify: the duplicate came back null");
+
+  check("the source holds the rotated value", h.kept.get(at("h-1", "password")), "after");
+  check(
+    "and the copy carries THAT, not the value the rotation replaced",
+    h.kept.get(at(copy.id, "password")),
+    "after",
+  );
+  check(
+    "with a flag that matches what it actually stored",
+    copy.credential.kind === "inline" ? copy.credential.hasPassword : null,
+    true,
+  );
+}
+
+// ---------------------------------------------------------------------------
 console.log("\n[recovery] the store layer hands the startup notice through");
 {
   const h = harness({
@@ -1037,6 +1350,179 @@ console.log("\n[recovery] the store layer hands the startup notice through");
   stop();
   await h.hosts.upsertHost(sshHost({ id: "h-2" }));
   check("and stops when unsubscribed", changes, 1);
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n[purge] the two old connection stores' secrets are cleared once, by name only");
+{
+  const sshFile = (ids: string[]): StoreFileRead => ({
+    kind: "text",
+    content: JSON.stringify({ connections: ids.map((id) => ({ id, name: id, host: "x" })) }),
+  });
+  const legacy = (ssh: StoreFileRead, rdp: StoreFileRead): Record<string, StoreFileRead> => ({
+    "tervia-ssh-connections.json": ssh,
+    "tervia-rdp-connections.json": rdp,
+  });
+
+  // What makes this worth building at all: once the old modules are gone there is
+  // no `secrets_list`, so `tervia-ssh :: <id>::privateKey` is a private key with no
+  // delete button anywhere in the app, forever.
+  const h = harness({
+    legacy: legacy(sshFile(["c-1", "c-2"]), sshFile(["r-1"])),
+    kept: {
+      "tervia-ssh::c-1::password": "old-pw",
+      "tervia-ssh::c-1::privateKey": "old-PEM",
+      "tervia-ssh::c-1::keyPassphrase": "old-pp",
+      "tervia-rdp::r-1::password": "old-rdp-pw",
+      [at("h-1", "password")]: "current",
+    },
+  });
+  const swept = await h.hosts.purgeLegacySecrets();
+  check("both files were read, from the store directory", h.fileReads, [
+    "/data/tervia-ssh-connections.json",
+    "/data/tervia-rdp-connections.json",
+  ]);
+  check("every account either old service could own is cleared", swept.cleared.slice().sort(), [
+    "tervia-rdp::r-1::password",
+    "tervia-ssh::c-1::keyPassphrase",
+    "tervia-ssh::c-1::password",
+    "tervia-ssh::c-1::privateKey",
+    "tervia-ssh::c-2::keyPassphrase",
+    "tervia-ssh::c-2::password",
+    "tervia-ssh::c-2::privateKey",
+  ]);
+  check("nothing failed", swept.failed, []);
+  check(
+    "the legacy secrets are gone",
+    [
+      h.kept.has("tervia-ssh::c-1::privateKey"),
+      h.kept.has("tervia-ssh::c-1::password"),
+      h.kept.has("tervia-rdp::r-1::password"),
+    ],
+    [false, false, false],
+  );
+  check("and a live host account is untouched", h.kept.get(at("h-1", "password")), "current");
+  // The invariant that matters most here: it deletes by ACCOUNT NAME and never
+  // learns a value, so no RDP password enters the webview even on the way out.
+  check("no secret value was read", h.reads().length, 0);
+  check(
+    "and nothing but deletes reached either old service",
+    h.calls
+      .filter((c) => c.service === "tervia-ssh" || c.service === "tervia-rdp")
+      .every((c) => c.op === "delete"),
+    true,
+  );
+
+  const callsBefore = h.calls.length;
+  const readsBefore = h.fileReads.length;
+  const again = await h.hosts.purgeLegacySecrets();
+  check("a second run is skipped by the marker", [again.skipped, again.cleared.length], [true, 0]);
+  check("so the files are not re-read forever", h.fileReads.length, readsBefore);
+  check("and the keychain is not touched again", h.calls.length, callsBefore);
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n[purge] a missing, empty, torn or unparseable file is nothing to do");
+{
+  // Every one of these is an ordinary launch, not an error: the app runs this on
+  // every start, and a throw would take startup with it.
+  const cases: [string, StoreFileRead, StoreFileRead][] = [
+    ["missing", { kind: "missing" }, { kind: "missing" }],
+    ["empty", { kind: "text", content: "" }, { kind: "text", content: "   \n" }],
+    ["torn", { kind: "binary" }, { kind: "text", content: '{"connections":[{"id":"c-1"' }],
+    [
+      "unparseable",
+      { kind: "text", content: '{"connections":"not a list"}' },
+      { kind: "toolarge" },
+    ],
+  ];
+  for (const [label, ssh, rdp] of cases) {
+    const h = harness({
+      legacy: {
+        "tervia-ssh-connections.json": ssh,
+        "tervia-rdp-connections.json": rdp,
+      },
+    });
+    const result = await h.hosts.purgeLegacySecrets();
+    check(
+      `a file that is ${label} clears nothing and fails nothing`,
+      [result.cleared, result.failed, h.calls.length],
+      [[], [], 0],
+    );
+    check(`and one that is ${label} still records the pass`, h.data[LEGACY_PURGE_KEY], true);
+  }
+
+  // A row without a usable id is skipped rather than turned into `undefined::field`.
+  const junk = harness({
+    legacy: {
+      "tervia-ssh-connections.json": {
+        kind: "text",
+        content: JSON.stringify({ connections: [null, 7, { id: "" }, { id: "c-1" }] }),
+      },
+      "tervia-rdp-connections.json": { kind: "missing" },
+    },
+  });
+  const result = await junk.hosts.purgeLegacySecrets();
+  check("only the rows that name an id are swept", result.cleared.slice().sort(), [
+    "tervia-ssh::c-1::keyPassphrase",
+    "tervia-ssh::c-1::password",
+    "tervia-ssh::c-1::privateKey",
+  ]);
+
+  // No data directory means no way to know whether there was anything to purge.
+  const nowhere = harness({ fail: { dir: "the app data directory is unreachable" } });
+  const blind = await nowhere.hosts.purgeLegacySecrets();
+  check(
+    "an unreachable data directory is not success",
+    [blind.cleared, blind.failed.length],
+    [[], 1],
+  );
+  check("and leaves no marker", nowhere.data[LEGACY_PURGE_KEY], undefined);
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n[purge] one failed delete does not abort the sweep, and is not success");
+{
+  const h = harness({
+    legacy: {
+      "tervia-ssh-connections.json": {
+        kind: "text",
+        content: JSON.stringify({ connections: [{ id: "c-1" }, { id: "c-2" }] }),
+      },
+      "tervia-rdp-connections.json": {
+        kind: "text",
+        content: JSON.stringify({ connections: [{ id: "r-1" }] }),
+      },
+    },
+    kept: { "tervia-ssh::c-1::privateKey": "stuck-PEM", "tervia-rdp::r-1::password": "old-rdp-pw" },
+    fail: { deleteAccount: "c-1::privateKey" },
+  });
+  const result = await h.hosts.purgeLegacySecrets();
+  check("the refusal is named", result.failed.length, 1);
+  check(
+    "every OTHER account is still cleared - the same id's, and the other file's",
+    result.cleared.slice().sort(),
+    [
+      "tervia-rdp::r-1::password",
+      "tervia-ssh::c-1::keyPassphrase",
+      "tervia-ssh::c-1::password",
+      "tervia-ssh::c-2::keyPassphrase",
+      "tervia-ssh::c-2::password",
+      "tervia-ssh::c-2::privateKey",
+    ],
+  );
+  check(
+    "the one it could not clear is still there",
+    h.kept.get("tervia-ssh::c-1::privateKey"),
+    "stuck-PEM",
+  );
+  // Reporting a partial purge as done is how a private key becomes permanently
+  // unreachable: `secrets_delete` already treats an absent account as success, so
+  // anything that throws is a real failure.
+  check("a partial purge is NOT recorded as done", h.data[LEGACY_PURGE_KEY], undefined);
+  const retry = await h.hosts.purgeLegacySecrets();
+  check("so the next launch tries again", retry.skipped, false);
+  check("and it is still not marked done", h.data[LEGACY_PURGE_KEY], undefined);
 }
 
 if (failed > 0) throw new Error(`hosts-store-verify: ${failed} FAILED`);

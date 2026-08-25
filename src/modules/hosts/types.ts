@@ -24,6 +24,14 @@ import {
 export const HOSTS_STORE_PATH = "tervia-hosts.json";
 export const HOSTS_KEY = "hosts";
 export const HOST_GROUPS_KEY = "groups";
+/**
+ * The third key in the same file, and the only one that is not host data: the
+ * marker saying the one-shot legacy secret purge has finished. It lives here
+ * because this store OUTLIVES the two connection modules whose secrets that purge
+ * clears, and it is listed beside the others so this stays the one place that says
+ * what is in the file. See `legacyPurge.ts`.
+ */
+export const LEGACY_PURGE_KEY = "legacySecretsPurged";
 
 /** Seeds for a new row. A stored row always carries a real port. */
 export const SSH_DEFAULT_PORT = 22;
