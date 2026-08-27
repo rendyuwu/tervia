@@ -1,6 +1,6 @@
 /**
- * Self-check for VLT-39: which pane owns the caret across a tab switch.
- * Run: `npx tsx scripts/pane-caret-verify.ts`.
+ * Self-check for VLT-39 (and its RDP-side twin, VLT-64): which pane owns the
+ * caret across a tab switch. Run: `npx tsx scripts/pane-caret-verify.ts`.
  *
  * Replaces `terminal-focus-attach-verify.ts`, which was green over the exact
  * implementation the hand test rejected. That check pinned one true but
@@ -28,10 +28,12 @@
  *      against a hand-cranked frame - including the property that IS the fix:
  *      a claim must not take the caret synchronously.
  *   2. THE CALL SITES, as source text. That a pane CLAIMS instead of calling
- *      `.focus()` is a shape, not a value, so it is read out of the two files
- *      that must not regress. Weaker than (1), and said plainly rather than
- *      dressed up - but it reddens on the exact edit that would reintroduce
- *      the bug.
+ *      `.focus()` is a shape, not a value, so it is read out of the files
+ *      that must not regress - HostsPage, useTerminalSession, and (VLT-64)
+ *      RdpPane, which had VLT-39's direct-focus defect verbatim until it was
+ *      converted to a claim here. Weaker than (1), and said plainly rather
+ *      than dressed up - but it reddens on the exact edit that would
+ *      reintroduce the bug.
  */
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -378,6 +380,49 @@ console.log("\n[useTerminalSession.ts] every terminal focus path is a claim");
     "...and does not call term.focus() itself - R11.6 is exactly that call losing to the tab chip",
     !/\.term\.focus\(\)/.test(withoutTakeCallback(visBody)),
     visBody,
+  );
+
+  check(
+    "the claim's stillOnScreen reads liveFocus.current (live), not the closed-over params",
+    /stillOnScreen:\s*\(\)\s*=>\s*liveFocus\.current\.visible\s*&&\s*liveFocus\.current\.focused/.test(
+      src,
+    ),
+    null,
+  );
+  const assign = /liveFocus\.current\s*=\s*\{\s*visible\s*,\s*focused\s*\}\s*;/.exec(src);
+  check("`liveFocus.current = { visible, focused };` exists", !!assign, null);
+  check(
+    "...at render scope (every render), not inside an effect (once, at mount)",
+    !!assign && !insideAnyEffect(spans, assign.index),
+    null,
+  );
+  check(
+    "the pending claim is released when the leaf unmounts",
+    /paneCaret\.release\(leafId\)/.test(src),
+    null,
+  );
+}
+
+console.log("\n[RdpPane.tsx] the RDP pane claims the caret, it does not take it (VLT-64)");
+{
+  const src = stripComments(read("src/modules/rdp/RdpPane.tsx"));
+  const spans = effectSpans(src);
+
+  // `dep(s, "leafId")` disambiguates from the OTHER `[visible, focused, ...]`
+  // effect in this file (the one that fires `releaseAll()`), which shares two
+  // of the three deps but not this one.
+  const claimEffect = spans.find((s) => dep(s, "leafId") && dep(s, "visible") && dep(s, "focused"));
+  check(
+    "found the [leafId, visible, focused] claim effect",
+    !!claimEffect,
+    spans.map((s) => s.deps),
+  );
+  const body = claimEffect?.body ?? "";
+  check("the tab-switch path claims", body.includes("paneCaret.claim("), body);
+  check(
+    "...and does not focus the host element directly - that is the shape the browser overwrites",
+    !/\.focus\(/.test(withoutTakeCallback(body)),
+    body,
   );
 
   check(

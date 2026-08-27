@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Monitor, MonitorOff, Unplug } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { paneCaret } from "@/lib/paneCaret";
 import { useHostKeyPrompt } from "@/modules/ssh/hostKeyPrompt";
 import {
   confirmRdpCert,
@@ -483,9 +484,42 @@ export function RdpPane({ leafId, connectionId, visible, focused = true }: Props
     return () => window.removeEventListener("blur", onWindowBlur);
   }, [releaseAll]);
 
+  /**
+   * `visible` / `focused` as of the LATEST render, read by the claim below at
+   * FLUSH time - one frame after it is made - so a claim made from a render
+   * that is already stale by the time the frame runs is dropped rather than
+   * honoured. Same property `liveFocus` gives `useTerminalSession`, here
+   * applied to a component rather than a hook closed over a stable `leafId`.
+   */
+  const liveFocus = useRef({ visible, focused });
+  liveFocus.current = { visible, focused };
+
+  // Claimed, not taken. This effect can run INSIDE the mousedown that
+  // switched the tab (Radix `Tabs` changes value on mousedown and React 19
+  // flushes the commit synchronously there), so a `.focus()` call here is
+  // undone a moment later by the browser focusing the tab chip that was
+  // clicked - VLT-39's defect, present here verbatim until VLT-64 (see
+  // `@/lib/paneCaret` for the measured sequence). The arbiter re-checks
+  // `liveFocus` one frame later before handing the caret over.
   useEffect(() => {
-    if (visible && focused) hostRef.current?.focus({ preventScroll: true });
-  }, [visible, focused]);
+    if (!visible || !focused) return;
+    paneCaret.claim(leafId, {
+      // The pane frame around this leaf, not just the RDP host element: a
+      // click on this pane's own header (Ctrl+Alt+Del, float, close) has to
+      // count as "the caret is already in my pane", or the claim would pull
+      // it back onto the canvas a frame later. Falls back to the host element
+      // itself when there is no such ancestor, mirroring
+      // `useTerminalSession`'s fallback for a pane with no `[data-pane-leaf]`
+      // frame.
+      pane: () => hostRef.current?.closest<HTMLElement>("[data-pane-leaf]") ?? hostRef.current,
+      stillOnScreen: () => liveFocus.current.visible && liveFocus.current.focused,
+      take: () => hostRef.current?.focus({ preventScroll: true }),
+    });
+  }, [leafId, visible, focused]);
+
+  // A claim outlives the render that made it by a frame, so an unmount
+  // between the two would otherwise focus a torn-down pane's host element.
+  useEffect(() => () => paneCaret.release(leafId), [leafId]);
 
   useEffect(
     () => () => {
