@@ -28,8 +28,10 @@ import {
   HOST_RDP_SECRET_FIELDS,
   HOST_SSH_SECRET_FIELDS,
   hostFingerprint,
+  hostPins,
   type Host,
   type HostGroup,
+  type HostPins,
   type RdpHost,
   type SshHost,
 } from "./types";
@@ -149,7 +151,12 @@ export type HostsStore = {
   getHostSshSecrets(id: string): Promise<SshSecretValues>;
   markConnected(id: string, fingerprint: string): Promise<void>;
   pinFingerprint(id: string, fingerprint: string): Promise<void>;
-  clearFingerprint(id: string): Promise<void>;
+  // No `clearFingerprint`. It existed for the editor's Forget button, which now
+  // records the intent in the DRAFT and lets Save apply it - because a Forget that
+  // wrote straight through left a cancelled dialog having silently put the host
+  // back on TOFU, with the pin unrecoverable since only that machine can present
+  // it. Nothing else ever cleared a pin, so keeping the method would have left a
+  // store write reachable that no UI path is allowed to make.
   /**
    * The hosts bound to one vault identity, in the shape `deleteIdentity` refuses
    * with. This is the wiring {@link IdentityHostRefs} describes, and it lives
@@ -263,10 +270,80 @@ function storedFlag(existing: Host | undefined, field: string): boolean {
   }
 }
 
-/** One host with its pin replaced, whichever field this protocol keeps it in. */
+/**
+ * One host carrying `pins`, with the flat pin field PROJECTED from it - the only
+ * shape this store persists, and the reason nothing outside this module has to
+ * know pins are keyed at all.
+ *
+ * `ssh-session.ts`, `tunnel.ts`, `jumps.ts` and `rdp/dial.ts` each read the flat
+ * field and hand it to the backend as the fingerprint to expect. So the flat field
+ * has to be the pin for the address the record names and nothing else: a pin left
+ * over from a previous address would be compared against a different machine and
+ * abort the connect as a MISMATCH, which is the failure this keying exists to
+ * remove rather than relocate.
+ *
+ * An empty map is stored as ABSENT, so a row that never pinned anything does not
+ * grow a key. {@link hostPins} reads the two the same way round.
+ */
+function withPins(host: Host, pins: HostPins): Host {
+  const keyed = Object.keys(pins).length > 0 ? pins : undefined;
+  const flat = pins[host.host];
+  if (host.protocol === "ssh") return { ...host, pins: keyed, lastFingerprint: flat };
+  return { ...host, pins: keyed, certFingerprint: flat };
+}
+
+/**
+ * The keyed pins to persist for an incoming record, which is the one place a flat
+ * pin with no map has to be given an address.
+ *
+ * Three readings of that record, and the STORED record is what tells them apart.
+ *
+ * A MAP was handed over: the caller has said which address each key belongs to, so
+ * there is nothing to infer and nothing else is consulted. That is every save from
+ * the editor.
+ *
+ * NO MAP AND NO STORED RECORD - an import, a first save: the flat pin can only
+ * mean this record's own address, because there is no earlier address for it to
+ * have come from. This is the migration for an exported row, and it is why an
+ * imported pin is kept rather than dropped.
+ *
+ * NO MAP AND THE ADDRESS HAS CHANGED: the flat pin came off the row as it was, so
+ * it is filed under the address it was actually recorded at. Not moved onto the
+ * new machine - that is the mis-attribution the old `keepPin` existed to prevent,
+ * and a pin compared against the wrong machine aborts the next connect as an
+ * attack. Not dropped either: re-pointing back finds it again. This is the branch
+ * a `{ ...stored, host: next }` spread in 6e or 6f lands in, and it is correct
+ * without that caller knowing pins exist.
+ */
+function nextPins(host: Host, existing: Host | undefined): HostPins {
+  if (host.pins) return host.pins;
+  const carried = existing ? hostPins(existing) : {};
+  const flat = hostFingerprint(host);
+  if (!flat) return carried;
+  const address = !existing || existing.host === host.host ? host.host : existing.host;
+  return { ...carried, [address]: flat };
+}
+
+/**
+ * One host with the pin for the address it CURRENTLY NAMES replaced.
+ *
+ * The address comes from the record rather than from the caller, and that is what
+ * lets {@link HostsStore.pinFingerprint} keep a two-argument signature: the connect
+ * that was presented this key dialled the address the record names, so the record
+ * is the only place the key can belong. A caller that wanted to pin some other
+ * address would be describing a machine this host is not pointed at.
+ *
+ * Only ever called with a record read from THIS store - both callers come through
+ * `patchHost` - which is what makes {@link hostPins}'s adoption of an unkeyed pin
+ * safe here: a stored record's flat pin is the pin for its own address by
+ * construction. An incoming record from a caller goes through {@link nextPins}
+ * instead, which does not assume that.
+ */
 function withFingerprint(host: Host, fingerprint: string | undefined): Host {
-  if (host.protocol === "ssh") return { ...host, lastFingerprint: fingerprint };
-  return { ...host, certFingerprint: fingerprint };
+  const pins: Record<string, string> = { ...hostPins(host) };
+  if (fingerprint) pins[host.host] = fingerprint;
+  else delete pins[host.host];
+  return withPins(host, pins);
 }
 
 function hostRef(host: Host): VaultRef {
@@ -385,10 +462,11 @@ export function createHostsStore(io: HostsIo): HostsStore {
    * read SSH secrets back through JS, so the RDP half of a duplicate silently got
    * no password.
    *
-   * SEQUENTIAL rather than `Promise.all`, unlike the delete fan-outs above: on
-   * Linux and Windows one write is a read-modify-write of the whole secret file,
-   * so concurrent writes can drop one. A vault-bound source owns no accounts, so
-   * this is an empty loop and no IPC.
+   * SEQUENTIAL, which is now what every account fan-out in this file does - see
+   * `deleteAccounts`. On Linux and Windows one write is a read-modify-write of the
+   * whole secrets file, and the delete fan-outs this comment used to contrast
+   * itself against are exactly what broke SSH host delete. A vault-bound source
+   * owns no accounts, so this is an empty loop and no IPC.
    */
   async function copyHostSecrets(source: Host, copyId: string): Promise<HostSecretInput> {
     const out: HostSecretInput = {};
@@ -417,6 +495,32 @@ export function createHostsStore(io: HostsIo): HostsStore {
   }
 
   /**
+   * Clear a list of this host's accounts, ONE AT A TIME.
+   *
+   * Sequential, and that is the point rather than a style choice. Every
+   * `secrets_delete` on Linux and Windows is a read-modify-write of the whole
+   * secrets file, and each one stages through the temp path `atomic_write` derives
+   * from that file - so three at once, which is what an SSH host owns, had two of
+   * them renaming a temp the third had already consumed. `os error 2`, and SSH
+   * host delete never completed while RDP host delete, owning one account, always
+   * did. `secrets.rs` holds its cache lock across the write now and
+   * `fs/atomic.rs` serializes per target, so this is no longer load-bearing for
+   * correctness - it is kept because rewriting one file three times over is work
+   * nobody asked for, and because a fan-out that only works thanks to a lock two
+   * layers down is a thing the next reader has to go and check.
+   *
+   * The one behavioural difference from the `Promise.all` this replaces: a throw
+   * stops the run, so the accounts after it are not attempted. Every caller
+   * already reported the whole list as unreachable on any failure, so the message
+   * was never per-account.
+   */
+  async function deleteAccounts(hostId: string, fields: readonly HostSecretField[]): Promise<void> {
+    for (const field of fields) {
+      await io.secrets.delete(HOST_KEYRING_SERVICE, account(hostId, field));
+    }
+  }
+
+  /**
    * Clear the host-owned accounts the new record can no longer NAME.
    *
    * Covers a credential moving inline -> vault, and a row changing protocol.
@@ -442,9 +546,7 @@ export function createHostsStore(io: HostsIo): HostsStore {
     const stale = secretFieldsFor(existing).filter((f) => !keeps.has(f));
     if (stale.length === 0) return;
     try {
-      await Promise.all(
-        stale.map((f) => io.secrets.delete(HOST_KEYRING_SERVICE, account(host.id, f))),
-      );
+      await deleteAccounts(host.id, stale);
     } catch (e) {
       // Re-worded rather than rethrown, because the record IS saved and is
       // accurate about what it owns: reporting the keychain's error alone would
@@ -474,11 +576,7 @@ export function createHostsStore(io: HostsIo): HostsStore {
    */
   async function rollbackNewHost(host: Host): Promise<void> {
     try {
-      await Promise.all(
-        secretFieldsFor(host).map((f) =>
-          io.secrets.delete(HOST_KEYRING_SERVICE, account(host.id, f)),
-        ),
-      );
+      await deleteAccounts(host.id, secretFieldsFor(host));
     } catch {
       // Replacing the real error with this one hides the reason.
     }
@@ -621,10 +719,17 @@ export function createHostsStore(io: HostsIo): HostsStore {
     assertReferences(host, hosts);
     const existing = hosts.find((h) => h.id === host.id);
 
-    const record: Host =
+    const credentialed: Host =
       host.protocol === "ssh"
         ? { ...host, credential: await nextSshCredential(host, secrets, existing) }
         : { ...host, credential: await nextRdpCredential(host, secrets, existing) };
+    // Pins resolved and projected HERE rather than trusted from the caller,
+    // because this is the layer every writer goes through and the flat field is
+    // what every CONSUMER reads. A record arriving with a pin for an address it no
+    // longer names must not have that pin projected onto the new address, and this
+    // is what makes that structural instead of remembered by each writer. Nothing
+    // is discarded: the pin stays in the map under the address it belongs to.
+    const record: Host = withPins(credentialed, nextPins(credentialed, existing));
 
     const next = [...hosts];
     const idx = next.findIndex((h) => h.id === host.id);
@@ -676,11 +781,13 @@ export function createHostsStore(io: HostsIo): HostsStore {
    * is the spread-copy bug, and `assertBindingOwner` in `upsertHost` is what
    * turns it into a refused save rather than two hosts quietly sharing secrets.
    *
-   * The PINNED SERVER KEY: it belongs to the machine that presented it, and a
-   * copy exists to be pointed somewhere else. Carrying it over would fail the
+   * THE PINNED SERVER KEYS: they belong to the machines that presented them, and
+   * a copy exists to be pointed somewhere else. Carrying them over would fail the
    * next connect as a key MISMATCH, which reads as an attack rather than as a
-   * copy. The copy takes one first-connect prompt instead. Both fields are
-   * dropped, since which of the two holds the pin is a function of the protocol.
+   * copy. The copy takes one first-connect prompt instead. The keyed map goes with
+   * the flat field, and dropping the map is the load-bearing half now: the flat
+   * field is a projection, so clearing it alone would have the store put it
+   * straight back from `pins` at the copy's (identical) address.
    *
    * The SECRETS DO travel, both protocols, and never through JS: `secrets_copy`
    * moves each account in-process. An RDP password used to be the exception -
@@ -710,6 +817,7 @@ export function createHostsStore(io: HostsIo): HostsStore {
               name,
               credential: rebound(source.credential, copyId),
               lastConnectedAt: undefined,
+              pins: {},
               lastFingerprint: undefined,
             }
           : {
@@ -718,6 +826,7 @@ export function createHostsStore(io: HostsIo): HostsStore {
               name,
               credential: rebound(source.credential, copyId),
               lastConnectedAt: undefined,
+              pins: {},
               certFingerprint: undefined,
             };
 
@@ -757,8 +866,9 @@ export function createHostsStore(io: HostsIo): HostsStore {
       // screen changing at all. An RDP row confined to this bastion becomes a
       // direct dial to `host:3389` with CredSSP; an SSH row that reached its
       // target through it becomes a direct dial to `host:22`. What makes the SSH
-      // half silent rather than merely quiet is the pin: `lastFingerprint` is
-      // keyed per HOST ID, so the same machine reached directly presents the same
+      // half silent rather than merely quiet is the pin: it is keyed by the
+      // address the ROW NAMES, and removing a bastion changes the route rather
+      // than the address - so the same machine reached directly presents the same
       // host key, matches the pin the row already had, and raises no TOFU
       // question whatsoever. A row that never connected has no pin, and the
       // first-connect prompt it gets instead names `row.host` and reads as
@@ -791,9 +901,10 @@ export function createHostsStore(io: HostsIo): HostsStore {
       await forwards(id);
       if (!host) return;
 
-      await Promise.all(
-        secretFieldsFor(host).map((f) => io.secrets.delete(HOST_KEYRING_SERVICE, account(id, f))),
-      );
+      // One at a time. Three concurrent deletes - which is what an SSH host's
+      // three accounts produced - is what reported `os error 2` and left the row
+      // on screen after a confirmed delete. See `deleteAccounts`.
+      await deleteAccounts(id, secretFieldsFor(host));
 
       // Drop the row and nothing else. No surviving row can be naming `id`: both
       // kinds of reference were refused above, so there is nothing left here to
@@ -869,14 +980,16 @@ export function createHostsStore(io: HostsIo): HostsStore {
   }
 
   /** Marks a successful connect: the timestamp, and the key or certificate the
-   *  server actually presented. */
+   *  server actually presented, recorded against the address that record names. */
   async function markConnected(id: string, fingerprint: string): Promise<void> {
     const at = Date.now();
-    return patchHost(id, (h) =>
-      h.protocol === "ssh"
-        ? { ...h, lastConnectedAt: at, lastFingerprint: fingerprint || h.lastFingerprint }
-        : { ...h, lastConnectedAt: at, certFingerprint: fingerprint || h.certFingerprint },
-    );
+    // An empty fingerprint leaves the pin alone rather than clearing it: a
+    // reconnect that could not report one must not discard the key an earlier
+    // connect recorded.
+    return patchHost(id, (h) => ({
+      ...withFingerprint(h, fingerprint || hostPins(h)[h.host]),
+      lastConnectedAt: at,
+    }));
   }
 
   /**
@@ -889,19 +1002,21 @@ export function createHostsStore(io: HostsIo): HostsStore {
    * TLS handshake, both before any credential is sent. Pinning only on a fully
    * successful connect meant a wrong password re-asked the question on every
    * retry. `lastConnectedAt` is deliberately untouched: nothing has connected.
+   *
+   * TWO ARGUMENTS, and the address is deliberately not one of them. The key came
+   * from the machine a connect had just dialled, and that connect read its address
+   * off this very record, so the record is the only place the key can belong -
+   * `withFingerprint` derives it there. Taking an address from the caller would
+   * let a stale one in and would have meant editing `ssh-session.ts`,
+   * `tunnel.ts` and `RdpPane.tsx` to pass something they already agree about.
    */
   async function pinFingerprint(id: string, fingerprint: string): Promise<void> {
     if (!fingerprint) return;
+    // Against the pin for THIS record's address, so an unchanged key writes
+    // nothing - including the file rewrite a no-op patch would still cost.
     return patchHost(id, (h) =>
-      hostFingerprint(h) === fingerprint ? null : withFingerprint(h, fingerprint),
+      hostPins(h)[h.host] === fingerprint ? null : withFingerprint(h, fingerprint),
     );
-  }
-
-  /** Clears the pinned key so the next connect re-pins via TOFU. Use after
-   *  verifying a legitimate rotation - which for RDP is routine, since a
-   *  self-signed certificate is regenerated on some reinstalls. */
-  async function clearFingerprint(id: string): Promise<void> {
-    return patchHost(id, (h) => withFingerprint(h, undefined));
   }
 
   const identityHostRefs: IdentityHostRefs = async (identityId) =>
@@ -924,7 +1039,6 @@ export function createHostsStore(io: HostsIo): HostsStore {
     getHostSshSecrets,
     markConnected,
     pinFingerprint,
-    clearFingerprint,
     identityHostRefs,
     onHostsChanged: (cb) => io.store.onChanged(cb),
     ensureLoaded: () => io.store.ensureLoaded(),
@@ -959,7 +1073,6 @@ export const {
   getHostSshSecrets,
   markConnected,
   pinFingerprint,
-  clearFingerprint,
   identityHostRefs,
   onHostsChanged,
   ensureLoaded,

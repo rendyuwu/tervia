@@ -100,10 +100,21 @@ export function presetById(id: string): RdpSizePreset | undefined {
   return RDP_SIZE_PRESETS.find((p) => p.id === id);
 }
 
+/**
+ * Server keys this host has accepted, by the ADDRESS each was presented at.
+ *
+ * The key is the record's own `host` field, never the authority actually dialled.
+ * Through a tunnel the backend connects to `127.0.0.1:<ephemeral>`, and keying on
+ * that would make one machine look like a new server on every connect - the same
+ * reason the pin was per host id to begin with. The port is no part of it either:
+ * one server presents one key on every port it listens on.
+ */
+export type HostPins = Readonly<Record<string, string>>;
+
 /** What both protocols hold in common. */
 export type HostBase = {
   /** Opaque, `h-` prefixed. Stays stable across renames, because the keychain
-   *  accounts and the pinned server key are both derived from it. */
+   *  accounts and the pinned server keys are both derived from it. */
   id: string;
   name: string;
   host: string;
@@ -113,6 +124,32 @@ export type HostBase = {
   description?: string;
   /** Unix ms of the last successful connect. */
   lastConnectedAt?: number;
+  /**
+   * Every server key this host trusts, keyed by the address it was presented at.
+   *
+   * On {@link HostBase} rather than per arm, unlike `credential`: the shape does
+   * not depend on `protocol`, so nothing here needs narrowing. Only the NAME of
+   * the flat projection differs, which is what {@link hostFingerprint} is for.
+   *
+   * Keyed, rather than one pin per host, because re-pointing a host used to force
+   * a choice between two bad options. Test verified against the pin of the machine
+   * the record still named, so testing a new address meant pressing Forget first -
+   * and Forget wrote the deletion straight to the store, so cancelling the dialog
+   * left the host on TOFU with no pin and no trace. With a key per address, Test
+   * simply finds no pin for an address never visited and takes the TOFU prompt,
+   * while the pin for the saved address is not touched at all.
+   *
+   * `undefined` means "not keyed yet", NOT "no pins": see {@link hostPins}, which
+   * is where a record written before this existed is read. An empty object is the
+   * other thing - every pin for this host has been forgotten - so the two are not
+   * interchangeable.
+   *
+   * WRITTEN BY THE STORE, which also keeps the flat projection in step. A caller
+   * that hands `upsertHost` a map is stating which address each pin belongs to and
+   * is believed; a caller that hands over only a flat pin has it attributed by
+   * `nextPins`, which is the one place that inference lives.
+   */
+  pins?: HostPins;
 };
 
 /**
@@ -137,7 +174,16 @@ export type SshHost = HostBase & {
    * both the write guard and `resolveJumpHops` refuse it.
    */
   proxyJumpId?: string;
-  /** SHA256 fingerprint of the server key, pinned on first connect (TOFU). */
+  /**
+   * SHA256 fingerprint of the server key, pinned on first connect (TOFU).
+   *
+   * A PROJECTION of {@link HostBase.pins} at this record's current `host`, kept in
+   * step by the store on every write. It exists because it is what every consumer
+   * reads - `ssh-session.ts`, `tunnel.ts` and `jumps.ts` each pass it straight to
+   * the backend as `expectedFingerprint` - and keeping the flat field valid for the
+   * address the record names is what makes those call sites correct without any of
+   * them knowing pins are keyed.
+   */
   lastFingerprint?: string;
 };
 
@@ -156,12 +202,16 @@ export type RdpHost = HostBase & {
    * SHA-256 fingerprint of the server's leaf certificate, pinned on first
    * connect (TOFU).
    *
-   * Pinned per SAVED HOST, not per `host:port`, and that is not a shortcut. The
-   * same machine is `host:3389` dialled directly and `127.0.0.1:<ephemeral>`
-   * dialled through a tunnel - so keying by authority would make one machine
-   * look like two servers, and the ephemeral port would look brand new on every
-   * connect, i.e. a TOFU prompt that never stops asking. The host id is the only
-   * identifier that survives both.
+   * A PROJECTION of {@link HostBase.pins} at this record's current `host`, on the
+   * same terms as `SshHost.lastFingerprint`: `rdp/dial.ts` passes it straight to
+   * the backend as `expectedCertFingerprint`.
+   *
+   * Still NOT keyed by the authority dialled, which is the part that was never a
+   * shortcut. The same machine is `host:3389` dialled directly and
+   * `127.0.0.1:<ephemeral>` dialled through a tunnel, so keying by authority would
+   * make one machine look like two servers and the ephemeral port would look brand
+   * new on every connect - a TOFU prompt that never stops asking. `pins` is keyed
+   * by the address the RECORD names, which survives both.
    */
   certFingerprint?: string;
   tunnel?: RdpTunnel;
@@ -189,11 +239,33 @@ export function isRdpHost(host: Host): host is RdpHost {
 }
 
 /**
- * The pinned server key, whichever field this protocol keeps it in.
+ * The pinned server key for the address this record names, whichever field this
+ * protocol keeps it in.
  *
  * Exported so a caller that only wants to ask "is a key pinned here" does not
  * have to know that SSH pins a host key and RDP pins a certificate.
  */
 export function hostFingerprint(host: Host): string | undefined {
   return host.protocol === "ssh" ? host.lastFingerprint : host.certFingerprint;
+}
+
+/**
+ * This host's pins keyed by address, which is also the MIGRATION off the pin that
+ * used to be keyed by host id alone.
+ *
+ * Run on READ rather than as a one-shot pass over the store file, because there is
+ * exactly one address an unkeyed pin can have been recorded against: a connect
+ * pins what the machine at `host` presented, so a record with no map adopts its
+ * flat pin onto `host`. Nothing is dropped, and no launch has to rewrite everyone's
+ * rows to prove it - the map is persisted the next time the record is written for
+ * any other reason.
+ *
+ * An EMPTY map is not a missing one. `{}` is how the editor says "the pins for this
+ * host were forgotten", so adopting on emptiness would resurrect the pin Forget
+ * had just discarded. Hence the check is `host.pins` present, and `{}` is present.
+ */
+export function hostPins(host: Host): HostPins {
+  if (host.pins) return host.pins;
+  const flat = hostFingerprint(host);
+  return flat ? { [host.host]: flat } : {};
 }

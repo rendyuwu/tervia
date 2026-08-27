@@ -41,6 +41,24 @@
  *    only that machine can present it. The FORM's pin is deliberately still
  *    ungated on the address - it is unsaved, visible, and disposed of by Cancel.
  *
+ *    The guard SURVIVES pins being keyed per address, and the reason is not the
+ *    mismatch any more: a keyed write for the address being proposed would never be
+ *    compared against by a record saved elsewhere, so it fails neither open nor
+ *    closed - but it would still be a trust change this dialog persisted and then
+ *    had cancelled. Save is the only thing that commits a pin.
+ *
+ * 6. FORGET RECORDS INTENT IN THE DRAFT, AND TEST VERIFIES AGAINST THE MACHINE IT
+ *    IS ACTUALLY DIALLING. The inverse of 3, found by hand (gaps 15 and 20), and it
+ *    failed OPEN. `Test` verified against the pin of the machine the SAVED record
+ *    named, so a re-pointed host could not be tested until `Forget` had destroyed
+ *    the old pin - and `Forget` wrote straight to the store, outside the dialog
+ *    transaction. Cancel reverted the address and nothing reverted the pin, so the
+ *    host was left with no pinned key at all, silently on TOFU, accepting whatever
+ *    the next connect presented. Unrecoverable: only that machine can present that
+ *    key. One fix closes both halves - pins keyed per address, so an address never
+ *    visited has no pin to compare against and none has to be destroyed first, and
+ *    Forget edits the draft map that Save writes.
+ *
  * 4. A VAULT-BOUND SAVE WRITES NO SECRET AND HANDS THE BINDING BACK. A non-inline
  *    record owns no accounts, so the draft loads blank - and rebuilding an inline
  *    credential from that blank draft sent the store its CLEAR instruction, losing
@@ -427,28 +445,112 @@ console.log("\n[3] Test pins the saved record only for the address that record n
     operands,
   );
 
-  // The other half of the split, and it must NOT be address-gated: the form's pin
-  // is unsaved, shown in the recorded-key row, and disposed of by Cancel, so it
-  // may describe the address being proposed. It is gated on the ROW instead,
-  // because a probe outlives the row it started on.
+  // The other half of the split, and it must NOT be address-gated: the form's pins
+  // are unsaved, one of them shows in the recorded-key row, and Cancel disposes of
+  // the map, so one may describe the address being proposed. It is gated on the ROW
+  // instead, because a probe outlives the row it started on.
   check(
     "the form's own pin is gated on the row rather than the address",
-    guardFor(onTrusted, "setPinnedFingerprint(fingerprint)") === "onProbeRow()",
-    guardFor(onTrusted, "setPinnedFingerprint(fingerprint)"),
+    guardFor(onTrusted, "setPins(") === "onProbeRow()",
+    guardFor(onTrusted, "setPins("),
+  );
+  // And keyed by the address the probe DIALLED rather than by whatever is in the
+  // field now: a trust prompt waits on a human, who is free to keep typing.
+  const trustedKey = /setPins\(\(\w+\) => \(\{ \.\.\.\w+, \[(\w+)\]: fingerprint \}\)\)/.exec(
+    onTrusted,
+  )?.[1];
+  check(
+    "and filed under the address the probe dialled",
+    trustedKey !== undefined && assignedIn(runTest, trustedKey) === "shared.host.trim()",
+    { trustedKey, from: trustedKey ? assignedIn(runTest, trustedKey) : null },
   );
 
-  // Save must agree with Test about when a pin survives, or one of them keeps a
-  // fingerprint the other has already decided belongs to a different machine.
+  // Save must agree with Test about which pin is the current one, and the agreement
+  // is now structural: both index the same draft map by a trimmed address, so there
+  // is no second predicate to drift.
   const save = between(editorSrc, "const save = async () => {", "const protocolLabel =");
+  check("save was found", save.length > 1000, save.length);
   check(
-    "save keeps or drops the pin by the same comparison, and the port is no part of it",
-    /const keepPin = !existing \|\| existing\.host === host;/.test(save),
+    "save hands the whole keyed map down, addresses and all",
+    /^\s*pins,$/m.test(save),
+    propertyLine(save, "pins"),
   );
+  // The flat pin is the STORE's projection of that map. A form that also wrote it
+  // would be a second writer for one fact, and the old `keepPin` - "the address
+  // changed, so the pin must be stale" - is exactly the wrong answer once Test can
+  // TOFU a new address: the pin the user just accepted belongs to the new one.
   check(
-    "and a dropped pin is left out of the record rather than written stale",
-    count(save, /\(keepPin && pinnedFingerprint\) \|\| undefined/g) === 2,
-    count(save, /\(keepPin && pinnedFingerprint\) \|\| undefined/g),
+    "and sets neither flat pin field itself",
+    !/lastFingerprint:|certFingerprint:/.test(save),
+    /.*(lastFingerprint|certFingerprint):.*/.exec(save)?.[0],
   );
+  check("so no address heuristic survives in the save path", !/keepPin/.test(editorSrc));
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n[6] Forget edits the draft, and Test dials with the pin for that address");
+{
+  // Gap 20. `Forget` used to call `clearFingerprint` straight through, so Cancel
+  // reverted the address and left the host with NO pin - silently back on TOFU.
+  const forget = between(editorSrc, "const forgetPin = () => {", "const runTest = async () => {");
+  check("forgetPin was found", forget.length > 50, forget.length);
+  check("it edits the draft pin map", /setPins\(/.test(forget), forget.trim());
+  check(
+    "and removes only the address on screen",
+    /delete \w+\[draftAddress\];/.test(forget),
+    forget.trim(),
+  );
+
+  // Every name this file imports from the store, read out of the file rather than
+  // listed here, so adding a NEW store import and calling it from Forget also fails.
+  const storeImports = /import \{([^}]*)\} from "\.\/store";/.exec(editorRaw)?.[1] ?? "";
+  const storeFns = [...storeImports.matchAll(/\b([a-z]\w*)\b/g)]
+    .map((m) => m[1])
+    .filter((n) => n !== "type");
+  check("the store's imported surface was found", storeFns.length >= 4, storeFns);
+  const leaks = storeFns.filter((fn) => forget.includes(`${fn}(`));
+  check(
+    "Forget calls nothing in the store, so Cancel has something to revert",
+    leaks.length === 0,
+    {
+      leaks,
+      forget: forget.trim(),
+    },
+  );
+  check("and awaits nothing, because there is nothing to wait for", !/\bawait\b/.test(forget));
+  // The store no longer offers the write either, so this cannot be re-added by
+  // reaching for the old helper.
+  check(
+    "no pin-clearing store call is reachable from here at all",
+    !editorSrc.includes("clearFingerprint"),
+  );
+
+  // Gap 15. Test must verify against the machine it is ACTUALLY DIALLING, or a
+  // re-pointed host cannot be tested without destroying its pin first - which is
+  // what made gap 20 reachable.
+  const runTest = between(editorSrc, "const runTest = async () => {", "const save = async () => {");
+  const expected = [
+    ...runTest.matchAll(/expected(?:Cert)?Fingerprint: (\w+)\[(\w+)\] \|\| undefined/g),
+  ];
+  // BOTH protocol arms. One `indexOf` here would have examined the SSH branch only
+  // while this file's header claimed it covered both - handoff §5.17.
+  check(
+    "both probes take their expected pin from a keyed map",
+    expected.length === 2,
+    expected.length,
+  );
+  for (const [whole, map, key] of expected) {
+    check(
+      `${whole.split(":")[0]} is keyed by the address the probe dialled`,
+      assignedIn(runTest, key) === "shared.host.trim()",
+      { key, from: assignedIn(runTest, key) },
+    );
+    check(
+      `${whole.split(":")[0]} reads the draft map rather than the saved record`,
+      new RegExp(`const \\[${map}, set\\w+\\] = useState<HostPins>\\(`).test(editorSrc),
+      map,
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------

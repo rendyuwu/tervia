@@ -37,7 +37,6 @@ import {
 } from "./editor/types";
 import type { HostEditorTarget } from "./pendingEditor";
 import {
-  clearFingerprint,
   getHostSshSecrets,
   listGroups,
   listHosts,
@@ -47,7 +46,7 @@ import {
   type HostSecretInput,
 } from "./store";
 import {
-  hostFingerprint,
+  hostPins,
   isRdpHost,
   isSshHost,
   presetById,
@@ -57,6 +56,7 @@ import {
   SSH_DEFAULT_PORT,
   type Host,
   type HostGroup,
+  type HostPins,
   type SshHost,
 } from "./types";
 
@@ -179,12 +179,24 @@ export function HostEditorDialog({ target, onClose, onSaved }: HostEditorDialogP
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [test, setTest] = useState<TestState>({ kind: "idle" });
-  // The server key or certificate this host trusts, as of right now: seeded from
-  // the saved one, cleared by Forget, set by trusting a new one during Test. It is
-  // the single source of truth for the pin - what Test verifies against AND what
-  // Save writes - so a key trusted here cannot be lost, and a forgotten one cannot
-  // come back from a stale record.
-  const [pinnedFingerprint, setPinnedFingerprint] = useState<string | null>(null);
+  /**
+   * The server keys this host trusts, as of right now, keyed by the ADDRESS each
+   * was presented at: seeded from the saved record, added to by trusting a new one
+   * during Test, and pruned by Forget.
+   *
+   * The single source of truth for the pin - what Test verifies against AND what
+   * Save writes - so a key trusted here cannot be lost and a forgotten one cannot
+   * come back from a stale record.
+   *
+   * KEYED, and that is the whole of this fix. With one pin per host, Test compared
+   * against the pin of the machine the saved record still named, so testing a new
+   * address meant pressing Forget first - and Forget went straight to the store, so
+   * Cancel reverted the address and left the host with no pin at all, silently back
+   * on TOFU. Per address, an address never visited simply has no pin and takes the
+   * TOFU prompt, and the saved address's pin is never in the way. Nothing in here
+   * is persisted until Save, so Cancel disposes of the whole map.
+   */
+  const [pins, setPins] = useState<HostPins>({});
 
   const token = tokenFor(target);
   /** The token whose load has been applied. A ref rather than state because the
@@ -270,7 +282,7 @@ export function HostEditorDialog({ target, onClose, onSaved }: HostEditorDialogP
         setProxyJumpId("");
         setPresetId(RDP_DEFAULT_PRESET.id);
         setTunnelSshHostId("");
-        setPinnedFingerprint(null);
+        setPins({});
         setReady(true);
         return;
       }
@@ -290,7 +302,12 @@ export function HostEditorDialog({ target, onClose, onSaved }: HostEditorDialogP
         groupId: liveGroup(host.groupId),
         description: host.description ?? "",
       });
-      setPinnedFingerprint(hostFingerprint(host) ?? null);
+      // Through `hostPins`, never off the flat field: it is the one place a record
+      // written before pins were keyed adopts its pin onto the address that record
+      // names, so seeding here from `lastFingerprint` instead would be a second
+      // copy of that migration - and the copy that drifts is how a pin silently
+      // stops being found.
+      setPins(hostPins(host));
 
       // Narrowed with the exported predicates, never a cast: a lookup by id
       // against the whole host list can hand back either protocol, and a cast
@@ -393,6 +410,12 @@ export function HostEditorDialog({ target, onClose, onSaved }: HostEditorDialogP
     existing.protocol === "rdp" &&
     existing.credential.kind === "inline" &&
     existing.credential.hasPassword;
+  // The address the form is proposing, trimmed exactly as Test and Save trim it,
+  // so all three agree about which pin is the current one.
+  const draftAddress = shared.host.trim();
+  /** The pin for the address currently in the form: what Test verifies against,
+   *  what the recorded-key row shows, and what Forget removes. */
+  const pinnedFingerprint = pins[draftAddress];
   const preset = presetById(presetId) ?? RDP_DEFAULT_PRESET;
   // Jump-host and tunnel options: every saved SSH host except the one being
   // edited, which cannot be its own bastion.
@@ -447,17 +470,28 @@ export function HostEditorDialog({ target, onClose, onSaved }: HostEditorDialogP
       : validateRdpCredential(rdpCred, boundIdentity, hasStoredRdpPassword);
   };
 
-  const forgetPin = async () => {
-    if (!existing) return;
-    try {
-      // Only the fingerprint: `clearFingerprint` patches that one field and
-      // nothing else, so Forget cannot take a credential or a rename with it.
-      await clearFingerprint(existing.id);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-      return;
-    }
-    setPinnedFingerprint(null);
+  /**
+   * Forget the pin for the address on screen - IN THE DRAFT. Save is what applies
+   * it, and Cancel is what discards it.
+   *
+   * This used to write the deletion straight to the store, and that was the defect
+   * rather than an ordering preference: Cancel correctly reverted the address and
+   * nothing reverted the pin, so the host was left with no pinned key, silently
+   * back on TOFU, accepting whatever the next connect was presented. Unrecoverable
+   * too - only that machine can present that key again. The forced sequence that
+   * made it reachable (Forget before you could Test a new address) is gone as well,
+   * because pins are keyed per address now.
+   *
+   * No `existing` guard any more: there is nothing to reach for. A host that was
+   * never saved can still have accepted a key during Test, and forgetting it is the
+   * same edit to the same draft.
+   */
+  const forgetPin = () => {
+    setPins((current) => {
+      const next = { ...current };
+      delete next[draftAddress];
+      return next;
+    });
     // A stale "mismatch" result no longer means anything.
     setTest({ kind: "idle" });
   };
@@ -495,10 +529,13 @@ export function HostEditorDialog({ target, onClose, onSaved }: HostEditorDialogP
     const savedHost = existing?.host;
     const onProbeRow = () => applied.current === probeToken;
     const onTrusted = (fingerprint: string) => {
-      // The FORM's pin follows the row on screen. It is unsaved, it is visible in
-      // the recorded-key row, and Forget or Cancel disposes of it, so it may
-      // describe the address being proposed.
-      if (onProbeRow()) setPinnedFingerprint(fingerprint);
+      // The FORM's pins follow the row on screen. Unsaved, visible in the
+      // recorded-key row, and disposed of by Forget or Cancel, so one of them may
+      // describe the address being proposed. Keyed by `host` - the address this
+      // probe actually DIALLED - rather than by whatever is in the field now: a
+      // trust prompt waits on a human, and the user is free to keep typing while it
+      // does.
+      if (onProbeRow()) setPins((current) => ({ ...current, [host]: fingerprint }));
       // The STORED pin may not. Nothing is persisted for a machine the record
       // does not name: re-point the form at 10.0.0.2, Test, accept the
       // certificate, then Cancel, and an ungated write has replaced the pin of a
@@ -507,8 +544,15 @@ export function HostEditorDialog({ target, onClose, onSaved }: HostEditorDialogP
       // attack rather than as a dialog the user cancelled - and the pin it
       // destroyed cannot come back, because only that machine can present it.
       //
-      // The same comparison `save`'s `keepPin` makes, and the port is deliberately
-      // no part of it: one server presents one key on every port it listens on.
+      // STILL GATED once pins are keyed per address, and deliberately so. A keyed
+      // write for 10.0.0.2 would no longer be COMPARED against by a record saved at
+      // 10.0.0.1, so the mismatch is gone - but it would still be a trust change
+      // this dialog persisted and then had cancelled, which is the question §5.16
+      // says to ask of every store write made from inside a dialog. Save is the only
+      // thing that commits a pin.
+      //
+      // The port is deliberately no part of the comparison: one server presents one
+      // key on every port it listens on.
       if (probeHostId && savedHost === host) {
         void pinFingerprint(probeHostId, fingerprint).catch(() => {});
       }
@@ -526,7 +570,11 @@ export function HostEditorDialog({ target, onClose, onSaved }: HostEditorDialogP
             privateKey: sshCred.privateKey,
             keyPassphrase: sshCred.keyPassphrase,
           },
-          expectedFingerprint: pinnedFingerprint || undefined,
+          // The pin for the address THIS PROBE DIALS, which is what removes the
+          // forced Forget: an address never visited has no pin here, so Test does
+          // TOFU against the machine actually being reached rather than comparing it
+          // against a different machine's key and refusing.
+          expectedFingerprint: pins[host] || undefined,
           proxyJumpId: proxyJumpId || undefined,
           hostId: probeHostId,
           hosts,
@@ -560,7 +608,7 @@ export function HostEditorDialog({ target, onClose, onSaved }: HostEditorDialogP
         credential,
         width: preset.width,
         height: preset.height,
-        expectedCertFingerprint: pinnedFingerprint || undefined,
+        expectedCertFingerprint: pins[host] || undefined,
         tunnelSshHostId: tunnelSshHostId || undefined,
         onTrusted,
         prompts: {
@@ -593,13 +641,14 @@ export function HostEditorDialog({ target, onClose, onSaved }: HostEditorDialogP
     try {
       const id = existing?.id ?? newHostId();
       const host = shared.host.trim();
-      // A pinned key belongs to the machine that presented it. Re-pointing this
-      // host at a different address makes it stale, and keeping it would fail the
-      // next connect as a MISMATCH, which reads as an attack rather than as an
-      // edit. The port is deliberately not part of that: one server presents the
-      // same key on every port it listens on, which is also what lets the same pin
-      // survive being reached through a tunnel on an ephemeral port.
-      const keepPin = !existing || existing.host === host;
+      // No `keepPin` any more, and its absence is the fix rather than a
+      // simplification. It answered "did the address change, so is the pin stale"
+      // - a heuristic that was right only while a pin could not be recorded for
+      // any address but the saved one. Now that Test can TOFU a new address, the
+      // pin the user has just accepted BELONGS to the new address, and that
+      // heuristic would have thrown it away. `pins` says which address each key
+      // was presented at, so the store projects the right one and keeps the rest
+      // under their own keys instead of discarding them.
       // Built field by field rather than spread over the stored record, and that is
       // the point rather than verbosity: a spread is how a credential naming
       // ANOTHER host reaches a save (§5.1), and how the other protocol's fields
@@ -614,6 +663,14 @@ export function HostEditorDialog({ target, onClose, onSaved }: HostEditorDialogP
         groupId: shared.groupId || undefined,
         description: shared.description.trim() || undefined,
         lastConnectedAt: existing?.lastConnectedAt,
+        // The whole draft map, addresses and all. The store decides which of them
+        // is the flat pin every consumer reads, so `lastFingerprint` /
+        // `certFingerprint` are deliberately NOT set here - one writer for the
+        // projection, and it is the layer that also sees an import and a
+        // duplicate. A pin for an address this record no longer names is kept
+        // rather than dropped: re-pointing back finds it again instead of asking
+        // TOFU about a machine already verified once.
+        pins,
       };
 
       let record: Host;
@@ -645,7 +702,6 @@ export function HostEditorDialog({ target, onClose, onSaved }: HostEditorDialogP
                 hasPrivateKey: false,
                 hasKeyPassphrase: false,
               },
-          lastFingerprint: (keepPin && pinnedFingerprint) || undefined,
           proxyJumpId: proxyJumpId || undefined,
         };
         // Nothing at all for a vault-bound row: `upsertHost` REFUSES a secret
@@ -668,7 +724,6 @@ export function HostEditorDialog({ target, onClose, onSaved }: HostEditorDialogP
           desktopWidth: preset.width,
           desktopHeight: preset.height,
           sizeMode: "preset",
-          certFingerprint: (keepPin && pinnedFingerprint) || undefined,
           // `undefined` rather than an empty object, so a direct connection is the
           // absence of a tunnel and not an empty one.
           tunnel: tunnelSshHostId ? { sshHostId: tunnelSshHostId } : undefined,
@@ -855,12 +910,16 @@ export function HostEditorDialog({ target, onClose, onSaved }: HostEditorDialogP
                       ? "No key pinned yet · next successful connect will record one (TOFU)."
                       : "No certificate pinned yet · the next connect will ask you to verify one (TOFU)."
                   }
+                  // Says which address this row is about, because the row now
+                  // changes as the Host field is edited: with a key per address, a
+                  // re-pointed host shows the new address's pin (usually none) while
+                  // the old one is still held and still saved.
                   footnote={
                     protocol === "rdp"
-                      ? "Pinned to this saved host, not to its address, so the same machine keeps one trusted certificate however it is reached."
-                      : undefined
+                      ? `Recorded for ${draftAddress || "this address"}, not for a port, so the same machine keeps one trusted certificate however it is reached. Forget applies when you save.`
+                      : `Recorded for ${draftAddress || "this address"}. Forget applies when you save.`
                   }
-                  onForget={() => void forgetPin()}
+                  onForget={forgetPin}
                 />
               ) : null}
             </>
@@ -905,8 +964,12 @@ export function HostEditorDialog({ target, onClose, onSaved }: HostEditorDialogP
 }
 
 /**
- * The pinned server key or certificate, with its Forget action. Edit mode only:
- * a host that has never been saved has nothing pinned to it.
+ * The pinned server key or certificate for the address on screen, with its Forget
+ * action. Edit mode only: a host that has never been saved has nothing pinned to it.
+ *
+ * Forget edits the DRAFT and Save applies it, which the footnote says out loud -
+ * a button that silently dropped a pinned key the moment it was pressed is what
+ * left a cancelled dialog with the host back on TOFU.
  */
 function PinnedKeyRow({
   label,
@@ -916,7 +979,7 @@ function PinnedKeyRow({
   onForget,
 }: {
   label: string;
-  fingerprint: string | null;
+  fingerprint: string | undefined;
   emptyText: string;
   footnote?: string;
   onForget: () => void;

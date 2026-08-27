@@ -42,11 +42,10 @@
  *    editor (`HostEditorDialog`, 6d - this used to be `RdpConnectionDialog`) is
  *    mounted persistently once latched and the trust prompt is global, so
  *    closing the dialog neither cancels a probe nor hides its question: row A ->
- *    Test -> cancel -> open row B -> answer, and an ungated
- *    `setPinnedFingerprint` writes A's certificate (or SSH host key) into B's
- *    form state, which Save then persists onto B. It fails closed (B's next
- *    connect aborts as a mismatch) but it is a pinned key on a row the user
- *    never tested.
+ *    Test -> cancel -> open row B -> answer, and an ungated write into the draft
+ *    pin map puts A's certificate (or SSH host key) into B's form state, which
+ *    Save then persists onto B. It fails closed (B's next connect aborts as a
+ *    mismatch) but it is a pinned key on a row the user never tested.
  *
  *    One `runTest` and one `onTrusted` serve both protocols now, and the two
  *    success writes are reached through their OWN arm of the protocol branch
@@ -588,8 +587,8 @@ console.log("\n[3] a Test probe cannot write to a row it no longer belongs to");
 
   check(
     "the FORM's pin is written only while the editor is still on the row that was probed",
-    enclosingGuard(onTrusted, "setPinnedFingerprint(fingerprint)") === onRow,
-    enclosingGuard(onTrusted, "setPinnedFingerprint(fingerprint)"),
+    enclosingGuard(onTrusted, "setPins(") === onRow,
+    enclosingGuard(onTrusted, "setPins("),
   );
 
   // The other half of the split. The saved row is not the row on screen and must

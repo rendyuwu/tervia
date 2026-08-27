@@ -1626,7 +1626,7 @@ console.log("\n[groups] deleting a group clears the label and keeps the rows");
 }
 
 // ---------------------------------------------------------------------------
-console.log("\n[pins] one pin per host, in whichever field the protocol keeps it");
+console.log("\n[pins] one pin per (host, address), in whichever field the protocol keeps it");
 {
   // h-3 is reserved for the credential-stability check at the end of this block:
   // it must reach that check having been through no pin at all, or the baseline it
@@ -1639,11 +1639,21 @@ console.log("\n[pins] one pin per host, in whichever field the protocol keeps it
     if (!host) return "MISSING";
     return hostFingerprint(host);
   };
+  /** The keyed map as PERSISTED, so a projection that agreed with itself in memory
+   *  but wrote nothing would not pass. */
+  const keys = (id: string): Record<string, string> | "MISSING" =>
+    h.rows().find((x) => x.id === id)?.pins ?? "MISSING";
 
   await h.hosts.pinFingerprint("h-1", "SHA256:KEY");
   await h.hosts.pinFingerprint("h-2", "SHA256:CERT");
   check("the SSH pin lands in lastFingerprint", await pin("h-1"), "SHA256:KEY");
   check("the RDP pin lands in certFingerprint", await pin("h-2"), "SHA256:CERT");
+  // The keying itself: the address comes off the RECORD, which is what lets
+  // `pinFingerprint(id, fingerprint)` stay a two-argument call.
+  check("and is filed under the address that record names", keys("h-1"), {
+    "prod.example": "SHA256:KEY",
+  });
+  check("the RDP one under its own", keys("h-2"), { "vps.example": "SHA256:CERT" });
   check(
     "pinning does not claim a connect happened",
     (await h.hosts.findHost("h-1"))?.lastConnectedAt,
@@ -1658,16 +1668,21 @@ console.log("\n[pins] one pin per host, in whichever field the protocol keeps it
   await h.hosts.markConnected("h-1", "");
   const marked = await h.hosts.findHost("h-1");
   check("a connect with no fingerprint keeps the pin", await pin("h-1"), "SHA256:KEY");
+  check("and keeps it keyed rather than re-filing it", keys("h-1"), {
+    "prod.example": "SHA256:KEY",
+  });
   assert((marked?.lastConnectedAt ?? 0) > 0, "and stamps the connect");
 
-  await h.hosts.clearFingerprint("h-2");
-  check("clearing drops the RDP pin", await pin("h-2"), undefined);
-  check("without dropping anything else", (await h.hosts.findHost("h-2"))?.protocol, "rdp");
+  // Re-pinning the same key is a no-op, not a rewrite: `pinFingerprint` compares
+  // against the pin for THIS address before it patches anything.
+  const beforeSame = JSON.stringify(h.rows());
+  await h.hosts.pinFingerprint("h-1", "SHA256:KEY");
+  check("re-pinning the same key writes nothing", JSON.stringify(h.rows()), beforeSame);
+
   const rowsBefore = JSON.stringify(h.rows());
   const callsBefore = h.calls.length;
   await h.hosts.pinFingerprint("h-x", "SHA256:Z");
   await h.hosts.markConnected("h-x", "SHA256:Z");
-  await h.hosts.clearFingerprint("h-x");
   check("pinning a host that is gone writes no row", JSON.stringify(h.rows()), rowsBefore);
   check("and makes no keychain call", h.calls.length, callsBefore);
 
@@ -1690,13 +1705,204 @@ console.log("\n[pins] one pin per host, in whichever field the protocol keeps it
   const beforePins = await bindingOf("h-3");
   await h.hosts.pinFingerprint("h-3", "SHA256:ROTATED");
   await h.hosts.markConnected("h-3", "SHA256:ROTATED");
-  await h.hosts.clearFingerprint("h-3");
   check(
     "no pin path rewrites the credential, so upsertHost is the only guarded write",
     await bindingOf("h-3"),
     beforePins,
   );
   check("and the binding still names its own host", await ownerOf("h-3"), "h-3");
+}
+
+// ---------------------------------------------------------------------------
+// Gaps 15 and 20 - the pair the hand test found, and the reason this section is
+// long. `Forget` used to write the pin deletion straight to the store, OUTSIDE the
+// dialog transaction, and `Test` verified against the pin of the machine the saved
+// record still named - so testing a new address required Forget first, and Cancel
+// then reverted the address while nothing reverted the pin. The host was left with
+// no pinned key at all, silently on TOFU, accepting whatever the next connect was
+// presented. It failed OPEN, which is why §5.16's inverse (a foreign fingerprint
+// persisted by a cancelled dialog, failing closed as a MISMATCH) got fixed first.
+//
+// The store's half of that fix is keying, and its contract is exactly two things:
+// the flat field is the pin for the address the record names AND NOTHING ELSE, and
+// no pin is thrown away when the address changes. Every check below is one of
+// those two.
+console.log("\n[pins] a re-pointed host never compares against another machine's key");
+{
+  const h = harness({ hosts: [sshHost({ id: "h-1", host: "a.example" })] });
+  const row = () => h.rows().find((x) => x.id === "h-1");
+  const saved = async (): Promise<Host> => {
+    const found = await h.hosts.findHost("h-1");
+    if (!found) throw new Error("h-1 vanished");
+    return found;
+  };
+
+  await h.hosts.pinFingerprint("h-1", "SHA256:A");
+  check("the pin is filed under the address it was presented at", row()?.pins, {
+    "a.example": "SHA256:A",
+  });
+
+  // What a save from the editor looks like after the user re-points the host and
+  // accepts the NEW machine's key during Test: the draft map carries both, keyed.
+  await h.hosts.upsertHost({
+    ...(await saved()),
+    host: "b.example",
+    pins: { "a.example": "SHA256:A", "b.example": "SHA256:B" },
+  });
+  check("re-pointing projects the NEW address's pin", hostFingerprint(await saved()), "SHA256:B");
+  check("and keeps the old one under its own key", row()?.pins, {
+    "a.example": "SHA256:A",
+    "b.example": "SHA256:B",
+  });
+
+  // The behaviour the old `keepPin` could not express: a key accepted for the new
+  // address survives the save that moves the host there. Under `keepPin` the
+  // address had changed, so this pin was discarded and the next connect re-asked.
+  await h.hosts.upsertHost({ ...(await saved()), host: "a.example" });
+  check(
+    "re-pointing BACK finds the original pin rather than re-asking TOFU",
+    hostFingerprint(await saved()),
+    "SHA256:A",
+  );
+
+  // Forget, applied by Save: the address's key is dropped and nothing else is.
+  await h.hosts.upsertHost({ ...(await saved()), pins: { "b.example": "SHA256:B" } });
+  check("a map without this address projects no pin", hostFingerprint(await saved()), undefined);
+  check("and the other address keeps its key", row()?.pins, { "b.example": "SHA256:B" });
+
+  // Defence behind the dialog's own gate on `onTrusted`. Even an UNGATED
+  // `pinFingerprint` cannot forge a pin for a machine this record does not name,
+  // because the address comes off the record rather than from the caller - which is
+  // also what lets that call keep a two-argument signature. So the worst a stray
+  // call can do is re-pin the machine the row already points at: it can neither
+  // destroy another address's key nor invent one.
+  await h.hosts.upsertHost({
+    ...(await saved()),
+    host: "a.example",
+    pins: { "a.example": "SHA256:A", "b.example": "SHA256:B" },
+  });
+  await h.hosts.pinFingerprint("h-1", "SHA256:STRAY");
+  check("a pin write lands on the record's own address and no other", row()?.pins, {
+    "a.example": "SHA256:STRAY",
+    "b.example": "SHA256:B",
+  });
+
+  // Forget every address: the map is stored as ABSENT rather than as `{}`, so a row
+  // with no pins does not carry an empty object around - and `hostPins` must not
+  // read that absence as "adopt the flat pin", because there is none to adopt.
+  await h.hosts.upsertHost({ ...(await saved()), pins: {} });
+  check("forgetting every pin leaves no map at all", row()?.pins, undefined);
+  check("and no flat pin", hostFingerprint(await saved()), undefined);
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n[pins] an unkeyed pin is attributed rather than dropped or moved");
+{
+  // The migration. Every host here is written the way a pre-keying build left it:
+  // `lastFingerprint` set, no `pins`. Nothing may lose a pin, and nothing may
+  // attribute one to a machine that never presented it.
+  const h = harness({
+    hosts: [
+      sshHost({ id: "h-old", host: "a.example", lastFingerprint: "SHA256:OLD" }),
+      sshHost({ id: "h-move", host: "a.example", lastFingerprint: "SHA256:OLD" }),
+      rdpHost({ id: "h-rdp", host: "r.example", certFingerprint: "SHA256:CERT" }),
+    ],
+  });
+  const row = (id: string) => h.rows().find((x) => x.id === id);
+  const get = async (id: string): Promise<Host> => {
+    const found = await h.hosts.findHost(id);
+    if (!found) throw new Error(`${id} vanished`);
+    return found;
+  };
+
+  // Read-side: the pin is FOUND. This is what the editor seeds its draft from, and
+  // what a connect keeps comparing against in the meantime.
+  check("an unkeyed row still reports its pin", hostFingerprint(await get("h-old")), "SHA256:OLD");
+  check("and has not been rewritten just by being read", row("h-old")?.pins, undefined);
+
+  // Written for an unrelated reason - a rename - and the map appears, keyed onto the
+  // address the row named. Nothing was lost and no launch had to rewrite the file.
+  await h.hosts.upsertHost({ ...(await get("h-old")), name: "renamed" });
+  check("a write for any other reason files it under that address", row("h-old")?.pins, {
+    "a.example": "SHA256:OLD",
+  });
+  check("and the flat pin is unchanged", hostFingerprint(await get("h-old")), "SHA256:OLD");
+
+  // THE MIS-ATTRIBUTION CASE, and the one this branch exists for. A caller that
+  // spreads an unkeyed stored record and changes the address - which is what
+  // `{ ...stored, host: next }` in a later sub-phase will look like - hands over a
+  // flat pin belonging to the OLD machine with the NEW address beside it. Moving it
+  // onto the new address would fail that machine's next connect as a MISMATCH,
+  // which reads as an attack; dropping it would put the old machine back on TOFU.
+  await h.hosts.upsertHost({ ...(await get("h-move")), host: "b.example" });
+  check(
+    "an unkeyed pin is NOT moved onto the address the caller changed to",
+    hostFingerprint(await get("h-move")),
+    undefined,
+  );
+  check("it is filed under the address it was actually recorded at", row("h-move")?.pins, {
+    "a.example": "SHA256:OLD",
+  });
+
+  // An IMPORT: an id this store has never seen, carrying a flat pin from the
+  // exported file. There is no earlier address it could have come from, so its own
+  // is the only reading - and dropping it would make every restored host re-ask.
+  await h.hosts.upsertHost(
+    sshHost({ id: "h-import", host: "i.example", lastFingerprint: "SHA256:IMPORTED" }),
+  );
+  check("an imported flat pin is kept", hostFingerprint(await get("h-import")), "SHA256:IMPORTED");
+  check("keyed onto the address it was imported with", row("h-import")?.pins, {
+    "i.example": "SHA256:IMPORTED",
+  });
+
+  // Both protocols through the same code, since the flat field's NAME is the only
+  // thing that differs and a projection written for one arm would silently do
+  // nothing for the other.
+  await h.hosts.upsertHost({ ...(await get("h-rdp")), name: "renamed" });
+  check("the RDP arm is keyed the same way", row("h-rdp")?.pins, { "r.example": "SHA256:CERT" });
+  check("and projects into certFingerprint", hostFingerprint(await get("h-rdp")), "SHA256:CERT");
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n[pins] a duplicate inherits no pin, keyed or flat");
+{
+  // The flat field is a PROJECTION now, so clearing it alone is not enough: the
+  // store would put it straight back from the map, at the copy's identical address.
+  // Both fields, because that is what a STORED row looks like: the map is the
+  // record and the flat field is the store's projection of it.
+  const h = harness({
+    hosts: [
+      sshHost({
+        id: "h-1",
+        host: "a.example",
+        pins: { "a.example": "SHA256:A" },
+        lastFingerprint: "SHA256:A",
+      }),
+      rdpHost({
+        id: "h-2",
+        host: "r.example",
+        pins: { "r.example": "SHA256:CERT" },
+        certFingerprint: "SHA256:CERT",
+      }),
+    ],
+  });
+  const copy = await h.hosts.duplicateHost("h-1");
+  assert(copy !== null, "the SSH host was duplicated");
+  check("the copy has no flat pin", copy ? hostFingerprint(copy) : "MISSING", undefined);
+  check("and no keyed pin either", copy?.pins, undefined);
+  check(
+    "while the source keeps its own",
+    hostFingerprint((await h.hosts.listHosts()).filter(isSshHost)[0]),
+    "SHA256:A",
+  );
+
+  const rdpCopy = await h.hosts.duplicateHost("h-2");
+  check(
+    "the RDP copy has no certificate pin",
+    rdpCopy ? hostFingerprint(rdpCopy) : "MISSING",
+    undefined,
+  );
+  check("and no keyed pin either", rdpCopy?.pins, undefined);
 }
 
 // ---------------------------------------------------------------------------
