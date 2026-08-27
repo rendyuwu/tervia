@@ -84,3 +84,87 @@ export function tabCloseRefusal(tabs: Tab[], tabId: number): CloseRefusal | null
 export function canCloseTab(tabs: Tab[], tabId: number): boolean {
   return tabCloseRefusal(tabs, tabId) === null;
 }
+
+/**
+ * WHETHER A LEGAL CLOSE MUST BE CONFIRMED FIRST - the other half of the rule.
+ *
+ * The refusals above answer whether a close MAY happen. These answer whether it
+ * may happen SILENTLY, and the two are asked in that order on every path:
+ * prompting "close the running terminal?" for a close that will then be refused
+ * is worse than the silent no-op it replaces.
+ *
+ * They live here, beside the refusals, because the same thing went wrong twice.
+ * `closable.ts` exists because three close paths each carried their own copy of
+ * "may this close" and answered differently; the confirmation was left behind in
+ * exactly that state. `handleClose` asked about unsaved work AND a running
+ * process. `requestCloseLeaf` asked only about the process and said so in a
+ * comment - "Editor leaves always close without a prompt". So a dirty editor
+ * prompted from the pane-header X of a single-pane tab and was discarded without
+ * a word by the tab-strip leaf X, by that same header X on a split, and by
+ * `Ctrl+Shift+X`. The chord is only how it was reported: removing its leaf-kind
+ * test (VLT-62) let it reach an editor for the first time, which surfaced a
+ * disagreement the other two paths had been carrying all along.
+ *
+ * `isProcessRunning` is a parameter rather than something read here: whether a
+ * terminal has a foreground command lives in the pane's imperative handle, not
+ * in the tab state. Keeping it out is what leaves these pure, so the close
+ * checks can run them over fixtures instead of asserting on source text.
+ */
+export type CloseConfirmReason =
+  /** An editor leaf with unsaved edits. Closing it discards them - unrecoverable. */
+  | "unsaved"
+  /** A terminal leaf with a foreground process. Closing it kills the process. */
+  | "running";
+
+/** Holds work that closing would discard. */
+function leafIsDirty(leaf: PaneLeaf): boolean {
+  return leaf.leafKind === "editor" && leaf.dirty;
+}
+
+/** Has a foreground command in flight. */
+function leafIsBusy(leaf: PaneLeaf, isProcessRunning: (leafId: number) => boolean): boolean {
+  // The kind test is what makes this honest rather than accidental: only
+  // terminal panes register a handle, so asking about any other leaf has always
+  // answered `false` - by absence, not by rule.
+  return leaf.leafKind === "terminal" && isProcessRunning(leaf.id);
+}
+
+/**
+ * Why closing leaf `leafId` must be confirmed first, or `null` to close silently.
+ *
+ * Unsaved beats running for a leaf that is somehow both: discarding an edit
+ * cannot be undone, and killing a process can be redone.
+ */
+export function leafCloseConfirmReason(
+  tabs: Tab[],
+  leafId: number,
+  isProcessRunning: (leafId: number) => boolean,
+): CloseConfirmReason | null {
+  const leaf = leafInTabs(tabs, leafId);
+  if (!leaf) return null;
+  if (leafIsDirty(leaf)) return "unsaved";
+  if (leafIsBusy(leaf, isProcessRunning)) return "running";
+  return null;
+}
+
+/**
+ * Why closing the WHOLE tab `tabId` must be confirmed first, or `null`.
+ *
+ * Asked of every leaf in the tab, exactly as `tabCloseRefusal` is and for the
+ * same reason: a tab close takes all of them. The running half already swept the
+ * tree; the unsaved half was read off `tab.dirty`, which `syncPaneMirror` copies
+ * from the ACTIVE leaf alone - so a split whose unsaved editor was not the pane
+ * you were looking at closed without a prompt.
+ */
+export function tabCloseConfirmReason(
+  tabs: Tab[],
+  tabId: number,
+  isProcessRunning: (leafId: number) => boolean,
+): CloseConfirmReason | null {
+  const tab = tabs.find((t) => t.id === tabId);
+  if (!tab || tab.kind !== "pane") return null;
+  const all = leaves(tab.paneTree);
+  if (all.some(leafIsDirty)) return "unsaved";
+  if (all.some((l) => leafIsBusy(l, isProcessRunning))) return "running";
+  return null;
+}

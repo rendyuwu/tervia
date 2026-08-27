@@ -210,6 +210,14 @@ export function buildShortcutHandlers(deps: ShortcutHandlerDeps): ShortcutHandle
     // With no kind test, the chord can now reach a page leaf; `leafCloseRefusal`
     // refuses it as permanent, and both X buttons are absent there, so its
     // silence still never contradicts a visible affordance.
+    //
+    // It also reaches an EDITOR leaf for the first time, and `requestCloseLeaf`
+    // used to confirm only on a busy terminal - so this chord discarded an
+    // unsaved buffer that the pane-header X and `Ctrl+W` both prompt for. The
+    // fix is at the funnel, not here: `leafCloseConfirmReason` in `closable.ts`
+    // now answers "must this be confirmed" for every close path, the same way
+    // `leafCloseRefusal` answers "may it happen". Adding the check here would
+    // have left the tab-strip X and the split pane-header X still dropping it.
     "terminal.close": () => {
       if (coveredByRailView()) return;
       if (activeLeafIdInTab === null) return;

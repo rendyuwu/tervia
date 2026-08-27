@@ -25,6 +25,15 @@
  * the chord for anything that was not a terminal. So "one predicate, all three
  * paths agree" needed both halves checking: the predicate treats RDP like any
  * other session leaf ([iv]), and no path re-decides in front of it ([v]).
+ *
+ * Sections [vi] and [vii] are the SECOND question a close has to answer - not
+ * "may this happen" but "may it happen silently" - which was still in the state
+ * the first one was in before VLT-43: one copy per path, and the copies
+ * disagreed. `requestCloseLeaf` confirmed only on a busy terminal, so a dirty
+ * editor was discarded without a word by three of the five affordances that
+ * funnel through it, while `handleClose` prompted for the same file. Every
+ * fixture in this suite was clean (`editorLeaf` hardcoded `dirty: false`), so
+ * nothing here could see it.
  */
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -32,7 +41,9 @@ import { dirname, join } from "node:path";
 import {
   canCloseLeaf,
   canCloseTab,
+  leafCloseConfirmReason,
   leafCloseRefusal,
+  tabCloseConfirmReason,
   tabCloseRefusal,
 } from "../src/modules/tabs/lib/closable";
 import { buildEntries, countTabEntries } from "../src/modules/tabs/lib/entries";
@@ -105,8 +116,11 @@ function hostsLeaf(id: number): PaneNode {
 function termLeaf(id: number, cwd = "/w"): PaneNode {
   return { kind: "leaf", id, leafKind: "terminal", cwd };
 }
-function editorLeaf(id: number, path = "/w/a.ts"): PaneNode {
-  return { kind: "leaf", id, leafKind: "editor", path, dirty: false, preview: false };
+// `dirty` is a PARAMETER, not the hardcoded `false` it was. Every fixture here
+// was clean, so the whole suite ran past the one input the confirmation rule
+// turns on - see [vi].
+function editorLeaf(id: number, path = "/w/a.ts", dirty = false): PaneNode {
+  return { kind: "leaf", id, leafKind: "editor", path, dirty, preview: false };
 }
 function rdpLeaf(id: number, rdpConnectionId = "conn-1"): PaneNode {
   return { kind: "leaf", id, leafKind: "rdp", rdpConnectionId, sizeMode: "preset" };
@@ -136,6 +150,20 @@ const ONE_TAB_TWO_PANES: Tab[] = [tab(1, split(5, [termLeaf(2), termLeaf(6)]), 2
 const HOSTS_AND_RDP: Tab[] = [tab(1, hostsLeaf(2), 2), tab(3, rdpLeaf(4), 4)];
 const RDP_ONLY: Tab[] = [tab(3, rdpLeaf(4), 4)];
 const RDP_SPLIT_WITH_TERMINAL: Tab[] = [tab(3, split(5, [rdpLeaf(4), termLeaf(6)]), 4)];
+// The [vi] shapes. Hosts sits beside each one so the close is LEGAL and the
+// only question left is whether it happens silently.
+const HOSTS_AND_DIRTY_EDITOR: Tab[] = [
+  tab(1, hostsLeaf(2), 2),
+  tab(3, editorLeaf(4, "/w/a.ts", true), 4),
+];
+const HOSTS_AND_CLEAN_EDITOR: Tab[] = [tab(1, hostsLeaf(2), 2), tab(3, editorLeaf(4), 4)];
+// A split whose unsaved editor is NOT the active leaf. `syncPaneMirror` copies
+// `dirty` from the active leaf alone, so this is the shape a tab-level answer
+// read off `tab.dirty` gets wrong.
+const SPLIT_DIRTY_EDITOR_BEHIND: Tab[] = [
+  tab(1, hostsLeaf(2), 2),
+  tab(3, split(5, [termLeaf(6), editorLeaf(7, "/w/b.ts", true)]), 6),
+];
 
 // ---- (i) a Hosts page leaf is never closable ------------------------------
 console.log("[i] a page leaf is permanent, on every path and in every arrangement");
@@ -392,6 +420,182 @@ console.log("\n[v] Ctrl+Shift+X and Ctrl+W ask the arbiter rather than a leaf ki
   check("the catalogue still carries the terminal.close id", entry !== null);
   check("labelled for a pane, not a terminal", entry?.[1] === "Close focused pane", entry?.[1]);
   check("and grouped with the other pane chords", entry?.[2] === "Panes", entry?.[2]);
+}
+
+// ---- (vi) a legal close still has to ask before discarding work -----------
+// The sections above are all about which closes are LEGAL. This one is about
+// which of the legal ones may happen SILENTLY, and it exists because that
+// second question was in the same state the first one was in before VLT-43:
+// one copy per path, and the copies disagreed. `handleClose` prompted on a
+// dirty editor; `requestCloseLeaf` prompted only on a busy terminal. So for a
+// single-pane tab holding an unsaved editor the pane-header X and `Ctrl+W`
+// asked, and `Ctrl+Shift+X`, the tab-strip leaf X and the split pane-header X
+// discarded the buffer without a word.
+//
+// Removing the chord's leaf-kind test (VLT-62) is only what made it reachable
+// FROM THE CHORD - the other two paths had been losing buffers all along, which
+// is why the fix is at the funnel and why this section is behavioural over
+// `closable.ts` rather than a source-text check on the chord.
+console.log("\n[vi] and a legal close asks first when it would discard work");
+/** No pane has a foreground command. The default for an editor fixture. */
+const noProcess = () => false;
+/** Every pane claims one - only terminal leaves may act on it. */
+const everyProcess = () => true;
+check(
+  // THE defect: `Ctrl+Shift+X` on this tab used to close it in silence.
+  "an unsaved editor leaf must be confirmed before it is dropped",
+  leafCloseConfirmReason(HOSTS_AND_DIRTY_EDITOR, 4, noProcess) === "unsaved",
+  leafCloseConfirmReason(HOSTS_AND_DIRTY_EDITOR, 4, noProcess),
+);
+check(
+  // The negative half, and the one that makes the check above mean something:
+  // "confirm everything" satisfies every positive assertion here while turning
+  // each of the five close affordances into a two-click action.
+  "a SAVED editor leaf still closes silently",
+  leafCloseConfirmReason(HOSTS_AND_CLEAN_EDITOR, 4, noProcess) === null,
+  leafCloseConfirmReason(HOSTS_AND_CLEAN_EDITOR, 4, noProcess),
+);
+check(
+  "a busy terminal leaf is confirmed, and for being busy",
+  leafCloseConfirmReason(HOSTS_AND_TERMINAL, 4, everyProcess) === "running",
+  leafCloseConfirmReason(HOSTS_AND_TERMINAL, 4, everyProcess),
+);
+check(
+  "an idle terminal leaf closes silently",
+  leafCloseConfirmReason(HOSTS_AND_TERMINAL, 4, noProcess) === null,
+  leafCloseConfirmReason(HOSTS_AND_TERMINAL, 4, noProcess),
+);
+check(
+  // VLT-62's pane must keep closing on one keystroke. Only terminal panes
+  // register a handle, so a predicate that answered `true` for everything was
+  // never asked about an RDP leaf by accident - state it as a rule instead.
+  "an RDP leaf is never confirmed, even when the process probe says yes",
+  leafCloseConfirmReason(HOSTS_AND_RDP, 4, everyProcess) === null,
+  leafCloseConfirmReason(HOSTS_AND_RDP, 4, everyProcess),
+);
+check(
+  "and nor is a leaf no tab holds - the refusal already stopped that close",
+  leafCloseConfirmReason(HOSTS_AND_TERMINAL, 999, everyProcess) === null,
+);
+check(
+  // Unrecoverable beats recoverable: a killed process can be re-run.
+  "unsaved wins over running for a tab that is both",
+  tabCloseConfirmReason(SPLIT_DIRTY_EDITOR_BEHIND, 3, everyProcess) === "unsaved",
+  tabCloseConfirmReason(SPLIT_DIRTY_EDITOR_BEHIND, 3, everyProcess),
+);
+check(
+  // Read off `tab.dirty` this is `false`, because the mirror follows the ACTIVE
+  // leaf and the active leaf here is the terminal.
+  "an unsaved editor in a BACKGROUND pane still stops the tab closing silently",
+  tabCloseConfirmReason(SPLIT_DIRTY_EDITOR_BEHIND, 3, noProcess) === "unsaved",
+  tabCloseConfirmReason(SPLIT_DIRTY_EDITOR_BEHIND, 3, noProcess),
+);
+check(
+  "the same editor, closed as a pane rather than a tab, gets the same answer",
+  leafCloseConfirmReason(SPLIT_DIRTY_EDITOR_BEHIND, 7, noProcess) === "unsaved",
+);
+check(
+  "while the idle terminal sharing its split closes silently",
+  leafCloseConfirmReason(SPLIT_DIRTY_EDITOR_BEHIND, 6, noProcess) === null,
+);
+check(
+  // The agreement itself, for the exact shape that was reported: a single-pane
+  // tab holding a dirty editor. The pane-header X routes it to the TAB question
+  // (`handleClose`), the chord and the strip X to the LEAF question
+  // (`requestCloseLeaf`). Same answer or somebody loses a buffer.
+  "on a single-pane dirty editor the tab question and the leaf question agree",
+  tabCloseConfirmReason(HOSTS_AND_DIRTY_EDITOR, 3, noProcess) ===
+    leafCloseConfirmReason(HOSTS_AND_DIRTY_EDITOR, 4, noProcess),
+  [
+    tabCloseConfirmReason(HOSTS_AND_DIRTY_EDITOR, 3, noProcess),
+    leafCloseConfirmReason(HOSTS_AND_DIRTY_EDITOR, 4, noProcess),
+  ],
+);
+check(
+  "a clean single-pane editor agrees the other way too",
+  tabCloseConfirmReason(HOSTS_AND_CLEAN_EDITOR, 3, noProcess) === null &&
+    leafCloseConfirmReason(HOSTS_AND_CLEAN_EDITOR, 4, noProcess) === null,
+);
+
+// ---- (vii) and both close paths ask it, rather than re-deciding -----------
+// Source-text over `useTabActions.ts`, for the same reason [v] is: the hook
+// cannot be rendered here. The behavioural section above cannot see a caller
+// that stopped asking - which is the whole defect, twice over now.
+console.log("\n[vii] handleClose and requestCloseLeaf both route through closable.ts");
+{
+  const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+  const src = stripComments(readFileSync(join(root, "src/app/hooks/useTabActions.ts"), "utf8"));
+  /**
+   * Each hook-level `const NAME = useCallback(...)` body, keyed by name. The
+   * chunk runs to the next hook-level declaration; the two-space indent is what
+   * keeps a `const` nested inside a callback from cutting its body in half.
+   */
+  const bodies = (() => {
+    const marks: { name: string; at: number }[] = [];
+    const re = /\n {2}const (\w+) = useCallback\(/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(src)) !== null) marks.push({ name: m[1], at: m.index });
+    const out = new Map<string, string>();
+    for (let i = 0; i < marks.length; i++) {
+      out.set(
+        marks[i].name,
+        src.slice(marks[i].at, i + 1 < marks.length ? marks[i + 1].at : src.length),
+      );
+    }
+    return out;
+  })();
+  const leafClose = bodies.get("requestCloseLeaf");
+  const tabClose = bodies.get("handleClose");
+  check("found requestCloseLeaf", leafClose !== undefined, [...bodies.keys()]);
+  check("found handleClose", tabClose !== undefined, [...bodies.keys()]);
+  check(
+    "requestCloseLeaf asks closable.ts whether the close needs confirming",
+    leafClose !== undefined && /leafCloseConfirmReason\(/.test(leafClose),
+    leafClose,
+  );
+  check(
+    // The exact line that lost the buffer: it probed the terminal handle and
+    // treated "not running" as "close it". Passing the probe as an ARGUMENT is
+    // not a call, so this stays green for the fixed shape and reddens the
+    // moment the decision moves back in here.
+    "and does not re-decide from the process probe on its own",
+    leafClose !== undefined && !/leafHasRunningProcess\(/.test(leafClose),
+    leafClose,
+  );
+  check(
+    "handleClose asks the tab-level question from the same module",
+    tabClose !== undefined && /tabCloseConfirmReason\(/.test(tabClose),
+    tabClose,
+  );
+  check(
+    // `t.dirty` is the mirror of the ACTIVE leaf, which is why the tab question
+    // had to stop being asked of it - see SPLIT_DIRTY_EDITOR_BEHIND above.
+    "and no longer reads the tab's dirty mirror",
+    tabClose !== undefined && !/\.dirty/.test(tabClose),
+    tabClose,
+  );
+  for (const [name, body] of [
+    ["requestCloseLeaf", leafClose],
+    ["handleClose", tabClose],
+  ] as const) {
+    check(
+      // A hardcoded reason would satisfy "it calls the predicate" while
+      // throwing the answer away.
+      `${name} passes the answer through rather than naming a reason itself`,
+      body !== undefined && /reason,/.test(body) && !/reason: "(?:unsaved|running)"/.test(body),
+      body,
+    );
+    check(
+      // Order, not just presence: `closable.ts` says the refusal comes first,
+      // because prompting for a close that is then refused is worse than the
+      // silent no-op it replaces.
+      `${name} still asks the refusal first, so it never prompts for a close it will refuse`,
+      body !== undefined &&
+        /canClose(?:Leaf|Tab)\(/.test(body) &&
+        body.includes("ConfirmReason") &&
+        body.indexOf("canClose") < body.indexOf("ConfirmReason"),
+    );
+  }
 }
 
 if (failed > 0) throw new Error(`${failed} check(s) FAILED`);

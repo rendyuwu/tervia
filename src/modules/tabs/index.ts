@@ -14,8 +14,11 @@ export { countTabEntries } from "./lib/entries";
 export {
   canCloseLeaf,
   canCloseTab,
+  leafCloseConfirmReason,
   leafCloseRefusal,
+  tabCloseConfirmReason,
   tabCloseRefusal,
+  type CloseConfirmReason,
   type CloseRefusal,
 } from "./lib/closable";
 export {
