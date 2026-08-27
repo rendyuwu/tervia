@@ -653,13 +653,27 @@ console.log("\n[funnel] no route into the tab area writes activeId on its own");
       .join("\n");
   const stripQuotesAwareComments = stripComments;
   /**
-   * Each `const NAME = useCallback(...)` body, keyed by name. The chunk runs to
-   * the next such declaration, which is enough here: both files are one flat
-   * list of a hook's top-level callbacks.
+   * Each top-level declaration body, keyed by name. The chunk runs to the next
+   * such declaration, which is enough here: both files are one flat list of a
+   * hook's callbacks.
+   *
+   * NOT `const NAME = useCallback(` any more. That shape is a convention, not a
+   * rule, and every closure below is only a closure over the declarations this
+   * function returns - so a writer declared as a plain `const NAME = (id) => {}`
+   * was in the file, in the api, and in none of the buckets, silently. The marks
+   * are now any `const` / `function` at module level or at the hook's own
+   * indent.
+   *
+   * The indent is load-bearing and is why this is `{0,2}` rather than `\s*`: a
+   * `const` nested inside a callback would otherwise be a mark, cutting that
+   * callback's body off at its first local variable and hiding everything after
+   * it. Destructuring (`const { a, b } = ...`) is deliberately not matched -
+   * there is no single name to key it by, and the [return] check at the end of
+   * the sweep is what covers a callback that arrives that way.
    */
   const callbackBodies = (src: string): Map<string, string> => {
     const marks: { name: string; at: number }[] = [];
-    const re = /\n\s*const (\w+) = useCallback\(/g;
+    const re = /\n {0,2}(?:export )?(?:const|function) (\w+)\b/g;
     let m: RegExpExecArray | null;
     while ((m = re.exec(src)) !== null) marks.push({ name: m[1], at: m.index });
     const out = new Map<string, string>();
@@ -774,36 +788,124 @@ console.log("\n[funnel] no route into the tab area writes activeId on its own");
   // one of three named buckets, and the closure check at the end fails on any
   // that lands in none - which is what makes a NEW pane-tree mutation a red
   // check rather than the next round's defect report.
+  //
+  // THE CLOSURE WAS ITSELF A HARDCODED LIST, once (§4.29 one level up). "Which
+  // calls count as a pane-tree write" was seven names transcribed into a regex,
+  // out of the twenty-one `useTabs` imports from `panes.ts` - so `buildPaneTree`
+  // and `cloneLeafState` were imported, in use, and invisible to it, and a new
+  // callback that rebuilt a whole tree through `buildPaneTree` passed. The
+  // classification is now driven off the import statement itself: every name a
+  // swept file imports from `panes.ts` must appear in exactly one of the three
+  // lists below, so the next import lands as a red check by name rather than as
+  // a hole in a regex nobody re-reads.
   console.log("\n[sweep] every write of a pane tree leaves the rail view, or says why not");
   {
     /**
-     * A pane-tree write, by the functions that perform one. Structure
-     * (`splitLeaf`, `removeLeaf`, rotate, reorder, move-to-edge, normalize),
-     * the divider ratios (`setSplitSizes`), and the focused-leaf field, which
-     * is a write of WHICH PANE IS SHOWING even when the tree is untouched.
-     * Deliberately wider than the defect: `setSplitSizesInTree` is in here so
-     * its exemption has to be argued rather than assumed.
+     * `panes.ts` exports that PRODUCE OR RESHAPE a tree. A callback that calls
+     * one is rearranging what the workspace area shows.
+     *
+     * `cloneLeafState` is a read on its own and is listed here anyway: it exists
+     * only to lift a leaf's state out of one tree so it can be planted in
+     * another, so every call site is half of a move. `setSplitSizesInTree` is
+     * here for the opposite reason - so its exemption below has to be argued
+     * rather than obtained by leaving it out.
      */
-    const TREE_WRITE =
-      /\b(?:splitLeaf|removeLeaf|rotateLeafWithNeighbor|reorderLeafInTree|movePaneLeafToEdgeInTree|normalizePaneTree|setSplitSizesInTree)\(|activeLeafId:/;
+    const RESHAPES_A_TREE = [
+      "buildPaneTree",
+      "cloneLeafState",
+      "movePaneLeafToEdgeInTree",
+      "normalizePaneTree",
+      "removeLeaf",
+      "reorderLeafInTree",
+      "rotateLeafWithNeighbor",
+      "setSplitSizesInTree",
+      "splitLeaf",
+    ];
+    /**
+     * Write a FIELD of one leaf and nothing else. None of them changes which
+     * panes exist or which one is focused, so none is a route into the tab area:
+     * the pane is already on screen or already is not. They are also the ones
+     * driven by the session rather than by the user - an OSC 7 cwd, a PTY id, an
+     * editor going dirty - so making them show the tabs would let a background
+     * terminal yank someone out of the Vault by printing a prompt.
+     */
+    const WRITES_A_LEAF_FIELD = [
+      "setLeafActiveToolInTree",
+      "setLeafCustomTitleInTree",
+      "setLeafCwdInTree",
+      "setLeafPtyIdInTree",
+      "setLeafTerminalThemeInTree",
+      "updateEditorLeaf",
+    ];
+    /** Read nothing into the tree at all - lookups, id arithmetic, a label map. */
+    const READS_ONLY = [
+      "findLeaf",
+      "hasLeaf",
+      "leafIds",
+      "leaves",
+      "nextLeafId",
+      "PAGE_LABELS",
+      "siblingLeafOf",
+    ];
+    const CLASSIFIED = new Set([...RESHAPES_A_TREE, ...WRITES_A_LEAF_FIELD, ...READS_ONLY]);
+
+    /**
+     * The LOCAL names a file imports from `panes.ts`, types dropped. Local,
+     * because `movePaneLeafToEdge as movePaneLeafToEdgeInTree` is what a body
+     * actually calls, and the alias is the name that has to be in the regex.
+     */
+    const panesImports = (src: string): string[] => {
+      // `[^}]` rather than `[\s\S]*?`: a lazy any-character run starts matching
+      // at the file's FIRST `import {` and happily swallows every import between
+      // it and the panes one, so the "list" came back holding `useCallback`.
+      const m = /import \{([^}]*)\} from "@\/modules\/terminal\/lib\/panes";/.exec(src);
+      if (!m) return [];
+      return m[1]
+        .split(",")
+        .map((s) => s.trim())
+        .filter((s) => s !== "" && !s.startsWith("type "))
+        .map((s) => (s.includes(" as ") ? s.slice(s.indexOf(" as ") + 4).trim() : s));
+    };
+
+    /**
+     * A pane-tree write, DERIVED from what this file imports rather than
+     * transcribed. The two structural clauses are what catch a tree built from
+     * object literals with no helper at all - which is exactly how all three of
+     * `useAuxTabs`' openers mint theirs - and `activeLeafId:` is a write of
+     * WHICH PANE IS SHOWING even when the tree itself is untouched.
+     */
+    const treeWriteFor = (imports: string[]): RegExp => {
+      const named = imports.filter((n) => RESHAPES_A_TREE.includes(n));
+      const clauses = ["activeLeafId:", "paneTree:"];
+      if (named.length > 0) clauses.unshift(`\\b(?:${named.join("|")})\\(`);
+      return new RegExp(clauses.join("|"));
+    };
 
     /** Leaves the view, because its whole result is inside the covered area. */
-    const SHOWS_TABS = [
-      "newTab",
-      "newPaneGroupTab",
-      "newSshTab",
-      "openFileTab",
-      "splitActivePane",
-      "focusPane",
-      "focusNextPaneInTab",
-      "moveLeafToTab",
-      "moveLeafToNewTab",
-      // The three the chord-shaped enumeration missed. All three are reached
-      // from the header, which stays on screen above a rail view.
-      "rotateLeafSplit",
-      "reorderLeafInGroup",
-      "movePaneLeafToEdge",
-    ];
+    const SHOWS_TABS: Record<string, string[]> = {
+      "src/modules/tabs/lib/useTabs.ts": [
+        "newTab",
+        "newPaneGroupTab",
+        "newSshTab",
+        "openFileTab",
+        "replaceAllTabs",
+        "splitActivePane",
+        "focusPane",
+        "focusNextPaneInTab",
+        "moveLeafToTab",
+        "moveLeafToNewTab",
+        // The three the chord-shaped enumeration missed. All three are reached
+        // from the header, which stays on screen above a rail view.
+        "rotateLeafSplit",
+        "reorderLeafInGroup",
+        "movePaneLeafToEdge",
+      ],
+      // Swept for the first time here. `useAuxTabs` writes pane trees - three
+      // openers, each minting a single-leaf tree from an object literal - and
+      // the sweep read `useTabs` alone, while TERVIA.md claimed the guarantee
+      // covered both. They pass today; that they pass is now checked.
+      "src/modules/tabs/lib/useAuxTabs.ts": ["openBoardTab", "newRdpTab", "openPageTab"],
+    };
     /** Removals. They re-point `activeId` and must KEEP the view - closing a
      *  background tab from the strip X is not a request to leave the Vault
      *  (decision in force). Already asserted in full below. */
@@ -811,51 +913,120 @@ console.log("\n[funnel] no route into the tab area writes activeId on its own");
     /**
      * Writes a tree and deliberately does NOT show the tabs, with the reason.
      * One entry, and it has to earn it: `setSplitSizes` persists the ratio a
-     * divider drag produced. It changes no membership and no focus, and the
-     * divider it comes from is inside the covered surface - so unlike the
-     * header menus, there is no affordance that can fire it while a view is up.
-     * Showing the tabs on a ratio write would also mean a drag that lands
-     * mid-animation could yank the user out of the Vault.
+     * divider drag just produced. It changes no membership and no focus, so
+     * there is no new thing for showing the tabs to reveal - the drag that
+     * caused it was the user watching the result happen. And it is echoed, not
+     * commanded: `onLayoutChanged` fires on any relayout the panel library
+     * performs, so a write that cleared the view would hand every stray echo the
+     * power to close the Vault. The exemption rests on those two, NOT on the
+     * divider being unreachable under a view - `movePaneLeafToEdge` above gave
+     * up exactly that argument, because §4.26b says an unreachability claim is
+     * only ever as good as the enumeration of affordances behind it.
      */
     const NOT_A_ROUTE_IN = ["setSplitSizes"];
 
-    const declared = new Set([...SHOWS_TABS, ...KEEPS_VIEW, ...NOT_A_ROUTE_IN]);
-    for (const name of SHOWS_TABS) {
-      const body = tabsBodies.get(name);
-      check(`${name} is still a callback in useTabs`, body !== undefined, [...tabsBodies.keys()]);
+    const declared = new Set([
+      ...Object.values(SHOWS_TABS).flat(),
+      ...KEEPS_VIEW,
+      ...NOT_A_ROUTE_IN,
+    ]);
+    /** Every declaration name the scan found, across both swept files. */
+    const swept = new Map<string, Map<string, string>>();
+    const allImports = new Set<string>();
+    for (const file of Object.keys(SHOWS_TABS)) {
+      const short = file.split("/").pop();
+      const src = stripComments(read(file));
+      const bodies = callbackBodies(src);
+      swept.set(file, bodies);
+      const imports = panesImports(src);
+      for (const n of imports) allImports.add(n);
       check(
-        `${name} writes a pane tree - the reason it is on this list`,
-        body !== undefined && TREE_WRITE.test(body),
+        // Non-vacuity: a parse that finds nothing classifies nothing, and the
+        // derived regex below would fall back to its two structural clauses
+        // without a word. Both files import from `panes.ts` today.
+        `the panes.ts import list in ${short} parsed`,
+        imports.length > 0,
+        imports,
       );
       check(
-        `${name} shows the tabs, so its result is not applied behind a rail view`,
-        body !== undefined && (/\bsetActiveId\(/.test(body) || /\bshowTabs\(/.test(body)),
+        // THE fix for the hardcoded regex: an import nobody classified is a call
+        // the sweep cannot see. Fails by name, so the answer is "add it to a
+        // list", not "notice it".
+        `every panes.ts import in ${short} is classified as a tree write or not`,
+        imports.every((n) => CLASSIFIED.has(n)),
+        imports.filter((n) => !CLASSIFIED.has(n)),
+      );
+      const TREE_WRITE = treeWriteFor(imports);
+      for (const name of SHOWS_TABS[file]) {
+        const body = bodies.get(name);
+        check(`${name} is still declared in ${short}`, body !== undefined, [...bodies.keys()]);
+        check(
+          `${name} writes a pane tree - the reason it is on this list`,
+          body !== undefined && TREE_WRITE.test(body),
+        );
+        check(
+          `${name} shows the tabs, so its result is not applied behind a rail view`,
+          body !== undefined && (/\bsetActiveId\(/.test(body) || /\bshowTabs\(/.test(body)),
+        );
+      }
+      // THE CLOSURE. Every pane-tree writer must be spoken for; a new one that
+      // is not fails here by name. This is the check the round before this one
+      // did not have, and its absence is the whole of §4.29.
+      const treeWriters = [...bodies.entries()]
+        .filter(([, b]) => TREE_WRITE.test(b))
+        .map(([n]) => n);
+      check(
+        `the scan of ${short} found its known pane-tree writers, so it is not empty`,
+        treeWriters.length >= SHOWS_TABS[file].length,
+        treeWriters,
+      );
+      check(
+        `no pane-tree write in ${short} is unaccounted for`,
+        treeWriters.every((n) => declared.has(n)),
+        treeWriters.filter((n) => !declared.has(n)),
       );
     }
+    check(
+      // And the other direction, so the three lists cannot rot into a museum of
+      // names `panes.ts` no longer exports. A stale entry is worse than a
+      // missing one: it reads as coverage while covering a call that no longer
+      // happens, and it is the only way the classification can drift now that
+      // the import list drives it.
+      "every name the three lists classify is actually imported by a swept file",
+      [...CLASSIFIED].every((n) => allImports.has(n)),
+      [...CLASSIFIED].filter((n) => !allImports.has(n)),
+    );
+    const tabsOnlyBodies =
+      swept.get("src/modules/tabs/lib/useTabs.ts") ?? new Map<string, string>();
+    const TABS_TREE_WRITE = treeWriteFor(panesImports(tabsSrc));
     for (const name of NOT_A_ROUTE_IN) {
-      const body = tabsBodies.get(name);
-      check(`${name} is still a callback in useTabs`, body !== undefined);
-      check(`${name} writes a pane tree`, body !== undefined && TREE_WRITE.test(body));
+      const body = tabsOnlyBodies.get(name);
+      check(`${name} is still declared in useTabs`, body !== undefined);
+      check(`${name} writes a pane tree`, body !== undefined && TABS_TREE_WRITE.test(body));
       check(
         `${name} deliberately does NOT show the tabs`,
         body !== undefined && !/\bsetActiveId\(/.test(body) && !/\bshowTabs\(/.test(body),
       );
     }
-    // THE CLOSURE. Every pane-tree writer must be spoken for; a new one that is
-    // not fails here by name. This is the check the round before this one did
-    // not have, and its absence is the whole of §4.29.
-    const treeWriters = [...tabsBodies.entries()]
-      .filter(([, b]) => TREE_WRITE.test(b))
-      .map(([n]) => n);
+    // ONE MORE WAY OUT, and it is the reason `useAuxTabs` is swept rather than
+    // argued about: a writer that `useTabs` returns but does not DECLARE. The
+    // scan above reads declarations, and `const { openBoardTab, newRdpTab,
+    // openPageTab } = useAuxTabs(...)` declares none of them - so those three
+    // were returned from the same api, wrote pane trees, and appeared in no
+    // sweep at all. Every key the hook returns must therefore be a name found in
+    // one of the swept files, or one of the three pieces of STATE it returns.
+    const RETURNED_STATE = ["tabs", "activeId", "railView"];
+    const returned = (() => {
+      const at = tabsSrc.lastIndexOf("\n  return {");
+      if (at === -1) return [];
+      return [...tabsSrc.slice(at).matchAll(/\n {4}(\w+),/g)].map((m) => m[1]);
+    })();
+    const found = new Set([...swept.values()].flatMap((b) => [...b.keys()]));
+    check("found the useTabs return object to scan", returned.length > 20, returned.length);
     check(
-      "at least the known pane-tree writers were found, so the scan is not empty",
-      treeWriters.length >= SHOWS_TABS.length,
-      treeWriters,
-    );
-    check(
-      "no pane-tree write in useTabs is unaccounted for",
-      treeWriters.every((n) => declared.has(n)),
-      treeWriters.filter((n) => !declared.has(n)),
+      "every callback useTabs returns was declared in a file this sweep reads",
+      returned.every((n) => found.has(n) || RETURNED_STATE.includes(n)),
+      returned.filter((n) => !found.has(n) && !RETURNED_STATE.includes(n)),
     );
   }
 
@@ -880,8 +1051,26 @@ console.log("\n[funnel] no route into the tab area writes activeId on its own");
       const next = /\n\s{4}(?:\/|"[a-zA-Z]+\.)/.exec(rest.slice(1));
       return next ? rest.slice(0, next.index + 1) : rest;
     };
-    /** Deps whose call ENDS something the user cannot see behind a view. */
-    const DESTRUCTIVE = ["handleCloseTabOrPane", "requestCloseLeaf"];
+    /**
+     * FUNCTION NAMES WHOSE CALL ENDS A SESSION - not "the deps the two close
+     * chords happen to take". That is what this was, and the difference is the
+     * whole value of the closure below: a new chord wired straight to
+     * `closePaneByLeaf` rather than to `requestCloseLeaf` destroys exactly the
+     * same pane and matched nothing here, so it passed.
+     *
+     * So: the two App-side close funnels, plus the three mutations underneath
+     * them. A chord may reach any of the five - through App or by taking the
+     * `useTabs` api directly - and each ends something a rail view has taken off
+     * screen, which is the property the guard is about.
+     */
+    const DESTRUCTIVE = [
+      "handleCloseTabOrPane",
+      "requestCloseLeaf",
+      "handleClose",
+      "closePaneByLeaf",
+      "closeTab",
+      "disposeTab",
+    ];
     const CLOSING_CHORDS = ["tab.close", "terminal.close"];
     for (const id of CLOSING_CHORDS) {
       const body = handlerBody(id);

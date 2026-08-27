@@ -452,10 +452,36 @@ result the way a new tab or a split can. That refusal lives on the chord
 `closeTab` / `closePaneByLeaf` are shared with the strip X, which must keep
 leaving the user in the view.
 
+**And the second question, in the same module: may a legal close happen
+_silently_?** `leafCloseConfirmReason` / `tabCloseConfirmReason` answer
+`"unsaved"` (an editor leaf with unsaved edits), `"running"` (a terminal leaf
+with a foreground command) or `null`, and unsaved wins when a tab is both -
+discarding an edit cannot be undone, killing a process can be redone. Both are
+asked **after** the refusal, never before: prompting for a close that is then
+refused is worse than the silent no-op it replaces.
+
+They live beside the refusals because the confirmation was left in exactly the
+state the refusal was in before VLT-43 - one copy per path, disagreeing.
+`handleClose` asked about unsaved work and a running process; `requestCloseLeaf`
+asked only about the process, in so many words ("Editor leaves always close
+without a prompt"). So a single-pane tab holding a **dirty editor** prompted from
+the pane-header X and `Ctrl+W`, and was discarded without a word by
+`Ctrl+Shift+X`, by the tab-strip leaf X and by that same header X on a split.
+Removing the chord's leaf-kind test is only what made it reportable - it let the
+chord reach an editor for the first time - and the fix is at the funnel for that
+reason: guarding the chord would have left the other two paths losing buffers.
+The tab-level answer also stopped being read off `tab.dirty`, which
+`syncPaneMirror` mirrors from the **active** leaf alone, so a split whose unsaved
+editor was not the pane you were looking at closed in silence.
+
 Checked by `scripts/tab-close-verify.ts`, whose third assertion - an ordinary leaf
 beside another entry IS closable - is what stops a predicate hardwired to `false`
-from passing, plus an RDP section and a source-text check that no path re-decides
-in front of the arbiter.
+from passing, plus an RDP section, a source-text check that no path re-decides in
+front of the arbiter, and the confirmation half - behavioural, including the
+negative ("a **saved** editor still closes silently", which is what stops "confirm
+everything" passing) and the source-text check that both close paths route
+through it. The `editorLeaf` fixture takes `dirty` as a parameter; hardcoding it
+`false` is how the whole suite ran past the one input this rule turns on.
 
 #### Pages: tabs vs rail views (`tabs/lib/pages.ts`)
 
@@ -514,10 +540,26 @@ that ACTIVATES A TAB" cannot cover a mutation that rearranges the tab already
 active, so `Ctrl+D`, the header's Rotate split and its drag-reorder all reshaped
 panes behind the view - `Ctrl+D` being the worst, since it mints a shell with no
 visible effect at all. The rule is now enumerated from the **state write**: every
-`useTabs` callback whose body reshapes a pane tree or moves the focused leaf
-shows the tabs. One is deliberately exempt and says so - `setSplitSizes`, which
-persists the ratio a divider drag produced, changes no membership and no focus,
-and comes from an affordance inside the covered surface.
+`useTabs` / `useAuxTabs` callback whose body reshapes a pane tree or moves the
+focused leaf shows the tabs. One is deliberately exempt and says so -
+`setSplitSizes`, which persists the ratio a divider drag just produced: it changes
+no membership and no focus, so there is nothing for showing the tabs to reveal,
+and it is _echoed_ (`onLayoutChanged` fires on any relayout the panel library
+performs), so clearing the view from it would let a stray echo close the Vault.
+The exemption deliberately does **not** rest on the divider being unreachable
+under a view; `movePaneLeafToEdge` gave that argument up, because an
+unreachability claim is only as good as the enumeration of affordances behind it.
+
+**And "what counts as a pane-tree write" is derived, not transcribed.** It was
+seven function names hardcoded into a regex, out of the twenty-one `useTabs`
+imports from `panes.ts` - so `buildPaneTree` and `cloneLeafState` were in the
+file, in use, and invisible to it. Every name a swept file imports from `panes.ts`
+must now appear in exactly one of three classified lists (reshapes a tree / writes
+a leaf field / reads only), so the next import fails the check by name. The leaf-
+field writers are exempt as a class and for a reason: an OSC 7 cwd, a PTY id or an
+editor going dirty changes what a pane _says_, not which panes exist or which is
+focused, and they are driven by the session rather than by the user - a background
+terminal printing a prompt must not pull anyone out of the Vault.
 
 `useTabs` also stopped being the only place the rule lives: the two **closing**
 chords refuse instead of clearing, on the chord itself. See "What may be closed"
@@ -527,9 +569,14 @@ Checked by `scripts/rail-views-verify.ts`, which asserts the narrowing (and
 `setActiveId`'s signature) at compile time, the migration and the two re-basings
 at runtime **through their consumers**, and - source-text, because the state lives
 in a hook this suite cannot render - that every `activeId` write and every
-pane-tree write in `useTabs` / `useAuxTabs` goes through the funnel or is named as
-an exemption, that nothing else writes the view, and that the two closing chords
-carry the refusal while the constructive ones do not.
+pane-tree write in `useTabs` **and `useAuxTabs`** goes through the funnel or is
+named as an exemption, that nothing else writes the view, and that the two closing
+chords carry the refusal while the constructive ones do not. The scan reads any
+top-level `const` / `function`, not only `const x = useCallback(`, because that
+shape is a convention rather than a rule; and every key `useTabs` returns must be
+a declaration one of the two swept files owns, which is the check that would have
+caught `useAuxTabs`' three openers arriving by destructuring and being swept by
+nothing.
 
 #### Who owns the keyboard (`shortcuts/lib/keyboardOwner.ts`)
 

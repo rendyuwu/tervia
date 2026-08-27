@@ -128,10 +128,13 @@ export function activeLeafKind(tab: Tab): "terminal" | "editor" | "rdp" | null {
   // branch on; report null so callers fall to their defaults instead of every
   // one having to special-case them.
   //
-  // RDP is reported, unlike board or page, for one reason: a focused RDP pane
-  // owns the keyboard the way a focused terminal does, and App's shortcut
-  // `isDisabled` gate needs to know that or every bare-Ctrl chord would fire
-  // an app action instead of reaching the remote desktop.
+  // RDP is still reported rather than folded into that null, but no caller
+  // branches on it today: the one that did was App's shortcut `isDisabled`
+  // gate, and 54832a7 repointed that at `ownsRawKeyboard`, which asks the DOM
+  // where the caret is instead of asking which leaf is active in the tab. What
+  // is left is a truthful report of the active leaf's kind - `=== "terminal"`
+  // and `=== "editor"` callers read it exactly as they would a null - so
+  // narrowing the type would only cost the next consumer the distinction.
   return leaf.leafKind === "board" || leaf.leafKind === "page" ? null : leaf.leafKind;
 }
 
