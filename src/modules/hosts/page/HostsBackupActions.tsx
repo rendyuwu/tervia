@@ -13,6 +13,7 @@
  * guess whether that is a bug: it is not, yet.
  */
 import { Button } from "@/components/ui/button";
+import { toast } from "@/components/ui/toast";
 import type { FsReadResult } from "@/lib/ipc";
 import type { BackupMode } from "@/modules/ssh/SshBackupDialog";
 import { BACKUP_EXTENSION, BACKUP_EXTENSION_V1 } from "@/modules/ssh/backupFile";
@@ -36,10 +37,8 @@ export function HostsBackupActions(): ReactNode {
   const hosts = useHosts();
   const [backup, setBackup] = useState<BackupMode | null>(null);
   const [backupOpen, setBackupOpen] = useState(false);
-  const [pickError, setPickError] = useState<string | null>(null);
 
   const openExport = () => {
-    setPickError(null);
     setBackup({ kind: "export" });
     setBackupOpen(true);
   };
@@ -48,7 +47,6 @@ export function HostsBackupActions(): ReactNode {
   // wrong-type file is rejected up front instead of after the user has typed a
   // passphrase for it.
   const openImport = async () => {
-    setPickError(null);
     try {
       const selected = await openFileDialog({
         multiple: false,
@@ -64,13 +62,13 @@ export function HostsBackupActions(): ReactNode {
       if (!path) return;
       const result = await invoke<FsReadResult>("fs_read_file", { path });
       if (result.kind !== "text") {
-        setPickError("That file is not a UTF-8 text file.");
+        toast("That file is not a UTF-8 text file.", { variant: "error" });
         return;
       }
       setBackup({ kind: "import", path, text: result.content });
       setBackupOpen(true);
     } catch (e) {
-      setPickError(e instanceof Error ? e.message : String(e));
+      toast(e instanceof Error ? e.message : String(e), { variant: "error" });
     }
   };
 
@@ -108,10 +106,15 @@ export function HostsBackupActions(): ReactNode {
         <Upload size={13} strokeWidth={1.75} />
         <span className="@max-[420px]:hidden">Import…</span>
       </Button>
-      {/* The one improvement over the menu this replaces: the menu closed
-          itself before a failed pick could be reported, so the message had
-          nowhere to land. This surface stays on screen. */}
-      {pickError ? <span className="text-destructive text-[11px]">{pickError}</span> : null}
+      {/* The menu this replaces closed itself before a failed pick could be
+          reported, so the message had nowhere to land - the improvement is a
+          surface that outlives the click. VLT-36: that surface used to be an
+          inline line with NO dismiss of its own - cleared only implicitly, at
+          the top of the next `openExport`/`openImport`, so a failed pick from
+          one attempt could sit here through several unrelated successful
+          ones. `toast()` outlives it more completely than an inline line ever
+          did (it is not even tied to this component's mount), expires on its
+          own, and - new on this surface - gets an actual dismiss `×`. */}
 
       {/* Unmounted once closed: the dialog holds a passphrase and, for an
           import, the decrypted file text in state, so there is no reason to

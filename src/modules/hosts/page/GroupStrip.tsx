@@ -14,6 +14,7 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
+import { toast } from "@/components/ui/toast";
 import { cn } from "@/lib/utils";
 import { InlineInput } from "@/modules/explorer/InlineInput";
 import { TrailingIconButton } from "@/modules/tabs/components/TrailingIconButton";
@@ -82,16 +83,23 @@ export function GroupStrip({
   const [creating, setCreating] = useState(false);
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<HostGroup | null>(null);
-  const [error, setError] = useState<string | null>(null);
 
   // Every one of the three mutations can be refused by the store. Surface the
   // rejection here instead of letting it reach the console unhandled.
+  //
+  // VLT-36: this used to be its own persistent inline `error` state with no
+  // dismiss control at all - cleared only implicitly, at the top of the NEXT
+  // `runMutation` call, so a rename refused five minutes ago could sit under
+  // the strip until the user happened to try another create/rename/delete.
+  // `toast()` (see `HostsPage.tsx`'s header-error comment for the fuller
+  // reasoning, applied identically across all three of this page's error
+  // surfaces) both expires on its own and - new on this surface - gets an
+  // actual dismiss `×` for the first time.
   const runMutation = async (action: () => void | Promise<void>) => {
     try {
-      setError(null);
       await action();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      toast(e instanceof Error ? e.message : String(e), { variant: "error" });
     }
   };
 
@@ -163,8 +171,6 @@ export function GroupStrip({
           </Button>
         )}
       </div>
-
-      {error ? <span className="text-destructive text-[11px]">{error}</span> : null}
 
       <AlertDialog open={deleting !== null} onOpenChange={(open) => !open && setDeleting(null)}>
         <AlertDialogContent>

@@ -38,6 +38,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { InputGroup, InputGroupAddon, InputGroupInput } from "@/components/ui/input-group";
+import { toast } from "@/components/ui/toast";
 import { VaultInUseError } from "@/modules/vault/types";
 import { useVault } from "@/modules/vault/useVault";
 import { ChevronDown, Monitor, Plus, Search, SquareTerminal, X } from "lucide-react";
@@ -150,8 +151,6 @@ export function HostsPage({ onConnect, tabVisible }: HostsPageProps): ReactNode 
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [editorTarget, setEditorTarget] = useState<HostEditorTarget | null>(null);
   const [pendingDelete, setPendingDelete] = useState<Host | null>(null);
-  /** The last refused or failed row action. Cleared by the next one. */
-  const [actionError, setActionError] = useState<string | null>(null);
 
   const searchRef = useRef<HTMLInputElement>(null);
   // §5.5: search is the primary navigation at 100 hosts, so the page opens with
@@ -210,27 +209,29 @@ export function HostsPage({ onConnect, tabVisible }: HostsPageProps): ReactNode 
   }, []);
 
   const duplicate = useCallback((host: Host) => {
-    setActionError(null);
     void duplicateHost(host.id)
       .then((copy) => {
         // `null` is not a failure - the row was deleted between this render and
         // the click, in this window or another. Still worth saying, because a
         // click that produces no new card and no message looks swallowed.
-        if (!copy) setActionError(`"${host.name}" no longer exists, so there was nothing to copy.`);
+        if (!copy) {
+          toast(`"${host.name}" no longer exists, so there was nothing to copy.`, {
+            variant: "error",
+          });
+        }
       })
       // `duplicateHost` returns THROUGH `upsertHost`, whose guards refuse rather
       // than ignore (handoff §5.11). A call site handling only `null` gets an
       // unhandled rejection.
-      .catch((e: unknown) => setActionError(errorText(e)));
+      .catch((e: unknown) => toast(errorText(e), { variant: "error" }));
   }, []);
 
   const confirmDelete = useCallback((host: Host) => {
     setPendingDelete(null);
-    setActionError(null);
     // `noForwardRules` is passed by NAME, never as an inline `() => {}`, so 6f
     // finds every call site with one grep when `modules/forwards` lands.
     void deleteHost(host.id, noForwardRules).catch((e: unknown) =>
-      setActionError(deleteRefusalText(host, e)),
+      toast(deleteRefusalText(host, e), { variant: "error" }),
     );
   }, []);
 
@@ -260,6 +261,34 @@ export function HostsPage({ onConnect, tabVisible }: HostsPageProps): ReactNode 
     // 100px), not the viewport - so the header row and the grid below both
     // size off THIS box, not `sm:`/`xl:` viewport breakpoints. See the header
     // row and grid comments below for what that buys each of them.
+    //
+    // VLT-48: the `@max-[420px]` narrow layout below is reachable only by
+    // shrinking the OS WINDOW, never by dragging a divider at a wide window -
+    // and there is no single "pane minimum" constant to blame or to lower.
+    // EVERY size floor between here and the window edge is a PERCENTAGE, not
+    // a px minimum: the sidebar (`AppSidebar.tsx:215`, `minSize="8%"`, capped
+    // at `maxSize="450px"`), this workspace column
+    // (`WorkspaceArea.tsx:73`, `minSize="25%"`), the right slot
+    // (`AppRightSlot.tsx:178`, `minSize="18%"`), and a pane split inside the
+    // column (`PaneTreeView.tsx:1057`, `minSize="10%"`) - all deliberately
+    // container-invariant, for the reason `AppSidebar.tsx`'s own comment on
+    // `minSize="8%"` gives: a PERCENTAGE floor can't misbehave across a
+    // minimize/restore the way a px one did. (`SectionStack.tsx`'s
+    // `SECTION_MIN_SIZE = "100px"` is the one deliberate px floor near here,
+    // and it is a SIDEBAR ROW HEIGHT, not a pane width - unrelated.)
+    // A percentage floor SHRINKS WITH THE WINDOW, so this pane's absolute
+    // width from dragging a divider never crosses a fixed px line - the only
+    // way to make it happen is to shrink the number the percentage is taken
+    // OF, i.e. the window itself, down toward its own floor,
+    // `src-tauri/tauri.conf.json`'s `minWidth: 420` - the same order of
+    // magnitude as this breakpoint, which is the actual reason narrow layout
+    // is reachable only at the window's own edge. The tester (report N-4)
+    // confirmed this by hand at both divider stops across four window
+    // widths, landing on an effective floor in the 500s of px - an EMERGENT
+    // number (25% of whatever window width they were at), not a constant
+    // anyone can find or lower. Per the owner: the pane minimums stay where
+    // they are; `hosts-header-narrow-verify.ts` forces the container width
+    // directly instead of relying on a hand test that cannot get here.
     <div className="bg-background @container flex h-full w-full min-w-0 flex-col">
       <div className="flex flex-col gap-2 border-b p-3">
         {/* Every control below either has no hard-minimum floor, or collapses
@@ -317,12 +346,24 @@ export function HostsPage({ onConnect, tabVisible }: HostsPageProps): ReactNode 
             ))}
           </div>
 
-          {/* No unconditional floor: `min-w-40` was a 160px minimum this box
-              cannot always afford. `min-w-0` lets it shrink to whatever
-              `flex-1` leaves it (still typeable at any width), and the
-              160px comfort floor comes back only once the box has room to
-              spare for it. */}
-          <InputGroup className="min-w-0 flex-1 @[480px]:min-w-40">
+          {/* VLT-41: `min-w-0` alone let this shrink to whatever `flex-1` left
+              it - typeable, but past a point the rendered box is a few px
+              wide and the placeholder/typed text clips at the edge ("Se…" at
+              ~417px), which is not "shrinks", it's "clips". Below the same
+              420px line every OTHER control on this row collapses to icon-
+              only (New host, Export…/Import…) and, being a plain flex child
+              with a content basis rather than `flex-1`'s basis-0, still
+              WRAPS onto its own line if it doesn't fit - `flex-1` never does
+              that on its own, because a 0%-basis item always "fits" by
+              shrinking instead. `@max-[420px]:basis-full` is that same wrap
+              behaviour, explicit, so this claims a full row instead of being
+              squeezed by whatever collapsed neighbours it shares the first
+              row with; `@max-[420px]:min-w-40` is a floor for that row in
+              case the container itself is narrower than 160px (a pane's own
+              padding aside, this is defense, not the reported case). Above
+              420px this is unchanged from before - still no floor until
+              480px, which was never the reported bug. */}
+          <InputGroup className="min-w-0 flex-1 @max-[420px]:min-w-40 @max-[420px]:basis-full @[480px]:min-w-40">
             <InputGroupAddon>
               <Search />
             </InputGroupAddon>
@@ -365,22 +406,18 @@ export function HostsPage({ onConnect, tabVisible }: HostsPageProps): ReactNode 
           </div>
         </div>
 
-        {/* Above the scroll container on purpose: a refused delete names rows the
-            user now has to go and find, and a message that scrolls out of the
-            grid is a message they will not see. */}
-        {actionError ? (
-          <div className="text-destructive flex items-start gap-2 text-[11px]">
-            <span className="flex-1">{actionError}</span>
-            <button
-              type="button"
-              aria-label="Dismiss"
-              onClick={() => setActionError(null)}
-              className="shrink-0 opacity-70 hover:opacity-100"
-            >
-              <X size={12} strokeWidth={2} />
-            </button>
-          </div>
-        ) : null}
+        {/* VLT-36: a refused action used to pin an inline line to the page
+            header, `×`-dismissable but otherwise permanent - a stale refusal
+            from one click read as live during the next unrelated one. Routed
+            through the shared `toast()` (used the same way in
+            `explorer/ExplorerGrep.tsx`) instead: it still names the rows a
+            refused delete left untouched, still has its own dismiss `×`, but
+            now also expires on its own (errors get the longer ERROR_MS,
+            `components/ui/toast.tsx`) so a message nobody dismissed cannot
+            outlive the click that produced it. See `GroupStrip.tsx` and
+            `HostsBackupActions.tsx` for the other two surfaces this page
+            used to render inline - same fix, same reasoning, applied there
+            too so the fix could not leave one of the three still pinned. */}
 
         <GroupStrip
           groups={groups}
