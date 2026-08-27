@@ -980,49 +980,76 @@ export function useTabs() {
    * of the opposite direction. Other siblings stay put, so rotating B in
    * `[A, B, C]` affects only B and C. The tree is normalized afterwards
    * so a second click cleanly undoes the change.
+   *
+   * Shows the tabs, and this is one of the two the rail-view sweep found by
+   * enumerating pane-tree WRITES instead of chords (VLT-58): it is reached from
+   * the header's entry menu, which stays on screen while a rail view covers the
+   * workspace, so rotating from there rearranged panes nobody could see. The
+   * rearrangement IS the whole result, so showing it is the only thing the
+   * action can mean.
    */
-  const rotateLeafSplit = useCallback((leafId: number) => {
-    setTabs((curr) =>
-      curr.map((t) => {
-        if (t.kind !== "pane") return t;
-        if (!hasLeaf(t.paneTree, leafId)) return t;
-        const splitId = nextIdRef.current++;
-        const rotated = rotateLeafWithNeighbor(t.paneTree, leafId, splitId);
-        if (rotated === null) return t;
-        return syncPaneMirror({
-          ...t,
-          paneTree: normalizePaneTree(rotated),
-        });
-      }),
-    );
-  }, []);
+  const rotateLeafSplit = useCallback(
+    (leafId: number) => {
+      showTabs();
+      setTabs((curr) =>
+        curr.map((t) => {
+          if (t.kind !== "pane") return t;
+          if (!hasLeaf(t.paneTree, leafId)) return t;
+          const splitId = nextIdRef.current++;
+          const rotated = rotateLeafWithNeighbor(t.paneTree, leafId, splitId);
+          if (rotated === null) return t;
+          return syncPaneMirror({
+            ...t,
+            paneTree: normalizePaneTree(rotated),
+          });
+        }),
+      );
+    },
+    [showTabs],
+  );
 
   /**
    * Reorder a leaf within its own split group. Places `leafId` before
    * `beforeLeafId`, or at the end when null. No-op when the two leaves
    * aren't direct siblings. Use Move to New Tab / Join Group for cross-group.
+   *
+   * Shows the tabs for the same reason `rotateLeafSplit` does: the drag that
+   * drives it happens in the header's entry list, which a rail view does not
+   * cover, and the reorder it produces is only visible in the panes.
    */
-  const reorderLeafInGroup = useCallback((leafId: number, beforeLeafId: number | null) => {
-    setTabs((curr) =>
-      curr.map((t) => {
-        if (t.kind !== "pane") return t;
-        if (!hasLeaf(t.paneTree, leafId)) return t;
-        const paneTree = reorderLeafInTree(t.paneTree, leafId, beforeLeafId);
-        if (paneTree === t.paneTree) return t;
-        return syncPaneMirror({ ...t, paneTree });
-      }),
-    );
-  }, []);
+  const reorderLeafInGroup = useCallback(
+    (leafId: number, beforeLeafId: number | null) => {
+      showTabs();
+      setTabs((curr) =>
+        curr.map((t) => {
+          if (t.kind !== "pane") return t;
+          if (!hasLeaf(t.paneTree, leafId)) return t;
+          const paneTree = reorderLeafInTree(t.paneTree, leafId, beforeLeafId);
+          if (paneTree === t.paneTree) return t;
+          return syncPaneMirror({ ...t, paneTree });
+        }),
+      );
+    },
+    [showTabs],
+  );
 
   /**
    * Drag-and-drop a leaf onto one edge of another leaf in the same tab.
    * Repositions the source as a left/right/top/bottom sibling of the target,
    * preserving its id (and thus its PTY / editor session). No-op across tabs
    * or when the move can't apply.
+   *
+   * Shows the tabs like the other pane-tree writes, even though the drag that
+   * starts it is inside the covered surface and so cannot begin while a rail
+   * view is up. That is an unreachability claim about affordances, and the
+   * whole point of sweeping by state write is not to rest on one: it also moves
+   * focus to the dragged leaf, which is a route into the tab area whatever
+   * started it. A no-op when no view is showing.
    */
   const movePaneLeafToEdge = useCallback(
     (sourceLeafId: number, targetLeafId: number, edge: PaneEdge) => {
       if (sourceLeafId === targetLeafId) return;
+      showTabs();
       setTabs((curr) =>
         curr.map((t) => {
           if (t.kind !== "pane") return t;
@@ -1040,10 +1067,17 @@ export function useTabs() {
         }),
       );
     },
-    [],
+    [showTabs],
   );
 
-  /** Reorder tabs: move `fromTabId` before `beforeTabId`, or append when null. */
+  /**
+   * Reorder tabs: move `fromTabId` before `beforeTabId`, or append when null.
+   *
+   * Does NOT show the tabs, and is one of the writes the sweep deliberately
+   * leaves alone: it changes neither a pane tree nor which tab is active, only
+   * the order of the strip - and the strip is the one part of the tab area a
+   * rail view does not cover, so the result is already on screen.
+   */
   const reorderTabs = useCallback((fromTabId: number, beforeTabId: number | null) => {
     setTabs((curr) => {
       const from = curr.find((t) => t.id === fromTabId);

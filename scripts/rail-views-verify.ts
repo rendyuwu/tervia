@@ -516,6 +516,19 @@ console.log("\n[exit] activating a tab leaves the rail view, and a removal does 
   // Built from `RAIL_VIEW_KINDS`, not a copy of the union: a third rail view is
   // then covered by these rows the moment it is declared.
   const RAIL: (RailViewKind | null)[] = [null, ...RAIL_VIEW_KINDS];
+  check(
+    // §4.18: driving the table off `RAIL_VIEW_KINDS` is what keeps it current,
+    // and is also the way it could quietly become vacuous - an empty list would
+    // leave only the `null` row, so every "over a view" assertion below would
+    // run exclusively against "no view" and pass while testing nothing. The
+    // compiler catches the specific way that happens today (narrow `PageKind`
+    // back to `"hosts"` and `RailViewKind` becomes `never`, so the literals in
+    // this section stop type-checking), but a compiler error is not a check,
+    // and `RAIL_VIEW_KINDS` could equally be emptied without changing the type.
+    "there is at least one rail view for the table below to test",
+    RAIL_VIEW_KINDS.length > 0 && RAIL.length === RAIL_VIEW_KINDS.length + 1,
+    { views: RAIL_VIEW_KINDS, rows: RAIL.length },
+  );
   // A table, not one case: "clears it when the id changed" is the subtle version
   // of the same bug, and only the same-id row shows it. Ctrl+1 on the tab that is
   // ALREADY active is precisely the case where the user is asking to be shown a
@@ -599,10 +612,46 @@ console.log("\n[funnel] no route into the tab area writes activeId on its own");
 {
   const root = join(dirname(fileURLToPath(import.meta.url)), "..");
   const read = (p: string) => readFileSync(join(root, p), "utf8");
-  /** Comments stripped so a doc comment naming a call is not read AS one. (The
-   *  third copy of this helper in the suite - VLT-33.) */
-  const stripComments = (s: string) =>
-    s.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+  /**
+   * Comments stripped so a doc comment naming a call is not read AS one. (The
+   * third copy of this pair in the suite - VLT-33. Canonical copy lives in
+   * `scripts/host-editor-verify.ts`; keep them the same shape. Duplicated
+   * rather than shared, because these scripts have no common module.)
+   *
+   * QUOTE-AWARE, and a character scan rather than a regex: a `//` inside a
+   * string is not a comment, and a regex alternation over string literals
+   * desyncs on the first unbalanced quote - after which it eats real code. The
+   * scan loses the strip for a line with an unclosed quote instead, which fails
+   * towards KEEPING text. That is the safe direction: the failure this exists
+   * to prevent is a positive check going green off `// was: <deleted code>`.
+   */
+  const stripLineComment = (line: string): string => {
+    let quote = "";
+    for (let i = 0; i < line.length; i++) {
+      const c = line[i];
+      if (quote) {
+        if (c === "\\") i++;
+        else if (c === quote) quote = "";
+        continue;
+      }
+      if (c === '"' || c === "'" || c === "`") {
+        quote = c;
+        continue;
+      }
+      if (c === "/" && line[i + 1] === "/") return line.slice(0, i);
+    }
+    return line;
+  };
+  const stripComments = (src: string): string =>
+    src
+      .split("\n")
+      .filter((line) => {
+        const t = line.trim();
+        return !(t.startsWith("//") || t.startsWith("/*") || t.startsWith("*"));
+      })
+      .map(stripLineComment)
+      .join("\n");
+  const stripQuotesAwareComments = stripComments;
   /**
    * Each `const NAME = useCallback(...)` body, keyed by name. The chunk runs to
    * the next such declaration, which is enough here: both files are one flat
@@ -624,10 +673,17 @@ console.log("\n[funnel] no route into the tab area writes activeId on its own");
   /** The four funnels. Only these may touch the view state. */
   const FUNNELS = ["setActiveId", "rehomeActiveId", "showTabs", "toggleRailView"];
   /**
-   * Every mutation in `useTabs` that activates a tab, mints one, or moves focus
-   * inside one - i.e. every route INTO the tab area. Each must funnel; the
-   * closure check below then proves the list is complete, because a new mutation
-   * that writes `activeId` and is not named here fails.
+   * Every mutation in `useTabs` that activates a tab, mints one, moves focus
+   * inside one, or REARRANGES the panes of one - i.e. every route INTO the tab
+   * area. Each must funnel; the closure check below then proves the list is
+   * complete, because a new mutation that writes `activeId` and is not named
+   * here fails.
+   *
+   * The last three arrived with §4.29: this list originally stopped at "moves
+   * focus", which is why a rotate or a reorder driven from the header - a
+   * surface a rail view does not cover - reshaped panes nobody could see. See
+   * the [sweep] section below, which enumerates from the pane-tree write rather
+   * than from what the mutation is called.
    */
   const ROUTES_IN: Record<string, string[]> = {
     "src/modules/tabs/lib/useTabs.ts": [
@@ -642,6 +698,9 @@ console.log("\n[funnel] no route into the tab area writes activeId on its own");
       "splitActivePane",
       "focusPane",
       "focusNextPaneInTab",
+      "rotateLeafSplit",
+      "reorderLeafInGroup",
+      "movePaneLeafToEdge",
     ],
     "src/modules/tabs/lib/useAuxTabs.ts": ["openBoardTab", "newRdpTab", "openPageTab"],
   };
@@ -700,6 +759,180 @@ console.log("\n[funnel] no route into the tab area writes activeId on its own");
       `${name} falls back to "no tab active" when nothing is left`,
       /\?\?\s*0\)/.test(body) && /\?\?\s*next\[0\]/.test(body),
     );
+  }
+
+  // ---- 8b. every PANE-TREE write, not just every activeId write ----------
+  // §4.29: the fix for this rule inherited the blind spot of the enumeration
+  // that scoped it. The list above is "routes that ACTIVATE A TAB", so it could
+  // never have covered a chord that rearranges the tab already active - Ctrl+D
+  // splitting a pane behind the Vault, the header's Rotate/reorder doing the
+  // same from a menu the view does not cover. Those write the PANE TREE, which
+  // is the other half of "what the workspace area is showing".
+  //
+  // So this enumerates from the mutation instead: every callback whose body
+  // reshapes a pane tree or moves focus inside one. Each must land in exactly
+  // one of three named buckets, and the closure check at the end fails on any
+  // that lands in none - which is what makes a NEW pane-tree mutation a red
+  // check rather than the next round's defect report.
+  console.log("\n[sweep] every write of a pane tree leaves the rail view, or says why not");
+  {
+    /**
+     * A pane-tree write, by the functions that perform one. Structure
+     * (`splitLeaf`, `removeLeaf`, rotate, reorder, move-to-edge, normalize),
+     * the divider ratios (`setSplitSizes`), and the focused-leaf field, which
+     * is a write of WHICH PANE IS SHOWING even when the tree is untouched.
+     * Deliberately wider than the defect: `setSplitSizesInTree` is in here so
+     * its exemption has to be argued rather than assumed.
+     */
+    const TREE_WRITE =
+      /\b(?:splitLeaf|removeLeaf|rotateLeafWithNeighbor|reorderLeafInTree|movePaneLeafToEdgeInTree|normalizePaneTree|setSplitSizesInTree)\(|activeLeafId:/;
+
+    /** Leaves the view, because its whole result is inside the covered area. */
+    const SHOWS_TABS = [
+      "newTab",
+      "newPaneGroupTab",
+      "newSshTab",
+      "openFileTab",
+      "splitActivePane",
+      "focusPane",
+      "focusNextPaneInTab",
+      "moveLeafToTab",
+      "moveLeafToNewTab",
+      // The three the chord-shaped enumeration missed. All three are reached
+      // from the header, which stays on screen above a rail view.
+      "rotateLeafSplit",
+      "reorderLeafInGroup",
+      "movePaneLeafToEdge",
+    ];
+    /** Removals. They re-point `activeId` and must KEEP the view - closing a
+     *  background tab from the strip X is not a request to leave the Vault
+     *  (decision in force). Already asserted in full below. */
+    const KEEPS_VIEW = ["closePaneByLeaf"];
+    /**
+     * Writes a tree and deliberately does NOT show the tabs, with the reason.
+     * One entry, and it has to earn it: `setSplitSizes` persists the ratio a
+     * divider drag produced. It changes no membership and no focus, and the
+     * divider it comes from is inside the covered surface - so unlike the
+     * header menus, there is no affordance that can fire it while a view is up.
+     * Showing the tabs on a ratio write would also mean a drag that lands
+     * mid-animation could yank the user out of the Vault.
+     */
+    const NOT_A_ROUTE_IN = ["setSplitSizes"];
+
+    const declared = new Set([...SHOWS_TABS, ...KEEPS_VIEW, ...NOT_A_ROUTE_IN]);
+    for (const name of SHOWS_TABS) {
+      const body = tabsBodies.get(name);
+      check(`${name} is still a callback in useTabs`, body !== undefined, [...tabsBodies.keys()]);
+      check(
+        `${name} writes a pane tree - the reason it is on this list`,
+        body !== undefined && TREE_WRITE.test(body),
+      );
+      check(
+        `${name} shows the tabs, so its result is not applied behind a rail view`,
+        body !== undefined && (/\bsetActiveId\(/.test(body) || /\bshowTabs\(/.test(body)),
+      );
+    }
+    for (const name of NOT_A_ROUTE_IN) {
+      const body = tabsBodies.get(name);
+      check(`${name} is still a callback in useTabs`, body !== undefined);
+      check(`${name} writes a pane tree`, body !== undefined && TREE_WRITE.test(body));
+      check(
+        `${name} deliberately does NOT show the tabs`,
+        body !== undefined && !/\bsetActiveId\(/.test(body) && !/\bshowTabs\(/.test(body),
+      );
+    }
+    // THE CLOSURE. Every pane-tree writer must be spoken for; a new one that is
+    // not fails here by name. This is the check the round before this one did
+    // not have, and its absence is the whole of §4.29.
+    const treeWriters = [...tabsBodies.entries()]
+      .filter(([, b]) => TREE_WRITE.test(b))
+      .map(([n]) => n);
+    check(
+      "at least the known pane-tree writers were found, so the scan is not empty",
+      treeWriters.length >= SHOWS_TABS.length,
+      treeWriters,
+    );
+    check(
+      "no pane-tree write in useTabs is unaccounted for",
+      treeWriters.every((n) => declared.has(n)),
+      treeWriters.filter((n) => !declared.has(n)),
+    );
+  }
+
+  // ---- 8c. the two CLOSING chords refuse while a view is up --------------
+  // The one place the rule is enforced at the chord rather than at the
+  // mutation, and it has to be: `closeTab` / `closePaneByLeaf` are shared with
+  // the tab-strip X, which names the tab it closes, is on screen, and must keep
+  // leaving the user in the view. A chord names "the active tab", which is
+  // exactly what the view has taken off screen - so it does nothing instead of
+  // ending a session with no feedback.
+  //
+  // Source-text: `shortcutHandlers.ts` imports through the `@/` alias, which
+  // this suite has no bundler to resolve. Weaker than driving the handler.
+  console.log("\n[chords] a closing chord does nothing while a rail view covers the tabs");
+  {
+    const src = stripQuotesAwareComments(read("src/app/lib/shortcutHandlers.ts"));
+    /** The body of the `"<id>": ...` entry, up to the next handler key. */
+    const handlerBody = (id: string): string | null => {
+      const at = src.indexOf(`"${id}": `);
+      if (at === -1) return null;
+      const rest = src.slice(at);
+      const next = /\n\s{4}(?:\/|"[a-zA-Z]+\.)/.exec(rest.slice(1));
+      return next ? rest.slice(0, next.index + 1) : rest;
+    };
+    /** Deps whose call ENDS something the user cannot see behind a view. */
+    const DESTRUCTIVE = ["handleCloseTabOrPane", "requestCloseLeaf"];
+    const CLOSING_CHORDS = ["tab.close", "terminal.close"];
+    for (const id of CLOSING_CHORDS) {
+      const body = handlerBody(id);
+      check(`found the ${id} handler`, body !== null);
+      check(
+        `${id} asks whether a rail view is covering the tabs`,
+        body !== null && /coveredByRailView\(\)/.test(body),
+        body,
+      );
+      check(
+        `${id} returns on that answer rather than closing anyway`,
+        body !== null && /if \(coveredByRailView\(\)\) return;/.test(body),
+      );
+      check(
+        `${id} still calls its close dep when it is not covered`,
+        body !== null && DESTRUCTIVE.some((d) => new RegExp(`\\b${d}\\(`).test(body)),
+      );
+    }
+    check(
+      "the refusal reads the railView dep, so it cannot be a constant",
+      /railView !== null/.test(src) && /railView,/.test(src),
+    );
+    // Closure: no OTHER chord may reach a destructive dep without the guard.
+    // Written as a scan of the whole handler map rather than a list of the two
+    // ids, so a third closing chord added later fails here.
+    const guarded = new Set(CLOSING_CHORDS);
+    const handlerIds = [...src.matchAll(/\n\s{4}"([a-zA-Z]+\.[a-zA-Z]+)":/g)].map((m) => m[1]);
+    check("found the handler map to scan", handlerIds.length > 10, handlerIds.length);
+    const unguarded = handlerIds.filter((id) => {
+      if (guarded.has(id)) return false;
+      const body = handlerBody(id) ?? "";
+      return DESTRUCTIVE.some((d) => new RegExp(`\\b${d}\\(`).test(body));
+    });
+    check(
+      "no other chord calls a close dep without the rail-view guard",
+      unguarded.length === 0,
+      unguarded,
+    );
+    // And the constructive chords must NOT carry it: they leave the view
+    // through `useTabs` and show the user their own result, so a guard here
+    // would turn Ctrl+T back into the "does nothing at all" this item opened
+    // with. The negative half of the refusal (§4.30).
+    for (const id of ["tab.new", "pane.splitRight", "pane.splitDown", "pane.focusNext"]) {
+      const body = handlerBody(id);
+      check(`found the ${id} handler`, body !== null);
+      check(
+        `${id} does NOT refuse under a rail view - it clears it instead`,
+        body !== null && !/coveredByRailView/.test(body),
+        body,
+      );
+    }
   }
 
   const setViewWriters = [...tabsBodies.entries()]
