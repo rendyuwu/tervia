@@ -4,8 +4,12 @@
     "windows": [
       {
         "label": "main",
+        "title": "Tervia",
         "decorations": false,
-        "transparent": true
+        "transparent": true,
+        "visible": false,
+        "minWidth": 420,
+        "minHeight": 280
       }
     ]
   },

@@ -8,7 +8,9 @@
         "decorations": false,
         "transparent": true,
         "visible": false,
-        "shadow": false
+        "shadow": false,
+        "minWidth": 420,
+        "minHeight": 280
       }
     ]
   },
