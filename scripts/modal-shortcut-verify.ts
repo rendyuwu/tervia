@@ -36,7 +36,59 @@ import { fileURLToPath } from "node:url";
 import { dirname, join, relative } from "node:path";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const read = (p: string) => readFileSync(join(root, p), "utf8");
+
+/**
+ * A line with its trailing `//` comment removed, string literals respected.
+ *
+ * VLT-33; canonical copy in `scripts/host-editor-verify.ts`, duplicated here on
+ * purpose (no shared module between these scripts, and no `scripts/lib`). A
+ * character scan rather than a regex: a `//` inside a string is not a comment,
+ * and a regex alternation over string literals desyncs on the first unbalanced
+ * quote and then eats real code. This loses the strip for that one line -
+ * failing towards KEEPING text.
+ */
+function stripLineComment(line: string): string {
+  let quote = "";
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (quote) {
+      if (c === "\\") i++;
+      else if (c === quote) quote = "";
+      continue;
+    }
+    if (c === '"' || c === "'" || c === "`") {
+      quote = c;
+      continue;
+    }
+    if (c === "/" && line[i + 1] === "/") return line.slice(0, i);
+  }
+  return line;
+}
+
+function stripComments(src: string): string {
+  return src
+    .split("\n")
+    .filter((line) => {
+      const t = line.trim();
+      return !(t.startsWith("//") || t.startsWith("/*") || t.startsWith("*"));
+    })
+    .map(stripLineComment)
+    .join("\n");
+}
+
+/**
+ * Every source-text check in this file is POSITIVE - "this expression is
+ * present" - which is exactly the shape a comment satisfies (VLT-33). This file
+ * read raw text until now, so `return openModal(modalName);` deleted and left
+ * behind as `// return openModal(modalName);` would have passed every wiring
+ * check below.
+ *
+ * The coverage and bypass scans further down read through the same stripper on
+ * purpose: a commented-out `createPortal` or `<Dialog>` is not a modal, and
+ * reporting one as an uncovered bypass is a false finding somebody then has to
+ * chase.
+ */
+const read = (p: string) => stripComments(readFileSync(join(root, p), "utf8"));
 
 let failed = 0;
 function check(name: string, ok: boolean, detail?: unknown): void {
@@ -116,7 +168,7 @@ function walk(dir: string, match: RegExp, out: string[] = []): string[] {
 // BEHAVIOURAL - the registry itself
 // ============================================================================
 console.log("[behavioural] modalRegistry counting");
-const { openModal, isModalOpen, __resetModalRegistryForTest } =
+const { openModal, isModalOpen, isTopModal, COMMAND_PALETTE_MODAL, __resetModalRegistryForTest } =
   await import("../src/modules/shortcuts/lib/modalRegistry");
 
 __resetModalRegistryForTest();
@@ -154,14 +206,68 @@ console.log("[behavioural] idempotent release: leak-safety building block");
   check("clean after", isModalOpen() === false);
 }
 
+console.log("[behavioural] which modal is on TOP (VLT-59: the palette exemption)");
+{
+  __resetModalRegistryForTest();
+  check(
+    // Nothing open is NOT an exemption: the gate asks isModalOpen() first, and
+    // this must not answer "yes, the palette" to a stack with nothing in it.
+    "with nothing open, no name is on top",
+    !isTopModal(COMMAND_PALETTE_MODAL),
+  );
+
+  // The repro, in the order the user performs it: the host editor is up, then
+  // Mod+Shift+P. The palette is not open, so it is not on top, so the chord is
+  // gated - which is the whole fix. Keyed by chord identity this returned
+  // "exempt" and the palette opened over the editor.
+  const releaseEditor = openModal();
+  check(
+    "host editor open -> the palette is not the topmost modal",
+    !isTopModal(COMMAND_PALETTE_MODAL),
+  );
+  check("and something IS open, so the gate applies", isModalOpen());
+
+  // THE NEGATIVE HALF (§4.30): the case the exemption exists for must still
+  // work, or this is just the suppression with extra steps.
+  releaseEditor();
+  const releasePalette = openModal(COMMAND_PALETTE_MODAL);
+  check(
+    "palette alone -> it IS topmost, so its own chord still closes it",
+    isTopModal(COMMAND_PALETTE_MODAL),
+  );
+
+  // A confirm stacked OVER the palette: the palette is still open, but it is no
+  // longer what the user is looking at, so the chord must not reach past the
+  // thing on top of it. "Open" and "topmost" are different questions and this
+  // is the fixture where they disagree.
+  const releaseConfirm = openModal();
+  check("a dialog stacked over it -> no longer topmost", !isTopModal(COMMAND_PALETTE_MODAL));
+  releaseConfirm();
+  check("that dialog closing gives the palette the top back", isTopModal(COMMAND_PALETTE_MODAL));
+
+  // Out-of-order close: a modal BELOW the top going away first (a form
+  // force-unmounted while its confirm is up) must remove its own entry, not pop
+  // whatever happens to be last.
+  const releaseUnder = openModal("under");
+  const releaseOver = openModal("over");
+  releaseUnder();
+  check("closing a modal below the top leaves the top alone", isTopModal("over"));
+  releaseOver();
+  check("and the palette is back on top once both are gone", isTopModal(COMMAND_PALETTE_MODAL));
+  releasePalette();
+  check("everything released -> closed", isModalOpen() === false);
+  check("and nothing is on top", !isTopModal(COMMAND_PALETTE_MODAL));
+}
+
 // ============================================================================
 // SOURCE-TEXT - the wiring the behavioural test above can't reach
 // ============================================================================
 console.log("[source-text] useGlobalShortcuts gates on isModalOpen() before dispatch");
 const useGlobalShortcuts = read("src/modules/shortcuts/lib/useGlobalShortcuts.ts");
 check(
-  "imports isModalOpen from the registry",
-  /import\s*\{\s*isModalOpen\s*\}\s*from\s*"\.\/modalRegistry"/.test(useGlobalShortcuts),
+  "imports isModalOpen and isTopModal from the registry",
+  /import\s*\{[^}]*\bisModalOpen\b[^}]*\}\s*from\s*"\.\/modalRegistry"/.test(useGlobalShortcuts) &&
+    /import\s*\{[^}]*\bisTopModal\b[^}]*\}\s*from\s*"\.\/modalRegistry"/.test(useGlobalShortcuts),
 );
 {
   // Item 1 (palette toggle chord): the gate is scoped to the MATCHED
@@ -177,16 +283,28 @@ check(
   check("found the onKey handler body", onKeyMatch !== null);
   const onKeyBody = onKeyMatch?.[1] ?? "";
   const continueIdx = onKeyBody.indexOf("if (!isMatch) continue;");
+  // The gate now asks the modal STACK, not the chord's identity: `isModalOpen()`
+  // decides whether it applies at all, and the exempt chord gets through only
+  // while the modal it names is the topmost one. A gate that still reads
+  // `MODAL_GATE_EXEMPT.has(...)` is VLT-59(b) back again, so the shape is
+  // pinned rather than merely "isModalOpen appears somewhere".
   const gateMatch =
-    /if\s*\(\s*isModalOpen\(\)\s*&&\s*!MODAL_GATE_EXEMPT\.has\(s\.id\)\s*\)\s*return\s*;/.exec(
+    /if\s*\(\s*isModalOpen\(\)\s*&&\s*\(\s*mayActOn === undefined\s*\|\|\s*!isTopModal\(mayActOn\)\s*\)\s*\)\s*return\s*;/.exec(
       onKeyBody,
     );
   const handlerCallIdx = onKeyBody.indexOf("h(e);");
   check("onKey checks isMatch before deciding anything else", continueIdx !== -1);
   check(
-    "onKey has an `if (isModalOpen() && !MODAL_GATE_EXEMPT.has(s.id)) return;` gate",
+    "onKey gates on isModalOpen() plus the matched chord's topmost target",
     gateMatch !== null,
     { onKeyBody: onKeyBody.slice(0, 160) },
+  );
+  check(
+    // The straight revert of the fix: exempting by membership means exempting
+    // the chord wherever it is pressed, which is what opened the palette over
+    // the host editor.
+    "the gate does NOT exempt by chord identity alone",
+    !/MODAL_GATE_EXEMPT\.has\(/.test(onKeyBody),
   );
   check(
     "the gate runs AFTER the match is known and BEFORE the handler fires",
@@ -200,31 +318,74 @@ check(
 
 console.log("[source-text] MODAL_GATE_EXEMPT holds exactly the one documented exception");
 {
-  // Pinned deliberately, not a restatement: item 1's whole safety argument is
-  // that this set stays a single pure-toggle id (see the comment above it in
-  // useGlobalShortcuts.ts). A silent addition here IS the "hole" that
-  // comment warns against, so growing the set - even by one id - must show
-  // up as a reddened check here, not slip through as an unreviewed one-line
-  // diff.
+  // Pinned deliberately, not a restatement: the whole safety argument is that
+  // this map stays a single pure-toggle id pointing at its OWN dialog (see the
+  // comment above it in useGlobalShortcuts.ts). A silent addition here IS the
+  // "hole" that comment warns against, so growing it - even by one id - must
+  // show up as a reddened check, not slip through as an unreviewed one-line
+  // diff. The VALUE is checked too: an entry naming some other modal would
+  // exempt the chord over a dialog it does not own, which is the same defect
+  // with a different spelling.
   const exemptMatch = useGlobalShortcuts.match(
-    /MODAL_GATE_EXEMPT:\s*ReadonlySet<ShortcutId>\s*=\s*new Set\(\[([^\]]*)\]\)/,
+    /MODAL_GATE_EXEMPT:\s*ReadonlyMap<ShortcutId,\s*string>\s*=\s*new Map\(\[([\s\S]*?)\]\)/,
   );
-  check("found the MODAL_GATE_EXEMPT declaration", exemptMatch !== null);
-  const exemptIds = (exemptMatch?.[1] ?? "")
-    .split(",")
-    .map((s) => s.trim().replace(/^["']|["']$/g, ""))
-    .filter(Boolean);
+  check("found the MODAL_GATE_EXEMPT declaration, as a Map of id -> modal", exemptMatch !== null);
+  const entries = [
+    ...(exemptMatch?.[1] ?? "").matchAll(/\[\s*"([^"]+)"\s*,\s*([A-Za-z_$][\w$]*)/g),
+  ];
   check(
-    "it holds exactly one id, commandPalette.open, and nothing else",
-    exemptIds.length === 1 && exemptIds[0] === "commandPalette.open",
-    exemptIds,
+    "it holds exactly one entry, commandPalette.open",
+    entries.length === 1 && entries[0][1] === "commandPalette.open",
+    entries.map((m) => m[1]),
+  );
+  check(
+    "and it names the palette's own modal, by the shared constant",
+    entries.length === 1 && entries[0][2] === "COMMAND_PALETTE_MODAL",
+    entries.map((m) => m[2]),
+  );
+}
+
+console.log("[source-text] the palette registers under the name the gate asks for");
+{
+  // The two ends of the name. A gate that asks about "commandPalette" while the
+  // dialog registers anonymously is a gate that suppresses the palette's own
+  // toggle again - and it would fail silently, since Escape still closes it.
+  const dialog = read("src/components/ui/dialog.tsx");
+  check(
+    "Dialog takes a modalName and passes it to openModal",
+    /modalName\?:\s*string/.test(dialog) && /openModal\(modalName\)/.test(dialog),
+  );
+  check(
+    // Radix has no such prop; forwarding it would put an unknown attribute on
+    // the DOM node.
+    "and destructures it out rather than spreading it into Radix",
+    /function Dialog\(\{[\s\S]*?modalName,[\s\S]*?\.\.\.props/.test(dialog),
+  );
+  const palette = read("src/modules/commandPalette/CommandPalette.tsx");
+  check(
+    "the palette passes modalName={COMMAND_PALETTE_MODAL}",
+    /modalName=\{COMMAND_PALETTE_MODAL\}/.test(palette),
+  );
+  check(
+    "imported from the shortcuts module, not spelled out again",
+    /COMMAND_PALETTE_MODAL[\s\S]*?from "@\/modules\/shortcuts"/.test(palette),
+  );
+  const registry = read("src/modules/shortcuts/lib/modalRegistry.ts");
+  check(
+    // A pop would drop the wrong entry when a modal below the top closes first.
+    "the registry removes an entry by identity, not by popping",
+    /stack\.splice\(at, 1\)/.test(registry) && !/stack\.pop\(\)/.test(registry),
   );
 }
 
 console.log("[source-text] the two primitives register on open, release on close/unmount");
-for (const [file, comp] of [
-  ["src/components/ui/dialog.tsx", "Dialog"],
-  ["src/components/ui/alert-dialog.tsx", "AlertDialog"],
+// `Dialog` alone can be handed a name to register under (VLT-59), so it calls
+// `openModal(modalName)` and carries that in its dep array. Spelled out per
+// primitive rather than as one loose pattern: a check that accepted "any
+// argument, any deps" would stop noticing the mechanism it is here to pin.
+for (const [file, comp, arg, deps] of [
+  ["src/components/ui/dialog.tsx", "Dialog", "modalName", "open, modalName"],
+  ["src/components/ui/alert-dialog.tsx", "AlertDialog", "", "open"],
 ] as const) {
   const text = read(file);
   check(`${comp}: imports openModal`, /import\s*\{\s*openModal\s*\}/.test(text));
@@ -245,9 +406,9 @@ for (const [file, comp] of [
     check(`${comp}: the useEffect(...) call's parens balance`, closeParenIdx !== -1);
     const call = closeParenIdx !== -1 ? text.slice(openParenIdx, closeParenIdx + 1) : "";
     const guardAt = call.search(/if\s*\(\s*!open\s*\)\s*return\s*;/);
-    const registerAt = call.search(/return\s+openModal\(\)\s*;/);
+    const registerAt = call.search(new RegExp(`return\\s+openModal\\(${arg}\\)\\s*;`));
     check(`${comp}: the effect guards on !open before registering`, guardAt !== -1);
-    check(`${comp}: the effect returns openModal() as its cleanup`, registerAt !== -1);
+    check(`${comp}: the effect returns openModal(${arg}) as its cleanup`, registerAt !== -1);
     check(
       `${comp}: the guard runs BEFORE the registration, not after`,
       guardAt !== -1 && registerAt !== -1 && guardAt < registerAt,
@@ -256,7 +417,10 @@ for (const [file, comp] of [
     // `trailingComma: "all"`, so a hard-wrapped call gets one after the last
     // argument - a real reflow this check must not mistake for a change in
     // the deps array itself.
-    check(`${comp}: keyed on exactly [open]`, /,\s*\[\s*open\s*\]\s*,?\s*\)\s*$/.test(call));
+    const depsRe = new RegExp(
+      `,\\s*\\[\\s*${deps.replace(/,\s*/g, ",\\s*")}\\s*\\]\\s*,?\\s*\\)\\s*$`,
+    );
+    check(`${comp}: keyed on exactly [${deps}]`, depsRe.test(call), { call: call.slice(-80) });
   }
 }
 
@@ -334,12 +498,35 @@ for (const [consumers, tagName] of [
 // overlay, an explicit ARIA dialog role, or a manual portal - outside the ui/
 // primitives themselves. Any hit is a NOT COVERED finding to report, not to
 // silently fix here.
+const ROLE_DIALOG_TELL = /(?:^|[^[])role=["']dialog["']/;
+{
+  // The tell, self-tested against both directions before it is trusted on real
+  // files. Narrowing it to exclude a bracketed selector is only safe if it
+  // still catches the thing it is for; a tell that has been quietly relaxed
+  // into never matching reports "no bypass found" forever.
+  console.log("[coverage] the hand-rolled-modal tell, against its own fixtures");
+  check('fires on a JSX role="dialog" attribute', ROLE_DIALOG_TELL.test('  <div role="dialog">'));
+  check(
+    "fires on one at the very start of the text too",
+    ROLE_DIALOG_TELL.test('role="dialog" className="x"'),
+  );
+  check(
+    "does NOT fire on a CSS attribute selector asking about someone else's dialog",
+    !ROLE_DIALOG_TELL.test('const S = \'[role="menu"],[role="dialog"]\';'),
+  );
+  check("nor on an alertdialog selector", !ROLE_DIALOG_TELL.test("'[role=\"alertdialog\"]'"));
+}
 const bypassCandidates: string[] = [];
 for (const f of srcFiles) {
   const rel = relative(root, f);
   if (rel.startsWith("src/components/ui/")) continue; // the primitives themselves
   const text = read(rel);
-  if (/role=["']dialog["']/.test(text)) bypassCandidates.push(`${rel}: role="dialog"`);
+  // A JSX attribute, not a CSS attribute SELECTOR. `'[role="dialog"]'` inside a
+  // query string is code asking about somebody else's dialog, which is the
+  // opposite of hand-rolling one - and the bare substring reported every such
+  // selector as a bypass. The `[` is what tells them apart; see the fixtures
+  // above.
+  if (ROLE_DIALOG_TELL.test(text)) bypassCandidates.push(`${rel}: role="dialog"`);
   if (/createPortal/.test(text)) bypassCandidates.push(`${rel}: createPortal`);
   if (/fixed inset-0/.test(text)) bypassCandidates.push(`${rel}: "fixed inset-0"`);
 }

@@ -6,7 +6,18 @@ import { Button } from "@/components/ui/button";
 import { X } from "lucide-react";
 import { openModal } from "@/modules/shortcuts/lib/modalRegistry";
 
-function Dialog({ open, ...props }: React.ComponentProps<typeof DialogPrimitive.Root>) {
+function Dialog({
+  open,
+  modalName,
+  ...props
+}: React.ComponentProps<typeof DialogPrimitive.Root> & {
+  /** Registers this dialog under a name so `isTopModal` can be asked about it
+   *  (VLT-59). Only the Command Palette needs one: it is the single chord
+   *  allowed through the modal gate, and only while its own dialog is the one
+   *  on top. Everything else stays anonymous - being counted is all the gate
+   *  needs from it. Not forwarded to Radix, which has no such prop. */
+  modalName?: string;
+}) {
   // VLT-30: registered here, at the shared primitive, so every dialog built
   // on top of it suppresses global shortcuts while open - see modalRegistry.ts.
   // Keyed on `open` rather than an onOpenChange hook: every dialog in this
@@ -18,8 +29,8 @@ function Dialog({ open, ...props }: React.ComponentProps<typeof DialogPrimitive.
   // `open` prop) would NOT be covered by this and would need its own fix.
   React.useEffect(() => {
     if (!open) return;
-    return openModal();
-  }, [open]);
+    return openModal(modalName);
+  }, [open, modalName]);
 
   return <DialogPrimitive.Root data-slot="dialog" open={open} {...props} />;
 }

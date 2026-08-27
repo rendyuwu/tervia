@@ -2,7 +2,7 @@ import { useEffect, useRef } from "react";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import { SHORTCUTS, matchBinding, type ShortcutId } from "../shortcuts";
 import { registerCommand, unregisterCommand } from "./commandRegistry";
-import { isModalOpen } from "./modalRegistry";
+import { COMMAND_PALETTE_MODAL, isModalOpen, isTopModal } from "./modalRegistry";
 
 export type ShortcutHandler = (e: KeyboardEvent) => void;
 export type ShortcutHandlers = Partial<Record<ShortcutId, ShortcutHandler>>;
@@ -16,22 +16,29 @@ export type ShortcutHandlers = Partial<Record<ShortcutId, ShortcutHandler>>;
  * (Escape and outside-click still could, so this was never a stranding bug,
  * just a toggle that stopped toggling).
  *
- * Safe to exempt because `commandPalette.open`'s handler is
- * `setCommandPaletteOpen(prev => !prev)` and nothing else (see
- * `shortcutHandlers.ts`) - it only flips the palette's own visibility, the
- * same class of action Radix's Escape-to-close already reaches through a
- * modal untouched by this gate. It does not read or write any OTHER dialog's
- * state, so firing it while a *different* modal is open cannot do what
- * VLT-30 forbids: mutate app state the user can't see behind that modal.
+ * THE EXEMPTION IS ON THE TARGET, NOT ON THE CHORD (VLT-59). Keyed by id
+ * alone it read "this chord is always allowed through", and the justification
+ * offered for that - the handler is `setCommandPaletteOpen(prev => !prev)` and
+ * touches no other dialog's state - is true of the palette CLOSING ITSELF and
+ * false of it OPENING over something else: with the host editor up,
+ * Mod+Shift+P put the palette on top of a form the user was mid-edit in, which
+ * is the modal-stacking version of exactly what VLT-30 forbids. So the value
+ * here is the modal the chord may act on, and the gate asks whether that modal
+ * is the one currently on TOP of the stack. Palette on top -> the chord can
+ * only be closing it -> let it through. Anything else on top - the host editor,
+ * or a confirm stacked over the palette itself - -> suppressed like every other
+ * chord.
+ *
+ * Keep this map to exactly this one entry. Anything added here must have the
+ * same shape - a pure open/closed toggle of its OWN named dialog's visibility
+ * and nothing more - never a chord whose handler touches tab/pane/editor/
+ * session state, which is exactly the class of chord VLT-30 exists to keep out.
  * `tab.newEditor` and `tab.newAgent` open dialogs too, but with `set(true)`,
  * not a toggle, so they have no closing half to exempt and stay fully gated.
- *
- * Keep this set to exactly this one id. Anything added here must have the
- * same shape - a pure open/closed toggle of its OWN dialog's visibility and
- * nothing more - never a chord whose handler touches tab/pane/editor/session
- * state, which is exactly the class of chord VLT-30 exists to keep out.
  */
-const MODAL_GATE_EXEMPT: ReadonlySet<ShortcutId> = new Set(["commandPalette.open"]);
+const MODAL_GATE_EXEMPT: ReadonlyMap<ShortcutId, string> = new Map([
+  ["commandPalette.open", COMMAND_PALETTE_MODAL],
+]);
 
 export type UseGlobalShortcutsOptions = {
   isDisabled?: (id: ShortcutId, e: KeyboardEvent) => boolean;
@@ -70,7 +77,11 @@ export function useGlobalShortcuts(
         const isMatch = bindings.some((b) => matchBinding(e, b, s.id));
         if (!isMatch) continue;
 
-        if (isModalOpen() && !MODAL_GATE_EXEMPT.has(s.id)) return;
+        // The modal the matched chord is allowed to act on, if any. Undefined
+        // for every chord but one; `isTopModal` then decides whether that one
+        // modal is the one the user is actually looking at.
+        const mayActOn = MODAL_GATE_EXEMPT.get(s.id);
+        if (isModalOpen() && (mayActOn === undefined || !isTopModal(mayActOn))) return;
         if (options?.isDisabled?.(s.id, e)) return;
         const h = handlers[s.id];
         if (!h) return;

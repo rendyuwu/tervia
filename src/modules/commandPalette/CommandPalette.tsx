@@ -9,7 +9,7 @@ import {
   type Shortcut,
   type ShortcutId,
 } from "@/modules/shortcuts/shortcuts";
-import { runCommand } from "@/modules/shortcuts";
+import { COMMAND_PALETTE_MODAL, runCommand } from "@/modules/shortcuts";
 import { Kbd } from "@/components/ui/kbd";
 import { KEY_SEP } from "@/lib/platform";
 import { fileIconUrl } from "@/modules/explorer/lib/iconResolver";
@@ -145,6 +145,12 @@ function CommandPaletteImpl({ open, onOpenChange, explorerRoot, onOpenFile }: Pr
     <CommandDialog
       open={open}
       onOpenChange={onOpenChange}
+      // Names this dialog in the modal stack (VLT-59). `commandPalette.open` is
+      // the one chord exempt from the modal gate, and the exemption applies
+      // only while THIS dialog is the topmost open modal - so the chord can
+      // close the palette but cannot open it over the host editor. Threaded
+      // straight through `CommandDialog`'s `{...props}` into `Dialog`.
+      modalName={COMMAND_PALETTE_MODAL}
       title="Command Palette"
       description="Search for a command to run..."
       className="sm:max-w-lg"
