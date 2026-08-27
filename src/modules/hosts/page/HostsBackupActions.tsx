@@ -1,10 +1,12 @@
 /**
  * Import/Export live here because the Hosts page replaced the header SSH
  * dropdown that used to own these two actions (`SshMenu.tsx`, before 6d).
- * Ported near verbatim - the state, the dialog, and the pick-then-read-then-open
- * ordering in `openImport` below are unchanged, only the presentation (two page
- * buttons instead of two menu items) and the error placement (next to the
- * buttons instead of inside a menu that has already closed by then) differ.
+ * Ported near verbatim - the state and the dialog are unchanged, only the
+ * presentation (two page buttons instead of two menu items) and the error
+ * placement (next to the buttons instead of inside a menu that has already
+ * closed by then) differ. `openImport`'s ordering gained one more step in
+ * VLT-60: the envelope is validated between the read and the dialog opening,
+ * not only picked-then-read-then-opened.
  *
  * The payload this writes and reads is still backup **v2** - SSH and RDP hosts
  * and their credentials, sealed as one blob. 6g takes it to v3, where
@@ -16,7 +18,7 @@ import { Button } from "@/components/ui/button";
 import { toast } from "@/components/ui/toast";
 import type { FsReadResult } from "@/lib/ipc";
 import type { BackupMode } from "@/modules/ssh/SshBackupDialog";
-import { BACKUP_EXTENSION, BACKUP_EXTENSION_V1 } from "@/modules/ssh/backupFile";
+import { BACKUP_EXTENSION, BACKUP_EXTENSION_V1, parseBackupFile } from "@/modules/ssh/backupFile";
 import { invoke } from "@tauri-apps/api/core";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { Download, Upload } from "lucide-react";
@@ -43,9 +45,9 @@ export function HostsBackupActions(): ReactNode {
     setBackupOpen(true);
   };
 
-  // The file is picked and read BEFORE the dialog opens, so an unreadable or
-  // wrong-type file is rejected up front instead of after the user has typed a
-  // passphrase for it.
+  // The file is picked, read, AND its envelope validated - all before the
+  // dialog opens - so an unreadable, wrong-type, or plainly non-Tervia file is
+  // rejected up front instead of after the user has typed a passphrase for it.
   const openImport = async () => {
     try {
       const selected = await openFileDialog({
@@ -63,6 +65,30 @@ export function HostsBackupActions(): ReactNode {
       const result = await invoke<FsReadResult>("fs_read_file", { path });
       if (result.kind !== "text") {
         toast("That file is not a UTF-8 text file.", { variant: "error" });
+        return;
+      }
+      // The envelope - kind, version, and for v2 the presence of a sealed
+      // payload block - is exactly what `parseBackupFile` can establish WITHOUT
+      // a passphrase: v2 seals the inventory itself, but not the wrapper around
+      // it, and v1's inventory is plaintext anyway. Checking it here, before the
+      // dialog ever asks for a secret, means a plainly non-Tervia file is
+      // rejected on the pick instead of after the user has typed a passphrase
+      // for a file that was never going to be read. `applyBackup` runs this
+      // same check again on its own input regardless - a function reachable on
+      // its own should not trust that some caller already validated it - so
+      // this is a duplicate ahead of the prompt, not a relocation of the only
+      // check.
+      let raw: unknown;
+      try {
+        raw = JSON.parse(result.content);
+      } catch {
+        toast("That file is not valid JSON.", { variant: "error" });
+        return;
+      }
+      try {
+        parseBackupFile(raw);
+      } catch (e) {
+        toast(e instanceof Error ? e.message : String(e), { variant: "error" });
         return;
       }
       setBackup({ kind: "import", path, text: result.content });

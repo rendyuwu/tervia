@@ -10,6 +10,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
+import { toast } from "@/components/ui/toast";
 import { applyBackup, buildBackup, type ImportResult } from "./backup";
 import { BACKUP_EXTENSION } from "./backupFile";
 import { invoke } from "@tauri-apps/api/core";
@@ -78,7 +79,22 @@ export function SshBackupDialog({ open, onOpenChange, mode }: Props) {
         setDone(summarize(result));
       }
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      const message = e instanceof Error ? e.message : String(e);
+      if (isExport) {
+        // Export's failure stays inline - consolidating it with import's is
+        // VLT-36's deferred "three surfaces become one" half, out of scope here.
+        setError(message);
+      } else {
+        // Import's failure routes through the shared toast instead of the old
+        // inline line: a toast self-expires, carries its own dismiss `×`, and
+        // outlives this dialog closing, where the inline line vanished only
+        // when the DIALOG did - so retyping a wrong passphrase, giving up, and
+        // closing left nothing behind for the user to reread. See
+        // HostsBackupActions.tsx's openImport for the same treatment of a bad
+        // file PICK; this is the same failure one step later, after the file
+        // was accepted and a passphrase typed for it.
+        toast(message, { variant: "error" });
+      }
     } finally {
       setBusy(false);
     }
