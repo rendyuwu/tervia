@@ -314,11 +314,12 @@ function PageLeafBody({ page, onScreen }: { page: TabPageKind; onScreen: boolean
           // splits Hosts beside a terminal, switching to that tab would
           // otherwise pull the caret out of the terminal and into this page's
           // search box. Single-leaf Hosts tabs - the ordinary case - are always
-          // the focused pane, so nothing changes for them.
-          //
-          // The prop is still named `tabVisible` on `HostsPage`; renaming it
-          // there is cosmetic and that file is held by another agent.
-          tabVisible={onScreen}
+          // the focused pane, so nothing changes for them. This is the
+          // ownership half of the caret contract; the timing half - a focus set
+          // during a tab switch being overwritten by the browser focusing the
+          // tab chip that was clicked - lives in `@/lib/paneCaret`, which both
+          // this page and every terminal claim through.
+          onScreen={onScreen}
         />
       );
   }

@@ -38,6 +38,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { InputGroup, InputGroupAddon, InputGroupInput } from "@/components/ui/input-group";
+import { paneCaret } from "@/lib/paneCaret";
 import { toast } from "@/components/ui/toast";
 import { VaultInUseError } from "@/modules/vault/types";
 import { useVault } from "@/modules/vault/useVault";
@@ -78,11 +79,14 @@ export type HostsPageProps = {
    *  for: a leaf body cannot call `useTabs`, so the callback arrives from the
    *  pane instead. */
   onConnect: (host: Host) => void;
-  /** Whether this page's tab is the one currently on screen. `PaneStack`
-   *  keeps an inactive tab's leaves mounted but `visibility:hidden`, which a
-   *  `.focus()` call cannot reach - so the search-input focus below has to
-   *  re-fire on becoming visible, not just once at mount. */
-  tabVisible: boolean;
+  /** "The user is looking at this page": its tab is the visible one AND this
+   *  leaf is the tab's active pane. `PaneStack` keeps an inactive tab's leaves
+   *  mounted but `visibility:hidden`, which a `.focus()` call cannot reach - so
+   *  the search-input focus below has to re-fire on becoming visible, not just
+   *  once at mount. The `focused` half is what keeps a Hosts page that shares a
+   *  split with a terminal from claiming the caret when the terminal is the
+   *  pane the user was working in. */
+  onScreen: boolean;
 };
 
 // Module constants so their IDENTITY is stable. Both are `useMemo` dependencies
@@ -140,7 +144,7 @@ function deleteKeychainNote(host: Host): string {
     : "Its saved credentials are removed from the keychain too.";
 }
 
-export function HostsPage({ onConnect, tabVisible }: HostsPageProps): ReactNode {
+export function HostsPage({ onConnect, onScreen }: HostsPageProps): ReactNode {
   const hostsById = useHosts();
   const groups = useHostGroups();
   const vault = useVault();
@@ -153,20 +157,45 @@ export function HostsPage({ onConnect, tabVisible }: HostsPageProps): ReactNode 
   const [pendingDelete, setPendingDelete] = useState<Host | null>(null);
 
   const searchRef = useRef<HTMLInputElement>(null);
+  const pageRef = useRef<HTMLDivElement>(null);
+  // Live copy for the deferred claim below, which is decided a frame after this
+  // effect runs and must not act on what was true when it was scheduled.
+  const onScreenRef = useRef(onScreen);
+  onScreenRef.current = onScreen;
   // §5.5: search is the primary navigation at 100 hosts, so the page opens with
   // the caret already in it. That is also the first half of the no-virtualization
   // plan (§12.6): search-first keeps the steady-state DOM a filtered handful, and
   // the card's own `content-visibility` covers the unfiltered case.
   //
-  // Keyed on `tabVisible`, not `[]`: `PaneStack` keeps a backgrounded tab's
+  // Keyed on `onScreen`, not `[]`: `PaneStack` keeps a backgrounded tab's
   // leaves mounted (`visibility:hidden`), so a mount-only effect fires once,
   // while the tab is not even visible yet, and never again - a Hosts tab
   // restored into the background loses this focus for good. Re-running on
   // every true transition covers both the fresh-open case (already visible at
   // mount) and every later switch back to an already-mounted tab.
+  //
+  // And it CLAIMS the caret rather than taking it. Taking it is what this did
+  // for two rounds, and it never worked from a tab click: the tab strip is a
+  // Radix `Tabs`, which changes value on mousedown, React 19 flushes this
+  // effect synchronously inside that same mousedown, and the browser then runs
+  // the mousedown's default action and focuses the tab chip - over the top of
+  // whatever this had just focused. `@/lib/paneCaret` has the measured
+  // sequence and hands the caret over one frame later instead, once that is
+  // done. R11.3/R11.5 are that bug; R11.6 is the same bug seen from the
+  // terminal's side.
   useEffect(() => {
-    if (tabVisible) searchRef.current?.focus();
-  }, [tabVisible]);
+    if (!onScreen) return;
+    paneCaret.claim(searchRef, {
+      // The whole leaf frame where there is one, so a click on this pane's own
+      // header buttons counts as "the caret is already in my pane" - the page
+      // root below does not contain them. `?? pageRef.current` covers a render
+      // outside the pane tree (a float window has no leaf frame).
+      pane: () => pageRef.current?.closest<HTMLElement>("[data-pane-leaf]") ?? pageRef.current,
+      stillOnScreen: () => onScreenRef.current,
+      take: () => searchRef.current?.focus(),
+    });
+    return () => paneCaret.release(searchRef);
+  }, [onScreen]);
 
   const hosts = useMemo(() => Array.from(hostsById.values()), [hostsById]);
   const knownGroupIds = useMemo(() => new Set(groups.map((g) => g.id)), [groups]);
@@ -289,7 +318,7 @@ export function HostsPage({ onConnect, tabVisible }: HostsPageProps): ReactNode 
     // anyone can find or lower. Per the owner: the pane minimums stay where
     // they are; `hosts-header-narrow-verify.ts` forces the container width
     // directly instead of relying on a hand test that cannot get here.
-    <div className="bg-background @container flex h-full w-full min-w-0 flex-col">
+    <div ref={pageRef} className="bg-background @container flex h-full w-full min-w-0 flex-col">
       <div className="flex flex-col gap-2 border-b p-3">
         {/* Every control below either has no hard-minimum floor, or collapses
             past one on its own `@container` threshold, and the protocol group
