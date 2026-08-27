@@ -130,6 +130,28 @@ export function decideSshConnectFailure(failure: SshConnectFailure): SshConnectF
 }
 
 /**
+ * VLT-57: did this attempt's host-key questions end in a refusal?
+ *
+ * `answers` holds one entry per ANSWER a first-connect prompt was given - the
+ * user's Trust, the user's Reject, or the rejection the app sends on its own
+ * behalf when whatever asked the question has gone away (`abandon`). Answers
+ * only. A prompt that was raised and never answered is not in the list at all,
+ * and that absence is the whole point: "asked but not trusted" is equally what a
+ * link dropping while the dialog is still on screen looks like from here, and
+ * that is a transport blip the ladder exists for. Deciding from what was RAISED
+ * mis-files it as a local refusal and parks it.
+ *
+ * ANY refusal counts - not the last answer, and not "every answer". A ProxyJump
+ * chain raises one question per hop, and trusting the bastion says nothing about
+ * whether the target's key was accepted, so a `true` must never be able to erase
+ * a `false`, in either order. That is the property a single "was one trusted?"
+ * latch loses the moment a connect has more than one hop.
+ */
+export function hostKeyRefused(answers: readonly boolean[]): boolean {
+  return answers.includes(false);
+}
+
+/**
  * Just the three fields that decide whether a credential can authenticate at
  * all. Structural on purpose (see the header): `ResolvedSshAuth` from the vault
  * module and `SshJumpHop` from the ssh bridge both satisfy it by shape, so the

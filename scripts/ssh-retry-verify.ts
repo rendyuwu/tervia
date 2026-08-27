@@ -25,10 +25,13 @@
  *      rot the way a list of message prefixes would.
  *   3. `decideSshConnectFailure` - only the transport category reconnects, and
  *      the two categories stay DISTINCT.
- *   4. Rust/TS parity for the mirrored guard and its wording.
- *   5. Source text: both catch sites actually consult the decision before
- *      reaching `scheduleSshReconnect`, and the pre-flight block marks what it
- *      throws. Pure functions that nobody calls fix nothing.
+ *   4. `hostKeyRefused` - an ANSWER decides, and any refusal in a chain counts.
+ *   5. Rust/TS parity for the mirrored guard and its wording.
+ *   6. Source text: at both catch sites the park arm lexically CONTROLS the
+ *      ladder call - it is a statement of the same block and it terminates it -
+ *      and the pre-flight block marks what it throws. Pure functions that nobody
+ *      calls fix nothing, and a gate that is merely NEAR the ladder is not a
+ *      gate (see the section's own header).
  */
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -38,6 +41,7 @@ import {
   canAuthenticate,
   classifySshConnectFailure,
   decideSshConnectFailure,
+  hostKeyRefused,
   SshLocalConnectError,
   type SshAuthAttempt,
 } from "../src/modules/terminal/lib/ssh-exit-decision";
@@ -175,6 +179,42 @@ console.log("\n[decideSshConnectFailure] only the transport category enters the 
 }
 
 // ============================================================================
+// HOST KEYS: which of them the frontend may call its own fault.
+//
+// The rejected shape is the one 76da6a5 shipped: `asked > trusted`, compared at
+// failure time. It reads "a prompt was raised and never trusted" as "the user
+// refused", and those are different worlds - a link that drops while the dialog
+// is still on screen leaves a prompt raised and untrusted with nobody having
+// refused anything, and parking it kills the ladder for exactly the blip the
+// ladder exists for. The row that pins it is the empty one.
+
+console.log("\n[hostKeyRefused] an ANSWER decides, and any refusal in a chain counts");
+{
+  // THE misfiling case, behaviourally: prompts were raised (that is why this is
+  // even asked) and none were answered, because the transport died underneath
+  // the dialog. Nothing was refused, so nothing is local, so the ladder stands.
+  assert(
+    !hostKeyRefused([]),
+    "no answer at all -> NOT a refusal (the link dropped while the prompt was still on screen)",
+  );
+  assert(!hostKeyRefused([true]), "the one key was trusted -> not a refusal");
+  assert(hostKeyRefused([false]), "the one key was refused -> a refusal");
+  // The ProxyJump property the counters were protecting, kept: one question per
+  // hop, and trusting the bastion says nothing about the target's key. Both
+  // orders, because a latch that records the LAST answer passes one and fails
+  // the other.
+  assert(
+    hostKeyRefused([true, false]),
+    "bastion trusted, target refused -> still a refusal (a trust cannot mask it)",
+  );
+  assert(
+    hostKeyRefused([false, true]),
+    "target refused, then another hop trusted -> order does not change the verdict",
+  );
+  assert(!hostKeyRefused([true, true]), "every hop in the chain trusted -> not a refusal");
+}
+
+// ============================================================================
 // RUST/TS PARITY: the pre-dial guard exists on both sides on purpose (the
 // frontend needs it to CLASSIFY, the backend keeps it for its other callers -
 // the forward tunnel and the host editor's Test probe). Two copies of a
@@ -229,12 +269,27 @@ console.log("\n[parity] the backend guard and its frontend mirror agree");
 }
 
 // ============================================================================
-// SOURCE TEXT: the decision has to be CONSULTED. Both retry sites are in files
-// that cannot be imported under plain node (ssh-session.ts reaches `window`
-// transitively - see the header of ssh-exit-decision.ts), and neither exposes
-// its catch block as a pure function, so this half is read rather than run.
-// Honest about its strength: weaker than the behavioural checks above, and
-// exactly as strong as it needs to be to catch "the gate was deleted".
+// SOURCE TEXT: the decision has to be CONSULTED, and it has to CONTROL the
+// ladder. Both retry sites are in files that cannot be imported under plain node
+// (ssh-session.ts reaches `window` transitively - see the header of
+// ssh-exit-decision.ts), and neither exposes its catch block as a pure function,
+// so this half is read rather than run.
+//
+// Read by SCOPE, never by distance - handoff §4.17. This section used to compare
+// character indices ("the gate's text comes before the ladder's in this block"),
+// and two mutants walked through it green:
+//
+//   * the park arm loses its `return`, so a local failure parks AND THEN walks
+//     1s + 3s + 7s. Every index assertion still held. That is VLT-57 restored in
+//     full, passing the check written to catch it.
+//   * `const decision = …; void decision; scheduleSshReconnect(…)`. The verdict
+//     is computed and dropped on the floor; `gate < ladder` cannot notice, and
+//     its own label claimed the ladder was gated.
+//
+// What is asserted instead: resolve the innermost statement list the ladder call
+// belongs to, and require a `parkSshConnectFailure` arm that is a sibling
+// statement of it, earlier in that same list, and that TERMINATES the list. No
+// index is compared to another index anywhere below.
 
 /** Index of the `}` matching the `{` at `openIdx`, or -1. */
 function matchingBrace(src: string, openIdx: number): number {
@@ -249,43 +304,219 @@ function matchingBrace(src: string, openIdx: number): number {
   return -1;
 }
 
-/** The source between `anchor`'s opening brace and its match. */
-function blockAfter(src: string, anchor: string): string | null {
-  const at = src.indexOf(anchor);
-  if (at === -1) return null;
-  const open = src.indexOf("{", at);
-  const close = matchingBrace(src, open);
-  return close === -1 ? null : src.slice(open, close);
+/** Every offset of `needle`, in source order. §4.17's "search by all matches,
+ *  not the first": one `indexOf` examines whichever occurrence happens to come
+ *  first, which is ordering luck rather than a check. */
+function allIndexes(src: string, needle: string): number[] {
+  const out: number[] = [];
+  for (let at = src.indexOf(needle); at !== -1; at = src.indexOf(needle, at + 1)) out.push(at);
+  return out;
 }
 
-console.log("\n[source-text] the first attempt's catch gates the ladder");
-{
-  const src = readTs("src/modules/terminal/lib/session-lifecycle.ts");
-  const body = blockAfter(src, "if (s.sshConnectionId) {");
-  assert(body !== null, "found the SSH branch of attachSession's spawn catch");
-  const gate = body?.indexOf("decideSshConnectFailure") ?? -1;
-  const ladder = body?.indexOf("scheduleSshReconnect") ?? -1;
-  assert(gate !== -1, "the SSH branch consults decideSshConnectFailure");
-  assert(ladder !== -1, "the SSH branch still has a scheduleSshReconnect path for transport drops");
-  assert(
-    gate !== -1 && ladder !== -1 && gate < ladder,
-    "the classification is consulted BEFORE the ladder is scheduled, not after",
-  );
-  assert(/parkSshConnectFailure\(/.test(body ?? ""), "a local failure parks instead of laddering");
+// ----------------------------------------------------------------------------
+// The scope walker, ported from scripts/rdp-lifetime-verify.ts. VLT-33 tracks
+// the duplication: these scripts exit on load, there is no scripts/lib to share
+// from, and a third divergent copy of "which block is this in" is worse than a
+// second identical one. The doc comments there carry the full reasoning.
+
+/** Does the `{` at `brace` open a statement list rather than a value? `)`, `>`,
+ *  `;`, `{`, `}` and the block keywords precede a BLOCK; `(`, `,`, `:`, `=`, `[`
+ *  and `$` all introduce a value, so the brace opens a literal. */
+function opensABlock(src: string, brace: number): boolean {
+  let i = brace - 1;
+  while (i >= 0 && /\s/.test(src[i])) i--;
+  if (i < 0) return true;
+  const prev = src[i];
+  if (")>;{}".includes(prev)) return true;
+  const word = /(\w+)$/.exec(src.slice(0, i + 1))?.[1] ?? "";
+  return word === "else" || word === "try" || word === "do" || word === "finally";
 }
 
-console.log("\n[source-text] the reconnect path gates the ladder too");
-{
-  const src = readTs("src/modules/terminal/lib/ssh-session.ts");
-  const body = blockAfter(src, "async function runSshReconnect(");
-  assert(body !== null, "found runSshReconnect");
-  const gate = body?.indexOf("decideSshConnectFailure") ?? -1;
-  const ladder = body?.lastIndexOf("scheduleSshReconnect") ?? -1;
-  assert(
-    gate !== -1 && ladder !== -1 && gate < ladder,
-    "attempts 2 and 3 re-run the classification rather than assuming the first attempt's verdict",
-  );
+/** Does the `}` at `brace` close a statement list? Its partner is found first,
+ *  because right-to-left a closing brace says nothing about what it closes. */
+function closesABlock(src: string, brace: number): boolean {
+  let depth = 0;
+  for (let i = brace; i >= 0; i--) {
+    if (src[i] === "}") depth++;
+    else if (src[i] === "{") {
+      depth--;
+      if (depth === 0) return opensABlock(src, i);
+    }
+  }
+  return false;
 }
+
+/** The innermost statement list containing `at`: where its block opens (-1 at
+ *  module scope), and the text of the list up to `at` with nested groups elided
+ *  and a `;` standing where a nested BLOCK closed. */
+function scopeOf(src: string, at: number): { block: number; before: string } {
+  let before = "";
+  let depth = 0;
+  for (let i = at - 1; i >= 0; i--) {
+    const c = src[i];
+    if (c === "}") {
+      if (depth === 0 && closesABlock(src, i)) before = ";" + before;
+      depth++;
+      continue;
+    }
+    if (c === "{") {
+      if (depth > 0) {
+        depth--;
+        continue;
+      }
+      if (opensABlock(src, i)) return { block: i, before };
+      continue;
+    }
+    if (depth === 0) before = c + before;
+  }
+  return { block: -1, before };
+}
+
+/** The condition of the innermost `if` whose block contains `start`, or "". */
+function guardAt(src: string, start: number): string {
+  let at = start;
+  if (at < 0) return "";
+  // Bounded rather than `for (;;)`: eight levels is more nesting than anything
+  // here has, and a bound cannot spin on a source this does not expect.
+  for (let level = 0; level < 8; level++) {
+    const { block, before } = scopeOf(src, at);
+    const parts = before.split(";");
+    const stmt = (parts[parts.length - 1] ?? "")
+      .trim()
+      .replace(/\b(?:void|await|return)$/, "")
+      .trim();
+    const own = /^if \((.*)\)$/s.exec(stmt);
+    if (own) return own[1];
+    // Some other statement head - a `for`, an arrow declaration, a call whose
+    // argument list this needle sits inside. Not a guard, and not something to
+    // look past either.
+    if (stmt.length > 0 || block < 0) return "";
+    at = block;
+  }
+  return "";
+}
+
+/**
+ * The statement list around the SOLE occurrence of `anchor`.
+ *
+ * `hits` is reported rather than swallowed because §4.17's cheap trap is an
+ * anchor that matches twice and an `indexOf` that takes whichever came first:
+ * this section's previous anchor, `if (s.sshConnectionId) {`, occurs TWICE in
+ * session-lifecycle.ts, and only source order put the spawn catch ahead of the
+ * status re-emit at the bottom of `attachSession`. Reordering the file would
+ * have silently pointed every assertion below at a block with no ladder in it -
+ * and a block with no ladder in it passes a check for an ungated ladder.
+ */
+function soleBlockAround(
+  src: string,
+  anchor: string,
+): { hits: number; open: number; close: number } {
+  const hits = allIndexes(src, anchor);
+  if (hits.length !== 1) return { hits: hits.length, open: -1, close: -1 };
+  const open = scopeOf(src, hits[0]).block;
+  return { hits: 1, open, close: open < 0 ? -1 : matchingBrace(src, open) };
+}
+
+/** Does this block body end by leaving the block, rather than falling out of the
+ *  bottom of it? The single question the index comparison could not ask, and the
+ *  one the "park loses its return" mutant turns on. */
+function terminates(body: string): boolean {
+  return /\b(?:return|throw)\b[^;{}]*;\s*$/.test(body);
+}
+
+/**
+ * The park arm that lexically CONTROLS the ladder call at `ladderAt`: an `if`
+ * whose block calls `parkSshConnectFailure`, whose block is a statement of the
+ * very list the ladder call is a statement of, and which comes earlier in it.
+ *
+ * Sibling-of, not near: an arm nested one level deeper, or sitting in the
+ * enclosing function rather than in this block, does not decide whether this
+ * call runs, and neither does one that follows it.
+ */
+function parkArmControlling(
+  src: string,
+  list: number,
+  ladderAt: number,
+): { guard: string; body: string } | null {
+  for (const p of allIndexes(src, "parkSshConnectFailure(")) {
+    if (p > ladderAt) continue;
+    const armOpen = scopeOf(src, p).block;
+    // -1 is the function DECLARATION of parkSshConnectFailure at module scope,
+    // which is not an arm of anything.
+    if (armOpen < 0) continue;
+    if (scopeOf(src, armOpen).block !== list) continue;
+    const armClose = matchingBrace(src, armOpen);
+    if (armClose === -1) continue;
+    return { guard: guardAt(src, p), body: src.slice(armOpen + 1, armClose) };
+  }
+  return null;
+}
+
+/**
+ * Both catch sites, asserted identically. The first attempt (session-lifecycle)
+ * and the ladder's own re-entry (ssh-session) have to answer the same question,
+ * so they are checked by one body of code rather than by two that could drift.
+ *
+ * Anchored on `isHostKeyMismatchError(e)`: the one statement that is unambiguous
+ * in BOTH files (the import spells the name without `(e)`), and one that belongs
+ * to this decision rather than to the logging around it - it is the other
+ * unretryable category, and it can only ever live in the connect-failure catch.
+ * Its uniqueness is asserted rather than assumed.
+ */
+function checkLadderSite(label: string, rel: string): void {
+  const src = readTs(rel);
+  const region = soleBlockAround(src, "isHostKeyMismatchError(e)");
+  assert(region.hits === 1, `${label}: the anchor occurs exactly once (found ${region.hits})`);
+  assert(
+    region.open >= 0 && region.close > region.open,
+    `${label}: resolved the connect-failure catch block around the anchor`,
+  );
+  if (region.open < 0 || region.close < 0) return;
+
+  const regionText = src.slice(region.open, region.close);
+  const verdict =
+    /(?:const|let)\s+(\w+)\s*=\s*decideSshConnectFailure\(\s*classifySshConnectFailure\(\s*e\s*,/.exec(
+      regionText,
+    );
+  assert(
+    verdict !== null,
+    `${label}: the catch classifies the error IT caught and keeps the verdict`,
+  );
+
+  const sites = allIndexes(src, "scheduleSshReconnect(").filter(
+    (at) => at > region.open && at < region.close,
+  );
+  assert(
+    sites.length === 1,
+    `${label}: exactly one scheduleSshReconnect call in that catch (found ${sites.length})`,
+  );
+  for (const at of sites) {
+    const list = scopeOf(src, at).block;
+    assert(list >= 0, `${label}: resolved the block that lexically controls the ladder call`);
+    const arm = list < 0 ? null : parkArmControlling(src, list, at);
+    assert(
+      arm !== null,
+      `${label}: a parkSshConnectFailure arm is a sibling statement of the ladder call, earlier in the same block`,
+    );
+    assert(
+      arm !== null && terminates(arm.body),
+      `${label}: the park arm TERMINATES that block - falling out of it parks AND ladders`,
+    );
+    assert(
+      arm !== null &&
+        verdict !== null &&
+        new RegExp(`\\b${verdict[1]}\\.action\\b`).test(arm.guard) &&
+        /"park"/.test(arm.guard),
+      `${label}: the arm is taken on the classifier's own verdict (guard: ${JSON.stringify(arm?.guard ?? "")})`,
+    );
+  }
+}
+
+console.log("\n[source-text] the first attempt's catch: the park arm controls the ladder");
+checkLadderSite("first attempt", "src/modules/terminal/lib/session-lifecycle.ts");
+
+console.log("\n[source-text] the ladder's own re-entry: same question, same answer");
+checkLadderSite("attempts 2 and 3", "src/modules/terminal/lib/ssh-session.ts");
 
 console.log("\n[source-text] nothing is dialled that could not authenticate");
 {
@@ -293,8 +524,14 @@ console.log("\n[source-text] nothing is dialled that could not authenticate");
   // Everything from the resolve block down to the dial itself: the property is
   // "asked BEFORE openSsh", so the region is bounded by the call rather than by
   // a brace, and a check that drifted below the dial would fall out of it.
-  const from = src.indexOf("let jumps: SshJumpHop[];");
-  const dial = src.indexOf("sshSession = await openSsh(", from === -1 ? 0 : from);
+  // Both bounds are asserted unambiguous - a second `await openSsh(` would make
+  // "before the dial" mean "before whichever one came first".
+  const fromHits = allIndexes(src, "let jumps: SshJumpHop[];");
+  const dialHits = allIndexes(src, "sshSession = await openSsh(");
+  assert(fromHits.length === 1, `one resolve block opens the region (found ${fromHits.length})`);
+  assert(dialHits.length === 1, `one dial closes it (found ${dialHits.length})`);
+  const from = fromHits.length === 1 ? fromHits[0] : -1;
+  const dial = dialHits.length === 1 ? dialHits[0] : -1;
   const body = from !== -1 && dial > from ? src.slice(from, dial) : null;
   assert(body !== null, "found the region between the resolve block and the dial");
   assert(
@@ -314,30 +551,78 @@ console.log("\n[source-text] nothing is dialled that could not authenticate");
   );
 }
 
-console.log("\n[source-text] a host key the user did not trust is a local decision");
+console.log("\n[source-text] a REFUSED host key is a local decision - an unanswered one is not");
 {
   const src = readTs("src/modules/terminal/lib/ssh-session.ts");
-  const handler = blockAfter(src, "onHostKeyPrompt: (prompt) => {");
-  assert(handler !== null, "found the onHostKeyPrompt handler");
-  const asked = handler?.indexOf("hostKeysAsked += 1") ?? -1;
-  const enqueue = handler?.indexOf("enqueue(prompt, () => {") ?? -1;
-  const trusted = handler?.indexOf("hostKeysTrusted += 1") ?? -1;
-  assert(asked !== -1, "every prompt raised by this attempt is counted");
-  // The load-bearing detail: the trusted counter lives INSIDE the accept
-  // callback. Bumped alongside `asked` in the handler it would always match,
-  // the comparison below would never fire, and a rejected key would quietly
-  // rejoin the ladder with all the other assertions still passing.
+
+  // A list of answers, not a latch on "was one trusted". The type is asserted
+  // because it is the multi-hop property in one token: a `boolean` cannot hold
+  // "the bastion said yes and the target said no", and a chain is exactly where
+  // the counters this replaces were pointed.
+  const record = /const (\w+): boolean\[\] = \[\];/.exec(src);
+  assert(record !== null, "the attempt keeps a LIST of host-key answers, not a single verdict");
+  // A name no identifier can have, so the assertions below fail loudly rather
+  // than searching for "" and matching at every offset in the file.
+  const answers = record?.[1] ?? "<no record>";
+
+  // The queue routes every answer through the prompt's own `confirm` - the
+  // user's Trust, the user's Reject, and the rejection `abandon` sends when
+  // whatever asked the question has gone away. Wrapping it is what lets the
+  // answer be recorded AS IT IS MADE instead of guessed at afterwards.
+  const enqueueHits = allIndexes(src, ".enqueue(");
+  const confirmHits = allIndexes(src, "confirm: (");
+  assert(enqueueHits.length === 1, `the connect enqueues one prompt (found ${enqueueHits.length})`);
+  assert(confirmHits.length === 1, `carrying one confirm wrapper (found ${confirmHits.length})`);
+  const argOpen = enqueueHits.length === 1 ? src.indexOf("{", enqueueHits[0]) : -1;
+  const argClose = argOpen === -1 ? -1 : matchingBrace(src, argOpen);
+  const confirmAt = confirmHits.length === 1 ? confirmHits[0] : -1;
   assert(
-    enqueue !== -1 && trusted > enqueue,
-    "the trusted counter is bumped only from the accept callback, not when the prompt is raised",
+    confirmAt > argOpen && argOpen !== -1 && confirmAt < argClose,
+    "the wrapper is a field of the prompt handed to enqueue - anywhere else and the queue calls the bare command instead",
+  );
+  const confirmBody = confirmAt === -1 ? -1 : src.indexOf("{", src.indexOf("=>", confirmAt));
+  assert(confirmBody > 0, "found the wrapper's body");
+  assert(
+    /confirmHostKey\(/.test(
+      confirmBody === -1 ? "" : src.slice(confirmBody, matchingBrace(src, confirmBody)),
+    ),
+    "the wrapper still forwards the answer - the paused handshake is blocked on this very call",
   );
 
-  const comparison = src.indexOf("if (hostKeysAsked > hostKeysTrusted)");
-  assert(comparison !== -1, "the connect catch compares prompts raised against prompts trusted");
-  const wrap = src.indexOf("new SshLocalConnectError", comparison);
+  // THE misfiling regression, in source terms: recording an answer where the
+  // PROMPT is raised rather than where it is answered restores `asked > trusted`
+  // under a new name, and files a link that dropped under the dialog as a local
+  // refusal. Every write to the record must sit in the wrapper.
+  const writes = allIndexes(src, `${answers}.push(`);
   assert(
-    comparison !== -1 && wrap !== -1 && wrap - comparison < 200,
-    "an unanswered or refused key throws the local marker, so the ladder does not re-ask it",
+    writes.length === 1,
+    `the record is written from exactly one place (found ${writes.length})`,
+  );
+  assert(
+    writes.length > 0 && writes.every((at) => scopeOf(src, at).block === confirmBody),
+    "the record is written only from the answer wrapper, never where a prompt is merely raised",
+  );
+
+  // Pinning stays on the accept callback. In the wrapper it would fire for every
+  // answer, which means pinning a key the user just REFUSED.
+  const pins = allIndexes(src, "pinFingerprint(");
+  assert(pins.length === 1, `the fingerprint is pinned from one place (found ${pins.length})`);
+  assert(
+    pins.length === 1 && scopeOf(src, pins[0]).block !== confirmBody,
+    "pinning is on the accept path, not on every answer",
+  );
+
+  // And the catch reads the verdict, rather than any restatement of "a prompt
+  // was raised and not trusted".
+  const marker = allIndexes(src, "throw new SshLocalConnectError(describeError(e)");
+  assert(
+    marker.length === 1,
+    `one host-key local marker in the connect catch (found ${marker.length})`,
+  );
+  const guard = marker.length === 1 ? guardAt(src, marker[0]) : "";
+  assert(
+    guard === `hostKeyRefused(${answers})`,
+    `the marker is thrown only for a REFUSAL, nothing weaker (guard: ${JSON.stringify(guard)})`,
   );
 }
 

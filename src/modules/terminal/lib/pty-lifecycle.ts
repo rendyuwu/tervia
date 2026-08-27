@@ -197,6 +197,20 @@ export function openPtyForSession(s: Session, cwd: string | undefined): Promise<
   const spawnCols = Math.max(MIN_PTY_DIM, s.term.cols);
   const spawnRows = Math.max(MIN_PTY_DIM, s.term.rows);
 
+  // VLT-57 caveat, recorded because an unreachability claim with nothing beside
+  // it is how a dead guard gets written twice (handoff §4.20). Two callers below
+  // reach this same SSH branch WITHOUT the connect-failure classifier: `retryPty`
+  // writes a plain PTY error, and `respawnSession` logs and gives up. Neither
+  // parks and neither ladders, so an SSH leaf failing through either gets none of
+  // the VLT-57 behaviour.
+  //
+  // Both are unreachable for SSH today, and only by other code's choices:
+  // Enter-to-retry and the stuck-recovery watchdog branch on `sshConnectionId`
+  // and call `retrySsh` instead (useTerminalSession.ts, session-lifecycle.ts),
+  // and `respawnSession` is only ever called for a leaf that is the LAST entry in
+  // its workspace (usePaneHandles.ts) - which the permanent Hosts tab (§5
+  // decision 1) means an SSH leaf never is. Make the Hosts tab closable, or add a
+  // caller that does not branch, and these two paths become live.
   if (s.sshConnectionId) {
     return openSshForSession(s, s.sshConnectionId, spawnCols, spawnRows, onData, onExit);
   }

@@ -3,6 +3,7 @@ import { resolveJumpHops } from "@/modules/hosts/jumps";
 import { isSshHost, type SshHost } from "@/modules/hosts/types";
 import { resolveSshAuth } from "@/modules/vault/resolve";
 import {
+  confirmHostKey,
   openSsh,
   openSshForward,
   isHostKeyMismatchError,
@@ -27,6 +28,7 @@ import {
   classifySshConnectFailure,
   decideSshConnectFailure,
   decideSshEnding,
+  hostKeyRefused,
   SshLocalConnectError,
   type SshEnding,
 } from "./ssh-exit-decision";
@@ -275,14 +277,16 @@ export async function openSshForSession(
   // Track the first-connect host-key prompt so it can be cleaned up if this
   // attempt dies before the user answers it (see the catch below).
   let hostKeyPromptId: string | null = null;
-  // VLT-57: how many host keys this attempt asked the user about, and how many
-  // they trusted. Counted rather than latched because a ProxyJump chain can
-  // raise one prompt per hop, and trusting the bastion says nothing about
-  // whether the target's key was accepted. `asked > trusted` at failure time
-  // means the connect died on an answer (or a non-answer) from the person at
-  // the keyboard, which is a local decision, not a transport fault.
-  let hostKeysAsked = 0;
-  let hostKeysTrusted = 0;
+  // VLT-57: every ANSWER this attempt's host-key questions were given, in the
+  // order they arrived. Recorded at the moment the answer is MADE - see the
+  // `confirm` wrapper below - rather than inferred at failure time from how many
+  // prompts were raised against how many were trusted.
+  //
+  // The difference is a real failure, not a tidiness one: "raised and not
+  // trusted" is also the state a link dropping while the dialog is still on
+  // screen leaves behind, so counting parks the exact transport blip the ladder
+  // exists for. Only an answer proves someone on this side ended the attempt.
+  const hostKeyAnswers: boolean[] = [];
   let sshSession: SshSession;
   try {
     const { user, ...credentialValues } = auth;
@@ -340,16 +344,35 @@ export async function openSshForSession(
         // the same question on every retry.
         onHostKeyPrompt: (prompt) => {
           hostKeyPromptId = prompt.promptId;
-          hostKeysAsked += 1;
           const owners = hostKeyOwners(
             prompt.host,
             { host: conn.host, connectionId: sshConnectionId },
             jumps,
           );
-          useHostKeyPrompt.getState().enqueue(prompt, () => {
-            hostKeysTrusted += 1;
-            for (const id of owners) void pinFingerprint(id, prompt.fingerprint).catch(() => {});
-          });
+          useHostKeyPrompt.getState().enqueue(
+            {
+              ...prompt,
+              // VLT-57: the queue answers every prompt through the prompt's own
+              // `confirm`, so wrapping it here is the one place that sees EVERY
+              // answer this attempt's questions get - the user's Trust, the
+              // user's Reject, and the rejection `abandon` sends on the user's
+              // behalf when the pane that asked has gone away. Recording the
+              // answer here is what makes the classification a fact rather than
+              // an inference: nothing is written when a prompt is merely raised,
+              // which is why a drop under the dialog stays a transport failure.
+              //
+              // Forwarded unchanged, and its result untouched: the paused
+              // handshake is blocked on this very call, so swallowing it would
+              // hang the connect until the backend's confirm window ran out.
+              confirm: (promptId, accept) => {
+                hostKeyAnswers.push(accept);
+                return confirmHostKey(promptId, accept);
+              },
+            },
+            () => {
+              for (const id of owners) void pinFingerprint(id, prompt.fingerprint).catch(() => {});
+            },
+          );
         },
         onData,
         onExit: (code, reason) => {
@@ -384,16 +407,27 @@ export async function openSshForSession(
       useHostKeyPrompt.getState().dismiss(hostKeyPromptId);
       hostKeyPromptId = null;
     }
-    // VLT-57: a key this attempt asked about and did not get trust for is the
-    // other failure the frontend can attribute on its own. Rejecting the key,
-    // or letting the 120s confirm window lapse, aborts the handshake BEFORE any
-    // credential is sent - and the ladder's answer to that was to ask the same
-    // question again, up to three more times. The user already answered.
+    // VLT-57: a key this attempt asked about and was REFUSED trust for is the
+    // other failure the frontend can attribute on its own. A refusal aborts the
+    // handshake before any credential is sent, and the ladder's answer to that
+    // was to ask the same question again, up to three more times. The user
+    // already answered.
+    //
+    // Refused, not "unanswered". A prompt still sitting in the queue when the
+    // connect died says nothing about who ended it: the link dropping under the
+    // dialog leaves exactly that state, and it is the blip the ladder is FOR.
+    // The backend's own 120s confirm window lapsing lands in the same bucket for
+    // the same reason - it is the backend's decision, made where this side
+    // cannot see it, and telling it apart from a drop needs the connect failure
+    // to carry a phase (the wire change VLT-63 describes). Left transport, so
+    // the reconnect re-raises the question for whoever comes back to it, rather
+    // than parking a pane whose link merely blinked.
+    //
     // Everything else here (a credential the server refused, an unparseable key,
-    // a host that would not resolve) is left transport: the backend reports it
-    // as one more string and the frontend has nothing structural to tell those
-    // apart with - see the report for the wire change that would.
-    if (hostKeysAsked > hostKeysTrusted) {
+    // a host that would not resolve) is left transport for the same reason: the
+    // backend reports it as one more string and the frontend has nothing
+    // structural to tell those apart with.
+    if (hostKeyRefused(hostKeyAnswers)) {
       throw new SshLocalConnectError(describeError(e), { cause: e });
     }
     throw e;
@@ -481,10 +515,14 @@ export async function forwardDetectedUrl(
  * VLT-57: the ladder's counterpart for a connect failure that retrying cannot
  * change. One attempt, one banner, then wait for the user.
  *
- * Deliberately the same resting state the ladder reaches after its third
- * attempt gives up - `error` with `canRetry`, so `canRetrySsh` lights up Enter
- * and the status pill's Retry - because the user's next move is identical
- * (fix the thing, then retry). What differs is only how long they waited to get
+ * Parks in `error` with `canRetry` - the same state a host-key mismatch parks in
+ * (`runSshReconnect` below, and its twin in session-lifecycle's spawn catch),
+ * and for the same reason: nothing about the attempt changes until the user
+ * changes something. NOT the state the ladder gives up in; that one is
+ * `disconnected` with `canRetry`, which reads as "the link went away", and this
+ * failure never had a link. Both satisfy `canRetrySsh`, so Enter and the status
+ * pill's Retry behave identically either way - the difference is what the pill
+ * says. What differs from the ladder is only how long the user waited to get
  * here: immediately, instead of 11 seconds and three identical failures.
  *
  * `sshReconnectAttempts` is reset so a later manual retry starts a fresh
