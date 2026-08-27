@@ -432,9 +432,30 @@ pane-header X (`PaneStack` passes it into `PaneTreeView`), and `Ctrl+Shift+X` /
   what lets the chord no-op silently without telling the user two different things.
   There is deliberately no confirmation dialog for either case.
 
+The predicate names exactly one leaf kind, `page`. Every other kind - terminal,
+editor, board, **rdp** - is answered by the last-entry rule alone, which is what
+"one predicate" means. `Ctrl+Shift+X` used to carry its own
+`activeLeafKind === "terminal"` test in front of it and so silently dropped the
+chord on an RDP pane both X buttons closed happily; that test is gone, the chord
+asks only `requestCloseLeaf`, and the catalogue entry says **"Close focused
+pane"** in the **Panes** group (the id stays `terminal.close`, because a user's
+rebinding is stored under it). With no kind test the chord can now reach the
+Hosts page leaf, where it is refused as permanent - and both X buttons are absent
+there, so its silence still never contradicts a visible affordance.
+
+The one thing a close chord refuses that the X buttons do not: **while a rail
+view covers the tab area, `Ctrl+W` and `Ctrl+Shift+X` do nothing.** The X names
+the tab it closes and is on screen; a chord names "the active tab", which is
+exactly what the view has taken off screen, and a close cannot show its own
+result the way a new tab or a split can. That refusal lives on the chord
+(`app/lib/shortcutHandlers.ts`), deliberately NOT at the mutation, because
+`closeTab` / `closePaneByLeaf` are shared with the strip X, which must keep
+leaving the user in the view.
+
 Checked by `scripts/tab-close-verify.ts`, whose third assertion - an ordinary leaf
 beside another entry IS closable - is what stops a predicate hardwired to `false`
-from passing.
+from passing, plus an RDP section and a source-text check that no path re-decides
+in front of the arbiter.
 
 #### Pages: tabs vs rail views (`tabs/lib/pages.ts`)
 
@@ -488,11 +509,70 @@ callers never called it - so **`restoreWorkspaceEntry` returns the tabs and the
 id to focus from one call**, and the workspace switch, the workspace close and the
 startup hydrate all take it.
 
+**The funnel was scoped to the wrong enumeration once already.** "Every route
+that ACTIVATES A TAB" cannot cover a mutation that rearranges the tab already
+active, so `Ctrl+D`, the header's Rotate split and its drag-reorder all reshaped
+panes behind the view - `Ctrl+D` being the worst, since it mints a shell with no
+visible effect at all. The rule is now enumerated from the **state write**: every
+`useTabs` callback whose body reshapes a pane tree or moves the focused leaf
+shows the tabs. One is deliberately exempt and says so - `setSplitSizes`, which
+persists the ratio a divider drag produced, changes no membership and no focus,
+and comes from an affordance inside the covered surface.
+
+`useTabs` also stopped being the only place the rule lives: the two **closing**
+chords refuse instead of clearing, on the chord itself. See "What may be closed"
+above for why the strip X must keep the opposite behaviour.
+
 Checked by `scripts/rail-views-verify.ts`, which asserts the narrowing (and
 `setActiveId`'s signature) at compile time, the migration and the two re-basings
 at runtime **through their consumers**, and - source-text, because the state lives
-in a hook this suite cannot render - that every `activeId` write in `useTabs` /
-`useAuxTabs` goes through the funnel and that nothing else writes the view.
+in a hook this suite cannot render - that every `activeId` write and every
+pane-tree write in `useTabs` / `useAuxTabs` goes through the funnel or is named as
+an exemption, that nothing else writes the view, and that the two closing chords
+carry the refusal while the constructive ones do not.
+
+#### Who owns the keyboard (`shortcuts/lib/keyboardOwner.ts`)
+
+A focused terminal owns every bare-Ctrl control code and every bare-Alt meta
+sequence, and a focused RDP pane owns the same; App's `isDisabled` gate lets them
+fall through instead of firing an app chord. That is a claim about **focus**, and
+it was answered with `activeLeafKind(activeTab)`, which is a claim about which
+leaf is active **in the tab** - so the gate was wrong in both directions. With
+the caret in the tab strip the terminal was still "active", so `Ctrl+W` closed no
+tab anywhere; with a rail view up the terminal was invisible and still "active",
+so `Ctrl+T` / `Ctrl+]` / `Ctrl+[` were swallowed by a surface nobody could see.
+
+So the gate asks the DOM: `ownsRawKeyboard(focusTargetOf(e))` walks up from the
+keydown's own target to `[data-terminal-leaf-id]` or `[data-rdp-leaf-id]` -
+markers both panes already render for the file-drop hit-test and for focus. It
+also requires `railView === null`, because a covered surface does not own the
+keyboard by definition and that should not depend on whether the browser blurs a
+`visibility: hidden` subtree. `pane.splitRight` keeps its documented exemption
+(Ctrl+D always fires, taking `^D` from the shell).
+
+The deciding half is a pure predicate over anything with `closest`, so
+`scripts/keybindings-terminal-verify.ts` runs it without a DOM - both directions,
+plus a read-back of `TerminalPane` / `RdpPane` proving every marker the selector
+names is actually rendered. A selector that matches nothing would turn the gate
+permanently off, silently.
+
+#### The modal gate, and its one exemption (`shortcuts/lib/modalRegistry.ts`)
+
+No catalogued chord fires while a `Dialog`/`AlertDialog` is open: a background
+action must not run out from under a modal the user is mid-edit in. Registration
+is at the two shared primitives, so every dialog built on them is covered.
+
+The registry is a **stack**, not a count. A count already handled the easy half
+(a confirm closing over a form must not un-suppress the form), but it could not
+answer _which_ modal is on top - and that is the question the single exemption
+needs. `commandPalette.open` was exempt by the chord's identity, which is true of
+the palette closing itself and false of it **opening over the host editor**. The
+exemption now names the modal the chord may act on, and applies only while that
+modal is topmost: the palette registers as `COMMAND_PALETTE_MODAL` (threaded
+through `Dialog`'s `modalName`), so its chord closes it, is suppressed over any
+other dialog, and is suppressed again the moment a confirm stacks on top of it.
+Checked by `scripts/modal-shortcut-verify.ts`, behaviourally for the stack and by
+source text for the wiring.
 
 ### AI CLI support (terminal-side only)
 

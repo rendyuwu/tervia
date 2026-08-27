@@ -14,7 +14,7 @@ import { type ShortcutHandlers } from "@/modules/shortcuts";
 import { type TerminalPaneHandle } from "@/modules/terminal";
 import { type EditorPaneHandle } from "@/modules/editor";
 import { type SearchInlineHandle } from "@/modules/header";
-import { type TabPageKind } from "@/modules/tabs";
+import { type RailViewKind, type TabPageKind } from "@/modules/tabs";
 
 /**
  * Component-local identifiers from App that the keyboard-shortcut handler
@@ -43,6 +43,20 @@ export interface ShortcutHandlerDeps {
   activeId: number;
   activeLeafIdInTab: number | null;
   activeLeafKindCurrent: "terminal" | "editor" | "rdp" | null;
+  /**
+   * The rail view covering the tab area, or null when the tabs are showing.
+   *
+   * Only the two CLOSING chords read it, and they read it HERE rather than at
+   * the mutation, which is the one place in the rail-view rule where those two
+   * differ. Every other route into the tab area leaves the view inside
+   * `useTabs` (`tabs/lib/tabView.ts`), so no caller can forget - but the close
+   * paths are shared with the tab-strip X, and the decision in force is that
+   * clicking a background tab's X while the Vault is up leaves you in the
+   * Vault. That X names the tab it closes and is on screen; a chord names "the
+   * active tab", which is exactly what a rail view has taken off screen. So the
+   * refusal belongs to the chord, not to `closeTab` / `closePaneByLeaf`.
+   */
+  railView: RailViewKind | null;
   commandPaletteOpen: () => void;
 }
 
@@ -65,8 +79,21 @@ export function buildShortcutHandlers(deps: ShortcutHandlerDeps): ShortcutHandle
     activeId,
     activeLeafIdInTab,
     activeLeafKindCurrent,
+    railView,
     commandPaletteOpen,
   } = deps;
+  /**
+   * A rail view is covering the tab area, so there is nothing on screen for a
+   * closing chord to be aimed at. Both close chords ask this and do nothing -
+   * they are the only two chords here that DESTROY: everything else either
+   * mints something (Ctrl+T, Ctrl+D) or moves focus (Ctrl+], Ctrl+1..9), and
+   * those all leave the view through `useTabs` and show the user their own
+   * result. A close cannot show its result - the thing it did is gone - so a
+   * chord that fires it against an unseen tab would end a session with no
+   * feedback at all. See `ShortcutHandlerDeps.railView` for why this is not
+   * enforced at the mutation.
+   */
+  const coveredByRailView = () => railView !== null;
   return {
     "commandPalette.open": commandPaletteOpen,
     "tab.new": openNewTab,
@@ -74,7 +101,10 @@ export function buildShortcutHandlers(deps: ShortcutHandlerDeps): ShortcutHandle
     "tab.newAgent": () => setAgentDialogOpen(true),
     // Used to raise the RDP dropdown; connecting now lives on the Hosts page.
     "rdp.connect": () => openPageTab("hosts"),
-    "tab.close": handleCloseTabOrPane,
+    "tab.close": () => {
+      if (coveredByRailView()) return;
+      handleCloseTabOrPane();
+    },
     "tab.next": () => cycleTab(1),
     "tab.prev": () => cycleTab(-1),
     "tab.selectByIndex": (e) => selectByIndex(parseInt(e.key, 10) - 1),
@@ -157,18 +187,32 @@ export function buildShortcutHandlers(deps: ShortcutHandlerDeps): ShortcutHandle
         if (text) term.paste(text);
       });
     },
-    // Ctrl+Shift+X: close the focused terminal pane, through `requestCloseLeaf`
-    // so a busy terminal confirms before being killed. Deliberately carries no
-    // count of its own: `tabs/lib/closable.ts` is the single arbiter of whether
-    // a close is legal and `requestCloseLeaf` asks it, which is what keeps this
-    // chord agreeing with the pane-header and tab-strip X buttons rather than
-    // refusing what they allow - or, as it did, allowing what they refuse.
+    // Ctrl+Shift+X: close the focused pane, through `requestCloseLeaf` so a busy
+    // terminal confirms before being killed. Deliberately carries no count of
+    // its own: `tabs/lib/closable.ts` is the single arbiter of whether a close
+    // is legal and `requestCloseLeaf` asks it, which is what keeps this chord
+    // agreeing with the pane-header and tab-strip X buttons rather than refusing
+    // what they allow - or, as it did, allowing what they refuse.
     //
-    // The terminal-only gate below means this chord can never reach a page leaf,
-    // so its silence is only ever about the last-entry rule - and there, both X
-    // buttons are absent, so nothing tells the user two different things.
+    // IT HAD A SECOND GATE (VLT-62). `activeLeafKindCurrent !== "terminal"`
+    // dropped the chord for an RDP pane, whose leaf kind is `"rdp"` - so both X
+    // buttons closed an RDP tab and the chord silently did nothing, which is the
+    // exact disagreement the single-arbiter argument above claims cannot happen.
+    // The arbiter itself was never the problem: `closable.ts` asks only whether
+    // the leaf is a page and whether it is the last entry, so it has always
+    // treated an RDP leaf exactly like a terminal one. What made the claim false
+    // was a kind test standing IN FRONT of it, in the chord that quoted it. So
+    // the kind test is gone and `canCloseLeaf` is genuinely the only thing
+    // deciding - which is also what makes the label "Close focused pane"
+    // honest, and why the id keeps its `terminal.` prefix (a user's rebinding
+    // is stored under it).
+    //
+    // With no kind test, the chord can now reach a page leaf; `leafCloseRefusal`
+    // refuses it as permanent, and both X buttons are absent there, so its
+    // silence still never contradicts a visible affordance.
     "terminal.close": () => {
-      if (activeLeafIdInTab === null || activeLeafKindCurrent !== "terminal") return;
+      if (coveredByRailView()) return;
+      if (activeLeafIdInTab === null) return;
       requestCloseLeaf(activeLeafIdInTab);
     },
   };

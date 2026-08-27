@@ -15,7 +15,20 @@
  * "Hosts is refused" and "the last entry is refused" while breaking the app
  * completely, so "an ordinary leaf beside another entry IS closable" is what
  * makes the other two mean anything.
+ *
+ * The claim was re-checked against RDP panes and needed a fifth section
+ * (VLT-62). `closable.ts` was fine - it asks only whether the leaf is a page and
+ * whether it is the last entry, so it has always answered for an `rdp` leaf
+ * exactly as for a `terminal` one, and both X buttons closed an RDP tab
+ * happily. What disagreed was `Ctrl+Shift+X`, which carried its OWN kind test
+ * in `app/lib/shortcutHandlers.ts` in FRONT of the arbiter and silently dropped
+ * the chord for anything that was not a terminal. So "one predicate, all three
+ * paths agree" needed both halves checking: the predicate treats RDP like any
+ * other session leaf ([iv]), and no path re-decides in front of it ([v]).
  */
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 import {
   canCloseLeaf,
   canCloseTab,
@@ -25,6 +38,52 @@ import {
 import { buildEntries, countTabEntries } from "../src/modules/tabs/lib/entries";
 import type { Tab } from "../src/modules/tabs/lib/tabTypes";
 import type { PaneNode } from "../src/modules/terminal/lib/panes";
+
+/**
+ * A line with its trailing `//` comment removed, string literals respected.
+ *
+ * VLT-33, and this is the fourth copy of this pair in the suite - duplicated
+ * on purpose, because these scripts share no module and `scripts/lib` is not a
+ * thing we want. The canonical copy is in `scripts/host-editor-verify.ts`; keep
+ * them the same shape.
+ *
+ * A character scan rather than a regex, because a `//` inside a string is not a
+ * comment and a regex alternation desyncs on the first unbalanced quote. An
+ * apostrophe in unquoted JSX text opens a quote state that never closes, which
+ * loses the strip for that one line - it fails towards KEEPING text, never
+ * towards deleting code, which is the direction that matters: a positive check
+ * must never be satisfied by a comment, and must never be reddened by prose it
+ * accidentally ate.
+ */
+function stripLineComment(line: string): string {
+  let quote = "";
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (quote) {
+      if (c === "\\") i++;
+      else if (c === quote) quote = "";
+      continue;
+    }
+    if (c === '"' || c === "'" || c === "`") {
+      quote = c;
+      continue;
+    }
+    if (c === "/" && line[i + 1] === "/") return line.slice(0, i);
+  }
+  return line;
+}
+
+/** The same source with whole-line and trailing comments removed. */
+function stripComments(src: string): string {
+  return src
+    .split("\n")
+    .filter((line) => {
+      const t = line.trim();
+      return !(t.startsWith("//") || t.startsWith("/*") || t.startsWith("*"));
+    })
+    .map(stripLineComment)
+    .join("\n");
+}
 
 let failed = 0;
 function check(name: string, ok: boolean, detail?: unknown): void {
@@ -49,6 +108,9 @@ function termLeaf(id: number, cwd = "/w"): PaneNode {
 function editorLeaf(id: number, path = "/w/a.ts"): PaneNode {
   return { kind: "leaf", id, leafKind: "editor", path, dirty: false, preview: false };
 }
+function rdpLeaf(id: number, rdpConnectionId = "conn-1"): PaneNode {
+  return { kind: "leaf", id, leafKind: "rdp", rdpConnectionId, sizeMode: "preset" };
+}
 function split(id: number, children: PaneNode[]): PaneNode {
   return { kind: "split", id, dir: "row", children };
 }
@@ -69,6 +131,11 @@ const THREE_TABS: Tab[] = [
 // one fixture that can tell `tabCloseRefusal`'s "last entry" gate apart from
 // `leafCloseRefusal`'s. See [ii-tab] below.
 const ONE_TAB_TWO_PANES: Tab[] = [tab(1, split(5, [termLeaf(2), termLeaf(6)]), 2)];
+// The VLT-62 shape: Hosts plus an RDP tab, which is what the hand test had open
+// when Ctrl+Shift+X did nothing and both X buttons worked.
+const HOSTS_AND_RDP: Tab[] = [tab(1, hostsLeaf(2), 2), tab(3, rdpLeaf(4), 4)];
+const RDP_ONLY: Tab[] = [tab(3, rdpLeaf(4), 4)];
+const RDP_SPLIT_WITH_TERMINAL: Tab[] = [tab(3, split(5, [rdpLeaf(4), termLeaf(6)]), 4)];
 
 // ---- (i) a Hosts page leaf is never closable ------------------------------
 console.log("[i] a page leaf is permanent, on every path and in every arrangement");
@@ -215,6 +282,116 @@ console.log("\n[strip] every entry the strip renders resolves through the same p
     "a Hosts-only workspace renders no close X at all",
     entries.every((e) => e.kind !== "pane-leaf" || !canCloseLeaf(HOSTS_ONLY, e.leafId)),
   );
+}
+
+// ---- (iv) an RDP leaf is a session leaf like any other -------------------
+// VLT-62. Checked as its own section rather than assumed from "terminal works",
+// because the whole item was somebody assuming exactly that: `closable.ts`
+// never names a leaf kind except `page`, so RDP was always fine here - and the
+// chord that quoted it as the single arbiter was refusing what it allows.
+console.log("\n[iv] an RDP pane closes on the same predicate a terminal does");
+check(
+  "an RDP tab beside Hosts closes",
+  leafCloseRefusal(HOSTS_AND_RDP, 4) === null,
+  leafCloseRefusal(HOSTS_AND_RDP, 4),
+);
+check("and so does the whole RDP tab", tabCloseRefusal(HOSTS_AND_RDP, 3) === null);
+check(
+  // Same answer a lone terminal gets: the rule is about the workspace being
+  // emptied, not about what kind of session is in the way.
+  "a lone RDP pane is refused as the last entry, not for being RDP",
+  leafCloseRefusal(RDP_ONLY, 4) === "last-entry",
+  leafCloseRefusal(RDP_ONLY, 4),
+);
+check(
+  "an RDP pane sharing a split with a terminal closes",
+  canCloseLeaf(RDP_SPLIT_WITH_TERMINAL, 4),
+);
+check("and the terminal beside it closes too", canCloseLeaf(RDP_SPLIT_WITH_TERMINAL, 6));
+{
+  // The strip's own answer, through `buildEntries` - the affordance half of
+  // "all three paths agree". Both entries get an X, which is what the hand test
+  // saw and the chord did not match.
+  const entries = buildEntries(HOSTS_AND_RDP, new Map());
+  const refused = entries.filter(
+    (e) => e.kind === "pane-leaf" && !canCloseLeaf(HOSTS_AND_RDP, e.leafId),
+  );
+  check(
+    "the strip refuses only the page entry, not the RDP one",
+    refused.length === 1 && refused[0].kind === "pane-leaf" && refused[0].leafKind === "page",
+    refused.map((e) => (e.kind === "pane-leaf" ? e.leafKind : e.kind)),
+  );
+}
+
+// ---- (v) and no close path re-decides in front of the arbiter ------------
+// Source-text, because `shortcutHandlers.ts` imports through the `@/` alias and
+// this suite has no bundler to resolve it. The behavioural checks above cannot
+// see a caller that stops asking - which is exactly the defect: every fixture in
+// [iv] passed for the whole life of VLT-62.
+console.log("\n[v] Ctrl+Shift+X and Ctrl+W ask the arbiter rather than a leaf kind");
+{
+  const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+  // Comments stripped first (VLT-33): every assertion below is POSITIVE - "this
+  // expression is present" - and a positive check is exactly the kind a comment
+  // satisfies. Deleting the guard and leaving `// if (coveredByRailView())
+  // return;` behind must fail, and stripping is what makes it fail.
+  const src = stripComments(readFileSync(join(root, "src/app/lib/shortcutHandlers.ts"), "utf8"));
+  /** The body of the `"<id>": () => { ... }` handler, or null. */
+  const handlerBody = (id: string): string | null => {
+    const at = src.indexOf(`"${id}": `);
+    if (at === -1) return null;
+    const open = src.indexOf("{", at);
+    if (open === -1) return null;
+    let depth = 0;
+    for (let i = open; i < src.length; i++) {
+      if (src[i] === "{") depth++;
+      else if (src[i] === "}") {
+        depth--;
+        if (depth === 0) return src.slice(open, i + 1);
+      }
+    }
+    return null;
+  };
+  const close = handlerBody("terminal.close");
+  check("found the terminal.close handler", close !== null);
+  check(
+    // The exact line that dropped the chord for RDP.
+    "it no longer gates on the active leaf KIND",
+    close !== null && !/activeLeafKindCurrent/.test(close),
+    close,
+  );
+  check(
+    "it routes the close through requestCloseLeaf, the funnel that asks canCloseLeaf",
+    close !== null && /requestCloseLeaf\(activeLeafIdInTab\)/.test(close),
+  );
+  check(
+    // The one guard it keeps, and the only one: no focused leaf, nothing to
+    // close. Not a refusal - a missing argument.
+    "and keeps only the no-focused-leaf guard",
+    close !== null && /activeLeafIdInTab === null/.test(close),
+  );
+  const tabClose = handlerBody("tab.close");
+  check("found the tab.close handler", tabClose !== null);
+  check(
+    "it routes through handleCloseTabOrPane, which asks canCloseTab / canCloseLeaf",
+    tabClose !== null && /handleCloseTabOrPane\(\)/.test(tabClose),
+  );
+  check(
+    "and it decides nothing about leaf kinds either",
+    tabClose !== null && !/activeLeafKindCurrent/.test(tabClose),
+    tabClose,
+  );
+  // The catalogue entry names what it now does, so Settings > Shortcuts and the
+  // Command Palette do not still say "terminal" for a chord that closes any
+  // pane. The id is deliberately unchanged: a user's rebinding is stored under
+  // it.
+  const catalogue = stripComments(
+    readFileSync(join(root, "src/modules/shortcuts/shortcuts.ts"), "utf8"),
+  );
+  const entry = /id: "terminal\.close",\s*label: "([^"]+)",\s*group: "([^"]+)",/.exec(catalogue);
+  check("the catalogue still carries the terminal.close id", entry !== null);
+  check("labelled for a pane, not a terminal", entry?.[1] === "Close focused pane", entry?.[1]);
+  check("and grouped with the other pane chords", entry?.[2] === "Panes", entry?.[2]);
 }
 
 if (failed > 0) throw new Error(`${failed} check(s) FAILED`);

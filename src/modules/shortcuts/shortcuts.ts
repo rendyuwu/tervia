@@ -271,10 +271,16 @@ export const SHORTCUTS: Shortcut[] = [
         ],
   },
   {
-    // Closes the focused terminal pane. No-op for the last terminal.
+    // Closes the focused PANE, whatever it holds - terminal, RDP session,
+    // editor or board. `tabs/lib/closable.ts` decides, so this refuses exactly
+    // what the pane-header and tab-strip X buttons refuse: the Hosts page and
+    // the last entry in the workspace. Named for a terminal while it was gated
+    // to one, which is how it came to drop the chord for an RDP pane both X
+    // buttons closed happily (VLT-62). The id keeps its `terminal.` prefix
+    // because a user's rebinding is stored under it; only the wording moves.
     id: "terminal.close",
-    label: "Close focused terminal",
-    group: "Terminal",
+    label: "Close focused pane",
+    group: "Panes",
     defaultBindings: [{ ctrl: true, shift: true, key: "x" }],
   },
   {
