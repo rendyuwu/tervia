@@ -11,3 +11,4 @@ export {
 } from "./shortcuts";
 export { useGlobalShortcuts, type ShortcutHandlers } from "./lib/useGlobalShortcuts";
 export { runCommand, hasCommand } from "./lib/commandRegistry";
+export { openModal, isModalOpen } from "./lib/modalRegistry";

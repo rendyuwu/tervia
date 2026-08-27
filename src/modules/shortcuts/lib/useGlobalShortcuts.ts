@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import { SHORTCUTS, matchBinding, type ShortcutId } from "../shortcuts";
 import { registerCommand, unregisterCommand } from "./commandRegistry";
+import { isModalOpen } from "./modalRegistry";
 
 export type ShortcutHandler = (e: KeyboardEvent) => void;
 export type ShortcutHandlers = Partial<Record<ShortcutId, ShortcutHandler>>;
@@ -22,6 +23,18 @@ export function useGlobalShortcuts(
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      // VLT-30: no catalogued chord fires while a Dialog/AlertDialog is open -
+      // a background action (Ctrl+W closing the tab, say) must not run out
+      // from under a modal the user is mid-edit in. Two things are
+      // deliberately unaffected: Escape, because it is not in SHORTCUTS (see
+      // shortcuts.ts) so this loop never matches it and Radix's own
+      // Escape-to-close on the dialog keeps handling it; and typing/select-
+      // all/copy/paste/undo inside the dialog's own inputs, because those are
+      // native browser behavior on the focused element, not a chord this
+      // catalog defines - returning here (no preventDefault) lets the
+      // keystroke fall through to the input untouched either way.
+      if (isModalOpen()) return;
+
       const { handlers, options } = latest.current;
       for (const s of SHORTCUTS) {
         // Use user-defined bindings if they exist, otherwise use default

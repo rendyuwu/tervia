@@ -4,9 +4,24 @@ import { Dialog as DialogPrimitive } from "radix-ui";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { X } from "lucide-react";
+import { openModal } from "@/modules/shortcuts/lib/modalRegistry";
 
-function Dialog({ ...props }: React.ComponentProps<typeof DialogPrimitive.Root>) {
-  return <DialogPrimitive.Root data-slot="dialog" {...props} />;
+function Dialog({ open, ...props }: React.ComponentProps<typeof DialogPrimitive.Root>) {
+  // VLT-30: registered here, at the shared primitive, so every dialog built
+  // on top of it suppresses global shortcuts while open - see modalRegistry.ts.
+  // Keyed on `open` rather than an onOpenChange hook: every dialog in this
+  // codebase is controlled (grep confirms there is no DialogTrigger-driven
+  // uncontrolled usage), so the resolved `open` prop is the one signal that
+  // covers mount-already-open, ordinary close, AND a force-unmount that skips
+  // the close transition - the effect's cleanup runs on unmount regardless of
+  // why. A future fully-uncontrolled dialog (open only via DialogTrigger, no
+  // `open` prop) would NOT be covered by this and would need its own fix.
+  React.useEffect(() => {
+    if (!open) return;
+    return openModal();
+  }, [open]);
+
+  return <DialogPrimitive.Root data-slot="dialog" open={open} {...props} />;
 }
 
 function DialogTrigger({ ...props }: React.ComponentProps<typeof DialogPrimitive.Trigger>) {
