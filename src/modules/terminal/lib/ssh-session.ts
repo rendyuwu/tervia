@@ -22,6 +22,7 @@ import type { PtySession } from "./pty-bridge";
 import { sessions, type Session } from "./sessionState";
 import { describeError } from "./session-helpers";
 import { flushPendingInput, openPtyForSession, syncPtySize } from "./pty-lifecycle";
+import { decideSshEnding, type SshEnding } from "./ssh-exit-decision";
 
 const RECONNECT_BACKOFF_MS = [1_000, 3_000, 7_000] as const;
 const MAX_SSH_RECONNECT_ATTEMPTS = RECONNECT_BACKOFF_MS.length;
@@ -127,9 +128,13 @@ export async function openSshForSession(
     `\x1b[2m[tervia] connecting to ${auth.user}@${conn.host}:${conn.port}…\x1b[0m\r\n`,
   );
 
-  // Route the first of onExit/onError into the reconnect scheduler; russh can fire both.
+  // Route the first ending (onExit or onError) through here; russh can fire
+  // both for one drop (an error followed by the channel closing), and only
+  // the first should be acted on. The actual reconnect-or-not decision is
+  // `decideSshEnding` (module scope, above) - kept pure and separate from
+  // these side effects so it stays unit-testable on its own.
   let terminated = false;
-  const handleTerminal = (reason: string) => {
+  const finishSsh = (ending: SshEnding) => {
     if (terminated) return;
     terminated = true;
     if (s.disposed) return;
@@ -141,19 +146,55 @@ export async function openSshForSession(
     // Whichever hop had not come up is where the chain broke; freeze that into
     // the route so the indicator names the failing link.
     if (s.sshRoute) s.sshRoute = failPendingSshHops(s.sshRoute);
-    if (s.sshUserClose) {
-      emitSshStatus(s, {
-        kind: "disconnected",
-        reason: "closed by user",
-        canRetry: true,
-      });
-      onExit(0);
-      return;
+
+    const decision = decideSshEnding(ending, s.sshUserClose);
+    switch (decision.action) {
+      case "userClosed":
+        emitSshStatus(s, {
+          kind: "disconnected",
+          reason: "closed by user",
+          canRetry: true,
+        });
+        onExit(0);
+        return;
+      case "closePane":
+        // Deliberate, in-band termination: no banner, no reconnect. Route
+        // through the normal PTY exit path so the leaf closes (or respawns,
+        // if it is the last one left in the workspace) exactly like a local
+        // shell exiting would - reusing that logic instead of duplicating
+        // pane-closing decisions here.
+        s.pty = null;
+        s.ptySpawnedAt = null;
+        onExit(decision.code);
+        return;
+      case "parkKilled":
+        // Also deliberate, not a transport failure, so no auto-reconnect -
+        // but unlike a plain exit this is unusual enough to flag rather
+        // than silently close under: park the pane with a banner naming
+        // the signal and let the user decide (Enter or the Retry button),
+        // the same manual path used once auto-reconnect below gives up.
+        s.pty = null;
+        s.ptySpawnedAt = null;
+        s.sshReconnectAttempts = 0;
+        emitSshStatus(s, {
+          kind: "disconnected",
+          reason: `killed by signal ${decision.signalName}`,
+          canRetry: true,
+        });
+        writeSshBanner(
+          s,
+          `\r\n\x1b[33m[tervia] remote process killed by signal ${decision.signalName}${
+            decision.coreDumped ? " (core dumped)" : ""
+          }. Press Enter or click Retry to reconnect.\x1b[0m\r\n`,
+        );
+        return;
+      case "reconnect":
+        // Drop the live handle so attachSession/retrySsh treat the leaf as "needs spawn".
+        s.pty = null;
+        s.ptySpawnedAt = null;
+        scheduleSshReconnect(s, decision.reason);
+        return;
     }
-    // Drop the live handle so attachSession/retrySsh treat the leaf as "needs spawn".
-    s.pty = null;
-    s.ptySpawnedAt = null;
-    scheduleSshReconnect(s, reason);
   };
 
   // Need both russh session id (from openSsh) and server fingerprint (from onConnected).
@@ -245,12 +286,22 @@ export async function openSshForSession(
           });
         },
         onData,
-        onExit: (code) => {
-          handleTerminal(code === 0 ? "remote closed" : `exit ${code}`);
+        onExit: (code, reason) => {
+          switch (reason.kind) {
+            case "exit":
+              finishSsh({ kind: "clean", code });
+              break;
+            case "signal":
+              finishSsh({ kind: "signal", name: reason.name, coreDumped: reason.coreDumped });
+              break;
+            case "disconnected":
+              finishSsh({ kind: "ambiguous", reason: "remote closed" });
+              break;
+          }
         },
         onError: (msg) => {
           writeSshBanner(s, `\r\n\x1b[31m[tervia] ssh error: ${msg}\x1b[0m\r\n`);
-          handleTerminal(msg);
+          finishSsh({ kind: "ambiguous", reason: msg });
         },
       },
     );

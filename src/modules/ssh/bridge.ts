@@ -3,6 +3,30 @@ import { invoke, Channel } from "@tauri-apps/api/core";
 /** First-connect host-key confirmation request from the backend. */
 export type SshHostKeyPrompt = { promptId: string; fingerprint: string; host: string };
 
+/** Why the shell channel ended, carried alongside `onExit`'s numeric `code`
+ *  (which is a convenience duplicate of `reason.code` for "exit", and
+ *  meaningless - always 0 - for the other two kinds; a caller that only
+ *  needs "did the session end" can keep ignoring `reason` entirely). Mirrors
+ *  the three ways `session.rs`'s pump can end a channel:
+ *    - "exit": the remote reported its own exit status
+ *      (`ChannelMsg::ExitStatus`) - a deliberate, in-band termination. 0 is
+ *      e.g. the user typing `exit`; nonzero is the process's own failure
+ *      code. NOT a dropped connection.
+ *    - "signal": the remote process was killed by a signal
+ *      (`ChannelMsg::ExitSignal`) before the channel closed - also
+ *      deliberate, but for a reason on the REMOTE side (OOM killer, `kill`,
+ *      a crash), not because the transport dropped.
+ *    - "disconnected": the channel just ended (Eof/Close, or the read
+ *      loop's `wait()` returning `None`) with NEITHER of the above ever
+ *      reported. The one genuinely ambiguous case - the remote may have
+ *      exited cleanly (Eof/Close can race a fast exit on some servers) or
+ *      the transport may really have died - and the only one worth treating
+ *      as reconnect-eligible. */
+export type SshExitReason =
+  | { kind: "exit"; code: number }
+  | { kind: "signal"; name: string; coreDumped: boolean }
+  | { kind: "disconnected" };
+
 export type SshEvent =
   | { type: "connected"; fingerprint: string }
   | { type: "jumpConnected"; connectionId: string; fingerprint: string }
@@ -10,6 +34,8 @@ export type SshEvent =
   | { type: "data"; data: string }
   | { type: "stderr"; data: string }
   | { type: "exit"; code: number }
+  | { type: "signal"; name: string; coreDumped: boolean }
+  | { type: "disconnected" }
   | { type: "error"; message: string };
 
 export type SshHandlers = {
@@ -22,7 +48,8 @@ export type SshHandlers = {
    *  credentials sent) until then. */
   onHostKeyPrompt?: (prompt: SshHostKeyPrompt) => void;
   onData: (bytes: Uint8Array) => void;
-  onExit?: (code: number) => void;
+  /** Fires exactly once when the channel ends - see `SshExitReason`. */
+  onExit?: (code: number, reason: SshExitReason) => void;
   onError?: (message: string) => void;
 };
 
@@ -167,7 +194,13 @@ export async function openSsh(input: SshOpenInput, handlers: SshHandlers): Promi
         handlers.onData(decodeBase64(event.data));
         break;
       case "exit":
-        handlers.onExit?.(event.code);
+        handlers.onExit?.(event.code, { kind: "exit", code: event.code });
+        break;
+      case "signal":
+        handlers.onExit?.(0, { kind: "signal", name: event.name, coreDumped: event.coreDumped });
+        break;
+      case "disconnected":
+        handlers.onExit?.(0, { kind: "disconnected" });
         break;
       case "error":
         handlers.onError?.(event.message);
