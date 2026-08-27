@@ -32,8 +32,10 @@ import { Header, type SearchInlineHandle } from "@/modules/header";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import { useSshRightPanelStore } from "@/modules/ssh/sshRightPanelStore";
 import {
+  focusTargetOf,
   isTerminalControlChord,
   isTerminalMetaChord,
+  ownsRawKeyboard,
   useGlobalShortcuts,
   type ShortcutHandlers,
 } from "@/modules/shortcuts";
@@ -603,12 +605,14 @@ export default function App() {
         activeId,
         activeLeafIdInTab,
         activeLeafKindCurrent,
+        railView,
         commandPaletteOpen: commandPaletteHandler,
       }),
     [
       activeId,
       activeLeafIdInTab,
       activeLeafKindCurrent,
+      railView,
       requestCloseLeaf,
       cycleTab,
       handleCloseTabOrPane,
@@ -623,7 +627,7 @@ export default function App() {
   );
 
   // The options object is read fresh each keydown (see useGlobalShortcuts), so
-  // closing over activeLeafKindCurrent without a dep array is fine.
+  // closing over `railView` without a dep array is fine.
   useGlobalShortcuts(shortcutHandlers, {
     isDisabled: (id, e) =>
       // A focused terminal owns every bare-Ctrl control code (Ctrl+E, Ctrl+W,
@@ -642,8 +646,25 @@ export default function App() {
       // Windows rather than close the pane showing it. (Ctrl+Alt+Del is the one
       // chord no gate can deliver - the OS eats it - which is why the pane
       // header has a button for it.)
+      //
+      // "FOCUSED" IS ASKED OF THE DOM (VLT-58 / VLT-59). This used to read
+      // `activeLeafKindCurrent === "terminal" || === "rdp"` - which is where
+      // the caret is *in the tab*, not where it is on screen - and its own
+      // comment justified it with "a FOCUSED terminal". The two differ exactly
+      // when the surface is not holding the keys: click the tab strip and
+      // Ctrl+W stayed suppressed, so it closed no tab anywhere; open a rail
+      // view and Ctrl+T / Ctrl+] / Ctrl+[ were eaten by a terminal that was
+      // invisible and pointer-events-none. `ownsRawKeyboard` asks the keydown's
+      // own target instead - see `shortcuts/lib/keyboardOwner.ts`.
+      //
+      // `railView === null` on top of that, rather than trusting the browser to
+      // blur what it hides: a covered surface does not own the keyboard by
+      // definition, and making that a state question rather than a focus
+      // question is what keeps the rail-view case from depending on whether
+      // Chromium happens to move focus off a `visibility: hidden` subtree.
       id !== "pane.splitRight" &&
-      (activeLeafKindCurrent === "terminal" || activeLeafKindCurrent === "rdp") &&
+      railView === null &&
+      ownsRawKeyboard(focusTargetOf(e)) &&
       (isTerminalControlChord(e) || isTerminalMetaChord(e)),
   });
 
