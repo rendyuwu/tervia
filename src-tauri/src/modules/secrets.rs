@@ -197,6 +197,81 @@ where
     Ok(f(map))
 }
 
+/// Mutate the cached store and the file it came from as ONE step, with the cache
+/// lock held ACROSS the disk write.
+///
+/// The lock spanning the write is not tidiness, it is the fix for a delete that
+/// could not work at all. `hosts/store.ts`'s `deleteHost` fans out one
+/// `secrets_delete` per account the host owns (three for an SSH row, one for RDP),
+/// and each is a separate async command, so they run concurrently. Every write
+/// here stages through the ONE fixed temp path `atomic_write` derives from the
+/// target (`.secrets.json.tervia.tmp` / `.secrets.bin.tervia.tmp`), so two
+/// concurrent writers share a single temp file: whichever `fs::rename` lands
+/// first consumes it, and the next one fails with `os error 2`, "The system
+/// cannot find the file specified". That is precisely the error SSH host delete
+/// reported, and precisely why RDP host delete, which makes one call, worked.
+///
+/// The lost-update race is the same interleaving one step earlier, and the reason
+/// `copyHostSecrets` was already written sequentially: each caller used to
+/// snapshot the map after its own mutation and write that snapshot unlocked, so
+/// the snapshot written LAST could still carry a key an earlier caller had
+/// removed - the file then disagreeing with the cache until the next launch.
+///
+/// The cache is ROLLED BACK when the write fails, so a caller that reports an
+/// error has not also left the in-memory view claiming a change the disk never
+/// took: without it a failed clear reads as "secret gone" for the rest of the
+/// session and the secret reappears on the next launch.
+///
+/// Blocking under a `std::sync::Mutex` from an async command body, deliberately:
+/// the critical section contains no `.await`, so it cannot deadlock a worker, and
+/// every one of these commands already did its file read, DPAPI call or Keychain
+/// call inline.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+fn commit_store<F, R>(app: &AppHandle, state: &SecretsState, f: F) -> Result<R, String>
+where
+    F: FnOnce(&mut HashMap<String, String>) -> R,
+{
+    commit_cached(
+        &state.cache,
+        || read_store(app),
+        |map| write_store(app, map),
+        f,
+    )
+}
+
+/// [`commit_store`] with the two `AppHandle` steps as parameters.
+///
+/// Split out to be testable AT ALL: `src-tauri` has no `[dev-dependencies]`, so
+/// `tauri::test::mock_app()` is unavailable and an `AppHandle` cannot be
+/// constructed (handoff gap 16). What has to be pinned down is the ORDERING -
+/// load once, mutate, write while still holding the lock, restore on failure -
+/// and every part of that ordering is here rather than in the wrapper.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+fn commit_cached<L, W, F, R>(
+    cache: &Mutex<Option<HashMap<String, String>>>,
+    load: L,
+    write: W,
+    f: F,
+) -> Result<R, String>
+where
+    L: FnOnce() -> Result<HashMap<String, String>, String>,
+    W: FnOnce(&HashMap<String, String>) -> Result<(), String>,
+    F: FnOnce(&mut HashMap<String, String>) -> R,
+{
+    let mut guard = cache.lock().map_err(|e| e.to_string())?;
+    if guard.is_none() {
+        *guard = Some(load()?);
+    }
+    let map = guard.as_mut().expect("cache initialized above");
+    let previous = map.clone();
+    let out = f(map);
+    if let Err(e) = write(map) {
+        *map = previous;
+        return Err(e);
+    }
+    Ok(out)
+}
+
 #[cfg(target_os = "macos")]
 fn entry(service: &str, account: &str) -> Result<keyring::Entry, String> {
     keyring::Entry::new(service, account).map_err(|e| e.to_string())
@@ -298,14 +373,12 @@ pub(crate) fn write_secret(
     #[cfg(any(target_os = "linux", target_os = "windows"))]
     {
         let k = key(service, account);
-        // Mutate and snapshot under one lock acquisition so a concurrent
-        // writer cannot slip an update between, which would leave the on-disk
-        // file lagging the in-memory cache (lost-update race).
-        let snapshot = with_store(app, state, |m| {
+        // Cache and file under ONE lock acquisition: see `commit_store`. Two
+        // concurrent writers used to stage into the same temp file and the second
+        // `rename` failed with `os error 2`.
+        commit_store(app, state, |m| {
             m.insert(k, password.to_owned());
-            m.clone()
         })?;
-        write_store(app, &snapshot)?;
         #[cfg(target_os = "windows")]
         {
             // Stale Credential Manager entry from an earlier build would
@@ -343,11 +416,14 @@ pub async fn secrets_delete(
     #[cfg(any(target_os = "linux", target_os = "windows"))]
     {
         let k = key(&service, &account);
-        let snapshot = with_store(&app, &state, |m| {
+        // An account that is not there is still a success - `HashMap::remove`
+        // removing nothing is not an error - so the failure this used to report
+        // was never about the secret. It was the fan-out: `deleteHost` calls this
+        // three times at once for an SSH host and once for an RDP one, and two
+        // unlocked writes raced over one staging temp file. See `commit_store`.
+        commit_store(&app, &state, |m| {
             m.remove(&k);
-            m.clone()
         })?;
-        write_store(&app, &snapshot)?;
         #[cfg(target_os = "windows")]
         {
             legacy_keyring_delete(&service, &account);
@@ -472,6 +548,170 @@ pub async fn secrets_copy(
         write_secret(&app, &state, &to_service, &to_account, &value)?;
     }
     Ok(true)
+}
+
+/// What `commit_cached` guarantees, exercised without an `AppHandle`.
+///
+/// The bug these exist for is not hypothetical and was not visible in a diff:
+/// three `secrets_delete` calls fan out from one SSH host delete, all three wrote
+/// the file unlocked, all three staged through the same temp path, and the second
+/// `fs::rename` failed with `os error 2` - so SSH host delete could never
+/// complete while RDP host delete, which makes one call, always did.
+///
+/// The write is a closure here rather than the real file, because what has to
+/// hold is an ORDERING - one writer inside the write at a time, the write seeing
+/// the mutation, the cache restored when the write fails - and a temp file only
+/// makes the first of those observable as a crash on one platform.
+#[cfg(all(test, any(target_os = "linux", target_os = "windows")))]
+mod commit_tests {
+    use super::commit_cached;
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    /// A stand-in for the secrets file that records the thing the real one could
+    /// only express as a failed rename: how many writers were inside the write at
+    /// the same time.
+    #[derive(Default)]
+    struct FakeFile {
+        inside: AtomicUsize,
+        overlaps: AtomicUsize,
+        written: Mutex<HashMap<String, String>>,
+    }
+
+    impl FakeFile {
+        fn write(&self, map: &HashMap<String, String>) -> Result<(), String> {
+            // Entering while another writer is in here is exactly the state that
+            // made two `fs::rename` calls fight over one staging temp.
+            if self.inside.fetch_add(1, Ordering::SeqCst) > 0 {
+                self.overlaps.fetch_add(1, Ordering::SeqCst);
+            }
+            // Wide enough that an unlocked implementation overlaps every run
+            // rather than most runs.
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            *self.written.lock().expect("test disk") = map.clone();
+            self.inside.fetch_sub(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    fn seeded() -> HashMap<String, String> {
+        ["password", "privateKey", "keyPassphrase"]
+            .into_iter()
+            .map(|f| (format!("tervia-hosts::h-1::{f}"), format!("secret-{f}")))
+            .collect()
+    }
+
+    // The reproduction, as close to `deleteHost`'s fan-out as a unit test gets:
+    // one host, its three accounts, three concurrent deletes.
+    #[test]
+    fn concurrent_deletes_never_overlap_in_the_write_and_all_three_land() {
+        let cache = Arc::new(Mutex::new(Some(seeded())));
+        let file = Arc::new(FakeFile::default());
+
+        let handles: Vec<_> = ["password", "privateKey", "keyPassphrase"]
+            .into_iter()
+            .map(|field| {
+                let cache = Arc::clone(&cache);
+                let file = Arc::clone(&file);
+                std::thread::spawn(move || {
+                    let k = format!("tervia-hosts::h-1::{field}");
+                    commit_cached(
+                        &cache,
+                        || panic!("the cache is already loaded"),
+                        |m| file.write(m),
+                        |m| {
+                            m.remove(&k);
+                        },
+                    )
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().expect("thread").expect("delete");
+        }
+
+        assert_eq!(file.overlaps.load(Ordering::SeqCst), 0, "writes overlapped");
+        // The lost-update half: the last snapshot written must not carry an
+        // account an earlier caller removed.
+        assert!(
+            file.written.lock().expect("test disk").is_empty(),
+            "the file kept an account a concurrent delete had removed: {:?}",
+            file.written.lock().expect("test disk"),
+        );
+        assert!(cache
+            .lock()
+            .expect("cache")
+            .as_ref()
+            .expect("loaded")
+            .is_empty());
+    }
+
+    #[test]
+    fn the_write_sees_the_mutation_rather_than_the_map_before_it() {
+        let cache = Mutex::new(Some(seeded()));
+        let seen = Mutex::new(HashMap::new());
+        commit_cached(
+            &cache,
+            || panic!("the cache is already loaded"),
+            |m| {
+                *seen.lock().expect("seen") = m.clone();
+                Ok(())
+            },
+            |m| {
+                m.insert("tervia-hosts::h-2::password".into(), "added".into());
+                m.remove("tervia-hosts::h-1::password");
+            },
+        )
+        .expect("commit");
+        let seen = seen.lock().expect("seen");
+        assert_eq!(
+            seen.get("tervia-hosts::h-2::password").map(String::as_str),
+            Some("added")
+        );
+        assert!(!seen.contains_key("tervia-hosts::h-1::password"));
+    }
+
+    #[test]
+    fn a_failed_write_leaves_the_cache_exactly_as_it_was() {
+        let cache = Mutex::new(Some(seeded()));
+        let err = commit_cached(
+            &cache,
+            || panic!("the cache is already loaded"),
+            |_| Err("dpapi: CryptProtectData failed".to_string()),
+            |m| {
+                m.remove("tervia-hosts::h-1::password");
+            },
+        )
+        .expect_err("the write failed, so the commit must fail");
+        assert_eq!(err, "dpapi: CryptProtectData failed");
+        // Otherwise a clear that failed reads as done for the rest of the
+        // session, and the secret comes back on the next launch.
+        assert_eq!(
+            cache
+                .lock()
+                .expect("cache")
+                .as_ref()
+                .expect("loaded")
+                .get("tervia-hosts::h-1::password")
+                .map(String::as_str),
+            Some("secret-password"),
+        );
+    }
+
+    #[test]
+    fn the_file_is_read_once_and_then_served_from_the_cache() {
+        let cache = Mutex::new(None);
+        let loads = AtomicUsize::new(0);
+        let load = || {
+            loads.fetch_add(1, Ordering::SeqCst);
+            Ok(seeded())
+        };
+        for _ in 0..2 {
+            commit_cached(&cache, load, |_| Ok(()), |m| m.clear()).expect("commit");
+        }
+        assert_eq!(loads.load(Ordering::SeqCst), 1);
+    }
 }
 
 #[cfg(test)]
