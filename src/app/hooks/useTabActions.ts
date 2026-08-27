@@ -1,5 +1,5 @@
 import { toast } from "@/components/ui/toast";
-import { activeLeaf, MAX_PANES_PER_TAB, type Tab } from "@/modules/tabs";
+import { activeLeaf, canCloseLeaf, canCloseTab, MAX_PANES_PER_TAB, type Tab } from "@/modules/tabs";
 import {
   agentToolKind,
   MAX_AGENT_SPAWN,
@@ -123,8 +123,15 @@ export function useTabActions({
 
   // Whole-tab close. Confirms first on unsaved editor changes or a running
   // terminal process; otherwise disposes immediately.
+  //
+  // The close rule (`tabs/lib/closable.ts`) is asked BEFORE the confirmation,
+  // not after: prompting "close the running terminal?" for a close that will
+  // then be refused is worse than the silent no-op it replaces. Nothing is said
+  // here because nothing offered the action - the tab strip and pane header do
+  // not render an X for a tab this refuses, and `Ctrl+W` is the only way in.
   const handleClose = useCallback(
     (id: number) => {
+      if (!canCloseTab(tabs, id)) return;
       const t = tabs.find((x) => x.id === id);
       if (t?.kind === "pane" && t.dirty) {
         setPendingClose({ target: { kind: "tab", tabId: id }, reason: "unsaved", title: t.title });
@@ -144,6 +151,11 @@ export function useTabActions({
   // pane immediately. Editor leaves always close without a prompt.
   const requestCloseLeaf = useCallback(
     (leafId: number) => {
+      // Same gate as `handleClose`, same reason it comes first. This is the
+      // funnel for the tab-strip X, the pane-header X on a split, `Ctrl+W` on a
+      // multi-pane tab, `Ctrl+Shift+X`, and "Close Tabs to the Right", so all of
+      // them refuse the identical set.
+      if (!canCloseLeaf(tabsRef.current, leafId)) return;
       if (leafHasRunningProcess(leafId)) {
         const tab = tabsRef.current.find((x) => x.kind === "pane" && hasLeaf(x.paneTree, leafId));
         setPendingClose({

@@ -14,7 +14,7 @@ import { type ShortcutHandlers } from "@/modules/shortcuts";
 import { type TerminalPaneHandle } from "@/modules/terminal";
 import { type EditorPaneHandle } from "@/modules/editor";
 import { type SearchInlineHandle } from "@/modules/header";
-import { type PageKind } from "@/modules/terminal/lib/panes";
+import { type TabPageKind } from "@/modules/tabs";
 
 /**
  * Component-local identifiers from App that the keyboard-shortcut handler
@@ -33,9 +33,10 @@ export interface ShortcutHandlerDeps {
   requestCloseLeaf: (leafId: number) => void;
   setNewEditorOpen: (open: boolean) => void;
   setAgentDialogOpen: (open: boolean) => void;
-  /** Open a rail page. Backs `rdp.connect` below, repointed at the Hosts page
-   *  now that connecting lives there instead of behind the RDP dropdown. */
-  openPageTab: (page: PageKind) => void;
+  /** Open a page tab, and leave any rail view that is covering the tab area.
+   *  Backs `rdp.connect` below, repointed at the Hosts page now that connecting
+   *  lives there instead of behind the RDP dropdown. */
+  openPageTab: (page: TabPageKind) => void;
   searchInlineRef: RefObject<SearchInlineHandle | null>;
   editorRefs: RefObject<Map<number, EditorPaneHandle>>;
   terminalRefs: RefObject<Map<number, TerminalPaneHandle>>;
@@ -158,9 +159,14 @@ export function buildShortcutHandlers(deps: ShortcutHandlerDeps): ShortcutHandle
     },
     // Ctrl+Shift+X: close the focused terminal pane, through `requestCloseLeaf`
     // so a busy terminal confirms before being killed. Deliberately carries no
-    // count of its own: `closePaneByLeaf` is the single arbiter of whether a
-    // close is legal, which is what keeps this chord agreeing with the
-    // pane-header and tab-strip X buttons rather than refusing what they allow.
+    // count of its own: `tabs/lib/closable.ts` is the single arbiter of whether
+    // a close is legal and `requestCloseLeaf` asks it, which is what keeps this
+    // chord agreeing with the pane-header and tab-strip X buttons rather than
+    // refusing what they allow - or, as it did, allowing what they refuse.
+    //
+    // The terminal-only gate below means this chord can never reach a page leaf,
+    // so its silence is only ever about the last-entry rule - and there, both X
+    // buttons are absent, so nothing tells the user two different things.
     "terminal.close": () => {
       if (activeLeafIdInTab === null || activeLeafKindCurrent !== "terminal") return;
       requestCloseLeaf(activeLeafIdInTab);

@@ -12,8 +12,13 @@ type SortableTabGroupProps = {
   tabId: number;
   /** Consecutive entries belonging to one tab. Length > 1 means split panes; rendered as a bordered cluster. */
   entries: Entry[];
-  /** Total entries across all groups. Drives can-close gating. */
+  /** Total entries across all groups. Drives the trigger's padding. */
   totalEntries: number;
+  /** Keys of the entries whose close is allowed, from the one close predicate
+   *  (`lib/closable.ts`). Per ENTRY, not per group: a workspace can hold a
+   *  permanent Hosts page beside a closable terminal, and the group they sit in
+   *  says nothing about either. */
+  closableKeys: ReadonlySet<string>;
   /** Active entry's composite key. Compared in JS instead of via CSS to avoid Tailwind variant collisions with Radix's `::after`. */
   activeKey: string | null;
   /** Composite key of the last entry. Drives the "Close tabs to the right" menu item. */
@@ -57,6 +62,7 @@ export function SortableTabGroup({
   tabId,
   entries,
   totalEntries,
+  closableKeys,
   activeKey,
   lastEntryKey,
   compact,
@@ -94,8 +100,6 @@ export function SortableTabGroup({
     transition,
   };
 
-  const canClose = totalEntries > 1;
-
   // Inner sortable items. Only consulted when `isSplit && leafSortable`; other tabs skip the inner SortableContext.
   const leafItems = useMemo(
     () =>
@@ -104,6 +108,7 @@ export function SortableTabGroup({
   );
 
   const renderedEntries = entries.map((e, idx) => {
+    const canClose = closableKeys.has(e.key);
     // Split group: each leaf carries its own drag handle. Single-leaf tab:
     // the first entry inherits the group-level drag listeners.
     if (isSplit && leafSortable && e.kind === "pane-leaf") {

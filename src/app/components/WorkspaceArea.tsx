@@ -3,11 +3,13 @@ import { cn } from "@/lib/utils";
 import { PaneStack } from "@/modules/panes";
 import { type AiCliStatus } from "@/modules/terminal/lib/aiCliStatus";
 import { type SshConnectionBinding, type SshStatus } from "@/modules/ssh/status";
-import { type PaneTab, type Tab } from "@/modules/tabs";
+import { type PaneTab, type RailViewKind, type Tab } from "@/modules/tabs";
+import { PAGE_LABELS } from "@/modules/terminal/lib/panes";
 import type { Host } from "@/modules/hosts/types";
 import type { SearchAddon } from "@xterm/addon-search";
 import { type TabsApi } from "../hooks/tabsApi";
 import { type usePaneHandles } from "../hooks/usePaneHandles";
+import { RailViewArea } from "./RailViewArea";
 
 type PaneHandles = ReturnType<typeof usePaneHandles>;
 
@@ -39,6 +41,9 @@ type Props = {
   onOpenPreview: () => void;
   /** Persist a split node's per-child size percentages after a divider drag. */
   onSplitSizes: (splitId: number, sizes: number[]) => void;
+  /** The rail view covering the tab area, or null when the tabs are showing
+   *  (DCR-1). Vault and Port Forwarding arrive here instead of as tabs. */
+  railView: RailViewKind | null;
 } & Pick<TabsApi, "movePaneLeafToEdge" | "setLeafTerminalTheme">;
 
 /**
@@ -68,6 +73,7 @@ export function WorkspaceArea({
   onSplitSizes,
   movePaneLeafToEdge,
   setLeafTerminalTheme,
+  railView,
 }: Props) {
   return (
     <ResizablePanel id="workspace" defaultSize="58%" minSize="25%">
@@ -82,13 +88,23 @@ export function WorkspaceArea({
             each pane is its own `bg-background` bordered card that floats on the
             tray, butting the uniform tray gutter like the sidebar / right cards. */}
         <div className="relative min-h-0 flex-1">
+          {/* A rail view HIDES the panes rather than unmounting them: a Vault
+              detour must not kill the PTYs behind it, exactly as a tab switch
+              doesn't. Same treatment the no-pane-tab case already gets. */}
           <div
-            className={cn("absolute inset-0", !activePaneTab && "pointer-events-none invisible")}
-            aria-hidden={activePaneTab ? "false" : "true"}
+            className={cn(
+              "absolute inset-0",
+              (!activePaneTab || railView !== null) && "pointer-events-none invisible",
+            )}
+            aria-hidden={activePaneTab && railView === null ? "false" : "true"}
           >
             <PaneStack
               tabs={tabs}
               activeId={activeId}
+              // A rail view on top means no pane is on screen, so no terminal
+              // should be holding a WebGL context or the caret behind it. Coming
+              // back is the same visibility flip as a tab switch.
+              visible={railView === null}
               registerTerminalHandle={paneHandles.registerTerminalHandle}
               onSearchReady={onSearchReady}
               onCwd={paneHandles.handleTerminalCwd}
@@ -119,7 +135,19 @@ export function WorkspaceArea({
             />
           </div>
           {/* The Board is a pane LEAF, not an overlay surface: it renders
-              inside PaneStack above, with the same header every other pane has. */}
+              inside PaneStack above, with the same header every other pane has.
+              A rail view is the opposite - not a leaf, so it mounts only while
+              shown and takes the whole workspace card, with the tab strip still
+              visible above it to click back to. */}
+          {railView !== null && (
+            <div
+              className="bg-background absolute inset-0 overflow-hidden rounded-md border shadow-sm"
+              role="region"
+              aria-label={PAGE_LABELS[railView]}
+            >
+              <RailViewArea view={railView} />
+            </div>
+          )}
         </div>
       </div>
     </ResizablePanel>

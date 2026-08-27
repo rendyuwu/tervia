@@ -33,6 +33,7 @@ import {
 } from "@/modules/terminal/lib/panes";
 import type { AiCliKind } from "@/modules/terminal/lib/aiCliStatus";
 import { type PaneTab, type Tab } from "./tabTypes";
+import { leafCloseRefusal, tabCloseRefusal } from "./closable";
 import { syncPaneMirror } from "./tabHelpers";
 import { useAuxTabs } from "./useAuxTabs";
 
@@ -386,7 +387,10 @@ export function useTabs() {
 
   const closeTab = useCallback((id: number) => {
     setTabs((curr) => {
-      if (curr.length <= 1) return curr;
+      // The mutation-site half of the close rule (`lib/closable.ts`). The render
+      // gates keep the X buttons off an unclosable tab; this is what a caller
+      // that never asked runs into, so the rule cannot be routed around.
+      if (tabCloseRefusal(curr, id) !== null) return curr;
       const idx = curr.findIndex((t) => t.id === id);
       const next = curr.filter((t) => t.id !== id);
       setActiveId((active) => (id === active ? next[Math.max(0, idx - 1)].id : active));
@@ -645,9 +649,14 @@ export function useTabs() {
     setTabs((curr) => {
       const tab = curr.find((t) => t.kind === "pane" && hasLeaf(t.paneTree, leafId));
       if (!tab || tab.kind !== "pane") return curr;
+      // Both halves of the close rule, at the mutation itself - see
+      // `lib/closable.ts`. `leafCloseRefusal` subsumes the `curr.length <= 1`
+      // guard this used to carry inline (it refuses whenever the workspace is
+      // down to one entry), and adds the permanent-page rule the inline guard
+      // could not express.
+      if (leafCloseRefusal(curr, leafId) !== null) return curr;
       const newTree = removeLeaf(tab.paneTree, leafId);
       if (newTree === null) {
-        if (curr.length <= 1) return curr;
         const idx = curr.findIndex((x) => x.id === tab.id);
         const next = curr.filter((x) => x.id !== tab.id);
         setActiveId((active) => (active === tab.id ? next[Math.max(0, idx - 1)].id : active));

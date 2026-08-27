@@ -40,6 +40,9 @@ export type RenderEntryArgs = {
   activeKey: string | null;
   lastEntryKey: string | null;
   compact?: boolean;
+  /** Whether THIS entry may be closed, decided by the one close predicate
+   *  (`lib/closable.ts`) and resolved by the caller. False renders no X at all
+   *  rather than a dead one - see the invariants in that file. */
   canClose: boolean;
   /** dnd-kit attributes for the trigger as drag handle. */
   dragAttrs?: ReturnType<typeof useSortable>["attributes"];

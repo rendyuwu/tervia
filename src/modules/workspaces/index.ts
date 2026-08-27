@@ -4,6 +4,8 @@ export {
   countSavedTabEntries,
   countSavedTerminalLeaves,
   defaultHostsTab,
+  restoreSavedTabs,
+  restoredActiveTabIndex,
   savedActiveTabIndex,
   savedToTab,
   serializeTabs,

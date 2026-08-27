@@ -37,7 +37,7 @@ import {
 import { SortableContext, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { memo, useMemo, useState, type ReactNode, type RefObject } from "react";
-import { countSavedTabEntries, savedToTab } from "./serialize";
+import { countSavedTabEntries, isRailViewLeaf, savedToTab } from "./serialize";
 import { useWorkspacesStore, type SavedPaneNode, type SavedTab, type Workspace } from "./store";
 import {
   ChevronRight,
@@ -154,7 +154,13 @@ function savedRows(tabs: SavedTab[], hosts: Map<string, Host>): EntryRow[] {
   let next = -1;
   const allocId = () => next--;
   const entries = buildEntries(
-    tabs.map((t) => savedToTab(t, allocId)),
+    // `savedToTab` returns null for a tab that does not survive restore (a
+    // pre-DCR-1 Vault tab). Showing a row for one would name a tab that opening
+    // the workspace will not produce.
+    tabs.flatMap((t) => {
+      const tab = savedToTab(t, allocId);
+      return tab === null ? [] : [tab];
+    }),
     hosts,
     undefined,
     undefined,
@@ -176,6 +182,9 @@ function savedTitles(tabs: SavedTab[]): (string | undefined)[] {
       node.children.forEach(walk);
       return;
     }
+    // Skip exactly the leaves restore drops, or every title after a pre-DCR-1
+    // Vault leaf would be zipped onto the wrong row.
+    if (isRailViewLeaf(node)) return;
     out.push(node.leafKind === "terminal" ? node.title : undefined);
   };
   for (const t of tabs) {

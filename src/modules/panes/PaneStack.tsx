@@ -1,5 +1,5 @@
 import type { EditorPaneHandle } from "@/modules/editor";
-import type { PaneTab, Tab } from "@/modules/tabs";
+import { canCloseLeaf, type PaneTab, type Tab } from "@/modules/tabs";
 import { leaves, type PaneEdge } from "@/modules/terminal/lib/panes";
 import type { TerminalPaneHandle } from "@/modules/terminal";
 import type {
@@ -11,12 +11,22 @@ import { useHosts } from "@/modules/hosts/useHosts";
 import type { Host } from "@/modules/hosts/types";
 import type { AiCliStatus } from "@/modules/terminal/lib/aiCliStatus";
 import type { SearchAddon } from "@xterm/addon-search";
-import { useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import { PaneTreeView, type LeafBundle } from "./PaneTreeView";
 
 type Props = {
   tabs: Tab[];
   activeId: number;
+  /**
+   * False while something covers the whole pane area - today, a rail view
+   * (DCR-1). Folded into each tab's `tabVisible` rather than handled by the
+   * caller hiding this subtree, because "visible" is what a leaf acts on: an
+   * xterm told it is visible holds a WebGL context nobody is looking at and
+   * keeps the caret while the user types into the surface on top of it. Panes
+   * stay MOUNTED either way, so a detour into a rail view is a visibility flip
+   * exactly like a tab switch, not a teardown.
+   */
+  visible?: boolean;
   // Terminal leaf callbacks
   registerTerminalHandle: (leafId: number, handle: TerminalPaneHandle | null) => void;
   onSearchReady: (leafId: number, addon: SearchAddon) => void;
@@ -74,6 +84,7 @@ type Props = {
 export function PaneStack({
   tabs,
   activeId,
+  visible = true,
   registerTerminalHandle,
   onSearchReady,
   onCwd,
@@ -104,6 +115,11 @@ export function PaneStack({
 }: Props) {
   // Memoize the filter so the prune effect below sees a stable identity.
   const paneTabs = useMemo(() => tabs.filter((t): t is PaneTab => t.kind === "pane"), [tabs]);
+
+  // The pane header's X asks the same predicate the tab strip does, so the two
+  // never disagree about whether a pane can be closed. This is the only place
+  // that has the whole tab list, which the answer depends on.
+  const canClosePaneLeaf = useCallback((leafId: number) => canCloseLeaf(tabs, leafId), [tabs]);
 
   // Resolve a leaf's `sshConnectionId` / `rdpConnectionId` to a host for the
   // `ssh:<host>` / `rdp:<host>` header label. Read here (not per-leaf), from
@@ -188,7 +204,7 @@ export function PaneStack({
   return (
     <div className="relative h-full w-full">
       {paneTabs.map((t) => {
-        const tabVisible = t.id === activeId;
+        const tabVisible = visible && t.id === activeId;
         return (
           <div
             key={t.id}
@@ -214,6 +230,7 @@ export function PaneStack({
               mdPreviewLeafIds={mdPreviewLeafIds}
               onMovePaneLeaf={onMovePaneLeaf}
               onCloseLeaf={onCloseLeafRequest}
+              canCloseLeaf={canClosePaneLeaf}
               onSetTerminalTheme={onSetTerminalTheme}
               onToggleMdPreview={onToggleMdPreview}
               detectedBrowserUrl={detectedBrowserUrl}

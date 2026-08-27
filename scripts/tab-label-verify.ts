@@ -269,7 +269,14 @@ console.log("\na cold workspace keeps depth-first order");
 
   let neg = -1;
   const entries = buildEntries(
-    saved.map((t) => savedToTab(t, () => neg--)),
+    // `savedToTab` returns null for a tab DCR-1 drops on restore (a saved
+    // Vault/Port-Forwarding page leaf). None of the snapshots here hold one, so
+    // the filter changes nothing - it is what keeps the walk above and the
+    // rehydrated entries counting the same leaves if one ever does.
+    saved.flatMap((t) => {
+      const tab = savedToTab(t, () => neg--);
+      return tab === null ? [] : [tab];
+    }),
     hosts,
   );
   check(

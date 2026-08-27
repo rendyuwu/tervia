@@ -40,7 +40,7 @@ import { setLineWrap } from "@/modules/settings/store";
 import { shortcutHint } from "@/modules/shortcuts/shortcuts";
 import { IconTooltip } from "@/components/ui/icon-tooltip";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
-import { LeafIcon, PAGE_ICONS, type LeafIconInfo } from "@/components/LeafIcon";
+import { LeafIcon, type LeafIconInfo } from "@/components/LeafIcon";
 import { cn } from "@/lib/utils";
 import { type EditorPaneHandle } from "@/modules/editor";
 import { useExplorerIconsReady } from "@/modules/explorer/lib/iconResolver";
@@ -49,13 +49,8 @@ import { RdpPane } from "@/modules/rdp/RdpPane";
 import { fireRdpPaneAction } from "@/modules/rdp/paneActions";
 import { TerminalPane, type TerminalPaneHandle } from "@/modules/terminal";
 import type { SearchAddon } from "@xterm/addon-search";
-import type { PaneEdge, PageKind, PaneLeaf, PaneNode } from "@/modules/terminal/lib/panes";
-import {
-  editorPaneSession,
-  isRemoteEditorLeaf,
-  leaves,
-  PAGE_LABELS,
-} from "@/modules/terminal/lib/panes";
+import type { PaneEdge, PaneLeaf, PaneNode, TabPageKind } from "@/modules/terminal/lib/panes";
+import { editorPaneSession, isRemoteEditorLeaf, leaves } from "@/modules/terminal/lib/panes";
 import type {
   TerviaOpenInput,
   TerviaSpawnTabInput,
@@ -161,6 +156,11 @@ type Props = {
   onMovePaneLeaf?: (sourceLeafId: number, targetLeafId: number, edge: PaneEdge) => void;
   /** Close button in a pane header. Hidden when omitted. */
   onCloseLeaf?: (leafId: number) => void;
+  /** Whether this leaf's close is allowed, from the one close predicate
+   *  (`tabs/lib/closable.ts`). Threaded in rather than derived here because the
+   *  answer depends on the whole workspace, which a pane tree does not know.
+   *  Omitted means "no gate", the default a caller without a tab list gets. */
+  canCloseLeaf?: (leafId: number) => boolean;
   /** Set (or clear, with `null`) a terminal leaf's per-pane theme override.
    *  `themeId` is a `TERMINAL_PRESETS` id. Backs the header "Terminal theme" menu. */
   onSetTerminalTheme?: (leafId: number, themeId: string | null) => void;
@@ -203,6 +203,7 @@ type PaneDndValue = {
   drag: PaneDragState;
   leafCount: number;
   onCloseLeaf?: (leafId: number) => void;
+  canCloseLeaf?: (leafId: number) => boolean;
   onSetTerminalTheme?: (leafId: number, themeId: string | null) => void;
   onToggleMdPreview?: (leafId: number) => void;
   detectedBrowserUrl?: string | null;
@@ -284,39 +285,43 @@ function BoardLeafBody({ leafId }: { leafId: number }) {
 }
 
 /**
- * A page leaf's body. `hosts` renders the real page (6d); `vault` and
- * `forwards` still fall through to the 6c placeholder below - they land in
- * 6e/6f without touching anything around them, since the pane header, drag,
- * close, split and persistence are already wired to the leaf, not to what's
- * rendered inside it.
+ * A page leaf's body. Hosts is the only case there is: DCR-1 made Vault and Port
+ * Forwarding rail VIEWS rather than tabs, and `PageLeafState.page` is
+ * `TabPageKind`, so no other page can reach here.
+ *
+ * A `switch` rather than an `if`, so widening `TabPageKind` later fails to
+ * compile here instead of silently rendering nothing.
  */
-function PageLeafBody({ page, tabVisible }: { page: PageKind; tabVisible: boolean }) {
+function PageLeafBody({ page, onScreen }: { page: TabPageKind; onScreen: boolean }) {
   const { onConnectHost } = use(PaneMetaContext);
-  if (page === "hosts") {
-    return (
-      <HostsPage
-        // `onConnectHost` is optional only because `PaneMetaContext`'s default
-        // value (`{}`) has to type-check; App always supplies the real
-        // dispatcher, so this fallback is never a state a real user reaches -
-        // it exists for the context default, not as a supported no-op path.
-        onConnect={onConnectHost ?? (() => {})}
-        // `PaneStack.tsx` keeps an inactive tab's leaves mounted (hidden via
-        // `visibility:hidden`, which a focus() call cannot reach), so this
-        // page's own mount-only focus effect would fire once and then never
-        // again for a tab restored into the background. Forwarded through so
-        // the page can re-fire it on becoming visible instead.
-        tabVisible={tabVisible}
-      />
-    );
+  switch (page) {
+    case "hosts":
+      return (
+        <HostsPage
+          // `onConnectHost` is optional only because `PaneMetaContext`'s default
+          // value (`{}`) has to type-check; App always supplies the real
+          // dispatcher, so this fallback is never a state a real user reaches -
+          // it exists for the context default, not as a supported no-op path.
+          onConnect={onConnectHost ?? (() => {})}
+          // "The user is looking at this page": its tab is on screen AND it is
+          // the focused pane. `PaneStack` keeps an inactive tab's leaves mounted
+          // (hidden via `visibility:hidden`, which a focus() call cannot reach),
+          // so the page's own mount-only focus effect would fire once - while it
+          // was not even visible - and never again for a tab restored into the
+          // background. Forwarded so it can re-fire on becoming visible.
+          //
+          // `focused` is in the signal, not just tab visibility: in a tab that
+          // splits Hosts beside a terminal, switching to that tab would
+          // otherwise pull the caret out of the terminal and into this page's
+          // search box. Single-leaf Hosts tabs - the ordinary case - are always
+          // the focused pane, so nothing changes for them.
+          //
+          // The prop is still named `tabVisible` on `HostsPage`; renaming it
+          // there is cosmetic and that file is held by another agent.
+          tabVisible={onScreen}
+        />
+      );
   }
-  const Icon = PAGE_ICONS[page];
-  return (
-    <div className="bg-background text-muted-foreground flex h-full w-full flex-col items-center justify-center gap-3 p-6 text-center">
-      <Icon size={28} strokeWidth={1.5} className="opacity-50" />
-      <span className="text-foreground text-sm font-medium">{PAGE_LABELS[page]}</span>
-      <span className="max-w-72 text-[11px] leading-relaxed opacity-70">Coming soon.</span>
-    </div>
-  );
 }
 
 const DRAG_PREFIX = "pane-drag:";
@@ -500,7 +505,7 @@ const LeafBody = memo(function LeafBody({
   if (node.leafKind === "page") {
     return (
       <ErrorBoundary label="page pane" resetKeys={[node.id, node.page]}>
-        <PageLeafBody page={node.page} tabVisible={tabVisible} />
+        <PageLeafBody page={node.page} onScreen={tabVisible && focused} />
       </ErrorBoundary>
     );
   }
@@ -578,6 +583,7 @@ function PaneLeafFrame({
     drag,
     leafCount,
     onCloseLeaf,
+    canCloseLeaf,
     onSetTerminalTheme,
     onToggleMdPreview,
     detectedBrowserUrl,
@@ -928,7 +934,11 @@ function PaneLeafFrame({
                 </DropdownMenuContent>
               </DropdownMenu>
             )}
-            {onCloseLeaf && (
+            {/* Not rendered when the close would be refused, rather than
+                rendered and dead: the tab strip already hides its X the same
+                way, and a permanent pane with a live-looking X is the one
+                outcome the close rule must not produce. */}
+            {onCloseLeaf && (canCloseLeaf?.(node.id) ?? true) && (
               <IconTooltip label="Close pane" side="bottom">
                 <button
                   type="button"
@@ -1082,6 +1092,7 @@ export function PaneTreeView({
   mdPreviewLeafIds,
   onMovePaneLeaf,
   onCloseLeaf,
+  canCloseLeaf,
   onSetTerminalTheme,
   onToggleMdPreview,
   detectedBrowserUrl,
@@ -1163,6 +1174,7 @@ export function PaneTreeView({
       drag,
       leafCount,
       onCloseLeaf,
+      canCloseLeaf,
       onSetTerminalTheme,
       onToggleMdPreview,
       detectedBrowserUrl,
@@ -1172,6 +1184,7 @@ export function PaneTreeView({
       drag,
       leafCount,
       onCloseLeaf,
+      canCloseLeaf,
       onSetTerminalTheme,
       onToggleMdPreview,
       detectedBrowserUrl,

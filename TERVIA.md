@@ -400,11 +400,64 @@ talks about `Tab` everywhere and the layer used to carry other kinds. A
   session and is not.
 - `board` - the kanban of the workspace's terminals grouped by what their AI CLI
   is doing. Stateless: rebuilt from the live tab tree every render.
+- `rdp` - one RDP session on a canvas. Holds a reference to a saved host, never a
+  copy of its fields, so it carries no secret and no host-shaped state.
+- `page` - the Hosts page, and only Hosts (`page: TabPageKind`). Stateless like
+  `board`. See "Pages: tabs vs rail views" below.
 
 `customTitle` is declared on every leaf kind so the tab strip's Rename works
 anywhere. Any leaf can be popped into a floating OS window (`panes/floatHost.ts`
 -> `open_float_window` -> `float.html`), which mirrors over Tauri events rather
 than sharing React state.
+
+#### What may be closed (`tabs/lib/closable.ts`)
+
+Two invariants, one predicate, and every close path asks it. They are separate
+reasons that share a gate:
+
+1. **A page leaf is permanent.** Hosts is the workspace's entry point and holds
+   no session that closing would end, so it is refused regardless of what else is
+   open - not merely when it happens to be the last thing left.
+2. **The last entry is permanent.** Closing the only thing on screen would leave
+   an empty window.
+
+`leafCloseRefusal` / `tabCloseRefusal` are the whole rule. Three paths consult
+them - the tab-strip X (`TabBar` builds its closable set from the predicate), the
+pane-header X (`PaneStack` passes it into `PaneTreeView`), and `Ctrl+Shift+X` /
+`Ctrl+W` (both funnel through `useTabActions`' `requestCloseLeaf` / `handleClose`)
+
+- and `useTabs`' `closePaneByLeaf` / `closeTab` re-check at the mutation, so a
+  caller that never asked cannot route around it. A refusal is **not rendered**
+  rather than rendered dead: neither X appears on a leaf the rule refuses, which is
+  what lets the chord no-op silently without telling the user two different things.
+  There is deliberately no confirmation dialog for either case.
+
+Checked by `scripts/tab-close-verify.ts`, whose third assertion - an ordinary leaf
+beside another entry IS closable - is what stops a predicate hardwired to `false`
+from passing.
+
+#### Pages: tabs vs rail views (`tabs/lib/pages.ts`)
+
+The rail has three pages, and the tab strip is for connections, so only **Hosts**
+is a tab - leftmost. Vault and Port Forwarding are **views** shown over the tab
+area (`app/components/RailViewArea.tsx`): the strip stays visible above them, and
+clicking any tab or the lit rail button again comes back. Rail-view activation is
+App state and is deliberately not persisted; a relaunch comes up on the tabs.
+
+The bad state is unrepresentable rather than checked for. `PageKind` still names
+all three (the rail, `PAGE_LABELS` and `PAGE_ICONS` are indexed by it), but
+`PageLeafState.page` is `TabPageKind` (`= "hosts"`, declared beside the leaf in
+`terminal/lib/panes.ts`, re-exported from `tabs/lib/pages.ts`), so a Vault or
+Port-Forwarding **leaf** is a compile error. The two page-leaf constructors -
+`useAuxTabs.openPageTab` and the restore path in `workspaces/serialize.ts` - take
+that type too.
+
+`SavedPageLeaf.page` stays wide, because old snapshots must still be readable.
+Restore therefore **migrates**: a `vault` / `forwards` page leaf is dropped, its
+tab goes with it if that empties it, and a workspace emptied that way falls back
+to Hosts (`restoreSavedTabs` / `restoredActiveTabIndex`). Checked by
+`scripts/rail-views-verify.ts`, which asserts the narrowing at compile time as
+well as the migration at runtime.
 
 ### AI CLI support (terminal-side only)
 

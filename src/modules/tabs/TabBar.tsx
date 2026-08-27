@@ -23,6 +23,7 @@ import {
 import { horizontalListSortingStrategy, SortableContext } from "@dnd-kit/sortable";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Tab } from "./lib/useTabs";
+import { canCloseLeaf, canCloseTab } from "./lib/closable";
 import { type Entry, type PaneEntry, buildEntries } from "./lib/entries";
 import { EntryIcon } from "./components/EntryIcon";
 import { NewTabMenu } from "./components/NewTabMenu";
@@ -145,6 +146,20 @@ export function TabBar({
     () => buildEntries(tabs, hosts, sshStatuses, aiCliStatuses),
     [tabs, hosts, sshStatuses, aiCliStatuses],
   );
+
+  // Which entries may show a close X, decided by the ONE close predicate
+  // (`lib/closable.ts`) rather than by an entry count of the strip's own. A
+  // permanent Hosts page and the last entry left both come back unclosable, and
+  // the pane header + Ctrl+Shift+X refuse the identical set.
+  const closableKeys = useMemo(() => {
+    const keys = new Set<string>();
+    for (const e of entries) {
+      // A standalone entry is a whole tab, so it asks the tab-level question.
+      const ok = e.kind === "pane-leaf" ? canCloseLeaf(tabs, e.leafId) : canCloseTab(tabs, e.tabId);
+      if (ok) keys.add(e.key);
+    }
+    return keys;
+  }, [entries, tabs]);
 
   /** Snapshot of pane tabs for the Move to Group menu. Full tabs are listed but disabled so the menu stays stable. */
   const paneGroupsForMove = useMemo(
@@ -397,6 +412,7 @@ export function TabBar({
                       tabId={group.tabId}
                       entries={group.entries}
                       totalEntries={entries.length}
+                      closableKeys={closableKeys}
                       activeKey={activeKey}
                       lastEntryKey={lastEntryKey}
                       compact={compact}

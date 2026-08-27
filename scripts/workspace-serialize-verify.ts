@@ -27,10 +27,12 @@
  *    migration, which is worthless if the serializer drops it. Together these
  *    are property 4's whitelist problem on a kind where the symptom is a dead
  *    pane rather than a wrong name.
- * 6. A page leaf (Hosts/Vault/Port Forwarding, phase 6c) must round-trip its
- *    `page` value and rename, inside a split exactly like any other kind, and
- *    an unrecognised `page` value (a newer build's page, or hand-edited state)
- *    must restore as Hosts rather than crash or drop the leaf.
+ * 6. A page leaf must round-trip its `page` value and rename, inside a split
+ *    exactly like any other kind, and an unrecognised `page` value (a newer
+ *    build's page, or hand-edited state) must restore as Hosts rather than crash
+ *    or drop the leaf. Hosts is the only page that may BE a leaf since DCR-1; a
+ *    saved `vault`/`forwards` leaf is dropped on restore, which is
+ *    `scripts/rail-views-verify.ts`.
  * 7. Switching to (or creating) a workspace with no saved tabs must land on
  *    the Hosts page, matching the startup fallback (decision 9) instead of
  *    reverting to a local shell; a workspace that does have saved tabs must
@@ -62,11 +64,28 @@ import {
   type SshStatus,
 } from "../src/modules/ssh/status";
 import type { SavedPaneNode, SavedTab } from "../src/modules/workspaces/store";
-import { editorPaneSession, type PaneNode } from "../src/modules/terminal/lib/panes";
+import {
+  editorPaneSession,
+  type PaneNode,
+  type TabPageKind,
+} from "../src/modules/terminal/lib/panes";
 import type { Tab } from "../src/modules/tabs";
 
 let nextId = 1;
 const id = () => nextId++;
+
+/**
+ * `savedToTab` returns null for a tab that does not survive restore - DCR-1's
+ * dropped Vault/Port-Forwarding leaves. Every case below restores a tab that is
+ * supposed to come back, so a null here is the check failing, not a branch to
+ * handle. The rail-view cases assert on `savedToTab` / `restoreSavedTabs`
+ * directly.
+ */
+function restoreOne(saved: SavedTab, allocId: () => number): Tab {
+  const tab = savedToTab(saved, allocId);
+  if (tab === null) throw new Error("expected the saved tab to survive restore");
+  return tab;
+}
 
 function term(leafId: number, cwd = "/w"): PaneNode {
   return { kind: "leaf", id: leafId, leafKind: "terminal", cwd };
@@ -108,8 +127,10 @@ function savedRemoteEditor(leafId: number, path: string): PaneNode {
 function rdp(leafId: number, rdpConnectionId: string): PaneNode {
   return { kind: "leaf", id: leafId, leafKind: "rdp", rdpConnectionId, sizeMode: "preset" };
 }
-/** A rail page leaf: nothing but which page it is. */
-function page(leafId: number, p: "hosts" | "vault" | "forwards"): PaneNode {
+/** A page leaf: nothing but which page it is. `TabPageKind`, so a Vault or
+ *  Port-Forwarding leaf cannot be built here either - since DCR-1 that is a
+ *  type error, not a fixture. See `scripts/rail-views-verify.ts`. */
+function page(leafId: number, p: TabPageKind): PaneNode {
   return { kind: "leaf", id: leafId, leafKind: "page", page: p };
 }
 function split(dir: "row" | "col", children: PaneNode[], sizes?: number[]): PaneNode {
@@ -252,7 +273,7 @@ function onlyLeaf(t: SavedTab): Extract<SavedPaneNode, { kind: "leaf" }> {
 {
   const s = serializeTabs([tab(savedRemoteEditor(1201, "/srv/a.ts"), 1201)]);
   let next = 1;
-  const restored = savedToTab(s[0], () => next++);
+  const restored = restoreOne(s[0], () => next++);
   if (restored.kind !== "pane" || restored.paneTree.kind !== "leaf") {
     throw new Error("expected a restored single-leaf pane tab");
   }
@@ -460,7 +481,7 @@ console.log("\n[active index] savedActiveTabIndex must match what serializeTabs 
     "docs",
   ]);
 
-  const restored = savedToTab(serializeTabs([t])[0], () => id());
+  const restored = restoreOne(serializeTabs([t])[0], () => id());
   const liveNames =
     restored.paneTree.kind === "split"
       ? restored.paneTree.children.map((c) => (c.kind === "leaf" ? c.customTitle : undefined))
@@ -514,7 +535,7 @@ console.log("\n[rdp] an rdp leaf must round-trip its connection id and size mode
     ["kind", "leafKind", "rdpConnectionId", "sizeMode"],
   );
 
-  const restored = savedToTab(s[0], () => id());
+  const restored = restoreOne(s[0], () => id());
   const liveLeaf =
     restored.paneTree.kind === "split" ? restored.paneTree.children[1] : restored.paneTree;
   check(
@@ -538,29 +559,34 @@ console.log("\n[rdp] an rdp leaf must round-trip its connection id and size mode
   );
 }
 
-console.log("\n[page] a rail page leaf round-trips its page value, name and tree shape");
+console.log("\n[page] a page leaf round-trips its page value, name and tree shape");
 
 // 6. A page leaf's whole restorable identity is which page it is.
+//
+// `hosts` throughout, not `vault`: since DCR-1 the only page that may be a tab
+// leaf is Hosts, and a saved `vault`/`forwards` leaf is DROPPED on restore rather
+// than round-tripped. That migration is `scripts/rail-views-verify.ts`; what is
+// checked here is that the surviving kind is unaffected by it.
 {
-  const t = tab(page(1400, "vault"), 1400);
+  const t = tab(page(1400, "hosts"), 1400);
   const s = serializeTabs([t]);
   const leaf = onlyLeaf(s[0]);
   check("saved as a page leaf", leaf.leafKind, "page");
-  check("the page value is persisted", leaf.leafKind === "page" && leaf.page, "vault");
+  check("the page value is persisted", leaf.leafKind === "page" && leaf.page, "hosts");
 
-  const restored = savedToTab(s[0], () => id());
+  const restored = restoreOne(s[0], () => id());
   const liveLeaf = restored.paneTree;
   check(
     "and comes back on restore",
     liveLeaf.kind === "leaf" && liveLeaf.leafKind === "page" ? liveLeaf.page : null,
-    "vault",
+    "hosts",
   );
 }
 
 // A rename has to survive on this kind too, same whitelist, same symptom.
 {
   const named = tab(
-    { ...(page(1401, "forwards") as object), customTitle: "tunnels" } as PaneNode,
+    { ...(page(1401, "hosts") as object), customTitle: "tunnels" } as PaneNode,
     1401,
   );
   const savedNamed = onlyLeaf(serializeTabs([named])[0]);
@@ -576,7 +602,7 @@ console.log("\n[page] a rail page leaf round-trips its page value, name and tree
 // because each kind spells its own `customTitle` spread, so the guard is
 // per-kind rather than shared.
 {
-  const cleared = tab({ ...(page(1404, "vault") as object), customTitle: "" } as PaneNode, 1404);
+  const cleared = tab({ ...(page(1404, "hosts") as object), customTitle: "" } as PaneNode, 1404);
   const savedCleared = onlyLeaf(serializeTabs([cleared])[0]);
   check("a cleared page name persists no key", "customTitle" in savedCleared, false);
 }
@@ -585,13 +611,13 @@ console.log("\n[page] a rail page leaf round-trips its page value, name and tree
 // leaf exactly as they do around any other kind - BOTH directions, since a
 // column split is a separate code path in the pane tree.
 {
-  const t = tab(split("col", [page(1405, "forwards"), term(1406)], [35, 65]), 1405);
+  const t = tab(split("col", [page(1405, "hosts"), term(1406)], [35, 65]), 1405);
   const s = serializeTabs([t]);
   check("a page leaf is saved in a column split", shape(s[0]), "split(page,terminal)");
   check("the column's divider ratios survive", sizes(s[0]), [35, 65]);
   check("the page leaf is the active one", activeIdx(s[0]), 0);
 
-  const restored = savedToTab(s[0], () => id());
+  const restored = restoreOne(s[0], () => id());
   const tree = restored.paneTree;
   check(
     "and the column direction survives restore",
@@ -607,7 +633,7 @@ console.log("\n[page] a rail page leaf round-trips its page value, name and tree
   check("divider ratios survive", sizes(s[0]), [40, 60]);
   check("the page leaf is still the active one", activeIdx(s[0]), 1);
 
-  const restored = savedToTab(s[0], () => id());
+  const restored = restoreOne(s[0], () => id());
   const tree = restored.paneTree;
   check(
     "and the split shape survives restore",
@@ -625,7 +651,7 @@ console.log("\n[page] a rail page leaf round-trips its page value, name and tree
 // DOES recognise, just with a value it doesn't.
 {
   const corrupt = { kind: "leaf", leafKind: "page", page: "snippets" } as unknown as SavedPaneNode;
-  const restored = savedToTab({ kind: "pane", paneTree: corrupt, activeLeafIndex: 0 }, () => id());
+  const restored = restoreOne({ kind: "pane", paneTree: corrupt, activeLeafIndex: 0 }, () => id());
   const leaf = restored.paneTree;
   check(
     "an unknown page value falls back to hosts",
@@ -659,7 +685,7 @@ console.log(
     "hosts",
   );
 
-  const saved = serializeTabs([tab(term(1701), 1701), tab(page(1702, "vault"), 1702)]);
+  const saved = serializeTabs([tab(term(1701), 1701), tab(page(1702, "hosts"), 1702)]);
   const restored = tabsForWorkspaceEntry({ tabs: saved }, allocId);
   check(
     "a workspace with saved tabs restores the same leaf kinds untouched",
@@ -678,7 +704,7 @@ console.log(
   const allocId = () => n++;
   const s = serializeTabs([defaultHostsTab(allocId)]);
   check("the fallback tab is persisted", s.length, 1);
-  const back = savedToTab(s[0], allocId);
+  const back = restoreOne(s[0], allocId);
   const backLeaf = back.paneTree;
   check(
     "and comes back as the same Hosts page",
@@ -723,7 +749,7 @@ console.log(
   );
   // Two panes in ONE tab: the tab list is length 1, so a tabs-only count would
   // wrongly refuse this close.
-  const splitTab = tab(split("row", [term(1803), page(1804, "vault")]), 1803);
+  const splitTab = tab(split("row", [term(1803), page(1804, "hosts")]), 1803);
   check(
     "a pane in a split is never the last thing on screen",
     isLastEntryInWorkspace([splitTab], 1803),

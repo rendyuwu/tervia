@@ -1,6 +1,7 @@
 import { useCallback, type Dispatch, type RefObject, type SetStateAction } from "react";
-import { leaves, PAGE_LABELS, type PageKind, type PaneLeaf } from "@/modules/terminal/lib/panes";
+import { leaves, PAGE_LABELS, type PaneLeaf } from "@/modules/terminal/lib/panes";
 import { type Tab } from "./tabTypes";
+import { type TabPageKind } from "./pages";
 import { syncPaneMirror } from "./tabHelpers";
 
 /**
@@ -91,13 +92,18 @@ export function useAuxTabs({ setTabs, setActiveId, nextIdRef, tabsRef }: AuxTabs
   }, []);
 
   /**
-   * Open (or focus) a rail page. Single-instance PER PAGE KIND: two Hosts
+   * Open (or focus) a page tab. Single-instance PER PAGE KIND: two Hosts
    * lists would be two copies of one store subscription fighting over the
-   * same selection state, with no upside - unlike `newRdpTab` below, which is
+   * same selection state, with no upside - unlike `newRdpTab` above, which is
    * deliberately not single-instance because two RDP panes are two genuine
    * logins with nothing to fight over.
+   *
+   * `TabPageKind`, not `PageKind`: this is one of the two page-leaf
+   * constructors, and DCR-1 says only Hosts is a tab (see `./pages.ts`). Asking
+   * for a Vault tab is a type error rather than a leaf nothing would render a
+   * tab strip entry for.
    */
-  const openPageTab = useCallback((page: PageKind) => {
+  const openPageTab = useCallback((page: TabPageKind) => {
     const existing = (() => {
       for (const t of tabsRef.current) {
         if (t.kind !== "pane") continue;
@@ -124,8 +130,12 @@ export function useAuxTabs({ setTabs, setActiveId, nextIdRef, tabsRef }: AuxTabs
     const tabId = nextIdRef.current++;
     const leafId = nextIdRef.current++;
     const leaf: PaneLeaf = { kind: "leaf", id: leafId, leafKind: "page", page };
+    // Leftmost, not appended (DCR-1): Hosts is where a workspace starts, so the
+    // strip reads left-to-right as "the machines, then what you opened from
+    // them". The startup fallback already puts it first; this branch is for a
+    // workspace whose saved tabs hold no page leaf at all - one snapshotted by a
+    // build where Hosts was closable, or before it was the default tab.
     setTabs((curr) => [
-      ...curr,
       syncPaneMirror({
         id: tabId,
         kind: "pane",
@@ -133,6 +143,7 @@ export function useAuxTabs({ setTabs, setActiveId, nextIdRef, tabsRef }: AuxTabs
         paneTree: leaf,
         activeLeafId: leafId,
       }),
+      ...curr,
     ]);
     setActiveId(tabId);
     return tabId;

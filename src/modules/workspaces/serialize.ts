@@ -1,6 +1,6 @@
-import type { PaneTab, Tab } from "@/modules/tabs";
+import { isRailViewKind, TAB_PAGE_KIND, type PaneTab, type Tab } from "@/modules/tabs";
 import type { PaneLeaf, PaneNode } from "@/modules/terminal/lib/panes";
-import { isPageKind, leaves, PAGE_LABELS } from "@/modules/terminal/lib/panes";
+import { leaves, PAGE_LABELS } from "@/modules/terminal/lib/panes";
 import { useTerminalTitles } from "@/modules/terminal/lib/terminalTitles";
 import type { SavedPaneNode, SavedTab } from "./store";
 
@@ -16,21 +16,15 @@ export function countSavedTerminalLeaves(node: SavedPaneNode): number {
   return n;
 }
 
-/** Count all leaves (terminal + editor) in a serialised pane tree. */
-export function countSavedLeaves(node: SavedPaneNode): number {
-  if (node.kind === "leaf") return 1;
-  let n = 0;
-  for (const child of node.children) n += countSavedLeaves(child);
-  return n;
-}
-
 /** Tab-strip entry count for a serialised (unvisited) workspace: every leaf of
  *  each pane tab plus one per standalone (preview) tab. Mirrors the live
  *  `countTabEntries` so the badge stays consistent once the workspace is
- *  opened - a multi-pane group tab counts as its panes, not 1. */
+ *  opened - a multi-pane group tab counts as its panes, not 1, and a rail-view
+ *  page leaf from an older snapshot counts as none, because opening the
+ *  workspace drops it (see {@link isRailViewLeaf}). */
 export function countSavedTabEntries(tabs: SavedTab[]): number {
   let n = 0;
-  for (const t of tabs) n += t.kind === "pane" ? countSavedLeaves(t.paneTree) : 1;
+  for (const t of tabs) n += t.kind === "pane" ? countRestorableLeaves(t.paneTree) : 1;
   return n;
 }
 
@@ -212,8 +206,31 @@ export function serializeTabs(tabs: Tab[]): SavedTab[] {
 
 // saved -> live
 
-function savedToNode(node: SavedPaneNode, allocId: () => number, outLeafIds: number[]): PaneNode {
+/**
+ * True for a saved page leaf that DCR-1 took out of the tab strip: a `vault` or
+ * `forwards` leaf, which a snapshot from before rail views existed can hold.
+ *
+ * Those pages are now views the rail shows over the tab area, so there is no
+ * such thing as a tab for one. Restoring it as a page leaf would put a tab in
+ * the strip that the rail's pressed state, `openPageTab` and `PageLeafBody` have
+ * all stopped believing in; restoring it as HOSTS would silently mint a second
+ * Hosts page. So it is dropped, exactly like an unrestorable remote editor leaf,
+ * and its siblings are kept.
+ */
+export function isRailViewLeaf(node: SavedPaneNode): boolean {
+  return node.kind === "leaf" && node.leafKind === "page" && isRailViewKind(node.page);
+}
+
+/** Restores a pane subtree, dropping leaves that must not come back (see
+ *  {@link isRailViewLeaf}). Returns null when nothing in this subtree survives.
+ *  Mirrors `nodeToSaved`'s pruning on the way out, collapse included. */
+function savedToNode(
+  node: SavedPaneNode,
+  allocId: () => number,
+  outLeafIds: number[],
+): PaneNode | null {
   if (node.kind === "leaf") {
+    if (isRailViewLeaf(node)) return null;
     const id = allocId();
     outLeafIds.push(id);
     if (node.leafKind === "terminal") {
@@ -280,11 +297,14 @@ function savedToNode(node: SavedPaneNode, allocId: () => number, outLeafIds: num
         kind: "leaf",
         id,
         leafKind: "page",
-        // A `page` value this build doesn't recognise (a newer build's page,
-        // or hand-edited state) falls back to Hosts rather than degrading the
-        // whole leaf - the same shape as RDP's `sizeMode ?? "preset"` below,
-        // not the "unknown leafKind" case (this IS a known, current kind).
-        page: isPageKind(node.page) ? node.page : "hosts",
+        // Hosts, and only Hosts. The rail views were dropped above, so what
+        // reaches here is either `hosts` or a value this build doesn't recognise
+        // (a newer build's page, hand-edited state) - and for an unrecognised
+        // one, Hosts is the right fallback rather than degrading the whole leaf,
+        // the same shape as RDP's `sizeMode ?? "preset"` below. Writing the
+        // constant unconditionally is what makes "the only page tab is Hosts"
+        // true of the restore path by construction instead of by inspection.
+        page: TAB_PAGE_KIND,
         ...(node.customTitle ? { customTitle: node.customTitle } : {}),
       };
     }
@@ -298,19 +318,36 @@ function savedToNode(node: SavedPaneNode, allocId: () => number, outLeafIds: num
       leafKind: "terminal",
     };
   }
-  const children = node.children.map((c) => savedToNode(c, allocId, outLeafIds));
+  const children: PaneNode[] = [];
+  for (const c of node.children) {
+    const restored = savedToNode(c, allocId, outLeafIds);
+    if (restored !== null) children.push(restored);
+  }
+  if (children.length === 0) return null;
+  // A lone survivor collapses into its parent: a one-child split is not a valid
+  // pane tree. Same rule `nodeToSaved` applies when it prunes on the way out.
+  if (children.length === 1) return children[0];
   return {
     kind: "split",
     id: allocId(),
     dir: node.dir,
     children,
     // Restore divider positions only when the saved sizes still line up with
-    // the child count; otherwise fall back to an equal split.
+    // the child count; otherwise fall back to an equal split. A pruned child
+    // invalidates the ratios, which is exactly what the length compare catches.
     ...(node.sizes && node.sizes.length === children.length ? { sizes: node.sizes } : {}),
   };
 }
 
-export function savedToTab(saved: SavedTab, allocId: () => number): Tab {
+/**
+ * One saved tab, restored - or `null` when nothing in it survives restore.
+ *
+ * `null` is the DCR-1 migration's "drop the tab if dropping its leaves empties
+ * it" case: a workspace with a Vault tab in it comes back with that tab gone,
+ * not with an empty one. Prefer {@link restoreSavedTabs}, which handles the
+ * dropping and the fall back to Hosts when a whole workspace empties out.
+ */
+export function savedToTab(saved: SavedTab, allocId: () => number): Tab | null {
   if (saved.kind === "preview") {
     // Legacy standalone browser ("preview") tab, from a build that still had an
     // embedded browser. Restore it as an empty terminal pane so the tab (and
@@ -329,6 +366,7 @@ export function savedToTab(saved: SavedTab, allocId: () => number): Tab {
   const id = allocId();
   const leafIds: number[] = [];
   const paneTree = savedToNode(saved.paneTree, allocId, leafIds);
+  if (paneTree === null) return null;
   const activeLeafId =
     leafIds[Math.min(Math.max(0, saved.activeLeafIndex), leafIds.length - 1)] ?? leafIds[0];
   const tab: PaneTab = {
@@ -357,10 +395,65 @@ export function defaultHostsTab(allocId: () => number): Tab {
       kind: "leaf",
       id: leafId,
       leafKind: "page",
-      page: "hosts",
+      page: TAB_PAGE_KIND,
     },
     activeLeafId: leafId,
   };
+}
+
+/**
+ * Every saved tab restored, with DCR-1's migration applied: a `vault` or
+ * `forwards` page leaf is dropped, the tab goes with it if that empties it, and
+ * a workspace emptied that way falls back to the Hosts page rather than to a
+ * window with no tabs at all.
+ *
+ * THE restore entry point. `savedToTab` is still exported for the cold-workspace
+ * row builder and the verify scripts, but every path that produces the live tab
+ * list goes through here, so a snapshot taken before rail views existed cannot
+ * put a Vault tab back in the strip.
+ */
+export function restoreSavedTabs(saved: SavedTab[], allocId: () => number): Tab[] {
+  const out: Tab[] = [];
+  for (const s of saved) {
+    const tab = savedToTab(s, allocId);
+    if (tab !== null) out.push(tab);
+  }
+  return out.length === 0 ? [defaultHostsTab(allocId)] : out;
+}
+
+/**
+ * The saved active-tab index, re-based onto what {@link restoreSavedTabs}
+ * actually produced. Dropping a tab shifts every later one, so the raw saved
+ * index would land on a tab the user was not looking at - or, for the last tab,
+ * past the end.
+ *
+ * Counts the surviving tabs BEFORE the saved index, which is the same shape as
+ * `savedActiveTabIndex` on the way out; a dropped active tab lands on its
+ * neighbour. Restore is destructive to nothing, so this only ever reads the
+ * saved array - it needs no ids and allocates none.
+ */
+export function restoredActiveTabIndex(saved: SavedTab[], activeIndex: number): number {
+  let idx = 0;
+  for (let i = 0; i < saved.length && i < activeIndex; i++) {
+    if (survivesRestore(saved[i])) idx++;
+  }
+  return idx;
+}
+
+/** True for exactly the tabs {@link restoreSavedTabs} keeps. Decided without
+ *  allocating ids so {@link restoredActiveTabIndex} can ask it too. */
+function survivesRestore(saved: SavedTab): boolean {
+  if (saved.kind === "preview") return true;
+  return countRestorableLeaves(saved.paneTree) > 0;
+}
+
+/** Leaves of a saved subtree that restore, i.e. all of them minus the rail-view
+ *  page leaves DCR-1 dropped. */
+function countRestorableLeaves(node: SavedPaneNode): number {
+  if (node.kind === "leaf") return isRailViewLeaf(node) ? 0 : 1;
+  let n = 0;
+  for (const child of node.children) n += countRestorableLeaves(child);
+  return n;
 }
 
 /**
@@ -377,7 +470,7 @@ export function defaultHostsTab(allocId: () => number): Tab {
  * outside a bundler). Only `tabs` is read; callers pass a whole workspace.
  */
 export function tabsForWorkspaceEntry(entry: { tabs: SavedTab[] }, allocId: () => number): Tab[] {
-  return entry.tabs.length === 0
-    ? [defaultHostsTab(allocId)]
-    : entry.tabs.map((s) => savedToTab(s, allocId));
+  // `restoreSavedTabs` already falls back to Hosts on an empty result, which
+  // covers both "no saved tabs" and "every saved tab was a rail view".
+  return restoreSavedTabs(entry.tabs, allocId);
 }

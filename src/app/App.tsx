@@ -9,6 +9,7 @@
  *
  * Where behaviors are set up (each is its own hook unless noted):
  *   - useWorkspaceRoot         - home / picked root + `tervia <path>` CLI targets
+ *   - useStoreRecoveryNotices  - toasts a store recovered from its `.bak`
  *   - useWorkspacePersistence  - hydrate + auto-snapshot workspaces
  *   - useQuitGuard             - pre-quit snapshot flush + busy-terminal prompt
  *   - useWorkspaceSwitching    - switch / create / close orchestration
@@ -43,7 +44,9 @@ import {
   isTerminalLikeTab,
   useTabs,
   useWorkspaceCwd,
+  type RailViewKind,
   type Tab,
+  type TabPageKind,
 } from "@/modules/tabs";
 import {
   acknowledgeAiCli,
@@ -75,6 +78,7 @@ import { useWorkspaceRoot } from "./hooks/useWorkspaceRoot";
 import { useQuitGuard } from "./hooks/useQuitGuard";
 import { useWorkspacePersistence } from "./hooks/useWorkspacePersistence";
 import { useSessionDisposal } from "./hooks/useSessionDisposal";
+import { useStoreRecoveryNotices } from "./hooks/useStoreRecoveryNotices";
 import { useAdoptDaemonSessions } from "./hooks/useAdoptDaemonSessions";
 import { useActiveLeafSurface } from "./hooks/useActiveLeafSurface";
 import { useProjectUrl } from "./hooks/useProjectUrl";
@@ -173,6 +177,36 @@ export default function App() {
   const searchInlineRef = useRef<SearchInlineHandle | null>(null);
 
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
+
+  /**
+   * The rail view covering the tab area, or null when the tabs are showing
+   * (DCR-1). Vault and Port Forwarding are views, not tabs.
+   *
+   * Plain component state, so it is deliberately NOT persisted: a relaunch comes
+   * up on the tabs, because what a workspace is for is the connections in it and
+   * a saved detour into the vault would be the first thing every launch shows.
+   */
+  const [railView, setRailView] = useState<RailViewKind | null>(null);
+  // Same button both ways: clicking the lit one goes back to the tabs, so the
+  // rail never holds a pressed state with no way out of it.
+  const toggleRailView = useCallback((view: RailViewKind) => {
+    setRailView((curr) => (curr === view ? null : view));
+  }, []);
+  // Every route INTO the tab area clears the rail view: clicking a tab, or
+  // opening the Hosts tab from the rail, the header or the connect chord.
+  // Without this the tab click would land behind a view still covering it.
+  const showTabs = useCallback(() => setRailView(null), []);
+  // The one way a page TAB is opened - rail button, header quick-connect and
+  // connect chord alike: focus the tab and leave whatever rail view was covering
+  // it. `TabPageKind`, so "open Vault as a tab" is a type error, not a leaf the
+  // tab strip would then have to explain.
+  const openPageTabInTabs = useCallback(
+    (page: TabPageKind) => {
+      showTabs();
+      openPageTab(page);
+    },
+    [showTabs, openPageTab],
+  );
 
   // `+` -> Agent...: the CLI-agent picker. Mount-once like the editor dialog so
   // the chunk loads on first open and Radix's exit animation still plays.
@@ -303,6 +337,12 @@ export default function App() {
         );
       });
   }, []);
+
+  // -------- crash-recovery notices --------
+  // Runs each store's recovery pass at startup and says out loud when one came
+  // back from its `.bak`. Without this the recovery happened silently: the
+  // notice was produced and nothing ever took it.
+  useStoreRecoveryNotices();
 
   // -------- workspaces wiring --------
   const wsHydrate = useWorkspacesStore((s) => s.hydrate);
@@ -576,7 +616,7 @@ export default function App() {
         requestCloseLeaf,
         setNewEditorOpen,
         setAgentDialogOpen,
-        openPageTab,
+        openPageTab: openPageTabInTabs,
         searchInlineRef,
         editorRefs,
         terminalRefs,
@@ -598,7 +638,7 @@ export default function App() {
       focusNextPaneInTab,
       toggleSidebar,
       commandPaletteHandler,
-      openPageTab,
+      openPageTabInTabs,
     ],
   );
 
@@ -681,8 +721,19 @@ export default function App() {
   );
 
   const handleOpenHostsPage = useCallback(() => {
-    openPageTab("hosts");
-  }, [openPageTab]);
+    openPageTabInTabs("hosts");
+  }, [openPageTabInTabs]);
+
+  // Clicking any tab entry returns to the tab area (DCR-1), then does what it
+  // always did. Wrapped here rather than inside `useHeaderActions` because the
+  // rail view is App's state and the hook has no business knowing about it.
+  const selectEntry = useCallback(
+    (tabId: number, leafId: number | null) => {
+      showTabs();
+      handleHeaderSelectEntry(tabId, leafId);
+    },
+    [showTabs, handleHeaderSelectEntry],
+  );
 
   // Activate a tab and focus a specific leaf inside it. Backs the Workspaces
   // panel's terminal list (jump straight to a running terminal).
@@ -701,7 +752,7 @@ export default function App() {
           <Header
             tabs={tabs}
             activeId={activeId}
-            onSelectEntry={handleHeaderSelectEntry}
+            onSelectEntry={selectEntry}
             onCloseEntry={handleHeaderCloseEntry}
             onNewTerminal={openNewTab}
             onRenameLeaf={renameLeaf}
@@ -733,7 +784,12 @@ export default function App() {
               (a fixed-width strip, never part of the resizable/collapsible
               layout) rather than inside AppSidebar. */}
           <main className="bg-sidebar flex min-h-0 flex-1 gap-1.5 p-1.5">
-            <ActivityRail activeTab={activeTab} onOpenPage={openPageTab} />
+            <ActivityRail
+              activeTab={activeTab}
+              onOpenPage={openPageTabInTabs}
+              railView={railView}
+              onToggleRailView={toggleRailView}
+            />
             <ResizablePanelGroup orientation="horizontal" className="min-h-0 flex-1 gap-1.5">
               <AppSidebar
                 sidebarRef={sidebarRef}
@@ -784,6 +840,7 @@ export default function App() {
                 movePaneLeafToEdge={movePaneLeafToEdge}
                 setLeafTerminalTheme={setLeafTerminalTheme}
                 onSplitSizes={setSplitSizes}
+                railView={railView}
               />
               <AppRightSlot
                 rightSections={rightSections}

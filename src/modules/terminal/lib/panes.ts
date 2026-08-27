@@ -144,8 +144,26 @@ export type RdpLeafState = {
   customTitle?: string;
 };
 
-/** The three rail-opened pages. §2 decision 10: exactly these three this phase. */
+/** The three pages the activity rail can show. §2 decision 10: exactly these
+ *  three this phase. Only one of them may be a pane LEAF - see
+ *  {@link TabPageKind}. */
 export type PageKind = "hosts" | "vault" | "forwards";
+
+/**
+ * The page kinds that may live in a tab as a pane leaf. Hosts, and only Hosts.
+ *
+ * DCR-1: the tab strip is for connections, and Hosts earns a place there because
+ * it is where connections come from. Vault and Port Forwarding are rail VIEWS
+ * shown over the tab area (`app/components/RailViewArea.tsx`), so there is no
+ * such thing as a tab for one - and narrowing the leaf's `page` here is what
+ * makes "open Vault as a tab" a type error rather than a leaf the rail's pressed
+ * state, `openPageTab` and `PageLeafBody` would each have to refuse separately.
+ *
+ * Declared beside the leaf it constrains rather than in `tabs/lib/pages.ts`
+ * (which re-exports it alongside the rail-view half): a module that owns a type
+ * cannot import its own constraint back from a module that imports it.
+ */
+export type TabPageKind = "hosts";
 
 export const PAGE_KINDS: readonly PageKind[] = ["hosts", "vault", "forwards"];
 
@@ -165,14 +183,17 @@ export const PAGE_LABELS: Record<PageKind, string> = {
 };
 
 /**
- * A page opened from the left rail (Hosts, Vault, Port Forwarding). Stateless
- * beyond the discriminator, exactly like `BoardLeafState` - restorable from
- * nothing but its own existence. The page bodies themselves are placeholders
- * this phase; the real Hosts/Vault/Port-Forwarding UIs land in 6d/6e/6f.
+ * A page tab: the Hosts page, opened from the left rail. Stateless beyond the
+ * discriminator, exactly like `BoardLeafState` - restorable from nothing but its
+ * own existence.
+ *
+ * `TabPageKind`, not `PageKind`: a Vault or Port-Forwarding leaf is
+ * unrepresentable (DCR-1). The workspace restore path drops one saved by an
+ * older build; see `workspaces/serialize.ts`.
  */
 export type PageLeafState = {
   leafKind: "page";
-  page: PageKind;
+  page: TabPageKind;
   /** User-chosen tab name; see {@link TerminalLeafState.customTitle}. */
   customTitle?: string;
 };
