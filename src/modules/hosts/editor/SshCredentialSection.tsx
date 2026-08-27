@@ -51,9 +51,25 @@ export function validateSshCredential(
   // A vault-bound row has no user and no credential of its own to validate:
   // both belong to the identity, and the form does not show either.
   if (boundIdentity) return null;
+  // Still required, and not by symmetry with the password below: `user` has no
+  // presence flag, no indicator and no path that fills it later. A row saved
+  // without one dials with `user: ""` and fails the handshake with a message that
+  // names nothing the card could show, so a blank user is a MALFORMED record
+  // rather than an incomplete one.
   if (!draft.user.trim()) return "User is required";
-  if (draft.authMode === "password" && !draft.password)
-    return "Password is required for password auth";
+  // A BLANK PASSWORD IS DELIBERATELY ALLOWED, and the missing rule here is the
+  // fix rather than an omission. `hasPassword: false` on an inline password-auth
+  // row is a state the store persists and the Hosts page renders - the card shows
+  // "Missing secret" and reads the stored flag, not the keychain - so refusing it
+  // made the one state that indicator exists for unreachable from the UI, while
+  // leaving no way to save a host now and store its password later. The connect
+  // then fails with the server's own authentication error, which is the honest
+  // outcome for a host whose password has not been entered yet.
+  //
+  // Key auth is NOT relaxed with it. `hasPrivateKey: false` renders the same pip,
+  // so this is a scope boundary and not a correctness one: it is a second
+  // behaviour change, it needs its own hand test of what the connect reports for
+  // an empty key body, and the reported defect (test C8) is about password auth.
   if (draft.authMode === "key" && !draft.privateKey.trim())
     return "Private key body is required for key auth";
   // Agent mode has nothing to require here on purpose: the agent may be started
@@ -186,6 +202,13 @@ export function SshCredentialSection({
             onChange={(e) => onChange({ password: e.target.value })}
             className="h-8 font-mono text-[12px]"
           />
+          {/* Saving with this blank is allowed - see `validateSshCredential` - so
+              the form says what that produces rather than leaving the user to
+              discover it at the first connect. */}
+          <span className="text-muted-foreground text-[10.5px]">
+            Leave blank to save the host without one. It is listed with a missing-secret warning
+            until a password is entered, and a connect fails authentication before then.
+          </span>
         </Field>
       ) : (
         <>
