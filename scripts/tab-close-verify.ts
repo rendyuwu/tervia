@@ -65,6 +65,10 @@ const THREE_TABS: Tab[] = [
   tab(3, termLeaf(4), 4),
   tab(7, editorLeaf(8), 8),
 ];
+// One tab, two panes: `countTabEntries` is 2 here but `tabs.length` is 1 - the
+// one fixture that can tell `tabCloseRefusal`'s "last entry" gate apart from
+// `leafCloseRefusal`'s. See [ii-tab] below.
+const ONE_TAB_TWO_PANES: Tab[] = [tab(1, split(5, [termLeaf(2), termLeaf(6)]), 2)];
 
 // ---- (i) a Hosts page leaf is never closable ------------------------------
 console.log("[i] a page leaf is permanent, on every path and in every arrangement");
@@ -124,7 +128,33 @@ check(
   leafCloseRefusal(TERMINAL_ONLY, 999) === "unknown-leaf",
   leafCloseRefusal(TERMINAL_ONLY, 999),
 );
-check("a tab id no workspace holds likewise", tabCloseRefusal(TERMINAL_ONLY, 999) !== null);
+check(
+  // Tightened to match the leaf-level equivalent two checks up: `!== null`
+  // also accepts "last-entry" or "permanent-page", which an implementation
+  // that checks the tab COUNT before even looking up the id would satisfy
+  // just as well - it would refuse for the wrong reason and this would not
+  // notice.
+  "a tab id no workspace holds likewise",
+  tabCloseRefusal(TERMINAL_ONLY, 999) === "unknown-leaf",
+  tabCloseRefusal(TERMINAL_ONLY, 999),
+);
+
+// ---- (ii-tab) the last TAB is permanent, regardless of how many panes it
+// holds -----------------------------------------------------------------
+// The case `tabCloseRefusal`'s two candidate gates - `tabs.length <= 1` (the
+// real one: is this the only TAB) and `countTabEntries(tabs) <= 1` (wrong:
+// counts panes, not tabs) - disagree on. `ONE_TAB_TWO_PANES` has
+// `tabs.length === 1` but `countTabEntries` of 2, so only the real gate
+// refuses it. Get this backwards and `closeTab` would filter the workspace's
+// only tab out from under itself, leaving `tabs = []` for whatever reads
+// `.id` off the (now empty) array next - see `useTabs.ts:396` and VLT-43.
+console.log("\n[ii-tab] the only tab is refused even though it holds two panes, not one");
+check(
+  "closing the workspace's one tab is refused as last-entry, not allowed for holding 2 panes",
+  tabCloseRefusal(ONE_TAB_TWO_PANES, 1) === "last-entry",
+  tabCloseRefusal(ONE_TAB_TWO_PANES, 1),
+);
+check("canCloseTab agrees", !canCloseTab(ONE_TAB_TWO_PANES, 1));
 
 // ---- (iii) an ordinary leaf beside another entry IS closable --------------
 // Without this the two checks above pass for a predicate that refuses
@@ -149,9 +179,11 @@ check("an editor leaf among three tabs closes", canCloseLeaf(THREE_TABS, 8));
 check("and so does its tab", canCloseTab(THREE_TABS, 7));
 check(
   // Two panes in one tab: dropping one leaves the other, so it is not the last
-  // entry even though the TAB count is 1.
+  // entry even though the TAB count is 1. Same fixture the [ii-tab] block
+  // above uses to pin the opposite question - the TAB itself is still
+  // refused even though a PANE within it is fine to close.
   "one of two panes in the only tab closes",
-  canCloseLeaf([tab(1, split(5, [termLeaf(2), termLeaf(6)]), 2)], 2),
+  canCloseLeaf(ONE_TAB_TWO_PANES, 2),
 );
 
 // ---- the strip asks the same question -----------------------------------

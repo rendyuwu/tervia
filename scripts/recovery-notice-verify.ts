@@ -129,7 +129,11 @@ console.log("\n[startup] each store is asked once, and a recovery reaches the us
   const { said, say } = recorder();
   await announceRecovery(store, say);
   check("the recovery pass ran", calls.ensureLoaded === 1, calls);
-  check("exactly once", calls.ensureLoaded === 1);
+  // Distinct from the check above, not a restatement of it: `announceRecovery`
+  // goes through `ensureLoaded` alone. A version that ALSO called
+  // `takeRecoveryNotice` (the drain-only method `drainRecovery` uses instead)
+  // would double-drain the slot on a startup pass and this would catch it.
+  check("and never separately drains via takeRecoveryNotice", calls.take === 0, calls);
   check("one toast, not none", said.length === 1, said);
   check("naming the store", said[0]?.message.startsWith("Saved machines:"), said[0]?.message);
 }
@@ -184,6 +188,57 @@ console.log("\n[later] a note that lands after startup is not lost");
   check("draining again says nothing - the notice is handed out once", said.length === 1, said);
 }
 
+// ---- the real once-per-launch guarantee (behavioural) ---------------------
+// The hook's comment used to credit `startedRef` for the once-per-launch
+// guarantee. A `useRef` does not survive a genuine unmount/remount of App - a
+// fresh mount gets a fresh ref and would ask again - so that was never the
+// real mechanism (see the corrected comment in useStoreRecoveryNotices.ts).
+// What actually stops a second toast is `createRecoveredStore`'s notice slot
+// being DRAINED by the first `ensureLoaded()` call. Proven directly here, at
+// the layer it actually happens - `lib/recoveredStore.ts`, with injected
+// ports so it runs under plain node - with no React and no `startedRef`
+// anywhere in the picture.
+console.log("\n[drain] the real once-per-launch guarantee: ensureLoaded() drains the slot");
+{
+  const { createRecoveredStore } = await import("../src/lib/recoveredStore");
+  // A torn primary with a good `.bak` beside it, so the recovery pass has a
+  // real notice to hand out - same shape as the [copy]/[startup] fixtures
+  // above, but exercised through the real store rather than a fake `Say`.
+  let primary = "not json";
+  const files = {
+    dir: async () => "/fake",
+    read: async (path: string) =>
+      path.endsWith(".bak")
+        ? ({ kind: "text", content: '{"ok":true}' } as const)
+        : ({ kind: "text", content: primary } as const),
+    write: async (path: string, content: string) => {
+      if (!path.endsWith(".bak")) primary = content;
+    },
+  };
+  const kv = { get: async () => undefined, set: async () => {}, save: async () => {} };
+  const broadcast = { emit: async () => {}, listen: async () => () => {} };
+  const io = createRecoveredStore(
+    { path: "fake.json", loadKey: "k", changedEvent: "fake-changed" },
+    { store: kv, files, broadcast },
+  );
+  const first = await io.ensureLoaded();
+  check(
+    "first ensureLoaded() reports the recovery",
+    first !== null && first.recovered === true,
+    first,
+  );
+  const second = await io.ensureLoaded();
+  check(
+    // The whole guarantee, in one call: a SECOND ask - modelling a
+    // StrictMode double-invoke of the hook's effect, or a genuine remount
+    // asking again with no memory of the first - finds the slot already
+    // drained. No ref, no React, nothing per-component involved.
+    "a second ensureLoaded() finds the slot already drained",
+    second === null,
+    second,
+  );
+}
+
 // ---- the wiring (source text only) -------------------------------------
 // Honest about its strength: these read the files, they do not run them. They
 // exist because the whole defect was a caller that did not exist, and nothing
@@ -202,7 +257,14 @@ console.log("\n[wiring] source text: the hook exists, is mounted, and uses the r
     "the hook asks the vault store",
     hook.includes('from "@/modules/vault/store"') && hook.includes("ensureVaultLoaded"),
   );
-  check("it runs the startup pass once per launch, by ref", hook.includes("startedRef.current"));
+  check(
+    // NOT the once-per-launch guarantee itself - the [drain] check above is
+    // what pins that, at the layer it actually holds. This only pins that
+    // the hook still has its own same-mount guard (StrictMode double-invoke
+    // of THIS effect), which is a real but much narrower property.
+    "the hook guards its own effect body with startedRef",
+    hook.includes("startedRef.current"),
+  );
   check("and it toasts what comes back", hook.includes("toast(t.message"));
 }
 

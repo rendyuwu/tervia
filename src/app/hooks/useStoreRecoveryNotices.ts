@@ -47,10 +47,17 @@ const say: Say = (t) => toast(t.message, { variant: t.variant });
  * cannot reject (see `announceRecovery`). The policy lives in
  * `app/lib/recoveryNotices.ts`; this is the mount and the real stores.
  *
- * The startup pass runs exactly once per launch - `startedRef`, not the effect's
- * empty dep array, is what guarantees that, so a remount cannot re-run it and
- * re-toast. The change listeners are re-established on a remount instead,
- * because those have to follow the mount rather than the launch.
+ * A second toast cannot happen even across a genuine unmount/remount of App -
+ * but `startedRef` is NOT why. It is a `useRef`, so a real remount gets a
+ * fresh ref and would ask again; it only stops THIS mount's effect from
+ * asking twice within its own lifetime (e.g. a React StrictMode dev
+ * double-invoke of the same effect). What actually makes the guarantee hold
+ * across a remount is store-side: `ensureLoaded()` DRAINS the notice slot
+ * (`createRecoveredStore`'s `takeRecoveryNotice`, in `lib/recoveredStore.ts`)
+ * before returning it, so every ask after the first - whichever ref asked -
+ * finds the slot already empty and says nothing. The change listeners are
+ * re-established on a remount instead, because those have to follow the
+ * mount rather than the launch.
  */
 export function useStoreRecoveryNotices(): void {
   const startedRef = useRef(false);
