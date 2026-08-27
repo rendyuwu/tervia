@@ -269,6 +269,70 @@ fn recenter_over_main(app: &tauri::AppHandle, window: &tauri::WebviewWindow) {
     }
 }
 
+/// The logical size a window has to be resized to in order to respect `min`, or
+/// `None` when it already does. Split out of [`enforce_configured_min_size`] so
+/// the decision is testable without a live window - everything else in that
+/// function is I/O against one.
+fn min_size_correction(current: (f64, f64), min: (f64, f64)) -> Option<(f64, f64)> {
+    if current.0 >= min.0 && current.1 >= min.1 {
+        return None;
+    }
+    Some((current.0.max(min.0), current.1.max(min.1)))
+}
+
+/// Re-apply the configured size floor after `tauri-plugin-window-state` has
+/// restored a saved size.
+///
+/// `minWidth`/`minHeight` from the config reach the window as TAO's
+/// `min_inner_size`, and the OS enforces that for *user* resizing (on Windows
+/// through `WM_GETMINMAXINFO`). A programmatic resize is not user resizing:
+/// the window-state plugin restores a saved size with a bare
+/// `set_size(PhysicalSize { .. })` (plugin 2.4.1, `src/lib.rs:212-217`) which lands
+/// as a plain `SetWindowPos`, and that is not clamped against the tracking
+/// size. So any profile carrying a window saved smaller than the floor comes
+/// back below it, and raising the floor never reaches an existing user - which
+/// is handoff §4.27 one level out: the change that makes a setting apply owns
+/// the setting applying, and a second mechanism was quietly bypassing it.
+/// GTK3 clamps the same call via its geometry hints so this is Windows-first,
+/// but the fix is correct everywhere and is not gated on a platform.
+///
+/// The minimum is read back out of the merged runtime config rather than
+/// restated here, so `tauri.conf.json` and the two platform files that must
+/// echo it (§4.22, enforced by `scripts/tauri-config-parity-verify.ts`) stay
+/// the only place the number is written.
+fn enforce_configured_min_size(config: &tauri::Config, window: &tauri::WebviewWindow) {
+    let Some(window_config) = config
+        .app
+        .windows
+        .iter()
+        .find(|w| w.label == window.label())
+    else {
+        return;
+    };
+    let (Some(min_width), Some(min_height)) = (window_config.min_width, window_config.min_height)
+    else {
+        return;
+    };
+    // A maximized or fullscreen window is not currently showing its restored
+    // size, and `set_size` would drag it out of that state - TAO's Windows
+    // `set_inner_size` clears the MAXIMIZED flag outright. Leave both alone and
+    // let the floor apply the next time the window is sized normally.
+    if window.is_maximized().unwrap_or(false) || window.is_fullscreen().unwrap_or(false) {
+        return;
+    }
+    let (Ok(scale), Ok(size)) = (window.scale_factor(), window.inner_size()) else {
+        return;
+    };
+    // The config states logical pixels; `inner_size` answers in physical ones.
+    let size = size.to_logical::<f64>(scale);
+    // `None` is a legitimately larger saved size - don't fight the plugin over it.
+    if let Some((width, height)) =
+        min_size_correction((size.width, size.height), (min_width, min_height))
+    {
+        let _ = window.set_size(tauri::LogicalSize::new(width, height));
+    }
+}
+
 /// Open (or reveal) an always-on-top floating window that hosts a single pane
 /// (a live terminal mirror or a file editor). Labeled `float-<leafId>` so each
 /// leaf reveals its own window instead of duplicating. Unlike Settings/Debug it
@@ -542,6 +606,12 @@ pub fn run() {
                     let _ = window.unmaximize();
                     let _ = window.maximize();
                 }
+                // Config windows are built - and the window-state plugin's
+                // `on_window_ready` restore therefore runs - before this setup
+                // hook, so this is the first point at which the restored size
+                // is observable. Raise it back to the configured floor if the
+                // saved size predates a floor increase (see fn docs).
+                enforce_configured_min_size(app.config(), &window);
             }
             // macOS: the default app menu binds Cmd+W to "Close Window", and
             // that native accelerator fires before the webview's JS handler - so
@@ -996,5 +1066,51 @@ mod ui_thread_guard {
             "ALLOWED_SYNC_COMMANDS lists commands that are no longer sync: {stale:?}\n\
              Remove them from the list."
         );
+    }
+}
+
+#[cfg(test)]
+mod min_size_tests {
+    use super::min_size_correction;
+
+    /// The whole point of the clamp: `tauri-plugin-window-state` restores a
+    /// saved size with a bare `set_size`, which Windows does not check against
+    /// the window's minimum, so a profile saved at the old 420x280 floor comes
+    /// back at 420x280 under a 640x480 config and never sees the new floor.
+    #[test]
+    fn a_size_saved_below_the_floor_is_raised_to_it() {
+        assert_eq!(
+            min_size_correction((420.0, 280.0), (640.0, 480.0)),
+            Some((640.0, 480.0))
+        );
+    }
+
+    /// Only the short axis moves. A window saved wide and short keeps its width
+    /// instead of being snapped back to the floor's aspect.
+    #[test]
+    fn only_the_axis_below_the_floor_moves() {
+        assert_eq!(
+            min_size_correction((900.0, 280.0), (640.0, 480.0)),
+            Some((900.0, 480.0))
+        );
+        assert_eq!(
+            min_size_correction((420.0, 700.0), (640.0, 480.0)),
+            Some((640.0, 700.0))
+        );
+    }
+
+    /// A saved size the user chose and that clears the floor must come back
+    /// untouched - the clamp exists to raise a stale size, not to normalize one.
+    #[test]
+    fn a_larger_saved_size_is_left_alone() {
+        assert_eq!(min_size_correction((1280.0, 800.0), (640.0, 480.0)), None);
+    }
+
+    /// Exactly at the floor is not below it, so no resize is issued at all.
+    /// Without this the clamp would fire on every launch of a floor-sized
+    /// window and fight the plugin for no reason.
+    #[test]
+    fn a_size_exactly_at_the_floor_is_left_alone() {
+        assert_eq!(min_size_correction((640.0, 480.0), (640.0, 480.0)), None);
     }
 }

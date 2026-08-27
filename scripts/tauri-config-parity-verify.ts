@@ -1,5 +1,5 @@
 /**
- * Self-check for the `app.windows[0]` key set across the three Tauri config
+ * Self-check for the `app.windows[0]` entry across the three Tauri config
  * files. Run: `npx tsx scripts/tauri-config-parity-verify.ts`.
  *
  * Tauri merges `tauri.<platform>.conf.json` into `tauri.conf.json` with an
@@ -17,17 +17,34 @@
  *
  * This check reads all three files off disk - not an inlined copy of their
  * contents, which would be the same disease as the bug it exists to catch -
- * and asserts that every key present in the base `windows[0]` is also a key
- * in `tauri.linux.conf.json`'s and `tauri.windows.conf.json`'s `windows[0]`.
+ * and applies two different rules, because there are two different failure
+ * modes:
  *
- * It checks key PRESENCE, not value equality. A platform file legitimately
- * carrying a different VALUE for a shared key (a different title string, a
- * different width to account for platform chrome) is normal customization
- * that the merge model is built to allow. What must never happen again is a
- * base-only key disappearing because a platform override redeclared the
- * array without it - that is a silent default, not a deliberate choice, and
- * presence is the only thing that check can catch without also outlawing
- * intentional divergence.
+ *   PRESENCE, for every key of the base `windows[0]`. A base-only key that an
+ *   override drops is never a decision, it is a silent schema default. And
+ *   presence is all that can be demanded of the keys a platform legitimately
+ *   tunes - `title`, `decorations`, `transparent`, `shadow` - where carrying a
+ *   different value is the merge model working as intended, not a bug.
+ *
+ *   VALUE EQUALITY, for GEOMETRY_KEYS. §4.22's actual damage was a *value*
+ *   silently not applying, and presence cannot see that shape at all: revert
+ *   `minWidth` to its old number in both override files and every key is still
+ *   present, while both shipping platforms get the old floor. Geometry has no
+ *   platform-specific right answer here - the floor is a property of what the
+ *   UI needs in order to render (VLT-61: an 80x24 terminal), not of the window
+ *   manager - so the three files must agree digit for digit.
+ *
+ * The geometry keys are additionally asserted to EXIST in the base. Without
+ * that, the per-key loop is driven entirely by the base's own key set, so
+ * trimming the base silently shrinks the check along with it: deleting
+ * `minWidth` from the base takes the floor away from macOS while every
+ * remaining assertion still passes, and an emptied `windows[0]` would run zero
+ * assertions and print a pass. That is handoff §4.18's empty-fold shape, and
+ * declaring the set up front is what closes it.
+ *
+ * `bundle.targets` is the other base array that both platform files redeclare.
+ * That divergence is deliberate - each platform builds its own installer set -
+ * and has no live defect, so it is out of scope here on purpose.
  */
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -60,14 +77,36 @@ const BASE_PATH = "src-tauri/tauri.conf.json";
 const LINUX_PATH = "src-tauri/tauri.linux.conf.json";
 const WINDOWS_PATH = "src-tauri/tauri.windows.conf.json";
 
-const base = firstWindow(BASE_PATH);
-const linux = firstWindow(LINUX_PATH);
-const windows = firstWindow(WINDOWS_PATH);
+/**
+ * Keys whose VALUE must match across all three files, and which the base must
+ * declare. Window size and the size floor: no platform has a reason to differ,
+ * and a divergence here is the §4.22 defect, not customization.
+ */
+const GEOMETRY_KEYS = ["width", "height", "minWidth", "minHeight"] as const;
 
-console.log("[key parity] every base app.windows[0] key survives the platform merge");
+const base = firstWindow(BASE_PATH);
+const overrides: ReadonlyArray<readonly [string, WindowConfig]> = [
+  [LINUX_PATH, firstWindow(LINUX_PATH)],
+  [WINDOWS_PATH, firstWindow(WINDOWS_PATH)],
+];
+
+console.log("[base declares] the geometry set exists in the base, so nothing below is vacuous");
+for (const key of GEOMETRY_KEYS) {
+  check(`${BASE_PATH} declares "${key}"`, key in base && base[key] !== null, true);
+}
+
+console.log("\n[key parity] every base app.windows[0] key survives the platform merge");
 for (const key of Object.keys(base)) {
-  check(`${LINUX_PATH} restates "${key}"`, key in linux, true);
-  check(`${WINDOWS_PATH} restates "${key}"`, key in windows, true);
+  for (const [path, override] of overrides) {
+    check(`${path} restates "${key}"`, key in override, true);
+  }
+}
+
+console.log("\n[geometry value] size and size floor are identical in all three files");
+for (const key of GEOMETRY_KEYS) {
+  for (const [path, override] of overrides) {
+    check(`${path} "${key}" matches the base`, override[key], base[key]);
+  }
 }
 
 console.log(
