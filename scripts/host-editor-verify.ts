@@ -5,9 +5,16 @@
  * Source text, not imports, for the reason `rdp-lifetime-verify.ts` gives: these
  * invariants live inside a React component's effects and event handlers, and
  * there is no DOM or renderer in this suite to drive them through. What is
- * checkable without one is the STRUCTURE - and structure is exactly what all four
+ * checkable without one is the STRUCTURE - and structure is exactly what the
  * findings below were: a write with no guard, a guard reading a value captured
- * before the thing it guards could happen, a persisted change gated on nothing.
+ * before the thing it guards could happen, a persisted change gated on nothing, a
+ * guard that permitted the destructive case of the two it could see.
+ *
+ * Section [2] is the exception, and deliberately: its rule is about VALUES - which
+ * of `undefined`, `""` and a string a field sends - so it calls the real function
+ * over a truth table. `sshSecretsForSave` lives in `editor/sshSecrets.ts` for that
+ * reason. A regex cannot tell an omitted key from one set to `""`, and those are
+ * the store's "leave it alone" and "delete the account".
  *
  * 1. THE KEYCHAIN SEED YIELDS TO A FIELD THE USER TYPED. The form is interactive
  *    from `setReady(true)` while `getHostSshSecrets` is still in flight, and that
@@ -26,26 +33,33 @@
  *    load started - all three false, forever, because the reset at the top of the
  *    same effect is what set them.
  *
- * 2. ONLY A FIELD THE USER TOUCHED REACHES THE SECRET STORE. An untouched field
- *    is `undefined`, the store's "leave whatever is stored alone"; `""` is its
- *    CLEAR instruction. Echoing the seed back would make an edit that only renamed
- *    a host take its password with it. Correct today, pinned because it is invisible
- *    at the call site: `sshSecretsForSave(cred, touched)` looks like a formatter.
+ * 2. ONLY A FIELD THE USER TOUCHED REACHES THE SECRET STORE, AND EMPTYING ONE IS A
+ *    CLEAR ONLY IF ITS VALUE WAS ON SCREEN. An untouched field is `undefined`, the
+ *    store's "leave whatever is stored alone"; `""` is its CLEAR instruction, which
+ *    deletes the keychain account. Echoing the seed back would make an edit that
+ *    only renamed a host take its password with it - and the touched mark alone is
+ *    not enough to send `""` either, because it is set by ANY patch carrying the
+ *    key. One character typed and backspaced marks the field touched while it is
+ *    empty, and the seed may not have landed yet, so the save deleted the password
+ *    of a host the user never meant to touch and reported success. `seeded` is the
+ *    second record that tells those apart, and section [2] is a truth table over
+ *    the real function rather than a regex, because the rule is about VALUES.
  *
- * 3. TEST PINS THE SAVED RECORD ONLY FOR THE ADDRESS THAT RECORD NAMES. `runTest`
- *    dials the DRAFT address, so trusting a certificate persisted a fingerprint
- *    from one machine onto a record still saved at another: re-point the form,
- *    Test, accept, Cancel, and the old pin is destroyed with nothing saved. The
- *    record's next real connect aborts as a MISMATCH, which reads as an attack
- *    rather than as a cancelled dialog, and the pin cannot be recovered because
- *    only that machine can present it. The FORM's pin is deliberately still
- *    ungated on the address - it is unsaved, visible, and disposed of by Cancel.
+ * 3. THE DIALOG PERSISTS NO PIN AT ALL. Save is the only writer, and Cancel
+ *    therefore cannot change what a host trusts in either direction.
  *
- *    The guard SURVIVES pins being keyed per address, and the reason is not the
- *    mismatch any more: a keyed write for the address being proposed would never be
- *    compared against by a record saved elsewhere, so it fails neither open nor
- *    closed - but it would still be a trust change this dialog persisted and then
- *    had cancelled. Save is the only thing that commits a pin.
+ *    Two defects got here. `onTrusted` first persisted a fingerprint ungated while
+ *    `runTest` dialled the DRAFT address, so re-pointing the form, testing,
+ *    accepting and cancelling left a record saved at 10.0.0.1 carrying 10.0.0.2's
+ *    key - the next real connect aborts as a MISMATCH, which reads as an attack
+ *    (§5.16). Gating the write on the saved address stopped it landing on the wrong
+ *    address but not on the right one: press Forget (a DRAFT edit), Test the same
+ *    address, and the probe TOFUs instead of raising the mismatch the pin existed
+ *    for; accept, and the addresses match, so the gate passes and the stored pin is
+ *    REPLACED; Cancel, and it cannot come back. The write the gate permitted was
+ *    the destructive one, so the write is gone rather than gated again. The FORM's
+ *    pin stays, gated on the row rather than the address: it is unsaved, visible in
+ *    the recorded-key row, and disposed of by Cancel.
  *
  * 6. FORGET RECORDS INTENT IN THE DRAFT, AND TEST VERIFIES AGAINST THE MACHINE IT
  *    IS ACTUALLY DIALLING. The inverse of 3, found by hand (gaps 15 and 20), and it
@@ -72,7 +86,22 @@
  *    truncating RSA key bodies. Nothing here may imply a secret is safer than it
  *    is, so the location is stated once and reused.
  *
- * Section [0] tests the helpers the other five depend on, against samples whose
+ * 7. THE PASSWORD FIELD'S COPY SAYS WHAT BLANK DOES, AND THAT IS TWO DIFFERENT
+ *    THINGS. On a host with nothing stored, blank saves a host without a password.
+ *    On a host that HAS one, blank is the state the field is in for the whole of the
+ *    keychain read - the form is interactive before its secrets arrive, deliberately
+ *    - and it means "leave the stored one alone". One string served both, so a user
+ *    who typed a character and backspaced read "Leave blank to save the host without
+ *    one" at the exact moment that described a deletion. The copy was not incidental
+ *    to that defect; it confirmed the mental model that made someone press Save.
+ *
+ *    Also here: what a credential-less connect reports. The comment justifying the
+ *    relaxed password rule claimed the server's own authentication error, and no
+ *    server is reached - `resolve.ts` maps an empty secret to `undefined` and
+ *    `session.rs` pre-flights it. The real outcome is the better one, which is why
+ *    the prose has to name it rather than an invented one.
+ *
+ * Section [0] tests the helpers the source-text sections depend on, against samples whose
  * answers are known. That is not ceremony: `rdp-lifetime-verify.ts` shipped a
  * gating check that looked back a fixed 90 characters, found the PREVIOUS
  * statement's guard, and reported a deliberately ungated write as gated. A
@@ -81,6 +110,13 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+
+import {
+  NOTHING_SEEDED,
+  sshSecretsForSave,
+  type SshSecretSeeded,
+} from "../src/modules/hosts/editor/sshSecrets";
+import type { SshCredentialDraft, SshSecretTouched } from "../src/modules/hosts/editor/types";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const read = (p: string) => readFileSync(join(root, p), "utf8");
@@ -162,17 +198,34 @@ function stripComments(src: string): string {
 }
 
 /**
- * The condition of the `if` attached to the statement `needle` sits in, or "" if
- * that statement has no guard of its own.
+ * The condition of the `if` attached to EVERY statement `needle` occurs in, in
+ * source order, with "" for an occurrence that has no guard of its own.
  *
  * Deliberately not "is there an `if` somewhere before this": it walks back to the
  * nearest statement boundary, so a write following a guarded statement borrows
  * nothing, and it makes exactly ONE hop over an opening brace so a block-bodied
  * `if` is read while a write merely sitting deeper in a function is not. Section
  * [0] holds it to both.
+ *
+ * ALL matches rather than the first, because the first-match form this replaces was
+ * a false pass waiting to happen: add a second write of the same kind and it reads
+ * the one that is still correct while reporting nothing about the new one. Handoff
+ * §5.17, which `expectedFingerprint` already follows in section [6] by asserting a
+ * count of two. A caller asserts the count as well, because an empty list satisfies
+ * `every` - a write that DISAPPEARS must not pass either.
  */
-function guardFor(region: string, needle: string): string {
-  let at = region.indexOf(needle);
+function guardsFor(region: string, needle: string): string[] {
+  const out: string[] = [];
+  for (let at = region.indexOf(needle); at >= 0; at = region.indexOf(needle, at + 1)) {
+    out.push(guardAt(region, at));
+  }
+  return out;
+}
+
+/** The shared walk, from a position rather than a needle, so one implementation
+ *  serves both the first-match and the all-matches form. */
+function guardAt(region: string, start: number): string {
+  let at = start;
   if (at < 0) return "";
   for (let hop = 0; hop < 2; hop++) {
     const from = Math.max(
@@ -213,12 +266,11 @@ function count(src: string, re: RegExp): number {
   return [...src.matchAll(re)].length;
 }
 
-const identifiers = (src: string): string[] =>
-  [...src.matchAll(/[A-Za-z_$][\w$]*/g)].map((m) => m[0]);
-
 const editorRaw = read("src/modules/hosts/HostEditorDialog.tsx");
 const editorSrc = stripComments(editorRaw);
 const rdpSectionRaw = read("src/modules/hosts/editor/RdpCredentialSection.tsx");
+const sshSectionRaw = read("src/modules/hosts/editor/SshCredentialSection.tsx");
+const sshSectionSrc = stripComments(sshSectionRaw);
 const copyRaw = read("src/modules/hosts/editor/secretStoreCopy.ts");
 
 const SECRET_FIELDS = ["password", "privateKey", "keyPassphrase"] as const;
@@ -226,44 +278,63 @@ const SECRET_FIELDS = ["password", "privateKey", "keyPassphrase"] as const;
 // ---------------------------------------------------------------------------
 console.log("[0] the helpers the checks below depend on");
 {
+  /** The guard of the only occurrence in a sample, so a one-write case reads as
+   *  one value. Asserts the sample HAS exactly one, or a walker that found none
+   *  would look like a walker that found no guard. */
+  const oneGuard = (region: string, needle: string): string => {
+    const all = guardsFor(region, needle);
+    return all.length === 1 ? all[0] : `<${all.length} matches>`;
+  };
+
   check(
-    "guardFor reads the condition of a block-bodied guard",
-    guardFor("if (a === b) {\n  writeIt();\n}\n", "writeIt()") === "a === b",
-    guardFor("if (a === b) {\n  writeIt();\n}\n", "writeIt()"),
+    "guardsFor reads the condition of a block-bodied guard",
+    oneGuard("if (a === b) {\n  writeIt();\n}\n", "writeIt()") === "a === b",
+    oneGuard("if (a === b) {\n  writeIt();\n}\n", "writeIt()"),
   );
   check(
     "and of a single-statement guard",
-    guardFor("if (a === b) writeIt();\n", "writeIt()") === "a === b",
+    oneGuard("if (a === b) writeIt();\n", "writeIt()") === "a === b",
   );
   check(
     "and of a guard whose body opens with void, which is how a fire-and-forget write reads",
-    guardFor("if (a === b) {\n  void writeIt();\n}\n", "writeIt()") === "a === b",
-    guardFor("if (a === b) {\n  void writeIt();\n}\n", "writeIt()"),
+    oneGuard("if (a === b) {\n  void writeIt();\n}\n", "writeIt()") === "a === b",
+    oneGuard("if (a === b) {\n  void writeIt();\n}\n", "writeIt()"),
   );
   // The false pass this file exists not to repeat.
   check(
     "but an unguarded write does not borrow the guard of the statement above it",
-    guardFor("if (a === b) other();\nwriteIt();\n", "writeIt()") === "",
-    guardFor("if (a === b) other();\nwriteIt();\n", "writeIt()"),
+    oneGuard("if (a === b) other();\nwriteIt();\n", "writeIt()") === "",
+    oneGuard("if (a === b) other();\nwriteIt();\n", "writeIt()"),
   );
   check(
     "not even when that write opens with void",
-    guardFor("if (a === b) other();\nvoid writeIt();\n", "writeIt()") === "",
-    guardFor("if (a === b) other();\nvoid writeIt();\n", "writeIt()"),
+    oneGuard("if (a === b) other();\nvoid writeIt();\n", "writeIt()") === "",
+    oneGuard("if (a === b) other();\nvoid writeIt();\n", "writeIt()"),
   );
   check(
     "nor the guard that opened the block it sits in two statements deep",
-    guardFor("if (a === b) {\n  other();\n  writeIt();\n}\n", "writeIt()") === "",
-    guardFor("if (a === b) {\n  other();\n  writeIt();\n}\n", "writeIt()"),
+    oneGuard("if (a === b) {\n  other();\n  writeIt();\n}\n", "writeIt()") === "",
+    oneGuard("if (a === b) {\n  other();\n  writeIt();\n}\n", "writeIt()"),
   );
   check(
     "and an unguarded write in a bare block reports nothing",
-    guardFor("{\n  writeIt();\n}\n", "writeIt()") === "",
+    oneGuard("{\n  writeIt();\n}\n", "writeIt()") === "",
   );
   check(
-    "a missing needle reports nothing rather than throwing",
-    guardFor("x();\n", "writeIt()") === "",
+    "a missing needle reports an empty list rather than throwing",
+    guardsFor("x();\n", "writeIt()").length === 0,
   );
+
+  // The reason this is the all-matches form: a second, ungated write of the same
+  // kind used to hide behind a correctly gated first one.
+  {
+    const two = "if (a === b) writeIt();\nwriteIt();\n";
+    check(
+      "and a second occurrence is reported even when the first is guarded",
+      JSON.stringify(guardsFor(two, "writeIt()")) === JSON.stringify(["a === b", ""]),
+      guardsFor(two, "writeIt()"),
+    );
+  }
 
   check(
     "stripComments drops a comment that merely NAMES a guard",
@@ -364,37 +435,172 @@ console.log("\n[1] the keychain seed cannot overwrite a field the user typed");
     /\.current = NO_SSH_SECRETS_TOUCHED;/.test(reset),
     reset.trim(),
   );
+  // And with nothing seeded, or the previous row's seed would license clearing
+  // this row's secret - the same drift, one field over.
+  check("and with nothing seeded either", /\.current = NOTHING_SEEDED;/.test(reset), reset.trim());
+
+  // The record section [2] enforces the clear rule with. Two properties, and both
+  // of them are what keeps it from re-opening the hole it closes: a field the seed
+  // YIELDED to is not seeded (the stored value never reached the screen, so the
+  // user cannot have meant to remove it), and a field seeded with an empty value is
+  // not either.
+  const seededWrite = between(seed, "sshSeeded.current = {", "};");
+  check("the seeded record's write was found", seededWrite.length > 50, seededWrite.length);
+  for (const f of SECRET_FIELDS) {
+    const line = propertyLine(seededWrite, f);
+    check(
+      `${f} counts as seeded only where the seed was not yielded to`,
+      new RegExp(`^${f}: !\\w+\\.${f} &&`).test(line),
+      line,
+    );
+    check(
+      `and only when what arrived for ${f} is not the store's own clear value`,
+      new RegExp(`!clearsSecret\\(secrets\\.${f} \\?\\? ""\\)`).test(line),
+      line,
+    );
+  }
+  // Outside the updater, which must stay pure: React may call an updater twice,
+  // and §5.14's whole lesson is about what a value read in the wrong place says.
+  check(
+    "and it is written outside the draft updater",
+    seed.indexOf("sshSeeded.current = {") > seed.indexOf("}));"),
+    { seededAt: seed.indexOf("sshSeeded.current = {"), updaterEndsAt: seed.indexOf("}));") },
+  );
 }
 
 // ---------------------------------------------------------------------------
-console.log("\n[2] only a field the user touched is sent to the secret store");
+console.log("\n[2] a secret is sent only when touched, and cleared only when it was on screen");
 {
-  const forSave = between(
-    editorSrc,
-    "function sshSecretsForSave(",
-    "export function HostEditorDialog(",
-  );
-  check("sshSecretsForSave was found", forSave.length > 100, forSave.length);
+  // The real function, called directly - `sshSecretsForSave` lives in a plain
+  // module for exactly this reason. A source-text check here would be a regex over
+  // a rule about VALUES, which is §5.18's first failure shape: it cannot tell `""`
+  // being FORWARDED from `""` being omitted, and those are the two outcomes the
+  // whole thing turns on.
+  const draft = (value: string): SshCredentialDraft => ({
+    user: "u",
+    authMode: "password",
+    password: value,
+    privateKey: value,
+    keyPassphrase: value,
+  });
+  const all = (on: boolean): SshSecretTouched => ({
+    password: on,
+    privateKey: on,
+    keyPassphrase: on,
+  });
+  const only = (field: keyof SshSecretSeeded): SshSecretSeeded => ({
+    ...NOTHING_SEEDED,
+    [field]: true,
+  });
+
+  // `absent` and `""` are DIFFERENT instructions to the store - leave it alone
+  // versus delete the account - and `JSON.stringify` cannot tell them apart, which
+  // is why the expectation is `null` for absent and the key test is `in`.
+  const table: {
+    what: string;
+    value: string;
+    touched: boolean;
+    seeded: boolean;
+    expect: string | null;
+  }[] = [
+    { what: "an untouched empty field", value: "", touched: false, seeded: false, expect: null },
+    {
+      what: "an untouched field holding the seeded value, which must not be echoed back",
+      value: "stored",
+      touched: false,
+      seeded: true,
+      expect: null,
+    },
+    { what: "a typed value", value: "typed", touched: true, seeded: false, expect: "typed" },
+    {
+      what: "a typed value over a seeded one",
+      value: "rotated",
+      touched: true,
+      seeded: true,
+      expect: "rotated",
+    },
+    // The defect. One character typed and backspaced before the keychain read
+    // landed used to send `""`, and the store deletes the account on `""`.
+    {
+      what: "a field emptied before the seed could land",
+      value: "",
+      touched: true,
+      seeded: false,
+      expect: null,
+    },
+    // And the deliberate clear, which must survive the fix.
+    {
+      what: "a seeded value the user selected and deleted",
+      value: "",
+      touched: true,
+      seeded: true,
+      expect: "",
+    },
+    // The store trims before it decides, so a space is its clear value too: judging
+    // emptiness any other way leaves the space bar as a way past the rule.
+    {
+      what: "a field holding only whitespace, before the seed could land",
+      value: "   ",
+      touched: true,
+      seeded: false,
+      expect: null,
+    },
+    {
+      what: "a seeded value replaced with whitespace, which the store trims to a clear",
+      value: "   ",
+      touched: true,
+      seeded: true,
+      expect: "   ",
+    },
+  ];
+
   for (const f of SECRET_FIELDS) {
+    for (const row of table) {
+      const out = sshSecretsForSave(
+        draft(row.value),
+        { ...all(false), [f]: row.touched },
+        row.seeded ? only(f) : NOTHING_SEEDED,
+      );
+      const present = f in out;
+      check(
+        `${f}: ${row.what} is ${row.expect === null ? "left alone" : `sent as ${JSON.stringify(row.expect)}`}`,
+        row.expect === null ? !present : present && out[f] === row.expect,
+        { present, value: out[f] },
+      );
+    }
+  }
+
+  // Per field, not per form: one seeded field must not license clearing another.
+  // The cross-field version of the same bug, and a `seeded` read with the wrong
+  // index passes every check above.
+  {
+    const out = sshSecretsForSave(draft(""), all(true), only("password"));
     check(
-      `${f} is sent only when it was touched`,
-      new RegExp(`if \\(touched\\.${f}\\) out\\.${f} = cred\\.${f};`).test(forSave),
-      propertyLine(forSave, f),
+      "a seeded password authorises clearing the password and nothing else",
+      "password" in out && out.password === "" && !("privateKey" in out),
+      out,
+    );
+    check("nor the key passphrase", !("keyPassphrase" in out), out);
+  }
+
+  // A fourth field added to the draft cannot arrive by spread.
+  {
+    const out = sshSecretsForSave(draft("v"), all(true), NOTHING_SEEDED);
+    check(
+      "and nothing but the three secret fields is ever sent",
+      JSON.stringify(Object.keys(out).sort()) === JSON.stringify([...SECRET_FIELDS].sort()),
+      Object.keys(out),
     );
   }
-  // Three writes, so a fourth field added later cannot arrive unguarded.
-  check(
-    "and it writes nothing else",
-    count(forSave, /out\./g) === SECRET_FIELDS.length,
-    count(forSave, /out\./g),
-  );
 
   const patch = between(editorSrc, "const patchSshCred = (patch:", "const changeProtocol =");
   check("patchSshCred was found", patch.length > 100, patch.length);
   for (const f of SECRET_FIELDS) {
     // `||` because the mark is STICKY: a second patch that does not carry this
-    // field must not un-touch it. `!== undefined` because "" is a real edit -
-    // clearing a password is a thing the user is allowed to do.
+    // field must not un-touch it. `!== undefined` because emptying a field IS an
+    // edit - and deliberately nothing more than that, because this handler cannot
+    // tell a backspace over a seeded value from one over a field the read has not
+    // reached. Whether that edit may delete anything is `seeded`'s answer, above.
     check(
       `a patch carrying ${f} marks it touched, and one that does not leaves the mark alone`,
       new RegExp(`${f}: \\w+\\.current\\.${f} \\|\\| patch\\.${f} !== undefined`).test(patch),
@@ -404,9 +610,13 @@ console.log("\n[2] only a field the user touched is sent to the secret store");
 
   const save = between(editorSrc, "const save = async () => {", "const protocolLabel =");
   check("save was found", save.length > 1000, save.length);
+  // BOTH live records. Reading either from state instead is §5.14's defect wearing
+  // the fix's shape, and a stale seeded record is the same fault one field over -
+  // it would license a clear the user could not see, which is the whole finding.
   check(
-    "the SSH secrets are taken from the live touched record",
-    /sshSecretsForSave\(sshCred, \w+\.current\)/.test(save),
+    "the SSH secrets are taken from the live touched AND seeded records",
+    /sshSecretsForSave\(sshCred, \w+\.current, \w+\.current\)/.test(save),
+    /.*sshSecretsForSave\([^;]*/s.exec(save)?.[0]?.slice(0, 160),
   );
   // The RDP half of the same convention, which has no touched record because the
   // stored password is never read back: blank is `undefined`, not the `""` that
@@ -418,41 +628,69 @@ console.log("\n[2] only a field the user touched is sent to the secret store");
 }
 
 // ---------------------------------------------------------------------------
-console.log("\n[3] Test pins the saved record only for the address that record names");
+console.log("\n[3] nothing inside the dialog persists a pin, in either direction");
 {
   const runTest = between(editorSrc, "const runTest = async () => {", "const save = async () => {");
   check("runTest was found", runTest.length > 500, runTest.length);
   const onTrusted = between(runTest, "const onTrusted = (fingerprint: string) => {", "try {");
   check("its trust callback was found", onTrusted.length > 50, onTrusted.length);
 
-  const storeGuard = guardFor(onTrusted, "pinFingerprint(");
-  check("the write to the SAVED record is guarded", storeGuard.length > 0, onTrusted.trim());
-  check("by an equality rather than a presence test", storeGuard.includes("==="), storeGuard);
-
-  // What the guard's operands ARE, not what they are called: a rename keeps this
-  // passing, dropping the address comparison does not.
-  const operands = identifiers(storeGuard).map((id) => ({ id, from: assignedIn(runTest, id) }));
-  const sources = operands.map((o) => o.from);
+  // The store write is GONE, not gated, and the check is the absence rather than
+  // the guard. Gating it on the saved address (§5.16) closed the case where a
+  // cancelled dialog left a FOREIGN machine's fingerprint on a record - the next
+  // real connect aborts as a MISMATCH, which reads as an attack. It did not close
+  // the case where the write lands on the address the record does name: Forget (a
+  // draft edit) removes the pin from `pins`, so Test TOFUs instead of raising the
+  // mismatch the pin existed for, accepting overwrites the STORED pin because the
+  // addresses agree, and Cancel leaves that in place with nothing warned. The write
+  // the gate permitted was the destructive one. With no write here, both cases are
+  // closed by construction and §5.16's question - does this survive Cancel, and
+  // should it - has nothing left in this dialog to ask it of.
+  //
+  // Read out of the import statement rather than listed here, so importing a NEW
+  // store function and calling it from the trust callback fails too.
+  const storeImports = /import \{([^}]*)\} from "\.\/store";/.exec(editorRaw)?.[1] ?? "";
+  const storeFns = [...storeImports.matchAll(/\b([a-z]\w*)\b/g)]
+    .map((m) => m[1])
+    .filter((n) => n !== "type");
+  check("the store's imported surface was found", storeFns.length >= 3, storeFns);
   check(
-    "it compares the address the SAVED record names",
-    sources.includes("existing?.host"),
-    operands,
+    "the trust callback calls nothing in the store at all",
+    storeFns.filter((fn) => onTrusted.includes(`${fn}(`)).length === 0,
+    { called: storeFns.filter((fn) => onTrusted.includes(`${fn}(`)), onTrusted: onTrusted.trim() },
   );
-  check("against the address the probe dialled", sources.includes("shared.host.trim()"), operands);
+  // And the pin-writing call is not reachable from anywhere in this file, so it
+  // cannot be re-added to some other handler with the same effect. `pinFingerprint`
+  // still exists for the real connect paths, which are the only things that have
+  // been presented a key by a connection the user asked for.
   check(
-    "and it still refuses to pin a host that has never been saved",
-    sources.includes("existing?.id"),
-    operands,
+    "and the editor does not import the store's pin writer at all",
+    !editorSrc.includes("pinFingerprint"),
+    /.*pinFingerprint.*/.exec(editorSrc)?.[0],
+  );
+  // Save is the only writer left, and the recorded-key row's footnote says so - a
+  // footnote promising "Forget applies when you save" while Test could overwrite the
+  // stored pin behind it was half of what made the sequence above invisible.
+  check(
+    "the recorded-key footnote promises that saving is what applies a pin change",
+    count(editorRaw, /apply when you save/g) === 2,
+    count(editorRaw, /apply when you save/g),
   );
 
-  // The other half of the split, and it must NOT be address-gated: the form's pins
-  // are unsaved, one of them shows in the recorded-key row, and Cancel disposes of
-  // the map, so one may describe the address being proposed. It is gated on the ROW
+  // The FORM's pin stays, and it must NOT be address-gated: the form's pins are
+  // unsaved, one of them shows in the recorded-key row, and Cancel disposes of the
+  // map, so one may describe the address being proposed. It is gated on the ROW
   // instead, because a probe outlives the row it started on.
+  //
+  // ALL of them, with the count asserted: a second trust write added beside a
+  // correctly gated first one is invisible to a first-match search, and an empty
+  // list satisfies `every` (handoff §5.17).
+  const formPins = guardsFor(onTrusted, "setPins(");
+  check("the callback holds exactly one write to the form's pins", formPins.length === 1, formPins);
   check(
-    "the form's own pin is gated on the row rather than the address",
-    guardFor(onTrusted, "setPins(") === "onProbeRow()",
-    guardFor(onTrusted, "setPins("),
+    "and every one of them is gated on the row rather than the address",
+    formPins.length > 0 && formPins.every((g) => g === "onProbeRow()"),
+    formPins,
   );
   // And keyed by the address the probe DIALLED rather than by whatever is in the
   // field now: a trust prompt waits on a human, who is free to keep typing.
@@ -614,6 +852,7 @@ console.log("\n[5] the credential copy names no store the platform does not have
   for (const [path, src] of [
     ["HostEditorDialog.tsx", editorRaw],
     ["editor/RdpCredentialSection.tsx", rdpSectionRaw],
+    ["editor/SshCredentialSection.tsx", sshSectionRaw],
   ] as const) {
     check(
       `${path} names no OS keychain of its own`,
@@ -631,6 +870,92 @@ console.log("\n[5] the credential copy names no store the platform does not have
       editor: count(editorRaw, /\$\{SECRET_STORE_LOCATIONS\}/g),
       rdpSection: count(rdpSectionRaw, /\$\{SECRET_STORE_LOCATIONS\}/g),
     },
+  );
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n[7] the password field says what BLANK does, which is two different things");
+{
+  // The copy half of section [2]'s rule, and it is here because the wrong version
+  // of it was load-bearing in the defect rather than incidental: a user who typed
+  // one character and backspaced saw a blank field plus "Leave blank to save the
+  // host without one", which describes the destruction the save used to perform and
+  // confirms the mental model that makes them press Save.
+  const help = between(
+    sshSectionSrc,
+    "function passwordHelp(",
+    "export function SshCredentialSection",
+  );
+  check("passwordHelp was found", help.length > 200, help.length);
+  check(
+    "it branches on what the STORED record claims",
+    /if \(hasStoredPassword\)/.test(help),
+    help,
+  );
+
+  const stored = between(help, "if (hasStoredPassword) {", "}");
+  check("the stored-password branch was found", stored.length > 60, stored.length);
+  check(
+    "and it does not offer to save the host without a password",
+    !/without one/.test(stored),
+    stored.trim(),
+  );
+  check(
+    "it says blank leaves the stored one alone",
+    /blank does not remove it/.test(stored),
+    stored.trim(),
+  );
+  // The clear is still reachable, and the copy names the precondition section [2]
+  // enforces - otherwise the honest text becomes "you cannot remove it".
+  check(
+    "and it says how to remove one, precondition included",
+    /load into this field/.test(stored) && /clear it, and save/.test(stored),
+    stored.trim(),
+  );
+
+  // Everything after the stored-password branch, and "" when that branch is not
+  // there at all - so a single-string version of this function reddens both halves
+  // rather than passing the second by accident.
+  const fresh = stored.length > 0 ? help.slice(help.indexOf(stored) + stored.length) : "";
+  check(
+    "the no-password branch still says blank saves a host without one",
+    /without one/.test(fresh),
+    fresh.trim(),
+  );
+  // §5.20: a string the component cannot reach is the same as no string at all.
+  check(
+    "the field renders the branch rather than a literal of its own",
+    /\{passwordHelp\(hasStoredPassword\)\}/.test(sshSectionSrc),
+    /.*passwordHelp\(.*/.exec(sshSectionSrc)?.[0],
+  );
+  check(
+    "and the dialog threads the stored flag in from the record, not from the draft",
+    /hasStoredPassword=\{hasStoredSshPassword\}/.test(editorSrc) &&
+      /const hasStoredSshPassword =[\s\S]{0,200}?credential\.hasPassword;/.test(editorSrc),
+    /.*hasStoredPassword=.*/.exec(editorSrc)?.[0],
+  );
+
+  // What a credential-less connect actually does, because the comment justifying
+  // the relaxed validation named something that does not happen: it claimed the
+  // server's own authentication error. `resolve.ts` maps an empty secret to
+  // `undefined` and `session.rs`'s `connect` pre-flights that before opening a
+  // socket, so nothing reaches a server at all. The real message is the better one,
+  // which is exactly why the prose must name it rather than the invented one.
+  check(
+    "the relaxation is justified by the refusal that happens, named as the backend words it",
+    /no credentials/.test(sshSectionRaw),
+    /.{0,80}no credentials.{0,40}/.exec(sshSectionRaw)?.[0],
+  );
+  check(
+    "and claims no authentication failure, which a connect with no credentials never reaches",
+    !/authentication error|fails authentication/.test(sshSectionRaw),
+    /.{0,80}(authentication error|fails authentication).{0,40}/.exec(sshSectionRaw)?.[0],
+  );
+  check(
+    "the pre-flight it names is still the backend's own wording",
+    /"ssh: no credentials: set use_agent, password, or private_key"/.test(
+      read("src-tauri/src/modules/ssh/session.rs"),
+    ),
   );
 }
 

@@ -24,6 +24,12 @@ import {
 import { RdpOptions } from "./editor/RdpOptions";
 import { runRdpProbe } from "./editor/rdpProbe";
 import { SECRET_STORE_LOCATIONS } from "./editor/secretStoreCopy";
+import {
+  clearsSecret,
+  NOTHING_SEEDED,
+  sshSecretsForSave,
+  type SshSecretSeeded,
+} from "./editor/sshSecrets";
 import { SshCredentialSection, validateSshCredential } from "./editor/SshCredentialSection";
 import { SshOptions } from "./editor/SshOptions";
 import { runSshProbe } from "./editor/sshProbe";
@@ -41,7 +47,6 @@ import {
   listGroups,
   listHosts,
   newHostId,
-  pinFingerprint,
   upsertHost,
   type HostSecretInput,
 } from "./store";
@@ -116,31 +121,6 @@ function tokenFor(target: HostEditorTarget | null): string | null {
   return `create:${target.protocol}:${JSON.stringify(target.prefill ?? {})}`;
 }
 
-/**
- * The SSH secrets to write, three-state per field.
- *
- * THE rule this function exists for: an UNTOUCHED field is `undefined`, which is
- * the store's "leave whatever is stored alone" instruction. The form seeds these
- * three from the keychain, so a save that echoed the seed back would send `""` for
- * any field whose read had not resolved yet - and `""` is the store's CLEAR
- * instruction, not a no-op. An edit that only renamed a host would take its
- * password with it.
- *
- * A field the current auth mode does not use is left ALONE rather than cleared,
- * which is the one place this differs from the dialog it came from. Nothing goes
- * unreachable by it: an inline SSH record NAMES all three accounts whatever its
- * auth mode, so the store still releases them when the credential moves to the
- * vault and still deletes them with the host. What it buys is that switching to
- * password auth and back does not cost the user the key they had.
- */
-function sshSecretsForSave(cred: SshCredentialDraft, touched: SshSecretTouched): HostSecretInput {
-  const out: HostSecretInput = {};
-  if (touched.password) out.password = cred.password;
-  if (touched.privateKey) out.privateKey = cred.privateKey;
-  if (touched.keyPassphrase) out.keyPassphrase = cred.keyPassphrase;
-  return out;
-}
-
 export function HostEditorDialog({ target, onClose, onSaved }: HostEditorDialogProps): ReactNode {
   const [shared, setShared] = useState<SharedDraft>(EMPTY_SHARED);
   const [protocol, setProtocol] = useState<"ssh" | "rdp">("ssh");
@@ -167,6 +147,21 @@ export function HostEditorDialog({ target, onClose, onSaved }: HostEditorDialogP
    * mutated in place: the initial value is a shared module constant.
    */
   const sshTouched = useRef<SshSecretTouched>(NO_SSH_SECRETS_TOUCHED);
+  /**
+   * Which SSH secret fields the keychain seed put a value the user can SEE into.
+   *
+   * A DIFFERENT FACT from `sshTouched`, not a second copy of it - §5.14's "keep
+   * exactly one such record" is about the touched mark, which is still one cell
+   * read by both the seed and the save. `touched` says the user edited the field;
+   * this says the field was showing a stored value while they did, and only that
+   * makes emptying it an instruction to delete something. Without it, one
+   * character typed and backspaced before the read landed sent `""` down to the
+   * store, which is its CLEAR instruction, and the keychain account went with it.
+   *
+   * A ref for the same reason `sshTouched` is one: it is written after the seed's
+   * await and read by the save, and neither renders from it.
+   */
+  const sshSeeded = useRef<SshSecretSeeded>(NOTHING_SEEDED);
   const [proxyJumpId, setProxyJumpId] = useState("");
   const [rdpCred, setRdpCred] = useState<RdpCredentialDraft>(EMPTY_RDP_CRED);
   const [presetId, setPresetId] = useState(RDP_DEFAULT_PRESET.id);
@@ -236,8 +231,10 @@ export function HostEditorDialog({ target, onClose, onSaved }: HostEditorDialogP
     setError(null);
     setSaving(false);
     setTest({ kind: "idle" });
-    // Per row, or the last row's typing would suppress this one's seed.
+    // Per row, or the last row's typing would suppress this one's seed - and the
+    // last row's seed would license clearing this one's secret.
     sshTouched.current = NO_SSH_SECRETS_TOUCHED;
+    sshSeeded.current = NOTHING_SEEDED;
     setExisting(null);
     setReady(false);
     setMode(target.mode);
@@ -365,6 +362,18 @@ export function HostEditorDialog({ target, onClose, onSaved }: HostEditorDialogP
             privateKey: typed.privateKey ? d.privateKey : (secrets.privateKey ?? ""),
             keyPassphrase: typed.keyPassphrase ? d.keyPassphrase : (secrets.keyPassphrase ?? ""),
           }));
+          // What the user can now SEE, which is what licenses a later clear -
+          // see `sshSecretsForSave`. Derived from the same `typed` the seed just
+          // yielded to, and from the value that actually arrived: a field the
+          // seed skipped is NOT seeded however much the keychain held, because
+          // the stored value never reached the screen, and a field seeded with
+          // nothing is not either. Computed out here rather than inside the
+          // updater, which must stay pure - React is free to call it twice.
+          sshSeeded.current = {
+            password: !typed.password && !clearsSecret(secrets.password ?? ""),
+            privateKey: !typed.privateKey && !clearsSecret(secrets.privateKey ?? ""),
+            keyPassphrase: !typed.keyPassphrase && !clearsSecret(secrets.keyPassphrase ?? ""),
+          };
         } catch (e) {
           // Reported rather than swallowed, and the form stays usable: the three
           // fields are untouched, so a save now writes none of them and the
@@ -410,6 +419,17 @@ export function HostEditorDialog({ target, onClose, onSaved }: HostEditorDialogP
     existing.protocol === "rdp" &&
     existing.credential.kind === "inline" &&
     existing.credential.hasPassword;
+  // The same flag for SSH, and it is here to keep the help text honest rather
+  // than to validate anything: what "leave this blank" produces is the opposite
+  // on the two sides of it. On a host with nothing stored, blank saves a host
+  // with no password; on a host that has one, blank means the seed has not landed
+  // and the save leaves the stored password exactly as it is. Read off the record
+  // rather than off the draft, because the draft is blank in both cases.
+  const hasStoredSshPassword =
+    !!existing &&
+    existing.protocol === "ssh" &&
+    existing.credential.kind === "inline" &&
+    existing.credential.hasPassword;
   // The address the form is proposing, trimmed exactly as Test and Save trim it,
   // so all three agree about which pin is the current one.
   const draftAddress = shared.host.trim();
@@ -437,6 +457,13 @@ export function HostEditorDialog({ target, onClose, onSaved }: HostEditorDialogP
    * It is also what the seed yields to, which is why the mark is taken here and
    * not inside an updater: the seed reads it after its own await, so it has to be
    * true the moment the keystroke happens rather than one render later.
+   *
+   * The mark says the field was EDITED, and deliberately nothing more - `patch.
+   * password !== undefined` is true for `""`, because emptying a field is an edit.
+   * It is `sshSeeded` that decides whether that particular edit is allowed to
+   * delete anything, and the reason the two are separate is that this handler
+   * cannot tell a backspace over a seeded password from a backspace over a field
+   * the keychain read has not reached yet.
    */
   const patchSshCred = (patch: Partial<SshCredentialDraft>) => {
     setSshCred((d) => ({ ...d, ...patch }));
@@ -482,9 +509,11 @@ export function HostEditorDialog({ target, onClose, onSaved }: HostEditorDialogP
    * made it reachable (Forget before you could Test a new address) is gone as well,
    * because pins are keyed per address now.
    *
-   * No `existing` guard any more: there is nothing to reach for. A host that was
-   * never saved can still have accepted a key during Test, and forgetting it is the
-   * same edit to the same draft.
+   * No `existing` guard any more, and the reason is that there is nothing left for
+   * it to guard rather than a case it was getting wrong: this touches the draft map
+   * and nothing else, so the saved record is not an operand of any of it. The
+   * unsaved host it would have refused is not reachable either - `PinnedKeyRow`,
+   * which is the only thing that calls this, renders only under `mode === "edit"`.
    */
   const forgetPin = () => {
     setPins((current) => {
@@ -497,9 +526,12 @@ export function HostEditorDialog({ target, onClose, onSaved }: HostEditorDialogP
   };
 
   const runTest = async () => {
-    // The button is disabled for a vault-bound row; this is the guard that makes
-    // that a rule rather than a UI state. Testing one would need the identity's
-    // credentials, which means the resolver and the picker that goes with it -
+    // UNREACHABLE as the form stands, and kept anyway: the Test button is
+    // `disabled` for a vault-bound row, so nothing can call this with one. It
+    // exists so that a caller which is NOT that button - a keyboard shortcut, a
+    // second Test entry point, the identity picker's own arrival - refuses rather
+    // than dialling with the blank draft a bound row loads. Testing one for real
+    // needs the identity's credentials, which means the resolver and the picker,
     // both the Vault page's work.
     if (boundIdentity) {
       setError("A host bound to a vault identity cannot be tested from here yet.");
@@ -523,10 +555,6 @@ export function HostEditorDialog({ target, onClose, onSaved }: HostEditorDialogP
     // it is still a pin on a row the user never tested.
     const probeToken = token;
     const probeHostId = existing?.id;
-    // The address the SAVED record names, which is not necessarily the one this
-    // probe dials: the form is free to propose a new one, and until Save runs the
-    // record still points at the old machine.
-    const savedHost = existing?.host;
     const onProbeRow = () => applied.current === probeToken;
     const onTrusted = (fingerprint: string) => {
       // The FORM's pins follow the row on screen. Unsaved, visible in the
@@ -536,26 +564,32 @@ export function HostEditorDialog({ target, onClose, onSaved }: HostEditorDialogP
       // trust prompt waits on a human, and the user is free to keep typing while it
       // does.
       if (onProbeRow()) setPins((current) => ({ ...current, [host]: fingerprint }));
-      // The STORED pin may not. Nothing is persisted for a machine the record
-      // does not name: re-point the form at 10.0.0.2, Test, accept the
-      // certificate, then Cancel, and an ungated write has replaced the pin of a
-      // host still saved at 10.0.0.1 with a fingerprint from a different machine.
-      // The record's next real connect aborts as a MISMATCH, which reads as an
-      // attack rather than as a dialog the user cancelled - and the pin it
-      // destroyed cannot come back, because only that machine can present it.
+      // AND THE STORE IS NOT WRITTEN AT ALL. There used to be a `pinFingerprint`
+      // call here, gated on the saved record still naming the address the probe
+      // dialled (§5.16, which that gate closed: a cancelled dialog must not leave
+      // a FOREIGN machine's fingerprint on a record, because the next real connect
+      // aborts as a MISMATCH and that reads as an attack). The gate was sound and
+      // still incomplete - it stopped the write landing on the wrong address, not
+      // on the right one:
       //
-      // STILL GATED once pins are keyed per address, and deliberately so. A keyed
-      // write for 10.0.0.2 would no longer be COMPARED against by a record saved at
-      // 10.0.0.1, so the mismatch is gone - but it would still be a trust change
-      // this dialog persisted and then had cancelled, which is the question §5.16
-      // says to ask of every store write made from inside a dialog. Save is the only
-      // thing that commits a pin.
+      //   press Forget (which now edits the DRAFT), so the pin for this address is
+      //   gone from `pins` but still in the store; Test the same address, which
+      //   therefore TOFUs instead of reporting the mismatch the pin existed to
+      //   raise; accept; the addresses match, so the write goes through and
+      //   REPLACES the stored pin; Cancel. The old pin cannot come back - only that
+      //   machine can present it - and nothing warned anyone. Forget-then-Test is
+      //   the natural sequence exactly when a key is suspected of having rotated.
       //
-      // The port is deliberately no part of the comparison: one server presents one
-      // key on every port it listens on.
-      if (probeHostId && savedHost === host) {
-        void pinFingerprint(probeHostId, fingerprint).catch(() => {});
-      }
+      // No gate fixes that, because the destructive write is the one the gate
+      // permits. Deleting the write does, and it costs nothing: `pins` above is
+      // already the single source of truth, Save writes the whole map, and Cancel
+      // disposes of it. §5.16's question - does this survive Cancel, and should it -
+      // now has no store write in this dialog to ask it of. Save is the only thing
+      // that commits a pin, which is what the comment on `pins` has always claimed.
+      //
+      // What is given up: accept a key, then Cancel, and nothing is pinned, so the
+      // next real connect asks again. That is the safe direction and the one the
+      // footnote on the recorded-key row promises.
     };
 
     try {
@@ -707,7 +741,9 @@ export function HostEditorDialog({ target, onClose, onSaved }: HostEditorDialogP
         // Nothing at all for a vault-bound row: `upsertHost` REFUSES a secret
         // handed in with a vault binding, and the fields it would come from are
         // ones this form never fills.
-        secrets = boundIdentity ? {} : sshSecretsForSave(sshCred, sshTouched.current);
+        secrets = boundIdentity
+          ? {}
+          : sshSecretsForSave(sshCred, sshTouched.current, sshSeeded.current);
       } else {
         record = {
           ...base,
@@ -855,6 +891,7 @@ export function HostEditorDialog({ target, onClose, onSaved }: HostEditorDialogP
                   boundIdentity={boundIdentity}
                   value={sshCred}
                   onChange={patchSshCred}
+                  hasStoredPassword={hasStoredSshPassword}
                 />
               ) : (
                 <RdpCredentialSection
@@ -914,10 +951,13 @@ export function HostEditorDialog({ target, onClose, onSaved }: HostEditorDialogP
                   // changes as the Host field is edited: with a key per address, a
                   // re-pointed host shows the new address's pin (usually none) while
                   // the old one is still held and still saved.
+                  // Both halves of the promise, because both are now true of
+                  // every pin: Forget and a key accepted during Test are edits to
+                  // this form, and saving is what applies either of them.
                   footnote={
                     protocol === "rdp"
-                      ? `Recorded for ${draftAddress || "this address"}, not for a port, so the same machine keeps one trusted certificate however it is reached. Forget applies when you save.`
-                      : `Recorded for ${draftAddress || "this address"}. Forget applies when you save.`
+                      ? `Recorded for ${draftAddress || "this address"}, not for a port, so the same machine keeps one trusted certificate however it is reached. Forget, and any certificate accepted while testing, apply when you save — cancelling leaves the recorded one alone.`
+                      : `Recorded for ${draftAddress || "this address"}. Forget, and any key accepted while testing, apply when you save — cancelling leaves the recorded one alone.`
                   }
                   onForget={forgetPin}
                 />

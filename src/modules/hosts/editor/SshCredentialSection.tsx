@@ -38,6 +38,14 @@ export type SshCredentialSectionProps = {
   boundIdentity: string | null;
   value: SshCredentialDraft;
   onChange: (patch: Partial<SshCredentialDraft>) => void;
+  /**
+   * Whether the STORED record claims a password, which is what a blank field
+   * means the opposite of. Blank on a host with nothing stored saves a host
+   * without a password; blank on a host that has one means the keychain read has
+   * not landed and the save leaves it alone. Same prop, same reason, as the RDP
+   * section's - see {@link passwordHelp}.
+   */
+  hasStoredPassword: boolean;
 };
 
 /**
@@ -62,9 +70,15 @@ export function validateSshCredential(
   // row is a state the store persists and the Hosts page renders - the card shows
   // "Missing secret" and reads the stored flag, not the keychain - so refusing it
   // made the one state that indicator exists for unreachable from the UI, while
-  // leaving no way to save a host now and store its password later. The connect
-  // then fails with the server's own authentication error, which is the honest
-  // outcome for a host whose password has not been entered yet.
+  // leaving no way to save a host now and store its password later.
+  //
+  // What a connect then does, stated correctly because the earlier version of this
+  // comment claimed the wrong thing: it never reaches the server. `resolve.ts` maps
+  // an empty secret to `undefined`, and `session.rs`'s `connect` pre-flights that -
+  // `ssh: no credentials: set use_agent, password, or private_key` - before any
+  // socket is opened. Better than the authentication failure this used to promise,
+  // since nothing is sent and nothing looks like a rejected login, but it is a
+  // different message and the reasoning here should name the one that happens.
   //
   // Key auth is NOT relaxed with it. `hasPrivateKey: false` renders the same pip,
   // so this is a scope boundary and not a correctness one: it is a second
@@ -79,10 +93,34 @@ export function validateSshCredential(
   return null;
 }
 
+/**
+ * What leaving the password field blank actually does, which is the OPPOSITE thing
+ * on the two sides of `hasStoredPassword`.
+ *
+ * One string served both until a review found what that costs. On a host that has
+ * no password, blank saves a host without one, and saying so is the point of the
+ * text. On a host that HAS one, the field is blank for the whole of the keychain
+ * read - the form is interactive before the secrets arrive, deliberately - and it
+ * stays blank if that read yielded to a keystroke. Telling the user "leave blank to
+ * save the host without one" at that moment describes a destruction the save
+ * refuses to perform, and confirms the mental model that makes them try.
+ *
+ * The delete path is described with its precondition attached, because that is the
+ * rule `sshSecretsForSave` enforces: emptying this field removes the stored
+ * password only once the stored password has been loaded into it.
+ */
+function passwordHelp(hasStoredPassword: boolean): string {
+  if (hasStoredPassword) {
+    return "A password is already stored for this host, and blank does not remove it: blank means leave it exactly as it is. To remove it, wait for the stored password to load into this field, clear it, and save.";
+  }
+  return "Leave blank to save the host without one. It is listed with a missing-secret warning until a password is entered, and a connect is then refused before it dials - the host process reports that it has no credentials rather than failing a login.";
+}
+
 export function SshCredentialSection({
   boundIdentity,
   value,
   onChange,
+  hasStoredPassword,
 }: SshCredentialSectionProps) {
   const [agent, setAgent] = useState<AgentState>({ kind: "checking" });
   const [imported, setImported] = useState<ImportState>({ kind: "idle" });
@@ -204,10 +242,11 @@ export function SshCredentialSection({
           />
           {/* Saving with this blank is allowed - see `validateSshCredential` - so
               the form says what that produces rather than leaving the user to
-              discover it at the first connect. */}
+              discover it at the first connect. Which of the two things it produces
+              depends on the stored record, not on this draft: see
+              `passwordHelp`. */}
           <span className="text-muted-foreground text-[10.5px]">
-            Leave blank to save the host without one. It is listed with a missing-secret warning
-            until a password is entered, and a connect fails authentication before then.
+            {passwordHelp(hasStoredPassword)}
           </span>
         </Field>
       ) : (

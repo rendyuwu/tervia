@@ -51,13 +51,19 @@
  *    success writes are reached through their OWN arm of the protocol branch
  *    rather than by searching for `kind: "ok"` - which occurs twice, so a single
  *    search examined the SSH write and the RDP one could lose its guard in
- *    silence. The two pin writes are gated on DIFFERENT things and the split is
- *    what this section pins: the form's pin on the row (unsaved, visible,
- *    disposed of by Cancel, so it may describe an address being proposed), the
- *    saved record's pin on the address that record names (persistent, and a pin
- *    destroyed by a probe of another machine cannot be recovered).
- *    `host-editor-verify.ts` §3 owns that address rule in full; what is here is
- *    that the two guards do not collapse into one.
+ *    silence.
+ *
+ *    There used to be a SECOND pin write here, straight to the store, gated on
+ *    the saved record still naming the address the probe dialled. It is gone
+ *    rather than re-gated: the gate stopped a cancelled dialog leaving a foreign
+ *    machine's fingerprint on a record, and did nothing about Forget (a draft
+ *    edit) making the next Test TOFU over the address the record DOES name, so
+ *    accepting replaced the stored pin and Cancel kept the replacement. Nothing
+ *    in this dialog persists a pin now; Save does. So the only trust write left
+ *    is the form's own, and the row guard below is what keeps a probe that
+ *    outlived its row from putting A's certificate into B's form.
+ *    `host-editor-verify.ts` §3 owns the absence rule in full; what is here is
+ *    that the row guard covers EVERY such write, counted, rather than the first.
  *
  * 4. THE `pagehide` BACKSTOP ANSWERS BOTH PROTOCOLS. `HostKeyPromptDialog` is
  *    shared, so its backstop fires for an SSH host key as well as an RDP
@@ -262,7 +268,31 @@ function statementsBefore(src: string, at: number): string[] {
  * statement text read back is a fragment of an argument list.
  */
 function enclosingGuard(region: string, needle: string): string {
-  let at = region.indexOf(needle);
+  return guardAt(region, region.indexOf(needle));
+}
+
+/**
+ * The same answer for EVERY occurrence of `needle`, in source order.
+ *
+ * Handoff §5.17's all-matches rule, which this file already follows for
+ * `kind: "ok"` by reaching each protocol arm separately. The form it exists for is
+ * the other one: a second write of the same kind added beside a correctly guarded
+ * first one, which `enclosingGuard` reports nothing about. A caller asserts the
+ * COUNT as well, because `[].every(...)` is true - a write that disappears must not
+ * pass either.
+ */
+function enclosingGuards(region: string, needle: string): string[] {
+  const out: string[] = [];
+  for (let at = region.indexOf(needle); at >= 0; at = region.indexOf(needle, at + 1)) {
+    out.push(guardAt(region, at));
+  }
+  return out;
+}
+
+/** The shared walk, from a position rather than a needle, so one implementation
+ *  serves both forms above. */
+function guardAt(region: string, start: number): string {
+  let at = start;
   if (at < 0) return "";
   // Bounded rather than `for (;;)`: eight levels of nesting is already more than
   // anything here has, and a bound cannot spin on a source this does not expect.
@@ -287,19 +317,9 @@ function enclosingGuard(region: string, needle: string): string {
   return "";
 }
 
-/** What `const <ident> = …;` assigns, so a check can ask what a guard's operands
- *  ARE rather than assuming the names they go by. */
-function assignedIn(region: string, ident: string): string {
-  const m = new RegExp(`const ${ident} = ([^;]*);`).exec(region);
-  return m ? m[1].trim() : "";
-}
-
 function count(src: string, re: RegExp): number {
   return [...src.matchAll(re)].length;
 }
-
-const identifiers = (src: string): string[] =>
-  [...src.matchAll(/[A-Za-z_$][\w$]*/g)].map((m) => m[0]);
 
 const paneRaw = read("src/modules/rdp/RdpPane.tsx");
 const editorRaw = read("src/modules/hosts/HostEditorDialog.tsx");
@@ -376,6 +396,22 @@ console.log("[0] the helpers the checks below depend on");
     enclosingGuard("x();\n", "writeIt()") === "",
   );
 
+  // The all-matches form, and the false pass it exists to remove: a second write
+  // of the same kind added beside a correctly guarded first one.
+  {
+    const two = "if (a === b) writeIt();\nwriteIt();\n";
+    check(
+      "enclosingGuards reports every occurrence, not just the one enclosingGuard finds",
+      enclosingGuard(two, "writeIt()") === "a === b" &&
+        JSON.stringify(enclosingGuards(two, "writeIt()")) === JSON.stringify(["a === b", ""]),
+      { first: enclosingGuard(two, "writeIt()"), all: enclosingGuards(two, "writeIt()") },
+    );
+    check(
+      "and an empty list for a needle that is not there, which no caller may read as a pass",
+      enclosingGuards("x();\n", "writeIt()").length === 0,
+    );
+  }
+
   const sample = 'if (a) {\n  mark();\n  send({ kind: "x" });\n}\n';
   check(
     "statementsBefore walks out of an argument position to the block the call is in",
@@ -432,12 +468,6 @@ console.log("[0] the helpers the checks below depend on");
       [stripped.length, raw.length],
     );
   }
-
-  check(
-    "assignedIn reports what a local was assigned",
-    assignedIn("const a = b?.c;", "a") === "b?.c",
-  );
-  check("and nothing for a local it cannot find", assignedIn("const a = b;", "z") === "");
 }
 
 // ---------------------------------------------------------------------------
@@ -585,27 +615,34 @@ console.log("\n[3] a Test probe cannot write to a row it no longer belongs to");
   const onTrusted = between(runTest, "const onTrusted = (fingerprint: string) => {", "\n    try {");
   check("its trust callback was found", onTrusted.length > 50, onTrusted.length);
 
+  // EVERY write to the form's pins, with the count asserted: the first-match form
+  // this replaces reports the guard of the one that is still correct and says
+  // nothing about a second one added beside it, and an empty list would satisfy
+  // `every` if the write were deleted outright.
+  const formPins = enclosingGuards(onTrusted, "setPins(");
+  check("the callback holds exactly one write to the form's pins", formPins.length === 1, formPins);
   check(
-    "the FORM's pin is written only while the editor is still on the row that was probed",
-    enclosingGuard(onTrusted, "setPins(") === onRow,
-    enclosingGuard(onTrusted, "setPins("),
+    "and every one of them is written only while the editor is still on the row that was probed",
+    formPins.length > 0 && formPins.every((g) => g === onRow),
+    formPins,
   );
 
-  // The other half of the split. The saved row is not the row on screen and must
-  // not be gated as if it were: `probeHostId` is the row that was tested, so the
-  // pin belongs there however long the answer took - but only if that record
-  // still names the machine that answered.
-  const storeGuard = enclosingGuard(onTrusted, "pinFingerprint(");
-  check("the SAVED row's pin is guarded too", storeGuard.length > 0, onTrusted.trim());
-  check("by an equality rather than a bare presence test", storeGuard.includes("==="), storeGuard);
-  const operands = identifiers(storeGuard).map((id) => ({ id, from: assignedIn(runTest, id) }));
-  const sources = operands.map((o) => o.from);
-  check("on the address the SAVED record names", sources.includes("existing?.host"), operands);
-  check("against the address the probe dialled", sources.includes("shared.host.trim()"), operands);
+  // The other half of the split is GONE rather than guarded, so the check is the
+  // absence. Gating the store write on the saved address closed the cancelled-dialog
+  // case where a FOREIGN fingerprint landed on a record (§5.16) and left the one
+  // where it lands on the address the record does name: Forget removes the pin from
+  // the draft, so Test TOFUs instead of raising the mismatch, accepting overwrites
+  // the stored pin because the addresses agree, and Cancel keeps it. Save is the
+  // only thing that commits a pin now.
   check(
-    "and NOT on the row the form is showing, which the probe has already outlived",
-    rowGuard.length > 0 && !storeGuard.includes(rowGuard),
-    storeGuard,
+    "the trust callback persists nothing, so a cancelled dialog cannot change a stored pin",
+    !onTrusted.includes("pinFingerprint("),
+    onTrusted.trim(),
+  );
+  check(
+    "and the editor does not reach the store's pin writer from anywhere",
+    !editorSrc.includes("pinFingerprint"),
+    /.*pinFingerprint.*/.exec(editorSrc)?.[0],
   );
 
   // Both protocol arms, reached separately. `kind: "ok"` occurs twice, so one
