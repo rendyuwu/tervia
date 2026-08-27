@@ -52,6 +52,7 @@ import { arrivedWithoutSecret, hostRefs, storedFields } from "../src/modules/ssh
 import {
   BACKUP_KIND,
   BACKUP_KIND_V1,
+  carryPins,
   clearDanglingJumps,
   clearDanglingTunnels,
   mergeGroups,
@@ -68,11 +69,38 @@ import {
 import { sshCredentialValues } from "../src/modules/vault/resolve";
 
 let failed = 0;
+
+/**
+ * A canonical rendering, used to compare AND to report. The same helper and the
+ * same reasoning as `hosts-store-verify.ts`: `JSON.stringify` drops `undefined`
+ * properties, so "the field is absent" and "the field is present and empty" - the
+ * distinction the whole of `pins` turns on - compare equal; and it is key-order
+ * sensitive, so a pin map assembled by spreading two maps together fails a check
+ * about which pins survived rather than about their order. Keys sorted, `undefined`
+ * rendered, arrays left in order for the checks where order IS the contract (write
+ * order, hop order).
+ */
+function shape(v: unknown): string {
+  if (v === undefined) return "undefined";
+  if (v === null) return "null";
+  if (Array.isArray(v)) return `[${v.map(shape).join(",")}]`;
+  if (typeof v === "object") {
+    const o = v as Record<string, unknown>;
+    return `{${Object.keys(o)
+      .sort()
+      .map((k) => `${JSON.stringify(k)}:${shape(o[k])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(v) ?? String(v);
+}
+
 function check(label: string, got: unknown, want: unknown): void {
-  if (JSON.stringify(got) === JSON.stringify(want)) {
+  const found = shape(got);
+  const wanted = shape(want);
+  if (found === wanted) {
     console.log(`  ok: ${label}`);
   } else {
-    console.error(`  FAIL: ${label} = ${JSON.stringify(got)}, want ${JSON.stringify(want)}`);
+    console.error(`  FAIL: ${label} = ${found}, want ${wanted}`);
     failed++;
   }
 }
@@ -782,6 +810,163 @@ check(
   0,
 );
 
+console.log("\n[pins] a pin the file carries belongs to the address the FILE names");
+// The failure this closes, and it is not a rounding error. The store's `nextPins`
+// has to give an unkeyed pin an address, and with no map handed over it uses the
+// SAVED record's - correct for a `{ ...stored, host: next }` spread, wrong for a
+// file, whose row is not a spread of anything on this machine. Let the file name
+// `c.example` for an id saved here as `b.example` (which is what
+// `ImportCounts.replaced` exists for) and the guess replaces `b.example`'s
+// verified key with the other machine's, so every later connect to `b.example`
+// aborts as a MISMATCH and can never TOFU past it - while `c.example`, the address
+// actually about to be dialled, is left silently unpinned.
+check(
+  "a keyed map survives the parser, every address of it",
+  host(ssh({ host: "c.example", pins: { "b.example": "SHA256:B", "c.example": "SHA256:C" } })).pins,
+  { "b.example": "SHA256:B", "c.example": "SHA256:C" },
+);
+check(
+  "a row carrying only a flat pin is keyed onto the address the FILE names",
+  host(ssh({ host: "c.example", lastFingerprint: "SHA256:C" })).pins,
+  { "c.example": "SHA256:C" },
+);
+check(
+  "the RDP arm the same, off certFingerprint - only the flat field's NAME differs",
+  host(rdp({ host: "r.example", certFingerprint: "SHA256:CERT" })).pins,
+  { "r.example": "SHA256:CERT" },
+);
+check(
+  "and a v1 row, which is the format that only ever had a flat pin",
+  sanitizeLegacyHost(legacy({ host: "v1.example", lastFingerprint: "SHA256:V1" }))?.pins,
+  { "v1.example": "SHA256:V1" },
+);
+// ABSENT, never `{}`. An empty map is Forget's spelling - "discard every pin for
+// this host" - and a file that carries no pins may not say that on this machine's
+// behalf. `undefined` is what the store reads as "leave what is stored alone".
+check(
+  "a row with no pin of any kind carries no map at all",
+  Object.prototype.hasOwnProperty.call(host(ssh()), "pins"),
+  false,
+);
+check(
+  "and neither does one whose map is empty",
+  Object.prototype.hasOwnProperty.call(host(ssh({ pins: {} })), "pins"),
+  false,
+);
+// Untrusted like every other field here. A blank key is an address nothing dials,
+// and a blank value would read as "a key is pinned here" to every consumer of the
+// flat projection while matching no server that ever answers.
+check(
+  "a blank address, a blank fingerprint and a non-string are each dropped",
+  host(
+    ssh({
+      host: "c.example",
+      pins: { "  ": "SHA256:X", "d.example": "   ", "e.example": 7, "f.example": "SHA256:F" },
+    }),
+  ).pins,
+  { "f.example": "SHA256:F" },
+);
+check(
+  "a map with nothing usable left in it falls back to the flat pin rather than to nothing",
+  host(ssh({ host: "c.example", lastFingerprint: "SHA256:C", pins: { "": "" } })).pins,
+  { "c.example": "SHA256:C" },
+);
+check(
+  "a map that is not an object is ignored rather than spread",
+  host(ssh({ host: "c.example", lastFingerprint: "SHA256:C", pins: ["c.example"] })).pins,
+  { "c.example": "SHA256:C" },
+);
+check(
+  "an address is trimmed, so it matches the address the store keys on",
+  host(ssh({ host: "c.example", pins: { " c.example ": " SHA256:C " } })).pins,
+  { "c.example": "SHA256:C" },
+);
+
+console.log("\n[pins] the import hands the store a map, so nothing is inferred from an address");
+// A pre-keying SAVED record: flat pin, no map. Built by hand rather than through
+// the parser, because the parser now keys one - and this is the shape a store file
+// written before keying still holds.
+const savedFlat: SshHost = {
+  ...sshHost(ssh({ id: "h-1", host: "b.example" })),
+  lastFingerprint: "SHA256:B",
+};
+const savedKeyed: SshHost = {
+  ...sshHost(ssh({ id: "h-1", host: "b.example" })),
+  pins: { "b.example": "SHA256:B" },
+  lastFingerprint: "SHA256:B",
+};
+const fileAtC = host(ssh({ id: "h-1", host: "c.example", lastFingerprint: "SHA256:C" }));
+check(
+  "the file's pin lands on the file's address, and the saved address keeps its own",
+  carryPins([fileAtC], [savedKeyed])[0].pins,
+  // The file's address first, which is NOT the order the union inserts them in.
+  // Deliberate: which pins survive is the contract here, and their key order is
+  // not, so the check must not be sensitive to it - see `shape`.
+  { "c.example": "SHA256:C", "b.example": "SHA256:B" },
+);
+check(
+  "a saved record written before keying is read the same way round, so its pin is not lost",
+  carryPins([fileAtC], [savedFlat])[0].pins,
+  { "b.example": "SHA256:B", "c.example": "SHA256:C" },
+);
+// A union, not a replacement: nothing else about an import deletes anything, and a
+// key this machine verified for an address the file never heard of is in exactly
+// that class. Dropping it is a silent TOFU downgrade for a machine already trusted.
+check(
+  "an address only THIS machine knows survives a file that never heard of it",
+  carryPins(
+    [host(ssh({ id: "h-1", host: "c.example", pins: { "c.example": "SHA256:C" } }))],
+    [savedKeyed],
+  )[0].pins,
+  { "b.example": "SHA256:B", "c.example": "SHA256:C" },
+);
+check(
+  "the file wins at an address both name, which is its authority over every other field",
+  carryPins(
+    [host(ssh({ id: "h-1", host: "b.example", lastFingerprint: "SHA256:NEW" }))],
+    [savedKeyed],
+  )[0].pins,
+  { "b.example": "SHA256:NEW" },
+);
+check(
+  "a file row with no pins hands over what this machine trusted rather than clearing it",
+  carryPins([host(ssh({ id: "h-1", host: "b.example" }))], [savedKeyed])[0].pins,
+  { "b.example": "SHA256:B" },
+);
+check("an id this machine has never seen carries only its own", carryPins([fileAtC], [])[0].pins, {
+  "c.example": "SHA256:C",
+});
+check(
+  "and a row with no pins on either side grows no empty map",
+  Object.prototype.hasOwnProperty.call(carryPins([host(ssh({ id: "h-2" }))], [])[0], "pins"),
+  false,
+);
+// §5.6 is not weakened by this pass running after it: it touches `pins` and nothing
+// else, so the credential the vault pass CHOSE is the one that gets written, and the
+// row still names the address the file gave it. A version that spread the saved
+// record instead of the incoming one would silently undo both.
+const afterBindings = carryPins(
+  resolveIdentityBindings(
+    [
+      host(
+        ssh({ id: "h-7", host: "c.example", credential: { kind: "identity", identityId: "i-1" } }),
+      ),
+    ],
+    [savedKeyHost],
+  ).hosts,
+  [savedKeyHost],
+);
+check(
+  "the credential the vault pass chose survives the pin pass",
+  afterBindings[0].credential,
+  savedKeyHost.credential,
+);
+check(
+  "and so does the address the file named, which is what the row will be dialled at",
+  afterBindings[0].host,
+  "c.example",
+);
+
 console.log("\n[secret refs] what an export sends, and what an import claims was stored");
 // One ref per field a host COULD own, including the ones with nothing behind them:
 // the host process answers `false` for a ref that resolves to nothing, which keeps
@@ -816,9 +1001,9 @@ check(
 const vaultBound = host(ssh({ id: "h-v", credential: { kind: "identity", identityId: "i-1" } }));
 check("a vault-bound host contributes none", hostRefs(vaultBound).length, 0);
 
-/** Which fields were claimed as ALREADY STORED, by name. Read this way rather
- *  than compared as an object because `JSON.stringify` drops a symbol value, so a
- *  direct comparison would pass against `{}`. */
+/** Which fields were claimed as ALREADY STORED, by name. Read out by name because
+ *  the names ARE the contract - `storedFields` promises a claim per field - which
+ *  keeps the assertion off how a symbol happens to render. */
 const claimed = (h: Host, landed: string[]): string[] =>
   Object.entries(storedFields(h, new Set(landed)))
     .filter(([, v]) => v === SECRET_ALREADY_STORED)

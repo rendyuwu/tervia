@@ -61,6 +61,7 @@ import {
   BACKUP_VERSION,
   HOST_SECRET_GROUP,
   SECRET_GROUPS,
+  carryPins,
   clearDanglingJumps,
   clearDanglingTunnels,
   mergeGroups,
@@ -375,8 +376,15 @@ async function applyV2(payload: SealedBlob, passphrase: string): Promise<ImportR
     // exist because the alternative deletes a saved host's secrets.
     const kinds = refuseProtocolConflicts(parsed.hosts, existingHosts);
     const bound = resolveIdentityBindings(kinds.hosts, existingHosts);
+    // Pins keyed EXPLICITLY before any row is written, so the store never has to
+    // infer which machine an imported pin came off. Its inference is written for a
+    // spread of a saved record; a file is not one, and a file naming a different
+    // address than the row saved here would have the saved address's verified key
+    // replaced by the other machine's while the address about to be dialled was
+    // left on TOFU.
+    const pinned = carryPins(bound.hosts, existingHosts);
 
-    const merged = mergeGroups(parsed.groups, existingGroups, bound.hosts);
+    const merged = mergeGroups(parsed.groups, existingGroups, pinned);
     const groupIds = new Set(existingGroups.map((g) => g.id));
     const groups: ImportGroupCounts = {
       ...NO_GROUP_COUNTS,
@@ -533,9 +541,12 @@ async function applyV1(
   // The same passes and the same ordering as v2, for the same reason: the store's
   // guards do not care which format the row came out of. `resolveIdentityBindings`
   // is the one that is not needed - a v1 row has no `credential` to read, so
-  // `sanitizeLegacyHost` can only produce an inline one.
+  // `sanitizeLegacyHost` can only produce an inline one. `carryPins` matters MORE
+  // here, not less: a v1 file predates keying, so every pin it carries is a flat
+  // one that has to be attributed to the address the file names.
   const kinds = refuseProtocolConflicts(hosts, existingHosts);
-  const incoming = orderHostWrites(clearDanglingJumps(kinds.hosts, existingHosts), existingHosts);
+  const pinned = carryPins(kinds.hosts, existingHosts);
+  const incoming = orderHostWrites(clearDanglingJumps(pinned, existingHosts), existingHosts);
 
   const ssh: ImportCounts = { ...NO_COUNTS };
   for (const host of incoming) {

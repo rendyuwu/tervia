@@ -104,16 +104,57 @@ import {
   type RdpHost,
   type SshHost,
 } from "../src/modules/hosts/types";
+// The import's own passes, so the pin block below can exercise the COMPOSITION
+// this store sits at the end of. Both are Tauri-free by design - `backupFile.ts`
+// is kept that way so `ssh-backup-verify.ts` can run under plain node - and
+// nothing here reaches `backup.ts`, which does `invoke`.
+import { carryPins, sanitizePayload } from "../src/modules/ssh/backupFile";
 import type { SecretsIo } from "../src/modules/vault/adapters";
 import type { ResolveDeps } from "../src/modules/vault/resolve";
 import { VaultInUseError, type VaultIdentity, type VaultKey } from "../src/modules/vault/types";
 
 let failed = 0;
+
+/**
+ * A canonical rendering of a value, used to compare AND to report - so what a
+ * failure prints is what was actually compared.
+ *
+ * Deliberately not `JSON.stringify`, which §5.18 lists as one of the shapes that
+ * passed against implementations it existed to reject. Two reasons, and the pin
+ * assertions below are exposed to both.
+ *
+ * It DROPS `undefined` properties, so `{ pins: undefined }` and `{}` serialize
+ * identically - and the whole of `hostPins` turns on `pins` being absent versus
+ * being an empty object versus being keyed. Here `undefined` is rendered, so a key
+ * that is present and empty is not the same as a key that is gone.
+ *
+ * It is KEY-ORDER-SENSITIVE, so a pin map built by spreading in a different order
+ * failed a check about which pins survived rather than about their order. Keys are
+ * sorted here. That leaves key order unasserted, which is correct for every use in
+ * this file: where order IS the contract - a list of accounts deleted in sequence -
+ * the assertion is on an ARRAY, whose order this preserves.
+ */
+function shape(v: unknown): string {
+  if (v === undefined) return "undefined";
+  if (v === null) return "null";
+  if (Array.isArray(v)) return `[${v.map(shape).join(",")}]`;
+  if (typeof v === "object") {
+    const o = v as Record<string, unknown>;
+    const keys = Object.keys(o).sort();
+    return `{${keys.map((k) => `${JSON.stringify(k)}:${shape(o[k])}`).join(",")}}`;
+  }
+  // A number, string or boolean; `String` covers the ones `JSON.stringify`
+  // answers `undefined` for rather than rendering them as a missing value.
+  return JSON.stringify(v) ?? String(v);
+}
+
 function check(label: string, got: unknown, want: unknown): void {
-  if (JSON.stringify(got) === JSON.stringify(want)) {
+  const found = shape(got);
+  const wanted = shape(want);
+  if (found === wanted) {
     console.log(`  ok: ${label}`);
   } else {
-    console.error(`  FAIL: ${label} = ${JSON.stringify(got)}, want ${JSON.stringify(want)}`);
+    console.error(`  FAIL: ${label} = ${found}, want ${wanted}`);
     failed++;
   }
 }
@@ -845,12 +886,17 @@ console.log("\n[jumps] the chain resolves in connect order, once per hop");
     hops.map((x) => x.connectionId),
     ["j-entry", "j-mid"],
   );
+  // `expectedFingerprint: undefined` is spelled out on both, because `check` now
+  // renders an explicit `undefined` rather than dropping it: the hop spec always
+  // carries the key, and an unpinned hop carrying it as `undefined` is the shape
+  // the backend is handed. Omitting it here made that unobservable.
   check("an agent hop is built with no credential in it at all", hops[0], {
     connectionId: "j-entry",
     host: "j-entry.example",
     port: 22,
     user: "hop",
     useAgent: true,
+    expectedFingerprint: undefined,
   });
   check("a vault-bound hop resolves through the identity, not the host accounts", hops[1], {
     connectionId: "j-mid",
@@ -858,6 +904,7 @@ console.log("\n[jumps] the chain resolves in connect order, once per hop");
     port: 22,
     user: "vaulted",
     password: "from-the-vault",
+    expectedFingerprint: undefined,
   });
   // The call LOG, not the hop shape: the agent hop's empty credential is what the
   // check above proves, and this is what proves it cost no IPC. One read for the
@@ -1253,6 +1300,47 @@ console.log("\n[accounts] the release happens AFTER the record is written, never
     "and the record on disk is the NEW one",
     (await orphan.hosts.findHost("h-1"))?.protocol,
     "rdp",
+  );
+
+  // The fan-out is sequential, so a throw part-way leaves some accounts cleared and
+  // some untouched - and the message has to name only what is actually left behind.
+  // Naming the whole stale list sends the user looking for bytes that are gone, in
+  // the one message whose job is saying where they are. `keyPassphrase` is the
+  // SECOND of the two fields an SSH -> RDP change makes stale, so the first one
+  // really is cleared before the failure.
+  const partial = harness({
+    hosts: [
+      sshHost({
+        id: "h-1",
+        credential: {
+          kind: "inline",
+          hostId: "h-1",
+          user: "root",
+          authMode: "key",
+          hasPassword: false,
+          hasPrivateKey: true,
+          hasKeyPassphrase: true,
+        },
+      }),
+    ],
+    kept: { [at("h-1", "privateKey")]: "PEM", [at("h-1", "keyPassphrase")]: "pp" },
+    fail: { deleteAccount: "h-1::keyPassphrase" },
+  });
+  let said = "";
+  try {
+    await partial.hosts.upsertHost(rdpHost({ id: "h-1" }));
+  } catch (e) {
+    said = e instanceof Error ? e.message : String(e);
+  }
+  assert(said.includes("keyPassphrase"), "the message names the account that was left behind");
+  assert(
+    !said.includes("privateKey"),
+    "and NOT the one it cleared on the way, which is not unreachable at all",
+  );
+  check(
+    "the cleared account really is gone, and the failed one really is still there",
+    [partial.kept.get(at("h-1", "privateKey")), partial.kept.get(at("h-1", "keyPassphrase"))],
+    [undefined, "pp"],
   );
 }
 
@@ -1806,6 +1894,24 @@ console.log("\n[pins] an unkeyed pin is attributed rather than dropped or moved"
       sshHost({ id: "h-old", host: "a.example", lastFingerprint: "SHA256:OLD" }),
       sshHost({ id: "h-move", host: "a.example", lastFingerprint: "SHA256:OLD" }),
       rdpHost({ id: "h-rdp", host: "r.example", certFingerprint: "SHA256:CERT" }),
+      // The two rows here that are NOT pre-keying, and they exist because a
+      // pre-keying row cannot tell the two halves of the changed-address branch
+      // apart: its flat pin IS its map's only entry, so both halves are the same
+      // no-op on it.
+      //
+      // `h-keyed` has a key AT the address it names, so a flat pin arriving with a
+      // changed address has something it could overwrite.
+      sshHost({
+        id: "h-keyed",
+        host: "b.example",
+        pins: { "b.example": "SHA256:B" },
+        lastFingerprint: "SHA256:B",
+      }),
+      // `h-gap` has a key at some OTHER address and none at its own - a row
+      // re-pointed to `b.example` that never trusted anything there. So the same
+      // arrival has nothing to overwrite. No flat pin, which is what the store's own
+      // projection of this map at `b.example` comes to.
+      sshHost({ id: "h-gap", host: "b.example", pins: { "a.example": "SHA256:A" } }),
     ],
   });
   const row = (id: string) => h.rows().find((x) => x.id === id);
@@ -1844,15 +1950,75 @@ console.log("\n[pins] an unkeyed pin is attributed rather than dropped or moved"
     "a.example": "SHA256:OLD",
   });
 
-  // An IMPORT: an id this store has never seen, carrying a flat pin from the
-  // exported file. There is no earlier address it could have come from, so its own
-  // is the only reading - and dropping it would make every restored host re-ask.
-  await h.hosts.upsertHost(
-    sshHost({ id: "h-import", host: "i.example", lastFingerprint: "SHA256:IMPORTED" }),
+  // THE UNATTRIBUTABLE ARRIVAL, which the case above cannot express: there the flat
+  // pin handed over is the store's own projection of the map's only entry, so
+  // whatever the branch does with it writes back what is already there.
+  //
+  // Here the stored record has a key at the address it names, and the caller hands
+  // over a flat pin that did NOT come off it - no map, changed address. The branch's
+  // premise ("the flat pin came off the row as it was") is false, and nothing here
+  // can tell that from a caller for which it is true. So the key already keyed there
+  // wins and the arriving pin is DROPPED: overwriting would put a different
+  // machine's key at an address the user may return to, and that connect aborts as a
+  // MISMATCH, which reads as an attack (§5.16) out of a save about something else.
+  // Dropping leaves that address exactly as fail-open as it was before the pin
+  // existed. Both leave the new address unpinned; only overwriting invents a false
+  // alarm.
+  const keyed = await get("h-keyed");
+  if (!isSshHost(keyed)) throw new Error("h-keyed came back on the wrong arm");
+  await h.hosts.upsertHost({
+    ...keyed,
+    host: "c.example",
+    lastFingerprint: "SHA256:C",
+    // Explicit, because the stored record HAS a map: clearing it is what makes this
+    // the no-map branch rather than the believed-caller one.
+    pins: undefined,
+  });
+  check(
+    "a flat pin that cannot be attributed does NOT replace the key already keyed there",
+    row("h-keyed")?.pins,
+    { "b.example": "SHA256:B" },
   );
-  check("an imported flat pin is kept", hostFingerprint(await get("h-import")), "SHA256:IMPORTED");
-  check("keyed onto the address it was imported with", row("h-import")?.pins, {
-    "i.example": "SHA256:IMPORTED",
+  check(
+    "and the address the caller moved to is left unpinned rather than given that key",
+    hostFingerprint(await get("h-keyed")),
+    undefined,
+  );
+
+  // The other half of the same branch: nothing is keyed at the stored address, so
+  // keeping the arriving pin destroys nothing and is the only claim anyone has made
+  // about that address. Filed there, not on the address the caller moved to - which
+  // is the mis-attribution the whole branch exists to prevent. For the spread caller
+  // this is the no-op it always was; it is reachable at all only for a caller that
+  // sets a flat pin the stored row did not carry, so it is a guard on a future
+  // caller rather than a live path today.
+  const gap = await get("h-gap");
+  if (!isSshHost(gap)) throw new Error("h-gap came back on the wrong arm");
+  await h.hosts.upsertHost({
+    ...gap,
+    host: "c.example",
+    lastFingerprint: "SHA256:X",
+    pins: undefined,
+  });
+  check("with nothing keyed there, the pin is kept rather than discarded", row("h-gap")?.pins, {
+    "a.example": "SHA256:A",
+    "b.example": "SHA256:X",
+  });
+  check(
+    "still at the STORED address, never at the one the caller moved to",
+    hostFingerprint(await get("h-gap")),
+    undefined,
+  );
+
+  // A FIRST SAVE of an id this store has never seen, carrying a flat pin and no
+  // map. There is no earlier address it could have come from, so its own is the only
+  // reading - and dropping it would make a restored host re-ask.
+  await h.hosts.upsertHost(
+    sshHost({ id: "h-new", host: "i.example", lastFingerprint: "SHA256:FIRST" }),
+  );
+  check("a flat pin on a new row is kept", hostFingerprint(await get("h-new")), "SHA256:FIRST");
+  check("keyed onto the address it arrived with", row("h-new")?.pins, {
+    "i.example": "SHA256:FIRST",
   });
 
   // Both protocols through the same code, since the flat field's NAME is the only
@@ -1861,6 +2027,91 @@ console.log("\n[pins] an unkeyed pin is attributed rather than dropped or moved"
   await h.hosts.upsertHost({ ...(await get("h-rdp")), name: "renamed" });
   check("the RDP arm is keyed the same way", row("h-rdp")?.pins, { "r.example": "SHA256:CERT" });
   check("and projects into certFingerprint", hostFingerprint(await get("h-rdp")), "SHA256:CERT");
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n[pins] an IMPORT keys the file's pin onto the address the FILE names");
+{
+  // THE COMPOSITION, because neither half fails on its own. `sanitizePayload` is
+  // the import's trust boundary, `upsertHost` is what persists, and between them
+  // sits `carryPins` - whose only job is that the store never has to infer which
+  // machine an imported pin came off. `nextPins`'s inference is written for a
+  // `{ ...stored, host: next }` spread, and a file's row is not one; the block above
+  // pins what that inference does when it is handed a pin it cannot attribute.
+  //
+  // The fixture is the case `ImportCounts.replaced` exists for: the same host id is
+  // saved here at `b.example` and named `c.example` by the file. Inferring from the
+  // stored record files `c.example`'s key at `b.example` - so every later connect to
+  // `b.example` aborts as a MISMATCH and can never TOFU past it - and leaves
+  // `c.example`, the address about to be dialled, silently unpinned even though the
+  // file carried a verified anchor for it.
+  const h = harness({
+    hosts: [
+      sshHost({
+        id: "h-1",
+        host: "b.example",
+        pins: { "b.example": "SHA256:B" },
+        lastFingerprint: "SHA256:B",
+      }),
+    ],
+  });
+  const row = (from: () => Host[]) => from().find((x) => x.id === "h-1");
+  /** The flat projection off the PERSISTED row, which is the field every connect
+   *  reads. `"MISSING"` rather than `undefined`, so a vanished row cannot pass a
+   *  check that expects no pin. */
+  const flat = (from: () => Host[]): string | undefined => {
+    const found = row(from);
+    return found ? hostFingerprint(found) : "MISSING";
+  };
+  // A decrypted v2 payload, as raw as `applyV2` gets it: one row, at an address
+  // this machine does not have for that id, carrying only the flat pin a pre-keying
+  // export wrote.
+  const file = sanitizePayload({
+    hosts: [
+      {
+        id: "h-1",
+        protocol: "ssh",
+        name: "prod",
+        host: "c.example",
+        port: 22,
+        credential: { kind: "inline", hostId: "h-1", user: "root", authMode: "password" },
+        lastFingerprint: "SHA256:C",
+      },
+    ],
+  });
+  check("the row survived the boundary", file.hosts.length, 1);
+  for (const incoming of carryPins(file.hosts, await h.hosts.listHosts())) {
+    await h.hosts.upsertHost(incoming);
+  }
+  check("the file's pin is filed under the address the FILE named", row(h.rows)?.pins, {
+    "b.example": "SHA256:B",
+    "c.example": "SHA256:C",
+  });
+  check(
+    "so the address about to be dialled is pinned rather than downgraded to TOFU",
+    flat(h.rows),
+    "SHA256:C",
+  );
+
+  // A ROUND TRIP, through the same serialization `buildBackup` performs: an export
+  // ships whole records, so the file carries every address the host has trusted
+  // rather than only the one it currently names. `h-1` now has two. Both have to
+  // arrive on the far machine, or "returning to a reassigned old address aborts
+  // instead of TOFU-accepting" is true only on the machine that wrote the file.
+  const far = harness();
+  const shipped = sanitizePayload(JSON.parse(JSON.stringify({ hosts: h.rows() })));
+  for (const incoming of carryPins(shipped.hosts, await far.hosts.listHosts())) {
+    await far.hosts.upsertHost(incoming);
+  }
+  check("a round trip carries the HISTORICAL address too", row(far.rows)?.pins, {
+    "b.example": "SHA256:B",
+    "c.example": "SHA256:C",
+  });
+  check(
+    "and the flat projection still names the address the record carries",
+    flat(far.rows),
+    "SHA256:C",
+  );
 }
 
 // ---------------------------------------------------------------------------

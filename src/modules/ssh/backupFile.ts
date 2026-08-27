@@ -35,14 +35,16 @@
  * Kept free of the Tauri runtime so `scripts/ssh-backup-verify.ts` can exercise
  * the parser under plain node. `@/modules/hosts/types` and
  * `@/modules/vault/types` are both plain TypeScript with no IPC of their own,
- * which is why the one value import below is safe; anything reaching a store or
+ * which is why the value imports below are safe; anything reaching a store or
  * an `invoke` belongs in `backup.ts` instead.
  */
 import {
   RDP_DEFAULT_PRESET,
+  hostPins,
   type Host,
   type HostBase,
   type HostGroup,
+  type HostPins,
   type RdpHost,
   type RdpSizeMode,
   type SshHost,
@@ -252,9 +254,54 @@ function rdpBinding(raw: unknown, hostId: string): RdpCredentialBinding {
   };
 }
 
+/**
+ * The pins one file row carries, keyed by address - or `undefined` when it
+ * carries none.
+ *
+ * THE FLAT PIN BELONGS TO THE ADDRESS THE FILE NAMES, and saying so here is the
+ * whole point of this function. `nextPins` in the host store has to give an
+ * unkeyed pin an address, and with no map handed over it uses the STORED
+ * record's: correct for a `{ ...stored, host: next }` spread, and wrong for a
+ * file, whose row is not a spread of anything on this machine. A file may name
+ * `c.example` for an id saved here as `b.example` - that is what `replaced`
+ * counts - and filing the file's pin at `b.example` would replace a verified key
+ * with a different machine's (every later connect to `b.example` aborts as a
+ * MISMATCH and can never TOFU past it) while leaving `c.example`, the address
+ * actually about to be dialled, silently unpinned. So the map is always EXPLICIT
+ * by the time `upsertHost` sees it, and nothing infers anything.
+ *
+ * UNTRUSTED, like every other field here. An entry with a blank address or a
+ * blank fingerprint is dropped: a blank key is an address nothing dials, and a
+ * blank value would read as "a key is pinned here" to every consumer of the flat
+ * projection while matching no server.
+ *
+ * ABSENT rather than `{}` when nothing survives, and that distinction is
+ * load-bearing. `{}` is what the editor's Forget means - "every pin for this host
+ * is discarded" - and an import may not say that on a file's behalf. `undefined`
+ * is what the store reads as "leave whatever is stored alone", which is the same
+ * non-destructive default the rest of this import takes.
+ *
+ * A map WINS over the flat field rather than merging with it. The store keeps the
+ * flat field as a projection of the map at the row's own address, so a file where
+ * the two disagree was hand-made, and the keyed map is the more specific claim.
+ */
+function pinsOf(raw: unknown, address: string, flat: string): HostPins | undefined {
+  const keyed: Record<string, string> = {};
+  if (isRecord(raw)) {
+    for (const [at, fingerprint] of Object.entries(raw)) {
+      const key = at.trim();
+      const pin = str(fingerprint).trim();
+      if (key && pin) keyed[key] = pin;
+    }
+  }
+  if (Object.keys(keyed).length > 0) return keyed;
+  return flat ? { [address]: flat } : undefined;
+}
+
 function sshArm(base: HostBase, raw: Record<string, unknown>): SshHost {
   const proxyJumpId = str(raw.proxyJumpId).trim();
   const lastFingerprint = str(raw.lastFingerprint).trim();
+  const pins = pinsOf(raw.pins, base.host, lastFingerprint);
   return {
     ...base,
     protocol: "ssh",
@@ -263,12 +310,17 @@ function sshArm(base: HostBase, raw: Record<string, unknown>): SshHost {
     // new machine keeps the same TOFU anchor instead of blindly accepting
     // whatever answers on the first connect.
     ...(lastFingerprint ? { lastFingerprint } : {}),
+    // And the OTHER addresses this host has trusted, which is what makes a round
+    // trip lossless: a build before keying wrote only the flat field, so the
+    // fallback in `pinsOf` is also the migration for an older export.
+    ...(pins ? { pins } : {}),
     ...(proxyJumpId ? { proxyJumpId } : {}),
   };
 }
 
 function rdpArm(base: HostBase, raw: Record<string, unknown>): RdpHost {
   const certFingerprint = str(raw.certFingerprint).trim();
+  const pins = pinsOf(raw.pins, base.host, certFingerprint);
   const sshHostId = isRecord(raw.tunnel) ? str(raw.tunnel.sshHostId).trim() : "";
   // Only one member today, so anything else - including a mode a later build
   // writes - resolves to the mode this build can actually render.
@@ -290,6 +342,8 @@ function rdpArm(base: HostBase, raw: Record<string, unknown>): RdpHost {
     // the new machine keeps the TOFU anchor instead of accepting whatever
     // answers first.
     ...(certFingerprint ? { certFingerprint } : {}),
+    // Keyed the same way on both arms - only the flat field's NAME differs.
+    ...(pins ? { pins } : {}),
     ...(sshHostId ? { tunnel: { sshHostId } } : {}),
   };
 }
@@ -343,6 +397,10 @@ export function sanitizeLegacyHost(raw: unknown): SshHost | null {
   if (!base) return null;
   const proxyJumpId = str(raw.proxyJumpId).trim();
   const lastFingerprint = str(raw.lastFingerprint).trim();
+  // A v1 file predates keying entirely, so this is the pure flat-pin case
+  // {@link pinsOf} exists for: the pin is keyed onto the address the FILE names,
+  // never onto whatever address is saved here under the same id.
+  const pins = pinsOf(raw.pins, base.host, lastFingerprint);
   return {
     ...base,
     protocol: "ssh",
@@ -356,6 +414,7 @@ export function sanitizeLegacyHost(raw: unknown): SshHost | null {
       hasKeyPassphrase: false,
     },
     ...(lastFingerprint ? { lastFingerprint } : {}),
+    ...(pins ? { pins } : {}),
     ...(proxyJumpId ? { proxyJumpId } : {}),
   };
 }
@@ -614,6 +673,47 @@ export function resolveIdentityBindings(
     return { ...h, credential: keep };
   });
   return { hosts, dropped };
+}
+
+/**
+ * Hand every incoming row an EXPLICIT pin map: what the file carried, over what
+ * this machine already trusted.
+ *
+ * The store's `nextPins` believes a caller that hands it a map and infers an
+ * address only for a caller that does not. This pass is what makes the import the
+ * first kind. Without it the import was the second, and its inference is written
+ * for a `{ ...stored, host: next }` spread rather than for a file - see
+ * {@link pinsOf} for the two failures that follow when the file's address and the
+ * saved one differ.
+ *
+ * A UNION, and the file only wins per ADDRESS. Nothing else about an import
+ * deletes anything - "a host that exists here but not in the file is left alone" -
+ * and a pin this machine verified for an address the file has never heard of is in
+ * exactly that class. Replacing the map wholesale would drop it, which is a silent
+ * TOFU downgrade for a machine the user has already trusted. The file DOES win at
+ * an address both name, which is the same authority it has over every other field
+ * on the row, and the same thing the store already did with a flat pin for an
+ * unchanged address.
+ *
+ * `hostPins` on both sides rather than reading `pins` directly, so a saved record
+ * written before keying and a file row written before keying are both read as the
+ * one-entry maps they are.
+ *
+ * Left ABSENT when the union is empty: a row with no pins anywhere must not grow a
+ * `{}`, which is Forget's spelling rather than "nothing to say".
+ *
+ * Run AFTER {@link refuseProtocolConflicts} and {@link resolveIdentityBindings},
+ * which is only about ordering discipline: those two decide what a row may BECOME,
+ * and this one may not put a pin on a row they are about to refuse. It touches
+ * nothing but `pins`, so it cannot disturb the credential either of them chose.
+ */
+export function carryPins(incoming: Host[], existing: Host[]): Host[] {
+  const byId = new Map(existing.map((h) => [h.id, h]));
+  return incoming.map((h): Host => {
+    const saved = byId.get(h.id);
+    const pins: Record<string, string> = { ...(saved ? hostPins(saved) : {}), ...hostPins(h) };
+    return Object.keys(pins).length > 0 ? { ...h, pins } : h;
+  });
 }
 
 /**

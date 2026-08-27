@@ -300,28 +300,50 @@ function withPins(host: Host, pins: HostPins): Host {
  *
  * A MAP was handed over: the caller has said which address each key belongs to, so
  * there is nothing to infer and nothing else is consulted. That is every save from
- * the editor.
+ * the editor - and every row an import writes, because `carryPins` in
+ * `ssh/backupFile.ts` builds the map there rather than leaving it to be guessed
+ * here.
  *
- * NO MAP AND NO STORED RECORD - an import, a first save: the flat pin can only
- * mean this record's own address, because there is no earlier address for it to
- * have come from. This is the migration for an exported row, and it is why an
- * imported pin is kept rather than dropped.
+ * NO MAP AND NO STORED RECORD - a first save: the flat pin can only mean this
+ * record's own address, because there is no earlier address for it to have come
+ * from.
  *
- * NO MAP AND THE ADDRESS HAS CHANGED: the flat pin came off the row as it was, so
- * it is filed under the address it was actually recorded at. Not moved onto the
- * new machine - that is the mis-attribution the old `keepPin` existed to prevent,
- * and a pin compared against the wrong machine aborts the next connect as an
- * attack. Not dropped either: re-pointing back finds it again. This is the branch
- * a `{ ...stored, host: next }` spread in 6e or 6f lands in, and it is correct
- * without that caller knowing pins exist.
+ * NO MAP AND THE ADDRESS HAS CHANGED: the flat pin is filed under the address the
+ * STORED record named, never moved onto the new machine - that is the
+ * mis-attribution the old `keepPin` existed to prevent, and a pin compared against
+ * the wrong machine aborts the next connect as an attack. Not dropped either:
+ * re-pointing back finds it again. This is the branch a `{ ...stored, host: next }`
+ * spread in 6e or 6f lands in, and it is correct without that caller knowing pins
+ * exist.
+ *
+ * AND IT ONLY FILES INTO AN EMPTY SLOT, which is the one thing this cannot take on
+ * trust. The branch's premise is that the flat pin was read off the stored row, and
+ * that is not checkable from here: for a spread it holds, because the flat field IS
+ * this store's projection of `carried` at the stored address - so the write is a
+ * no-op and `carried[existing.host]` is exactly the pin being handed back. A caller
+ * whose flat pin came from anywhere else, with no map and a changed address, cannot
+ * be identified, and the two ways of being wrong about it are not symmetric.
+ * OVERWRITING puts a different machine's key at an address the user may return to,
+ * and that connect aborts as a MISMATCH - which reads as an attack (§5.16), out of
+ * a save that was about something else. DROPPING leaves that address exactly as
+ * fail-open as it was before the pin existed. Both leave the new address unpinned;
+ * only overwriting manufactures a false alarm. So a key already keyed at the stored
+ * address wins, and the unattributable pin is discarded rather than filed over it.
+ *
+ * A file WAS that caller - same inputs, opposite correct answer - which is why the
+ * disambiguation belongs at the call site: `carryPins` in `ssh/backupFile.ts` builds
+ * the map from the FILE's own address, so no import reaches this branch at all.
  */
 function nextPins(host: Host, existing: Host | undefined): HostPins {
   if (host.pins) return host.pins;
   const carried = existing ? hostPins(existing) : {};
   const flat = hostFingerprint(host);
   if (!flat) return carried;
-  const address = !existing || existing.host === host.host ? host.host : existing.host;
-  return { ...carried, [address]: flat };
+  if (!existing || existing.host === host.host) return { ...carried, [host.host]: flat };
+  // A blank pin is never stored - `withFingerprint` deletes the key rather than
+  // keying an empty string, and `pinsOf` drops one at the import boundary - so
+  // presence and truthiness are the same question here.
+  return carried[existing.host] ? carried : { ...carried, [existing.host]: flat };
 }
 
 /**
@@ -510,9 +532,10 @@ export function createHostsStore(io: HostsIo): HostsStore {
    * layers down is a thing the next reader has to go and check.
    *
    * The one behavioural difference from the `Promise.all` this replaces: a throw
-   * stops the run, so the accounts after it are not attempted. Every caller
-   * already reported the whole list as unreachable on any failure, so the message
-   * was never per-account.
+   * stops the run, so the accounts after it are not attempted. `rollbackNewHost`
+   * does not care - it swallows the error either way. `releaseStaleAccounts` does,
+   * because it names the unreachable accounts in a message, so it calls this one
+   * field at a time and counts.
    */
   async function deleteAccounts(hostId: string, fields: readonly HostSecretField[]): Promise<void> {
     for (const field of fields) {
@@ -545,16 +568,28 @@ export function createHostsStore(io: HostsIo): HostsStore {
     const keeps = new Set(secretFieldsFor(host));
     const stale = secretFieldsFor(existing).filter((f) => !keeps.has(f));
     if (stale.length === 0) return;
+    // One field at a time and COUNTED, because the message below names what is
+    // unreachable and has to be true. `deleteAccounts` stops at the first throw,
+    // so the fields after it were never attempted while the ones before it are
+    // already gone - and naming the whole list would send the user looking for
+    // bytes that are not there, in a message whose whole job is saying where they
+    // are. `secrets_delete` reports an absent account as success, so a cleared
+    // field is cleared.
+    let cleared = 0;
     try {
-      await deleteAccounts(host.id, stale);
+      for (const field of stale) {
+        await deleteAccounts(host.id, [field]);
+        cleared++;
+      }
     } catch (e) {
       // Re-worded rather than rethrown, because the record IS saved and is
       // accurate about what it owns: reporting the keychain's error alone would
       // read as "your edit was not saved". Not swallowed either - what is left is
       // bytes at an account nothing names, and no `secrets_list` can find them.
       const why = e instanceof Error ? e.message : String(e);
+      const left = stale.slice(cleared);
       throw new Error(
-        `hosts: "${host.name}" was saved, but ${stale.join(", ")} could not be cleared ` +
+        `hosts: "${host.name}" was saved, but ${left.join(", ")} could not be cleared ` +
           `from the keychain and is now unreachable: ${why}`,
       );
     }
