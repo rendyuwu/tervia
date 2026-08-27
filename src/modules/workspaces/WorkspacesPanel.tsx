@@ -37,7 +37,7 @@ import {
 import { SortableContext, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { memo, useMemo, useState, type ReactNode, type RefObject } from "react";
-import { countSavedTabEntries, isRailViewLeaf, savedToTab } from "./serialize";
+import { countSavedTabEntries, isUnrestorablePageLeaf, savedToTab } from "./serialize";
 import { useWorkspacesStore, type SavedPaneNode, type SavedTab, type Workspace } from "./store";
 import {
   ChevronRight,
@@ -184,7 +184,7 @@ function savedTitles(tabs: SavedTab[]): (string | undefined)[] {
     }
     // Skip exactly the leaves restore drops, or every title after a pre-DCR-1
     // Vault leaf would be zipped onto the wrong row.
-    if (isRailViewLeaf(node)) return;
+    if (isUnrestorablePageLeaf(node)) return;
     out.push(node.leafKind === "terminal" ? node.title : undefined);
   };
   for (const t of tabs) {

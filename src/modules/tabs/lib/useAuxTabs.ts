@@ -6,12 +6,18 @@ import { syncPaneMirror } from "./tabHelpers";
 
 /**
  * Shared mutable handles `useTabs` threads into the aux-tab sub-hook. These
- * are the exact `setTabs` / `setActiveId` setters, id counter, and live-tabs
- * ref owned by `useTabs`; the callbacks below close over them verbatim.
+ * are the exact `setTabs` setter, `setActiveId` funnel, id counter, and
+ * live-tabs ref owned by `useTabs`; the callbacks below close over them
+ * verbatim.
+ *
+ * `setActiveId` is `useTabs`' funnel, not React's raw setter - so the tab these
+ * openers activate is a tab the user can actually see, with any rail view
+ * covering it left behind. Hence `(id: number)` rather than
+ * `Dispatch<SetStateAction<number>>`.
  */
 type AuxTabsDeps = {
   setTabs: Dispatch<SetStateAction<Tab[]>>;
-  setActiveId: Dispatch<SetStateAction<number>>;
+  setActiveId: (id: number) => void;
   nextIdRef: RefObject<number>;
   tabsRef: RefObject<Tab[]>;
 };

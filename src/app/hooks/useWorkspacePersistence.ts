@@ -1,12 +1,13 @@
 import { type Tab } from "@/modules/tabs";
 import {
   defaultHostsTab,
-  restoreSavedTabs,
-  restoredActiveTabIndex,
   savedActiveTabIndex,
   serializeTabs,
   useWorkspacesStore,
 } from "@/modules/workspaces";
+// Deep import, like `useWorkspaceSwitching`: `restoreWorkspaceEntry` lives beside
+// the serializer so the verify scripts can execute it (see its doc comment).
+import { restoreWorkspaceEntry } from "@/modules/workspaces/serialize";
 import { useEffect, useRef, type RefObject } from "react";
 
 type Workspace = ReturnType<typeof useWorkspacesStore.getState>["workspaces"][number];
@@ -89,15 +90,14 @@ export function useWorkspacePersistence({
       openHostsFallback();
       return;
     }
-    // `restoreSavedTabs` applies DCR-1's migration (a `vault`/`forwards` page
-    // leaf saved by an older build is dropped, and so is a tab that empties out)
-    // and falls back to Hosts if that leaves nothing - so the clamp below can no
-    // longer be handed an empty list. The active index is re-based for the same
-    // reason: a dropped tab shifts every later one.
-    const liveTabs: Tab[] = restoreSavedTabs(active.tabs, allocId);
-    const wanted = restoredActiveTabIndex(active.tabs, active.activeTabIndex);
-    const target = liveTabs[Math.min(wanted, liveTabs.length - 1)];
-    replaceAllTabs(liveTabs, target?.id ?? null);
+    // `restoreWorkspaceEntry` applies DCR-1's migration (a page leaf this build
+    // will not restore as a tab is dropped, and so is a tab that empties out),
+    // falls back to Hosts if that leaves nothing, and re-bases the saved active
+    // index onto the tabs that survived - a dropped tab shifts every later one.
+    // The three callers used to each do the last part themselves, and two of
+    // them clamped the raw index instead.
+    const restored = restoreWorkspaceEntry(active, allocId);
+    replaceAllTabs(restored.tabs, restored.activeId);
   }, [wsHydrated, wsList, wsActiveId, replaceAllTabs, allocId]);
 
   // Auto-snapshot tabs whenever they change. Lightly debounced via the

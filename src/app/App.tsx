@@ -44,9 +44,7 @@ import {
   isTerminalLikeTab,
   useTabs,
   useWorkspaceCwd,
-  type RailViewKind,
   type Tab,
-  type TabPageKind,
 } from "@/modules/tabs";
 import {
   acknowledgeAiCli,
@@ -97,6 +95,8 @@ export default function App() {
     tabs,
     activeId,
     setActiveId,
+    railView,
+    toggleRailView,
     newTab,
     newPaneGroupTab,
     newSshTab,
@@ -128,6 +128,16 @@ export default function App() {
     renameLeaf,
     setLeafTerminalTheme,
   } = useTabs();
+
+  // `railView` (DCR-1: Vault and Port Forwarding are views over the tab area,
+  // not tabs) comes from `useTabs` rather than being state here, because it and
+  // `activeId` carry an invariant between them: a tab cannot become active while
+  // a view is still covering it. As App state it was the caller's job to clear,
+  // and nine of the eleven routes into the tab area did not - so Ctrl+1,
+  // Ctrl+Tab, a file click and a workspace switch all looked like they had done
+  // nothing. See `tabs/lib/tabView.ts`. Nothing below wraps a tab action to
+  // clear it any more; `openPageTab`, `handleHeaderSelectEntry`, `focusPane` and
+  // the rest do it by construction.
 
   // Drop a file from the OS file manager onto a terminal pane to paste its
   // shell-quoted path. Tauri captures OS drops globally, so one listener
@@ -177,36 +187,6 @@ export default function App() {
   const searchInlineRef = useRef<SearchInlineHandle | null>(null);
 
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
-
-  /**
-   * The rail view covering the tab area, or null when the tabs are showing
-   * (DCR-1). Vault and Port Forwarding are views, not tabs.
-   *
-   * Plain component state, so it is deliberately NOT persisted: a relaunch comes
-   * up on the tabs, because what a workspace is for is the connections in it and
-   * a saved detour into the vault would be the first thing every launch shows.
-   */
-  const [railView, setRailView] = useState<RailViewKind | null>(null);
-  // Same button both ways: clicking the lit one goes back to the tabs, so the
-  // rail never holds a pressed state with no way out of it.
-  const toggleRailView = useCallback((view: RailViewKind) => {
-    setRailView((curr) => (curr === view ? null : view));
-  }, []);
-  // Every route INTO the tab area clears the rail view: clicking a tab, or
-  // opening the Hosts tab from the rail, the header or the connect chord.
-  // Without this the tab click would land behind a view still covering it.
-  const showTabs = useCallback(() => setRailView(null), []);
-  // The one way a page TAB is opened - rail button, header quick-connect and
-  // connect chord alike: focus the tab and leave whatever rail view was covering
-  // it. `TabPageKind`, so "open Vault as a tab" is a type error, not a leaf the
-  // tab strip would then have to explain.
-  const openPageTabInTabs = useCallback(
-    (page: TabPageKind) => {
-      showTabs();
-      openPageTab(page);
-    },
-    [showTabs, openPageTab],
-  );
 
   // `+` -> Agent...: the CLI-agent picker. Mount-once like the editor dialog so
   // the chunk loads on first open and Radix's exit animation still plays.
@@ -616,7 +596,7 @@ export default function App() {
         requestCloseLeaf,
         setNewEditorOpen,
         setAgentDialogOpen,
-        openPageTab: openPageTabInTabs,
+        openPageTab,
         searchInlineRef,
         editorRefs,
         terminalRefs,
@@ -638,7 +618,7 @@ export default function App() {
       focusNextPaneInTab,
       toggleSidebar,
       commandPaletteHandler,
-      openPageTabInTabs,
+      openPageTab,
     ],
   );
 
@@ -721,19 +701,8 @@ export default function App() {
   );
 
   const handleOpenHostsPage = useCallback(() => {
-    openPageTabInTabs("hosts");
-  }, [openPageTabInTabs]);
-
-  // Clicking any tab entry returns to the tab area (DCR-1), then does what it
-  // always did. Wrapped here rather than inside `useHeaderActions` because the
-  // rail view is App's state and the hook has no business knowing about it.
-  const selectEntry = useCallback(
-    (tabId: number, leafId: number | null) => {
-      showTabs();
-      handleHeaderSelectEntry(tabId, leafId);
-    },
-    [showTabs, handleHeaderSelectEntry],
-  );
+    openPageTab("hosts");
+  }, [openPageTab]);
 
   // Activate a tab and focus a specific leaf inside it. Backs the Workspaces
   // panel's terminal list (jump straight to a running terminal).
@@ -752,7 +721,7 @@ export default function App() {
           <Header
             tabs={tabs}
             activeId={activeId}
-            onSelectEntry={selectEntry}
+            onSelectEntry={handleHeaderSelectEntry}
             onCloseEntry={handleHeaderCloseEntry}
             onNewTerminal={openNewTab}
             onRenameLeaf={renameLeaf}
@@ -786,7 +755,7 @@ export default function App() {
           <main className="bg-sidebar flex min-h-0 flex-1 gap-1.5 p-1.5">
             <ActivityRail
               activeTab={activeTab}
-              onOpenPage={openPageTabInTabs}
+              onOpenPage={openPageTab}
               railView={railView}
               onToggleRailView={toggleRailView}
             />

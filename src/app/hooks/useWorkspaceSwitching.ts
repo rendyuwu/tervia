@@ -1,9 +1,9 @@
 import { leaves, disposeSession } from "@/modules/terminal";
 import { type Tab } from "@/modules/tabs";
 import { savedActiveTabIndex, serializeTabs, useWorkspacesStore } from "@/modules/workspaces";
-// Deep import: `tabsForWorkspaceEntry` lives beside the serializer so the
+// Deep import: `restoreWorkspaceEntry` lives beside the serializer so the
 // workspace verify script can execute it (see its doc comment).
-import { tabsForWorkspaceEntry } from "@/modules/workspaces/serialize";
+import { restoreWorkspaceEntry } from "@/modules/workspaces/serialize";
 import { useCallback, type RefObject } from "react";
 
 type Params = {
@@ -76,9 +76,12 @@ export function useWorkspaceSwitching({
       }
       const next = useWorkspacesStore.getState().workspaces.find((w) => w.id === workspaceId);
       if (!next) return;
-      const liveTabs = tabsForWorkspaceEntry(next, allocId);
-      const target = liveTabs[Math.min(next.activeTabIndex, liveTabs.length - 1)] ?? liveTabs[0];
-      replaceAllTabs(liveTabs, target?.id ?? null);
+      // One call for the tabs AND the tab to focus: the saved index has to be
+      // re-based onto the tabs that survived restore, and doing that here (as
+      // this used to, by clamping the raw index) is how two of the three call
+      // sites landed on the wrong tab.
+      const restored = restoreWorkspaceEntry(next, allocId);
+      replaceAllTabs(restored.tabs, restored.activeId);
     },
     [wsActiveId, tabs, activeId, wsSaveTabs, wsSetActive, allocId, replaceAllTabs],
   );
@@ -125,9 +128,10 @@ export function useWorkspaceSwitching({
         replaceAllTabs(cached.tabs, cached.activeId);
         return;
       }
-      const liveTabs = tabsForWorkspaceEntry(next, allocId);
-      const target = liveTabs[Math.min(next.activeTabIndex, liveTabs.length - 1)] ?? liveTabs[0];
-      replaceAllTabs(liveTabs, target?.id ?? null);
+      // Same re-basing as the switch path above, for the neighbour this falls
+      // back to.
+      const restored = restoreWorkspaceEntry(next, allocId);
+      replaceAllTabs(restored.tabs, restored.activeId);
     },
     [wsActiveId, wsRemove, allocId, replaceAllTabs],
   );

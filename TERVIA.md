@@ -442,7 +442,22 @@ The rail has three pages, and the tab strip is for connections, so only **Hosts*
 is a tab - leftmost. Vault and Port Forwarding are **views** shown over the tab
 area (`app/components/RailViewArea.tsx`): the strip stays visible above them, and
 clicking any tab or the lit rail button again comes back. Rail-view activation is
-App state and is deliberately not persisted; a relaunch comes up on the tabs.
+deliberately not persisted; a relaunch comes up on the tabs.
+
+Which view is up lives in **`useTabs`, in the same state object as `activeId`**
+(`tabs/lib/tabView.ts`), not beside it and not in App. The pair carries an
+invariant that two `useState`s cannot express - _a tab cannot become active while
+a view is still covering it_ - and as App state it was every caller's job to
+clear: nine of the eleven routes into the tab area did not, so Ctrl+T, Ctrl+Tab,
+Ctrl+1..9, header quick-connect, a file click, a workspace switch and an OSC-8889
+open all activated a tab behind the view and looked like they had done nothing.
+So there is one write instead: `focusTabView` is the only way `activeId` moves,
+and it leaves the view unconditionally - including when the id does not change,
+because Ctrl+1 on the tab the Vault is covering is exactly that case. The two
+close paths use `rehomeTabView` instead, which deliberately keeps the view:
+closing a tab in the strip is not a request to leave the Vault. `setActiveId` is
+typed `(id: number)`, so the functional updater a removal used to write - which
+read identically to a focus - is a type error.
 
 The bad state is unrepresentable rather than checked for. `PageKind` still names
 all three (the rail, `PAGE_LABELS` and `PAGE_ICONS` are indexed by it), but
@@ -453,11 +468,31 @@ Port-Forwarding **leaf** is a compile error. The two page-leaf constructors -
 that type too.
 
 `SavedPageLeaf.page` stays wide, because old snapshots must still be readable.
-Restore therefore **migrates**: a `vault` / `forwards` page leaf is dropped, its
-tab goes with it if that empties it, and a workspace emptied that way falls back
-to Hosts (`restoreSavedTabs` / `restoredActiveTabIndex`). Checked by
-`scripts/rail-views-verify.ts`, which asserts the narrowing at compile time as
-well as the migration at runtime.
+Restore therefore **migrates**: a saved page leaf that is not the tab page is
+dropped, its tab goes with it if that empties it, and a workspace emptied that way
+falls back to Hosts (`restoreSavedTabs`). The predicate is
+`isUnrestorablePageLeaf`, and it asks `!isTabPageKind` rather than naming the two
+rail views - so a page value **this build does not recognise** (a newer build's
+page, a hand-edited file) is dropped too. Rewriting it into Hosts, which the
+enumerating version fell through to, minted a _second_ Hosts tab, and a page leaf
+is permanent, so neither could then be closed.
+
+Dropping a leaf or a tab shifts every later one, so restore **re-bases** both
+saved focus indices onto the survivors rather than clamping the raw index:
+`restoredActiveTabIndex` for tabs, `restoredActiveLeafIndex` for the active pane
+inside one - the mirror of `tabToSaved`'s `kept.findIndex` on the way out. A clamp
+lands on the wrong entry whenever a drop sat _before_ the saved index, which is
+not a rounding error: `[Hosts, Vault, termA, termB]` saved on termA came back on
+termB. Getting the helper right was not enough - two of the three cold-restore
+callers never called it - so **`restoreWorkspaceEntry` returns the tabs and the
+id to focus from one call**, and the workspace switch, the workspace close and the
+startup hydrate all take it.
+
+Checked by `scripts/rail-views-verify.ts`, which asserts the narrowing (and
+`setActiveId`'s signature) at compile time, the migration and the two re-basings
+at runtime **through their consumers**, and - source-text, because the state lives
+in a hook this suite cannot render - that every `activeId` write in `useTabs` /
+`useAuxTabs` goes through the funnel and that nothing else writes the view.
 
 ### AI CLI support (terminal-side only)
 

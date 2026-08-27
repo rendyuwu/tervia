@@ -16,8 +16,9 @@ import { type PageKind, type TabPageKind } from "@/modules/terminal/lib/panes";
  * but `PageLeafState.page` is `TabPageKind`, so "open Vault as a tab" is a type
  * error rather than a thing a caller can say. The two leaf constructors are
  * `useAuxTabs.openPageTab` and the workspace restore path in
- * `workspaces/serialize.ts`; both take that type, and restore drops a
- * `vault`/`forwards` leaf saved by an older build.
+ * `workspaces/serialize.ts`; both take that type, and restore drops any saved
+ * page leaf that is not the tab page - the `vault`/`forwards` leaves an older
+ * build saved, and equally a page value this build has never heard of.
  *
  * `TabPageKind` itself is declared next to the leaf it constrains, in
  * `terminal/lib/panes.ts`, and re-exported here so the two halves of the split
@@ -39,8 +40,15 @@ export function isTabPageKind(value: string): value is TabPageKind {
   return value === TAB_PAGE_KIND;
 }
 
-/** True for a page that must NOT be restored as a pane leaf. Read by the
- *  workspace migration, which drops such a leaf from a pre-DCR-1 snapshot. */
+/**
+ * True for a page the rail shows as a view.
+ *
+ * Deliberately NOT what the workspace migration asks - it asks
+ * `!isTabPageKind`, so an unrecognised page is dropped rather than falling
+ * through to Hosts (see `workspaces/serialize.ts`'s `isUnrestorablePageLeaf`).
+ * This is the other half of the partition, and `scripts/rail-views-verify.ts`
+ * uses it to prove there is nothing in `PageKind` that is neither.
+ */
 export function isRailViewKind(value: string): value is RailViewKind {
   return (RAIL_VIEW_KINDS as readonly string[]).includes(value);
 }

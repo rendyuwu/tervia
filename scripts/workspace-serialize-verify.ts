@@ -644,19 +644,40 @@ console.log("\n[page] a page leaf round-trips its page value, name and tree shap
   );
 }
 
-// An unrecognised `page` value (a newer build's page, or hand-edited state)
-// must not crash restore, and defaults to Hosts rather than degrading the
-// whole leaf to an empty terminal - the same shape as RDP's
-// `sizeMode ?? "preset"` fallback, since `page` is a leaf kind this build
-// DOES recognise, just with a value it doesn't.
+// An unrecognised `page` value (a newer build's page, or hand-edited state) must
+// not crash restore, and is DROPPED - the same treatment a `vault`/`forwards`
+// leaf gets, by the same predicate (`isUnrestorablePageLeaf` asks
+// `!isTabPageKind`, so there is no list of known-bad pages to keep in step).
+//
+// This used to default to Hosts, on the reasoning that `page` is a leaf kind
+// this build recognises with a value it does not - the shape of RDP's
+// `sizeMode ?? "preset"`. That reasoning does not survive the page leaf becoming
+// PERMANENT (`tabs/lib/closable.ts` invariant 1): the fallback minted a SECOND
+// Hosts tab, and neither of the two could then be closed. A page leaf holds
+// nothing but which page it is, so dropping it loses no state - unlike an RDP
+// leaf, where the fallback is the difference between a dialable host and nothing.
+// The migration itself is `scripts/rail-views-verify.ts`.
 {
   const corrupt = { kind: "leaf", leafKind: "page", page: "snippets" } as unknown as SavedPaneNode;
-  const restored = restoreOne({ kind: "pane", paneTree: corrupt, activeLeafIndex: 0 }, () => id());
-  const leaf = restored.paneTree;
   check(
-    "an unknown page value falls back to hosts",
-    leaf.kind === "leaf" && leaf.leafKind === "page" ? leaf.page : null,
-    "hosts",
+    "a tab holding only an unknown page value is dropped, not rewritten to Hosts",
+    savedToTab({ kind: "pane", paneTree: corrupt, activeLeafIndex: 0 }, () => id()),
+    null,
+  );
+  // Beside a sibling: the leaf goes, the tab stays, and the split collapses.
+  const savedTerm: SavedPaneNode = { kind: "leaf", leafKind: "terminal", cwd: "/w" };
+  const withSibling = restoreOne(
+    {
+      kind: "pane",
+      paneTree: { kind: "split", dir: "row", children: [savedTerm, corrupt] },
+      activeLeafIndex: 1,
+    },
+    () => id(),
+  );
+  check(
+    "beside a terminal, only the unknown page leaf is dropped",
+    withSibling.paneTree.kind === "leaf" ? withSibling.paneTree.leafKind : "split",
+    "terminal",
   );
 }
 
