@@ -22,10 +22,34 @@ import type { PtySession } from "./pty-bridge";
 import { sessions, type Session } from "./sessionState";
 import { describeError } from "./session-helpers";
 import { flushPendingInput, openPtyForSession, syncPtySize } from "./pty-lifecycle";
-import { decideSshEnding, type SshEnding } from "./ssh-exit-decision";
+import {
+  canAuthenticate,
+  classifySshConnectFailure,
+  decideSshConnectFailure,
+  decideSshEnding,
+  SshLocalConnectError,
+  type SshEnding,
+} from "./ssh-exit-decision";
 
 const RECONNECT_BACKOFF_MS = [1_000, 3_000, 7_000] as const;
 const MAX_SSH_RECONNECT_ATTEMPTS = RECONNECT_BACKOFF_MS.length;
+
+/**
+ * The backend's own "nothing to authenticate with" wording, mirrored verbatim
+ * (see `NO_CREDENTIALS_ERROR` in src-tauri/src/modules/ssh/session.rs).
+ *
+ * Deliberately identical rather than improved: this pre-flight check exists to
+ * CLASSIFY the failure, not to reword it, and a user who hits the backend guard
+ * through some other caller must read the same sentence. The two constants are
+ * cross-referenced in both directions so a change to either is a change to a
+ * documented pair.
+ */
+const NO_CREDENTIALS_MESSAGE = "ssh: no credentials: set use_agent, password, or private_key";
+
+/** The jump-hop half of the same guard, mirroring `connect`'s per-hop message. */
+function noJumpCredentialsMessage(host: string): string {
+  return `ssh: jump host ${host} has no ssh-agent, password or private key configured`;
+}
 
 // On an SSH drop the remote program (vim/htop/tmux) never got to send its
 // mode-reset teardown, so xterm.js stays in whatever stateful modes it left on -
@@ -110,8 +134,19 @@ export async function openSshForSession(
     // could not even be resolved (a jump host was deleted, or it is cyclic), so
     // the hops from last time no longer describe anything.
     s.sshRoute = null;
-    emitSshStatus(s, { kind: "error", message: describeError(e), canRetry: true });
-    throw e;
+    const message = describeError(e);
+    emitSshStatus(s, { kind: "error", message, canRetry: true });
+    // VLT-57: everything this block can fail on is a fact about THIS machine -
+    // the profile is gone, it names an RDP host, its jump chain is broken or
+    // cyclic, its vault binding no longer resolves, it has no credential. None
+    // of them involve the network and none of them can come out differently on
+    // the next attempt, so they are marked local at the point that is known
+    // rather than guessed at from the wording downstream. Re-wrapped whole (via
+    // `cause`, so the original still reaches the console) instead of tagging
+    // each `throw` above, which is what makes a failure added to this block
+    // later local by default - the safe direction for a block that by
+    // construction never touches the wire.
+    throw e instanceof SshLocalConnectError ? e : new SshLocalConnectError(message, { cause: e });
   }
 
   // Rebuild the route for this attempt, so an edited chain is picked up on
@@ -127,6 +162,27 @@ export async function openSshForSession(
     s,
     `\x1b[2m[tervia] connecting to ${auth.user}@${conn.host}:${conn.port}…\x1b[0m\r\n`,
   );
+
+  // VLT-57: refuse to dial with nothing to authenticate with. Saving a host with
+  // no password has been a supported state since VLT-44 relaxed the save
+  // validation, which made this previously-unreachable failure routine - and the
+  // backend can only report it as one more connect-failed string, at which point
+  // the ladder cannot tell it apart from a server that is merely down. Asked
+  // here, the answer is attributable: it is a fact about the saved host, and no
+  // amount of retrying changes a saved host.
+  //
+  // Deliberately AFTER the banner above rather than up in the resolve block, so
+  // the failure still reads like every other connect failure - "connecting to
+  // user@host:port", then why it did not. The alternative prints an error naming
+  // no host at all, which in a split workspace does not say which pane failed.
+  if (!canAuthenticate(auth)) throw new SshLocalConnectError(NO_CREDENTIALS_MESSAGE);
+  // Every hop is dialled with its own credential and fails the same way, so the
+  // same question is asked of each. Named rather than counted so the banner says
+  // WHICH hop, matching the backend's per-hop message.
+  const hopWithoutCredential = jumps.find((hop) => !canAuthenticate(hop));
+  if (hopWithoutCredential) {
+    throw new SshLocalConnectError(noJumpCredentialsMessage(hopWithoutCredential.host));
+  }
 
   // Route the first ending (onExit or onError) through here; russh can fire
   // both for one drop (an error followed by the channel closing), and only
@@ -219,6 +275,14 @@ export async function openSshForSession(
   // Track the first-connect host-key prompt so it can be cleaned up if this
   // attempt dies before the user answers it (see the catch below).
   let hostKeyPromptId: string | null = null;
+  // VLT-57: how many host keys this attempt asked the user about, and how many
+  // they trusted. Counted rather than latched because a ProxyJump chain can
+  // raise one prompt per hop, and trusting the bastion says nothing about
+  // whether the target's key was accepted. `asked > trusted` at failure time
+  // means the connect died on an answer (or a non-answer) from the person at
+  // the keyboard, which is a local decision, not a transport fault.
+  let hostKeysAsked = 0;
+  let hostKeysTrusted = 0;
   let sshSession: SshSession;
   try {
     const { user, ...credentialValues } = auth;
@@ -276,12 +340,14 @@ export async function openSshForSession(
         // the same question on every retry.
         onHostKeyPrompt: (prompt) => {
           hostKeyPromptId = prompt.promptId;
+          hostKeysAsked += 1;
           const owners = hostKeyOwners(
             prompt.host,
             { host: conn.host, connectionId: sshConnectionId },
             jumps,
           );
           useHostKeyPrompt.getState().enqueue(prompt, () => {
+            hostKeysTrusted += 1;
             for (const id of owners) void pinFingerprint(id, prompt.fingerprint).catch(() => {});
           });
         },
@@ -317,6 +383,18 @@ export async function openSshForSession(
     if (hostKeyPromptId) {
       useHostKeyPrompt.getState().dismiss(hostKeyPromptId);
       hostKeyPromptId = null;
+    }
+    // VLT-57: a key this attempt asked about and did not get trust for is the
+    // other failure the frontend can attribute on its own. Rejecting the key,
+    // or letting the 120s confirm window lapse, aborts the handshake BEFORE any
+    // credential is sent - and the ladder's answer to that was to ask the same
+    // question again, up to three more times. The user already answered.
+    // Everything else here (a credential the server refused, an unparseable key,
+    // a host that would not resolve) is left transport: the backend reports it
+    // as one more string and the frontend has nothing structural to tell those
+    // apart with - see the report for the wire change that would.
+    if (hostKeysAsked > hostKeysTrusted) {
+      throw new SshLocalConnectError(describeError(e), { cause: e });
     }
     throw e;
   }
@@ -399,6 +477,29 @@ export async function forwardDetectedUrl(
   return toLocalUrl(url, await pending);
 }
 
+/**
+ * VLT-57: the ladder's counterpart for a connect failure that retrying cannot
+ * change. One attempt, one banner, then wait for the user.
+ *
+ * Deliberately the same resting state the ladder reaches after its third
+ * attempt gives up - `error` with `canRetry`, so `canRetrySsh` lights up Enter
+ * and the status pill's Retry - because the user's next move is identical
+ * (fix the thing, then retry). What differs is only how long they waited to get
+ * here: immediately, instead of 11 seconds and three identical failures.
+ *
+ * `sshReconnectAttempts` is reset so a later manual retry starts a fresh
+ * three-attempt window if it fails for a transport reason instead.
+ */
+export function parkSshConnectFailure(s: Session, message: string): void {
+  s.sshReconnectAttempts = 0;
+  writeSshBanner(
+    s,
+    `\r\n\x1b[31m[tervia] ssh connect failed: ${message}\x1b[0m\r\n` +
+      `\x1b[33m[tervia] Press Enter or click Retry to reconnect.\x1b[0m\r\n`,
+  );
+  emitSshStatus(s, { kind: "error", message, canRetry: true });
+}
+
 export function scheduleSshReconnect(s: Session, reason: string): void {
   if (s.disposed || s.sshUserClose) return;
   if (!s.sshConnectionId) return;
@@ -470,6 +571,14 @@ async function runSshReconnect(s: Session): Promise<void> {
       s.sshReconnectAttempts = 0;
       writeSshBanner(s, `\r\n\x1b[31m[tervia] ${msg}\x1b[0m\r\n`);
       emitSshStatus(s, { kind: "error", message: msg, canRetry: true });
+      return;
+    }
+    // VLT-57: the ladder re-enters here for attempts 2 and 3, so the same gate
+    // has to stand here as on the first attempt - otherwise a host edited into a
+    // credential-less state mid-session would still walk the whole ladder.
+    const decision = decideSshConnectFailure(classifySshConnectFailure(e, msg));
+    if (decision.action === "park") {
+      parkSshConnectFailure(s, decision.message);
       return;
     }
     scheduleSshReconnect(s, msg);

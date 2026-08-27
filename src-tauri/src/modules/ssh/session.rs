@@ -945,12 +945,37 @@ async fn authenticate_hop(
     }
 }
 
+/// Whether a hop has anything to authenticate WITH. One predicate for the target
+/// and for every jump hop: the two used to be separate inline expressions, and
+/// they must agree by construction, because the frontend mirrors this exact test
+/// before it dials (`canAuthenticate` in
+/// src/modules/terminal/lib/ssh-exit-decision.ts, VLT-57) so that a host saved
+/// with no credential is reported as a configuration error rather than fed to
+/// the reconnect ladder as if the server had hung up.
+///
+/// `is_none`, not emptiness: an empty password is a credential the user chose to
+/// send, and the server - not this guard - decides what to make of it.
+fn has_credential(use_agent: bool, password: Option<&str>, private_key: Option<&str>) -> bool {
+    use_agent || password.is_some() || private_key.is_some()
+}
+
+/// The target-side wording of that guard. Named because the frontend's
+/// pre-flight check reproduces it verbatim (`NO_CREDENTIALS_MESSAGE` in
+/// src/modules/terminal/lib/ssh-session.ts): a user must read the same sentence
+/// whether they arrived through a terminal leaf, the forward tunnel, or the host
+/// editor's Test probe, only the last two of which reach this guard now.
+const NO_CREDENTIALS_ERROR: &str = "ssh: no credentials: set use_agent, password, or private_key";
+
 pub async fn connect(
     input: SshOpenInput,
     on_event: IpcChannel<SshEvent>,
 ) -> Result<Arc<SshSession>, String> {
-    if !input.use_agent && input.password.is_none() && input.private_key.is_none() {
-        return Err("ssh: no credentials: set use_agent, password, or private_key".into());
+    if !has_credential(
+        input.use_agent,
+        input.password.as_deref(),
+        input.private_key.as_deref(),
+    ) {
+        return Err(NO_CREDENTIALS_ERROR.into());
     }
 
     // --- Jump chain (ProxyJump / Termius-style "host chaining") -------------
@@ -963,7 +988,11 @@ pub async fn connect(
     // riding on it (including the target), so they must outlive the session.
     let mut jump_handles: Vec<Handle<HostKeyVerifier>> = Vec::new();
     for hop in &input.jumps {
-        if !hop.use_agent && hop.password.is_none() && hop.private_key.is_none() {
+        if !has_credential(
+            hop.use_agent,
+            hop.password.as_deref(),
+            hop.private_key.as_deref(),
+        ) {
             return Err(format!(
                 "ssh: jump host {} has no ssh-agent, password or private key configured",
                 hop.host
@@ -1384,6 +1413,55 @@ mod exit_classification_tests {
         assert!(
             matches!(ev, SshEvent::Signal { ref name, core_dumped: true } if name == "TERM"),
             "{ev:?}"
+        );
+    }
+}
+
+/// VLT-57: the pre-dial credential guard. Its exact shape is load-bearing twice
+/// over - the target and every jump hop are judged by it here, and the frontend
+/// reproduces it before dialling so that "this host has nothing to authenticate
+/// with" is classified as a configuration error instead of entering the
+/// reconnect ladder. A guard that quietly accepted one of the empty shapes would
+/// send the frontend and the backend down different paths for the same input.
+#[cfg(test)]
+mod credential_guard_tests {
+    use super::*;
+
+    #[test]
+    fn each_credential_alone_is_enough() {
+        assert!(has_credential(true, None, None), "ssh-agent alone");
+        assert!(has_credential(false, Some("pw"), None), "password alone");
+        assert!(
+            has_credential(false, None, Some("KEY")),
+            "private key alone"
+        );
+    }
+
+    #[test]
+    fn nothing_configured_is_refused() {
+        // The VLT-57 state exactly: a host saved with no password at all, which
+        // VLT-44 made a legal thing to save.
+        assert!(!has_credential(false, None, None));
+    }
+
+    #[test]
+    fn an_empty_secret_still_counts_as_a_credential() {
+        // Deliberate: an empty password is something to SEND, and the server
+        // rejecting it is a different (and reconnect-relevant) outcome from
+        // there being nothing to send. The frontend's mirror tests presence the
+        // same way, so both sides agree on this input.
+        assert!(has_credential(false, Some(""), None));
+        assert!(has_credential(false, None, Some("")));
+    }
+
+    #[test]
+    fn the_target_message_is_the_one_the_frontend_mirrors() {
+        // src/modules/terminal/lib/ssh-session.ts's NO_CREDENTIALS_MESSAGE is
+        // this string. Reworded on one side only, the two callers of the same
+        // guard start telling the user different things about the same host.
+        assert_eq!(
+            NO_CREDENTIALS_ERROR,
+            "ssh: no credentials: set use_agent, password, or private_key"
         );
     }
 }
