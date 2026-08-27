@@ -128,6 +128,24 @@ export function useTerminalSession({
     onPtyId,
   };
 
+  /**
+   * `visible` / `focused` as of the LATEST render, for the async attach below.
+   *
+   * That effect's dep array is `[leafId]`, so everything it closes over is frozen
+   * at mount - and `tryAttach` can land seconds later: it waits up to
+   * `MAX_ATTACH_FRAMES` for the container ref (the react-resizable-panels measure
+   * pass during workspace restore) and then polls. Taking focus on the mount-time
+   * answer pulls the caret out of whatever the user switched to in the meantime.
+   *
+   * That was VLT-39, and it is why keying the page's own focus effect on
+   * visibility looked like it should work but didn't: a Hosts tab restored into
+   * the background DOES focus its search input on becoming visible, and then the
+   * terminal it was switched away from - still waiting to attach, still holding
+   * `visible: true, focused: true` from mount - focuses itself and wins.
+   */
+  const liveFocus = useRef({ visible, focused });
+  liveFocus.current = { visible, focused };
+
   useEffect(() => {
     let cancelled = false;
     let rafId: number | null = null;
@@ -170,7 +188,7 @@ export function useTerminalSession({
       if (cancelled) return;
       if (container.current) {
         attachSession(leafId, container.current, callbacks);
-        if (visible && focused) s.term.focus();
+        if (liveFocus.current.visible && liveFocus.current.focused) s.term.focus();
         return;
       }
       if (framesLeft <= 0) {
@@ -191,7 +209,7 @@ export function useTerminalSession({
             attachIntervalId = null;
           }
           attachSession(leafId, container.current, callbacks);
-          if (visible && focused) s.term.focus();
+          if (liveFocus.current.visible && liveFocus.current.focused) s.term.focus();
         }, ATTACH_FALLBACK_INTERVAL_MS);
         return;
       }
