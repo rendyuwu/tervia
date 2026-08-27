@@ -5,11 +5,15 @@
       {
         "label": "main",
         "title": "Tervia",
+        "width": 800,
+        "height": 600,
         "decorations": false,
         "transparent": true,
         "visible": false,
-        "minWidth": 420,
-        "minHeight": 280
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "minWidth": 640,
+        "minHeight": 480
       }
     ]
   },
