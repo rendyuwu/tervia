@@ -819,11 +819,11 @@ console.log("\n[4] a vault-bound save writes no secret and hands the binding bac
     count(save, /kind: "inline"/g) === 2,
     count(save, /kind: "inline"/g),
   );
-  // The store, not the form, decides what was actually written.
-  check(
-    "the record and those secrets go down together",
-    /upsertHost\(record, secrets\)/.test(save),
-  );
+  // The store, not the form, decides what was actually written. The third
+  // argument (the binding stamp, section [8]) is part of every call, including
+  // this one, so the record-and-secrets pairing is asserted as a prefix rather
+  // than the whole call.
+  check("the record and those secrets go down together", /upsertHost\(record, secrets,/.test(save));
   check(
     "and the caller is handed the persisted record rather than the one built here",
     /onSaved\?\.\(saved\)/.test(save),
@@ -956,6 +956,88 @@ console.log("\n[7] the password field says what BLANK does, which is two differe
     /"ssh: no credentials: set use_agent, password, or private_key"/.test(
       read("src-tauri/src/modules/ssh/session.rs"),
     ),
+  );
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n[8] the save hands the store the binding it loaded, and recovers from a refusal");
+{
+  // Scoped through `save` first, exactly as section [4] locates it: `} catch (e) {`
+  // is not unique in this file - the keychain seed's own inner try/catch (around
+  // `getHostSshSecrets`) has one too - so anchoring on it directly from the top of
+  // the file would capture everything between the WRONG catch and the one
+  // `} finally {` in the component, which is almost the whole body. Narrowing to
+  // `save` first is what makes the anchor unique.
+  const save = between(editorSrc, "const save = async () => {", "const protocolLabel =");
+  check("save was found", save.length > 1000, save.length);
+  const saveRaw = between(editorRaw, "const save = async () => {", "const protocolLabel =");
+
+  // Stripped, per the file's own convention: the comment blocks written for this
+  // recovery quote the very strings the checks below search for, and a check that
+  // matches its own explanatory comment is green over a deleted implementation.
+  const catchRegion = between(save, "} catch (e) {", "} finally {");
+  check("the catch region was located", catchRegion.length > 40, catchRegion.length);
+
+  check(
+    "the save hands the store the binding it loaded",
+    /upsertHost\(\s*record,\s*secrets,\s*credentialStamp\(existing\)\s*\)/.test(editorSrc),
+  );
+
+  // Over the RAW source, comments included: a forbidden call parked behind a
+  // comment or a dead branch is one edit from live, and a negative assertion
+  // belongs over everything, not over what stripComments left behind.
+  check(
+    "and there is no unconditional two-argument save left",
+    !/upsertHost\(record,\s*secrets\)/.test(editorRaw),
+  );
+
+  check(
+    "the refusal is recognised by type, not by matching its text",
+    /e instanceof HostBindingChangedError/.test(catchRegion) &&
+      !/message.*includes\(/.test(catchRegion),
+  );
+
+  // The CREDENTIAL_STAMP_ABSENT arm, located by its own lexical boundaries -
+  // the literal `else if (...) {` that opens it and the `} else {` that closes
+  // it - rather than by how far away `findHost(` sits. A distance heuristic
+  // reads a correctly guarded call that is the second statement in a block as
+  // ungated, which is a false PASS on exactly the negative check this exists
+  // to catch: `guardsFor` was checked against this shape directly and reports
+  // "" for both `CREDENTIAL_STAMP_ABSENT` and `findHost(` here, because neither
+  // sits as the bare first statement of an `if (cond) { ... }` it recognises -
+  // an `else if`/`else` chain is not a pattern it models. Anchored extraction is
+  // what actually resolves the block; a distance check would not "abstain", it
+  // would silently pass every wiring.
+  const absentArm = between(catchRegion, "e.actual === CREDENTIAL_STAMP_ABSENT) {", "} else {");
+  check("the CREDENTIAL_STAMP_ABSENT arm was located", absentArm.length > 20, absentArm.length);
+  check(
+    "a deleted record gets no recover-and-retry path",
+    absentArm.includes("CREDENTIAL_STAMP_ABSENT") && !absentArm.includes("findHost("),
+  );
+
+  // Raw, not stripped, and scoped through the raw `save` for the same
+  // not-unique-anchor reason above. Negative assertions run over everything,
+  // comments included: a call pasted back in must not get to hide behind its
+  // own explanatory comment either.
+  const catchRegionRaw = between(saveRaw, "} catch (e) {", "} finally {");
+  check("the raw catch region was located", catchRegionRaw.length > 40, catchRegionRaw.length);
+  check(
+    "recovery refreshes the record and nothing else",
+    catchRegionRaw.includes("setExisting(") &&
+      ![
+        "setSshCred(",
+        "setRdpCred(",
+        "setShared(",
+        "setPins(",
+        "getHostSshSecrets(",
+        "sshSeeded.current =",
+        "sshTouched.current =",
+      ].some((s) => catchRegionRaw.includes(s)),
+  );
+
+  check(
+    "the error text tells the user their edits survived",
+    /edits are still here/.test(catchRegion),
   );
 }
 

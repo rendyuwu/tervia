@@ -43,6 +43,7 @@ import {
 } from "./editor/types";
 import type { HostEditorTarget } from "./pendingEditor";
 import {
+  findHost,
   getHostSshSecrets,
   listGroups,
   listHosts,
@@ -51,7 +52,10 @@ import {
   type HostSecretInput,
 } from "./store";
 import {
+  CREDENTIAL_STAMP_ABSENT,
+  credentialStamp,
   hostPins,
+  HostBindingChangedError,
   isRdpHost,
   isSshHost,
   presetById,
@@ -776,14 +780,46 @@ export function HostEditorDialog({ target, onClose, onSaved }: HostEditorDialogP
       // secret against a vault-bound host, and key material against an RDP host -
       // as rejected promises. Caught here so the reason lands in the form instead
       // of the console.
-      const saved = await upsertHost(record, secrets);
+      // The binding this form loaded, handed to the store so it can refuse a save
+      // whose credential has moved underneath. Always passed, including in create
+      // mode: `existing` is null there, the stamp is "absent", and the store finds
+      // no record under a freshly minted id either - so the check passes and there
+      // is no `mode` branch here to get wrong.
+      const saved = await upsertHost(record, secrets, credentialStamp(existing));
       // The persisted record, not the one built above: the store fills in the
       // presence flags from what it actually wrote, so a caller that renders a
       // credential pip gets the truth rather than three `false`s.
       onSaved?.(saved);
       onClose();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      if (!(e instanceof HostBindingChangedError)) {
+        setError(e instanceof Error ? e.message : String(e));
+      } else if (e.actual === CREDENTIAL_STAMP_ABSENT) {
+        // No recovery offered, deliberately. Saving again would mint a NEW id and
+        // create a different host - the deleted record's keychain accounts went
+        // with it, so nothing this form still holds can put the original back.
+        setError(
+          `${e.message} Close this editor - saving again would create a different host, not ` +
+            `restore this one.`,
+        );
+      } else {
+        // ONLY the stored record is refreshed. The draft - and every field the user
+        // has typed into it - is deliberately untouched, which is what makes the
+        // refusal a stop rather than a dead end: `existing` is what `boundIdentity`
+        // and the next stamp are derived from, so one more press of Save writes the
+        // same edits over the record as it now stands.
+        //
+        // Not seeded, either: re-running the keychain read here would overwrite a
+        // password the user typed while the first read was in flight, which is the
+        // exact defect `sshTouched` exists to prevent. This path reads the record,
+        // never a secret.
+        const fresh = await findHost(e.hostId).catch(() => undefined);
+        if (fresh) setExisting(fresh);
+        setError(
+          `${e.message} Your edits are still here, and the credential shown below is now the ` +
+            `current one - review it and press Save again.`,
+        );
+      }
     } finally {
       setSaving(false);
     }
