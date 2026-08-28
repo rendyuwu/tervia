@@ -48,7 +48,10 @@ export type IdentityRow = {
   /** How many hosts bind to this identity. A COUNT, not the array: a zustand v5
    *  selector that builds a fresh array re-subscribes forever and throws "Maximum
    *  update depth exceeded", and a count is a primitive. The array is available
-   *  from `hostsUsingIdentity` for the delete refusal, which needs the names. */
+   *  from `hostsUsingIdentity` for the delete refusal, which needs the names.
+   *
+   *  This field being a primitive does NOT make {@link identityRows} itself safe
+   *  to call from inside a selector - see that function's own doc. */
   hostCount: number;
   missingSecret: boolean;
 };
@@ -72,6 +75,19 @@ export type KeyRow = {
  * then offered to CREATE a host the page could already see. A shared pure
  * function guarantees nothing about callers that assemble its arguments
  * separately, so the assembly itself has to be the shared thing.
+ *
+ * Returns a FRESH array on every call, the same as any function ending in
+ * `.map` does - this is a plain function, not a memoized selector. A caller
+ * MUST wrap the call in `useMemo` keyed on its three arguments, and must never
+ * call it directly inside a zustand selector: a fresh array read as "changed"
+ * on every store broadcast re-renders forever (v5 throws "Maximum update
+ * depth exceeded" outright). `hostCount` being a primitive (see its own doc)
+ * fixes the LEAF, not this - the array this function returns is a new
+ * reference every call regardless of what its elements are made of.
+ * `useVault()` and `useHosts()` hand back stable references between
+ * broadcasts (they return the store's own state, not something derived from
+ * it), so a memo keyed on those plus `identities`/`keys` is safe; calling this
+ * function with no memo at all is not.
  */
 export function identityRows(
   identities: readonly VaultIdentity[],
@@ -194,8 +210,31 @@ export function rankIdentities(rows: readonly IdentityRow[], query: string): Ide
  * verification: the fingerprint shown next to the row is what a user compares
  * against, and nothing authenticates off a search result.
  *
+ * That residual holds only because nothing today asks this function a
+ * verification question. `VaultKey.fingerprint`'s own doc
+ * (`src/modules/vault/types.ts:122`) says the field is for "display, and
+ * duplicate detection at import" - and `rankKeys`/`keyMatchTier` must NEVER be
+ * the implementation of that second half. The moment an import path asks "does
+ * the vault already have this fingerprint?" through this search layer, a
+ * case-folded false positive stops being a ranking nicety and becomes a wrong
+ * answer about whether a secret is a duplicate. Duplicate detection needs its
+ * own case-sensitive equality over the full digest, not this function.
+ *
  * `keyType` (`VaultKeyType`, `src/modules/vault/types.ts:113`) is already a short
  * lowercase token, so a `.includes` on it needs no folding of its own.
+ *
+ * Tier 3 and tier 5 compare DIGEST to digest, never the un-stripped
+ * `"sha256:<digest>"` string. Every fingerprint this app produces shares the
+ * literal "sha256:" lead (`src-tauri/src/modules/ssh/mod.rs:309`), so testing
+ * the un-stripped form against the query made any prefix of that constant
+ * string - "s", "sh", ..., all the way to "sha256:" itself - a tier-3 hit
+ * against EVERY fingerprinted key, independent of the actual digest. That was
+ * the bug: rows that should have been dropped for a one-letter query instead
+ * flooded tier 3, and the tier order stopped meaning anything once every key
+ * cleared it. Stripping the constant prefix from both sides before comparing
+ * closes that off, including the degenerate case where the query strips down
+ * to an empty digest (the query WAS just "sha256:"): `hasDigestQuery` refuses
+ * to treat an empty digest as a match-everything wildcard.
  */
 function keyMatchTier(row: KeyRow, query: string): number | null {
   const name = row.key.name.toLowerCase();
@@ -204,18 +243,23 @@ function keyMatchTier(row: KeyRow, query: string): number | null {
 
   if (name === query) return 1;
   if (name.startsWith(query)) return 2;
-  if (fingerprint !== undefined) {
-    // A leading "sha256:" is the fingerprint's own prefix, folded along with
-    // everything else - so a query for the raw digest matches without the
-    // caller having to know the prefix is there.
-    const afterPrefix = fingerprint.startsWith("sha256:") ? fingerprint.slice(7) : fingerprint;
-    if (fingerprint.startsWith(query) || afterPrefix.startsWith(query)) return 3;
-  }
+
+  // `digest` is the fingerprint with its constant "sha256:" lead stripped, or
+  // `undefined` when the row has no fingerprint at all. `queryDigest` strips
+  // the SAME optional prefix from the query, so a query for the bare digest
+  // (no prefix typed) still matches - but an empty result after stripping
+  // (`hasDigestQuery` false) means the query carried no actual digest, so it
+  // must not match by virtue of the constant prefix alone.
+  const digest = fingerprint?.startsWith("sha256:") ? fingerprint.slice(7) : fingerprint;
+  const queryDigest = query.startsWith("sha256:") ? query.slice(7) : query;
+  const hasDigestQuery = queryDigest.length > 0;
+
+  if (digest !== undefined && hasDigestQuery && digest.startsWith(queryDigest)) return 3;
   if (hasWordBoundaryMatch(name, query)) return 4;
   if (
     name.includes(query) ||
     (keyType !== undefined && keyType.includes(query)) ||
-    (fingerprint !== undefined && fingerprint.includes(query))
+    (digest !== undefined && hasDigestQuery && digest.includes(queryDigest))
   ) {
     return 5;
   }

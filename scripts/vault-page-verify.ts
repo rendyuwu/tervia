@@ -259,27 +259,41 @@ console.log("\n[4] identityRows and keyRows: counts and key-name resolution agre
 
   const rows = identityRows(identities, keyMap, hosts);
 
+  // Literal expected values, not `hosts.map(...).length)`-shaped expressions
+  // built from the same lookups the rows are built from: i-1 is bound by h-1
+  // and h-2 (2), i-2 and i-3 are bound by nothing under this key (0 each - i-3
+  // binds h-3 for host purposes but that is irrelevant to ITS OWN hostCount,
+  // which counts hosts binding i-3, not i-1/i-2), i-4 by nothing (0). A check
+  // that instead re-ran `hostsUsingIdentity` to build its own "want" would
+  // pass even if `hostsUsingIdentity` itself always returned `[]`, because
+  // both sides of the comparison would move together.
   check(
-    "hostCount matches hostsUsingIdentity(...).length for every row",
+    "hostCount: literal count per identity - i-1 has two holders, i-2/i-3/i-4 none",
     rows.map((r) => r.hostCount),
-    identities.map((i) => hostsUsingIdentity(hosts, i.id).length),
+    [2, 0, 1, 0],
   );
   check(
     "keyName: live key's name, UNKNOWN_KEY_LABEL for dangling, undefined for none",
     rows.map((r) => r.keyName),
     ["Key k-1", UNKNOWN_KEY_LABEL, undefined, "Key k-2"],
   );
+  // Same literal discipline: i-1's key (k-1) has its private half, so i-1 is
+  // fine; i-2 names a key the map does not have, so it is missing; i-3 is
+  // password auth with `hasPassword: true` (the `identity()` default), so it
+  // is fine; i-4's key (k-2) is missing its private half, so i-4 is missing.
   check(
-    "missingSecret agrees with identityMissingSecret for every row",
+    "missingSecret: literal per identity - only the dangling key and the key missing its private half are missing",
     rows.map((r) => r.missingSecret),
-    identities.map((i) => identityMissingSecret(i, keyMap)),
+    [false, true, false, true],
   );
 
   const kRows = keyRows(keys, identities);
+  // k-1 is named by i-1 alone (i-4 names k-2, i-2 names a dangling id, i-3
+  // names none): count 1. k-2 is named by i-4 alone: count 1.
   check(
-    "keyRows.identityCount matches identitiesUsingKey(...).length for every row",
+    "keyRows.identityCount: literal per key - each of k-1 and k-2 is named by exactly one identity",
     kRows.map((r) => r.identityCount),
-    keys.map((k) => identitiesUsingKey(identities, k.id).length),
+    [1, 1],
   );
 }
 
@@ -345,34 +359,114 @@ console.log("\n[5] rankIdentities and rankKeys: tiers, drops, empty and whitespa
   );
 
   // keyName reaches tier 5: a user searching for the key an identity uses
-  // should find it even though the query matches neither name nor username.
-  const withKey: IdentityRow = {
-    identity: identity("i-key", { name: "solo", username: "solo-user" }),
+  // should find it even though the query matches neither name nor username. A
+  // ONE-row list can only prove "matched", not "matched at tier 5" - moving
+  // keyName to any other tier would still rank it first (and last) in a list
+  // of one. Pairing it with a row that qualifies at tier 2 (name-prefix) makes
+  // the tier observable: the tier-2 row must sort first regardless of name,
+  // and only does if keyName is genuinely weaker than tier 2.
+  const keyNameOnly: IdentityRow = {
+    identity: identity("i-key", { name: "zzzzzz", username: "zz-user" }),
     keyName: "deploy-key",
     hostCount: 0,
     missingSecret: false,
   };
+  const namePrefixCompetitor: IdentityRow = {
+    identity: identity("i-name", { name: "deploy-box", username: "zz-user2" }),
+    keyName: undefined,
+    hostCount: 0,
+    missingSecret: false,
+  };
   check(
-    "keyName participates at tier 5",
-    rankIdentities([withKey], "deploy").map((r) => r.identity.id),
-    ["i-key"],
+    "keyName participates at tier 5: ranks behind a tier-2 name-prefix match, not ahead or tied",
+    rankIdentities([keyNameOnly, namePrefixCompetitor], "deploy").map((r) => r.identity.id),
+    ["i-name", "i-key"],
   );
 
-  // rankKeys mirrors the same shape over its own fields.
-  const kAlpha = key("k-alpha", { name: "alpha", fingerprint: "SHA256:zzzz" });
-  const kBravo = key("k-bravo", { name: "db-prod-key", fingerprint: "SHA256:yyyy" });
-  const kCharlie = key("k-charlie", { name: "db", fingerprint: "SHA256:xxxx" });
-  const kNomatch = key("k-nomatch", { name: "nothing", fingerprint: "SHA256:wwww" });
-  const kRows: KeyRow[] = [kAlpha, kBravo, kCharlie, kNomatch].map((k) => ({
+  // domain reaches tier 5 the same way - RDP-only field, untested until now.
+  // Same observability shape: a tier-2 name-prefix competitor must outrank it.
+  const domainOnly: IdentityRow = {
+    identity: identity("i-domain", {
+      name: "zzzzzz",
+      username: "zz-user",
+      domain: "corp.example.com",
+    }),
+    keyName: undefined,
+    hostCount: 0,
+    missingSecret: false,
+  };
+  const domainCompetitor: IdentityRow = {
+    identity: identity("i-domain-name", { name: "corp-box", username: "zz-user2" }),
+    keyName: undefined,
+    hostCount: 0,
+    missingSecret: false,
+  };
+  check(
+    "domain participates at tier 5: ranks behind a tier-2 name-prefix match, not ahead or tied",
+    rankIdentities([domainOnly, domainCompetitor], "corp").map((r) => r.identity.id),
+    ["i-domain-name", "i-domain"],
+  );
+
+  // rankKeys mirrors the same shape over its own fields. Six rows against
+  // query "db", chosen (as above) so the DEFAULT order is a genuine
+  // permutation of the tier order - not the input order - so an unsorted
+  // result, or a filter that never ran, fails this too.
+  //
+  //   name           fingerprint       tier for "db"
+  //   -------------  ----------------  ------------------------------------
+  //   "db"                             1 - exact
+  //   "db-prod-key"                    2 - prefix (also word-boundary, but
+  //                                    tier 2 is checked first and wins)
+  //   "zzzzzz"       "SHA256:dbxxxx"   3 - fingerprint prefix (name matches
+  //                                    nothing)
+  //   "prod-db-01"                     4 - word boundary, NOT a name prefix
+  //   "adbox"                          5 - plain substring, no boundary
+  //                                    either side
+  //   "nothing"                        no tier - dropped
+  const kAlpha = key("k-alpha", { name: "adbox" });
+  const kBravo = key("k-bravo", { name: "db-prod-key" });
+  const kCharlie = key("k-charlie", { name: "db" });
+  const kDelta = key("k-delta", { name: "prod-db-01" });
+  const kEcho = key("k-echo", { name: "zzzzzz", fingerprint: "SHA256:dbxxxx" });
+  const kNomatch = key("k-nomatch", { name: "nothing" });
+  const kRows: KeyRow[] = [kAlpha, kBravo, kCharlie, kDelta, kEcho, kNomatch].map((k) => ({
     key: k,
     identityCount: 0,
   }));
+
+  // Default order by name: adbox, db, db-prod-key, nothing, prod-db-01, zzzzzz.
   check(
-    "rankKeys: exact beats prefix beats word-boundary; nomatch dropped",
-    rankKeys(kRows, "db").map((r) => r.key.id),
-    ["k-charlie", "k-bravo"],
+    "rankKeys: empty query returns every row in default (name, then id) order",
+    rankKeys(kRows, "").map((r) => r.key.id),
+    ["k-alpha", "k-charlie", "k-bravo", "k-nomatch", "k-delta", "k-echo"],
   );
-  check("rankKeys empty query returns every row in default order", rankKeys(kRows, "").length, 4);
+  check(
+    "rankKeys 'db': exact beats prefix beats fingerprint-prefix beats word-boundary beats substring; no-tier dropped",
+    rankKeys(kRows, "db").map((r) => r.key.id),
+    ["k-charlie", "k-bravo", "k-echo", "k-delta", "k-alpha"],
+  );
+  ok(
+    "rankKeys: the non-matching row is dropped, not sorted to the bottom",
+    !rankKeys(kRows, "db")
+      .map((r) => r.key.id)
+      .includes("k-nomatch"),
+  );
+  check("rankKeys 'db' hit count is 5 of 6 rows", rankKeys(kRows, "db").length, 5);
+
+  // keyType reaches tier 5, same observability shape as keyName/domain above.
+  const keyTypeOnly: KeyRow = {
+    key: key("k-type", { name: "zzzzzz", keyType: "ed25519" }),
+    identityCount: 0,
+  };
+  const keyTypeCompetitor: KeyRow = {
+    key: key("k-type-name", { name: "ed25519-prod" }),
+    identityCount: 0,
+  };
+  check(
+    "keyType participates at tier 5: ranks behind a tier-2 name-prefix match, not ahead or tied",
+    rankKeys([keyTypeOnly, keyTypeCompetitor], "ed25519").map((r) => r.key.id),
+    ["k-type-name", "k-type"],
+  );
 }
 
 // --- 6. The comparator is total --------------------------------------------
@@ -459,37 +553,101 @@ console.log("\n[7] mixed-case name vs lowercase query, and the reverse, both fol
 
 // --- 8. rankKeys fingerprint tier --------------------------------------------
 
-console.log("\n[8] fingerprint tier: full SHA256 form and the bare digest both match");
+console.log(
+  "\n[8] fingerprint tier: full SHA256 form and the bare digest both match, at tier 3 specifically",
+);
 {
-  const row: KeyRow = { key: key("k-1", { fingerprint: "SHA256:AbCdEf" }), identityCount: 0 };
+  // A one-row list can only prove "matched", not "matched at tier 3" - tiers 3
+  // and 5 would look identical with one row. Each check below pairs the
+  // fingerprint row with a row that qualifies ONLY at tier 5 (a plain
+  // substring of that same query text, no boundary either side, no
+  // fingerprint) - the fingerprint row must sort first, which only happens if
+  // its match is genuinely tier 3, stronger than tier 5.
+  const fp: KeyRow = {
+    key: key("k-fp", { name: "zzzzzz", fingerprint: "SHA256:AbCdEf" }),
+    identityCount: 0,
+  };
+
+  const subForPrefixed: KeyRow = {
+    key: key("k-sub-1", { name: "xxsha256:abcxx" }),
+    identityCount: 0,
+  };
   check(
-    "query 'sha256:abc' matches at tier 3",
-    rankKeys([row], "sha256:abc").map((r) => r.key.id),
-    ["k-1"],
+    "query 'sha256:abc': fingerprint row ranks ahead of a tier-5 substring row (tier 3 beats tier 5)",
+    rankKeys([subForPrefixed, fp], "sha256:abc").map((r) => r.key.id),
+    ["k-fp", "k-sub-1"],
   );
+
+  const subForBare: KeyRow = { key: key("k-sub-2", { name: "xxabcdefxx" }), identityCount: 0 };
   check(
-    "query 'abcdef' (after the prefix) also matches at tier 3",
-    rankKeys([row], "abcdef").map((r) => r.key.id),
-    ["k-1"],
+    "query 'abcdef' (after the prefix): same, tier 3 still beats tier 5",
+    rankKeys([subForBare, fp], "abcdef").map((r) => r.key.id),
+    ["k-fp", "k-sub-2"],
   );
+
+  // The regression this whole tier exists to prevent: every fingerprint
+  // shares the literal "SHA256:" lead, so a query that is only a PREFIX of
+  // that constant string - "s", "sh", "sha", ... all the way to "sha256:"
+  // itself - must NOT match a fingerprinted key by virtue of the prefix
+  // alone. Both rows below have a fingerprint and a name unrelated to any of
+  // these queries; the un-stripped-string bug this file used to have (see
+  // `derive.ts`'s `keyMatchTier` doc) made every one of them a tier-3 hit
+  // against both rows.
+  const irrelevant1: KeyRow = {
+    key: key("k-irr-1", { name: "zzzzzz1", fingerprint: "SHA256:aaaa" }),
+    identityCount: 0,
+  };
+  const irrelevant2: KeyRow = {
+    key: key("k-irr-2", { name: "zzzzzz2", fingerprint: "SHA256:bbbb" }),
+    identityCount: 0,
+  };
+  for (const q of ["s", "sh", "sha", "sha2", "sha25", "sha256", "sha256:"]) {
+    ok(
+      `query ${JSON.stringify(q)} matches neither fingerprinted key by the constant "sha256:" prefix alone`,
+      rankKeys([irrelevant1, irrelevant2], q).length === 0,
+    );
+  }
 }
 
 // --- 9. Purity: source text, over the raw file, not just reachable code -----
 
-console.log("\n[9] purity: neither file imports the store, Tauri, React or a secret call");
+console.log(
+  "\n[9] purity: neither file imports the store, Tauri, React or a secret call - by relative path OR alias",
+);
 {
   const deriveSrc = readFileSync(join(root, "src/modules/vault/page/derive.ts"), "utf8");
   const refsSrc = readFileSync(join(root, "src/modules/vault/refs.ts"), "utf8");
-  const forbidden = [
-    "@tauri-apps",
-    'from "react"',
-    "../store",
-    "../adapters",
-    "../resolve",
-    "secrets_get",
-    "getHostSshSecrets",
-  ];
-  for (const needle of forbidden) {
+
+  // Needles with no relative form at all - true regardless of which file
+  // writes them.
+  const universal = ["@tauri-apps", 'from "react"', "secrets_get", "getHostSshSecrets"];
+  for (const needle of universal) {
+    ok(`derive.ts does not contain ${JSON.stringify(needle)}`, !deriveSrc.includes(needle));
+    ok(`refs.ts does not contain ${JSON.stringify(needle)}`, !refsSrc.includes(needle));
+  }
+
+  // The relative-import needles are NOT path-independent: `derive.ts` sits at
+  // `src/modules/vault/page/`, one directory deeper than `refs.ts` at
+  // `src/modules/vault/`, so the same sibling module is spelled "../store"
+  // from derive.ts but "./store" from refs.ts. Checking "../store" against
+  // refs.ts's own text was checking for a form that file could never write -
+  // one needle per file, at that file's own depth.
+  const deriveRelative = ["../store", "../adapters", "../resolve"];
+  for (const needle of deriveRelative) {
+    ok(`derive.ts does not contain ${JSON.stringify(needle)}`, !deriveSrc.includes(needle));
+  }
+  const refsRelative = ["./store", "./adapters", "./resolve"];
+  for (const needle of refsRelative) {
+    ok(`refs.ts does not contain ${JSON.stringify(needle)}`, !refsSrc.includes(needle));
+  }
+
+  // Neither depth-specific check catches the ALIAS form, and this codebase's
+  // own imports use it (`@/modules/hosts/types`, `@/lib/searchTiers` above) -
+  // `import { createVaultStore } from "@/modules/vault/store"` would pass
+  // every needle above while being exactly the violation this section exists
+  // to catch.
+  const aliased = ["@/modules/vault/store", "@/modules/vault/adapters", "@/modules/vault/resolve"];
+  for (const needle of aliased) {
     ok(`derive.ts does not contain ${JSON.stringify(needle)}`, !deriveSrc.includes(needle));
     ok(`refs.ts does not contain ${JSON.stringify(needle)}`, !refsSrc.includes(needle));
   }
