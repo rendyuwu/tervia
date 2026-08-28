@@ -269,3 +269,72 @@ export function hostPins(host: Host): HostPins {
   const flat = hostFingerprint(host);
   return flat ? { [host.host]: flat } : {};
 }
+
+/** The value {@link credentialStamp} reports for a host that is not in the store. */
+export const CREDENTIAL_STAMP_ABSENT = "absent";
+/** The value {@link credentialStamp} reports for a host that owns its credentials. */
+export const CREDENTIAL_STAMP_INLINE = "inline";
+
+/**
+ * What a host's credential binding IS, as one comparable string.
+ *
+ * A string rather than a structural comparison because the only question anyone
+ * asks of it is "is this still the same thing it was", and a string makes that
+ * one `!==` at the write instead of a deep compare each caller writes itself.
+ *
+ * Three values, and the third carries the id: `"absent"` for a record that is not
+ * in the store at all, `"inline"` for one that owns its credentials, and
+ * `identity:<identityId>` for one bound to a shared vault identity. Re-binding
+ * from one identity to another therefore changes the stamp, which is the case a
+ * bare `kind` comparison would miss.
+ *
+ * Deliberately NOT a hash of the whole record. This answers one question - has the
+ * binding moved under a form that loaded it - and widening it to every field would
+ * refuse ordinary concurrent edits to a name or a port, which last-write-wins
+ * already handles correctly.
+ */
+export function credentialStamp(host: Host | null | undefined): string {
+  if (!host) return CREDENTIAL_STAMP_ABSENT;
+  const cred = host.credential;
+  return cred.kind === "inline" ? CREDENTIAL_STAMP_INLINE : `identity:${cred.identityId}`;
+}
+
+/**
+ * A save refused because the stored record's credential binding is no longer the
+ * one the caller loaded.
+ *
+ * Refuse, never overwrite. The write this stops is silent and unrecoverable: a
+ * form that loaded a vault-bound host, was converted underneath, and saved anyway
+ * would rebuild an INLINE credential out of a draft that loaded blank - all three
+ * presence flags false, no secrets - and the account-release pass computes an
+ * EMPTY stale set for it, because a vault-bound record owns no accounts. So
+ * nothing is deleted, nothing is restored, and the row loses its binding and
+ * cannot connect, with no error anywhere.
+ *
+ * Carries `hostId` so a caller can re-read the record it was refused against
+ * without having to hold one.
+ */
+export class HostBindingChangedError extends Error {
+  readonly hostId: string;
+  readonly expected: string;
+  readonly actual: string;
+
+  constructor(hostId: string, name: string, expected: string, actual: string) {
+    super(
+      `hosts: "${name}" changed while this editor was open - it was ` +
+        `${describeStamp(expected)} and is now ${describeStamp(actual)}. Nothing was saved.`,
+    );
+    this.name = "HostBindingChangedError";
+    this.hostId = hostId;
+    this.expected = expected;
+    this.actual = actual;
+  }
+}
+
+/** The stamp in words, so the refusal names what changed rather than printing an
+ *  internal token at the user. */
+function describeStamp(stamp: string): string {
+  if (stamp === CREDENTIAL_STAMP_ABSENT) return "deleted";
+  if (stamp === CREDENTIAL_STAMP_INLINE) return "using credentials of its own";
+  return "bound to a shared vault identity";
+}

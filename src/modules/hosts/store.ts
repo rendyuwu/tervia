@@ -23,10 +23,12 @@ import { createTauriHostsStoreIo, defaultHostFiles, type HostsIo } from "./adapt
 import { jumpChain } from "./jumps";
 import { purgeLegacySecrets as runLegacyPurge, type LegacyPurgeResult } from "./legacyPurge";
 import {
+  credentialStamp,
   HOSTS_KEY,
   HOST_GROUPS_KEY,
   HOST_RDP_SECRET_FIELDS,
   HOST_SSH_SECRET_FIELDS,
+  HostBindingChangedError,
   hostFingerprint,
   hostPins,
   type Host,
@@ -143,7 +145,17 @@ export type HostsStore = {
   findGroup(id: string): Promise<HostGroup | undefined>;
   newHostId(): string;
   newGroupId(): string;
-  upsertHost(host: Host, secrets?: HostSecretInput): Promise<Host>;
+  /**
+   * `expect` is the credential stamp the caller loaded, from
+   * {@link credentialStamp}. Supplied, the write is refused unless the stored
+   * record still carries that binding; omitted, the write is unconditional.
+   *
+   * Optional, and that is a statement rather than an oversight: an import and a
+   * duplicate hold no earlier snapshot of the record, so a required parameter
+   * would only make them invent one. The caller that DOES hold one is the editor,
+   * and `scripts/host-editor-verify.ts` is what proves it still passes it.
+   */
+  upsertHost(host: Host, secrets?: HostSecretInput, expect?: string): Promise<Host>;
   upsertGroup(group: HostGroup): Promise<HostGroup>;
   duplicateHost(id: string): Promise<Host | null>;
   deleteHost(id: string, forwards: ForwardRuleCleanup): Promise<void>;
@@ -734,8 +746,12 @@ export function createHostsStore(io: HostsIo): HostsStore {
     jumpChain(host.tunnel.sshHostId, host.id, hosts);
   }
 
-  async function upsertHost(host: Host, secrets: HostSecretInput = {}): Promise<Host> {
-    return enqueueWrite(() => writeHost(host, secrets));
+  async function upsertHost(
+    host: Host,
+    secrets: HostSecretInput = {},
+    expect?: string,
+  ): Promise<Host> {
+    return enqueueWrite(() => writeHost(host, secrets, expect));
   }
 
   /**
@@ -746,13 +762,27 @@ export function createHostsStore(io: HostsIo): HostsStore {
    * window's rotation lands between the two. Nothing else may call it - a write
    * outside the queue is the lost-update this store exists to prevent.
    */
-  async function writeHost(host: Host, secrets: HostSecretInput): Promise<Host> {
+  async function writeHost(host: Host, secrets: HostSecretInput, expect?: string): Promise<Host> {
     // The write-time half of the binding invariant, and the only half there is.
     assertBindingOwner(host.credential, host.id);
 
     const hosts = await listHosts();
     assertReferences(host, hosts);
     const existing = hosts.find((h) => h.id === host.id);
+
+    // INSIDE the queue, and before any secret is written. Inside, because a check
+    // the caller ran before calling has a window between its read and this write
+    // that another writer fits in - `writeHost` runs as one queue entry, so the
+    // record read here is the record about to be replaced, with nothing able to
+    // land in between. Before, because a refusal must leave the keychain exactly
+    // as it was: `nextSshCredential` below writes up to three accounts, and a
+    // refusal after that has already mutated the thing it was refusing to touch.
+    if (expect !== undefined) {
+      const current = credentialStamp(existing);
+      if (current !== expect) {
+        throw new HostBindingChangedError(host.id, host.name, expect, current);
+      }
+    }
 
     const credentialed: Host =
       host.protocol === "ssh"

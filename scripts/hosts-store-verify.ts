@@ -91,6 +91,8 @@ import {
   SECRET_ALREADY_STORED,
 } from "../src/modules/hosts/store";
 import {
+  credentialStamp,
+  CREDENTIAL_STAMP_INLINE,
   hostFingerprint,
   isRdpHost,
   isSshHost,
@@ -2553,6 +2555,92 @@ console.log("\n[flags] the sentinel is still refused where there is no account f
     ["rdp host", "no key material"],
   );
   check("neither refusal touched the keychain", h.calls, []);
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n[concurrency] a save is refused when the binding moved under the caller");
+{
+  const h = harness();
+  const loaded = await h.hosts.upsertHost(sshHost({ id: "h-1" }), { password: "hunter2" });
+  const stamp = credentialStamp(loaded);
+  check("what the caller loaded", stamp, CREDENTIAL_STAMP_INLINE);
+
+  // Another writer converts it to a vault binding. No expectation passed, so this
+  // one is unconditional - which is what an import or a convert action is.
+  await h.hosts.upsertHost({ ...loaded, credential: { kind: "identity", identityId: "i-1" } });
+
+  h.calls.length = 0;
+  await rejects(
+    "the stale caller's save is refused, naming both states",
+    () => h.hosts.upsertHost(sshHost({ id: "h-1", name: "renamed" }), { password: "x" }, stamp),
+    ["changed while this editor was open", "credentials of its own", "vault identity"],
+  );
+  check("and the refusal touched no keychain account at all", h.calls, []);
+  const after = await h.hosts.findHost("h-1");
+  check(
+    "the vault binding survived the refused save",
+    after && after.credential.kind === "identity" ? after.credential.identityId : null,
+    "i-1",
+  );
+  check("and the name the stale save proposed did not land", after?.name, "prod");
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n[concurrency] the same expectation permits the save when nothing moved");
+{
+  const h = harness();
+  const loaded = await h.hosts.upsertHost(sshHost({ id: "h-1" }), { password: "hunter2" });
+  const saved = await h.hosts.upsertHost(
+    sshHost({ id: "h-1", name: "renamed" }),
+    {},
+    credentialStamp(loaded),
+  );
+  check("an unchanged binding saves normally", saved.name, "renamed");
+  check("and the untouched password is still there", h.kept.get(at("h-1", "password")), "hunter2");
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n[concurrency] a record deleted under the caller is refused, not recreated");
+{
+  const h = harness();
+  const loaded = await h.hosts.upsertHost(sshHost({ id: "h-1" }));
+  await h.hosts.deleteHost("h-1", noForwardRules);
+  await rejects(
+    "a save against a deleted record is refused and says so",
+    () => h.hosts.upsertHost(sshHost({ id: "h-1" }), {}, credentialStamp(loaded)),
+    ["deleted"],
+  );
+  check("and nothing was put back", await h.hosts.findHost("h-1"), undefined);
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n[concurrency] re-binding between two identities is a change, not a no-op");
+{
+  const h = harness();
+  const loaded = await h.hosts.upsertHost(
+    sshHost({ id: "h-1", credential: { kind: "identity", identityId: "i-1" } }),
+  );
+  await h.hosts.upsertHost({ ...loaded, credential: { kind: "identity", identityId: "i-2" } });
+  await rejects(
+    "identity:i-1 does not satisfy identity:i-2",
+    () =>
+      h.hosts.upsertHost(
+        sshHost({ id: "h-1", credential: { kind: "identity", identityId: "i-1" } }),
+        {},
+        credentialStamp(loaded),
+      ),
+    ["vault identity"],
+  );
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n[concurrency] no expectation means no check, for the callers that hold none");
+{
+  const h = harness();
+  const loaded = await h.hosts.upsertHost(sshHost({ id: "h-1" }));
+  await h.hosts.upsertHost({ ...loaded, credential: { kind: "identity", identityId: "i-1" } });
+  const forced = await h.hosts.upsertHost(sshHost({ id: "h-1", name: "by import" }));
+  check("an import with no expectation still writes", forced.name, "by import");
 }
 
 if (failed > 0) throw new Error(`hosts-store-verify: ${failed} FAILED`);
