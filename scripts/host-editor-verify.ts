@@ -1008,31 +1008,76 @@ console.log("\n[8] the save hands the store the binding it loaded, and recovers 
   // an `else if`/`else` chain is not a pattern it models. Anchored extraction is
   // what actually resolves the block; a distance check would not "abstain", it
   // would silently pass every wiring.
-  const absentArm = between(catchRegion, "e.actual === CREDENTIAL_STAMP_ABSENT) {", "} else {");
-  check("the CREDENTIAL_STAMP_ABSENT arm was located", absentArm.length > 20, absentArm.length);
+  const absentAnchor = "e.actual === CREDENTIAL_STAMP_ABSENT) {";
+  const absentArm = between(catchRegion, absentAnchor, "} else {");
+  // Above the ANCHOR's own length, not an arbitrary round number: `between`
+  // returns a slice that STARTS WITH `from`, so a threshold at or below
+  // `absentAnchor.length` (39) is satisfied by the anchor text alone, with an
+  // empty arm body behind it - measured, deleting the whole arm body left this
+  // check green. The real arm is currently ~260 characters; this only has to
+  // clear the anchor by a wide margin to stop being vacuous.
   check(
-    "a deleted record gets no recover-and-retry path",
-    absentArm.includes("CREDENTIAL_STAMP_ABSENT") && !absentArm.includes("findHost("),
+    "the CREDENTIAL_STAMP_ABSENT arm was located",
+    absentArm.length > absentAnchor.length + 40,
+    absentArm.length,
+  );
+  check("a deleted record gets no recover-and-retry path", !absentArm.includes("findHost("));
+  // The arm's own message, not a substring shared with its own anchor -
+  // `absentArm.includes("CREDENTIAL_STAMP_ABSENT")` is true of the anchor text
+  // by construction and asserts nothing about the code after it. Checked
+  // against the ACTUAL wording so a regression back to the old, false claim -
+  // "saving again would create a different host" - fails here rather than only
+  // reading wrong in the running app.
+  check(
+    "its message says a retry is refused, not that a retry creates something new",
+    /pressing Save again will not help/.test(absentArm) &&
+      !/create a different host/.test(absentArm),
   );
 
   // Raw, not stripped, and scoped through the raw `save` for the same
-  // not-unique-anchor reason above. Negative assertions run over everything,
-  // comments included: a call pasted back in must not get to hide behind its
-  // own explanatory comment either.
+  // not-unique-anchor reason above.
   const catchRegionRaw = between(saveRaw, "} catch (e) {", "} finally {");
   check("the raw catch region was located", catchRegionRaw.length > 40, catchRegionRaw.length);
+
+  // The recovery arm - the FINAL `else { ... }`, past the ABSENT arm above -
+  // located the same anchored way and taken from BOTH the stripped and the raw
+  // region, because the positive and negative checks below need different text.
+  // Bundling them onto one region forces one of the two onto the wrong text:
+  // the positive check ("does this call exist") has to run where a call parked
+  // behind a `//` comment does not count as present, which only the STRIPPED
+  // region gives; the negative checks ("is this call ABSENT") have to run
+  // where a call pasted back in cannot hide behind its own comment, which only
+  // the RAW region gives. Measured: with the recovery region collapsed onto raw
+  // text alone, commenting out both `setExisting(fresh)` calls left "recovery
+  // refreshes the record" passing, because the comment above them still
+  // contained the word `setExisting`.
+  const recoveryMarker = "} else {";
+  const recoveryAt = catchRegion.indexOf(recoveryMarker);
+  check("the recovery arm's opening brace was found", recoveryAt >= 0, recoveryAt);
+  const recoveryArm = catchRegion.slice(recoveryAt + recoveryMarker.length);
+  check("the recovery arm has a body", recoveryArm.length > 100, recoveryArm.length);
+
+  const recoveryAtRaw = catchRegionRaw.indexOf(recoveryMarker);
+  check("the raw recovery arm's opening brace was found", recoveryAtRaw >= 0, recoveryAtRaw);
+  const recoveryArmRaw = catchRegionRaw.slice(recoveryAtRaw + recoveryMarker.length);
+
+  check("recovery refreshes the record", recoveryArm.includes("setExisting("));
   check(
-    "recovery refreshes the record and nothing else",
-    catchRegionRaw.includes("setExisting(") &&
-      ![
-        "setSshCred(",
-        "setRdpCred(",
-        "setShared(",
-        "setPins(",
-        "getHostSshSecrets(",
-        "sshSeeded.current =",
-        "sshTouched.current =",
-      ].some((s) => catchRegionRaw.includes(s)),
+    "and touches nothing else - not the draft, not the secret seed, not the dialog itself",
+    ![
+      "setSshCred(",
+      "setRdpCred(",
+      "setShared(",
+      "setPins(",
+      "setPresetId(",
+      "setProxyJumpId(",
+      "setTunnelSshHostId(",
+      "setReady(",
+      "getHostSshSecrets(",
+      "sshSeeded.current =",
+      "sshTouched.current =",
+      "onClose(",
+    ].some((s) => recoveryArmRaw.includes(s)),
   );
 
   check(

@@ -92,8 +92,10 @@ import {
 } from "../src/modules/hosts/store";
 import {
   credentialStamp,
+  CREDENTIAL_STAMP_ABSENT,
   CREDENTIAL_STAMP_INLINE,
   hostFingerprint,
+  HostBindingChangedError,
   isRdpHost,
   isSshHost,
   HOSTS_KEY,
@@ -2641,6 +2643,64 @@ console.log("\n[concurrency] no expectation means no check, for the callers that
   await h.hosts.upsertHost({ ...loaded, credential: { kind: "identity", identityId: "i-1" } });
   const forced = await h.hosts.upsertHost(sshHost({ id: "h-1", name: "by import" }));
   check("an import with no expectation still writes", forced.name, "by import");
+}
+
+// ---------------------------------------------------------------------------
+console.log(
+  "\n[concurrency] create mode's call - expect ABSENT - is enforced too, not waved through",
+);
+{
+  // The editor never special-cases create mode: `existing` is null there, so it
+  // passes `credentialStamp(null)`, which is `CREDENTIAL_STAMP_ABSENT`, on every
+  // create. Every OTHER section in this file either passes `undefined` or a
+  // stamp read off a record that IS present - none of them passes
+  // `expect === CREDENTIAL_STAMP_ABSENT` against an id another writer has since
+  // claimed, so a guard silently rewritten to skip the check whenever
+  // `expect === "absent"` - on the theory that "absent" means "no expectation" -
+  // would leave every one of those sections green. This is the section that
+  // closes it: the id a create-mode caller mints for itself is exactly the kind
+  // of id someone else can also have raced to use first.
+  const h = harness();
+  await h.hosts.upsertHost(sshHost({ id: "h-1", name: "someone else's host" }));
+  await rejects(
+    "a stale create is refused, not silently overwritten",
+    () =>
+      h.hosts.upsertHost(sshHost({ id: "h-1", name: "my new host" }), {}, CREDENTIAL_STAMP_ABSENT),
+    ["changed while this editor was open"],
+  );
+  const after = await h.hosts.findHost("h-1");
+  check("the id's actual owner survived the refused create", after?.name, "someone else's host");
+}
+
+// ---------------------------------------------------------------------------
+console.log(
+  "\n[concurrency] the refusal is a HostBindingChangedError, not just a matching message",
+);
+{
+  // Nothing above this line ever inspects the THROWN VALUE - `rejects` only
+  // reads `e.message` - so a store that stopped constructing this class, or
+  // built one with the wrong fields, passes every check above it while the
+  // editor's `e instanceof HostBindingChangedError` / `e.actual` / `e.hostId`
+  // reads silently break. Checked directly here instead.
+  const h = harness();
+  const loaded = await h.hosts.upsertHost(sshHost({ id: "h-1" }), { password: "hunter2" });
+  const stamp = credentialStamp(loaded);
+  await h.hosts.upsertHost({ ...loaded, credential: { kind: "identity", identityId: "i-1" } });
+
+  let caught: unknown;
+  try {
+    await h.hosts.upsertHost(sshHost({ id: "h-1", name: "renamed" }), { password: "x" }, stamp);
+  } catch (e) {
+    caught = e;
+  }
+  assert(
+    caught instanceof HostBindingChangedError,
+    "the refusal is an instance of HostBindingChangedError, not a lookalike Error",
+  );
+  const err = caught as HostBindingChangedError;
+  check("it carries the id of the host it was refused against", err?.hostId, "h-1");
+  check("it carries what the caller expected", err?.expected, stamp);
+  check("it carries what is actually stored now", err?.actual, "identity:i-1");
 }
 
 if (failed > 0) throw new Error(`hosts-store-verify: ${failed} FAILED`);

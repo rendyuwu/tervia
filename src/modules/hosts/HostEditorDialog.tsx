@@ -795,12 +795,14 @@ export function HostEditorDialog({ target, onClose, onSaved }: HostEditorDialogP
       if (!(e instanceof HostBindingChangedError)) {
         setError(e instanceof Error ? e.message : String(e));
       } else if (e.actual === CREDENTIAL_STAMP_ABSENT) {
-        // No recovery offered, deliberately. Saving again would mint a NEW id and
-        // create a different host - the deleted record's keychain accounts went
-        // with it, so nothing this form still holds can put the original back.
+        // No recovery offered, deliberately. `existing` is left exactly as it was
+        // - nothing here calls `setExisting` - so `id` and the stamp this form
+        // sends stay the same on a second press, and the store finds the same
+        // absent record and refuses the same way again. Saving again does not
+        // create a different host; it does not create anything at all.
         setError(
-          `${e.message} Close this editor - saving again would create a different host, not ` +
-            `restore this one.`,
+          `${e.message} Close this editor - pressing Save again will not help: this form ` +
+            `still names the deleted record, so the write is refused the same way every time.`,
         );
       } else {
         // ONLY the stored record is refreshed. The draft - and every field the user

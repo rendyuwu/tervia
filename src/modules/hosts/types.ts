@@ -303,13 +303,22 @@ export function credentialStamp(host: Host | null | undefined): string {
  * A save refused because the stored record's credential binding is no longer the
  * one the caller loaded.
  *
- * Refuse, never overwrite. The write this stops is silent and unrecoverable: a
- * form that loaded a vault-bound host, was converted underneath, and saved anyway
- * would rebuild an INLINE credential out of a draft that loaded blank - all three
- * presence flags false, no secrets - and the account-release pass computes an
- * EMPTY stale set for it, because a vault-bound record owns no accounts. So
- * nothing is deleted, nothing is restored, and the row loses its binding and
- * cannot connect, with no error anywhere.
+ * Refuse, never overwrite. The write this stops is silent and unrecoverable, and
+ * it runs the OTHER direction from how it first reads: a form loads an INLINE
+ * host; another writer converts that same row to a vault binding underneath it,
+ * which releases all three keychain accounts, because a vault-bound record owns
+ * none; the stale form saves anyway. It still believes the row is inline, so it
+ * writes an inline credential back - and every field the user did not retype reads
+ * its presence flag off the record as it is stored NOW, which is vault-bound and
+ * owns nothing, so the flag comes back false for all three. Nothing is deleted a
+ * second time and nothing is restored, because the accounts are already gone - but
+ * the row loses its vault binding and is left claiming inline credentials it does
+ * not have, with no error anywhere.
+ *
+ * (The mirror image - a form that loaded a VAULT-BOUND host saving after a stale
+ * convert - cannot happen this way: which credential a save writes is decided by
+ * what the form loaded, not by what is stored now, so a form that loaded a bound
+ * row keeps writing `{kind:"identity"}` back whatever changed underneath it.)
  *
  * Carries `hostId` so a caller can re-read the record it was refused against
  * without having to hold one.
