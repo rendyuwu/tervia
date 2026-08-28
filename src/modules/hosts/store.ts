@@ -1,5 +1,6 @@
 import type { StoreRecovery } from "@/lib/storeRecovery";
 import { tauriSecretsIo } from "@/modules/vault/adapters";
+import { hostsUsingIdentity } from "@/modules/vault/refs";
 import type { SshSecretValues } from "@/modules/vault/resolve";
 import type { SecretInput } from "@/modules/vault/store";
 import {
@@ -1084,10 +1085,11 @@ export function createHostsStore(io: HostsIo): HostsStore {
     );
   }
 
+  // Through the shared lookup, so the hosts this refuses a delete over are exactly
+  // the hosts the Vault page lists as holders. Two implementations of one question
+  // is how a delete refused for reasons a page does not show gets shipped.
   const identityHostRefs: IdentityHostRefs = async (identityId) =>
-    (await listHosts())
-      .filter((h) => h.credential.kind === "identity" && h.credential.identityId === identityId)
-      .map(hostRef);
+    hostsUsingIdentity(await listHosts(), identityId);
 
   return {
     listHosts,

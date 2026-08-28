@@ -1,3 +1,4 @@
+import { hasWordBoundaryMatch } from "@/lib/searchTiers";
 import type { VaultIdentity } from "@/modules/vault/types";
 
 import type { Host, HostGroup } from "./types";
@@ -38,16 +39,6 @@ export type HostSearchRow = { host: Host; username?: string; groupName?: string 
  * is assignable to it, so a caller holding one passes it straight in.
  */
 export type IdentityLookup = { identities: ReadonlyMap<string, VaultIdentity> };
-
-// Word-boundary delimiters for tier 4. Matches the punctuation people actually
-// put in host and machine names ("prod-db-01", "prod_db", "db.internal",
-// "prod db"); anything else falls through to the tier-5 plain substring test.
-const WORD_BOUNDARY = /[.\-_ ]/;
-
-/** True when `query` starts one of `value`'s delimiter-separated words. */
-function hasWordBoundaryMatch(value: string, query: string): boolean {
-  return value.split(WORD_BOUNDARY).some((word) => word.length > 0 && word.startsWith(query));
-}
 
 /**
  * The strongest tier `row` qualifies for against a lowercased, non-empty

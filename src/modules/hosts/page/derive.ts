@@ -1,3 +1,4 @@
+import { identityMissingSecret } from "@/modules/vault/refs";
 import type {
   RdpInlineCredentials,
   SshInlineCredentials,
@@ -94,27 +95,6 @@ function sshInlineMissing(cred: SshInlineCredentials): boolean {
   }
 }
 
-/** The same question against an IDENTITY's flags, plus the key's - an identity
- *  naming a key whose `hasPrivateKey` is false is as broken as an inline host
- *  with no key, and `resolveIdentity` throws on both. */
-function sshIdentityMissing(identity: VaultIdentity, keys: VaultSnapshot["keys"]): boolean {
-  switch (identity.authMode) {
-    case "agent":
-      return false;
-    case "password":
-      return !identity.hasPassword;
-    case "key": {
-      if (!identity.keyId) return true;
-      const key = keys.get(identity.keyId);
-      return !key || !key.hasPrivateKey;
-    }
-    default: {
-      const unhandled: never = identity.authMode;
-      throw new Error(`hosts: unhandled auth mode ${String(unhandled)}`);
-    }
-  }
-}
-
 /** RDP asks about the password and nothing else. */
 function rdpInlineMissing(cred: RdpInlineCredentials): boolean {
   return !cred.hasPassword;
@@ -143,7 +123,7 @@ export function missingSecret(host: Host, vault: VaultSnapshot): boolean {
     // as fine: the row cannot connect at all, and `resolveSshAuth` throws
     // "identity … no longer exists" the moment it is tried.
     if (!identity) return true;
-    return sshIdentityMissing(identity, vault.keys);
+    return identityMissingSecret(identity, vault.keys);
   }
   const cred = host.credential;
   if (cred.kind === "inline") return rdpInlineMissing(cred);

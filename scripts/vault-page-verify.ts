@@ -510,6 +510,54 @@ console.log("\n[10] refs.ts imports Host as a TYPE, never as a value");
   );
 }
 
+// --- 11. hosts/search.ts shares the word-boundary primitive -----------------
+
+console.log("\n[11] hosts/search.ts imports the shared word-boundary check, no local copy");
+{
+  const searchSrc = readFileSync(join(root, "src/modules/hosts/search.ts"), "utf8");
+  ok(
+    "imports hasWordBoundaryMatch from the shared module",
+    /from "@\/lib\/searchTiers"/.test(searchSrc),
+  );
+  ok("does not redefine WORD_BOUNDARY locally", !searchSrc.includes("const WORD_BOUNDARY"));
+}
+
+// --- 12. hosts/page/derive.ts shares the missing-secret answer --------------
+
+console.log("\n[12] hosts/page/derive.ts imports the shared missing-secret check, no local copy");
+{
+  const deriveSrc = readFileSync(join(root, "src/modules/hosts/page/derive.ts"), "utf8");
+  ok(
+    "imports identityMissingSecret from the shared module",
+    /from "@\/modules\/vault\/refs"/.test(deriveSrc),
+  );
+  ok(
+    "does not redefine sshIdentityMissing locally",
+    !deriveSrc.includes("function sshIdentityMissing"),
+  );
+}
+
+// --- 13. hosts/store.ts shares the identity-holder lookup --------------------
+
+console.log("\n[13] hosts/store.ts's identityHostRefs delegates to the shared lookup");
+{
+  const storeSrc = readFileSync(join(root, "src/modules/hosts/store.ts"), "utf8");
+  ok("calls hostsUsingIdentity(", storeSrc.includes("hostsUsingIdentity("));
+  ok(
+    "does not re-derive the predicate inline",
+    !storeSrc.includes("credential.identityId === identityId"),
+  );
+}
+
+// --- 14. vault/store.ts shares the key-holder lookup -------------------------
+
+console.log("\n[14] vault/store.ts's deleteKey holder lookup delegates to the shared lookup");
+{
+  const vaultStoreSrc = readFileSync(join(root, "src/modules/vault/store.ts"), "utf8");
+  ok("calls identitiesUsingKey(", vaultStoreSrc.includes("identitiesUsingKey("));
+  ok("does not re-derive the predicate inline", !vaultStoreSrc.includes("i.keyId === id"));
+}
+
 console.log(failed === 0 ? "\nAll vault-page checks passed." : `\n${failed} check(s) FAILED.`);
 process.exit(failed === 0 ? 0 : 1);
 
@@ -533,3 +581,28 @@ process.exit(failed === 0 ? 0 : 1);
 //     (B4)                                             word-boundary check
 //   derive.ts: `id` tie-break deleted from both       section 6
 //     comparators (B5)
+//
+// Step 5 (this wave's plan) adds the cross-file half: each mutation below
+// reddens THIS file's section 11-14 check AND a pre-existing suite that now
+// depends on the same single definition, proving the delegation, not just the
+// source text, actually happened. See /tmp/wave1-step5/MUTATIONS.md.
+//
+//   refs.ts: hostsUsingIdentity returns `[]` (B6)      section 13, AND
+//                                                       hosts-store-verify's
+//                                                       "identityHostRefs names
+//                                                       every host bound to one
+//                                                       identity, across
+//                                                       protocols"
+//   refs.ts: identityMissingSecret's `key` arm         section 12, AND
+//     returns `false` (B7)                              hosts-page-verify's
+//                                                       identity-bound
+//                                                       missingSecret checks
+//   searchTiers.ts: WORD_BOUNDARY changed to /[Q]/     section 11, AND
+//     (B8)                                              hosts-search-verify's
+//                                                       tier 4 word-boundary
+//                                                       checks
+//   refs.ts: identitiesUsingKey returns `[]` (B9)      section 14, AND
+//                                                       vault-resolve-verify's
+//                                                       "a key held by two
+//                                                       identities refuses,
+//                                                       naming both"

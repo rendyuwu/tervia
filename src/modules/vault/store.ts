@@ -1,6 +1,7 @@
 import type { StoreRecovery } from "@/lib/storeRecovery";
 
 import { createTauriVaultStoreIo, tauriSecretsIo, type SecretsIo, type VaultIo } from "./adapters";
+import { identitiesUsingKey } from "./refs";
 import {
   IDENTITY_PASSWORD_FIELD,
   KEY_PASSPHRASE_FIELD,
@@ -15,7 +16,6 @@ import {
   type IdentityHostRefs,
   type VaultIdentity,
   type VaultKey,
-  type VaultRef,
 } from "./types";
 
 // The vault store: metadata and presence flags here, secrets in the keychain.
@@ -73,10 +73,6 @@ export type VaultStore = {
 /** Opaque id. Stays stable across renames so keychain accounts don't drift. */
 function newId(prefix: string): string {
   return `${prefix}-${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36)}`;
-}
-
-function toRef(record: { id: string; name: string }): VaultRef {
-  return { id: record.id, name: record.name };
 }
 
 /** Key names are compared the way a person reads them, so `" id_rsa"` and
@@ -308,7 +304,7 @@ export function createVaultStore(io: VaultIo): VaultStore {
       const key = keys.find((k) => k.id === id);
       if (!key) return;
 
-      const holders = identities.filter((i) => i.keyId === id).map(toRef);
+      const holders = identitiesUsingKey(identities, id);
       if (holders.length > 0) {
         throw new VaultInUseError(`key "${key.name}"`, "identity", holders);
       }
