@@ -2,7 +2,12 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import type { FsReadResult } from "@/lib/ipc";
-import { listSshAgentKeys, type SshAgentKey } from "@/modules/ssh/bridge";
+import { inspectSshKey, listSshAgentKeys, type SshAgentKey } from "@/modules/ssh/bridge";
+import {
+  describeKeyError,
+  describeKeyInfo,
+  type KeyInspectState,
+} from "@/modules/vault/keyInspect";
 import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useState } from "react";
@@ -124,6 +129,7 @@ export function SshCredentialSection({
 }: SshCredentialSectionProps) {
   const [agent, setAgent] = useState<AgentState>({ kind: "checking" });
   const [imported, setImported] = useState<ImportState>({ kind: "idle" });
+  const [inspected, setInspected] = useState<KeyInspectState>({ kind: "idle" });
 
   // Ask the agent what it holds whenever this mode is on screen. Cheap enough to
   // re-run on every open and every switch into the tab, which is also what makes
@@ -144,6 +150,33 @@ export function SshCredentialSection({
     if (value.authMode !== "agent") return;
     void checkAgent();
   }, [value.authMode, checkAgent]);
+
+  /**
+   * Ask the backend what this key text is, without dialing anything.
+   *
+   * Explicit rather than on every keystroke: this is an IPC round trip that runs
+   * bcrypt-pbkdf for an encrypted key, at a round count the key file's own header
+   * chooses, so firing it per character would freeze the form on a hand-edited
+   * key. A file import calls it once, and a pasted key gets a button.
+   *
+   * The passphrase is passed because an OpenSSH container answers type,
+   * fingerprint and public half WITHOUT it but seals the comment away, and every
+   * other container seals the lot - and because verifying the passphrase here is
+   * the whole reason a wrong one stops being something the user discovers at the
+   * first connect.
+   */
+  const checkKey = async (pem: string, passphrase: string) => {
+    if (!pem.trim()) {
+      setInspected({ kind: "idle" });
+      return;
+    }
+    setInspected({ kind: "checking" });
+    try {
+      setInspected(describeKeyInfo(await inspectSshKey(pem, passphrase || undefined)));
+    } catch (e) {
+      setInspected(describeKeyError(e));
+    }
+  };
 
   const pickKeyFile = async () => {
     setImported({ kind: "idle" });
@@ -181,6 +214,7 @@ export function SshCredentialSection({
       }
       onChange({ privateKey: result.content });
       setImported({ kind: "loaded", path: picked });
+      await checkKey(result.content, value.keyPassphrase);
     } catch (e) {
       setImported({
         kind: "error",
@@ -255,21 +289,38 @@ export function SshCredentialSection({
             <div className="flex flex-col gap-1">
               <Textarea
                 value={value.privateKey}
-                onChange={(e) => onChange({ privateKey: e.target.value })}
+                onChange={(e) => {
+                  onChange({ privateKey: e.target.value });
+                  // A stale "ok" panel must not sit under a key that has since
+                  // been edited - the fields it shows would describe the OLD text.
+                  setInspected({ kind: "idle" });
+                }}
                 placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
                 spellCheck={false}
                 className="h-32 font-mono text-[11px]"
               />
               <div className="flex items-center justify-between gap-2">
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  className="h-7 px-2 text-[11px]"
-                  onClick={() => void pickKeyFile()}
-                >
-                  Import from file…
-                </Button>
+                <div className="flex items-center gap-1.5">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="h-7 px-2 text-[11px]"
+                    onClick={() => void pickKeyFile()}
+                  >
+                    Import from file…
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="h-7 px-2 text-[11px]"
+                    onClick={() => void checkKey(value.privateKey, value.keyPassphrase)}
+                    disabled={inspected.kind === "checking" || value.privateKey.trim() === ""}
+                  >
+                    Check key
+                  </Button>
+                </div>
                 {imported.kind === "loaded" ? (
                   <span className="text-muted-foreground truncate text-[10.5px]">
                     Loaded {imported.path}
@@ -284,6 +335,7 @@ export function SshCredentialSection({
                   </span>
                 )}
               </div>
+              <KeyInspectPanel state={inspected} />
             </div>
           </Field>
           <Field label="Key passphrase (optional)">
@@ -390,5 +442,51 @@ function AgentPanel({ state, onRecheck }: { state: AgentState; onRecheck: () => 
         <span className="font-mono">SSH_AUTH_SOCK</span>.
       </span>
     </Field>
+  );
+}
+
+/**
+ * What `checkKey` found, rendered under the key textarea.
+ *
+ * Reports what the key IS, and nothing more: no wording here may say a key is
+ * "verified" or "safe" - that is not a question this panel, or the vault, answers.
+ * A missing `comment` is not shown as a gap: it is normal for an encrypted
+ * `openssh-key-v1` key inspected without its passphrase (see `keyInspect.ts`).
+ */
+function KeyInspectPanel({ state }: { state: KeyInspectState }) {
+  if (state.kind === "idle") return null;
+  if (state.kind === "checking") {
+    return <span className="text-muted-foreground text-[10.5px]">Reading key…</span>;
+  }
+  if (state.kind === "locked") {
+    return (
+      <span className="text-muted-foreground text-[10.5px]">
+        This key is encrypted and hides its details. Enter the key passphrase below and press Check
+        key.
+      </span>
+    );
+  }
+  if (state.kind === "error") {
+    return <span className="text-destructive text-[10.5px]">{state.message}</span>;
+  }
+  return (
+    // Same box as the two other read-only status blocks in this editor.
+    <div className="border-border/60 bg-muted/30 flex flex-col gap-1 rounded-md border px-2 py-1.5">
+      <div className="flex items-center gap-2 text-[11px]">
+        <span>{state.keyType}</span>
+        {state.encrypted ? <span className="text-muted-foreground">Encrypted</span> : null}
+      </div>
+      <div className="flex min-w-0 items-center gap-1.5 font-mono text-[10.5px]">
+        <span className="text-muted-foreground shrink-0">Key fingerprint</span>
+        <span className="truncate" title={state.fingerprint}>
+          {state.fingerprint}
+        </span>
+      </div>
+      {state.comment ? (
+        <span className="text-muted-foreground truncate text-[10.5px]" title={state.comment}>
+          {state.comment}
+        </span>
+      ) : null}
+    </div>
   );
 }
