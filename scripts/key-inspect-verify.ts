@@ -66,6 +66,54 @@ function between(src: string, from: string, to: string): string {
   return src.slice(start, end);
 }
 
+function count(src: string, re: RegExp): number {
+  return [...src.matchAll(re)].length;
+}
+
+/**
+ * A single line with any `//` that starts OUTSIDE a string literal, and
+ * everything after it, cut off. Quote-aware so a URL or a literal `//` inside a
+ * string survives - same convention as `host-editor-verify.ts` and
+ * `rdp-lifetime-verify.ts`'s own `stripLineComment`, duplicated here rather than
+ * imported because this file owns no shared module to import it from.
+ */
+function stripLineComment(line: string): string {
+  let quote = "";
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (quote) {
+      if (c === "\\") i++;
+      else if (c === quote) quote = "";
+      continue;
+    }
+    if (c === '"' || c === "'" || c === "`") {
+      quote = c;
+      continue;
+    }
+    if (c === "/" && line[i + 1] === "/") return line.slice(0, i);
+  }
+  return line;
+}
+
+/**
+ * The same source with comments removed: a whole line is dropped if its
+ * trimmed text opens a `//`, `/*` or `*` comment (which is every continuation
+ * line of a prettier-formatted block or doc comment), and a trailing `//` is
+ * stripped from what is left. Used by section [5]'s whole-file safe/verified
+ * check so that check runs over what this file RENDERS rather than over a doc
+ * comment that states the rule by quoting the words it forbids.
+ */
+function stripComments(src: string): string {
+  return src
+    .split("\n")
+    .filter((line) => {
+      const t = line.trim();
+      return !(t.startsWith("//") || t.startsWith("/*") || t.startsWith("*"));
+    })
+    .map(stripLineComment)
+    .join("\n");
+}
+
 // ---------------------------------------------------------------------------
 console.log("[1] describeKeyInfo - the container's answer, translated for the panel");
 {
@@ -205,7 +253,33 @@ console.log("\n[3] vaultKeyTypeFrom - the wire name, mapped to the vault's four-
 }
 
 // ---------------------------------------------------------------------------
-console.log("\n[4] SshCredentialSection.tsx - the wiring, over the raw source");
+console.log("\n[4] stripComments - the helper this section's whole-file check depends on");
+{
+  // Proved before it is trusted, because section [5]'s safe/verified check is
+  // only as honest as this stripper: too little stripped and it fails on the
+  // rule's own wording (the gap D4 found, scoped to KeyInspectPanel's body
+  // specifically to dodge it); too much stripped, or silently vacuous, and it
+  // passes for free over a live violation sitting in real, rendered code.
+  check(
+    "drops a whole-line comment that merely NAMES a forbidden word",
+    !stripComments('// this key is now "verified" and safe\nwriteIt();').includes("verified"),
+  );
+  check(
+    "drops a TRAILING comment naming a forbidden word, not only a whole line",
+    !stripComments('const ok = true; // was: reads as "protected"').includes("protected"),
+  );
+  check(
+    "does not touch a forbidden word sitting inside a STRING literal",
+    stripComments('const s = "still safe // not a comment";').includes("safe"),
+  );
+  check(
+    "keeps the code that sits around the comment it drops",
+    stripComments("// safe\nwriteIt();").includes("writeIt();"),
+  );
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n[5] SshCredentialSection.tsx - the wiring, over the raw source");
 {
   const sectionRaw = read("src/modules/hosts/editor/SshCredentialSection.tsx");
 
@@ -214,15 +288,17 @@ console.log("\n[4] SshCredentialSection.tsx - the wiring, over the raw source");
     /import \{[^}]*\binspectSshKey\b[^}]*\}\s*from\s*"@\/modules\/ssh\/bridge";/.test(sectionRaw),
   );
 
-  // checkKey's own region: from its declaration to the next sibling declaration,
+  // checkKey's own region: from its declaration to the next sibling declaration
+  // (`invalidateInspection`, added between it and `pickKeyFile` to close D1-D3),
   // so "inside checkKey" means the innermost enclosing block rather than merely
   // somewhere nearby in the file. A distance heuristic ("within N characters of
   // the function name") would read a call sitting just past checkKey's closing
-  // brace as gated, and is exactly what let C1 and C2 hide.
+  // brace as gated, and is exactly what let C1 and C2 hide (see the mutation
+  // record at the bottom of this file).
   const checkKeyRegion = between(
     sectionRaw,
     "const checkKey = async (pem: string, passphrase: string) => {",
-    "const pickKeyFile = async () => {",
+    "const invalidateInspection = () => {",
   );
   check("checkKey's region was located", checkKeyRegion.length > 50, checkKeyRegion.length);
 
@@ -241,6 +317,83 @@ console.log("\n[4] SshCredentialSection.tsx - the wiring, over the raw source");
     checkKeyRegion,
   );
 
+  // D1: a checkKey response must be discarded unless the input it answers is
+  // still the input in the field. A generation counter needs to be three
+  // things at once - claimed before the first await (so a second call outruns
+  // a first one still in flight), and checked again on BOTH the resolved and
+  // the rejected path (so neither can slip a stale panel past a guard the
+  // other one has) - and all three are asserted, not just the counter's
+  // existence.
+  check(
+    "checkKey claims a generation before its first await, not after",
+    /const generation = \+\+inspectGeneration\.current;\s*\n\s*if \(!pem\.trim\(\)\)/.test(
+      checkKeyRegion,
+    ),
+    checkKeyRegion,
+  );
+  check(
+    "both the resolved and the rejected path gate setInspected behind that generation - not one of the two, and not neither",
+    count(
+      checkKeyRegion,
+      /if \(inspectGeneration\.current === generation\) setInspected\(result\);/g,
+    ) === 2,
+    checkKeyRegion,
+  );
+
+  // D2/D3: `invalidateInspection` is the one place that retires a stale panel,
+  // so it must exist, actually reset to idle (not merely bump a counter no
+  // renderer reads), and actually be wired to BOTH inputs checkKey consumes -
+  // not only the key body, which is the half D3 already had a comment, but no
+  // check, for.
+  const invalidateRegion = between(
+    sectionRaw,
+    "const invalidateInspection = () => {",
+    "const pickKeyFile = async () => {",
+  );
+  check(
+    "invalidateInspection's region was located",
+    invalidateRegion.length > 20,
+    invalidateRegion.length,
+  );
+  check(
+    "invalidateInspection bumps the generation AND resets the panel to idle - either alone leaves a gap the other closes",
+    invalidateRegion.includes("inspectGeneration.current += 1;") &&
+      invalidateRegion.includes('setInspected({ kind: "idle" });'),
+    invalidateRegion,
+  );
+
+  const textareaOnChangeRegion = between(
+    sectionRaw,
+    "<Textarea",
+    'placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"',
+  );
+  check(
+    "the key-body textarea's onChange region was located",
+    textareaOnChangeRegion.length > 20,
+    textareaOnChangeRegion.length,
+  );
+  check(
+    "editing the key body invalidates the panel (D3) through the shared helper, not a bare reset D1/D2's generation guard could then be bypassed by",
+    textareaOnChangeRegion.includes("invalidateInspection();"),
+    textareaOnChangeRegion,
+  );
+
+  const passphraseFieldRegion = between(
+    sectionRaw,
+    '<Field label="Key passphrase (optional)">',
+    "</Field>",
+  );
+  check(
+    "the key-passphrase field's region was located",
+    passphraseFieldRegion.length > 20,
+    passphraseFieldRegion.length,
+  );
+  check(
+    "editing the key passphrase ALSO invalidates the panel (D2) - checkKey reads this field too, so a stale panel can outlive it exactly as it can the key body",
+    passphraseFieldRegion.includes("invalidateInspection();"),
+    passphraseFieldRegion,
+  );
+
   // pickKeyFile's own region, likewise bounded by the next sibling in the file
   // rather than a fixed character window.
   const pickKeyFileRegion = between(
@@ -254,17 +407,62 @@ console.log("\n[4] SshCredentialSection.tsx - the wiring, over the raw source");
     pickKeyFileRegion.length,
   );
 
-  const onChangeAt = pickKeyFileRegion.indexOf("onChange({ privateKey: result.content });");
-  const checkKeyCallAt = pickKeyFileRegion.indexOf("checkKey(");
+  const onChangeAt = pickKeyFileRegion.indexOf("onChange({ privateKey: result.content");
+  const emptyGuardAt = pickKeyFileRegion.indexOf("if (!result.content.trim())");
+  const loadedAt = pickKeyFileRegion.indexOf('setImported({ kind: "loaded", path: picked });');
+  const checkKeyCallAt = pickKeyFileRegion.indexOf('await checkKey(result.content, "");');
   check(
-    "both the draft write and the inspection call were found inside pickKeyFile",
-    onChangeAt >= 0 && checkKeyCallAt >= 0,
-    { onChangeAt, checkKeyCallAt },
+    "the draft write, the emptiness check, the loaded status and the inspection call were all found inside pickKeyFile",
+    onChangeAt >= 0 && emptyGuardAt >= 0 && loadedAt >= 0 && checkKeyCallAt >= 0,
+    { onChangeAt, emptyGuardAt, loadedAt, checkKeyCallAt },
   );
   check(
-    "and the draft write happens BEFORE the inspection, so a failed check still leaves the picked text on screen",
-    onChangeAt >= 0 && checkKeyCallAt >= 0 && onChangeAt < checkKeyCallAt,
-    { onChangeAt, checkKeyCallAt },
+    "and they run in that order: commit the picked text, THEN check whether it was blank, THEN report loaded, THEN inspect - so a failed check still leaves the picked text on screen and a blank one is never reported as a load",
+    onChangeAt >= 0 &&
+      emptyGuardAt >= 0 &&
+      loadedAt >= 0 &&
+      checkKeyCallAt >= 0 &&
+      onChangeAt < emptyGuardAt &&
+      emptyGuardAt < loadedAt &&
+      loadedAt < checkKeyCallAt,
+    { onChangeAt, emptyGuardAt, loadedAt, checkKeyCallAt },
+  );
+
+  // D6a: a passphrase left over from whatever key WAS in the field must not be
+  // reused against a newly picked one.
+  check(
+    "picking a new key file clears the passphrase field rather than reusing whatever was already in it",
+    /onChange\(\{ privateKey: result\.content, keyPassphrase: "" \}\);/.test(pickKeyFileRegion),
+    pickKeyFileRegion,
+  );
+  check(
+    "and checks the newly picked key with that blank passphrase, not the stale value.keyPassphrase",
+    pickKeyFileRegion.includes('await checkKey(result.content, "");'),
+    pickKeyFileRegion,
+  );
+
+  // D6b: the empty-file guard's own region, so its message and its cleanup are
+  // asserted to be INSIDE the branch only a blank file takes, not merely
+  // present somewhere in pickKeyFile.
+  const emptyGuardRegion = between(
+    pickKeyFileRegion,
+    "if (!result.content.trim())",
+    'setImported({ kind: "loaded"',
+  );
+  check(
+    "the empty-file guard's own region was located",
+    emptyGuardRegion.length > 20,
+    emptyGuardRegion.length,
+  );
+  check(
+    'a whitespace-only picked file reports a diagnostic - "Picked file is empty" - instead of silently landing on "Loaded <path>" beside a panel showing nothing',
+    /kind:\s*"error"/.test(emptyGuardRegion) && emptyGuardRegion.includes('"Picked file is empty"'),
+    emptyGuardRegion,
+  );
+  check(
+    "and it retires any inspection panel already on screen from whatever key was there before",
+    emptyGuardRegion.includes("invalidateInspection();"),
+    emptyGuardRegion,
   );
 
   check(
@@ -272,24 +470,41 @@ console.log("\n[4] SshCredentialSection.tsx - the wiring, over the raw source");
     /Key fingerprint/.test(sectionRaw),
   );
 
-  // The two-hard-constraints trap: nothing the panel RENDERS may claim a secret
-  // is safer than it is. Scoped to the panel component's own body (from its
-  // declaration to the end of the file, where it is the last thing defined)
-  // rather than the whole file, because the doc comment right above it names
-  // "safe"/"verified" explicitly to state the rule it is not allowed to violate -
-  // checking the whole file would fail on the rule's own wording.
-  const panelAt = sectionRaw.indexOf("function KeyInspectPanel(");
-  check("KeyInspectPanel's declaration was located", panelAt >= 0, panelAt);
-  const panelBody = panelAt >= 0 ? sectionRaw.slice(panelAt) : "";
+  // D5: "Encrypted" alone, beside the algorithm, in an editor that is about to
+  // persist the key body to a mode-0600 plaintext JSON file, reads as a claim
+  // about THIS app's storage rather than the key file's own passphrase. The
+  // label must name the object the encryption belongs to.
   check(
-    'no copy the panel renders claims the key or the vault is "safe" or "verified"',
-    !/\bsafe\b|\bverified\b/i.test(panelBody),
-    /.{0,40}(\bsafe\b|\bverified\b).{0,40}/i.exec(panelBody)?.[0],
+    'the encrypted badge names what is encrypted (the key FILE) rather than the bare, misreadable word "Encrypted"',
+    sectionRaw.includes("Key file is passphrase-encrypted") &&
+      !/>Encrypted<\/span>/.test(sectionRaw),
+    sectionRaw.match(/<span[^>]*>[^<]*[Ee]ncrypted[^<]*<\/span>/)?.[0],
+  );
+
+  // The two-hard-constraints trap: nothing this FILE renders may claim a secret
+  // is safer than it is. D4: scoping this to KeyInspectPanel's own body missed
+  // the "Check key" button and the imported-file status line - same visual
+  // block, same ability to overclaim - so this now runs over the WHOLE file,
+  // comments stripped, rather than one component's tail. Comments are stripped
+  // rather than excluded by carving out one doc comment's byte range, because a
+  // doc comment naming these words to STATE the rule is not the only place in
+  // this file allowed to name them, and is not the only place a future comment
+  // might.
+  const strippedSection = stripComments(sectionRaw);
+  check(
+    "stripping comments left real code behind - not an empty or near-empty string, which would pass the next check for free",
+    strippedSection.length > 3000 && strippedSection.includes("function KeyInspectPanel("),
+    strippedSection.length,
+  );
+  check(
+    'no copy this file renders - the panel, the "Check key" button, or the imported-file status line - claims a key or the vault is "safe", "verified" or "protected"',
+    !/\bsafe\b|\bverified\b|\bprotected\b/i.test(strippedSection),
+    /.{0,40}(\bsafe\b|\bverified\b|\bprotected\b).{0,40}/i.exec(strippedSection)?.[0],
   );
 }
 
 // ---------------------------------------------------------------------------
-console.log("\n[5] the Rust side's own messages have not silently changed under this UI's feet");
+console.log("\n[6] the Rust side's own messages have not silently changed under this UI's feet");
 {
   const modRs = read("src-tauri/src/modules/ssh/mod.rs");
   for (const substring of [
@@ -318,9 +533,10 @@ if (failed > 0) console.error(`${failed} check(s) FAILED.`);
 //                                                       stand-in"
 //   C2: `onChange({ privateKey: pem });` added          "and checkKey never calls
 //     inside checkKey                                    onChange..."
-//   C3: `await checkKey(...)` moved above               "and the draft write
-//     `onChange({ privateKey: result.content })`         happens BEFORE the
-//     in pickKeyFile                                     inspection..."
+//   C3: `await checkKey(...)` moved above               "and they run in that
+//     `onChange({ privateKey: result.content,             order: commit the picked
+//     keyPassphrase: "" })` in pickKeyFile                 text, THEN check whether
+//                                                       it was blank..."
 //   C4: mod.rs's ERR_DSA text changed to "nope"         "mod.rs still carries the
 //     (src-tauri/, restored by hash - see the wave        message naming "DSA keys
 //     orchestrator's mutation log, not this repo)         are not supported""
@@ -328,4 +544,38 @@ if (failed > 0) console.error(`${failed} check(s) FAILED.`);
 //     unconditionally                                    section [3] (every row
 //                                                       whose expectation was not
 //                                                       already "unknown")
+//
+// D1-D6 (this pass, live UI defects rather than the wiring shape above):
+//
+//   D1: both `if (inspectGeneration.current ===          count(...) === 2 check:
+//     generation)` guards in checkKey replaced with        "both the resolved and
+//     bare `setInspected(result);`                         the rejected path gate
+//                                                       setInspected behind that
+//                                                       generation..."
+//   D1: `const generation = ++inspectGeneration.current;`  "checkKey claims a
+//     moved to AFTER the `if (!pem.trim())` guard            generation before its
+//                                                       first await, not after"
+//   D2: `invalidateInspection();` deleted from the         "editing the key
+//     passphrase Input's onChange                           passphrase ALSO
+//                                                       invalidates the panel
+//                                                       (D2)..."
+//   D3: textarea onChange's `invalidateInspection();`      "editing the key body
+//     reverted to a bare `setInspected({ kind: "idle" });`   invalidates the panel
+//                                                       (D3) through the shared
+//                                                       helper..."
+//   D6a: `keyPassphrase: ""` dropped from pickKeyFile's     "picking a new key file
+//     `onChange` call                                       clears the passphrase
+//                                                       field..."
+//   D6b: the `if (!result.content.trim())` branch          "the empty-file guard's
+//     deleted from pickKeyFile                               own region was
+//                                                       located" (region collapses
+//                                                       to length 0)
+//   D6b: the branch kept but its `invalidateInspection();`  "and it retires any
+//     line removed                                          inspection panel
+//                                                       already on screen..."
+//   D5: "Key file is passphrase-encrypted" reverted to      the D5 check itself
+//     bare `Encrypted`
+//   D4: `verified` written into KeyInspectPanel's           "no copy this file
+//     rendered JSX (not a comment)                          renders...safe...
+//                                                       verified...protected"
 process.exit(failed === 0 ? 0 : 1);

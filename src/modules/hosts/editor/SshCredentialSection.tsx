@@ -10,7 +10,7 @@ import {
 } from "@/modules/vault/keyInspect";
 import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { Field, ToggleButton } from "./FormControls";
 import type { SshCredentialDraft } from "./types";
@@ -130,6 +130,14 @@ export function SshCredentialSection({
   const [agent, setAgent] = useState<AgentState>({ kind: "checking" });
   const [imported, setImported] = useState<ImportState>({ kind: "idle" });
   const [inspected, setInspected] = useState<KeyInspectState>({ kind: "idle" });
+  // What `inspected` currently describes: the (pem, passphrase) pair as of the
+  // last `checkKey` call that is still allowed to write to `inspected`. Bumped
+  // by `checkKey` itself, so a second call outruns and discards a first one
+  // still in flight, and by `invalidateInspection`, so an edit to either input
+  // does the same to a call already in flight over the text before the edit.
+  // A response may only ever repaint the panel while it still names the
+  // generation it was asked to answer for.
+  const inspectGeneration = useRef(0);
 
   // Ask the agent what it holds whenever this mode is on screen. Cheap enough to
   // re-run on every open and every switch into the tab, which is also what makes
@@ -166,16 +174,39 @@ export function SshCredentialSection({
    * first connect.
    */
   const checkKey = async (pem: string, passphrase: string) => {
+    // Claim this generation before the first await, so a call already in
+    // flight for an older (pem, passphrase) pair can no longer win a race
+    // against this one - see `inspectGeneration`.
+    const generation = ++inspectGeneration.current;
     if (!pem.trim()) {
       setInspected({ kind: "idle" });
       return;
     }
     setInspected({ kind: "checking" });
     try {
-      setInspected(describeKeyInfo(await inspectSshKey(pem, passphrase || undefined)));
+      const result = describeKeyInfo(await inspectSshKey(pem, passphrase || undefined));
+      // Discard rather than render if a newer call - or an edit to either
+      // input, via `invalidateInspection` - has since moved the generation on.
+      if (inspectGeneration.current === generation) setInspected(result);
     } catch (e) {
-      setInspected(describeKeyError(e));
+      const result = describeKeyError(e);
+      if (inspectGeneration.current === generation) setInspected(result);
     }
+  };
+
+  /**
+   * What every edit to either input `checkKey` consumed must do to the panel
+   * it produced: the panel names an algorithm, a fingerprint and a comment
+   * that describe ONE (pem, passphrase) pair, and neither input may change
+   * out from under it while it still claims to describe them. Bumping the
+   * generation here, not only inside `checkKey`, is what closes the passphrase
+   * side of that: clearing or editing the passphrase after a successful check
+   * has no new `checkKey` call to race against, so without this the response
+   * already delivered would simply sit there, unretracted.
+   */
+  const invalidateInspection = () => {
+    inspectGeneration.current += 1;
+    setInspected({ kind: "idle" });
   };
 
   const pickKeyFile = async () => {
@@ -212,9 +243,23 @@ export function SshCredentialSection({
         });
         return;
       }
-      onChange({ privateKey: result.content });
+      // A freshly picked file is a different key from whatever was in the
+      // field before it, so a passphrase left over from that one must not be
+      // carried into a check of this one: it would report a wrong-passphrase
+      // error against a key it was never meant to unlock.
+      onChange({ privateKey: result.content, keyPassphrase: "" });
+      if (!result.content.trim()) {
+        // The one unusable key `checkKey`'s own guard says nothing about: a
+        // blank `pem` makes it set `inspected` back to idle, so without this
+        // branch the status line would claim "Loaded <path>" beside a panel
+        // showing nothing - a silent success for the one file that has none.
+        // `validateSshCredential` still catches this at save time regardless.
+        setImported({ kind: "error", message: "Picked file is empty" });
+        invalidateInspection();
+        return;
+      }
       setImported({ kind: "loaded", path: picked });
-      await checkKey(result.content, value.keyPassphrase);
+      await checkKey(result.content, "");
     } catch (e) {
       setImported({
         kind: "error",
@@ -293,7 +338,7 @@ export function SshCredentialSection({
                   onChange({ privateKey: e.target.value });
                   // A stale "ok" panel must not sit under a key that has since
                   // been edited - the fields it shows would describe the OLD text.
-                  setInspected({ kind: "idle" });
+                  invalidateInspection();
                 }}
                 placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
                 spellCheck={false}
@@ -342,7 +387,16 @@ export function SshCredentialSection({
             <Input
               type="password"
               value={value.keyPassphrase}
-              onChange={(e) => onChange({ keyPassphrase: e.target.value })}
+              onChange={(e) => {
+                onChange({ keyPassphrase: e.target.value });
+                // The panel's "ok" and "locked" results, and any error naming
+                // a wrong passphrase, all describe the passphrase that was
+                // IN this field at check time. Editing it - correcting it,
+                // clearing it, or mistyping over a correct one - makes that
+                // description stale in exactly the way editing the key body
+                // already does above.
+                invalidateInspection();
+              }}
               className="h-8 font-mono text-[12px]"
             />
           </Field>
@@ -474,7 +528,9 @@ function KeyInspectPanel({ state }: { state: KeyInspectState }) {
     <div className="border-border/60 bg-muted/30 flex flex-col gap-1 rounded-md border px-2 py-1.5">
       <div className="flex items-center gap-2 text-[11px]">
         <span>{state.keyType}</span>
-        {state.encrypted ? <span className="text-muted-foreground">Encrypted</span> : null}
+        {state.encrypted ? (
+          <span className="text-muted-foreground">Key file is passphrase-encrypted</span>
+        ) : null}
       </div>
       <div className="flex min-w-0 items-center gap-1.5 font-mono text-[10.5px]">
         <span className="text-muted-foreground shrink-0">Key fingerprint</span>
