@@ -111,6 +111,17 @@ export function HostsBackupActions(): ReactNode {
           collapsed state's accessible name silently track whatever text the
           span happens to hold, rather than being an explicit, always-present
           label. */}
+      {/* DCR-3 (owner, 2026-08-28): the DESKTOP arrow convention - export
+          points OUT of the box, import points IN. Lucide's `Upload` is an
+          arrow leaving a tray and `Download` an arrow entering one, so the two
+          names read backwards against these two labels and that is the whole
+          swap. What shipped first was the WEB-FORM convention ("download the
+          result" / "upload your file"); both are live conventions, which is why
+          this was never a defect and why it needs a comment and a check rather
+          than looking self-evident. Accepted residual, stated when the decision
+          was made: a bare arrow still reads backwards to someone arriving from
+          web tooling. Below 420px both labels collapse and the arrow IS the
+          affordance - `scripts/hosts-header-narrow-verify.ts` owns both facts. */}
       <Button
         variant="outline"
         size="sm"
@@ -119,7 +130,7 @@ export function HostsBackupActions(): ReactNode {
         aria-label="Export…"
         className="gap-1.5"
       >
-        <Download size={13} strokeWidth={1.75} />
+        <Upload size={13} strokeWidth={1.75} />
         <span className="@max-[420px]:hidden">Export…</span>
       </Button>
       <Button
@@ -129,7 +140,7 @@ export function HostsBackupActions(): ReactNode {
         aria-label="Import…"
         className="gap-1.5"
       >
-        <Upload size={13} strokeWidth={1.75} />
+        <Download size={13} strokeWidth={1.75} />
         <span className="@max-[420px]:hidden">Import…</span>
       </Button>
       {/* The menu this replaces closed itself before a failed pick could be
