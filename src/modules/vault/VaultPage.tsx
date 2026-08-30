@@ -22,9 +22,12 @@
  * key sits in a mode-0600 plaintext file before and after this work. What a
  * shared identity buys is FEWER COPIES of one secret.
  *
- * Wave 3 adds the two editors and the New buttons; wave 4 adds
- * convert-to-vault. This wave deliberately ships no affordance that opens
- * nothing.
+ * The two editor dialogs are mounted here, one instance of each for the whole
+ * page: every affordance that opens one - both New buttons and both cards'
+ * Edit button - sets the same `identityTarget`/`keyTarget` state this file
+ * owns, and the dialog itself owns its own load and its own save. Wave 4 adds
+ * convert-to-vault and the identity picker that binds a host to one of these
+ * records.
  */
 import {
   AlertDialog,
@@ -36,14 +39,17 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import { Button } from "@/components/ui/button";
 import { InputGroup, InputGroupAddon, InputGroupInput } from "@/components/ui/input-group";
 import { toast } from "@/components/ui/toast";
 import { paneCaret } from "@/lib/paneCaret";
 import { identityHostRefs } from "@/modules/hosts/store";
 import { useHosts } from "@/modules/hosts/useHosts";
-import { Search, X } from "lucide-react";
+import { KeyRound, Plus, Search, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
+import { IdentityEditorDialog, type IdentityEditorTarget } from "./editor/IdentityEditorDialog";
+import { KeyEditorDialog, type KeyEditorTarget } from "./editor/KeyEditorDialog";
 import { IdentityCard } from "./page/IdentityCard";
 import { KeyCard } from "./page/KeyCard";
 import {
@@ -78,6 +84,8 @@ export function VaultPage(): ReactNode {
 
   const [query, setQuery] = useState("");
   const [pendingDelete, setPendingDelete] = useState<PendingDelete | null>(null);
+  const [identityTarget, setIdentityTarget] = useState<IdentityEditorTarget | null>(null);
+  const [keyTarget, setKeyTarget] = useState<KeyEditorTarget | null>(null);
 
   const searchRef = useRef<HTMLInputElement>(null);
   const pageRef = useRef<HTMLDivElement>(null);
@@ -228,6 +236,36 @@ export function VaultPage(): ReactNode {
             CLIPS in place instead of wrapping when wave 3's New buttons arrive
             beside it. The floor is what bites today. */}
         <div className="flex flex-wrap items-center gap-2">
+          {/* Both labels collapse at the same `@container` threshold the Hosts
+              page's New host button and the two backup buttons use
+              (`HostsPage.tsx:337`, `page/HostsBackupActions.tsx:134,144`), so
+              each button floors at icon + padding instead of icon-plus-text -
+              and the search box's `@max-[420px]:basis-full` rule, anticipatory
+              until now, becomes the thing that keeps it off their row.
+              `aria-label` is SEPARATE from the span for the reason
+              `HostsBackupActions.tsx:107-113` gives: a hidden span still has an
+              accessible name via the DOM, but relying on that makes the
+              collapsed button's name track whatever text the span happens to
+              hold. */}
+          <Button
+            size="sm"
+            className="gap-1.5"
+            aria-label="New identity"
+            onClick={() => setIdentityTarget({ mode: "create" })}
+          >
+            <Plus size={13} strokeWidth={2} />
+            <span className="@max-[420px]:hidden">New identity</span>
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            className="gap-1.5"
+            aria-label="New key"
+            onClick={() => setKeyTarget({ mode: "create" })}
+          >
+            <KeyRound size={13} strokeWidth={2} />
+            <span className="@max-[420px]:hidden">New key</span>
+          </Button>
           <InputGroup className="min-w-0 flex-1 @max-[420px]:min-w-40 @max-[420px]:basis-full @[480px]:min-w-40">
             <InputGroupAddon>
               <Search />
@@ -289,6 +327,7 @@ export function VaultPage(): ReactNode {
                   keyDangling={row.keyDangling}
                   hostCount={row.hostCount}
                   missingSecret={row.missingSecret}
+                  onEdit={() => setIdentityTarget({ mode: "edit", identityId: row.identity.id })}
                   onDelete={() =>
                     setPendingDelete({
                       kind: "identity",
@@ -321,6 +360,7 @@ export function VaultPage(): ReactNode {
                   vaultKey={row.key}
                   identityCount={row.identityCount}
                   missingPrivateKey={row.missingPrivateKey}
+                  onEdit={() => setKeyTarget({ mode: "edit", keyId: row.key.id })}
                   onDelete={() =>
                     setPendingDelete({
                       kind: "key",
@@ -335,6 +375,18 @@ export function VaultPage(): ReactNode {
           )}
         </VaultSection>
       </div>
+
+      {/* The page owns which editor is open; each dialog owns its own load and
+          its own save. `keyRowList` is the UNFILTERED list on purpose - the
+          picker inside the identity editor must not follow this page's search
+          box - and it is the same array the Keys section ranks, so the picker
+          and the list cannot disagree about what a key is called. */}
+      <IdentityEditorDialog
+        target={identityTarget}
+        onClose={() => setIdentityTarget(null)}
+        keyRows={keyRowList}
+      />
+      <KeyEditorDialog target={keyTarget} onClose={() => setKeyTarget(null)} />
 
       <AlertDialog
         open={pendingDelete !== null}

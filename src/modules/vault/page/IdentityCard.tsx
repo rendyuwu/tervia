@@ -4,10 +4,12 @@
  * page owns the data (the row builder, the reference counts, the missing-secret
  * answer) and this file owns only the rendering.
  *
- * No Edit action and no selection, deliberately: the identity editor lands in
- * wave 3, and a button that opens nothing is the dead-affordance class already
- * filed against this app once (a header drag that silently does nothing under a
- * rail view). Delete is here because the refusal behind it is real code today.
+ * Edit opens the identity editor (wave 3). Still no selection, no connect
+ * action and no card-level `onClick`: this card is a static row, not the
+ * interactive surface `HostCard` is, and giving it one for no caller would be
+ * the dead-affordance class already filed against this app once (a header
+ * drag that silently does nothing under a rail view). Delete is here because
+ * the refusal behind it is real code today.
  *
  * Nothing here says anything about how well a secret is protected, because
  * nothing about the vault protects one better than it was protected before:
@@ -18,7 +20,7 @@ import { Button } from "@/components/ui/button";
 import { IconTooltip } from "@/components/ui/icon-tooltip";
 import { DESTRUCTIVE_ACTION } from "@/lib/toolbarButton";
 import { cn } from "@/lib/utils";
-import { CircleAlert, KeyRound, Trash2 } from "lucide-react";
+import { CircleAlert, KeyRound, Pencil, Trash2 } from "lucide-react";
 import type { ReactNode } from "react";
 
 import type { VaultAuthMode, VaultIdentity } from "../types";
@@ -42,6 +44,11 @@ export type IdentityCardProps = {
   hostCount: number;
   /** The record names a secret it does not have. Renders as a warning pip. */
   missingSecret?: boolean;
+  /** Open the editor for this record. Required, not optional: after wave 3
+   *  there is no surface that lists these rows without being able to edit
+   *  one, and an optional callback would let a future caller render a card
+   *  whose Edit button does nothing. */
+  onEdit: () => void;
   onDelete: () => void;
 };
 
@@ -70,6 +77,7 @@ export function IdentityCard({
   keyDangling,
   hostCount,
   missingSecret,
+  onEdit,
   onDelete,
 }: IdentityCardProps): ReactNode {
   return (
@@ -114,6 +122,17 @@ export function IdentityCard({
           ) : null}
         </div>
         <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100">
+          <IconTooltip label="Edit">
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-xs"
+              aria-label={`Edit ${identity.name}`}
+              onClick={onEdit}
+            >
+              <Pencil size={12} strokeWidth={1.75} />
+            </Button>
+          </IconTooltip>
           <IconTooltip label="Delete">
             <Button
               type="button"
