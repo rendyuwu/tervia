@@ -1,8 +1,14 @@
 import { hasWordBoundaryMatch } from "@/lib/searchTiers";
 import type { Host } from "@/modules/hosts/types";
 
-import { hostsUsingIdentity, identitiesUsingKey, identityMissingSecret } from "../refs";
+import {
+  hostsUsingIdentity,
+  identitiesUsingKey,
+  identityMissingSecret,
+  keyMissingSecret,
+} from "../refs";
 import type { VaultIdentity, VaultKey } from "../types";
+import { VaultInUseError } from "../types";
 
 // Everything the Vault page derives from its three inputs - the identity list,
 // the key list and the host list - as PURE FUNCTIONS over plain data.
@@ -29,7 +35,12 @@ import type { VaultIdentity, VaultKey } from "../types";
 // the header quick-connect disagree about which hosts a query matched. They are
 // re-exported so this file stays the single import site for everything the page
 // derives; there is exactly one definition of each, in `../refs`.
-export { hostsUsingIdentity, identitiesUsingKey, identityMissingSecret } from "../refs";
+export {
+  hostsUsingIdentity,
+  identitiesUsingKey,
+  identityMissingSecret,
+  keyMissingSecret,
+} from "../refs";
 
 /** What {@link identityRows} reports for a `keyId` naming a key the vault does
  *  not have. A named label rather than `undefined`, because `undefined` already
@@ -45,6 +56,17 @@ export type IdentityRow = {
    *  `undefined` already means "names no key" - so a dangling reference would
    *  render as an identity that uses a password, which is the one thing it is not. */
   keyName?: string;
+  /** `keyId` names a key the vault does not have.
+   *
+   *  Separate from `keyName` because the label cannot carry this: a dangling
+   *  reference renders as {@link UNKNOWN_KEY_LABEL}, and a key the user
+   *  actually named "Unknown key" renders identically. Separate from
+   *  `missingSecret` because the two are not the same fact - `keyId` is
+   *  independent of `authMode` (`src/modules/vault/types.ts:107-108`), so an
+   *  identity on `password` auth with a stale `keyId` has a dangling reference
+   *  AND a working credential. A renderer must be able to warn about the chip
+   *  without calling the row broken. */
+  keyDangling: boolean;
   /** How many hosts bind to this identity. A COUNT, not the array: a zustand v5
    *  selector that builds a fresh array re-subscribes forever and throws "Maximum
    *  update depth exceeded", and a count is a primitive. The array is available
@@ -60,6 +82,10 @@ export type KeyRow = {
   key: VaultKey;
   /** How many identities name this key. Same reasoning as `hostCount`. */
   identityCount: number;
+  /** The record claims a private key the keychain does not hold. From the
+   *  shared {@link keyMissingSecret}, so this pip and the pip on every identity
+   *  row that names this key are one answer rather than two. */
+  missingPrivateKey: boolean;
 };
 
 /**
@@ -96,13 +122,16 @@ export function identityRows(
 ): IdentityRow[] {
   return identities.map((identity) => {
     let keyName: string | undefined;
+    let keyDangling = false;
     if (identity.keyId) {
       const key = keys.get(identity.keyId);
       keyName = key ? key.name : UNKNOWN_KEY_LABEL;
+      keyDangling = key === undefined;
     }
     return {
       identity,
       keyName,
+      keyDangling,
       hostCount: hostsUsingIdentity(hosts, identity.id).length,
       missingSecret: identityMissingSecret(identity, keys),
     };
@@ -115,6 +144,7 @@ export function keyRows(keys: readonly VaultKey[], identities: readonly VaultIde
   return keys.map((key) => ({
     key,
     identityCount: identitiesUsingKey(identities, key.id).length,
+    missingPrivateKey: keyMissingSecret(key),
   }));
 }
 
@@ -284,4 +314,43 @@ export function rankKeys(rows: readonly KeyRow[], query: string): KeyRow[] {
 
   matched.sort((a, b) => (a.tier !== b.tier ? a.tier - b.tier : compareKeyRows(a.row, b.row)));
   return matched.map((m) => m.row);
+}
+
+/**
+ * A refused vault delete, said in terms of what the user has to go and fix.
+ *
+ * Page COPY rather than a derivation, and it lives here anyway so the page has
+ * one import site for everything it needs from this layer - the same argument
+ * that put the three reference lookups' re-export at the top of this file.
+ *
+ * `VaultInUseError` already carries a serviceable message
+ * (`src/modules/vault/types.ts:249-260`: `cannot delete X: still used by 2
+ * hosts (a, b)`), and it is not the one to show, for the reason
+ * `deleteRefusalText` in `HostsPage.tsx:119-128` exists: "still used by" reads
+ * as a tidiness complaint, and this is not one. The holders are records that
+ * would stop being able to connect, so the copy names them AND names the edit
+ * that clears the way.
+ *
+ * `holderKind` comes from the caller rather than from the error because the
+ * error does not carry it - the noun is baked into its message string only. The
+ * caller always knows: an identity is held by hosts, a key is held by
+ * identities, and nothing else holds either.
+ *
+ * Anything that is not a refusal falls through to its own message unchanged. A
+ * keychain that refused a delete has something to say and this must not eat it.
+ */
+export function deleteRefusalText(
+  subject: string,
+  holderKind: "host" | "identity",
+  e: unknown,
+): string {
+  if (!(e instanceof VaultInUseError)) return e instanceof Error ? e.message : String(e);
+  const names = e.holders.map((h) => h.name || h.id).join(", ");
+  const one = e.holders.length === 1;
+  const noun = one ? holderKind : holderKind === "host" ? "hosts" : "identities";
+  const target = holderKind === "host" ? "another credential" : "another key";
+  return (
+    `Cannot delete ${subject}: ${e.holders.length} ${noun} still ` +
+    `${one ? "uses" : "use"} it (${names}). Point ${one ? "it" : "each of them"} at ${target} first.`
+  );
 }

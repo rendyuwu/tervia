@@ -17,10 +17,12 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
+  deleteRefusalText,
   hostsUsingIdentity,
   identitiesUsingKey,
   identityMissingSecret,
   identityRows,
+  keyMissingSecret,
   keyRows,
   rankIdentities,
   rankKeys,
@@ -29,6 +31,7 @@ import {
   type KeyRow,
 } from "../src/modules/vault/page/derive";
 import type { RdpHost, SshHost } from "../src/modules/hosts/types";
+import { VaultInUseError } from "../src/modules/vault/types";
 import type { VaultIdentity, VaultKey } from "../src/modules/vault/types";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -325,6 +328,7 @@ console.log("\n[5] rankIdentities and rankKeys: tiers, drops, empty and whitespa
   const rowOf = (i: VaultIdentity): IdentityRow => ({
     identity: i,
     keyName: undefined,
+    keyDangling: false,
     hostCount: 0,
     missingSecret: false,
   });
@@ -368,12 +372,14 @@ console.log("\n[5] rankIdentities and rankKeys: tiers, drops, empty and whitespa
   const keyNameOnly: IdentityRow = {
     identity: identity("i-key", { name: "zzzzzz", username: "zz-user" }),
     keyName: "deploy-key",
+    keyDangling: false,
     hostCount: 0,
     missingSecret: false,
   };
   const namePrefixCompetitor: IdentityRow = {
     identity: identity("i-name", { name: "deploy-box", username: "zz-user2" }),
     keyName: undefined,
+    keyDangling: false,
     hostCount: 0,
     missingSecret: false,
   };
@@ -392,12 +398,14 @@ console.log("\n[5] rankIdentities and rankKeys: tiers, drops, empty and whitespa
       domain: "corp.example.com",
     }),
     keyName: undefined,
+    keyDangling: false,
     hostCount: 0,
     missingSecret: false,
   };
   const domainCompetitor: IdentityRow = {
     identity: identity("i-domain-name", { name: "corp-box", username: "zz-user2" }),
     keyName: undefined,
+    keyDangling: false,
     hostCount: 0,
     missingSecret: false,
   };
@@ -432,6 +440,7 @@ console.log("\n[5] rankIdentities and rankKeys: tiers, drops, empty and whitespa
   const kRows: KeyRow[] = [kAlpha, kBravo, kCharlie, kDelta, kEcho, kNomatch].map((k) => ({
     key: k,
     identityCount: 0,
+    missingPrivateKey: false,
   }));
 
   // Default order by name: adbox, db, db-prod-key, nothing, prod-db-01, zzzzzz.
@@ -457,10 +466,12 @@ console.log("\n[5] rankIdentities and rankKeys: tiers, drops, empty and whitespa
   const keyTypeOnly: KeyRow = {
     key: key("k-type", { name: "zzzzzz", keyType: "ed25519" }),
     identityCount: 0,
+    missingPrivateKey: false,
   };
   const keyTypeCompetitor: KeyRow = {
     key: key("k-type-name", { name: "ed25519-prod" }),
     identityCount: 0,
+    missingPrivateKey: false,
   };
   check(
     "keyType participates at tier 5: ranks behind a tier-2 name-prefix match, not ahead or tied",
@@ -476,12 +487,14 @@ console.log("\n[6] two rows equal on name break the tie on id, both input orders
   const a: IdentityRow = {
     identity: identity("i-b", { name: "same" }),
     keyName: undefined,
+    keyDangling: false,
     hostCount: 0,
     missingSecret: false,
   };
   const b: IdentityRow = {
     identity: identity("i-a", { name: "same" }),
     keyName: undefined,
+    keyDangling: false,
     hostCount: 0,
     missingSecret: false,
   };
@@ -496,8 +509,16 @@ console.log("\n[6] two rows equal on name break the tie on id, both input orders
     ["i-a", "i-b"],
   );
 
-  const ka: KeyRow = { key: key("k-b", { name: "same" }), identityCount: 0 };
-  const kb: KeyRow = { key: key("k-a", { name: "same" }), identityCount: 0 };
+  const ka: KeyRow = {
+    key: key("k-b", { name: "same" }),
+    identityCount: 0,
+    missingPrivateKey: false,
+  };
+  const kb: KeyRow = {
+    key: key("k-a", { name: "same" }),
+    identityCount: 0,
+    missingPrivateKey: false,
+  };
   check(
     "rankKeys forward input order: id order wins the tie",
     rankKeys([ka, kb], "").map((r) => r.key.id),
@@ -517,6 +538,7 @@ console.log("\n[7] mixed-case name vs lowercase query, and the reverse, both fol
   const mixedName: IdentityRow = {
     identity: identity("i-1", { name: "ProdBox" }),
     keyName: undefined,
+    keyDangling: false,
     hostCount: 0,
     missingSecret: false,
   };
@@ -528,6 +550,7 @@ console.log("\n[7] mixed-case name vs lowercase query, and the reverse, both fol
   const lowerName: IdentityRow = {
     identity: identity("i-2", { name: "prodbox" }),
     keyName: undefined,
+    keyDangling: false,
     hostCount: 0,
     missingSecret: false,
   };
@@ -537,13 +560,21 @@ console.log("\n[7] mixed-case name vs lowercase query, and the reverse, both fol
     ["i-2"],
   );
 
-  const mixedKey: KeyRow = { key: key("k-1", { name: "DeployKey" }), identityCount: 0 };
+  const mixedKey: KeyRow = {
+    key: key("k-1", { name: "DeployKey" }),
+    identityCount: 0,
+    missingPrivateKey: false,
+  };
   check(
     "rankKeys: mixed-case name matches a lowercase query",
     rankKeys([mixedKey], "deploykey").map((r) => r.key.id),
     ["k-1"],
   );
-  const lowerKey: KeyRow = { key: key("k-2", { name: "deploykey" }), identityCount: 0 };
+  const lowerKey: KeyRow = {
+    key: key("k-2", { name: "deploykey" }),
+    identityCount: 0,
+    missingPrivateKey: false,
+  };
   check(
     "rankKeys: lowercase name matches a mixed-case query",
     rankKeys([lowerKey], "DeployKey").map((r) => r.key.id),
@@ -566,11 +597,13 @@ console.log(
   const fp: KeyRow = {
     key: key("k-fp", { name: "zzzzzz", fingerprint: "SHA256:AbCdEf" }),
     identityCount: 0,
+    missingPrivateKey: false,
   };
 
   const subForPrefixed: KeyRow = {
     key: key("k-sub-1", { name: "xxsha256:abcxx" }),
     identityCount: 0,
+    missingPrivateKey: false,
   };
   check(
     "query 'sha256:abc': fingerprint row ranks ahead of a tier-5 substring row (tier 3 beats tier 5)",
@@ -578,7 +611,11 @@ console.log(
     ["k-fp", "k-sub-1"],
   );
 
-  const subForBare: KeyRow = { key: key("k-sub-2", { name: "xxabcdefxx" }), identityCount: 0 };
+  const subForBare: KeyRow = {
+    key: key("k-sub-2", { name: "xxabcdefxx" }),
+    identityCount: 0,
+    missingPrivateKey: false,
+  };
   check(
     "query 'abcdef' (after the prefix): same, tier 3 still beats tier 5",
     rankKeys([subForBare, fp], "abcdef").map((r) => r.key.id),
@@ -596,10 +633,12 @@ console.log(
   const irrelevant1: KeyRow = {
     key: key("k-irr-1", { name: "zzzzzz1", fingerprint: "SHA256:aaaa" }),
     identityCount: 0,
+    missingPrivateKey: false,
   };
   const irrelevant2: KeyRow = {
     key: key("k-irr-2", { name: "zzzzzz2", fingerprint: "SHA256:bbbb" }),
     identityCount: 0,
+    missingPrivateKey: false,
   };
   for (const q of ["s", "sh", "sha", "sha2", "sha25", "sha256", "sha256:"]) {
     ok(
@@ -716,6 +755,137 @@ console.log("\n[14] vault/store.ts's deleteKey holder lookup delegates to the sh
   ok("does not re-derive the predicate inline", !vaultStoreSrc.includes("i.keyId === id"));
 }
 
+// --- 15. The dangling-key and missing-private-key fields --------------------
+
+console.log("\n[15] keyDangling and missingPrivateKey: separate facts, literal per row");
+{
+  const keys = [
+    key("k-1"),
+    key("k-2", { hasPrivateKey: false }),
+    key("k-3", { name: UNKNOWN_KEY_LABEL }),
+  ];
+  const keyMap = new Map(keys.map((k) => [k.id, k]));
+  const identities = [
+    identity("i-1", { authMode: "key", keyId: "k-1" }),
+    identity("i-2", { authMode: "key", keyId: "k-gone" }),
+    identity("i-3", { authMode: "password", keyId: "k-gone" }),
+    identity("i-4", { authMode: "password", keyId: undefined }),
+    identity("i-5", { authMode: "key", keyId: "k-3" }),
+  ];
+  const rows = identityRows(identities, keyMap, []);
+
+  // i-5 is the case a label cannot express: it names a key that EXISTS and is
+  // called "Unknown key", so its keyName is identical to i-2's and its
+  // keyDangling must not be.
+  check(
+    "keyName cannot tell a dangling reference from a key named 'Unknown key'",
+    [rows[1].keyName, rows[4].keyName],
+    [UNKNOWN_KEY_LABEL, UNKNOWN_KEY_LABEL],
+  );
+  check(
+    "keyDangling can - literal per row",
+    rows.map((r) => r.keyDangling),
+    [false, true, true, false, false],
+  );
+  // i-3 is the row wave 1 filed: a dangling keyId with a working password.
+  check(
+    "a dangling keyId on password auth is NOT a missing secret",
+    [rows[2].keyDangling, rows[2].missingSecret],
+    [true, false],
+  );
+  check("and on key auth it is both", [rows[1].keyDangling, rows[1].missingSecret], [true, true]);
+
+  const kRows = keyRows(keys, identities);
+  check(
+    "missingPrivateKey: literal per key - only k-2 lacks its private half",
+    kRows.map((r) => r.missingPrivateKey),
+    [false, true, false],
+  );
+  check(
+    "keyMissingSecret answers the same question the key row shows",
+    keys.map((k) => keyMissingSecret(k)),
+    kRows.map((r) => r.missingPrivateKey),
+  );
+}
+
+// --- 16. One definition of "this key has no private half" -------------------
+
+console.log("\n[16] identityMissingSecret's key arm and the key row agree, by construction");
+{
+  const good = key("k-good");
+  const bad = key("k-bad", { hasPrivateKey: false });
+  const keyMap = new Map([good, bad].map((k) => [k.id, k]));
+  for (const [k, want] of [
+    [good, false],
+    [bad, true],
+  ] as const) {
+    const onKey = identityMissingSecret(identity("i", { authMode: "key", keyId: k.id }), keyMap);
+    check(`identity on key auth naming ${k.id}`, onKey, want);
+    check(
+      `...and the key row for ${k.id} says the same`,
+      keyRows([k], []).length === 1 && keyRows([k], [])[0].missingPrivateKey,
+      want,
+    );
+  }
+  // Not covered by the two above: a key arm that ignored the shared leaf and
+  // asked `!identity.hasPassword` instead would still pass them for these
+  // fixtures. `hasPassword: false` on an identity whose KEY is fine must read
+  // as not-missing.
+  check(
+    "key auth ignores hasPassword entirely",
+    identityMissingSecret(
+      identity("i", { authMode: "key", keyId: "k-good", hasPassword: false }),
+      keyMap,
+    ),
+    false,
+  );
+}
+
+// --- 17. deleteRefusalText ---------------------------------------------------
+
+console.log("\n[17] deleteRefusalText: names the holders and the edit that clears them");
+{
+  const twoHosts = new VaultInUseError('identity "Prod root"', "host", [
+    { id: "h-1", name: "web-1" },
+    { id: "h-2", name: "db-1" },
+  ]);
+  check(
+    "two hosts holding an identity",
+    deleteRefusalText('identity "Prod root"', "host", twoHosts),
+    'Cannot delete identity "Prod root": 2 hosts still use it (web-1, db-1). ' +
+      "Point each of them at another credential first.",
+  );
+
+  const oneIdentity = new VaultInUseError('key "id_ed25519"', "identity", [
+    { id: "i-1", name: "Prod root" },
+  ]);
+  check(
+    "one identity holding a key - singular throughout",
+    deleteRefusalText('key "id_ed25519"', "identity", oneIdentity),
+    'Cannot delete key "id_ed25519": 1 identity still uses it (Prod root). ' +
+      "Point it at another key first.",
+  );
+
+  const unnamed = new VaultInUseError('key "k"', "identity", [{ id: "i-7", name: "" }]);
+  ok(
+    "a holder with no name falls back to its id",
+    deleteRefusalText('key "k"', "identity", unnamed).includes("(i-7)"),
+  );
+
+  // Anything that is not a refusal passes through untouched. A keychain error
+  // eaten here is a user staring at a failure with no reason given.
+  check(
+    "a plain Error keeps its own message",
+    deleteRefusalText('key "k"', "identity", new Error("keyring: access denied")),
+    "keyring: access denied",
+  );
+  check(
+    "and a non-Error is stringified rather than dropped",
+    deleteRefusalText('key "k"', "identity", "boom"),
+    "boom",
+  );
+}
+
 console.log(failed === 0 ? "\nAll vault-page checks passed." : `\n${failed} check(s) FAILED.`);
 process.exit(failed === 0 ? 0 : 1);
 
@@ -764,3 +934,27 @@ process.exit(failed === 0 ? 0 : 1);
 //                                                       "a key held by two
 //                                                       identities refuses,
 //                                                       naming both"
+//
+// Wave 2 step 1 adds the two new row fields, the shared key-missing leaf and
+// the refusal copy. See /tmp/wave2-derive/MUTATIONS.md for the full transcript.
+//
+//   derive.ts: identityRows' `keyDangling = key ===         section 15's
+//     undefined` changed to `keyDangling = false` (W1)        keyDangling
+//                                                              literal check
+//   derive.ts: `keyDangling = keyName === UNKNOWN_KEY_LABEL`  section 15's
+//     instead of `key === undefined` (W2)                     keyName-cannot-
+//                                                              tell pairing
+//   refs.ts: keyMissingSecret's body changed to               sections 1, 15,
+//     `return false` (W3) - CROSS-FILE                        16 in THIS file,
+//                                                              AND hosts-page-
+//                                                              verify's identity-
+//                                                              bound missingSecret
+//                                                              check (proves the
+//                                                              `key` arm actually
+//                                                              routes through the
+//                                                              shared leaf)
+//   derive.ts: deleteRefusalText's refusal branch            section 17's two
+//     changed to `return e.message` (W4)                       exact-string checks
+//   derive.ts: deleteRefusalText's guard changed to           section 17's last
+//     `if (e instanceof VaultInUseError) {...}` with the        two checks
+//     non-refusal path returning `""` (W5)

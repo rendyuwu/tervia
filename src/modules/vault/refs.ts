@@ -49,6 +49,26 @@ export function identitiesUsingKey(
 }
 
 /**
+ * Does this key name a private half it does not have?
+ *
+ * One line, and extracted anyway, because two surfaces ask it: the Vault page's
+ * key row shows a pip for it, and {@link identityMissingSecret} below asks the
+ * same question of whichever key an identity names. Two implementations of one
+ * question is how a delete refused for reasons a page does not show gets
+ * shipped - and here it would be worse than inconsistent, because the two pips
+ * sit on the same screen, one row above the other.
+ *
+ * From the `has*` flag on the record and NEVER from a keychain read, for the
+ * reason {@link identityMissingSecret} gives.
+ *
+ * `hasPassphrase` is deliberately not part of the answer: a key with no
+ * passphrase is a key with no passphrase, not a key that is missing one.
+ */
+export function keyMissingSecret(key: VaultKey): boolean {
+  return !key.hasPrivateKey;
+}
+
+/**
  * Does this identity name a secret it does not have?
  *
  * Answered from the `has*` flags on the records and NEVER from a keychain read.
@@ -75,7 +95,9 @@ export function identityMissingSecret(
     case "key": {
       if (!identity.keyId) return true;
       const key = keys.get(identity.keyId);
-      return !key || !key.hasPrivateKey;
+      // Through the shared leaf, so the pip on an identity row and the pip on
+      // the key row it points at cannot disagree.
+      return !key || keyMissingSecret(key);
     }
     default: {
       const unhandled: never = identity.authMode;
