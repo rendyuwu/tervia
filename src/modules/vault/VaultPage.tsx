@@ -46,14 +46,31 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 
 import { IdentityCard } from "./page/IdentityCard";
 import { KeyCard } from "./page/KeyCard";
-import { deleteRefusalText, identityRows, keyRows, rankIdentities, rankKeys } from "./page/derive";
+import {
+  deleteNote,
+  deleteRefusalText,
+  identityRows,
+  keyRows,
+  rankIdentities,
+  rankKeys,
+} from "./page/derive";
 import { deleteIdentity, deleteKey } from "./store";
+import type { VaultAuthMode } from "./types";
 import { useVault } from "./useVault";
 
-/** Which delete is awaiting confirmation. The NAME is carried alongside the id
- *  because the refusal message and the dialog title both need it, and the
- *  record may be gone from the store by the time either renders. */
-type PendingDelete = { kind: "identity" | "key"; id: string; name: string };
+/**
+ * Which delete is awaiting confirmation. `id` and `name` are carried
+ * alongside `kind` because the refusal message and the dialog title both need
+ * them, and the record may be gone from the store by the time either renders.
+ * `hasPassword`/`authMode` (identity) and `hasPassphrase` (key) are carried
+ * for the same reason, one level down: `deleteNote` (`page/derive.ts`)
+ * decides what the description honestly says from these fields, and it must
+ * decide from the values captured AT THE MOMENT the delete was requested, not
+ * from a second lookup into a store the record may have already left.
+ */
+type PendingDelete =
+  | { kind: "identity"; id: string; name: string; hasPassword: boolean; authMode: VaultAuthMode }
+  | { kind: "key"; id: string; name: string; hasPassphrase: boolean };
 
 export function VaultPage(): ReactNode {
   const vault = useVault();
@@ -114,8 +131,14 @@ export function VaultPage(): ReactNode {
   // zustand v5 dropped the equality-function overload and matches React's
   // `Object.is`, so a selector building a fresh array re-subscribes forever and
   // throws "Maximum update depth exceeded". `useVault()` and `useHosts()` hand
-  // back references that only change when the data does, so a memo keyed on
-  // them is correct.
+  // back references that are stable BETWEEN RENDERS - straight out of
+  // `useState`, not rebuilt by a render this component did not cause - and
+  // that is what stops the loop. They are NOT stable across a BROADCAST:
+  // `useHosts.ts:19` and `useVault.ts:38,54` each build a fresh `Map` on every
+  // `onHostsChanged`/`onVaultChanged`, identical data or not, so this page
+  // re-derives every row on every store change, not only a change that
+  // actually touches what it shows - free at this scale, worth knowing the
+  // day it is not.
   //
   // The two `[...map.values()]` spreads live HERE, inside the memos, for the
   // same reason: the row builders take arrays for the collections they iterate
@@ -162,6 +185,27 @@ export function VaultPage(): ReactNode {
   }, []);
 
   const filtering = query.trim().length > 0;
+
+  // Radix keeps `AlertDialogContent`/`AlertDialogOverlay` MOUNTED for their
+  // `data-closed:animate-out … duration-100` exit animation
+  // (`components/ui/alert-dialog.tsx:39,64`), so the dialog re-renders with
+  // `pendingDelete === null` for ~100ms on every close path - Cancel, Esc,
+  // outside-click, the X, and the Delete button itself, which nulls it as its
+  // OWN first statement in `confirmDelete` above. Reading `pendingDelete`
+  // directly in the title, description or action label would render
+  // `Delete ""?` on the way out, and - worse - the description would fall
+  // through to whichever `deleteNote` arm a `kind` of `undefined` happens to
+  // hit.
+  //
+  // `shownDelete` is the same record, held past the moment `pendingDelete` is
+  // cleared, and exists ONLY to answer "what does the dialog show" - the
+  // `open` prop below and `confirmDelete`'s own argument still key off
+  // `pendingDelete` itself, never this, so a click during the exit animation
+  // (already impossible - `open` is false) could not act on stale data even
+  // if it landed.
+  const lastDeleteRef = useRef<PendingDelete | null>(null);
+  if (pendingDelete) lastDeleteRef.current = pendingDelete;
+  const shownDelete = pendingDelete ?? lastDeleteRef.current;
 
   return (
     // `@container`, not viewport breakpoints: this page renders inside the
@@ -250,6 +294,8 @@ export function VaultPage(): ReactNode {
                       kind: "identity",
                       id: row.identity.id,
                       name: row.identity.name,
+                      hasPassword: row.identity.hasPassword,
+                      authMode: row.identity.authMode,
                     })
                   }
                 />
@@ -276,7 +322,12 @@ export function VaultPage(): ReactNode {
                   identityCount={row.identityCount}
                   missingPrivateKey={row.missingPrivateKey}
                   onDelete={() =>
-                    setPendingDelete({ kind: "key", id: row.key.id, name: row.key.name })
+                    setPendingDelete({
+                      kind: "key",
+                      id: row.key.id,
+                      name: row.key.name,
+                      hasPassphrase: row.key.hasPassphrase,
+                    })
                   }
                 />
               ))}
@@ -292,18 +343,20 @@ export function VaultPage(): ReactNode {
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>
-              Delete {pendingDelete?.kind} &quot;{pendingDelete?.name}&quot;?
+              Delete {shownDelete?.kind} &quot;{shownDelete?.name}&quot;?
             </AlertDialogTitle>
-            {/* What is deleted, and nothing about how well it was kept. The
-                store deletes this record's own secrets and refuses outright
-                while anything still references it, so there is no cascade to
-                warn about - and no claim to make about where the value was
-                sitting. */}
+            {/* What is actually deleted for THIS record, not a blanket claim
+                keyed on `kind` alone - `deleteNote` branches on the record's
+                own fields (`hasPassword`, `authMode`, `hasPassphrase`)
+                because two identities on the same `authMode` can differ on
+                what they actually have stored. Nothing here says how well a
+                secret was kept: the store deletes this record's own secrets
+                and refuses outright while anything still references it, so
+                there is no cascade to warn about either. Guarded on
+                `shownDelete`, not read unconditionally, for the same reason
+                the title reads `shownDelete` rather than `pendingDelete`. */}
             <AlertDialogDescription>
-              {pendingDelete?.kind === "key"
-                ? "Its stored private key and passphrase are deleted too."
-                : "Its stored password is deleted too."}{" "}
-              This cannot be undone.
+              {shownDelete ? deleteNote(shownDelete) : null} This cannot be undone.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -314,7 +367,7 @@ export function VaultPage(): ReactNode {
                 if (pendingDelete) confirmDelete(pendingDelete);
               }}
             >
-              Delete {pendingDelete?.kind}
+              Delete {shownDelete?.kind}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

@@ -7,7 +7,7 @@ import {
   identityMissingSecret,
   keyMissingSecret,
 } from "../refs";
-import type { VaultIdentity, VaultKey } from "../types";
+import type { VaultAuthMode, VaultIdentity, VaultKey } from "../types";
 import { VaultInUseError } from "../types";
 
 // Everything the Vault page derives from its three inputs - the identity list,
@@ -110,10 +110,14 @@ export type KeyRow = {
  * depth exceeded" outright). `hostCount` being a primitive (see its own doc)
  * fixes the LEAF, not this - the array this function returns is a new
  * reference every call regardless of what its elements are made of.
- * `useVault()` and `useHosts()` hand back stable references between
- * broadcasts (they return the store's own state, not something derived from
- * it), so a memo keyed on those plus `identities`/`keys` is safe; calling this
- * function with no memo at all is not.
+ * `useVault()` and `useHosts()` hand back references that are stable BETWEEN
+ * RENDERS - they come straight out of `useState`, not rebuilt by a render
+ * their own component did not cause - so a memo keyed on those plus
+ * `identities`/`keys` is safe; calling this function with no memo at all is
+ * not. They are NOT stable across a BROADCAST: `useHosts.ts` and `useVault.ts`
+ * each build a fresh `Map` on every `onHostsChanged`/`onVaultChanged`,
+ * identical data or not, so a real store change still re-runs every memo on
+ * this page - cheap at this scale, not a property the hooks themselves have.
  */
 export function identityRows(
   identities: readonly VaultIdentity[],
@@ -353,4 +357,64 @@ export function deleteRefusalText(
     `Cannot delete ${subject}: ${e.holders.length} ${noun} still ` +
     `${one ? "uses" : "use"} it (${names}). Point ${one ? "it" : "each of them"} at ${target} first.`
   );
+}
+
+/**
+ * The facts {@link deleteNote} needs, and no more - the page's `PendingDelete`
+ * carries `id` and `name` too (for the title and the refusal message), but
+ * this type only takes what decides which sentence is TRUE. A structural
+ * subset on purpose: the page's wider type is assignable here without a cast.
+ */
+export type DeleteNoteSubject =
+  | { kind: "identity"; hasPassword: boolean; authMode: VaultAuthMode }
+  | { kind: "key"; hasPassphrase: boolean };
+
+/**
+ * What the confirm dialog says about the keychain, said in terms of the
+ * RECORD being deleted rather than a blanket claim keyed on `kind` alone.
+ *
+ * Modelled on `deleteKeychainNote` in `HostsPage.tsx:141`, and needed for the
+ * same reason: a single sentence per kind was ONE thing for every host, but
+ * the vault's `hasPassword` on a `VaultIdentity` is independent of `authMode`
+ * (`../types.ts:106`) - one identity can be a key over SSH and the same
+ * account's password over RDP - so "its stored password is deleted too" was
+ * false for an agent- or key-authenticating identity that never got one, and
+ * silent about the one thing a key-authenticating identity's owner actually
+ * wonders: the key itself is a SEPARATE record (`../types.ts:108`) that this
+ * delete does not touch.
+ *
+ * A key has no such split - `hasPrivateKey` is not modelled here because a
+ * key row with `hasPrivateKey: false` is already the "missing private key"
+ * pip (`keyMissingSecret`), a state this dialog cannot reach: nothing can
+ * open a delete confirmation for a key it does not have. `hasPassphrase` is
+ * the only field that varies.
+ *
+ * Never claims a secret was PROTECTED - no store name, no "secure"/"securely"/
+ * "safer"/"more secure": `scripts/vault-shell-verify.ts` section 12 forbids
+ * those over `VaultPage.tsx`'s raw source, and the claim would be false
+ * regardless - a private key sits in a mode-0600 plaintext file before and
+ * after this delete. This says only what is DELETED.
+ *
+ * The store refuses outright while anything still references the record
+ * (`VaultInUseError`), so there is never a cascade to warn about here either.
+ */
+export function deleteNote(subject: DeleteNoteSubject): string {
+  if (subject.kind === "key") {
+    return subject.hasPassphrase
+      ? "Its stored private key and passphrase are deleted too."
+      : "Its stored private key is deleted too.";
+  }
+
+  const passwordNote = subject.hasPassword ? "Its stored password is deleted too." : null;
+  const keyNote =
+    subject.authMode === "key" ? "The key it uses is a separate record and is not deleted." : null;
+
+  if (passwordNote && keyNote) return `${passwordNote} ${keyNote}`;
+  if (passwordNote) return passwordNote;
+  if (keyNote) return keyNote;
+  // Agent auth with no stored password, or key auth with no stored password:
+  // this identity holds no secret of its own for the delete to touch. Said
+  // outright rather than omitted - a blank space where the other five cases
+  // all say something reads as an unfinished dialog, not as "nothing to see".
+  return "There is no stored secret to delete.";
 }
