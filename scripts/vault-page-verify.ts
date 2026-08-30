@@ -17,6 +17,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
+  deleteNote,
   deleteRefusalText,
   hostsUsingIdentity,
   identitiesUsingKey,
@@ -27,6 +28,7 @@ import {
   rankIdentities,
   rankKeys,
   UNKNOWN_KEY_LABEL,
+  type DeleteNoteSubject,
   type IdentityRow,
   type KeyRow,
 } from "../src/modules/vault/page/derive";
@@ -801,6 +803,12 @@ console.log("\n[15] keyDangling and missingPrivateKey: separate facts, literal p
     kRows.map((r) => r.missingPrivateKey),
     [false, true, false],
   );
+  // AGREEMENT BY VALUE, not structure: this compares `keys.map(keyMissingSecret)`
+  // against rows built from that SAME function, so it cannot tell delegation
+  // from duplication - a `key` arm that asked `!key.hasPrivateKey` itself
+  // instead of calling `keyMissingSecret` would satisfy this identically.
+  // Section 18's source-text check is what actually forbids the duplicate; do
+  // not mistake this one for that guarantee.
   check(
     "keyMissingSecret answers the same question the key row shows",
     keys.map((k) => keyMissingSecret(k)),
@@ -886,6 +894,165 @@ console.log("\n[17] deleteRefusalText: names the holders and the edit that clear
   );
 }
 
+// --- 18. One definition of "this key has no private half", structurally ----
+
+console.log("\n[18] refs.ts and derive.ts do not duplicate keyMissingSecret's private-half test");
+{
+  const refsSrc = readFileSync(join(root, "src/modules/vault/refs.ts"), "utf8");
+  const deriveSrc = readFileSync(join(root, "src/modules/vault/page/derive.ts"), "utf8");
+
+  // Locate keyMissingSecret's own body FIRST, as ITS OWN check: a rename here
+  // must fail loudly rather than the two checks below silently running over
+  // `null`. The anchor is the function's signature line, which mentions
+  // neither "hasPrivateKey" nor "keyMissingSecret(key)" - the two substrings
+  // checked against the captured body below - so neither of those checks can
+  // be satisfied by the anchor alone.
+  const keyMissingSecretMatch =
+    /function keyMissingSecret\(key: VaultKey\): boolean \{([\s\S]*?)\n\}/.exec(refsSrc);
+  ok("keyMissingSecret's body is located in refs.ts", keyMissingSecretMatch !== null);
+  const keyMissingSecretBody = keyMissingSecretMatch?.[1] ?? "";
+
+  // `hasPrivateKey` names the flag exactly once in the whole file. Two means
+  // the `key` arm of `identityMissingSecret` asked the question itself again
+  // instead of delegating - duplication rather than the one shared leaf the
+  // module's own top-of-file doc requires.
+  const hasPrivateKeyCount = (refsSrc.match(/hasPrivateKey/g) ?? []).length;
+  check("refs.ts names hasPrivateKey exactly once", hasPrivateKeyCount, 1);
+  ok(
+    "and that one occurrence sits inside keyMissingSecret's own body",
+    keyMissingSecretBody.includes("hasPrivateKey"),
+  );
+
+  // keyRows must never read the flag directly - it must ask the shared
+  // function instead. Scoped to keyRows's OWN body rather than the whole file:
+  // `deleteNote`'s doc comment (`derive.ts` around its `DeleteNoteSubject`
+  // type) legitimately names `hasPrivateKey` to explain why THAT function does
+  // not model it, so a whole-file "nowhere at all" ban would redden on that
+  // honest prose, not on a duplicate. The duplication Y3b actually introduces
+  // lives inside `keyRows`, so that is where the negative assertion belongs.
+  const keyRowsMatch = /function keyRows\([^)]*\): KeyRow\[\] \{([\s\S]*?)\n\}/.exec(deriveSrc);
+  ok("keyRows's body is located in derive.ts", keyRowsMatch !== null);
+  const keyRowsBody = keyRowsMatch?.[1] ?? "";
+  ok(
+    "keyRows's body does not read .hasPrivateKey directly",
+    !keyRowsBody.includes("hasPrivateKey"),
+  );
+  ok(
+    "keyRows computes missingPrivateKey by CALLING keyMissingSecret, not by reading the flag itself",
+    keyRowsBody.includes("keyMissingSecret(key)"),
+  );
+}
+
+// --- 19. deleteNote: exact sentence per record, never a protection claim ----
+
+console.log(
+  "\n[19] deleteNote: exact sentence per record, and no claim about how well a secret was kept",
+);
+{
+  const keyWithPassphrase: DeleteNoteSubject = { kind: "key", hasPassphrase: true };
+  const keyWithoutPassphrase: DeleteNoteSubject = { kind: "key", hasPassphrase: false };
+  const passwordAuthWithPassword: DeleteNoteSubject = {
+    kind: "identity",
+    authMode: "password",
+    hasPassword: true,
+  };
+  const passwordAuthWithoutPassword: DeleteNoteSubject = {
+    kind: "identity",
+    authMode: "password",
+    hasPassword: false,
+  };
+  const keyAuthWithPassword: DeleteNoteSubject = {
+    kind: "identity",
+    authMode: "key",
+    hasPassword: true,
+  };
+  const keyAuthWithoutPassword: DeleteNoteSubject = {
+    kind: "identity",
+    authMode: "key",
+    hasPassword: false,
+  };
+  const agentAuthNoPassword: DeleteNoteSubject = {
+    kind: "identity",
+    authMode: "agent",
+    hasPassword: false,
+  };
+  // Not one of the plan's minimum cases, but the honest consequence of
+  // `hasPassword` being independent of `authMode` (`../types.ts:106`): agent
+  // auth never NEEDS a password, but nothing stops the flag being true anyway,
+  // and `deleteNote` reads the flag, not the mode, for that half of its answer.
+  const agentAuthWithPassword: DeleteNoteSubject = {
+    kind: "identity",
+    authMode: "agent",
+    hasPassword: true,
+  };
+
+  check(
+    "key with a passphrase: both halves named",
+    deleteNote(keyWithPassphrase),
+    "Its stored private key and passphrase are deleted too.",
+  );
+  check(
+    "key with no passphrase: only the key named",
+    deleteNote(keyWithoutPassphrase),
+    "Its stored private key is deleted too.",
+  );
+  check(
+    "password auth with a stored password: the password, nothing about a key",
+    deleteNote(passwordAuthWithPassword),
+    "Its stored password is deleted too.",
+  );
+  check(
+    "password auth with no stored password: nothing to delete",
+    deleteNote(passwordAuthWithoutPassword),
+    "There is no stored secret to delete.",
+  );
+  check(
+    "key auth with a stored password: both the password AND the key's separateness",
+    deleteNote(keyAuthWithPassword),
+    "Its stored password is deleted too. The key it uses is a separate record and is not deleted.",
+  );
+  check(
+    "key auth with no stored password: only the key's separateness",
+    deleteNote(keyAuthWithoutPassword),
+    "The key it uses is a separate record and is not deleted.",
+  );
+  check(
+    "agent auth with no stored password: nothing to delete",
+    deleteNote(agentAuthNoPassword),
+    "There is no stored secret to delete.",
+  );
+  check(
+    "agent auth with a stored password anyway: the flag speaks, not the mode",
+    deleteNote(agentAuthWithPassword),
+    "Its stored password is deleted too.",
+  );
+
+  // Never a claim about how well the secret was kept - a private key sits in a
+  // mode-0600 plaintext file before and after this delete regardless of which
+  // sentence fires. `scripts/vault-shell-verify.ts` section 12 scans
+  // `VaultPage.tsx` and the two card files for exactly this pattern; this copy
+  // lives in `derive.ts`, which that scan never reaches. Asserted over every
+  // string the function above was shown to return, not a sample of one.
+  const everyNote = [
+    keyWithPassphrase,
+    keyWithoutPassphrase,
+    passwordAuthWithPassword,
+    passwordAuthWithoutPassword,
+    keyAuthWithPassword,
+    keyAuthWithoutPassword,
+    agentAuthNoPassword,
+    agentAuthWithPassword,
+  ].map((subject) => deleteNote(subject));
+  for (const note of everyNote) {
+    ok(
+      `${JSON.stringify(note)} makes no protection claim`,
+      !/\bsafer\b|\bsecurely\b|\bmore secure\b/i.test(note) &&
+        !note.includes("OS keychain") &&
+        !note.includes("Credential Manager"),
+    );
+  }
+}
+
 console.log(failed === 0 ? "\nAll vault-page checks passed." : `\n${failed} check(s) FAILED.`);
 process.exit(failed === 0 ? 0 : 1);
 
@@ -942,8 +1109,27 @@ process.exit(failed === 0 ? 0 : 1);
 //     undefined` changed to `keyDangling = false` (W1)        keyDangling
 //                                                              literal check
 //   derive.ts: `keyDangling = keyName === UNKNOWN_KEY_LABEL`  section 15's
-//     instead of `key === undefined` (W2)                     keyName-cannot-
-//                                                              tell pairing
+//     instead of `key === undefined` (W2)                     "keyDangling can
+//                                                              - literal per
+//                                                              row" - NOT the
+//                                                              "keyName cannot
+//                                                              tell..." check
+//                                                              this table used
+//                                                              to (wrongly)
+//                                                              credit: that one
+//                                                              asserts keyName,
+//                                                              which W2 never
+//                                                              touches. i-5's
+//                                                              fixture (a REAL
+//                                                              key named
+//                                                              "Unknown key")
+//                                                              is what makes
+//                                                              the surviving
+//                                                              check
+//                                                              discriminating -
+//                                                              it is present
+//                                                              and doing its
+//                                                              job.
 //   refs.ts: keyMissingSecret's body changed to               sections 1, 15,
 //     `return false` (W3) - CROSS-FILE                        16 in THIS file,
 //                                                              AND hosts-page-
@@ -958,3 +1144,24 @@ process.exit(failed === 0 ? 0 : 1);
 //   derive.ts: deleteRefusalText's guard changed to           section 17's last
 //     `if (e instanceof VaultInUseError) {...}` with the        two checks
 //     non-refusal path returning `""` (W5)
+//
+// Wave 2 fix pass adds section 18 (the structural duplicate-detection check
+// gap 1 of that pass names) and section 19 (`deleteNote`, previously
+// uncovered). See /tmp/wave2-fix-derivecheck/MUTATIONS.md for the full
+// transcript, including W1-W5 re-run to confirm this table is still honest.
+//
+//   Y3 (measured): refs.ts's `key` arm duplicates          section 18's
+//     `!key.hasPrivateKey` AND derive.ts's `keyRows`          "hasPrivateKey
+//     reads `!key.hasPrivateKey` directly, BOTH at once -     exactly once" AND
+//     before this pass, all of vault-page (91), hosts-page     "derive.ts names
+//     (58) and vault-shell (76) stayed EXIT=0 and              hasPrivateKey
+//     `keyMissingSecret` became a dead export unnoticed         nowhere at all"
+//   Y3a: refs.ts half of Y3 alone                           section 18's
+//                                                              "hasPrivateKey
+//                                                              exactly once"
+//   Y3b: derive.ts half of Y3 alone                         section 18's
+//                                                              "hasPrivateKey
+//                                                              nowhere at all"
+//                                                              AND "keyRows
+//                                                              computes... by
+//                                                              CALLING"
