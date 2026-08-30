@@ -127,6 +127,16 @@ check(
   "exactly one InputGroup in VaultPage.tsx",
   (vaultPageSrc.match(/<InputGroup /g) ?? []).length === 1,
 );
+const newIdentityLabelClass = findClass(
+  vaultPageSrc,
+  /<span className="([^"]*)">New identity<\/span>/,
+  "New identity button label",
+);
+const newKeyLabelClass = findClass(
+  vaultPageSrc,
+  /<span className="([^"]*)">New key<\/span>/,
+  "New key button label",
+);
 const exportLabelClass = findClass(
   backupActionsSrc,
   /<span className="([^"]*)">Export…<\/span>/,
@@ -241,6 +251,11 @@ console.log("\n[vault header] the same wrap rule and floor, on the second page t
   // three adjacent unlabelled search fields was accepted on the condition that
   // the Vault page copies this header rather than re-deriving it. If a later
   // wave needs them to differ, it has to change this line on purpose.
+  //
+  // The search box's `@max-[420px]:basis-full` rule was anticipatory in wave
+  // 2 - a single child has nothing to wrap against - and becomes load-bearing
+  // here, with two collapsible buttons (New identity, New key) now sharing
+  // its row. That is hand-off boundary 6, discharged.
   check(
     "the Vault page's search box carries the identical className string",
     vaultSearchInputGroupClass === searchInputGroupClass,
@@ -265,6 +280,18 @@ console.log("\n[vault header] the same wrap rule and floor, on the second page t
   const vaultAt480 = activeAt(vaultSearchInputGroupClass, 480);
   check("min-w-40 active again at 480px", vaultAt480.has("min-w-40"));
   check("basis-full NOT active at 480px", !vaultAt480.has("basis-full"));
+
+  // The two new header buttons collapse to icon-only at the same threshold
+  // the Hosts page's New host button and the two backup buttons use.
+  for (const [label, cls] of [
+    ["New identity", newIdentityLabelClass],
+    ["New key", newKeyLabelClass],
+  ] as const) {
+    check(`${label} label hidden at 400px`, activeAt(cls, 400).has("hidden"));
+    check(`${label} label hidden at 420px (boundary, inclusive)`, activeAt(cls, 420).has("hidden"));
+    check(`${label} label visible at 421px`, !activeAt(cls, 421).has("hidden"));
+    check(`${label} label visible at 1200px`, !activeAt(cls, 1200).has("hidden"));
+  }
 }
 
 // --- gate: what this check would catch, and what it was watched to catch ---

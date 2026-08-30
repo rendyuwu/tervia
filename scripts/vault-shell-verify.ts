@@ -43,6 +43,11 @@ const FILES = {
   identityCard: "src/modules/vault/page/IdentityCard.tsx",
   keyCard: "src/modules/vault/page/KeyCard.tsx",
   railViewArea: "src/app/components/RailViewArea.tsx",
+  identityEditorDialog: "src/modules/vault/editor/IdentityEditorDialog.tsx",
+  keyEditorDialog: "src/modules/vault/editor/KeyEditorDialog.tsx",
+  draft: "src/modules/vault/editor/draft.ts",
+  hostCard: "src/modules/hosts/page/HostCard.tsx",
+  hostsPage: "src/modules/hosts/HostsPage.tsx",
 } as const;
 
 const src = Object.fromEntries(Object.entries(FILES).map(([k, p]) => [k, read(p)])) as Record<
@@ -55,6 +60,19 @@ const src = Object.fromEntries(Object.entries(FILES).map(([k, p]) => [k, read(p)
 // EDIT, not a new file, and is deliberately excluded from every whole-suite
 // sweep below (sections 9 and 12) for that reason.
 const NEW_FILES = ["vaultPage", "identityCard", "keyCard"] as const;
+
+// Section 12's sweep is wider than section 9's: the two editor dialogs and
+// `editor/draft.ts` are where a sentence about a stored private key is most
+// likely to be written, so they join the "no false safety claim" check.
+// Section 9 must keep using NEW_FILES, not this - a dialog is portalled to
+// `document.body`, outside every `@container`, so `sm:max-w-lg` is correct
+// there and would be a false FAIL under section 9's viewport-breakpoint ban.
+const SAFETY_CLAIM_FILES = [
+  ...NEW_FILES,
+  "identityEditorDialog",
+  "keyEditorDialog",
+  "draft",
+] as const;
 
 // ============================================================================
 // Shared compiler-API helpers - sections 9, 10, 13 and 15 all ask some
@@ -574,7 +592,7 @@ console.log("\n[11. vaultKey, not key] the reserved prop name is avoided on both
 console.log(
   '\n[12. no false safety claim] "safer"/"securely"/"OS keychain" etc. appear nowhere new',
 );
-for (const key of NEW_FILES) {
+for (const key of SAFETY_CLAIM_FILES) {
   check(
     `${FILES[key]} does not name a specific secret store`,
     !/OS keychain|Credential Manager/.test(src[key]),
@@ -695,18 +713,99 @@ console.log("    UNFILTERED row list");
 }
 
 // ============================================================================
-// 14. No dead affordance.
+// 14. Every affordance opens something, and nothing else is offered yet.
 // ============================================================================
 // Protects: a button that opens nothing is the dead-affordance class already
-// filed against this app once. Wave 3 deletes items off this list as it
-// implements them, deliberately.
-console.log("\n[14. no dead affordance] no button/prop for something this wave does not implement");
-for (const label of ["New identity", "New key", "Edit", "Export", "Import"]) {
+// filed against this app once (VLT-69, a header drag that silently does
+// nothing under a rail view). Wave 2 held that line by FORBIDDING the strings;
+// wave 3 implements three of the five, so those three move from the forbidden
+// list to a positive claim - the New buttons set an editor target, the cards'
+// Edit prop does too, and both dialogs are actually rendered. Export and
+// Import stay forbidden: nothing implements them before 6g.
+console.log("\n[14] every affordance opens something; Export/Import are still not offered");
+for (const label of ["Export", "Import"]) {
   check(`VaultPage.tsx contains no "${label}" string`, !src.vaultPage.includes(label));
 }
 for (const key of ["identityCard", "keyCard"] as const) {
-  for (const prop of ["onEdit", "onSelect", "onConnect"]) {
+  for (const prop of ["onSelect", "onConnect"]) {
     check(`${FILES[key]} declares no ${prop} prop`, !src[key].includes(prop));
+  }
+  // The cards are still non-interactive containers: two icon buttons, and no
+  // focusable card. `HostCard.tsx:63,73-82` carries tabIndex/onClick/
+  // onDoubleClick/onKeyDown because that card IS interactive; adding any of
+  // them here would create a focusable element that does nothing.
+  for (const smell of ["tabIndex", "onDoubleClick", "onKeyDown"]) {
+    check(`${FILES[key]} has no ${smell}`, !src[key].includes(smell));
+  }
+}
+
+{
+  const sf = ts.createSourceFile(
+    FILES.vaultPage,
+    src.vaultPage,
+    ts.ScriptTarget.ESNext,
+    true,
+    ts.ScriptKind.TSX,
+  );
+  const body = findFunctionBody(sf, "VaultPage");
+  check("found VaultPage's function body to check", body !== null);
+
+  const buttons = body ? findOpeningElementsByTag(body, "Button", sf) : [];
+  check("found VaultPage's header buttons", buttons.length >= 2, buttons.length);
+  for (const [label, setter] of [
+    ["New identity", "setIdentityTarget"],
+    ["New key", "setKeyTarget"],
+  ] as const) {
+    const el = buttons.find((b) => jsxAttrExprText(b, "aria-label", sf) === label) ?? null;
+    check(`found the <Button aria-label="${label}">`, el !== null);
+    const onClick = el ? jsxAttrExprText(el, "onClick", sf) : null;
+    check(`${label}'s onClick expression was found`, onClick !== null);
+    if (onClick !== null) {
+      check(
+        `${label} opens an editor: its onClick calls ${setter}`,
+        onClick.includes(`${setter}(`) && onClick.includes(`mode: "create"`),
+        onClick,
+      );
+    }
+  }
+
+  // ...and the dialogs the setters open are actually rendered, with a target.
+  for (const tag of ["IdentityEditorDialog", "KeyEditorDialog"]) {
+    const els = body ? findOpeningElementsByTag(body, tag, sf) : [];
+    check(`exactly one <${tag}> is rendered`, els.length === 1, els.length);
+    const target = els[0] ? jsxAttrExprText(els[0], "target", sf) : null;
+    check(`<${tag}> is handed a target`, target !== null, target ?? undefined);
+  }
+
+  // The identity editor gets the UNFILTERED rows. Handing it `visibleKeys`
+  // would make the key picker follow the page's search box, which is a
+  // different surface's query deciding what a form can name - and it would
+  // look right in every screenshot where the box is empty.
+  const identityEditor =
+    (body ? findOpeningElementsByTag(body, "IdentityEditorDialog", sf) : [])[0] ?? null;
+  const rowsProp = identityEditor ? jsxAttrExprText(identityEditor, "keyRows", sf) : null;
+  check(
+    "the identity editor is handed keyRowList, not the filtered list",
+    rowsProp === "keyRowList",
+    rowsProp ?? undefined,
+  );
+
+  // Each card's onEdit reaches the matching setter, in edit mode.
+  for (const [tag, setter, idExpr] of [
+    ["IdentityCard", "setIdentityTarget", "row.identity.id"],
+    ["KeyCard", "setKeyTarget", "row.key.id"],
+  ] as const) {
+    const el = (body ? findOpeningElementsByTag(body, tag, sf) : [])[0] ?? null;
+    check(`found the <${tag}> call site`, el !== null);
+    const onEdit = el ? jsxAttrExprText(el, "onEdit", sf) : null;
+    check(`<${tag}> passes onEdit`, onEdit !== null);
+    if (onEdit !== null) {
+      check(
+        `${tag}'s onEdit opens the editor on THIS row, in edit mode`,
+        onEdit.includes(`${setter}(`) && onEdit.includes(`mode: "edit"`) && onEdit.includes(idExpr),
+        onEdit,
+      );
+    }
   }
 }
 
@@ -853,6 +952,99 @@ console.log("    missingPrivateKey -> the row Badge's variant AND its label");
       'KeyCard\'s row Badge LABEL also switches on missingPrivateKey: `missingPrivateKey ? "Missing private key" : …`',
       /missingPrivateKey\s*\?\s*"Missing private key"/.test(badgeText),
       badgeText,
+    );
+  }
+}
+
+// ============================================================================
+// 16. The duplicated layout strings still agree with each other.
+// ============================================================================
+// Protects: three files carry the identical containment pair and three call
+// sites carry the identical responsive grid, and nothing asserted that they
+// match. The remedy a review proposed was one shared shell; the reason it is
+// not here is that a vault-only shell would cut three copies to two -
+// `hosts/page/HostCard.tsx` is the third and lives in another module - so it
+// would shrink the property rather than close it, while rewriting hand-tested
+// code and moving the root element sections 10 and 15 anchor on. A structural
+// equality between the copies costs one section and makes a later divergence
+// deliberate, which is exactly what the search box already gets
+// (`hosts-header-narrow-verify.ts:244-247`). If a shared shell ever lands,
+// this section is what has to be deleted on purpose.
+//
+// `usageDetail` is deliberately NOT checked here: it is nine lines of copy
+// differing only in its noun, a drift in it is visible on screen rather than
+// silent, and a check per duplicated helper is the "one check per copy" this
+// section exists to avoid.
+console.log("\n[16. VLT-75 parity] the containment pair and the responsive grid still agree");
+{
+  // --- the containment pair: IdentityCard, KeyCard, HostCard ---
+  const CONTAINMENT_TOKEN = /^\[(contain-intrinsic-size|content-visibility):/;
+  const containmentTexts: string[] = [];
+  for (const [key, functionName] of [
+    ["identityCard", "IdentityCard"],
+    ["keyCard", "KeyCard"],
+    ["hostCard", "HostCard"],
+  ] as const) {
+    const sf = ts.createSourceFile(
+      FILES[key],
+      src[key],
+      ts.ScriptTarget.ESNext,
+      true,
+      ts.ScriptKind.TSX,
+    );
+    const body = findFunctionBody(sf, functionName);
+    check(`found ${functionName}'s function body to check`, body !== null);
+    const root = body && findReturnedJsxRoot(body);
+    check(`found ${functionName}'s own root returned JSX element`, root !== null);
+    const classValue = root && classNameAttrValue(root, sf);
+    check(`found ${FILES[key]}'s root element's className attribute`, classValue !== null);
+    const classText = classValue ? literalClassNameText(classValue) : "";
+    check(
+      `${FILES[key]}'s root className is non-trivial (extraction sanity)`,
+      classText.length > "[contain-intrinsic-size:auto_100px]".length,
+      classText,
+    );
+    const tokens = classText
+      .split(/\s+/)
+      .filter((t) => CONTAINMENT_TOKEN.test(t))
+      .sort();
+    check(
+      `${FILES[key]}'s root carries exactly two containment tokens`,
+      tokens.length === 2,
+      tokens.join(" "),
+    );
+    containmentTexts.push(tokens.join(" "));
+  }
+  check(
+    "the containment pair is identical across IdentityCard, KeyCard and HostCard",
+    containmentTexts.every((t) => t === containmentTexts[0]),
+    containmentTexts.join(" | "),
+  );
+
+  // --- the responsive grid: two call sites on VaultPage, one on HostsPage ---
+  const GRID_RE = /<div className="(grid [^"]*)">/g;
+  const vaultGridMatches = [...src.vaultPage.matchAll(GRID_RE)].map((m) => m[1]);
+  const hostsGridMatches = [...src.hostsPage.matchAll(GRID_RE)].map((m) => m[1]);
+  check(
+    "VaultPage.tsx has exactly 2 responsive-grid divs",
+    vaultGridMatches.length === 2,
+    vaultGridMatches.length,
+  );
+  check(
+    "HostsPage.tsx has exactly 1 responsive-grid div",
+    hostsGridMatches.length === 1,
+    hostsGridMatches.length,
+  );
+  if (vaultGridMatches.length === 2 && hostsGridMatches.length === 1) {
+    check(
+      "VaultPage's two grid strings are equal to each other",
+      vaultGridMatches[0] === vaultGridMatches[1],
+      vaultGridMatches.join(" | "),
+    );
+    check(
+      "VaultPage's grid string equals HostsPage's",
+      vaultGridMatches[0] === hostsGridMatches[0],
+      [vaultGridMatches[0], hostsGridMatches[0]].join(" | "),
     );
   }
 }
