@@ -1,5 +1,6 @@
 import { PagePlaceholder } from "@/components/PagePlaceholder";
 import { type RailViewKind } from "@/modules/tabs";
+import { VaultPage } from "@/modules/vault/VaultPage";
 
 /**
  * The body of a rail view - a page shown OVER the tab area instead of in it
@@ -17,8 +18,9 @@ import { type RailViewKind } from "@/modules/tabs";
 export function RailViewArea({ view }: { view: RailViewKind }) {
   switch (view) {
     case "vault":
-      // 6e replaces this with the real vault UI (`modules/vault`).
-      return <PagePlaceholder page="vault" />;
+      // No props: mounted only while this view is shown (`WorkspaceArea.tsx:142`)
+      // - see `VaultPage.tsx` for why its caret claim is keyed on `[]`, not onScreen.
+      return <VaultPage />;
     case "forwards":
       // 6f replaces this with the real port-forwarding UI.
       return <PagePlaceholder page="forwards" />;
