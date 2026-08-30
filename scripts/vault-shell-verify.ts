@@ -57,6 +57,132 @@ const src = Object.fromEntries(Object.entries(FILES).map(([k, p]) => [k, read(p)
 const NEW_FILES = ["vaultPage", "identityCard", "keyCard"] as const;
 
 // ============================================================================
+// Shared compiler-API helpers - sections 9, 10, 13 and 15 all ask some
+// variant of "what does THIS element's THIS attribute actually say", never
+// "does this string appear somewhere in the file": a plain substring check
+// on the raw source is satisfied by a comment that merely mentions the same
+// text, which is exactly the flank left open in the first draft of sections
+// 9 and 10.
+// ============================================================================
+
+/** The function DECLARATION body named `name`, or `null` if there is none.
+ *  `IdentityCard`, `KeyCard` and `VaultPage` are all plain
+ *  `export function Name(...) { ... }` declarations - never an arrow bound to
+ *  a `const` - so this one shape covers every call site below. */
+function findFunctionBody(root: ts.Node, name: string): ts.Node | null {
+  let result: ts.Node | null = null;
+  const visit = (n: ts.Node): void => {
+    if (ts.isFunctionDeclaration(n) && n.name?.text === name && n.body) result = n.body;
+    ts.forEachChild(n, visit);
+  };
+  visit(root);
+  return result;
+}
+
+/** The JSX element a function body's own `return (...)` renders, unwrapping
+ *  parentheses - i.e. what the component actually puts on screen, not any
+ *  JSX elsewhere in its body (a helper it calls, for instance). */
+function findReturnedJsxRoot(
+  functionBody: ts.Node,
+): ts.JsxElement | ts.JsxSelfClosingElement | null {
+  let result: ts.JsxElement | ts.JsxSelfClosingElement | null = null;
+  const visit = (n: ts.Node): void => {
+    if (ts.isReturnStatement(n) && n.expression) {
+      let expr: ts.Expression = n.expression;
+      while (ts.isParenthesizedExpression(expr)) expr = expr.expression;
+      if (ts.isJsxElement(expr) || ts.isJsxSelfClosingElement(expr)) result = expr;
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(functionBody);
+  return result;
+}
+
+/** The `className` attribute's VALUE on a JSX opening tag - a bare string
+ *  literal (`className="…"`) or an expression (`className={cn(…)}`) - or
+ *  `null` if the element has none. */
+function classNameAttrValue(
+  el: ts.JsxElement | ts.JsxSelfClosingElement,
+  sf: ts.SourceFile,
+): ts.StringLiteral | ts.Expression | null {
+  const opening = ts.isJsxElement(el) ? el.openingElement : el;
+  for (const attr of opening.attributes.properties) {
+    if (ts.isJsxAttribute(attr) && attr.name.getText(sf) === "className" && attr.initializer) {
+      if (ts.isStringLiteral(attr.initializer)) return attr.initializer;
+      if (ts.isJsxExpression(attr.initializer) && attr.initializer.expression) {
+        return attr.initializer.expression;
+      }
+    }
+  }
+  return null;
+}
+
+/** Every STRING-LITERAL argument a `cn(...)` call is given - recursing into
+ *  nested calls and both arms of a ternary - space-joined: the class names
+ *  actually applied at runtime, read from the AST's own string-literal
+ *  nodes. A `//` comment sitting between two arguments is trivia BETWEEN
+ *  nodes, never inside one, so it cannot leak into this text the way it
+ *  leaks into a raw `src.includes(...)` scan of the whole file. */
+function literalClassNameText(value: ts.StringLiteral | ts.Expression): string {
+  if (ts.isStringLiteral(value) || ts.isNoSubstitutionTemplateLiteral(value)) return value.text;
+  if (ts.isCallExpression(value)) return value.arguments.map(literalClassNameText).join(" ");
+  if (ts.isConditionalExpression(value)) {
+    return [literalClassNameText(value.whenTrue), literalClassNameText(value.whenFalse)].join(" ");
+  }
+  return "";
+}
+
+/** Every JSX element or self-closing element in `root` whose tag is
+ *  `tagName`, returned as its OPENING element (so callers read attributes off
+ *  either shape uniformly). */
+function findOpeningElementsByTag(
+  root: ts.Node,
+  tagName: string,
+  sf: ts.SourceFile,
+): (ts.JsxOpeningElement | ts.JsxSelfClosingElement)[] {
+  const out: (ts.JsxOpeningElement | ts.JsxSelfClosingElement)[] = [];
+  const visit = (n: ts.Node): void => {
+    if (ts.isJsxSelfClosingElement(n) && n.tagName.getText(sf) === tagName) out.push(n);
+    if (ts.isJsxOpeningElement(n) && n.tagName.getText(sf) === tagName) out.push(n);
+    ts.forEachChild(n, visit);
+  };
+  visit(root);
+  return out;
+}
+
+/** The literal SOURCE TEXT of a named attribute's expression (`{...}`) or
+ *  string value on one opening element - e.g. `variant` off `<Badge
+ *  variant={missingSecret ? "destructive" : "outline"}>` reads back
+ *  `missingSecret ? "destructive" : "outline"`. `null` if the element has no
+ *  such attribute. */
+function jsxAttrExprText(
+  el: ts.JsxOpeningElement | ts.JsxSelfClosingElement,
+  attrName: string,
+  sf: ts.SourceFile,
+): string | null {
+  for (const attr of el.attributes.properties) {
+    if (ts.isJsxAttribute(attr) && attr.name.getText(sf) === attrName && attr.initializer) {
+      if (ts.isStringLiteral(attr.initializer)) return attr.initializer.text;
+      if (ts.isJsxExpression(attr.initializer) && attr.initializer.expression) {
+        return attr.initializer.expression.getText(sf);
+      }
+    }
+  }
+  return null;
+}
+
+/** The nearest ancestor `JsxElement` (an open/children/close element, never a
+ *  self-closing one) above `node` - used to climb from an icon like
+ *  `<KeyRound />` up to the `<span>` that wraps it, when that wrapper carries
+ *  no attribute distinctive enough to search for directly. */
+function nearestAncestorJsxElement(node: ts.Node): ts.JsxElement | null {
+  for (let cur: ts.Node | undefined = node.parent; cur; cur = cur.parent) {
+    if (ts.isJsxElement(cur)) return cur;
+  }
+  return null;
+}
+
+// ============================================================================
 // 1. The rail branch was replaced, and only that branch.
 // ============================================================================
 // Protects: `RailViewArea.tsx`'s `vault` case renders `<VaultPage />`, its
@@ -333,7 +459,41 @@ console.log("\n[9. @container, not sm:/md:/lg:/xl:/2xl:] no viewport breakpoints
 for (const key of NEW_FILES) {
   check(`${FILES[key]} has no viewport breakpoint`, !/\b(sm|md|lg|xl|2xl):/.test(src[key]));
 }
-check("VaultPage.tsx uses @container", src.vaultPage.includes("@container"));
+{
+  // Compiler-verified, not `src.vaultPage.includes("@container")`: this
+  // file's own header comment on the page root (just above its `return`)
+  // SAYS "@container" in prose to explain the decision, so a plain substring
+  // check passes on that comment alone with the real `@container` deleted
+  // from the root `className` - and every `@[…]:` rule downstream, in this
+  // file and both cards, would then resolve against some other ancestor or
+  // nothing. Root only, and read from the className ATTRIBUTE's own
+  // string-literal node, which cannot see a comment sitting elsewhere in the
+  // file.
+  const sf = ts.createSourceFile(
+    FILES.vaultPage,
+    src.vaultPage,
+    ts.ScriptTarget.ESNext,
+    true,
+    ts.ScriptKind.TSX,
+  );
+  const body = findFunctionBody(sf, "VaultPage");
+  check("found VaultPage's function body to check", body !== null);
+  const root = body && findReturnedJsxRoot(body);
+  check("found VaultPage's own root returned JSX element", root !== null);
+  const classValue = root && classNameAttrValue(root, sf);
+  check("found the root element's className attribute", classValue !== null);
+  const classText = classValue ? literalClassNameText(classValue) : "";
+  check(
+    "the root element's className is non-trivial (extraction sanity)",
+    classText.length > "@container".length,
+    classText,
+  );
+  check(
+    "the root element's className token list includes @container",
+    /(^|\s)@container(?=\s|$)/.test(classText),
+    classText,
+  );
+}
 
 // ============================================================================
 // 10. content-visibility comes with its floor.
@@ -342,15 +502,44 @@ check("VaultPage.tsx uses @container", src.vaultPage.includes("@container"));
 // 0px and the scrollbar jumps while the user scrolls - the pair is
 // load-bearing, and M7 deletes exactly the half that is easy to drop by
 // accident.
-console.log("\n[10. content-visibility + its floor] both halves, on both cards");
+console.log("\n[10. content-visibility + its floor] both halves, on both cards, actually applied");
 for (const key of ["identityCard", "keyCard"] as const) {
+  const functionName = key === "identityCard" ? "IdentityCard" : "KeyCard";
+  // Compiler-verified for the same reason as section 9: M7 deleting the
+  // whole `[contain-intrinsic-size:auto_100px]` string is caught by a plain
+  // substring check just fine, but a mutation that empties that STRING
+  // LITERAL and moves the same text into a `//` comment on the line above is
+  // not - the comment and the real class both satisfy `src[key].includes`.
+  // Extracting only the STRING-LITERAL arguments actually passed to
+  // `cn(...)` on the root element cannot see a comment sitting between them.
+  const sf = ts.createSourceFile(
+    FILES[key],
+    src[key],
+    ts.ScriptTarget.ESNext,
+    true,
+    ts.ScriptKind.TSX,
+  );
+  const body = findFunctionBody(sf, functionName);
+  check(`found ${functionName}'s function body to check`, body !== null);
+  const root = body && findReturnedJsxRoot(body);
+  check(`found ${functionName}'s own root returned JSX element`, root !== null);
+  const classValue = root && classNameAttrValue(root, sf);
+  check(`found ${FILES[key]}'s root element's className attribute`, classValue !== null);
+  const classText = classValue ? literalClassNameText(classValue) : "";
   check(
-    `${FILES[key]} has [content-visibility:auto]`,
-    src[key].includes("[content-visibility:auto]"),
+    `${FILES[key]}'s root className is non-trivial (extraction sanity)`,
+    classText.length > "[content-visibility:auto]".length,
+    classText,
   );
   check(
-    `${FILES[key]} has [contain-intrinsic-size:auto_100px]`,
-    src[key].includes("[contain-intrinsic-size:auto_100px]"),
+    `${FILES[key]} applies [content-visibility:auto] on its root element`,
+    classText.includes("[content-visibility:auto]"),
+    classText,
+  );
+  check(
+    `${FILES[key]} applies [contain-intrinsic-size:auto_100px] on its root element`,
+    classText.includes("[contain-intrinsic-size:auto_100px]"),
+    classText,
   );
 }
 
@@ -415,7 +604,13 @@ for (const key of NEW_FILES) {
 // checked too, via the compiler API: `SectionEmpty`'s function body must
 // contain the literal ternary shape, not just the two identifiers somewhere
 // in scope.
-console.log("\n[13. two-way empty states] all four messages present, AND actually branched on");
+console.log(
+  "\n[13. two-way empty states] all four messages present, actually branched on (headline AND",
+);
+console.log(
+  "    hint), the predicate is hasAny && filtering, and both call sites feed hasAny from the",
+);
+console.log("    UNFILTERED row list");
 {
   const v = src.vaultPage;
   for (const msg of [
@@ -434,22 +629,69 @@ console.log("\n[13. two-way empty states] all four messages present, AND actuall
     true,
     ts.ScriptKind.TSX,
   );
+
+  // --- SectionEmpty's own body: the predicate, and BOTH ternaries it feeds.
+  // The first draft of this check only asserted the headline ternary, which
+  // Z4 (the hint's ternary collapsed to `{nothingYetHint}`) and Z1 (the
+  // predicate narrowed to `filtering` alone) both leave green.
   let sectionEmptyBody: string | null = null;
-  const visit = (n: ts.Node): void => {
+  const visitBody = (n: ts.Node): void => {
     if (ts.isFunctionDeclaration(n) && n.name?.text === "SectionEmpty" && n.body) {
       sectionEmptyBody = n.body.getText(sf);
     }
-    ts.forEachChild(n, visit);
+    ts.forEachChild(n, visitBody);
   };
-  visit(sf);
+  visitBody(sf);
   check("found SectionEmpty's function body to check", sectionEmptyBody !== null);
   if (sectionEmptyBody) {
+    check(
+      "SectionEmpty derives its predicate as `hasAny && filtering` - not `filtering` alone",
+      /const\s+matching\s*=\s*hasAny\s*&&\s*filtering/.test(sectionEmptyBody),
+      sectionEmptyBody,
+    );
     check(
       "SectionEmpty's headline actually branches: `matching ? noMatch : nothingYet`",
       /matching\s*\?\s*noMatch\s*:\s*nothingYet/.test(sectionEmptyBody),
       sectionEmptyBody,
     );
+    check(
+      "SectionEmpty's HINT branches too, not only the headline: `matching ? … : nothingYetHint`",
+      /matching\s*\?[^:]*:\s*nothingYetHint/.test(sectionEmptyBody),
+      sectionEmptyBody,
+    );
   }
+
+  // --- Both call sites feed `hasAny` from the UNFILTERED row list. `hasAny`
+  // asks "does this section have anything AT ALL, ignoring the query" - the
+  // one thing that tells `matching` apart from `filtering` alone. Feeding it
+  // from the FILTERED/visible list instead makes it agree with `filtering`
+  // exactly when the section is empty, so `noMatch` can never render: the
+  // section 13 defect, reached from the call site rather than from inside
+  // `SectionEmpty` itself, which the body-only check above cannot see.
+  const sectionEmptyCalls = findOpeningElementsByTag(sf, "SectionEmpty", sf);
+  check(
+    "found exactly two <SectionEmpty> call sites to check",
+    sectionEmptyCalls.length === 2,
+    sectionEmptyCalls.length,
+  );
+  const seenHasAny = new Set<string>();
+  for (const el of sectionEmptyCalls) {
+    const hasAnyText = jsxAttrExprText(el, "hasAny", sf);
+    check("a <SectionEmpty> call site's hasAny expression was found", hasAnyText !== null);
+    if (hasAnyText !== null) {
+      seenHasAny.add(hasAnyText);
+      check(
+        `<SectionEmpty hasAny={${hasAnyText}}> is fed from the row list, not the filtered list`,
+        hasAnyText === "identityRowList.length > 0" || hasAnyText === "keyRowList.length > 0",
+        hasAnyText,
+      );
+    }
+  }
+  check(
+    "the two call sites feed hasAny from DIFFERENT row lists, one per section",
+    seenHasAny.size === 2,
+    [...seenHasAny].join(", "),
+  );
 }
 
 // ============================================================================
@@ -465,6 +707,153 @@ for (const label of ["New identity", "New key", "Edit", "Export", "Import"]) {
 for (const key of ["identityCard", "keyCard"] as const) {
   for (const prop of ["onEdit", "onSelect", "onConnect"]) {
     check(`${FILES[key]} declares no ${prop} prop`, !src[key].includes(prop));
+  }
+}
+
+// ============================================================================
+// 15. Each card's new prop reaches the one element it is meant to colour,
+//     and no other.
+// ============================================================================
+// Protects: `IdentityCard.tsx`'s own header on `keyDangling` - it colours the
+// KEY CHIP alone, deliberately. A stale `keyId` does not stop most auth modes
+// from connecting, so marking the ROW destructive over it is a false alarm on
+// a record that works fine; and for `authMode: "key"` the row is ALREADY
+// destructive through `missingSecret`, so a second destructive mark on the
+// row says the same fact twice. `missingSecret` (identity) and
+// `missingPrivateKey` (key) are the ones that DO belong on the row `Badge`,
+// driving both its `variant` and its label. Nothing in `scripts/` checked any
+// of this before this section - `tsc`'s `noUnusedLocals` catches a prop with
+// BOTH reads deleted, by accident, but a prop moved to the wrong element
+// keeps every read alive and passes `tsc`, `pnpm verify` and (until now) this
+// file, all three.
+console.log("\n[15. card props reach the right element] keyDangling -> chip only; missingSecret /");
+console.log("    missingPrivateKey -> the row Badge's variant AND its label");
+{
+  const sfIdentity = ts.createSourceFile(
+    FILES.identityCard,
+    src.identityCard,
+    ts.ScriptTarget.ESNext,
+    true,
+    ts.ScriptKind.TSX,
+  );
+  const identityBody = findFunctionBody(sfIdentity, "IdentityCard");
+  check("found IdentityCard's function body to check", identityBody !== null);
+
+  // --- keyDangling: reaches the key chip, and ONLY the key chip. Anchored on
+  // the `<KeyRound />` icon - the chip's own wrapping `<span>` carries no
+  // attribute distinctive enough to search for directly - so a rename of
+  // that icon fails this loudly instead of leaving every check below it
+  // running over `null`.
+  const keyRoundIcons = identityBody
+    ? findOpeningElementsByTag(identityBody, "KeyRound", sfIdentity)
+    : [];
+  check(
+    "found the <KeyRound /> icon, the key chip's anchor",
+    keyRoundIcons.length === 1,
+    keyRoundIcons.length,
+  );
+  const keyRoundIcon = keyRoundIcons[0] ?? null;
+  const chip = keyRoundIcon ? nearestAncestorJsxElement(keyRoundIcon) : null;
+  check("found the key chip element (the <KeyRound />'s wrapping <span>)", chip !== null);
+  const chipClassValue = chip ? classNameAttrValue(chip, sfIdentity) : null;
+  check("found the key chip's className attribute", chipClassValue !== null);
+  if (chipClassValue) {
+    const chipClassText = chipClassValue.getText(sfIdentity);
+    check(
+      "the key chip's className is non-trivial (extraction sanity)",
+      chipClassText.length > "keyDangling".length,
+      chipClassText,
+    );
+    check(
+      "keyDangling reaches the key chip's className",
+      /\bkeyDangling\b/.test(chipClassText),
+      chipClassText,
+    );
+  }
+
+  const identityBadges = identityBody
+    ? findOpeningElementsByTag(identityBody, "Badge", sfIdentity)
+    : [];
+  check(
+    "found exactly one <Badge> in IdentityCard.tsx",
+    identityBadges.length === 1,
+    identityBadges.length,
+  );
+  const identityBadge = identityBadges[0] ?? null;
+  const identityVariant = identityBadge
+    ? jsxAttrExprText(identityBadge, "variant", sfIdentity)
+    : null;
+  check("found the row Badge's variant expression", identityVariant !== null);
+  if (identityVariant !== null) {
+    check(
+      "the row Badge's variant is driven by missingSecret",
+      /\bmissingSecret\b/.test(identityVariant),
+      identityVariant,
+    );
+    check(
+      "NEGATIVE: the row Badge's variant is NOT also driven by keyDangling",
+      !/\bkeyDangling\b/.test(identityVariant),
+      identityVariant,
+    );
+  }
+
+  const identityBadgeElement =
+    identityBadge && ts.isJsxOpeningElement(identityBadge) && ts.isJsxElement(identityBadge.parent)
+      ? identityBadge.parent
+      : null;
+  check(
+    "found the row Badge's own JSX element (for its label text)",
+    identityBadgeElement !== null,
+  );
+  if (identityBadgeElement) {
+    const badgeText = identityBadgeElement.getText(sfIdentity);
+    check(
+      'the row Badge\'s LABEL also switches on missingSecret: `missingSecret ? "Missing secret" : …`',
+      /missingSecret\s*\?\s*"Missing secret"/.test(badgeText),
+      badgeText,
+    );
+  }
+
+  // --- missingPrivateKey: the same shape, on KeyCard, with no chip to
+  // protect - `KeyCard.tsx` has only the one destructive signal.
+  const sfKey = ts.createSourceFile(
+    FILES.keyCard,
+    src.keyCard,
+    ts.ScriptTarget.ESNext,
+    true,
+    ts.ScriptKind.TSX,
+  );
+  const keyBody = findFunctionBody(sfKey, "KeyCard");
+  check("found KeyCard's function body to check", keyBody !== null);
+
+  const keyBadges = keyBody ? findOpeningElementsByTag(keyBody, "Badge", sfKey) : [];
+  check("found exactly one <Badge> in KeyCard.tsx", keyBadges.length === 1, keyBadges.length);
+  const keyBadge = keyBadges[0] ?? null;
+  const keyVariant = keyBadge ? jsxAttrExprText(keyBadge, "variant", sfKey) : null;
+  check("found KeyCard's row Badge's variant expression", keyVariant !== null);
+  if (keyVariant !== null) {
+    check(
+      "KeyCard's row Badge variant is driven by missingPrivateKey",
+      /\bmissingPrivateKey\b/.test(keyVariant),
+      keyVariant,
+    );
+  }
+
+  const keyBadgeElement =
+    keyBadge && ts.isJsxOpeningElement(keyBadge) && ts.isJsxElement(keyBadge.parent)
+      ? keyBadge.parent
+      : null;
+  check(
+    "found KeyCard's row Badge's own JSX element (for its label text)",
+    keyBadgeElement !== null,
+  );
+  if (keyBadgeElement) {
+    const badgeText = keyBadgeElement.getText(sfKey);
+    check(
+      'KeyCard\'s row Badge LABEL also switches on missingPrivateKey: `missingPrivateKey ? "Missing private key" : …`',
+      /missingPrivateKey\s*\?\s*"Missing private key"/.test(badgeText),
+      badgeText,
+    );
   }
 }
 
@@ -527,4 +916,47 @@ console.log(failed === 0 ? "\nAll vault-shell checks passed." : `\n${failed} che
 //                                                        over SectionEmpty's own
 //                                                        function body) is what
 //                                                        was added to catch it.
+//
+// ROUND 2 - four gaps an Oracle review measured against the checks above,
+// each confirmed by running the mutation in a worktree and recording the
+// exit code (transcript: /tmp/wave2-fix-shellcheck/MUTATIONS.md):
+//
+//   Z2: VaultPage.tsx's root className had          section 9's compiler-
+//     `@container` deleted, leaving the header        verified check, naming
+//     comment above `return` (which also says          the root className
+//     "@container") untouched                          with `@container`
+//                                                       missing
+//   Z3: IdentityCard.tsx's `cn()` argument           section 10's two
+//     `"[contain-intrinsic-size:auto_100px]           compiler-verified
+//     [content-visibility:auto]"` emptied to `""`,     checks for
+//     the original string moved to a `//` comment      identityCard, naming
+//     on the line above                                the (now-empty)
+//                                                       root className
+//   Z1: SectionEmpty's `const matching = hasAny &&    section 13's new
+//     filtering;` narrowed to `const matching =         predicate check,
+//     filtering;`                                       naming the
+//                                                       mutated body
+//   Z5: the identity <SectionEmpty>'s                section 13's new
+//     `hasAny={identityRowList.length > 0}` call-       per-call-site check,
+//     site prop switched to                             naming
+//     `hasAny={visibleIdentities.length > 0}`            `visibleIdentities…`
+//   Z4: the hint ternary `{matching ? "Clear the      section 13's new HINT
+//     search box…" : nothingYetHint}` collapsed to      check (the headline
+//     `{nothingYetHint}`                                check alone stayed
+//                                                       green)
+//   M10 RE-RUN: both ternaries collapsed to           still kills section
+//     `{nothingYet}` / `{nothingYetHint}` (the          13's headline AND
+//     original regression this section exists for)      HINT checks
+//   Y6: `keyDangling` moved from the key chip's        section 15's chip
+//     className to the row `<Badge variant={           check (chip no
+//     missingSecret || keyDangling ? …}>`               longer references
+//                                                       keyDangling) AND
+//                                                       its NEGATIVE Badge
+//                                                       check (variant now
+//                                                       does)
+//   keyDangling-ternary: the chip's                   section 15's chip
+//     `keyDangling ? "text-destructive" :               check (chip's
+//     "text-muted-foreground"` collapsed to just        className no longer
+//     `"text-muted-foreground"`                         mentions
+//                                                       keyDangling)
 process.exit(failed === 0 ? 0 : 1);
