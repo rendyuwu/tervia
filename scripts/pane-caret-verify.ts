@@ -593,6 +593,12 @@ function reachIdentifiers(n: ts.Node, stop: ts.Node): Set<string> {
 type Effect = {
   body: ts.ConciseBody;
   deps: string[];
+  /** Whether a second argument was written at all. `useEffect(fn, [])` and
+   *  `useEffect(fn)` both parse to `deps: []` above, but they are opposite
+   *  effects: the first runs once, on mount; the second runs after EVERY
+   *  render, because React only skips a re-run when it has a deps array to
+   *  compare against. `deps.length === 0` alone cannot tell them apart. */
+  depsArgPresent: boolean;
   /** Functions this effect returns - React runs them on cleanup. */
   cleanups: ts.Node[];
 };
@@ -624,7 +630,7 @@ function effectsIn(sf: ts.SourceFile): Effect[] {
       depsArg && ts.isArrayLiteralExpression(depsArg)
         ? depsArg.elements.map((e) => e.getText())
         : [];
-    return { body: fn.body, deps, cleanups: cleanupsOf(fn) };
+    return { body: fn.body, deps, depsArgPresent: !!depsArg, cleanups: cleanupsOf(fn) };
   });
 }
 
@@ -985,7 +991,15 @@ console.log("\n[VaultPage.tsx] the rail view claims the caret, and mount is its 
   // That is the opposite of HostsPage's `[onScreen]` above, and the reason the
   // two differ is the reason this section exists at all rather than reusing
   // that one.
-  const mountEffects = effects.filter((e) => e.deps.length === 0);
+  //
+  // `depsArgPresent` as well as `deps.length === 0`: an ABSENT second argument
+  // parses to the same `deps: []` as a literal `[]`, but it is the opposite
+  // effect - `useEffect(fn)` with no deps array re-runs after every render,
+  // which would claim and release the caret continuously instead of once on
+  // mount. `hasDeps`/`e.deps.length === 1` elsewhere in this file never asks
+  // "is this effect mount-only", so this is the only site that needs the
+  // distinction, and the field means nothing to the other three sections.
+  const mountEffects = effects.filter((e) => e.deps.length === 0 && e.depsArgPresent);
   check(
     "found exactly one mount-only effect to look in",
     mountEffects.length === 1,
@@ -1060,7 +1074,14 @@ console.log("\n[VaultPage.tsx] the rail view claims the caret, and mount is its 
   // A prop could only ever carry the literal `true` here (RailViewArea's own
   // `case "vault":` is the only mount point), and a restated literal cannot
   // fail. Pinned so a future wave does not "fix" the ref by adding one.
-  check("the page declares no onScreen prop", !sf.getText().includes("onScreen:"));
+  //
+  // `getFullText()`, not `getText()`: this negative is over the WHOLE FILE,
+  // comments included - a future wave drafting the prop in the header doc
+  // comment above and forgetting to remove it should still redden this. Node
+  // `getText()` skips a node's leading trivia, and for a `SourceFile` that
+  // trivia is the entire leading doc comment; only `getFullText()` returns the
+  // raw source `readFileSync` read.
+  check("the page declares no onScreen prop", !sf.getFullText().includes("onScreen:"));
 }
 
 console.log(`\n${tally.executed} executed / ${tally.parsed} parsed-source checks`);
