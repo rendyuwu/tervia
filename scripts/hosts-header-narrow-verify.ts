@@ -1,6 +1,7 @@
 /**
- * Self-check for the Hosts page header row at a FORCED container width
- * (VLT-48, and VLT-41's fix specifically).
+ * Self-check for the page header row pattern - the Hosts page, and the Vault
+ * page that reuses it verbatim by decision (DCR-2) - at a FORCED container
+ * width (VLT-48, and VLT-41's fix specifically).
  * Run: `pnpm verify hosts-header-narrow` (or `npx tsx
  * scripts/hosts-header-narrow-verify.ts` to iterate).
  *
@@ -95,6 +96,7 @@ function findClass(src: string, re: RegExp, label: string): string {
 
 const hostsPageSrc = read("src/modules/hosts/HostsPage.tsx");
 const backupActionsSrc = read("src/modules/hosts/page/HostsBackupActions.tsx");
+const vaultPageSrc = read("src/modules/vault/VaultPage.tsx");
 
 const headerRowClass = findClass(
   hostsPageSrc,
@@ -115,6 +117,15 @@ const searchInputGroupClass = findClass(
   hostsPageSrc,
   /<InputGroup className="([^"]*)">\s*\n\s*<InputGroupAddon>\s*\n\s*<Search \/>/,
   "search InputGroup (VLT-41)",
+);
+const vaultSearchInputGroupClass = findClass(
+  vaultPageSrc,
+  /<InputGroup className="([^"]*)">\s*\n\s*<InputGroupAddon>\s*\n\s*<Search \/>/,
+  "Vault page search InputGroup",
+);
+check(
+  "exactly one InputGroup in VaultPage.tsx",
+  (vaultPageSrc.match(/<InputGroup /g) ?? []).length === 1,
 );
 const exportLabelClass = findClass(
   backupActionsSrc,
@@ -190,6 +201,72 @@ console.log("\n[VLT-41] search box: a wrap rule AND a min-width floor at <=420px
   check("basis-full NOT active at 1200px", !at1200.has("basis-full"));
 }
 
+// --- DCR-3: the desktop arrow convention, and the only check on it ----------
+
+console.log("\n[DCR-3] Export points OUT of the box, Import points IN");
+{
+  // Settled by the owner on 2026-08-28 and pulled forward from wave 4. Two
+  // live conventions exist - the web-form one ("download the result" / "upload
+  // your file") is what shipped, and the desktop one is the reverse - so this
+  // was never a defect and is not self-evident from reading the file. Which
+  // means: without a check, the next person to touch these two buttons flips
+  // them back on instinct and nothing notices. Lucide's `Upload` is an arrow
+  // leaving a tray (data going OUT = Export); `Download` is an arrow entering
+  // one (data coming IN = Import).
+  //
+  // Anchored to the button each icon sits in, not to the import list: both
+  // names stay imported either way, so an import-list check cannot tell the
+  // swap from the pre-swap state.
+  const exportButton = findClass(
+    backupActionsSrc,
+    /aria-label="Export…"([\s\S]{0,400}?)<span className="[^"]*">Export…<\/span>/,
+    "Export… button body",
+  );
+  const importButton = findClass(
+    backupActionsSrc,
+    /aria-label="Import…"([\s\S]{0,400}?)<span className="[^"]*">Import…<\/span>/,
+    "Import… button body",
+  );
+  check("Export renders <Upload> (arrow out)", /<Upload\b/.test(exportButton));
+  check("...and not <Download>", !/<Download\b/.test(exportButton));
+  check("Import renders <Download> (arrow in)", /<Download\b/.test(importButton));
+  check("...and not <Upload>", !/<Upload\b/.test(importButton));
+}
+
+// --- the Vault page reuses that header verbatim (DCR-2) ---------------------
+
+console.log("\n[vault header] the same wrap rule and floor, on the second page that has one");
+{
+  // ONE check for the whole pattern, because "reused as-is" is the decision:
+  // three adjacent unlabelled search fields was accepted on the condition that
+  // the Vault page copies this header rather than re-deriving it. If a later
+  // wave needs them to differ, it has to change this line on purpose.
+  check(
+    "the Vault page's search box carries the identical className string",
+    vaultSearchInputGroupClass === searchInputGroupClass,
+  );
+
+  // And the same width assertions anyway, so this section still says something
+  // if that equality is ever deliberately relaxed.
+  const vaultAt400 = activeAt(vaultSearchInputGroupClass, 400);
+  check("basis-full (wrap rule) active at 400px", vaultAt400.has("basis-full"));
+  check("min-w-40 (floor) active at 400px", vaultAt400.has("min-w-40"));
+  const vaultAt420 = activeAt(vaultSearchInputGroupClass, 420);
+  check(
+    "both active at the 420px boundary (inclusive)",
+    vaultAt420.has("basis-full") && vaultAt420.has("min-w-40"),
+  );
+  const vaultAt421 = activeAt(vaultSearchInputGroupClass, 421);
+  check("basis-full NOT active at 421px", !vaultAt421.has("basis-full"));
+  check(
+    "min-w-40 NOT active at 421px (the same pre-existing 420-480px gap)",
+    !vaultAt421.has("min-w-40"),
+  );
+  const vaultAt480 = activeAt(vaultSearchInputGroupClass, 480);
+  check("min-w-40 active again at 480px", vaultAt480.has("min-w-40"));
+  check("basis-full NOT active at 480px", !vaultAt480.has("basis-full"));
+}
+
 // --- gate: what this check would catch, and what it was watched to catch ---
 //
 // Mutation                                            Check it killed
@@ -200,6 +277,16 @@ console.log("\n[VLT-41] search box: a wrap rule AND a min-width floor at <=420px
 //                                                       at 400px"
 // Both of the above at once (full revert to the         Both checks above, plus
 //   pre-fix `min-w-0 flex-1 @[480px]:min-w-40`)         the two 420px-boundary ones
+// Swap Export/Import icons back to the web-form         All four DCR-3 checks
+//   convention (Download on Export, Upload on Import)
+// Reorder the `import { Download, Upload }` line while   No change - the four
+//   leaving the icons swapped                            DCR-3 checks are anchored
+//                                                         to the button body, not
+//                                                         the import list
+// Delete `@max-[420px]:basis-full` from VaultPage.tsx's  The equality check AND
+//   InputGroup                                           the Vault 400px wrap check
+// Rename `InputGroup` to `InputGroupX` in VaultPage.tsx  "anchor found: Vault page
+//                                                         search InputGroup"
 //
 // See the report for this pass for the actual mutate -> red -> restore ->
 // `diff` transcript; it is not duplicated here because a stale transcript

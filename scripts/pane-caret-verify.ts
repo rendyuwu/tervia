@@ -975,6 +975,94 @@ console.log("\n[PaneTreeView.tsx] the page is only on screen when its leaf is th
   );
 }
 
+console.log("\n[VaultPage.tsx] the rail view claims the caret, and mount is its on-screen signal");
+{
+  const sf = parse("src/modules/vault/VaultPage.tsx");
+  const effects = effectsIn(sf);
+
+  // A rail view is UNMOUNTED when it is not showing (`WorkspaceArea.tsx:142`),
+  // so mount IS the visibility transition and the claim effect has no deps.
+  // That is the opposite of HostsPage's `[onScreen]` above, and the reason the
+  // two differ is the reason this section exists at all rather than reusing
+  // that one.
+  const mountEffects = effects.filter((e) => e.deps.length === 0);
+  check(
+    "found exactly one mount-only effect to look in",
+    mountEffects.length === 1,
+    effects.map((e) => `[${e.deps.join(",")}]`).join(" "),
+  );
+  const body = mountEffects.length === 1 ? mountEffects[0].body : undefined;
+  const claims = body ? claimsIn(body) : [];
+  check("it makes exactly one REACHABLE paneCaret.claim(", claims.length === 1, claims.length);
+  if (body && claims.length === 1) {
+    const claim = claims[0];
+    const claimCall = liveMatches(body, callTo("paneCaret.claim"))[0];
+
+    checkStillOnScreenIsLive("stillOnScreen", sf, claim.props.get("stillOnScreen") ?? claimCall);
+
+    // NOT checkPaneIsTheLeafFrame: this surface has no `[data-pane-leaf]`
+    // ancestor - it is rendered outside PaneStack - so asking for one would
+    // resolve null and switch the "the caret is already inside my own box"
+    // clause OFF, which is what stops the claim yanking the caret out of
+    // something the user just clicked in here. The property is the same
+    // (`pane:` reads a LIVE ref, because `pane: () => null` type-checks and
+    // silently disables the clause); the element it resolves is not.
+    const pane = claim.props.get("pane");
+    const paneReadsRef =
+      !!pane &&
+      allMatches(pane, (n) =>
+        ts.isPropertyAccessExpression(n) && n.name.text === "current" ? n : null,
+      ).length > 0;
+    check(
+      "its pane: reads a live ref rather than resolving to null",
+      paneReadsRef,
+      pane?.getText() ?? "(missing)",
+    );
+    check(
+      "...and does not ask for a leaf frame this surface has never had",
+      !!pane && !pane.getText().includes("data-pane-leaf"),
+      pane?.getText() ?? "(missing)",
+    );
+
+    checkTakeFocuses("its take: is what focuses the search box", claim.props.get("take"));
+    check(
+      "the claim is withdrawn on cleanup, for the SAME owner it was made for",
+      releasedOwners(sf).includes(claim.owner),
+      claim.owner,
+    );
+
+    // The half a mount-only surface needs that a leaf does not: the cleanup
+    // has to falsify the on-screen ref as well as release the claim, or a
+    // claim already handed to the arbiter in the same frame as an unmount is
+    // decided against a ref that still says "showing".
+    const refName = (claim.props.get("stillOnScreen")?.getText() ?? "").match(
+      /(\w+)\.current/,
+    )?.[1];
+    check("stillOnScreen names a ref we can look for", !!refName, refName ?? "(none)");
+    const falsified = mountEffects[0].cleanups.some(
+      (c) =>
+        allMatches(c, (n) =>
+          ts.isBinaryExpression(n) &&
+          n.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+          n.left.getText() === `${refName}.current` &&
+          n.right.kind === ts.SyntaxKind.FalseKeyword
+            ? n
+            : null,
+        ).length > 0,
+    );
+    check("...and the cleanup sets it false as well as releasing the claim", falsified);
+  }
+  checkNoDirectFocus(
+    "no .focus() outside take: in that effect - that is the shape the browser overwrites",
+    body ?? sf,
+  );
+
+  // A prop could only ever carry the literal `true` here (RailViewArea's own
+  // `case "vault":` is the only mount point), and a restated literal cannot
+  // fail. Pinned so a future wave does not "fix" the ref by adding one.
+  check("the page declares no onScreen prop", !sf.getText().includes("onScreen:"));
+}
+
 console.log(`\n${tally.executed} executed / ${tally.parsed} parsed-source checks`);
 console.log(failed === 0 ? "ALL PASS" : `${failed} FAILED`);
 process.exit(failed === 0 ? 0 : 1);
