@@ -35,8 +35,10 @@ import { fileURLToPath } from "node:url";
 import {
   describeKeyError,
   describeKeyInfo,
+  vaultKeyFactsFrom,
   vaultKeyTypeFrom,
   type KeyInspectResult,
+  type VaultKeyFacts,
 } from "../src/modules/vault/keyInspect";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -250,6 +252,86 @@ console.log("\n[3] vaultKeyTypeFrom - the wire name, mapped to the vault's four-
       vaultKeyTypeFrom(row.algorithm),
     );
   }
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n[3b] vaultKeyFactsFrom - what the STORE records, which is not what the panel shows");
+{
+  const facts = (info: Partial<KeyInspectResult>): VaultKeyFacts =>
+    vaultKeyFactsFrom({
+      parsed: true,
+      encrypted: false,
+      keyType: null,
+      fingerprint: null,
+      publicKey: null,
+      comment: null,
+      ...info,
+    });
+
+  // A sealed container yields NOTHING - not `keyType: "unknown"`, which would
+  // claim the algorithm was read. `KeyCard.tsx:53-57` renders the two
+  // differently, so this is a visible difference and not a nicety.
+  check(
+    "a sealed container records no keyType at all",
+    facts({ parsed: false, encrypted: true, keyType: "ssh-rsa" }).keyType === undefined,
+    facts({ parsed: false, encrypted: true, keyType: "ssh-rsa" }),
+  );
+  check(
+    "...and no fingerprint or public half either",
+    Object.keys(facts({ parsed: false })).length === 0,
+    facts({ parsed: false }),
+  );
+
+  // A PARSED key with no algorithm reported is the opposite case: it WAS read,
+  // and "unknown" is the honest answer rather than an absent field.
+  check(
+    "a parsed key with no algorithm records keyType 'unknown'",
+    facts({ keyType: null }).keyType === "unknown",
+    facts({ keyType: null }),
+  );
+
+  const ed = facts({
+    keyType: "ssh-ed25519",
+    fingerprint: "SHA256:abc123",
+    publicKey: "ssh-ed25519 AAAAC3Nz... rendy@host",
+  });
+  check("the wire algorithm is mapped, not stored raw", ed.keyType === "ed25519", ed);
+  check("the fingerprint is carried verbatim", ed.fingerprint === "SHA256:abc123", ed);
+  check(
+    "and so is the public half, which describeKeyInfo drops",
+    ed.publicKey === "ssh-ed25519 AAAAC3Nz... rendy@host",
+    ed,
+  );
+
+  // The `??` trap: `KeyCard.tsx:68` renders
+  // `vaultKey.fingerprint ?? "No fingerprint recorded"`, and `"" ?? x` is `""`,
+  // so a blank stored here is a blank LINE on screen where the sentence
+  // belongs. Same for the public half.
+  const blank = facts({ keyType: "ssh-rsa", fingerprint: "", publicKey: "" });
+  check('a blank fingerprint becomes undefined, never ""', blank.fingerprint === undefined, blank);
+  check('a blank public half becomes undefined, never ""', blank.publicKey === undefined, blank);
+
+  // STRUCTURAL, not behavioural: the mapping is DELEGATED. The three
+  // checks above agree with an implementation that reimplemented the algorithm
+  // table here, and a second table is how two surfaces come to disagree about
+  // what an `sk-ecdsa-` key is. V8 in this step's mutation list is the
+  // cross-file half of the same claim.
+  const keyInspectSrc = read("src/modules/vault/keyInspect.ts");
+  const factsBody =
+    /function vaultKeyFactsFrom\(info: KeyInspectResult\): VaultKeyFacts \{([\s\S]*?)\n\}/.exec(
+      keyInspectSrc,
+    );
+  check("vaultKeyFactsFrom's body is located", factsBody !== null);
+  const factsSrc = factsBody?.[1] ?? "";
+  check(
+    "it calls vaultKeyTypeFrom rather than mapping the algorithm itself",
+    factsSrc.includes("vaultKeyTypeFrom("),
+  );
+  check(
+    "and names no algorithm literal of its own",
+    !/ed25519|ecdsa|ssh-rsa|rsa-sha2/.test(factsSrc),
+    factsSrc,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -544,6 +626,23 @@ if (failed > 0) console.error(`${failed} check(s) FAILED.`);
 //     unconditionally                                    section [3] (every row
 //                                                       whose expectation was not
 //                                                       already "unknown")
+//
+// V3-V4, V8 (wave 3 step 1, over keyInspect.ts's new vaultKeyFactsFrom):
+//
+//   V3: `fingerprint: info.fingerprint || undefined`      section [3b]'s "a blank
+//     changed to `fingerprint: info.fingerprint ?? undefined`  fingerprint becomes
+//                                                       undefined, never \"\"" check
+//   V4: `if (!info.parsed) return {};` changed to         section [3b]'s first two
+//     `if (!info.parsed) return { keyType:                 checks (sealed container
+//     vaultKeyTypeFrom(info.keyType) };`                    records no keyType/facts)
+//   V8: vaultKeyTypeFrom's body changed to                section [3]'s eight
+//     `return "unknown";` unconditionally                  non-"unknown" rows AND
+//                                                       section [3b]'s mapping row
+//                                                       ("the wire algorithm is
+//                                                       mapped, not stored raw") -
+//                                                       ALSO fails vault-draft-verify
+//                                                       section 1, which is the
+//                                                       cross-file half of this claim
 //
 // D1-D6 (this pass, live UI defects rather than the wiring shape above):
 //
