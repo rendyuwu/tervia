@@ -80,8 +80,9 @@ export function Combobox({
             className="max-h-56"
             // VLT-47: this popover is portaled to `document.body` as a sibling
             // of the host editor's `Dialog`, not a descendant of it - so when
-            // the editor is open (it always is, here; every caller sits inside
-            // `HostEditorDialog`), Radix's modal scroll lock
+            // the editor is open (every caller so far is inside a modal
+            // `Dialog` - the three host-editor pickers and the vault identity
+            // editor's key picker), Radix's modal scroll lock
             // (`react-remove-scroll`, driven by that Dialog) treats every wheel
             // event in here as happening OUTSIDE its own subtree and calls
             // `preventDefault()` on it globally before the browser's native
