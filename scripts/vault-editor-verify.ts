@@ -158,6 +158,53 @@ function findCalls(root: ts.Node, sf: ts.SourceFile, calleeNames: string[]): ts.
   return out;
 }
 
+/** Whitespace-stripped, for comparing two expressions' source text - VLT-76's
+ *  pins 1 and 2 both need this: Prettier decides whether a call spans one
+ *  line or four, and that choice is not the claim. Everything else in the
+ *  text IS the claim, so this is the ONLY normalisation applied before an
+ *  exact-text pin compares two sides. */
+function norm(s: string): string {
+  return s.replace(/\s+/g, "");
+}
+
+/** Every top-level (`=`) assignment expression anywhere under `root` whose
+ *  left side is the bare identifier `name` - added for VLT-76's pin 2: "what
+ *  is assigned to `facts` inside this function" is a nesting question the
+ *  compiler API answers directly, where a regex over the region cannot tell
+ *  a real assignment from the same identifier mentioned in a comment or a
+ *  different scope. */
+function findAssignmentsTo(root: ts.Node, name: string): ts.BinaryExpression[] {
+  const out: ts.BinaryExpression[] = [];
+  const visit = (n: ts.Node): void => {
+    if (
+      ts.isBinaryExpression(n) &&
+      n.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+      ts.isIdentifier(n.left) &&
+      n.left.text === name
+    ) {
+      out.push(n);
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(root);
+  return out;
+}
+
+/** The `let`/`const` variable declaration named `name` anywhere under `root` -
+ *  the declaration node itself, not its enclosing statement (callers that
+ *  need the `let`/keyword and the trailing `;` read `.parent.parent`). */
+function findVariableDeclaration(root: ts.Node, name: string): ts.VariableDeclaration | null {
+  let result: ts.VariableDeclaration | null = null;
+  const visit = (n: ts.Node): void => {
+    if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.name.text === name) {
+      result = n;
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(root);
+  return result;
+}
+
 /** Every JSX element or self-closing element in `root` whose tag is
  *  `tagName`, as its opening element - copied from `vault-shell-verify.ts`. */
 function findOpeningElementsByTag(
@@ -350,6 +397,80 @@ console.log("\n[3. save inspects fields] KeyEditorDialog's save reads draft.priv
     !/inspected/i.test(strippedSave),
     strippedSave,
   );
+
+  // Pin 2 (VLT-76): the declaration and the SINGLE assignment to `facts`,
+  // pinned exactly, over the COMPILER API's own view of `save`'s body -
+  // `findConstArrowBody(keySf, "save")` is already used by section 4. A name
+  // scoped check (the `!/inspected/i` negative above) does not survive an
+  // alias: `const panel = inspected;` above `save`, with `facts` assigned
+  // from `panel` instead of a fresh `inspectSshKey` call, passes every check
+  // above while reintroducing exactly the "inherit that question one level
+  // deeper" failure this file's own header on `save` forbids. Only pinning
+  // what is actually assigned to `facts` closes that.
+  const keySfForFacts = sourceFile("keyDialog");
+  const saveBodyForFacts = findConstArrowBody(keySfForFacts, "save");
+  check("KeyEditorDialog's save body is located (compiler API, pin 2)", saveBodyForFacts !== null);
+  if (saveBodyForFacts) {
+    const factsDecl = findVariableDeclaration(saveBodyForFacts, "facts");
+    check("save declares `facts` (compiler API)", factsDecl !== null);
+    if (factsDecl) {
+      const declStatement = factsDecl.parent.parent;
+      const declText = ts.isVariableStatement(declStatement)
+        ? declStatement.getText(keySfForFacts)
+        : "";
+      check(
+        "the `facts` declaration is exactly `let facts: VaultKeyFacts | null = null;` - an" +
+          " `= lastInfo.current` initializer is the alias mutation, and this pin is what catches it",
+        norm(declText) === norm("let facts: VaultKeyFacts | null = null;"),
+        declText,
+      );
+    }
+
+    // Exactly one, not merely "at least one": a second assignment in a later
+    // arm of `save` is how a fallback hides behind this pin's positive.
+    const factsAssignments = findAssignmentsTo(saveBodyForFacts, "facts");
+    check(
+      "save contains exactly one assignment to `facts`",
+      factsAssignments.length === 1,
+      factsAssignments.length,
+    );
+    if (factsAssignments.length === 1) {
+      // Decomposed into callee + its own single argument, rather than one
+      // getText() over the whole right-hand side: `vaultKeyFactsFrom(...)` is
+      // committed as a MULTI-LINE call (its one argument on its own line),
+      // and Prettier's trailing comma on that line sits INSIDE this node's
+      // own span - unlike pin 1's arguments, which sit inside a call ONE
+      // LEVEL UP from any trailing comma of their own. A whole-text compare
+      // here would falsely FAIL against the correct, committed code the
+      // moment Prettier's trailing comma is counted as part of "the claim"
+      // rather than as formatting pin 1's rule 2 already says to discount.
+      const rhs = factsAssignments[0].right;
+      const rhsIsVaultKeyFactsFromCall =
+        ts.isCallExpression(rhs) && rhs.expression.getText(keySfForFacts) === "vaultKeyFactsFrom";
+      check(
+        "the single assignment to `facts` calls vaultKeyFactsFrom(",
+        rhsIsVaultKeyFactsFromCall,
+        rhs.getText(keySfForFacts),
+      );
+      if (rhsIsVaultKeyFactsFromCall && ts.isCallExpression(rhs)) {
+        check(
+          "vaultKeyFactsFrom( is called with exactly 1 argument",
+          rhs.arguments.length === 1,
+          rhs.arguments.length,
+        );
+        if (rhs.arguments.length === 1) {
+          const argText = rhs.arguments[0].getText(keySfForFacts);
+          check(
+            "vaultKeyFactsFrom's argument is exactly" +
+              " await inspectSshKey(draft.privateKey, draft.passphrase || undefined)",
+            norm(argText) ===
+              norm("await inspectSshKey(draft.privateKey, draft.passphrase || undefined)"),
+            argText,
+          );
+        }
+      }
+    }
+  }
 }
 
 // ============================================================================
@@ -425,23 +546,64 @@ console.log("\n[4. store writes] every upsert call is lexically inside its file'
 // divergent implementation. Structural: `save` must call the shared builders,
 // and the file must not carry the object-literal keys that are the tell of a
 // record assembled by hand instead.
+//
+// Pin 1 (VLT-76): `includes("keyRecordFrom(")` is satisfied by
+// `{ ...keyRecordFrom(id, draft, existing, facts), ...existing }` - the
+// decisive mutation this round exists to close, which spreads the shared
+// builder's own output and then overwrites its `hasPassword`/`hasPrivateKey`
+// fields (or, on the identity twin, its stored password) with the STALE
+// object's. A substring check cannot tell "calls the builder" from "calls the
+// builder and then undoes it", so each `upsert*` call's own argument
+// expressions are pinned EXACTLY below instead - whitespace-normalised only,
+// because Prettier alone decides whether the committed call spans one line or
+// four (`KeyEditorDialog.tsx`'s does; `IdentityEditorDialog.tsx`'s doesn't).
 console.log(
   "\n[5. shared pure functions] save calls the draft.ts builders, and assembles nothing itself",
 );
 {
-  check("KeyEditorDialog.tsx calls keyRecordFrom(", src.keyDialog.includes("keyRecordFrom("));
-  check(
-    "KeyEditorDialog.tsx calls keySecretsForSave(",
-    src.keyDialog.includes("keySecretsForSave("),
-  );
-  check(
-    "IdentityEditorDialog.tsx calls identityRecordFrom(",
-    src.identityDialog.includes("identityRecordFrom("),
-  );
-  check(
-    "IdentityEditorDialog.tsx calls identitySecretsForSave(",
-    src.identityDialog.includes("identitySecretsForSave("),
-  );
+  const pinUpsertArgs = (
+    fileKey: keyof typeof FILES,
+    calleeName: string,
+    expectedArgs: readonly [string, string],
+  ): void => {
+    const sf = sourceFile(fileKey);
+    const calls = findCalls(sf, sf, [calleeName]);
+    // Found independently of section 4's own `found at least one` - a check
+    // is not allowed to rely on a precondition asserted in an earlier
+    // section: a renamed callee would otherwise leave THIS section's loop
+    // below silently iterating zero times, which is a pass for free (the
+    // §4.38 shape).
+    check(
+      `${FILES[fileKey]}: found at least one ${calleeName}( call to pin (section 5)`,
+      calls.length > 0,
+      calls.length,
+    );
+    for (const c of calls) {
+      check(
+        `${FILES[fileKey]}: ${calleeName}( is called with exactly 2 arguments`,
+        c.arguments.length === 2,
+        c.arguments.length,
+      );
+      if (c.arguments.length !== 2) continue;
+      for (const [i, expected] of expectedArgs.entries()) {
+        const actual = c.arguments[i].getText(sf);
+        check(
+          `${FILES[fileKey]}: ${calleeName}('s argument ${i} is exactly ${expected}`,
+          norm(actual) === norm(expected),
+          actual,
+        );
+      }
+    }
+  };
+
+  pinUpsertArgs("keyDialog", "upsertKey", [
+    "keyRecordFrom(id, draft, existing, facts)",
+    "keySecretsForSave(draft)",
+  ]);
+  pinUpsertArgs("identityDialog", "upsertIdentity", [
+    "identityRecordFrom(id, draft)",
+    "identitySecretsForSave(draft)",
+  ]);
 
   const smellKeys = [
     "keyType:",

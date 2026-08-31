@@ -200,6 +200,26 @@ function nearestAncestorJsxElement(node: ts.Node): ts.JsxElement | null {
   return null;
 }
 
+/** The `const <name> = ...` variable declaration anywhere under `root` -
+ *  VLT-76's pin 3 needs this, and this file had no variable-declaration
+ *  finder before it (VLT-33: there is no `scripts/lib`, so helpers are
+ *  copied per script on purpose). Pins a definition, not an identifier: a
+ *  check that only reads WHICH NAME is handed to a prop (like section 14's
+ *  `rowsProp === "keyRowList"` below) is satisfied by
+ *  `const keyRowList = visibleKeys;`, or by the two definitions swapped -
+ *  either makes the key picker silently follow the page's search box. */
+function findConstDeclaration(root: ts.Node, name: string): ts.VariableDeclaration | null {
+  let result: ts.VariableDeclaration | null = null;
+  const visit = (n: ts.Node): void => {
+    if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.name.text === name) {
+      result = n;
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(root);
+  return result;
+}
+
 // ============================================================================
 // 1. The rail branch was replaced, and only that branch.
 // ============================================================================
@@ -789,6 +809,40 @@ for (const key of ["identityCard", "keyCard"] as const) {
     rowsProp === "keyRowList",
     rowsProp ?? undefined,
   );
+
+  // Pin 3 (VLT-76): `keyRowList` pinned by its own DEFINITION, not merely by
+  // the identifier the check above reads off the prop. `const keyRowList =
+  // visibleKeys;` - or the two definitions swapped so `keyRowList` itself
+  // becomes the ranked list - leaves the check above green while the key
+  // picker silently starts following the page's search box.
+  const keyRowListDecl = body ? findConstDeclaration(body, "keyRowList") : null;
+  check(
+    "keyRowList's variable declaration was found - a missing anchor must fail loudly here",
+    keyRowListDecl !== null,
+  );
+  if (keyRowListDecl) {
+    const init = keyRowListDecl.initializer;
+    const initText = init ? init.getText(sf) : "";
+    check(
+      "keyRowList's initializer is a useMemo(...) call",
+      init !== undefined && ts.isCallExpression(init) && init.expression.getText(sf) === "useMemo",
+      initText,
+    );
+    check(
+      "keyRowList's initializer text contains keyRows(",
+      initText.includes("keyRows("),
+      initText,
+    );
+    // A negative over a FOUND declaration, never over "" - `rankKeys`/`query`
+    // are the two tells of the FILTERED list, so their absence here is what
+    // tells `keyRowList` apart from `visibleKeys` by what it actually is,
+    // not by what it happens to be named.
+    check(
+      "keyRowList's initializer names neither rankKeys nor query",
+      !/\brankKeys\b/.test(initText) && !/\bquery\b/.test(initText),
+      initText,
+    );
+  }
 
   // Each card's onEdit reaches the matching setter, in edit mode.
   for (const [tag, setter, idExpr] of [
