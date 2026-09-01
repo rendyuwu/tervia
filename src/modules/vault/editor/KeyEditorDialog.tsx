@@ -54,6 +54,7 @@ import { findKey, newKeyId, upsertKey } from "../store";
 import type { VaultKey } from "../types";
 import {
   EMPTY_KEY_DRAFT,
+  encryptedKeyRefusal,
   keyDraftFrom,
   keyRecordFrom,
   keySecretsForSave,
@@ -263,9 +264,13 @@ export function KeyEditorDialog({ target, onClose }: KeyEditorDialogProps): Reac
       // record already has.
       let facts: VaultKeyFacts | null = null;
       if (draft.privateKey.trim() !== "") {
-        facts = vaultKeyFactsFrom(
-          await inspectSshKey(draft.privateKey, draft.passphrase || undefined),
-        );
+        const info = await inspectSshKey(draft.privateKey, draft.passphrase || undefined);
+        const refusal = encryptedKeyRefusal(info.encrypted, draft.passphrase);
+        if (refusal) {
+          setError(refusal);
+          return;
+        }
+        facts = vaultKeyFactsFrom(info);
       }
       const id = existing?.id ?? newKeyId();
       // `upsertKey` REFUSES a nameless key and rolls both accounts back for a

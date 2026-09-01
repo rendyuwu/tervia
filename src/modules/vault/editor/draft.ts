@@ -312,3 +312,28 @@ export function passphraseHelp(replacingBody: boolean): string {
   }
   return "Leave blank to keep whatever is already stored. Typing here replaces it.";
 }
+
+/**
+ * The refusal for an encrypted key body saved with no passphrase, or `null`.
+ *
+ * `encrypted` comes from the inspection, not from the draft: an
+ * `openssh-key-v1` container answers `parsed: true` with a real type,
+ * fingerprint and public half WITHOUT its passphrase
+ * (`../../../../src-tauri/src/modules/ssh/mod.rs:302-313`), so nothing about the
+ * record that would be written says the passphrase is missing. A sealed
+ * container - `.ppk`, PKCS#8 - answers `parsed: false, encrypted: true`, and is
+ * the same trap with fewer facts.
+ *
+ * Refused rather than warned, because the state has no way out. There is no way
+ * to add a passphrase to a stored key without replacing the body
+ * ({@link keySecretsForSave}), so a key saved this way is permanently unusable,
+ * and `keyMissingSecret` (`../refs.ts:67-69`) reads only `hasPrivateKey`, so
+ * nothing on the Vault page says a word about it.
+ *
+ * The host editor's inline key field has the same hole and is NOT changed here:
+ * its save does not inspect at all. VLT-81.
+ */
+export function encryptedKeyRefusal(encrypted: boolean, passphrase: string): string | null {
+  if (!encrypted || passphrase.trim() !== "") return null;
+  return "This key file is encrypted and needs its passphrase. Enter it below and save again - a key stored without it cannot be used, and nothing on the saved record can tell that apart from a key that has none.";
+}
