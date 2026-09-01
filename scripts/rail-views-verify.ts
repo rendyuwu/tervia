@@ -642,6 +642,19 @@ console.log("\n[funnel] no route into the tab area writes activeId on its own");
     }
     return line;
   };
+  // VLT-83: no JSX-comment branch here - but not for the reason the other
+  // Group B files have. This stripper DOES run over a `.tsx` file (`appSrc`
+  // below reads `src/app/App.tsx`), so a `{/* ... */}` left behind by a
+  // deletion would survive it. What makes that safe here is that every check
+  // over `appSrc` is a NEGATIVE (`!/setRailView/`, `!/useState<RailViewKind/`,
+  // `!/openPageTabInTabs/`): an un-stripped JSX comment can only cause a
+  // FALSE FAILURE (the forbidden text still present, inertly, inside a
+  // comment), never a silenced pass - the unsafe direction this bug is about.
+  // The branch must be added the MOMENT a positive check is written over a
+  // `.tsx` file here. Copy it from `host-editor-verify.ts:191` (fixed there)
+  // and `vault-editor-verify.ts:101`, and not the lazy form
+  // `\{\s*\/\*[\s\S]*?\*\/\s*\}`, which is not a substitute: it can still
+  // cross an intervening `*/` while hunting for one followed by `}`.
   const stripComments = (src: string): string =>
     src
       .split("\n")

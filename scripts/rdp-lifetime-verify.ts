@@ -158,7 +158,24 @@ function stripLineComment(line: string): string {
  * two files cannot drift into disagreeing about what counts as code.
  */
 function stripComments(src: string): string {
-  return src
+  // JSX comment expressions - `{/* ... */}` - are the only comment syntax
+  // legal INSIDE JSX children, and the line-based filter below only ever
+  // recognised `//`, `/*` and `*` starting a trimmed line, none of which match
+  // a line starting `{`. `paneSrc`/`editorSrc`/`promptDialogSrc` below all
+  // strip `.tsx` files, so this file is exposed exactly as VLT-83 describes -
+  // and demonstrated live: deleting `HostEditorDialog.tsx:297`'s
+  // `applied.current = token;` and leaving it in exactly this shape passed
+  // section [3]'s row guard entirely, 81 ok / 0 FAIL, with the guard removed.
+  //
+  // VLT-83: the inner group must NOT be allowed to cross a `*/` while hunting
+  // for one followed by `}` - a lazy `[\s\S]*?` is still permitted to do that,
+  // and a type literal opening `{ /** ... */ x: T }` then swallows everything
+  // up to some later, unrelated `*/}`. The negative lookahead below forbids
+  // that: the first `*/` is final, either a real `{/* ... */}` or the match
+  // fails right there. Copied from `host-editor-verify.ts:191`'s fixed form;
+  // see that file's comment for the measured damage the lazy form did.
+  const withoutJsxComments = src.replace(/\{\s*\/\*(?:(?!\*\/)[\s\S])*\*\/\s*\}/g, "");
+  return withoutJsxComments
     .split("\n")
     .filter((line) => {
       const t = line.trim();
@@ -457,6 +474,19 @@ console.log("[0] the helpers the checks below depend on");
     stripComments('const s = "a // b";').includes("a // b"),
   );
   check("and keeps the code around it", stripComments("// x\nwriteIt();").includes("writeIt();"));
+
+  // VLT-83: the JSX-comment branch, both directions.
+  const STRIPPER_PROBE =
+    "type P = { /** c */ x: X };\nconst KEEP = 1;\nconst j = <div>{/* c */}</div>;";
+  check(
+    "stripComments does not over-strip past a type literal's doc comment (the lazy-regex trap)",
+    stripComments(STRIPPER_PROBE).includes("KEEP"),
+  );
+  check(
+    "stripComments does remove a JSX comment expression's own body",
+    !stripComments(STRIPPER_PROBE).includes("{/*"),
+  );
+
   for (const [path, raw, stripped] of [
     ["RdpPane.tsx", paneRaw, paneSrc],
     ["HostEditorDialog.tsx", editorRaw, editorSrc],

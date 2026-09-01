@@ -66,7 +66,23 @@ function stripLineComment(line: string): string {
 }
 
 function stripComments(src: string): string {
-  return src
+  // JSX comment expressions - `{/* ... */}` - are the only comment syntax
+  // legal INSIDE JSX children, and the line-based filter below only ever
+  // recognised `//`, `/*` and `*` starting a trimmed line, none of which match
+  // a line starting `{`. `read()` above strips `dialog.tsx` and
+  // `CommandPalette.tsx` (both `.tsx`), so this file is exposed exactly as
+  // VLT-83 describes: a deleted call left behind as `{/* ... */}` would pass
+  // every positive check that reads through `read()`.
+  //
+  // VLT-83: the inner group must NOT be allowed to cross a `*/` while hunting
+  // for one followed by `}` - a lazy `[\s\S]*?` is still permitted to do that,
+  // and a type literal opening `{ /** ... */ x: T }` then swallows everything
+  // up to some later, unrelated `*/}`. The negative lookahead below forbids
+  // that: the first `*/` is final, either a real `{/* ... */}` or the match
+  // fails right there. Copied from `host-editor-verify.ts:191`'s fixed form;
+  // see that file's comment for the measured damage the lazy form did.
+  const withoutJsxComments = src.replace(/\{\s*\/\*(?:(?!\*\/)[\s\S])*\*\/\s*\}/g, "");
+  return withoutJsxComments
     .split("\n")
     .filter((line) => {
       const t = line.trim();
@@ -99,6 +115,22 @@ function check(name: string, ok: boolean, detail?: unknown): void {
   console.error(`  FAIL: ${name}`, detail === undefined ? "" : JSON.stringify(detail));
   failed++;
 }
+
+// VLT-83 self-test: both directions of stripComments' JSX-comment branch, run
+// once so a regression here cannot hide behind every other check in this
+// file. Placed after check()/failed are initialised rather than immediately
+// under the stripComments declaration - failed is a `let`, and calling
+// check() before its initialiser runs would throw instead of reporting FAIL.
+const STRIPPER_PROBE =
+  "type P = { /** c */ x: X };\nconst KEEP = 1;\nconst j = <div>{/* c */}</div>;";
+check(
+  "stripComments does not over-strip past a type literal's doc comment (the lazy-regex trap)",
+  stripComments(STRIPPER_PROBE).includes("KEEP"),
+);
+check(
+  "stripComments does remove a JSX comment expression's own body",
+  !stripComments(STRIPPER_PROBE).includes("{/*"),
+);
 
 /** Index of the `)` matching the `(` at `openIdx`, or -1. Counts nesting so a
  *  paren inside the call's own arguments (an arrow function, a condition)

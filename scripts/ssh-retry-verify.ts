@@ -63,6 +63,16 @@ const readRaw = (rel: string) => readFileSync(join(repoRoot, rel), "utf8");
  * swallow the rest of the line - which for `has_credential('a ...)` would hide
  * real code from a check rather than reveal it.
  */
+// VLT-83: no JSX-comment branch here, deliberately. `readTs` strips only
+// `ssh-session.ts` (a `.ts` file), and `readRust` strips Rust source - neither
+// language gives `{/* ... */}` any meaning, so this stripper cannot be fooled
+// the way `host-editor-verify.ts`'s was (fixed at `host-editor-verify.ts:191`
+// - copy the branch from there, and not the lazy form
+// `\{\s*\/\*[\s\S]*?\*\/\s*\}`, which is not a substitute: it can still cross
+// an intervening `*/` while hunting for one followed by `}`) and
+// `vault-editor-verify.ts:101`. If this file is ever pointed at a `.tsx`
+// file, that branch has to be added first - to the `quotes` two-argument form
+// below, not a copy-pasted single-argument one.
 function stripComments(src: string, quotes: string): string {
   const stripLine = (line: string): string => {
     let quote = "";

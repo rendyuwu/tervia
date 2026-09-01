@@ -140,6 +140,15 @@ function stripLineComment(line: string): string {
   }
   return line;
 }
+// VLT-83: no JSX-comment branch here, deliberately. Every input this file
+// strips is a `.ts` file - `bridge.ts` and `ssh-session.ts` - and a `{/* ...
+// */}` is only meaningful inside JSX children, so a `.ts` source can never
+// contain one that would hide code from a positive check the way it did in
+// `host-editor-verify.ts` (fixed at `host-editor-verify.ts:191` - copy the
+// branch from there, and not the lazy form `\{\s*\/\*[\s\S]*?\*\/\s*\}`,
+// which is not a substitute: it can still cross an intervening `*/` while
+// hunting for one followed by `}`) and `vault-editor-verify.ts:101`. If this
+// file is ever pointed at a `.tsx` file, that branch has to be added first.
 function stripComments(src: string): string {
   return src
     .split("\n")
