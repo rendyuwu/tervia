@@ -1100,6 +1100,20 @@ console.log("\n[16. VLT-75 parity] the containment pair and the responsive grid 
       vaultGridMatches[0] === hostsGridMatches[0],
       [vaultGridMatches[0], hostsGridMatches[0]].join(" | "),
     );
+    // VLT-80/7d(d): a LITERAL pin, not merely agreement between the three call
+    // sites. The two checks above pass a coordinated edit that changes all
+    // three grids together - exactly the mutation withheld from this step
+    // (P14, run by the orchestrator once step 4 has retired) - because they
+    // never compare against a value nobody can move for free. Nothing else in
+    // this 53-script suite anchors this string, so without this pin a
+    // coordinated three-site change passes every one of them.
+    const PINNED_GRID =
+      "grid grid-cols-1 gap-2 @[580px]:grid-cols-2 @[860px]:grid-cols-3 @[1140px]:grid-cols-4";
+    check(
+      "the responsive grid className is pinned to its current literal value",
+      vaultGridMatches[0] === PINNED_GRID,
+      vaultGridMatches[0],
+    );
   }
 }
 

@@ -323,14 +323,25 @@ console.log("\n[3b] vaultKeyFactsFrom - what the STORE records, which is not wha
     );
   check("vaultKeyFactsFrom's body is located", factsBody !== null);
   const factsSrc = factsBody?.[1] ?? "";
+  // VLT-80/7d(b): comment-stripped before the positive below - a raw
+  // `.includes("vaultKeyTypeFrom(")` is satisfied by moving the real call
+  // into a comment and deleting it. Sanity-checked first, the same model as
+  // this file's own section [5] at :576-580: an empty string would pass the
+  // next check for free.
+  const strippedFacts = stripComments(factsSrc);
+  check(
+    "stripping comments left real code behind (vaultKeyFactsFrom's body)",
+    strippedFacts.length > 50,
+    strippedFacts.length,
+  );
   check(
     "it calls vaultKeyTypeFrom rather than mapping the algorithm itself",
-    factsSrc.includes("vaultKeyTypeFrom("),
+    strippedFacts.includes("vaultKeyTypeFrom("),
   );
   check(
     "and names no algorithm literal of its own",
-    !/ed25519|ecdsa|ssh-rsa|rsa-sha2/.test(factsSrc),
-    factsSrc,
+    !/ed25519|ecdsa|ssh-rsa|rsa-sha2/.test(strippedFacts),
+    strippedFacts,
   );
 }
 

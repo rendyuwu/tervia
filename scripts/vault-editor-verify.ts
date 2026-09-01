@@ -99,7 +99,17 @@ function stripLineComment(line: string): string {
  *  check. `KeyEditorDialog.tsx`'s `save` has exactly this shape: its comment
  *  says "read off `inspected`" while explaining why it does not. */
 function stripComments(str: string): string {
-  return str
+  // JSX comment expressions - `{/* ... */}` - are the only comment syntax
+  // legal INSIDE JSX children (a bare `//` there renders as literal text),
+  // and the line-based filter below only ever recognised `//`, `/*` and `*`
+  // starting a trimmed line, none of which match a line starting `{`.
+  // Discovered live, not hypothesised: P11 (VLT-80/7d(b)'s own paired
+  // mutation) moved `chosenKey?.missingPrivateKey` into exactly this shape -
+  // `{/* chosenKey?.missingPrivateKey */}` - and the original version of this
+  // helper passed it straight through, leaving section 7's positive green
+  // over dead, commented-out code.
+  const withoutJsxComments = str.replace(/\{\s*\/\*[\s\S]*?\*\/\s*\}/g, "");
+  return withoutJsxComments
     .split("\n")
     .filter((line) => {
       const t = line.trim();
@@ -222,6 +232,88 @@ function findOpeningElementsByTag(
   return out;
 }
 
+/** The literal SOURCE TEXT of a named attribute's expression (`{...}`) or
+ *  string value on one opening element - copied from `vault-shell-verify.ts`'s
+ *  helper of the same name. `null` if the element has no such attribute. */
+function jsxAttrExprText(
+  el: ts.JsxOpeningElement | ts.JsxSelfClosingElement,
+  attrName: string,
+  sf: ts.SourceFile,
+): string | null {
+  for (const attr of el.attributes.properties) {
+    if (ts.isJsxAttribute(attr) && attr.name.getText(sf) === attrName && attr.initializer) {
+      if (ts.isStringLiteral(attr.initializer)) return attr.initializer.text;
+      if (ts.isJsxExpression(attr.initializer) && attr.initializer.expression) {
+        return attr.initializer.expression.getText(sf);
+      }
+    }
+  }
+  return null;
+}
+
+/** The full `<tag label="label">...</tag>` JsxElement (not merely its opening
+ *  tag, which `findOpeningElementsByTag` returns) - so a caller can search
+ *  CALLS made inside its children, the way section 12 (VLT-79.2) needs to. */
+function findJsxElementByTagAndLabel(
+  root: ts.Node,
+  tag: string,
+  label: string,
+  sf: ts.SourceFile,
+): ts.JsxElement | null {
+  let result: ts.JsxElement | null = null;
+  const visit = (n: ts.Node): void => {
+    if (
+      ts.isJsxElement(n) &&
+      n.openingElement.tagName.getText(sf) === tag &&
+      jsxAttrExprText(n.openingElement, "label", sf) === label
+    ) {
+      result = n;
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(root);
+  return result;
+}
+
+/** Walking UP from `node`, the source text of the first ternary condition or
+ *  `&&`/`||` left-hand side whose own text names `name` - or `null` if the
+ *  walk runs out of parents first. VLT-79.1: "is this JSX element wrapped in
+ *  a conditional that mentions authMode" is a nesting question a string scan
+ *  cannot answer - the field's own comment names `authMode` right beside it,
+ *  to disclaim exactly this, which is why this cannot be a substring check. */
+function findAncestorConditionOn(node: ts.Node, name: string, sf: ts.SourceFile): string | null {
+  let n: ts.Node | undefined = node.parent;
+  while (n) {
+    if (ts.isConditionalExpression(n)) {
+      const condText = n.condition.getText(sf);
+      if (condText.includes(name)) return condText;
+    }
+    if (
+      ts.isBinaryExpression(n) &&
+      (n.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken ||
+        n.operatorToken.kind === ts.SyntaxKind.BarBarToken)
+    ) {
+      const condText = n.left.getText(sf);
+      if (condText.includes(name)) return condText;
+    }
+    n = n.parent;
+  }
+  return null;
+}
+
+/** Whether some ancestor of `node` is a `<tag>...</tag>` JsxElement - lets a
+ *  Button standing inside a `<DialogClose>` satisfy section 13's sweep
+ *  without an onClick of its own, the same way the rendered Cancel button
+ *  does in both dialogs. */
+function findAncestorJsxElementByTag(node: ts.Node, tag: string, sf: ts.SourceFile): boolean {
+  let n: ts.Node | undefined = node.parent;
+  while (n) {
+    if (ts.isJsxElement(n) && n.openingElement.tagName.getText(sf) === tag) return true;
+    n = n.parent;
+  }
+  return false;
+}
+
 const sourceFile = (key: keyof typeof FILES): ts.SourceFile =>
   ts.createSourceFile(FILES[key], src[key], ts.ScriptTarget.ESNext, true, ts.ScriptKind.TSX);
 
@@ -269,12 +361,19 @@ console.log(
 {
   const ks = src.keyDialog;
 
-  const checkKeyRegion = between(
-    ks,
-    "const checkKey = async (pem: string, passphrase: string) => {",
-    "const invalidateInspection = () => {",
+  const checkKeyAnchor = "const checkKey = async (pem: string, passphrase: string) => {";
+  const checkKeyRegion = between(ks, checkKeyAnchor, "const invalidateInspection = () => {");
+  // VLT-80/7d(c): above the ANCHOR's own length (61) by a wide margin, not an
+  // arbitrary round number below it - `between()` returns a slice that
+  // STARTS WITH `from`, so a floor at or below 61 is satisfied by the anchor
+  // text alone with an empty region behind it (P13 empties exactly that).
+  // Measured: the real region is ~600+ characters (the model is
+  // `host-editor-verify.ts:1013-1022`).
+  check(
+    "checkKey's region was located",
+    checkKeyRegion.length > checkKeyAnchor.length + 40,
+    checkKeyRegion.length,
   );
-  check("checkKey's region was located", checkKeyRegion.length > 50, checkKeyRegion.length);
   check(
     "checkKey claims a generation before its first await, not after (before the blank-body guard's return)",
     /const generation = \+\+inspectGeneration\.current;\s*\n\s*if \(!pem\.trim\(\)\)/.test(
@@ -291,14 +390,14 @@ console.log(
     checkKeyRegion,
   );
 
-  const invalidateRegion = between(
-    ks,
-    "const invalidateInspection = () => {",
-    "const pickKeyFile = async () => {",
-  );
+  const invalidateAnchor = "const invalidateInspection = () => {";
+  const invalidateRegion = between(ks, invalidateAnchor, "const pickKeyFile = async () => {");
+  // VLT-80/7d(c): above the anchor's own length (36) by a wide margin - see
+  // the checkKeyRegion floor just above for why a floor at or below it is
+  // vacuous.
   check(
     "invalidateInspection's region was located",
-    invalidateRegion.length > 20,
+    invalidateRegion.length > invalidateAnchor.length + 40,
     invalidateRegion.length,
   );
   check(
@@ -328,10 +427,13 @@ console.log(
   // passphrase input closes it. If this fails alone (textarea above staying
   // green), the check is doing its per-input job; if both fail together, the
   // check cannot tell the two apart and is not doing its job at all.
-  const passphraseRegion = between(ks, '<Field label="Key passphrase (optional)">', "</Field>");
+  const passphraseAnchor = '<Field label="Key passphrase (optional)">';
+  const passphraseRegion = between(ks, passphraseAnchor, "</Field>");
+  // VLT-80/7d(c): above the anchor's own length (41) by a wide margin - same
+  // reasoning as the two floors above.
   check(
     "the key-passphrase field's region was located",
-    passphraseRegion.length > 20,
+    passphraseRegion.length > passphraseAnchor.length + 40,
     passphraseRegion.length,
   );
   check(
@@ -367,9 +469,13 @@ console.log("\n[3. save inspects fields] KeyEditorDialog's save reads draft.priv
 {
   const saveRegion = between(src.keyDialog, "const save = async () => {", "const busy = saving");
   check("KeyEditorDialog's save region was located", saveRegion.length > 100, saveRegion.length);
+  // Whitespace-normalised (VLT-80's own §4.51 reformat pair found this one
+  // vulnerable too): a bare substring check breaks the moment Prettier wraps
+  // this call's arguments across lines, which is a real Prettier output shape
+  // once the line is long enough - not a hypothetical.
   check(
     "save calls inspectSshKey on the draft's own field",
-    saveRegion.includes("inspectSshKey(draft.privateKey"),
+    norm(saveRegion).includes(norm("inspectSshKey(draft.privateKey")),
     saveRegion,
   );
   check(
@@ -398,15 +504,20 @@ console.log("\n[3. save inspects fields] KeyEditorDialog's save reads draft.priv
     strippedSave,
   );
 
-  // Pin 2 (VLT-76): the declaration and the SINGLE assignment to `facts`,
-  // pinned exactly, over the COMPILER API's own view of `save`'s body -
-  // `findConstArrowBody(keySf, "save")` is already used by section 4. A name
-  // scoped check (the `!/inspected/i` negative above) does not survive an
-  // alias: `const panel = inspected;` above `save`, with `facts` assigned
-  // from `panel` instead of a fresh `inspectSshKey` call, passes every check
-  // above while reintroducing exactly the "inherit that question one level
-  // deeper" failure this file's own header on `save` forbids. Only pinning
-  // what is actually assigned to `facts` closes that.
+  // Pin 2 (VLT-76, re-aimed for VLT-77): the declaration and the SINGLE
+  // assignment to `facts`, pinned exactly, over the COMPILER API's own view
+  // of `save`'s body - `findConstArrowBody(keySf, "save")` is already used by
+  // section 4. A name scoped check (the `!/inspected/i` negative above) does
+  // not survive an alias: `const panel = inspected;` above `save`, with
+  // `facts` assigned from `panel` instead of a fresh `inspectSshKey` call,
+  // passes every check above while reintroducing exactly the "inherit that
+  // question one level deeper" failure this file's own header on `save`
+  // forbids. Only pinning what is actually assigned to `facts` closes that.
+  //
+  // VLT-77 (`e4cc903`) inserted an encrypted-with-no-passphrase refusal
+  // between the inspection and the assignment, so the inspection now lives in
+  // its own `info` binding that both the refusal and `vaultKeyFactsFrom`
+  // read - this pin follows it there instead of naming the old inline call.
   const keySfForFacts = sourceFile("keyDialog");
   const saveBodyForFacts = findConstArrowBody(keySfForFacts, "save");
   check("KeyEditorDialog's save body is located (compiler API, pin 2)", saveBodyForFacts !== null);
@@ -460,12 +571,151 @@ console.log("\n[3. save inspects fields] KeyEditorDialog's save reads draft.priv
         );
         if (rhs.arguments.length === 1) {
           const argText = rhs.arguments[0].getText(keySfForFacts);
+          // Re-aimed for VLT-77 (step 2, `e4cc903`): `save` now inspects the
+          // key ONCE into a local `info` and reuses it for both the refusal
+          // below and this call, rather than inspecting twice - so the
+          // argument here is the bare identifier `info`, not the inline
+          // `inspectSshKey(...)` call this pin used to name directly. The
+          // claim that `facts` comes from a FRESH inspection has not
+          // weakened: it has moved one line up, onto `info`'s own
+          // initializer, which the next two checks pin instead.
           check(
-            "vaultKeyFactsFrom's argument is exactly" +
-              " await inspectSshKey(draft.privateKey, draft.passphrase || undefined)",
-            norm(argText) ===
-              norm("await inspectSshKey(draft.privateKey, draft.passphrase || undefined)"),
+            "vaultKeyFactsFrom's argument is exactly info - the fresh inspection bound above, not" +
+              " a cached one (e.g. `lastInfo.current`) that would reintroduce the alias mutation" +
+              " this pin exists to catch",
+            norm(argText) === norm("info"),
             argText,
+          );
+        }
+      }
+    }
+
+    // New for VLT-77/step 2: `save` now inspects the key into `info` before
+    // deciding whether to refuse it, and `vaultKeyFactsFrom` above is pinned
+    // to consume exactly that binding. These two checks are what actually
+    // carries the "fresh inspection" claim now that the argument pin above
+    // names `info` rather than the call itself.
+    const infoDecl = findVariableDeclaration(saveBodyForFacts, "info");
+    check("save declares `info`", infoDecl !== null);
+    if (infoDecl) {
+      const init = infoDecl.initializer;
+      // Decomposed into the awaited call's callee + each argument, rather
+      // than one getText() over the whole initializer (the same trap pin 1's
+      // own comment names, one level further in): `inspectSshKey`'s own
+      // arguments are long enough that a real `pnpm format` CAN wrap them
+      // across lines, and Prettier's trailing comma on the last argument
+      // then sits INSIDE this initializer's own span (the call IS the
+      // initializer here, unlike pin 1's arguments, which sit one level
+      // below any trailing comma of their own). A whole-text compare would
+      // falsely FAIL against the correct, committed code the moment that
+      // reflow happens - caught by this section's own paired reformat
+      // mutation (§4.51), which is what moved this pin here.
+      const awaited = init && ts.isAwaitExpression(init) ? init.expression : init;
+      const isInspectCall =
+        awaited !== undefined &&
+        ts.isCallExpression(awaited) &&
+        awaited.expression.getText(keySfForFacts) === "inspectSshKey";
+      check(
+        "info's initializer is an `await inspectSshKey(...)` call",
+        isInspectCall,
+        init ? init.getText(keySfForFacts) : undefined,
+      );
+      if (isInspectCall && awaited && ts.isCallExpression(awaited)) {
+        check(
+          "inspectSshKey( is called with exactly 2 arguments",
+          awaited.arguments.length === 2,
+          awaited.arguments.length,
+        );
+        if (awaited.arguments.length === 2) {
+          const arg0 = awaited.arguments[0].getText(keySfForFacts);
+          const arg1 = awaited.arguments[1].getText(keySfForFacts);
+          check(
+            "inspectSshKey's argument 0 is exactly draft.privateKey",
+            norm(arg0) === norm("draft.privateKey"),
+            arg0,
+          );
+          check(
+            "inspectSshKey's argument 1 is exactly draft.passphrase || undefined",
+            norm(arg1) === norm("draft.passphrase || undefined"),
+            arg1,
+          );
+        }
+      }
+    }
+
+    // New for VLT-77: the encrypted-with-no-passphrase refusal. Pinned by
+    // argument VALUE (so `encryptedKeyRefusal(info.encrypted, draft.privateKey)`
+    // - the wrong field, and a real defect a save could ship with no type
+    // error - is caught) and by NESTING (so a refusal computed but never
+    // actually returned on - "a refusal that sets the error and then saves
+    // anyway is one line away", per this section's own brief - is caught
+    // too, the same class section 4's lexical-containment check exists for).
+    const refusalCalls = findCalls(saveBodyForFacts, keySfForFacts, ["encryptedKeyRefusal"]);
+    check(
+      "save contains exactly one call to encryptedKeyRefusal",
+      refusalCalls.length === 1,
+      refusalCalls.length,
+    );
+    if (refusalCalls.length === 1) {
+      const refusalCall = refusalCalls[0];
+      check(
+        "encryptedKeyRefusal( is called with exactly 2 arguments",
+        refusalCall.arguments.length === 2,
+        refusalCall.arguments.length,
+      );
+      if (refusalCall.arguments.length === 2) {
+        const arg0 = refusalCall.arguments[0].getText(keySfForFacts);
+        const arg1 = refusalCall.arguments[1].getText(keySfForFacts);
+        check(
+          "encryptedKeyRefusal's argument 0 is exactly info.encrypted",
+          norm(arg0) === norm("info.encrypted"),
+          arg0,
+        );
+        check(
+          "encryptedKeyRefusal's argument 1 is exactly draft.passphrase",
+          norm(arg1) === norm("draft.passphrase"),
+          arg1,
+        );
+      }
+
+      // The call's own enclosing `const refusal = ...` declaration, so the
+      // `if` that tests it can be found by NAME rather than by guessing it is
+      // the next sibling statement - a distance heuristic is exactly what
+      // section 4's own header warns reads a correctly nested call as
+      // un-nested.
+      const refusalDeclParent = refusalCall.parent;
+      const refusalVarName =
+        ts.isVariableDeclaration(refusalDeclParent) && ts.isIdentifier(refusalDeclParent.name)
+          ? refusalDeclParent.name.text
+          : null;
+      check(
+        "encryptedKeyRefusal's result is bound to a variable the save body can branch on",
+        refusalVarName !== null,
+        refusalVarName ?? undefined,
+      );
+      if (refusalVarName) {
+        let refusalIf: ts.IfStatement | null = null;
+        const visitIf = (n: ts.Node): void => {
+          if (
+            ts.isIfStatement(n) &&
+            n.expression.getText(keySfForFacts).trim() === refusalVarName
+          ) {
+            refusalIf = n;
+          }
+          ts.forEachChild(n, visitIf);
+        };
+        visitIf(saveBodyForFacts);
+        check(
+          `an if statement tests ${refusalVarName} directly (bare, not wrapped)`,
+          refusalIf !== null,
+        );
+        if (refusalIf) {
+          const thenText = (refusalIf as ts.IfStatement).thenStatement.getText(keySfForFacts);
+          check(
+            `the branch that tests ${refusalVarName} contains a return - a refusal that sets the` +
+              " error and saves anyway is one line away",
+            /\breturn\b/.test(thenText),
+            thenText,
           );
         }
       }
@@ -672,9 +922,21 @@ console.log("\n[7. shared picker] IdentityEditorDialog uses the shared Combobox,
     "IdentityEditorDialog.tsx does not read hasPrivateKey directly - it reads missingPrivateKey off the shared row",
     !idn.includes("hasPrivateKey"),
   );
+
+  // VLT-80/7d(b): comment-stripped before the positive below - a raw
+  // `.includes(...)` is satisfied by moving the real read into a comment and
+  // deleting it (P11). Sanity-checked first: an empty string would pass the
+  // next check for free (the model is this same file's section 10, and
+  // `key-inspect-verify.ts:576-580`).
+  const strippedIdnForRow = stripComments(idn);
+  check(
+    "IdentityEditorDialog.tsx: stripping comments left real code behind (section 7)",
+    strippedIdnForRow.length > 3000,
+    strippedIdnForRow.length,
+  );
   check(
     "reads chosenKey?.missingPrivateKey off the shared row",
-    idn.includes("chosenKey?.missingPrivateKey"),
+    strippedIdnForRow.includes("chosenKey?.missingPrivateKey"),
   );
 }
 
@@ -690,11 +952,34 @@ console.log(
   "\n[8. shared help copy] both dialogs call the draft.ts help functions, and never inline them",
 );
 {
-  check("KeyEditorDialog.tsx calls privateKeyHelp(", src.keyDialog.includes("privateKeyHelp("));
-  check("KeyEditorDialog.tsx calls passphraseHelp(", src.keyDialog.includes("passphraseHelp("));
+  // VLT-80/7d(b): comment-stripped before the three positives below, for the
+  // same reason section 7 just applied it to `chosenKey?.missingPrivateKey` -
+  // moving a call into a comment and deleting the real one would otherwise
+  // pass a raw `.includes(...)`. Sanity-checked first, same floor as
+  // section 10 (which already proves both files' stripped length clears it).
+  const strippedKeyForHelp = stripComments(src.keyDialog);
+  const strippedIdentityForHelp = stripComments(src.identityDialog);
+  check(
+    "KeyEditorDialog.tsx: stripping comments left real code behind (section 8)",
+    strippedKeyForHelp.length > 3000,
+    strippedKeyForHelp.length,
+  );
+  check(
+    "IdentityEditorDialog.tsx: stripping comments left real code behind (section 8)",
+    strippedIdentityForHelp.length > 3000,
+    strippedIdentityForHelp.length,
+  );
+  check(
+    "KeyEditorDialog.tsx calls privateKeyHelp(",
+    strippedKeyForHelp.includes("privateKeyHelp("),
+  );
+  check(
+    "KeyEditorDialog.tsx calls passphraseHelp(",
+    strippedKeyForHelp.includes("passphraseHelp("),
+  );
   check(
     "IdentityEditorDialog.tsx calls identityPasswordHelp(",
-    src.identityDialog.includes("identityPasswordHelp("),
+    strippedIdentityForHelp.includes("identityPasswordHelp("),
   );
 
   // A distinctive middle slice of each of the six possible return values -
@@ -795,6 +1080,132 @@ console.log(
       `${FILES[key]}: does not re-inline a store name literal instead of using SECRET_STORE_LOCATIONS`,
       !/Keychain|DPAPI|Credential Manager/.test(stripped),
     );
+  }
+}
+
+// ============================================================================
+// 11. The identity password field renders in every auth mode. (VLT-79.1,
+//     COMPILER API for the nesting question a string scan cannot answer.)
+// ============================================================================
+// Protects: `IdentityEditorDialog.tsx:274-280`'s own five-line comment on why
+// this field must NOT be hidden under key/agent auth - `VaultIdentity.hasPassword`
+// is independent of `authMode` by design and `resolveRdpAuth` never consults
+// the mode - and nothing but that comment currently enforces it.
+console.log(
+  "\n[11. VLT-79.1] the identity Password field is never wrapped in an authMode conditional",
+);
+{
+  const sf = sourceFile("identityDialog");
+  const passwordFields = findOpeningElementsByTag(sf, "Field", sf).filter(
+    (el) => jsxAttrExprText(el, "label", sf) === "Password",
+  );
+  check(
+    'found exactly one <Field label="Password"> in IdentityEditorDialog.tsx',
+    passwordFields.length === 1,
+    passwordFields.length,
+  );
+  if (passwordFields.length === 1) {
+    const cond = findAncestorConditionOn(passwordFields[0], "authMode", sf);
+    check(
+      "the Password field has no ancestor conditional (ternary or &&/||) whose condition names authMode",
+      cond === null,
+      cond ?? undefined,
+    );
+  }
+}
+
+// ============================================================================
+// 12. keyId is normalised only at the record, never at either toggle handler.
+//     (VLT-79.2, COMPILER API.)
+// ============================================================================
+// Protects: `editor/draft.ts:39-44`'s own claim that a second normalisation in
+// a toggle handler "is how the two drift" - `identityRecordFrom` is the ONE
+// place `keyId` is dropped for a non-key auth mode, so every `patch({...})`
+// inside the Authentication field must touch `authMode` alone.
+console.log(
+  "\n[12. VLT-79.2] no auth-mode toggle handler patches keyId - only identityRecordFrom does",
+);
+{
+  const sf = sourceFile("identityDialog");
+  const authField = findJsxElementByTagAndLabel(sf, "Field", "Authentication", sf);
+  check('found the <Field label="Authentication"> element to search inside', authField !== null);
+  if (authField) {
+    const patchCalls = findCalls(authField, sf, ["patch"]);
+    check(
+      "found at least one patch( call inside the Authentication field (one per toggle button)",
+      patchCalls.length > 0,
+      patchCalls.length,
+    );
+    for (const c of patchCalls) {
+      const callText = c.getText(sf);
+      check(
+        `${callText}: called with exactly 1 argument`,
+        c.arguments.length === 1,
+        c.arguments.length,
+      );
+      if (c.arguments.length !== 1) continue;
+      const arg = c.arguments[0];
+      const isObjectLiteral = ts.isObjectLiteralExpression(arg);
+      check(`${callText}: argument is an object literal`, isObjectLiteral);
+      if (isObjectLiteral && ts.isObjectLiteralExpression(arg)) {
+        const keys = arg.properties
+          .map((p) => (p.name && ts.isIdentifier(p.name) ? p.name.text : null))
+          .filter((k): k is string => k !== null);
+        check(
+          `${callText}: patches exactly ["authMode"] - not keyId alongside it`,
+          keys.length === 1 && keys[0] === "authMode",
+          keys,
+        );
+      }
+    }
+  }
+}
+
+// ============================================================================
+// 13. A dead-affordance sweep over both dialogs. (VLT-79.3, COMPILER API.)
+// ============================================================================
+// Protects: `vault-shell-verify.ts` section 14 covers VaultPage/IdentityCard/
+// KeyCard only; the two editor dialogs are the app's largest new interactive
+// surface and had no such check before this. Every <Button> either wires an
+// onClick or is a Cancel standing inside <DialogClose> (which wires the close
+// itself); and neither file offers a SECOND, nested "New key"/"New identity"
+// creator - reachable from nowhere and dead by construction if it existed.
+console.log(
+  "\n[13. VLT-79.3] every <Button> in either dialog does something; no nested New key/identity",
+);
+{
+  for (const key of ["keyDialog", "identityDialog"] as const) {
+    const sf = sourceFile(key);
+    const buttons = findOpeningElementsByTag(sf, "Button", sf);
+    check(`${FILES[key]}: found at least one <Button>`, buttons.length > 0, buttons.length);
+    for (const el of buttons) {
+      const onClick = jsxAttrExprText(el, "onClick", sf);
+      const owner: ts.Node = ts.isJsxOpeningElement(el) ? el.parent : el;
+      const insideDialogClose = findAncestorJsxElementByTag(owner, "DialogClose", sf);
+      const tagDesc = el.getText(sf).replace(/\s+/g, " ").slice(0, 60);
+      check(
+        `<${tagDesc}> has an onClick, or stands inside <DialogClose>`,
+        onClick !== null || insideDialogClose,
+        { onClick, insideDialogClose },
+      );
+
+      // The button's own direct text children only - not the whole file - so
+      // this cannot be tripped by unrelated prose elsewhere that happens to
+      // contain the same two words: IdentityEditorDialog.tsx's own "no keys
+      // saved yet" help line literally says "use New key first".
+      if (ts.isJsxOpeningElement(el) && ts.isJsxElement(owner)) {
+        const label = owner.children
+          .filter(ts.isJsxText)
+          .map((t) => t.getText(sf))
+          .join("")
+          .trim();
+        check(
+          `<${tagDesc}>'s own label text is not a second, nested "New key…"/"New identity…" creator: ${JSON.stringify(label)}`,
+          !label.startsWith("New key") && !label.startsWith("New identity"),
+          label,
+        );
+      }
+    }
   }
 }
 

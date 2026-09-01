@@ -24,6 +24,7 @@ import { vaultKeyFactsFrom, type KeyInspectResult } from "../src/modules/vault/k
 import {
   EMPTY_IDENTITY_DRAFT,
   EMPTY_KEY_DRAFT,
+  encryptedKeyRefusal,
   identityPasswordHelp,
   identityRecordFrom,
   identitySecretsForSave,
@@ -385,21 +386,31 @@ console.log(
 );
 {
   const draftSrc = read("src/modules/vault/editor/draft.ts");
-  for (const forbidden of [
-    "@tauri-apps",
-    'from "react"',
-    "secrets_get",
-    "getHostSshSecrets",
-    '"../store"',
-    "../store'",
-    '"../adapters"',
-    "../adapters'",
-    '"../resolve"',
-    "../resolve'",
-    "@/modules/vault/store",
-    "@/modules/vault/adapters",
-    "@/modules/vault/resolve",
-  ]) {
+
+  // VLT-80/7d(a): an IMPORT-SPECIFIER parse, not a quoted-needle scan. The
+  // needle list this replaced forbade the exact quoted text `"../store"`,
+  // `"../adapters"`, `"../resolve"` and three `@/modules/vault/*` spellings -
+  // and `import { findKey } from "../../vault/store";` (P10, reviewer A's own
+  // executed evasion) matches none of them: it resolves under this tsconfig
+  // and the old check went green over it. Enumerating forbidden spellings
+  // cannot close a class with infinitely many members (`../../vault/store`,
+  // `../../../vault/store` from a nested file, `@/modules/vault/store`, ...);
+  // collecting every import specifier the file actually has and asserting the
+  // SET is exactly the two pure modules this file is allowed to depend on
+  // does.
+  const importSpecifiers = [...draftSrc.matchAll(/from\s*["']([^"']+)["']/g)]
+    .map((m) => m[1])
+    .sort();
+  ok(
+    `draft.ts's import specifiers are exactly ["../keyInspect", "../types"] - found ${JSON.stringify(importSpecifiers)}`,
+    JSON.stringify(importSpecifiers) === JSON.stringify(["../keyInspect", "../types"]),
+  );
+
+  // Two ways impurity could arrive with no `from "..."` clause to catch above:
+  // a bare Tauri invoke name, or a sibling module's helper name typed in
+  // without an import (dead code, but still the smell this file's own header
+  // forbids).
+  for (const forbidden of ["secrets_get", "getHostSshSecrets"]) {
     ok(
       `draft.ts's raw source does not contain ${JSON.stringify(forbidden)}`,
       !draftSrc.includes(forbidden),
@@ -444,6 +455,37 @@ console.log(
     privateKeyHelp("create") !== privateKeyHelp("edit"),
   );
   ok("passphraseHelp's two branches are distinct", passphraseHelp(true) !== passphraseHelp(false));
+}
+
+// --- 9. encryptedKeyRefusal (VLT-77/7b) --------------------------------------
+console.log(
+  "\n[9] encryptedKeyRefusal - refuses only an ENCRYPTED body saved with a BLANK (trimmed) passphrase",
+);
+{
+  const REFUSAL =
+    "This key file is encrypted and needs its passphrase. Enter it below and save again - a key" +
+    " stored without it cannot be used, and nothing on the saved record can tell that apart from" +
+    " a key that has none.";
+
+  check("not encrypted + a blank passphrase: passes", encryptedKeyRefusal(false, ""), null);
+  check(
+    "not encrypted + a passphrase typed anyway: passes - encrypted is what this decides on",
+    encryptedKeyRefusal(false, "hunter2"),
+    null,
+  );
+  check("encrypted + a passphrase typed: passes", encryptedKeyRefusal(true, "hunter2"), null);
+  check(
+    "encrypted + a blank passphrase: refused, by value",
+    encryptedKeyRefusal(true, ""),
+    REFUSAL,
+  );
+  check(
+    "encrypted + a WHITESPACE-ONLY passphrase: ALSO refused - writeSecret trims before it decides" +
+      " (../store.ts:126), so an all-spaces passphrase is the same blank to the store, and this" +
+      " function has to agree or a save could look successful while storing an unusable key",
+    encryptedKeyRefusal(true, "   "),
+    REFUSAL,
+  );
 }
 
 console.log(failed === 0 ? "\nAll vault-draft checks passed." : `\n${failed} check(s) FAILED.`);
