@@ -36,6 +36,30 @@ export type VaultUpsert<T> = {
  *  leaves whatever is stored alone. */
 export type SecretInput = string | null | undefined;
 
+/**
+ * The secret is ALREADY at this account: record it as present and write nothing.
+ *
+ * The fourth state, and it is a `Symbol` rather than a sentinel string for the
+ * reason the host store's copy of this doc gives: `JSON.parse` cannot produce
+ * one, so no imported file, no store row and no IPC payload can reach this
+ * branch by carrying the right characters - and the caller that would hand one
+ * over is the one parsing an untrusted backup. Do not simplify it to a string.
+ *
+ * Two callers, one of them not written yet. `credentialMove.ts` copies a host's
+ * secret onto a vault account with `secrets_copy`, which never returns the value,
+ * so the record it then writes has no other way to claim the secret honestly.
+ * 6g's import is the second: `backup_apply_secrets` writes from Rust and hands
+ * JS a `boolean[]`.
+ *
+ * Declared HERE rather than in `modules/hosts`, and re-exported from there, so
+ * there is exactly ONE of it: two symbols with the same description are not
+ * `===`, and the branch would silently never be taken.
+ */
+export const SECRET_ALREADY_STORED = Symbol("secretAlreadyStored");
+
+/** {@link SecretInput} plus {@link SECRET_ALREADY_STORED}. */
+export type VaultSecretValue = SecretInput | typeof SECRET_ALREADY_STORED;
+
 export type VaultStore = {
   listIdentities(): Promise<VaultIdentity[]>;
   listKeys(): Promise<VaultKey[]>;
@@ -45,11 +69,11 @@ export type VaultStore = {
   newKeyId(): string;
   upsertIdentity(
     identity: VaultIdentity,
-    secrets: { password?: SecretInput },
+    secrets: { password?: VaultSecretValue },
   ): Promise<VaultUpsert<VaultIdentity>>;
   upsertKey(
     key: VaultKey,
-    secrets: { privateKey?: SecretInput; passphrase?: SecretInput },
+    secrets: { privateKey?: VaultSecretValue; passphrase?: VaultSecretValue },
   ): Promise<VaultUpsert<VaultKey>>;
   deleteIdentity(id: string, hostRefs: IdentityHostRefs): Promise<void>;
   deleteKey(id: string): Promise<void>;
@@ -114,14 +138,19 @@ export function createVaultStore(io: VaultIo): VaultStore {
    * read-back, and that part is deliberate - the flags exist so a list screen
    * never costs one `secrets_get` per row, and a no-change write reading the
    * secret back would spend exactly what they were added to save.
+   *
+   * {@link SECRET_ALREADY_STORED} is the one input that reports `true` without
+   * touching the keychain at all - no set, no delete, and no read either. The
+   * caller has already put the value at this account.
    */
   async function writeSecret(
     secrets: SecretsIo,
     id: string,
     field: string,
-    value: SecretInput,
+    value: VaultSecretValue,
     current: boolean,
   ): Promise<boolean> {
+    if (value === SECRET_ALREADY_STORED) return true;
     if (value === undefined) return current;
     const trimmed = value?.trim() ?? "";
     if (!trimmed) {
@@ -154,10 +183,17 @@ export function createVaultStore(io: VaultIo): VaultStore {
    * is already rethrowing the write's own error, which is the one the user can act
    * on, and a keychain that refused the write usually refuses this too. What
    * survives that is VLT-23.
+   *
+   * {@link SECRET_ALREADY_STORED} does not change this arm. A caller passing it
+   * for `privateKey` and a real string for `passphrase` that then throws has the
+   * rollback delete the private key it never wrote here - and that is correct,
+   * not a bug: both accounts were populated by THIS operation, under an id
+   * nothing else names, so there is nothing pre-existing for the rollback to
+   * destroy.
    */
   async function writeKeySecrets(
     key: VaultKey,
-    secrets: { privateKey?: SecretInput; passphrase?: SecretInput },
+    secrets: { privateKey?: VaultSecretValue; passphrase?: VaultSecretValue },
     existing: VaultKey | undefined,
   ): Promise<VaultKey> {
     try {
@@ -196,7 +232,7 @@ export function createVaultStore(io: VaultIo): VaultStore {
 
   async function upsertIdentity(
     identity: VaultIdentity,
-    secrets: { password?: SecretInput },
+    secrets: { password?: VaultSecretValue },
   ): Promise<VaultUpsert<VaultIdentity>> {
     return enqueueWrite(async () => {
       const [identities, keys] = await Promise.all([listIdentities(), listKeys()]);
@@ -237,7 +273,7 @@ export function createVaultStore(io: VaultIo): VaultStore {
 
   async function upsertKey(
     key: VaultKey,
-    secrets: { privateKey?: SecretInput; passphrase?: SecretInput },
+    secrets: { privateKey?: VaultSecretValue; passphrase?: VaultSecretValue },
   ): Promise<VaultUpsert<VaultKey>> {
     return enqueueWrite(async () => {
       // Required, unlike an identity's name: a key is chosen by name from a

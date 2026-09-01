@@ -2,7 +2,7 @@ import type { StoreRecovery } from "@/lib/storeRecovery";
 import { tauriSecretsIo } from "@/modules/vault/adapters";
 import { hostsUsingIdentity } from "@/modules/vault/refs";
 import type { SshSecretValues } from "@/modules/vault/resolve";
-import type { SecretInput } from "@/modules/vault/store";
+import { SECRET_ALREADY_STORED, type VaultSecretValue } from "@/modules/vault/store";
 import {
   assertBindingOwner,
   HOST_KEYRING_SERVICE,
@@ -79,18 +79,12 @@ import {
  * from an absent record: every flag false over a live secret. SSH survives that
  * (`resolveSshAuth` resolves by auth mode and never reads a flag) but RDP does
  * not - `RdpPane` pre-flights `hasPassword` and refuses to connect.
- *
- * A `Symbol` rather than a sentinel string, and that is the point rather than
- * taste: `JSON.parse` cannot produce one, so no imported file, no store row and
- * no IPC payload can reach this branch by carrying the right characters. A
- * `"__already_stored"` could, and the caller that would hand it over is the one
- * parsing an untrusted backup. Do not simplify it to a string.
  */
-export const SECRET_ALREADY_STORED = Symbol("hosts.secretAlreadyStored");
+export { SECRET_ALREADY_STORED };
 
 /** One field of {@link HostSecretInput}: the three-state convention plus
  *  {@link SECRET_ALREADY_STORED}. */
-export type HostSecretValue = SecretInput | typeof SECRET_ALREADY_STORED;
+export type HostSecretValue = VaultSecretValue;
 
 /**
  * Secrets to write alongside one host. Three-state per field, the app-wide
