@@ -701,6 +701,32 @@ console.log("[0] the helpers the checks below depend on");
     stripComments("<div>{/* writeIt() */}</div>").includes("<div>") &&
       stripComments("<div>{/* writeIt() */}</div>").includes("</div>"),
   );
+  // VLT-83(d): the OVER-strip direction, which is the one that actually
+  // shipped broken and which no stripper self-test in this suite covers - every
+  // other one asserts only that a comment was removed. The original lazy form
+  // `\{\s*\/\*[\s\S]*?\*\/\s*\}` swallowed 50752 characters of
+  // `HostEditorDialog.tsx`, because `HostEditorDialogProps`' own `{ /** null =
+  // closed. */ target: … }` type literal opens with `{` immediately followed by
+  // `/*` and has no `}` after its `*/`: the lazy group kept extending past
+  // every later `*/` until it found one that WAS followed by `}`, eating `save`
+  // and everything sections [4]/[7]/[8] anchor on. One probe carries both
+  // shapes - the type literal on line 1 and a real JSX comment on line 3 - so
+  // one string tests both directions at once.
+  const STRIPPER_PROBE =
+    "type P = { /** c */ x: X };\nconst KEEP = 1;\nconst j = <div>{/* c */}</div>;";
+  check(
+    "stripComments does not OVER-strip: a `{ /** … */ …` type literal does not eat the code after it",
+    stripComments(STRIPPER_PROBE).includes("KEEP"),
+    stripComments(STRIPPER_PROBE),
+  );
+  // Worded as "no `{/*` survives" rather than "no `c` survives", because the
+  // `/** c */` on line 1 would satisfy the latter without the JSX comment on
+  // line 3 having been touched at all.
+  check(
+    "and does not UNDER-strip: no JSX comment expression survives it",
+    !stripComments(STRIPPER_PROBE).includes("{/*"),
+    stripComments(STRIPPER_PROBE),
+  );
   check("the editor survived it", editorSrc.includes("export function HostEditorDialog("));
   check("and it removed something", editorSrc.length < editorRaw.length);
 
@@ -1222,23 +1248,15 @@ console.log("\n[5] the credential copy names no store the platform does not have
       /.{0,60}(OS keychain|Credential Manager).{0,40}/.exec(src)?.[0],
     );
   }
-  // Deviation from 6c's literal "over the same set": `HostEditorDialog.tsx`'s
-  // own module-header comment already reads "Nothing here makes a secret
-  // safer than it was" - a NEGATED, true disclaimer that happens to use the
-  // one word this needle bans. The vault files this rule is modelled on never
-  // hit that: they phrase the identical disclaimer around the ban instead
-  // ("Nothing here says how well a secret is protected",
-  // `vault/page/IdentityCard.tsx:14`), which is the established convention -
-  // but rewording `HostEditorDialog.tsx`'s prose is a product-code edit this
-  // step does not own (its write list is this file alone). Scoped to the
-  // other four, which is where 6c's own reasoning actually points ("these two
-  // are now where a sentence about a stored private key is most likely to be
-  // written") plus the two credential sections, which already pass it clean.
+  // All five files, `HostEditorDialog.tsx` included: its module header was
+  // reworded to the vault convention that phrases this disclaimer AROUND the
+  // ban ("Nothing here protects a secret better than it was protected
+  // before", per `vault/page/IdentityCard.tsx:14-16`) rather than the sweep
+  // being narrowed to fit the one file most likely to grow a safety claim.
   // `Encrypted` is deliberately not forbidden - wave 3's key panel says it
   // about a locked key, truthfully, and that is a different claim
   // (`vault-shell-verify.ts:610-611`).
   for (const [path, src] of KEYCHAIN_SWEEP_FILES) {
-    if (path === "HostEditorDialog.tsx") continue;
     check(
       `${path} makes no safety comparison`,
       !/\bsafer\b|\bsecurely\b|\bmore secure\b/i.test(src),
@@ -1807,6 +1825,196 @@ console.log(
   }
 
   // -------------------------------------------------------------------------
+  // VLT-86 pin 1: the create arm RESETS `choice` to the inline sentinel, and
+  // does so on the path that `return`s before the edit arm's own reset.
+  //
+  // The three checks above pin where `boundIdentity` READS `choice`. Nothing
+  // pinned where `choice` is WRITTEN per target, and `choice` is component
+  // state that survives a close - the load effect returns at `if (!target ||
+  // !token)` without resetting anything. So with this one statement deleted:
+  // edit a vault-bound host, close, press New host, and `boundIdentity` is
+  // still the previous sitting's identity id; `save()` then writes a
+  // `{kind:"identity"}` record and DISCARDS the password the user typed.
+  // Measured with the statement deleted: `tsc` 0, this file 212/212,
+  // `pnpm verify` 53/53. The line is correct in shipped code; what was
+  // missing was anything holding it there.
+  //
+  // Rooted at `load`'s own body and then counted, per
+  // {@link findVariableDeclarations}: rooting excludes a decoy appended
+  // outside the effect, the count excludes a second reset added inside it.
+  // A THIRD check the `boundIdentity` pin did not need is below, because the
+  // mutation here is a DELETION rather than a rewrite - a decoy nested one
+  // arrow deeper REPLACES the real call instead of joining it, so the count
+  // stays at exactly one and only the direct-statement check bites.
+  // -------------------------------------------------------------------------
+  const loadBody = hostEditorFnBody ? findConstArrowBody(hostEditorFnBody, "load") : null;
+  check("the load effect's `load` arrow body was found (compiler API)", loadBody !== null);
+  const inlineResets = loadBody
+    ? findCalls(loadBody, editorSf, ["setChoice"]).filter(
+        (c) =>
+          c.arguments.length === 1 &&
+          norm(c.arguments[0].getText(editorSf)) === "CREDENTIAL_CHOICE_INLINE",
+      )
+    : [];
+  check(
+    "the load effect resets choice to the inline sentinel EXACTLY ONCE - rooted at `load` so a decoy outside it is not counted, counted so a second one inside it is",
+    inlineResets.length === 1,
+    inlineResets.length,
+  );
+  if (inlineResets.length === 1) {
+    const reset = inlineResets[0];
+    // Callee and argument as separate comparisons rather than the
+    // CallExpression's whole text: a trailing comma sits INSIDE a multi-line
+    // call's own span but OUTSIDE its arguments' spans, so pinning the two
+    // smallest nodes that carry the claim cannot falsely redden on a reflow
+    // that pinning the whole right-hand side would. Whitespace is normalised
+    // and only whitespace - Prettier owns the line breaks, everything else
+    // here IS the claim (§4.51).
+    check(
+      "and the reset it makes is setChoice(CREDENTIAL_CHOICE_INLINE) - the sentinel, not some other draft value",
+      norm(reset.expression.getText(editorSf)) === "setChoice" &&
+        norm(reset.arguments[0].getText(editorSf)) === "CREDENTIAL_CHOICE_INLINE",
+      { callee: reset.expression.getText(editorSf), arg: reset.arguments[0].getText(editorSf) },
+    );
+    check(
+      'and it is reached only under a condition naming target.mode === "create" - never by adjacency (§4.17)',
+      ifConditionsEnclosing(reset, editorSf).some((c) => /target\.mode === "create"/.test(c)),
+      ifConditionsEnclosing(reset, editorSf),
+    );
+  }
+  // The half of the claim that "a setChoice call exists in the create arm"
+  // does not carry: the reset has to run BEFORE the arm's `return`, or it is
+  // dead code AND the edit arm's reset below is never reached either. Direct
+  // statements of the block only - a call one arrow deeper is not one, which
+  // is what closes the nested-decoy case the count above cannot see.
+  const createIf = loadBody
+    ? findIfByCondition(loadBody, editorSf, 'target.mode === "create"')
+    : null;
+  check("the create arm's own `if` was found (compiler API)", createIf !== null);
+  if (createIf && ts.isBlock(createIf.thenStatement)) {
+    const stmts = createIf.thenStatement.statements;
+    // By NODE IDENTITY against the set already filtered above, not by a second
+    // comparison of the call's own text. Two reasons, and the first is a
+    // landmine this check shipped with for one draft: a TRAILING COMMA sits
+    // inside a multi-line call's own span but outside its arguments' spans, so
+    // `norm(s.expression.getText())` against "setChoice(CREDENTIAL_CHOICE_INLINE)"
+    // reddened the moment the statement was legally reflowed onto three lines -
+    // caught by running exactly that reflow. Second, it keeps ONE definition of
+    // "which call is the reset" instead of two that can drift.
+    const resetAt = stmts.findIndex(
+      (s) =>
+        ts.isExpressionStatement(s) &&
+        ts.isCallExpression(s.expression) &&
+        inlineResets.includes(s.expression),
+    );
+    const returnAt = stmts.findIndex((s) => ts.isReturnStatement(s));
+    check(
+      "the reset is a DIRECT statement of the create arm's block and precedes its return - the path that returns before the edit arm's reset is reached",
+      resetAt >= 0 && returnAt >= 0 && resetAt < returnAt,
+      { resetAt, returnAt, statements: stmts.length },
+    );
+  }
+
+  // -------------------------------------------------------------------------
+  // VLT-86 pin 2: what makes the stale-`choice` window UNREACHABLE THROUGH
+  // SAVE. A pin on the mitigation, deliberately not a rewrite of the effect -
+  // the shipped behaviour is correct today and this region has been
+  // hand-tested three times.
+  //
+  // The window is real. `setMode(target.mode)` runs SYNCHRONOUSLY in the
+  // effect body while both `setChoice` resets sit behind the `Promise.all`
+  // two awaits down, so for the whole duration of a load `mode` is already
+  // the new target's mode while `choice` is still the previous sitting's
+  // value - and `boundIdentity` reads exactly that pair. That is A1's own
+  // `!existing`-versus-`mode === "create"` argument one step to the side.
+  //
+  // Three links close it and all three are pinned, because any one of them
+  // going reopens it:
+  //
+  //   1. `setReady(false)` is a DIRECT statement of the effect body, in the
+  //      same synchronous run as `setMode(target.mode)` and before
+  //      `void load();`. One React batch, one render out of it, so no render
+  //      observes the new `mode` with `ready` still true.
+  //   2. `busy` still carries the `!ready` term.
+  //   3. the ONE Save entry point is `disabled={busy}`.
+  //
+  // WHAT THIS DOES NOT COVER, which belongs in the register rather than in a
+  // silence. (a) `boundIdentity` has a consumer that is NOT behind the gate:
+  // the `DialogDescription` renders outside the `{ready ? … }` branch, so
+  // during the window it can say "This host authenticates with a shared vault
+  // identity" about a row that does not. Cosmetic, costs no credential, left
+  // unpinned on purpose. (b) `runTest`'s `if (boundIdentity)` refusal is its
+  // own fail-safe guard and is not part of this chain. (c) A second Save entry
+  // point added later that does not read `busy` - an Enter-key submit, a
+  // keyboard shortcut - would reopen the window; link 3 counts the Buttons so
+  // that addition reddens rather than passing silently, but it cannot pin a
+  // gate on an entry point that does not exist yet. (d) This pins the
+  // MITIGATION, not the invariant: `setReady(false)` moved behind an await
+  // reddens, an effect split in two reddens, a change in React's batching
+  // semantics would not.
+  // -------------------------------------------------------------------------
+  const loadEffect = hostEditorFnBody
+    ? findCalls(hostEditorFnBody, editorSf, ["useEffect"]).find(
+        (c) =>
+          c.arguments.length > 0 &&
+          c.arguments[0].getText(editorSf).includes("applied.current === token"),
+      )
+    : undefined;
+  check("the load effect's useEffect call was found (compiler API)", loadEffect !== undefined);
+  const effectArg = loadEffect?.arguments[0];
+  const effectBody =
+    effectArg && ts.isArrowFunction(effectArg) && ts.isBlock(effectArg.body)
+      ? effectArg.body
+      : null;
+  check("and its callback is a block-bodied arrow (compiler API)", effectBody !== null);
+  if (effectBody) {
+    const stmts = effectBody.statements;
+    const indexOfExpr = (text: string) =>
+      stmts.findIndex(
+        (s) => ts.isExpressionStatement(s) && norm(s.expression.getText(editorSf)) === text,
+      );
+    const readyAt = indexOfExpr("setReady(false)");
+    const modeAt = indexOfExpr("setMode(target.mode)");
+    const loadAt = indexOfExpr("voidload()");
+    check(
+      "setReady(false) and setMode(target.mode) are both direct statements of the effect body, both before `void load()` - one synchronous batch, so no render sees the new mode with ready still true",
+      readyAt >= 0 && modeAt >= 0 && loadAt >= 0 && readyAt < loadAt && modeAt < loadAt,
+      { readyAt, modeAt, loadAt },
+    );
+  }
+  const busyDecls = hostEditorFnBody ? findVariableDeclarations(hostEditorFnBody, "busy") : [];
+  check(
+    "busy is declared exactly once inside the component",
+    busyDecls.length === 1,
+    busyDecls.length,
+  );
+  const busyInit = busyDecls.length === 1 ? busyDecls[0].initializer : undefined;
+  if (busyInit) {
+    check(
+      "and it is exactly `saving || !ready || changing`, whitespace aside - dropping the !ready term is what reopens the window",
+      norm(busyInit.getText(editorSf)) === norm("saving || !ready || changing"),
+      busyInit.getText(editorSf),
+    );
+  }
+  const saveButtons = hostEditorFnBody
+    ? findOpeningElementsByTag(hostEditorFnBody, "Button", editorSf).filter((el) =>
+        (jsxAttrExprText(el, "onClick", editorSf) ?? "").includes("save()"),
+      )
+    : [];
+  check(
+    "there is exactly ONE Save entry point in the dialog - a second one is a second thing that has to read the gate",
+    saveButtons.length === 1,
+    saveButtons.length,
+  );
+  if (saveButtons.length === 1) {
+    check(
+      "and it is disabled={busy}, so it cannot fire during the load window",
+      jsxAttrExprText(saveButtons[0], "disabled", editorSf) === "busy",
+      jsxAttrExprText(saveButtons[0], "disabled", editorSf),
+    );
+  }
+
+  // -------------------------------------------------------------------------
   // Addendum check 3 (A1): the convert option is edit-mode only. Supersedes
   // 6b.6 as literally written ("the picker is edit-mode only") - amendment A1
   // supersedes plan §0's "no picker in create mode", and the committed
@@ -1846,13 +2054,24 @@ console.log(
   //
   // 6b.8: the confirmation copy comes from the pure module.
   // -------------------------------------------------------------------------
+  // Over `editorSrc`, the COMMENT-STRIPPED source, and the direction is why:
+  // a POSITIVE count over the raw file is satisfied by a comment that merely
+  // names the call. Replacing the real call with `{/* credentialChangeNote(...)
+  // */}` plus three hand-written strings left `tsc` at 0, this count green, and
+  // the three negatives below green as well - the mutation writes DIFFERENT
+  // copy, which is exactly the drift this check exists to catch - while
+  // `credential-move-verify` section [16]'s exact-text pins went dead in the
+  // same move: the three strings are still pinned there, the dialog simply
+  // stops rendering them. `stripComments` above carries the corrected
+  // negative-lookahead JSX branch (VLT-83), so the JSX comment form is removed
+  // here rather than counted.
   check(
     "the confirmation calls the pure module's title and note builders, not literals of its own",
-    count(editorRaw, /credentialChangeTitle\(/g) >= 1 &&
-      count(editorRaw, /credentialChangeNote\(/g) === 1,
+    count(editorSrc, /credentialChangeTitle\(/g) >= 1 &&
+      count(editorSrc, /credentialChangeNote\(/g) === 1,
     {
-      titles: count(editorRaw, /credentialChangeTitle\(/g),
-      notes: count(editorRaw, /credentialChangeNote\(/g),
+      titles: count(editorSrc, /credentialChangeTitle\(/g),
+      notes: count(editorSrc, /credentialChangeNote\(/g),
     },
   );
   // The three note strings' own fixed text (no `${}` inside the fragment
@@ -1860,6 +2079,14 @@ console.log(
   // caught even though the dialog's title now ALSO comes from the same pure
   // module (no separate one-line-description string was added - see step 4's
   // own note on this).
+  //
+  // These stay on `editorRaw` while the positive above moved to `editorSrc`,
+  // and the two directions genuinely want different inputs rather than one of
+  // them being an oversight. A NEGATIVE over raw source catches a comment that
+  // CLAIMS the banned thing, which is the defect a negative exists for - copy
+  // pasted into a comment is still copy that drifted from the pure module. A
+  // POSITIVE over raw source is SATISFIED by a comment that claims it, which
+  // is the defect above. Do not "fix" either one to match the other.
   const NOTE_FRAGMENTS = [
     "move into a new shared identity, and the host stops owning them",
     "stops using its own stored credentials and authenticates as",

@@ -105,10 +105,10 @@ import {
 // dialogs that costs a lost credential when it is got wrong and merging two forms
 // is quite enough to do in one pass.
 //
-// Nothing here makes a secret safer than it was. On Linux a private key sits in a
-// mode-0600 JSON file before and after, and the SSH connect path still round-trips
-// plaintext through the webview. What the vault binding this form preserves buys is
-// FEWER COPIES of one secret.
+// Nothing here protects a secret better than it was protected before. On Linux a
+// private key sits in a mode-0600 JSON file before and after, and the SSH connect
+// path still round-trips plaintext through the webview. What the vault binding this
+// form preserves buys is FEWER COPIES of one secret.
 
 export type HostEditorDialogProps = {
   /** null = closed. */
