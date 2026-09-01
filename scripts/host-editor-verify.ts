@@ -111,6 +111,8 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
+import ts from "typescript";
+
 import {
   NOTHING_SEEDED,
   sshSecretsForSave,
@@ -187,7 +189,32 @@ function stripLineComment(line: string): string {
  * [3] with the comparison gone. Confirmed by breaking it exactly that way.
  */
 function stripComments(src: string): string {
-  return src
+  // JSX comment expressions - `{/* ... */}` - are the only comment syntax
+  // legal INSIDE JSX children (a bare `//` there renders as literal text),
+  // and the line-based filter below only ever recognised `//`, `/*` and `*`
+  // starting a trimmed line, none of which match a line starting `{`.
+  // Fixed here per `vault-editor-verify.ts`'s own fix (VLT-83, found live by
+  // step 7 of this wave against a DIFFERENT file): without this, a mutation
+  // that moves code into exactly this shape slips past every comment-stripped
+  // positive in this file, of which section [7] already has one -
+  // `/\{passwordHelp\(hasStoredPassword\)\}/.test(sshSectionSrc)` would still
+  // match a `{/* passwordHelp(hasStoredPassword) */}` left behind by a delete.
+  //
+  // NOT a straight copy of that fix's regex: `vault-editor-verify.ts`'s
+  // `\{\s*\/\*[\s\S]*?\*\/\s*\}` is lazy but still ALLOWED to skip over an
+  // intervening `*/` while searching for one followed by `}` - and
+  // `HostEditorDialogProps`'s own `{ /** null = closed. */ target: … }` type
+  // literal opens with exactly a `{` immediately followed by `/*`, with no
+  // `}` after ITS `*/`. Measured: with that regex, the lazy group kept
+  // extending past every later `*/` that was not immediately followed by `}`
+  // until it found one 50KB downstream that was - eating the entire file in
+  // between, including `save` and everything section [4]/[7]/[8] anchor on.
+  // The negative lookahead below forbids the inner group from ever crossing a
+  // `*/` at all, so the first one found is final: either `}` follows it and
+  // this is a real `{/* … */}`, or it does not and the match fails HERE,
+  // at this `{`, rather than searching onward for a luckier one.
+  const withoutJsxComments = src.replace(/\{\s*\/\*(?:(?!\*\/)[\s\S])*\*\/\s*\}/g, "");
+  return withoutJsxComments
     .split("\n")
     .filter((line) => {
       const t = line.trim();
@@ -266,12 +293,279 @@ function count(src: string, re: RegExp): number {
   return [...src.matchAll(re)].length;
 }
 
+// ---------------------------------------------------------------------------
+// Compiler-API helpers for section [9] (6b, and 6a's re-aim of section [8]).
+// Copied from `vault-editor-verify.ts` / `vault-shell-verify.ts` where a
+// helper of the same job already exists there, so this file's shape matches
+// the rest of the suite rather than inventing a sixth way to do the same walk
+// (§4.43's list of `check()` shapes is exactly this kind of drift, one level
+// up). New helpers are ones neither file needed: `conditionalArmOf`,
+// `findIfByCondition`, `ifConditionsEnclosing`, `findObjectLiteralProperties`,
+// `parseFragment`.
+// ---------------------------------------------------------------------------
+
+/** The function DECLARATION body named `name` - `HostEditorDialog` is a plain
+ *  `export function HostEditorDialog(...) { ... }`, the shape
+ *  `vault-editor-verify.ts`'s helper of the same name covers. */
+function findFunctionBody(root: ts.Node, name: string): ts.Node | null {
+  let result: ts.Node | null = null;
+  const visit = (n: ts.Node): void => {
+    if (ts.isFunctionDeclaration(n) && n.name?.text === name && n.body) result = n.body;
+    ts.forEachChild(n, visit);
+  };
+  visit(root);
+  return result;
+}
+
+/** The body of a `const <name> = (...) => { ... }` arrow function declaration -
+ *  the shape `applyCredentialChange` uses. */
+function findConstArrowBody(root: ts.Node, name: string): ts.Node | null {
+  let result: ts.Node | null = null;
+  const visit = (n: ts.Node): void => {
+    if (
+      ts.isVariableDeclaration(n) &&
+      ts.isIdentifier(n.name) &&
+      n.name.text === name &&
+      n.initializer &&
+      ts.isArrowFunction(n.initializer)
+    ) {
+      result = n.initializer.body;
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(root);
+  return result;
+}
+
+/** Every call expression under `root` whose callee's own source text is
+ *  exactly one of `calleeNames`. */
+function findCalls(root: ts.Node, sf: ts.SourceFile, calleeNames: string[]): ts.CallExpression[] {
+  const out: ts.CallExpression[] = [];
+  const visit = (n: ts.Node): void => {
+    if (ts.isCallExpression(n) && calleeNames.includes(n.expression.getText(sf))) out.push(n);
+    ts.forEachChild(n, visit);
+  };
+  visit(root);
+  return out;
+}
+
+/** Whitespace-stripped, for comparing two expressions' source text - Prettier
+ *  decides whether a call or a ternary spans one line or several, and that
+ *  choice is not the claim (§4.51). The ONLY normalisation applied before an
+ *  exact-text pin compares two sides. */
+function norm(s: string): string {
+  return s.replace(/\s+/g, "");
+}
+
+/** The `let`/`const` variable declaration named `name` anywhere under `root`. */
+function findVariableDeclaration(root: ts.Node, name: string): ts.VariableDeclaration | null {
+  let result: ts.VariableDeclaration | null = null;
+  const visit = (n: ts.Node): void => {
+    if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.name.text === name) {
+      result = n;
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(root);
+  return result;
+}
+
+/** Every identifier reference to `name` anywhere under `root` - scope `root`
+ *  to exclude a declaration or an import specifier a caller does not want
+ *  counted. */
+function findIdentifierUses(root: ts.Node, name: string): ts.Identifier[] {
+  const out: ts.Identifier[] = [];
+  const visit = (n: ts.Node): void => {
+    if (ts.isIdentifier(n) && n.text === name) out.push(n);
+    ts.forEachChild(n, visit);
+  };
+  visit(root);
+  return out;
+}
+
+/** Every JSX element or self-closing element in `root` whose tag is
+ *  `tagName`, as its opening element - copied from `vault-shell-verify.ts` /
+ *  `vault-editor-verify.ts`. */
+function findOpeningElementsByTag(
+  root: ts.Node,
+  tagName: string,
+  sf: ts.SourceFile,
+): (ts.JsxOpeningElement | ts.JsxSelfClosingElement)[] {
+  const out: (ts.JsxOpeningElement | ts.JsxSelfClosingElement)[] = [];
+  const visit = (n: ts.Node): void => {
+    if (ts.isJsxSelfClosingElement(n) && n.tagName.getText(sf) === tagName) out.push(n);
+    if (ts.isJsxOpeningElement(n) && n.tagName.getText(sf) === tagName) out.push(n);
+    ts.forEachChild(n, visit);
+  };
+  visit(root);
+  return out;
+}
+
+/** The literal SOURCE TEXT of a named attribute's expression (`{...}`) or
+ *  string value on one opening element - copied from `vault-editor-verify.ts`'s
+ *  helper of the same name. `null` if the element has no such attribute. */
+function jsxAttrExprText(
+  el: ts.JsxOpeningElement | ts.JsxSelfClosingElement,
+  attrName: string,
+  sf: ts.SourceFile,
+): string | null {
+  for (const attr of el.attributes.properties) {
+    if (ts.isJsxAttribute(attr) && attr.name.getText(sf) === attrName && attr.initializer) {
+      if (ts.isStringLiteral(attr.initializer)) return attr.initializer.text;
+      if (ts.isJsxExpression(attr.initializer) && attr.initializer.expression) {
+        return attr.initializer.expression.getText(sf);
+      }
+    }
+  }
+  return null;
+}
+
+/** Whether some ancestor of `node` is a `<tag>...</tag>` JsxElement - copied
+ *  from `vault-editor-verify.ts`. */
+function findAncestorJsxElementByTag(node: ts.Node, tag: string, sf: ts.SourceFile): boolean {
+  let n: ts.Node | undefined = node.parent;
+  while (n) {
+    if (ts.isJsxElement(n) && n.openingElement.tagName.getText(sf) === tag) return true;
+    n = n.parent;
+  }
+  return false;
+}
+
+/**
+ * Walking UP from `node`, the nearest ConditionalExpression ancestor together
+ * with which arm the walk left through - "then" for `whenTrue`, "else" for
+ * `whenFalse`; `null` once the walk runs out of parents.
+ *
+ * This resolves nesting through the AST rather than by scanning for the
+ * nearest `?`/`:` in the text (§4.17's shape): `mode === "create" ?
+ * identityIdFromChoice(choice) : …` and `mode === "edit" ? [ { value:
+ * CREDENTIAL_CHOICE_NEW_IDENTITY, … } ] : []` both bury the identifier this
+ * file checks for several nodes below the ternary whose gate actually
+ * matters - an object literal, an array literal, a property assignment - and
+ * a text-distance walk has no principled way to see through those.
+ */
+function conditionalArmOf(
+  node: ts.Node,
+): { cond: ts.ConditionalExpression; arm: "then" | "else" } | null {
+  let child: ts.Node = node;
+  let n: ts.Node | undefined = node.parent;
+  while (n) {
+    if (ts.isConditionalExpression(n)) {
+      if (n.whenTrue === child) return { cond: n, arm: "then" };
+      if (n.whenFalse === child) return { cond: n, arm: "else" };
+    }
+    child = n;
+    n = n.parent;
+  }
+  return null;
+}
+
+/** The nearest IfStatement anywhere under `root` (source order) whose own
+ *  condition's text CONTAINS `substr` - locates one arm of an `if (x) {} else
+ *  if (y) {} else if (z) {}` chain by what it TESTS rather than by position,
+ *  so re-ordering `applyCredentialChange`'s three arms does not mis-locate
+ *  one. */
+function findIfByCondition(
+  root: ts.Node,
+  sf: ts.SourceFile,
+  substr: string,
+): ts.IfStatement | null {
+  let result: ts.IfStatement | null = null;
+  const visit = (n: ts.Node): void => {
+    if (result) return;
+    if (ts.isIfStatement(n) && n.expression.getText(sf).includes(substr)) {
+      result = n;
+      return;
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(root);
+  return result;
+}
+
+/** Every enclosing `if` statement's own condition text, walking upward from
+ *  `node`, innermost first - resolved through the AST rather than by how far
+ *  away the text sits (§4.17), which is what section [8]'s 6a re-aim needs:
+ *  `setSshCred(`/`setRdpCred(` sit two `if`s below the one that actually
+ *  names the refreshed record's credential kind, with an `if (isSshHost(fresh))`
+ *  in between that a fixed-hop walk would stop at instead. */
+function ifConditionsEnclosing(node: ts.Node, sf: ts.SourceFile): string[] {
+  const out: string[] = [];
+  let n: ts.Node | undefined = node.parent;
+  while (n) {
+    if (ts.isIfStatement(n)) out.push(n.expression.getText(sf));
+    n = n.parent;
+  }
+  return out;
+}
+
+/** Every plain `name: value` property assignment under `root` whose key is
+ *  one of `names` - the parsed-object-literal form of "no secret field is
+ *  written with anything but the empty string", which a regex on the text
+ *  cannot tell from the same words inside a comment, a string, or a shorthand
+ *  property of the same name bound to something else entirely. */
+function findObjectLiteralProperties(root: ts.Node, names: string[]): ts.PropertyAssignment[] {
+  const out: ts.PropertyAssignment[] = [];
+  const visit = (n: ts.Node): void => {
+    if (ts.isPropertyAssignment(n) && ts.isIdentifier(n.name) && names.includes(n.name.text)) {
+      out.push(n);
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(root);
+  return out;
+}
+
+/**
+ * Parses a STATEMENT fragment - not a whole file - by wrapping it in a
+ * throwaway function, so section [8]'s recovery arm (already isolated as a
+ * plain string by `between()`, the file's existing convention) gets the same
+ * compiler-API nesting checks section [9] uses, without re-deriving `save`'s
+ * location a second way through the compiler API as well.
+ *
+ * `recoveryArmRaw` already ends in the arm's own closing brace - `between()`'s
+ * `"} else {"` anchor consumed the OPENING one - so exactly one new `{` is
+ * what balances it; the fragment is `TS`, not `TSX`, since nothing inside an
+ * async function body here is JSX.
+ */
+function parseFragment(statements: string): ts.SourceFile {
+  return ts.createSourceFile(
+    "fragment.ts",
+    `function _fragment() {${statements}`,
+    ts.ScriptTarget.ESNext,
+    true,
+    ts.ScriptKind.TS,
+  );
+}
+
 const editorRaw = read("src/modules/hosts/HostEditorDialog.tsx");
 const editorSrc = stripComments(editorRaw);
 const rdpSectionRaw = read("src/modules/hosts/editor/RdpCredentialSection.tsx");
 const sshSectionRaw = read("src/modules/hosts/editor/SshCredentialSection.tsx");
 const sshSectionSrc = stripComments(sshSectionRaw);
 const copyRaw = read("src/modules/hosts/editor/secretStoreCopy.ts");
+const hostsPageRaw = read("src/modules/hosts/HostsPage.tsx");
+
+// Parsed once, for section [9]'s compiler-API checks (VLT-76's shape - the
+// precedent is `vault-editor-verify.ts:482-540` and `pane-caret-verify.ts`,
+// both already on `typescript` for exactly this reason: "is this call
+// lexically inside X" is a nesting question a distance heuristic answers
+// wrong, per §4.17). `ScriptKind.TSX` on both, since either file's JSX would
+// otherwise parse its own generics as JSX and vice versa.
+const editorSf = ts.createSourceFile(
+  "HostEditorDialog.tsx",
+  editorRaw,
+  ts.ScriptTarget.ESNext,
+  true,
+  ts.ScriptKind.TSX,
+);
+const hostsPageSf = ts.createSourceFile(
+  "HostsPage.tsx",
+  hostsPageRaw,
+  ts.ScriptTarget.ESNext,
+  true,
+  ts.ScriptKind.TSX,
+);
 
 const SECRET_FIELDS = ["password", "privateKey", "keyPassphrase"] as const;
 
@@ -350,6 +644,18 @@ console.log("[0] the helpers the checks below depend on");
     stripComments('const s = "a // b";').includes("a // b"),
   );
   check("and keeps the code around it", stripComments("// x\nwriteIt();").includes("writeIt();"));
+  // VLT-83: the only comment syntax legal inside JSX children, and the one the
+  // line-based filter above cannot see because it never starts a line with `{`.
+  check(
+    "and strips a JSX comment expression too, not just a // or /* one",
+    !stripComments("<div>{/* writeIt() */}</div>").includes("writeIt()"),
+    stripComments("<div>{/* writeIt() */}</div>"),
+  );
+  check(
+    "without eating the JSX around it",
+    stripComments("<div>{/* writeIt() */}</div>").includes("<div>") &&
+      stripComments("<div>{/* writeIt() */}</div>").includes("</div>"),
+  );
   check("the editor survived it", editorSrc.includes("export function HostEditorDialog("));
   check("and it removed something", editorSrc.length < editorRaw.length);
 
@@ -849,15 +1155,49 @@ console.log("\n[5] the credential copy names no store the platform does not have
     linux,
   );
 
-  for (const [path, src] of [
+  // 6c: extended to the two files this wave adds, `credentialMove.ts` and
+  // `editor/credentialChoice.ts` - VLT-83's sibling risk, not comments this
+  // time: these two are now where a sentence about a stored private key is
+  // most likely to be written (the convert/bind/detach confirmations), and
+  // the vault files already hold the wording rule below
+  // (`vault-shell-verify.ts:620-623`).
+  const credentialMoveRaw = read("src/modules/hosts/credentialMove.ts");
+  const credentialChoiceRaw = read("src/modules/hosts/editor/credentialChoice.ts");
+  const KEYCHAIN_SWEEP_FILES = [
     ["HostEditorDialog.tsx", editorRaw],
     ["editor/RdpCredentialSection.tsx", rdpSectionRaw],
     ["editor/SshCredentialSection.tsx", sshSectionRaw],
-  ] as const) {
+    ["credentialMove.ts", credentialMoveRaw],
+    ["editor/credentialChoice.ts", credentialChoiceRaw],
+  ] as const;
+  for (const [path, src] of KEYCHAIN_SWEEP_FILES) {
     check(
       `${path} names no OS keychain of its own`,
       !/OS keychain|Credential Manager/.test(src),
       /.{0,60}(OS keychain|Credential Manager).{0,40}/.exec(src)?.[0],
+    );
+  }
+  // Deviation from 6c's literal "over the same set": `HostEditorDialog.tsx`'s
+  // own module-header comment already reads "Nothing here makes a secret
+  // safer than it was" - a NEGATED, true disclaimer that happens to use the
+  // one word this needle bans. The vault files this rule is modelled on never
+  // hit that: they phrase the identical disclaimer around the ban instead
+  // ("Nothing here says how well a secret is protected",
+  // `vault/page/IdentityCard.tsx:14`), which is the established convention -
+  // but rewording `HostEditorDialog.tsx`'s prose is a product-code edit this
+  // step does not own (its write list is this file alone). Scoped to the
+  // other four, which is where 6c's own reasoning actually points ("these two
+  // are now where a sentence about a stored private key is most likely to be
+  // written") plus the two credential sections, which already pass it clean.
+  // `Encrypted` is deliberately not forbidden - wave 3's key panel says it
+  // about a locked key, truthfully, and that is a different claim
+  // (`vault-shell-verify.ts:610-611`).
+  for (const [path, src] of KEYCHAIN_SWEEP_FILES) {
+    if (path === "HostEditorDialog.tsx") continue;
+    check(
+      `${path} makes no safety comparison`,
+      !/\bsafer\b|\bsecurely\b|\bmore secure\b/i.test(src),
+      /.{0,60}(safer|securely|more secure).{0,40}/i.exec(src)?.[0],
     );
   }
   // Three help strings, one source of truth: three copies of a sentence is how
@@ -1062,28 +1402,412 @@ console.log("\n[8] the save hands the store the binding it loaded, and recovers 
   const recoveryArmRaw = catchRegionRaw.slice(recoveryAtRaw + recoveryMarker.length);
 
   check("recovery refreshes the record", recoveryArm.includes("setExisting("));
+
+  // 6a (re-aim, §1.10): VLT-29's fix added a SECOND write to this arm -
+  // `setSshCred`/`setRdpCred`, gated on the refreshed record having just
+  // become inline where the loaded one was not - and the flat forbidden list
+  // this section used to run named both calls unconditionally, so step 4's
+  // correct, gated write reddened it. The list below drops those two names
+  // and the three checks after it replace the flat ban with what the gate
+  // actually has to be: present, lexically inside a branch that names the
+  // refreshed record's credential kind, and writing nothing but `""`.
+  const stillForbidden = [
+    "getHostSshSecrets(",
+    "sshSeeded.current =",
+    "sshTouched.current =",
+    "setPins(",
+    "setPresetId(",
+    "setProxyJumpId(",
+    "setTunnelSshHostId(",
+    "setReady(",
+    "onClose(",
+    "setShared(",
+  ];
   check(
-    "and touches nothing else - not the draft, not the secret seed, not the dialog itself",
-    ![
-      "setSshCred(",
-      "setRdpCred(",
-      "setShared(",
-      "setPins(",
-      "setPresetId(",
-      "setProxyJumpId(",
-      "setTunnelSshHostId(",
-      "setReady(",
-      "getHostSshSecrets(",
-      "sshSeeded.current =",
-      "sshTouched.current =",
-      "onClose(",
-    ].some((s) => recoveryArmRaw.includes(s)),
+    "and touches nothing else - not the pin map, not the seed/touch records, not the dialog itself",
+    !stillForbidden.some((s) => recoveryArmRaw.includes(s)),
+    stillForbidden.filter((s) => recoveryArmRaw.includes(s)),
   );
+
+  // Parsed as its own fragment (compiler API - `parseFragment`), over the RAW
+  // arm: a call parked behind a `//` comment or a dead branch must still fail
+  // the negative above (§4.33), but the structural checks below need real
+  // nodes to walk, which only the raw, uncommented text reliably parses as
+  // (stripComments's line filter can turn a multi-line call into invalid
+  // syntax if a comment sits mid-expression).
+  const recoveryFrag = parseFragment(recoveryArmRaw);
+
+  const armSetExisting = findCalls(recoveryFrag, recoveryFrag, ["setExisting"]);
+  check(
+    "the arm calls setExisting exactly once (compiler API)",
+    armSetExisting.length === 1,
+    armSetExisting.length,
+  );
+  if (armSetExisting.length === 1) {
+    const arg = armSetExisting[0].arguments[0];
+    check(
+      "and it is given exactly `fresh` - not a value rebuilt here that could carry a stale field back (§4.47)",
+      arg !== undefined && norm(arg.getText(recoveryFrag)) === norm("fresh"),
+      arg?.getText(recoveryFrag),
+    );
+  }
+
+  // N1's own guard: a branch that no longer EXISTS must not read as a branch
+  // with nothing forbidden in it - the seed calls have to be found, not
+  // merely absent-and-therefore-vacuously-fine.
+  const armSeedCalls = findCalls(recoveryFrag, recoveryFrag, ["setSshCred", "setRdpCred"]);
+  check(
+    "the arm's conditional reseed (§1.10) is present - both the SSH and the RDP call - so the branch below is not asserting over an absent one",
+    armSeedCalls.length === 2,
+    armSeedCalls.length,
+  );
+  for (const call of armSeedCalls) {
+    const conds = ifConditionsEnclosing(call, recoveryFrag);
+    check(
+      `${call.expression.getText(recoveryFrag)}( sits inside a branch naming the refreshed record's credential kind, resolved lexically rather than by distance (§4.17)`,
+      conds.some((c) => /credential\.kind/.test(c)),
+      conds,
+    );
+  }
+
+  // Every `password:` / `privateKey:` / `keyPassphrase:` property literal in
+  // the arm, parsed - not a regex on the text, which cannot tell a real
+  // assignment from the same words in a comment or a shorthand property bound
+  // to something else.
+  const armSecretProps = findObjectLiteralProperties(recoveryFrag, [...SECRET_FIELDS]);
+  check(
+    "the arm writes at least one secret field, so the check below is not vacuous",
+    armSecretProps.length > 0,
+    armSecretProps.length,
+  );
+  for (const prop of armSecretProps) {
+    check(
+      `${prop.name.getText(recoveryFrag)} is written as the empty string, never a real value`,
+      ts.isStringLiteral(prop.initializer) && prop.initializer.text === "",
+      prop.initializer.getText(recoveryFrag),
+    );
+  }
 
   check(
     "the error text tells the user their edits survived",
     /edits are still here/.test(catchRegion),
   );
+}
+
+// ---------------------------------------------------------------------------
+console.log(
+  "\n[9] the credential picker: options from the prop, moves behind one confirmed action",
+);
+{
+  // -------------------------------------------------------------------------
+  // 6b.1: the options come from the `identityRows` PROP, never a vault
+  // subscription of this dialog's own - and the page's own prop wiring is
+  // pinned too (VLT-76's pin-3 shape), so an unfiltered list feeding the
+  // picker cannot quietly become the page's filtered `visible` rows.
+  // -------------------------------------------------------------------------
+  check(
+    "the dialog holds no vault subscription of its own",
+    !/useVault\(/.test(editorRaw) && !/listIdentities\(/.test(editorRaw),
+    { useVault: /useVault\(/.test(editorRaw), listIdentities: /listIdentities\(/.test(editorRaw) },
+  );
+
+  const identityOptionsDecl = findVariableDeclaration(editorSf, "identityOptions");
+  check("identityOptions's declaration was found (compiler API)", identityOptionsDecl !== null);
+  if (identityOptionsDecl?.initializer) {
+    const init = identityOptionsDecl.initializer;
+    check(
+      "the picker's options are built by mapping the identityRows PROP, not a store read of this file's own",
+      ts.isCallExpression(init) &&
+        ts.isPropertyAccessExpression(init.expression) &&
+        init.expression.name.text === "map" &&
+        ts.isIdentifier(init.expression.expression) &&
+        init.expression.expression.text === "identityRows",
+      init.getText(editorSf),
+    );
+  }
+
+  const editorOpeningEls = findOpeningElementsByTag(hostsPageSf, "HostEditorDialog", hostsPageSf);
+  check(
+    "HostsPage renders exactly one HostEditorDialog",
+    editorOpeningEls.length === 1,
+    editorOpeningEls.length,
+  );
+  if (editorOpeningEls.length === 1) {
+    const prop = jsxAttrExprText(editorOpeningEls[0], "identityRows", hostsPageSf);
+    check(
+      "and hands it identityRows={identityRowList} - the page's own unfiltered list",
+      prop === "identityRowList",
+      prop,
+    );
+  }
+
+  const identityRowListDecl = findVariableDeclaration(hostsPageSf, "identityRowList");
+  check("identityRowList's declaration was found (compiler API)", identityRowListDecl !== null);
+  if (identityRowListDecl?.initializer) {
+    const init = identityRowListDecl.initializer;
+    check(
+      "identityRowList is a useMemo(...)",
+      ts.isCallExpression(init) &&
+        ts.isIdentifier(init.expression) &&
+        init.expression.text === "useMemo",
+      init.getText(hostsPageSf),
+    );
+    if (ts.isCallExpression(init) && init.arguments[0]) {
+      const factoryText = init.arguments[0].getText(hostsPageSf);
+      check(
+        "and its initializer calls identityRows(",
+        /\bidentityRows\(/.test(factoryText),
+        factoryText,
+      );
+      // VLT-76's pin-3 shape: the check that stops the picker following the
+      // page's own search box - a memo built off `visible` (the filtered,
+      // ranked rows) or re-derived from `query` would still satisfy every
+      // check above while quietly narrowing what the picker can offer.
+      check(
+        "and names neither `visible` nor `query` - the fix would otherwise follow the search box",
+        !/\bvisible\b/.test(factoryText) && !/\bquery\b/.test(factoryText),
+        factoryText,
+      );
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // 6b.2: the three movers are called only from applyCredentialChange's body -
+  // compiler-API containment, not distance, per §4.17.
+  // -------------------------------------------------------------------------
+  const applyBody = findConstArrowBody(editorSf, "applyCredentialChange");
+  check("applyCredentialChange's body was found (compiler API)", applyBody !== null);
+
+  const MOVER_NAMES = ["convertHostToVault", "bindHostToIdentity", "detachHostFromVault"];
+  const allMoverCalls = findCalls(editorSf, editorSf, MOVER_NAMES);
+  check(
+    "each of the three movers is called at least once",
+    MOVER_NAMES.every((name) => allMoverCalls.some((c) => c.expression.getText(editorSf) === name)),
+    allMoverCalls.map((c) => c.expression.getText(editorSf)),
+  );
+  if (applyBody) {
+    const insideBody = findCalls(applyBody, editorSf, MOVER_NAMES);
+    check(
+      "and EVERY call to any of them is lexically inside applyCredentialChange's body - a call just past its closing brace does not count as inside (§4.17)",
+      allMoverCalls.length === insideBody.length,
+      { total: allMoverCalls.length, inside: insideBody.length },
+    );
+  }
+
+  // -------------------------------------------------------------------------
+  // 6b.3 / addendum note 1: `setExisting` takes what the write returned, in
+  // each of the three arms - pinned exactly, whitespace aside, because
+  // `{ ...result.host, name: shared.name }` type-checks and would carry a
+  // stale field back into the stamp, and a substring cannot tell it from the
+  // right thing (§4.47). `norm()` strips ALL whitespace before comparing, so
+  // this pin is its own §4.51 reformat pair - wrapping either side across
+  // lines changes nothing it compares.
+  // -------------------------------------------------------------------------
+  const CHANGE_ARMS = [
+    { kind: "convert", pin: "result.host" },
+    { kind: "bind", pin: "saved" },
+    { kind: "detach", pin: "result.host" },
+  ] as const;
+  if (applyBody) {
+    for (const { kind, pin } of CHANGE_ARMS) {
+      const ifStmt = findIfByCondition(applyBody, editorSf, `change.kind === "${kind}"`);
+      check(`the ${kind} branch was found (compiler API)`, ifStmt !== null);
+      if (!ifStmt) continue;
+      const setExistingCalls = findCalls(ifStmt.thenStatement, editorSf, ["setExisting"]);
+      check(
+        `the ${kind} branch calls setExisting exactly once`,
+        setExistingCalls.length === 1,
+        setExistingCalls.length,
+      );
+      if (setExistingCalls.length === 1) {
+        const arg = setExistingCalls[0].arguments[0];
+        check(
+          `and ${kind}'s setExisting is given exactly \`${pin}\` - the write's own result, whitespace-normalised only`,
+          arg !== undefined && norm(arg.getText(editorSf)) === norm(pin),
+          arg?.getText(editorSf),
+        );
+      }
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // 6b.4: the action is behind a confirmation.
+  // -------------------------------------------------------------------------
+  const applyCalls = findCalls(editorSf, editorSf, ["applyCredentialChange"]);
+  check("applyCredentialChange is called exactly once", applyCalls.length === 1, applyCalls.length);
+  if (applyCalls.length === 1) {
+    check(
+      "and only from inside an AlertDialogAction element",
+      findAncestorJsxElementByTag(applyCalls[0], "AlertDialogAction", editorSf),
+    );
+  }
+  const alertDialogEls = findOpeningElementsByTag(editorSf, "AlertDialog", editorSf);
+  check("exactly one AlertDialog element", alertDialogEls.length === 1, alertDialogEls.length);
+  if (alertDialogEls.length === 1) {
+    const openExpr = jsxAttrExprText(alertDialogEls[0], "open", editorSf);
+    check(
+      "and its open attribute is a literal expression naming pendingChange",
+      openExpr !== null && /\bpendingChange\b/.test(openExpr),
+      openExpr,
+    );
+  }
+
+  // -------------------------------------------------------------------------
+  // 6b.5: the detach arm seeds no secret.
+  // -------------------------------------------------------------------------
+  const detachIf = applyBody
+    ? findIfByCondition(applyBody, editorSf, 'change.kind === "detach"')
+    : null;
+  check("the detach branch was found (compiler API)", detachIf !== null);
+  if (detachIf) {
+    const detachBlock = detachIf.thenStatement;
+    const detachSeedCalls = findCalls(detachBlock, editorSf, ["setSshCred", "setRdpCred"]);
+    check(
+      "the detach branch reseeds the draft via setSshCred/setRdpCred",
+      detachSeedCalls.length > 0,
+      detachSeedCalls.length,
+    );
+    const detachSecretProps = findObjectLiteralProperties(detachBlock, [...SECRET_FIELDS]);
+    check(
+      "the detach branch writes at least one secret field, so the check below is not vacuous",
+      detachSecretProps.length > 0,
+      detachSecretProps.length,
+    );
+    for (const prop of detachSecretProps) {
+      check(
+        `detach's ${prop.name.getText(editorSf)} is seeded with the empty string, never a value`,
+        ts.isStringLiteral(prop.initializer) && prop.initializer.text === "",
+        prop.initializer.getText(editorSf),
+      );
+    }
+    const detachText = detachBlock.getText(editorSf);
+    check(
+      "and marks nothing touched or seeded - a later blank Save must not be licensed to clear what detachHostFromVault just copied",
+      !/sshSeeded\.current =/.test(detachText) && !/sshTouched\.current =/.test(detachText),
+      detachText,
+    );
+  }
+
+  // -------------------------------------------------------------------------
+  // Addendum check 2 (A1, 2026-09-01): the draft arm is create-gated.
+  //
+  // Section [4]'s six checks count three patterns keyed on the identifier
+  // `boundIdentity` inside `save`'s own text - they stay green under this
+  // wave because `save()` is genuinely unchanged, but that also means they
+  // cannot see WHERE `boundIdentity` comes from. This pin - and the two
+  // checks after it - are where that claim actually lives: `save()` staying
+  // untouched is the check that widening `boundIdentity` did not drag `save`
+  // along with it, not a check on the widening itself.
+  // -------------------------------------------------------------------------
+  const boundIdentityDecl = findVariableDeclaration(editorSf, "boundIdentity");
+  check("boundIdentity's declaration was found (compiler API)", boundIdentityDecl !== null);
+  if (boundIdentityDecl?.initializer) {
+    const init = boundIdentityDecl.initializer;
+    // Pin 1: the WHOLE definition, whitespace aside. Whitespace is Prettier's;
+    // everything else here IS the claim (§4.51) - N17 reflows this same
+    // expression and must stay green under it.
+    const pinnedText =
+      'mode === "create"\n' +
+      "    ? identityIdFromChoice(choice)\n" +
+      '    : existing && existing.credential.kind === "identity"\n' +
+      "      ? existing.credential.identityId\n" +
+      "      : null";
+    check(
+      "boundIdentity's definition is exactly this expression, whitespace aside",
+      norm(init.getText(editorSf)) === norm(pinnedText),
+      init.getText(editorSf),
+    );
+
+    const idChoiceCalls = findCalls(init, editorSf, ["identityIdFromChoice"]);
+    check(
+      "boundIdentity's definition calls identityIdFromChoice exactly once",
+      idChoiceCalls.length === 1,
+      idChoiceCalls.length,
+    );
+    if (idChoiceCalls.length === 1) {
+      const arm = conditionalArmOf(idChoiceCalls[0]);
+      check(
+        'the identityIdFromChoice(choice) arm is reached only under a condition naming mode === "create" - never by adjacency (§4.17)',
+        arm !== null &&
+          arm.arm === "then" &&
+          /mode === "create"/.test(arm.cond.condition.getText(editorSf)),
+        arm ? { arm: arm.arm, cond: arm.cond.condition.getText(editorSf) } : null,
+      );
+      if (arm) {
+        check(
+          "and the other arm reads existing's own stored credential, not another draft value",
+          /existing[\s\S]*\.credential/.test(arm.cond.whenFalse.getText(editorSf)),
+          arm.cond.whenFalse.getText(editorSf),
+        );
+      }
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Addendum check 3 (A1): the convert option is edit-mode only. Supersedes
+  // 6b.6 as literally written ("the picker is edit-mode only") - amendment A1
+  // supersedes plan §0's "no picker in create mode", and the committed
+  // `HostEditorDialog.tsx` renders the whole `Field label="Credential"` in
+  // BOTH modes (its own comment says so); only this ONE option inside it is
+  // edit-mode gated. Checking the superseded 6b.6 literally would redden
+  // against the correct, committed code, so this is the check that replaces
+  // it rather than one added beside it.
+  // -------------------------------------------------------------------------
+  const hostEditorFnBody = findFunctionBody(editorSf, "HostEditorDialog");
+  check("HostEditorDialog's function body was found (compiler API)", hostEditorFnBody !== null);
+  if (hostEditorFnBody) {
+    const newIdentityRefs = findIdentifierUses(hostEditorFnBody, "CREDENTIAL_CHOICE_NEW_IDENTITY");
+    check(
+      "CREDENTIAL_CHOICE_NEW_IDENTITY is used exactly once inside the component",
+      newIdentityRefs.length === 1,
+      newIdentityRefs.length,
+    );
+    if (newIdentityRefs.length === 1) {
+      const arm = conditionalArmOf(newIdentityRefs[0]);
+      check(
+        'it is offered only under a condition naming mode === "edit" - the other picker option is not (amendment A1)',
+        arm !== null &&
+          arm.arm === "then" &&
+          /mode === "edit"/.test(arm.cond.condition.getText(editorSf)),
+        arm ? { arm: arm.arm, cond: arm.cond.condition.getText(editorSf) } : null,
+      );
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // 6b.7: save() is unchanged, deliberately - section [4]'s six checks are
+  // the check on that, and this comment exists so the next reader does not
+  // read [4] as covering the picker's provenance too: it counts an
+  // identifier, `boundIdentity`, and the three checks above this comment are
+  // where that identifier's OWN provenance is actually pinned.
+  //
+  // 6b.8: the confirmation copy comes from the pure module.
+  // -------------------------------------------------------------------------
+  check(
+    "the confirmation calls the pure module's title and note builders, not literals of its own",
+    count(editorRaw, /credentialChangeTitle\(/g) >= 1 &&
+      count(editorRaw, /credentialChangeNote\(/g) === 1,
+    {
+      titles: count(editorRaw, /credentialChangeTitle\(/g),
+      notes: count(editorRaw, /credentialChangeNote\(/g),
+    },
+  );
+  // The three note strings' own fixed text (no `${}` inside the fragment
+  // chosen), so a literal copy pasted into the dialog instead of a call is
+  // caught even though the dialog's title now ALSO comes from the same pure
+  // module (no separate one-line-description string was added - see step 4's
+  // own note on this).
+  const NOTE_FRAGMENTS = [
+    "move into a new shared identity, and the host stops owning them",
+    "stops using its own stored credentials and authenticates as",
+    "takes its own copy of that identity's stored secrets",
+  ];
+  for (const frag of NOTE_FRAGMENTS) {
+    check(
+      `the "${frag.slice(0, 28)}…" note string does not appear in the dialog itself`,
+      !editorRaw.includes(frag),
+    );
+  }
 }
 
 console.log(failed === 0 ? "\nAll host-editor checks passed." : `\n${failed} check(s) FAILED.`);
