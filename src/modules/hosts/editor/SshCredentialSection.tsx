@@ -41,6 +41,10 @@ export type SshCredentialSectionProps = {
   /** The identity this host is bound to, or null when it owns its credentials
    *  inline. A bound row shows a read-only panel and nothing editable. */
   boundIdentity: string | null;
+  /** `boundIdentity`'s NAME, resolved by the dialog from the `identityRows`
+   *  prop it already holds (wave 4) - this component does no vault read of its
+   *  own. `undefined` renders the id alone, which covers a dangling binding. */
+  identityName?: string;
   value: SshCredentialDraft;
   onChange: (patch: Partial<SshCredentialDraft>) => void;
   /**
@@ -123,6 +127,7 @@ function passwordHelp(hasStoredPassword: boolean): string {
 
 export function SshCredentialSection({
   boundIdentity,
+  identityName,
   value,
   onChange,
   hasStoredPassword,
@@ -272,7 +277,9 @@ export function SshCredentialSection({
   // both: an identity carries the username as well as the secret, so showing a
   // user field for a bound row would offer to edit half of something this dialog
   // cannot edit at all.
-  if (boundIdentity) return <VaultBindingPanel identityId={boundIdentity} />;
+  if (boundIdentity) {
+    return <VaultBindingPanel identityId={boundIdentity} identityName={identityName} />;
+  }
 
   return (
     <>
@@ -413,24 +420,35 @@ export function SshCredentialSection({
  * Read-only on purpose, and it says which parts of the form still work: the
  * alternative was refusing to open the dialog at all, which would leave an
  * imported host unable to be renamed or re-pointed until the identity picker
- * ships. The identity is named by id rather than by name because resolving the
- * name means a vault read, and a dialog that cannot edit the binding does not
- * need to load it.
+ * ships. The identity used to be named by id alone because resolving the name
+ * meant a vault read this dialog had no reason to do - it no longer does:
+ * `HostEditorDialog` holds `identityRows` for its own picker (wave 4) and
+ * passes the resolved name down, so the id is now a footnote under it rather
+ * than the only thing on screen, kept for the one case a name cannot cover - a
+ * binding naming an identity that no longer exists.
  */
-function VaultBindingPanel({ identityId }: { identityId: string }) {
+function VaultBindingPanel({
+  identityId,
+  identityName,
+}: {
+  identityId: string;
+  identityName?: string;
+}) {
   return (
     <Field label="Credential">
       {/* Same box as the two other read-only status blocks in this editor. */}
       <div className="border-border/60 bg-muted/30 flex flex-col gap-1 rounded-md border px-2 py-1.5">
-        <span className="text-[11px]">This host uses a shared vault identity.</span>
+        <span className="text-[11px]">
+          This host uses the shared vault identity{identityName ? ` "${identityName}"` : ""}.
+        </span>
         <span className="text-muted-foreground truncate font-mono text-[10.5px]" title={identityId}>
           {identityId}
         </span>
       </div>
       <span className="text-muted-foreground text-[10.5px]">
         The user and the credential belong to the identity, so neither is editable here and Test
-        cannot run - choosing or changing an identity arrives with the Vault page. Everything else
-        on this form is editable, and saving leaves the binding exactly as it is.
+        cannot run. The binding is changed with the Credential picker above; everything else on this
+        form can still be edited.
       </span>
     </Field>
   );

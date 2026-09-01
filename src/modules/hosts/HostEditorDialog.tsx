@@ -1,3 +1,13 @@
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -10,11 +20,27 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
+import { inspectSshKey } from "@/modules/ssh/bridge";
 import { useHostKeyPrompt } from "@/modules/ssh/hostKeyPrompt";
+import { vaultKeyFactsFrom, type VaultKeyFacts } from "@/modules/vault/keyInspect";
+import type { IdentityRow } from "@/modules/vault/page/derive";
 import type { ReactNode } from "react";
 import { useEffect, useRef, useState } from "react";
 
+import { bindHostToIdentity, convertHostToVault, detachHostFromVault } from "./credentialMove";
 import { Combobox, type ComboboxOption } from "./editor/Combobox";
+import {
+  CREDENTIAL_CHOICE_INLINE,
+  CREDENTIAL_CHOICE_NEW_IDENTITY,
+  credentialChangeFor,
+  credentialChangeNote,
+  credentialChangeTitle,
+  currentCredentialChoice,
+  hostOwnedSecretNames,
+  identityChoice,
+  identityIdFromChoice,
+  type CredentialChange,
+} from "./editor/credentialChoice";
 import { Field, ToggleButton } from "./editor/FormControls";
 import {
   RdpCredentialSection,
@@ -90,6 +116,15 @@ export type HostEditorDialogProps = {
   onClose: () => void;
   /** After a successful save, with the persisted record. */
   onSaved?: (host: Host) => void;
+  /**
+   * Every identity row, UNFILTERED - the credential picker's own options, and
+   * the source this dialog resolves a bound identity's name from. A prop
+   * rather than a vault subscription of this file's own: `identityRows` is
+   * built once by the page from the vault hook it already subscribes to
+   * (`vault/page/derive.ts:96-103`), so this dialog and the Hosts page cannot
+   * disagree about what an identity is called.
+   */
+  identityRows: IdentityRow[];
 };
 
 const EMPTY_SHARED: SharedDraft = { name: "", host: "", port: "", groupId: "", description: "" };
@@ -125,7 +160,12 @@ function tokenFor(target: HostEditorTarget | null): string | null {
   return `create:${target.protocol}:${JSON.stringify(target.prefill ?? {})}`;
 }
 
-export function HostEditorDialog({ target, onClose, onSaved }: HostEditorDialogProps): ReactNode {
+export function HostEditorDialog({
+  target,
+  onClose,
+  onSaved,
+  identityRows,
+}: HostEditorDialogProps): ReactNode {
   const [shared, setShared] = useState<SharedDraft>(EMPTY_SHARED);
   const [protocol, setProtocol] = useState<"ssh" | "rdp">("ssh");
   // Taken from the target when one is applied rather than read off `target` on
@@ -196,6 +236,31 @@ export function HostEditorDialog({ target, onClose, onSaved }: HostEditorDialogP
    * is persisted until Save, so Cancel disposes of the whole map.
    */
   const [pins, setPins] = useState<HostPins>({});
+  /**
+   * The credential picker's own value: one of the two sentinels from
+   * `credentialChoice.ts`, or `identityChoice(id)` for one specific identity.
+   *
+   * Reset to `currentCredentialChoice(host)` in the load effect - in EITHER
+   * mode, so a leftover choice from the previous row cannot leak into this one
+   * - and again after every successful credential change, or the picker would
+   * keep showing the value it just applied instead of what is now true.
+   */
+  const [choice, setChoice] = useState(CREDENTIAL_CHOICE_INLINE);
+  /**
+   * The change `credentialChangeFor` reported for `choice` at the moment
+   * "Change credential" was pressed, waiting on the confirmation below.
+   *
+   * Amendment A1 (2026-09-01) keeps create mode's picker UNCONFIRMED:
+   * `credentialChangeFor` answers `{kind:"none"}` for every create-mode choice
+   * because `existing` is null, so this is only ever set from the edit-mode
+   * button - there is no create-mode branch that opens it.
+   */
+  const [pendingChange, setPendingChange] = useState<CredentialChange | null>(null);
+  /** The identity name offered in the convert confirmation - editable there,
+   *  because `${user}@${host}` is a poor name for a credential about to be
+   *  shared across every host that binds to it. */
+  const [convertName, setConvertName] = useState("");
+  const [changing, setChanging] = useState(false);
 
   const token = tokenFor(target);
   /** The token whose load has been applied. A ref rather than state because the
@@ -242,6 +307,10 @@ export function HostEditorDialog({ target, onClose, onSaved }: HostEditorDialogP
     setExisting(null);
     setReady(false);
     setMode(target.mode);
+    // A confirmation left open from the row this editor was just pointed away
+    // from must not survive onto the new one.
+    setPendingChange(null);
+    setConvertName("");
 
     const stale = () => applied.current !== token;
 
@@ -284,6 +353,10 @@ export function HostEditorDialog({ target, onClose, onSaved }: HostEditorDialogP
         setPresetId(RDP_DEFAULT_PRESET.id);
         setTunnelSshHostId("");
         setPins({});
+        // The create arm returns before the `currentCredentialChoice(host)`
+        // reset below is reached, so it gets its own - amendment A1: a choice
+        // left over from a previous EDIT sitting must not leak into a new host.
+        setChoice(CREDENTIAL_CHOICE_INLINE);
         setReady(true);
         return;
       }
@@ -294,6 +367,7 @@ export function HostEditorDialog({ target, onClose, onSaved }: HostEditorDialogP
         return;
       }
       setExisting(host);
+      setChoice(currentCredentialChoice(host));
       setProtocol(host.protocol);
       setPortTouched(true);
       setShared({
@@ -414,8 +488,38 @@ export function HostEditorDialog({ target, onClose, onSaved }: HostEditorDialogP
     void load();
   }, [target, token]);
 
+  /**
+   * The identity this row is bound to - the STORED binding in edit mode, the
+   * draft picker's own choice in create mode (amendment A1, 2026-09-01).
+   *
+   * In EDIT mode this is the stored record's binding and nothing else. A draft
+   * value here would let a stale picker rebuild a bound host's credential
+   * inside `save()`, which is exactly §4.3's defect - a silently detached vault
+   * binding - so `save()` itself is unchanged by this widening and stays
+   * ignorant of `choice` entirely.
+   *
+   * In CREATE mode there is no stored record, so the draft choice is the only
+   * source there is: `save()`'s three `boundIdentity ?` ternaries build the
+   * binding from it with NO CHANGE TO `save()` AT ALL, which is why
+   * `scripts/host-editor-verify.ts` section [4] stays green under this wave.
+   *
+   * The test is `mode === "create"`, deliberately NOT `!existing`: the load
+   * effect resets `existing` to `null` before its own fetch, so `existing` is
+   * transiently null in edit mode too, and a `!existing` gate would let a
+   * leftover `choice` from a previous sitting drive this during that window.
+   */
   const boundIdentity =
-    existing && existing.credential.kind === "identity" ? existing.credential.identityId : null;
+    mode === "create"
+      ? identityIdFromChoice(choice)
+      : existing && existing.credential.kind === "identity"
+        ? existing.credential.identityId
+        : null;
+  /** `boundIdentity`'s NAME, resolved here because this dialog is the only
+   *  thing that holds `identityRows` - the credential sections take it as a
+   *  prop rather than reading the vault themselves. */
+  const boundIdentityName = boundIdentity
+    ? identityRows.find((row) => row.identity.id === boundIdentity)?.identity.name
+    : undefined;
   // Blank is only "unchanged" when there is something stored to leave unchanged,
   // and that flag lives under the inline arm only.
   const hasStoredRdpPassword =
@@ -448,6 +552,42 @@ export function HostEditorDialog({ target, onClose, onSaved }: HostEditorDialogP
     { value: "", label: "None", search: "none no group ungrouped" },
     ...groups.map((g) => ({ value: g.id, label: g.name, search: `${g.name} ${g.id}` })),
   ];
+
+  // The credential picker's options. Each identity option carries the id in
+  // `search` too, not only in `label` - `Combobox.tsx:27-29` and
+  // `IdentityEditorDialog.tsx:152-155` already hold key options to the same
+  // rule, because two like-named identities must not collapse into one entry.
+  const identityOptions: ComboboxOption[] = identityRows.map((row) => ({
+    value: identityChoice(row.identity.id),
+    label: row.identity.name,
+    hint: row.identity.username,
+    search: `${row.identity.name} ${row.identity.id} ${row.identity.username}`,
+  }));
+  // `CREDENTIAL_CHOICE_NEW_IDENTITY` is EDIT MODE ONLY (amendment A1): a new
+  // host stores no credentials to move, so offering to convert one would be a
+  // dead affordance (§4.20).
+  const credentialOptions: ComboboxOption[] = [
+    {
+      value: CREDENTIAL_CHOICE_INLINE,
+      label: "This host's own credentials",
+      search: "own inline credentials",
+    },
+    ...(mode === "edit"
+      ? [
+          {
+            value: CREDENTIAL_CHOICE_NEW_IDENTITY,
+            label: "New shared identity from these credentials…",
+            search: "new shared identity convert vault",
+          },
+        ]
+      : []),
+    ...identityOptions,
+  ];
+  // `{kind:"none"}` for every create-mode choice, because `credentialChangeFor`
+  // reads `existing`, which is null there - so the description and the "Change
+  // credential" button below render for neither create mode nor an unchanged
+  // edit-mode choice, with no mode test of their own.
+  const credentialChange = credentialChangeFor(existing, choice);
 
   /**
    * Every write from a credential section arrives as a patch, and the keys it
@@ -816,7 +956,43 @@ export function HostEditorDialog({ target, onClose, onSaved }: HostEditorDialogP
         // exact defect `sshTouched` exists to prevent. This path reads the record,
         // never a secret.
         const fresh = await findHost(e.hostId).catch(() => undefined);
-        if (fresh) setExisting(fresh);
+        if (fresh) {
+          setExisting(fresh);
+          // VLT-29. The most common way this refusal is reached now is the
+          // credential picker above, on ANOTHER open editor for the same host:
+          // this form loaded a row BOUND to an identity, that binding was
+          // detached in the meantime, and `boundIdentity` recomputes off
+          // `fresh` and goes null the instant it does. A form that loaded a
+          // bound row never had an editable user/username field to seed the
+          // draft from - it was blank the whole time, under
+          // `VaultBindingPanel` - so pressing Save again would write that
+          // blank draft as the record's plain `user`/`authMode` (or
+          // `username`/`domain`), silently overwriting the real values
+          // `fresh` just copied from the identity. Re-seeding those two
+          // fields from `fresh` closes it. The secret fields are written ""
+          // alongside them rather than left as whatever the blank draft
+          // already held, because nothing here has read them and a stale
+          // value must not be implied as current.
+          if (existing?.credential.kind !== "inline" && fresh.credential.kind === "inline") {
+            if (isSshHost(fresh)) {
+              const cred = fresh.credential;
+              if (cred.kind === "inline") {
+                setSshCred({
+                  user: cred.user,
+                  authMode: cred.authMode,
+                  password: "",
+                  privateKey: "",
+                  keyPassphrase: "",
+                });
+              }
+            } else if (isRdpHost(fresh)) {
+              const cred = fresh.credential;
+              if (cred.kind === "inline") {
+                setRdpCred({ username: cred.username, domain: cred.domain ?? "", password: "" });
+              }
+            }
+          }
+        }
         setError(
           `${e.message} Your edits are still here, and the credential shown below is now the ` +
             `current one - review it and press Save again.`,
@@ -827,217 +1003,428 @@ export function HostEditorDialog({ target, onClose, onSaved }: HostEditorDialogP
     }
   };
 
+  /** The identity name the convert confirmation opens with - editable there,
+   *  never sent as-is when the field is left blank. */
+  const defaultConvertName = () =>
+    `${(sshCred.user || rdpCred.username).trim()}@${shared.host.trim()}`;
+
+  /**
+   * The credential picker's confirmed action: convert this host's own
+   * credentials into a new identity, bind to an existing one, or detach back
+   * to inline. One function, so there is exactly one call site for each of
+   * `credentialMove.ts`'s three writes and exactly one place that refreshes
+   * `existing` from what a write actually returned.
+   *
+   * `setExisting` is ALWAYS given the record the write returned, never one
+   * built here - VLT-29's first obligation. Without it, the very next Save in
+   * the same sitting would send `credentialStamp(existing)` from BEFORE this
+   * action and be refused against this editor's own write - `save()` itself is
+   * not touched by any of this, so it is the only thing standing between a
+   * completed action and a refusal that reads as this editor arguing with
+   * itself.
+   *
+   * `choice` is reset from the SAME record for the same reason: leaving it
+   * would show the picker on a value the row no longer has.
+   */
+  const applyCredentialChange = async (change: CredentialChange) => {
+    if (!existing) return;
+    setPendingChange(null);
+    setError(null);
+    setChanging(true);
+    try {
+      if (change.kind === "convert") {
+        // The draft's key body, when there is one - never the stored record,
+        // which cannot be reached from here without a second keychain read.
+        // The host editor already seeds SSH secrets from the keychain
+        // (`getHostSshSecrets` above), so a saved host's body is in `sshCred`.
+        let facts: VaultKeyFacts = {};
+        if (protocol === "ssh" && sshCred.privateKey.trim()) {
+          try {
+            facts = vaultKeyFactsFrom(
+              await inspectSshKey(sshCred.privateKey, sshCred.keyPassphrase || undefined),
+            );
+          } catch {
+            // Cosmetic only: the secret itself still travels by account move,
+            // and a failed inspection must not fail the convert over it.
+            facts = {};
+          }
+        }
+        const result = await convertHostToVault({
+          host: existing,
+          identity: {
+            name: convertName.trim() || defaultConvertName(),
+            username: (sshCred.user || rdpCred.username).trim(),
+            domain: protocol === "rdp" ? rdpCred.domain.trim() : "",
+            authMode: protocol === "rdp" ? "password" : sshCred.authMode,
+            description: "",
+          },
+          key: protocol === "ssh" ? { name: `${shared.name.trim()} key`, facts } : null,
+        });
+        setExisting(result.host);
+        setChoice(currentCredentialChoice(result.host));
+      } else if (change.kind === "bind") {
+        const saved = await bindHostToIdentity({ host: existing, identityId: change.identityId });
+        setExisting(saved);
+        setChoice(currentCredentialChoice(saved));
+      } else if (change.kind === "detach") {
+        // The identity row the picker already holds, not the (blank) draft:
+        // `SshCredentialSection`/`RdpCredentialSection` render nothing
+        // editable for a bound row, so there is no draft user/username to
+        // seed from.
+        const identity = identityRows.find(
+          (row) => row.identity.id === change.identityId,
+        )?.identity;
+        let result: { host: Host; warning?: string };
+        if (protocol === "ssh") {
+          const inline = {
+            user: identity?.username ?? "",
+            authMode: identity?.authMode ?? "password",
+          };
+          result = await detachHostFromVault({ host: existing, inline });
+          // Non-secret fields only. `sshTouched`/`sshSeeded` deliberately stay
+          // as they are - seeding them would license a later blank Save to
+          // clear the secrets `detachHostFromVault` just copied
+          // (`editor/sshSecrets.ts:48-79`).
+          setSshCred({ ...inline, password: "", privateKey: "", keyPassphrase: "" });
+        } else {
+          const inline = { username: identity?.username ?? "", domain: identity?.domain ?? "" };
+          result = await detachHostFromVault({ host: existing, inline });
+          setRdpCred({ ...inline, password: "" });
+        }
+        setExisting(result.host);
+        setChoice(currentCredentialChoice(result.host));
+        if (result.warning) setError(result.warning);
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setChanging(false);
+    }
+  };
+
   const protocolLabel = protocol === "ssh" ? "SSH" : "RDP";
-  const busy = saving || !ready;
+  const busy = saving || !ready || changing;
   // The protocol is only known once the record has loaded, so until then the
   // title says less rather than naming the protocol of whatever row was open
   // before this one.
   const title = mode === "create" ? "New host" : ready ? `Edit ${protocolLabel} host` : "Edit host";
 
-  return (
-    <Dialog
-      open={target !== null}
-      onOpenChange={(open) => {
-        if (!open) onClose();
-      }}
-    >
-      <DialogContent className="sm:max-w-lg">
-        <DialogHeader>
-          <DialogTitle>{title}</DialogTitle>
-          <DialogDescription>
-            {boundIdentity
-              ? "This host authenticates with a shared vault identity, so its credential is not edited here."
-              : protocol === "rdp"
-                ? `The password is stored outside Tervia's settings file (${SECRET_STORE_LOCATIONS}) and read by Tervia's host process when you connect — it is never handed back to the interface.`
-                : sshCred.authMode === "agent"
-                  ? "Nothing to store: the local ssh-agent holds the key and signs each handshake."
-                  : `Credentials are stored outside Tervia's settings file: ${SECRET_STORE_LOCATIONS}.`}
-          </DialogDescription>
-        </DialogHeader>
+  // Radix keeps `AlertDialogContent` mounted for its ~100ms exit animation
+  // (`VaultPage.tsx:197-216` found this first, over its own delete confirm), so
+  // a body reading `pendingChange` directly would render an empty title and
+  // description while the dialog fades out. `shownChange` is the same record,
+  // held past the moment `pendingChange` clears, and exists ONLY to answer
+  // "what does the dialog show" - `open` below and `applyCredentialChange`'s own
+  // argument still key off `pendingChange` itself.
+  const lastChangeRef = useRef<CredentialChange | null>(null);
+  if (pendingChange) lastChangeRef.current = pendingChange;
+  const shownChange = pendingChange ?? lastChangeRef.current ?? { kind: "none" as const };
+  const shownIdentityName =
+    shownChange.kind === "bind" || shownChange.kind === "detach"
+      ? identityRows.find((row) => row.identity.id === shownChange.identityId)?.identity.name
+      : undefined;
+  const shownOwnedSecrets = existing ? hostOwnedSecretNames(existing) : [];
 
-        {/* DialogContent caps at calc(100dvh-2rem). min-h-0 lets the inner stack
+  return (
+    <>
+      <Dialog
+        open={target !== null}
+        onOpenChange={(open) => {
+          if (!open) onClose();
+        }}
+      >
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>{title}</DialogTitle>
+            <DialogDescription>
+              {boundIdentity
+                ? "This host authenticates with a shared vault identity, so its credential is not edited here."
+                : protocol === "rdp"
+                  ? `The password is stored outside Tervia's settings file (${SECRET_STORE_LOCATIONS}) and read by Tervia's host process when you connect — it is never handed back to the interface.`
+                  : sshCred.authMode === "agent"
+                    ? "Nothing to store: the local ssh-agent holds the key and signs each handshake."
+                    : `Credentials are stored outside Tervia's settings file: ${SECRET_STORE_LOCATIONS}.`}
+            </DialogDescription>
+          </DialogHeader>
+
+          {/* DialogContent caps at calc(100dvh-2rem). min-h-0 lets the inner stack
             shrink so the form scrolls inside the dialog instead of top fields
             sliding off-screen. -mr-2/pr-2 keeps the scrollbar off the content
             edge. */}
-        <div className="-mr-2 flex min-h-0 flex-col gap-3 overflow-y-auto pr-2">
-          {/* A load that failed reports its reason below instead, so the two do
+          <div className="-mr-2 flex min-h-0 flex-col gap-3 overflow-y-auto pr-2">
+            {/* A load that failed reports its reason below instead, so the two do
               not stack up as "Loading…" over "that host no longer exists". */}
-          {!ready && !error ? <p className="text-muted-foreground text-[11px]">Loading…</p> : null}
-          {ready ? (
-            <>
-              <Field label="Protocol">
-                {mode === "create" ? (
-                  <div className="flex gap-1">
-                    <ToggleButton active={protocol === "ssh"} onClick={() => changeProtocol("ssh")}>
-                      SSH
-                    </ToggleButton>
-                    <ToggleButton active={protocol === "rdp"} onClick={() => changeProtocol("rdp")}>
-                      RDP
-                    </ToggleButton>
-                  </div>
-                ) : (
-                  <>
-                    <span className="text-[12px]">{protocolLabel}</span>
-                    <span className="text-muted-foreground text-[10.5px]">
-                      Fixed once a host is saved. Flipping it would leave the stored credential
-                      describing the wrong thing - the password account survives the change while
-                      the key material is released - so switching means a new host.
-                    </span>
-                  </>
-                )}
-              </Field>
+            {!ready && !error ? (
+              <p className="text-muted-foreground text-[11px]">Loading…</p>
+            ) : null}
+            {ready ? (
+              <>
+                <Field label="Protocol">
+                  {mode === "create" ? (
+                    <div className="flex gap-1">
+                      <ToggleButton
+                        active={protocol === "ssh"}
+                        onClick={() => changeProtocol("ssh")}
+                      >
+                        SSH
+                      </ToggleButton>
+                      <ToggleButton
+                        active={protocol === "rdp"}
+                        onClick={() => changeProtocol("rdp")}
+                      >
+                        RDP
+                      </ToggleButton>
+                    </div>
+                  ) : (
+                    <>
+                      <span className="text-[12px]">{protocolLabel}</span>
+                      <span className="text-muted-foreground text-[10.5px]">
+                        Fixed once a host is saved. Flipping it would leave the stored credential
+                        describing the wrong thing - the password account survives the change while
+                        the key material is released - so switching means a new host.
+                      </span>
+                    </>
+                  )}
+                </Field>
 
-              <Field label="Name">
-                <Input
-                  value={shared.name}
-                  onChange={(e) => setShared({ ...shared, name: e.target.value })}
-                  placeholder={protocol === "ssh" ? "prod-bastion" : "win-build-01"}
-                  spellCheck={false}
-                  className="h-8 text-[12px]"
-                />
-              </Field>
-
-              <div className="grid grid-cols-[1fr_5rem] gap-2">
-                <Field label="Host">
+                <Field label="Name">
                   <Input
-                    value={shared.host}
-                    onChange={(e) => setShared({ ...shared, host: e.target.value })}
-                    placeholder={
-                      protocol === "ssh"
-                        ? "example.com or 192.168.1.10"
-                        : "win.example.com or 192.168.1.20"
-                    }
+                    value={shared.name}
+                    onChange={(e) => setShared({ ...shared, name: e.target.value })}
+                    placeholder={protocol === "ssh" ? "prod-bastion" : "win-build-01"}
                     spellCheck={false}
-                    className="h-8 font-mono text-[12px]"
+                    className="h-8 text-[12px]"
                   />
                 </Field>
-                <Field label="Port">
-                  <Input
-                    value={shared.port}
-                    onChange={(e) => {
-                      setPortTouched(true);
-                      setShared({ ...shared, port: e.target.value });
-                    }}
-                    inputMode="numeric"
-                    className="h-8 font-mono text-[12px]"
+
+                <div className="grid grid-cols-[1fr_5rem] gap-2">
+                  <Field label="Host">
+                    <Input
+                      value={shared.host}
+                      onChange={(e) => setShared({ ...shared, host: e.target.value })}
+                      placeholder={
+                        protocol === "ssh"
+                          ? "example.com or 192.168.1.10"
+                          : "win.example.com or 192.168.1.20"
+                      }
+                      spellCheck={false}
+                      className="h-8 font-mono text-[12px]"
+                    />
+                  </Field>
+                  <Field label="Port">
+                    <Input
+                      value={shared.port}
+                      onChange={(e) => {
+                        setPortTouched(true);
+                        setShared({ ...shared, port: e.target.value });
+                      }}
+                      inputMode="numeric"
+                      className="h-8 font-mono text-[12px]"
+                    />
+                  </Field>
+                </div>
+
+                {/* Renders in BOTH modes (amendment A1) - only the options differ,
+                  not the picker's presence. `credentialOptions` already omits
+                  `CREDENTIAL_CHOICE_NEW_IDENTITY` outside edit mode, and
+                  `credentialChangeFor` already answers `{kind:"none"}` for
+                  every create-mode choice, so the description and button below
+                  need no mode test of their own. */}
+                <Field label="Credential">
+                  <Combobox
+                    options={credentialOptions}
+                    value={choice}
+                    onChange={setChoice}
+                    searchPlaceholder="Search identities…"
+                    emptyLabel="No identities found."
+                  />
+                  {credentialChange.kind !== "none" ? (
+                    <div className="border-border/60 bg-muted/30 flex items-center justify-between gap-2 rounded-md border px-2 py-1.5">
+                      <span className="text-muted-foreground text-[10.5px]">
+                        {credentialChangeTitle(credentialChange)}
+                      </span>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="h-7 shrink-0 px-2 text-[11px]"
+                        disabled={changing}
+                        onClick={() => {
+                          if (credentialChange.kind === "convert")
+                            setConvertName(defaultConvertName());
+                          setPendingChange(credentialChange);
+                        }}
+                      >
+                        Change credential
+                      </Button>
+                    </div>
+                  ) : null}
+                </Field>
+
+                {protocol === "ssh" ? (
+                  <SshCredentialSection
+                    boundIdentity={boundIdentity}
+                    identityName={boundIdentityName}
+                    value={sshCred}
+                    onChange={patchSshCred}
+                    hasStoredPassword={hasStoredSshPassword}
+                  />
+                ) : (
+                  <RdpCredentialSection
+                    boundIdentity={boundIdentity}
+                    identityName={boundIdentityName}
+                    value={rdpCred}
+                    onChange={(patch) => setRdpCred((d) => ({ ...d, ...patch }))}
+                    hasStoredPassword={hasStoredRdpPassword}
+                  />
+                )}
+
+                {protocol === "ssh" ? (
+                  <SshOptions
+                    hosts={sshHosts}
+                    proxyJumpId={proxyJumpId}
+                    onChange={setProxyJumpId}
+                  />
+                ) : (
+                  <RdpOptions
+                    sshHosts={sshHosts}
+                    presetId={presetId}
+                    tunnelSshHostId={tunnelSshHostId}
+                    onPresetChange={setPresetId}
+                    onTunnelChange={setTunnelSshHostId}
+                  />
+                )}
+
+                <Field label="Group">
+                  <Combobox
+                    options={groupOptions}
+                    value={shared.groupId}
+                    onChange={(groupId) => setShared({ ...shared, groupId })}
+                    searchPlaceholder="Search groups…"
+                    emptyLabel="No group found."
+                  />
+                  <span className="text-muted-foreground text-[10.5px]">
+                    A label for filtering, and a host has at most one. New groups are created on the
+                    Hosts page.
+                  </span>
+                </Field>
+
+                <Field label="Description (optional)">
+                  <Textarea
+                    value={shared.description}
+                    onChange={(e) => setShared({ ...shared, description: e.target.value })}
+                    placeholder="What this machine is for"
+                    spellCheck={false}
+                    className="h-16 text-[12px]"
                   />
                 </Field>
-              </div>
 
-              {protocol === "ssh" ? (
-                <SshCredentialSection
-                  boundIdentity={boundIdentity}
-                  value={sshCred}
-                  onChange={patchSshCred}
-                  hasStoredPassword={hasStoredSshPassword}
-                />
-              ) : (
-                <RdpCredentialSection
-                  boundIdentity={boundIdentity}
-                  value={rdpCred}
-                  onChange={(patch) => setRdpCred((d) => ({ ...d, ...patch }))}
-                  hasStoredPassword={hasStoredRdpPassword}
-                />
-              )}
+                {mode === "edit" ? (
+                  <PinnedKeyRow
+                    label={
+                      protocol === "ssh" ? "Recorded server key" : "Recorded server certificate"
+                    }
+                    fingerprint={pinnedFingerprint}
+                    emptyText={
+                      protocol === "ssh"
+                        ? "No key pinned yet · next successful connect will record one (TOFU)."
+                        : "No certificate pinned yet · the next connect will ask you to verify one (TOFU)."
+                    }
+                    // Says which address this row is about, because the row now
+                    // changes as the Host field is edited: with a key per address, a
+                    // re-pointed host shows the new address's pin (usually none) while
+                    // the old one is still held and still saved.
+                    // Both halves of the promise, because both are now true of
+                    // every pin: Forget and a key accepted during Test are edits to
+                    // this form, and saving is what applies either of them.
+                    footnote={
+                      protocol === "rdp"
+                        ? `Recorded for ${draftAddress || "this address"}, not for a port, so the same machine keeps one trusted certificate however it is reached. Forget, and any certificate accepted while testing, apply when you save — cancelling leaves the recorded one alone.`
+                        : `Recorded for ${draftAddress || "this address"}. Forget, and any key accepted while testing, apply when you save — cancelling leaves the recorded one alone.`
+                    }
+                    onForget={forgetPin}
+                  />
+                ) : null}
+              </>
+            ) : null}
 
-              {protocol === "ssh" ? (
-                <SshOptions hosts={sshHosts} proxyJumpId={proxyJumpId} onChange={setProxyJumpId} />
-              ) : (
-                <RdpOptions
-                  sshHosts={sshHosts}
-                  presetId={presetId}
-                  tunnelSshHostId={tunnelSshHostId}
-                  onPresetChange={setPresetId}
-                  onTunnelChange={setTunnelSshHostId}
-                />
-              )}
+            {error ? <p className="text-destructive text-[11px]">{error}</p> : null}
 
-              <Field label="Group">
-                <Combobox
-                  options={groupOptions}
-                  value={shared.groupId}
-                  onChange={(groupId) => setShared({ ...shared, groupId })}
-                  searchPlaceholder="Search groups…"
-                  emptyLabel="No group found."
-                />
-                <span className="text-muted-foreground text-[10.5px]">
-                  A label for filtering, and a host has at most one. New groups are created on the
-                  Hosts page.
-                </span>
-              </Field>
-
-              <Field label="Description (optional)">
-                <Textarea
-                  value={shared.description}
-                  onChange={(e) => setShared({ ...shared, description: e.target.value })}
-                  placeholder="What this machine is for"
-                  spellCheck={false}
-                  className="h-16 text-[12px]"
-                />
-              </Field>
-
-              {mode === "edit" ? (
-                <PinnedKeyRow
-                  label={protocol === "ssh" ? "Recorded server key" : "Recorded server certificate"}
-                  fingerprint={pinnedFingerprint}
-                  emptyText={
-                    protocol === "ssh"
-                      ? "No key pinned yet · next successful connect will record one (TOFU)."
-                      : "No certificate pinned yet · the next connect will ask you to verify one (TOFU)."
-                  }
-                  // Says which address this row is about, because the row now
-                  // changes as the Host field is edited: with a key per address, a
-                  // re-pointed host shows the new address's pin (usually none) while
-                  // the old one is still held and still saved.
-                  // Both halves of the promise, because both are now true of
-                  // every pin: Forget and a key accepted during Test are edits to
-                  // this form, and saving is what applies either of them.
-                  footnote={
-                    protocol === "rdp"
-                      ? `Recorded for ${draftAddress || "this address"}, not for a port, so the same machine keeps one trusted certificate however it is reached. Forget, and any certificate accepted while testing, apply when you save — cancelling leaves the recorded one alone.`
-                      : `Recorded for ${draftAddress || "this address"}. Forget, and any key accepted while testing, apply when you save — cancelling leaves the recorded one alone.`
-                  }
-                  onForget={forgetPin}
-                />
-              ) : null}
-            </>
-          ) : null}
-
-          {error ? <p className="text-destructive text-[11px]">{error}</p> : null}
-
-          {test.kind === "running" ? (
-            <p className="text-muted-foreground text-[11px]">Testing connection…</p>
-          ) : test.kind === "ok" ? (
-            <p className="text-diff-added text-[11px]">{test.summary}</p>
-          ) : test.kind === "fail" ? (
-            <p className="text-destructive text-[11px]">Test failed: {test.message}</p>
-          ) : null}
-        </div>
-
-        {/* Override DialogFooter's flex-col-reverse so Cancel stays on the left at
-            any viewport width. */}
-        <DialogFooter className="flex-row items-center justify-between gap-2 sm:justify-between sm:[&>button]:flex-none">
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => void runTest()}
-            disabled={test.kind === "running" || busy || boundIdentity !== null}
-          >
-            {test.kind === "running" ? "Testing…" : "Test connection"}
-          </Button>
-          <div className="flex items-center gap-2">
-            <DialogClose asChild>
-              <Button variant="outline" size="sm">
-                Cancel
-              </Button>
-            </DialogClose>
-            <Button size="sm" onClick={() => void save()} disabled={busy}>
-              {saving ? "Saving…" : mode === "edit" ? "Save" : "Create"}
-            </Button>
+            {test.kind === "running" ? (
+              <p className="text-muted-foreground text-[11px]">Testing connection…</p>
+            ) : test.kind === "ok" ? (
+              <p className="text-diff-added text-[11px]">{test.summary}</p>
+            ) : test.kind === "fail" ? (
+              <p className="text-destructive text-[11px]">Test failed: {test.message}</p>
+            ) : null}
           </div>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+
+          {/* Override DialogFooter's flex-col-reverse so Cancel stays on the left at
+            any viewport width. */}
+          <DialogFooter className="flex-row items-center justify-between gap-2 sm:justify-between sm:[&>button]:flex-none">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => void runTest()}
+              disabled={test.kind === "running" || busy || boundIdentity !== null}
+            >
+              {test.kind === "running" ? "Testing…" : "Test connection"}
+            </Button>
+            <div className="flex items-center gap-2">
+              <DialogClose asChild>
+                <Button variant="outline" size="sm">
+                  Cancel
+                </Button>
+              </DialogClose>
+              <Button size="sm" onClick={() => void save()} disabled={busy}>
+                {saving ? "Saving…" : mode === "edit" ? "Save" : "Create"}
+              </Button>
+            </div>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <AlertDialog
+        open={pendingChange !== null}
+        onOpenChange={(open) => {
+          if (!open) setPendingChange(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{credentialChangeTitle(shownChange)}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {credentialChangeNote(shownChange, shownIdentityName, shownOwnedSecrets)}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          {shownChange.kind === "convert" ? (
+            <div className="flex flex-col gap-1">
+              <label htmlFor="convert-identity-name" className="text-[11px] font-medium">
+                Identity name
+              </label>
+              <Input
+                id="convert-identity-name"
+                value={convertName}
+                onChange={(e) => setConvertName(e.target.value)}
+                spellCheck={false}
+                className="h-8 text-[12px]"
+              />
+            </div>
+          ) : null}
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={changing}
+              onClick={() => {
+                if (pendingChange) void applyCredentialChange(pendingChange);
+              }}
+            >
+              {changing ? "Working…" : "Confirm"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </>
   );
 }
 

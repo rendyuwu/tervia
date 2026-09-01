@@ -40,6 +40,7 @@ import {
 import { InputGroup, InputGroupAddon, InputGroupInput } from "@/components/ui/input-group";
 import { paneCaret } from "@/lib/paneCaret";
 import { toast } from "@/components/ui/toast";
+import { identityRows } from "@/modules/vault/page/derive";
 import { VaultInUseError } from "@/modules/vault/types";
 import { useVault } from "@/modules/vault/useVault";
 import { ChevronDown, Monitor, Plus, Search, SquareTerminal, X } from "lucide-react";
@@ -198,6 +199,15 @@ export function HostsPage({ onConnect, onScreen }: HostsPageProps): ReactNode {
   }, [onScreen]);
 
   const hosts = useMemo(() => Array.from(hostsById.values()), [hostsById]);
+  // Unfiltered, on purpose - `HostEditorDialog`'s credential picker must not
+  // follow this page's search box, the same reason `VaultPage.tsx`'s
+  // `keyRowList` prop is unfiltered for the identity editor's key picker.
+  // `identityRows` returns a fresh array every call, so the memo is load-
+  // bearing, not an optimisation (`vault/page/derive.ts:105-121`).
+  const identityRowList = useMemo(
+    () => identityRows(Array.from(vault.identities.values()), vault.keys, hosts),
+    [vault.identities, vault.keys, hosts],
+  );
   const knownGroupIds = useMemo(() => new Set(groups.map((g) => g.id)), [groups]);
   const rows = useMemo(() => searchRows(hosts, groups, vault), [hosts, groups, vault]);
   const counts = useMemo(() => groupCounts(hosts, groups), [hosts, groups]);
@@ -504,6 +514,7 @@ export function HostsPage({ onConnect, onScreen }: HostsPageProps): ReactNode {
       <HostEditorDialog
         target={editorTarget}
         onClose={closeEditor}
+        identityRows={identityRowList}
         // Selected but not un-filtered: if the saved row is hidden, it is hidden
         // by a query the user typed, and clearing it out from under them is worse
         // than the row not being on screen.

@@ -26,6 +26,10 @@ export type RdpCredentialSectionProps = {
   /** The identity this host is bound to, or null when it owns its password
    *  itself. A bound row shows a read-only panel and nothing editable. */
   boundIdentity: string | null;
+  /** `boundIdentity`'s NAME, resolved by the dialog from the `identityRows`
+   *  prop it already holds (wave 4) - this component does no vault read of its
+   *  own. `undefined` renders the id alone, which covers a dangling binding. */
+  identityName?: string;
   value: RdpCredentialDraft;
   onChange: (patch: Partial<RdpCredentialDraft>) => void;
   /** Whether the SAVED row already has a password stored. Blank is only
@@ -84,6 +88,7 @@ export function rdpCredentialForTest(args: {
 
 export function RdpCredentialSection({
   boundIdentity,
+  identityName,
   value,
   onChange,
   hasStoredPassword,
@@ -91,7 +96,9 @@ export function RdpCredentialSection({
   // Username, domain and password are one block, because a vault identity owns
   // all three: offering to edit the username of a bound row would be editing a
   // third of something this dialog cannot change.
-  if (boundIdentity) return <VaultBindingPanel identityId={boundIdentity} />;
+  if (boundIdentity) {
+    return <VaultBindingPanel identityId={boundIdentity} identityName={identityName} />;
+  }
 
   return (
     <>
@@ -144,24 +151,35 @@ export function RdpCredentialSection({
  *
  * Read-only, and it names which parts of the form still work: refusing to open
  * the dialog at all would leave an imported host unable to be renamed, resized or
- * re-pointed until the identity picker ships. The identity is named by id rather
- * than by name because resolving the name means a vault read, and a dialog that
- * cannot edit the binding does not need to load it.
+ * re-pointed until the identity picker ships. The identity used to be named by
+ * id alone because resolving the name meant a vault read this dialog had no
+ * reason to do - it no longer does: `HostEditorDialog` holds `identityRows` for
+ * its own picker (wave 4) and passes the resolved name down, so the id is now a
+ * footnote under it rather than the only thing on screen, kept for the one case
+ * a name cannot cover - a binding naming an identity that no longer exists.
  */
-function VaultBindingPanel({ identityId }: { identityId: string }) {
+function VaultBindingPanel({
+  identityId,
+  identityName,
+}: {
+  identityId: string;
+  identityName?: string;
+}) {
   return (
     <Field label="Credential">
       {/* Same box as the recorded-certificate block. */}
       <div className="border-border/60 bg-muted/30 flex flex-col gap-1 rounded-md border px-2 py-1.5">
-        <span className="text-[11px]">This host uses a shared vault identity.</span>
+        <span className="text-[11px]">
+          This host uses the shared vault identity{identityName ? ` "${identityName}"` : ""}.
+        </span>
         <span className="text-muted-foreground truncate font-mono text-[10.5px]" title={identityId}>
           {identityId}
         </span>
       </div>
       <span className="text-muted-foreground text-[10.5px]">
         The username, domain and password belong to the identity, so none of them is editable here
-        and Test cannot run - choosing or changing an identity arrives with the Vault page.
-        Everything else on this form is editable, and saving leaves the binding exactly as it is.
+        and Test cannot run. The binding is changed with the Credential picker above; everything
+        else on this form can still be edited.
       </span>
     </Field>
   );

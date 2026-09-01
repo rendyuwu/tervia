@@ -316,9 +316,14 @@ export function credentialStamp(host: Host | null | undefined): string {
  * not have, with no error anywhere.
  *
  * (The mirror image - a form that loaded a VAULT-BOUND host saving after a stale
- * convert - cannot happen this way: which credential a save writes is decided by
- * what the form loaded, not by what is stored now, so a form that loaded a bound
- * row keeps writing `{kind:"identity"}` back whatever changed underneath it.)
+ * convert - still cannot happen through `save()` ITSELF: which credential that
+ * function writes is decided by `boundIdentity` as this render holds it, not by
+ * what is stored now, so a stale `save()` keeps writing `{kind:"identity"}` back
+ * whatever changed underneath it. Narrowed to `save()` because it is no longer
+ * true of the editor as a whole - 6e wave 4's credential picker changes a bound
+ * host's binding on purpose, through `convertHostToVault` / `bindHostToIdentity`
+ * / `detachHostFromVault`, each a separate, immediately-committed write that
+ * carries its own `credentialStamp` check rather than riding inside this one.)
  *
  * Carries `hostId` so a caller can re-read the record it was refused against
  * without having to hold one.
