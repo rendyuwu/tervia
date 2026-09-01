@@ -108,7 +108,26 @@ function stripComments(str: string): string {
   // `{/* chosenKey?.missingPrivateKey */}` - and the original version of this
   // helper passed it straight through, leaving section 7's positive green
   // over dead, commented-out code.
-  const withoutJsxComments = str.replace(/\{\s*\/\*[\s\S]*?\*\/\s*\}/g, "");
+  //
+  // VLT-83: the inner group may not CROSS a `*/`. The first form here was
+  // `\{\s*\/\*[\s\S]*?\*\/\s*\}` - lazy, but still allowed to skip past an
+  // intervening `*/` while hunting for one that a `}` follows. A type literal
+  // opening with a doc comment (`{ /** null = closed. */ target: … }`) matches
+  // at that `{`, and the group then keeps extending past every later `*/` not
+  // followed by `}` until it finds one that is, eating everything in between.
+  // In `host-editor-verify.ts` that cost 50752 characters and 70 cascading
+  // failures, and the fix landed there first (`host-editor-verify.ts:216`).
+  // Here it was LATENT and reddened nothing, which is the worse half:
+  // measured on `KeyEditorDialog.tsx` with such a comment added, the old form
+  // swallowed 10954 of 22505 characters and the suite still passed 151/151,
+  // because the two `> 3000` floors clear on the remainder and every positive
+  // happens to anchor outside the swallowed span. What it does silence is the
+  // NEGATIVES: a record assembly with a literal `keyType:` planted inside that
+  // span passes section 5 for free (§4.17 - a check over stripped-away text
+  // goes green). With the lookahead the first `*/` is final: either a `}`
+  // follows it and this is a real `{/* … */}`, or the match fails at that `{`
+  // rather than searching onward for a luckier one.
+  const withoutJsxComments = str.replace(/\{\s*\/\*(?:(?!\*\/)[\s\S])*\*\/\s*\}/g, "");
   return withoutJsxComments
     .split("\n")
     .filter((line) => {

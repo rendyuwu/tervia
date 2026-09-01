@@ -32,7 +32,11 @@
  * 4. ORDERING (research §5.3): every copy happens before the host record is
  *    rewritten, and the host's own accounts are released only AFTER that
  *    rewrite. A crash between the two must cost at most an orphan account,
- *    never a key that existed nowhere else.
+ *    never a key that existed nowhere else. The corollary, and the reason
+ *    group 9 exists: when the host write REFUSES, the vault records that
+ *    ordering already wrote have to be taken back - records AND accounts, or
+ *    the failed convert leaves behind exactly the second copy of the credential
+ *    it existed to avoid.
  *
  * 5. CONVERT REFUSES A BOUND HOST, AND A KEY-STORING HOST WITH NO KEY NAME. A
  *    bound host owns nothing to move; a host storing key material needs
@@ -760,44 +764,79 @@ console.log("\n[8] convert refuses a bound host, and a key-storing host with no 
 }
 
 // ===========================================================================
-console.log(
-  "\n[9] convert refused when the credential moved underneath - checked as the code behaves",
-);
+console.log("\n[9] a refused convert leaves no vault record, no copy of the secret, and no delete");
 {
-  // DEVIATION FROM THE PLAN, reported verbatim in the wave report: the plan's
-  // own text for this group says a refused convert leaves "no vault record, no
-  // copy, no delete". Measured against the committed code, that is false.
-  // `convertHostToVault` mints the new identity (and key, when there is one)
-  // and copies the stale host's accounts onto them BEFORE it ever calls
-  // `hosts.upsertHost` - which is the one call that compares the stamp - so a
-  // stale-binding refusal still leaves an ORPHANED vault identity behind (and a
-  // duplicated secret, when the stale account still held one). What genuinely
-  // holds or the record could actually be lost: no host account is deleted, and
-  // the stored host record is untouched.
+  // `convertHostToVault` mints the new identity (and key), copies the host's
+  // accounts onto them and writes both records BEFORE it calls
+  // `hosts.upsertHost` - which is the first call in it that can refuse for any
+  // reason beyond its own two pre-checks. That ordering is §4.5's and does not
+  // move; what closes the hole is the compensating delete on the failure path.
+  // Without it every one of those refusals stranded an identity, a key, and a
+  // SECOND copy of the host's secret at vault accounts nothing referenced.
+  //
+  // So this group asserts the cleanup POSITIVELY, not merely that records are
+  // absent. The two pins that carry it: the copies really landed first (an
+  // undo of nothing would pass an absence check for free), and the vault
+  // accounts are empty AFTERWARDS (a cleanup that dropped the records and left
+  // the accounts is exactly the cosmetic version of this fix).
+  //
+  // Both halves of the refusal are covered, because the stamp path is the
+  // near-unreachable one: 9a is the stamp moving underneath a stale editor,
+  // 9b is a dangling `proxyJumpId`, which needs no second writer at all and is
+  // reachable today by converting a host whose jump target was deleted.
+  const keptFor = (h: ReturnType<typeof harness>, service: string): string[] =>
+    [...h.kept.entries()]
+      .filter(([k]) => k.startsWith(`${service}::`))
+      .map(([k, v]) => `${k}=${v}`)
+      .sort();
+  /** The FIELD of every vault account the cleanup released, so the assertion is
+   *  a value pin rather than a count, without naming a freshly minted id. */
+  const releasedVaultFields = (h: ReturnType<typeof harness>): string[] =>
+    h.calls
+      .filter((c) => c.op === "delete" && c.service === VAULT_KEYRING_SERVICE)
+      .map((c) => c.accounts[0].split("::")[1])
+      .sort();
+  const hostDeletes = (h: ReturnType<typeof harness>): string[] =>
+    h.calls
+      .filter((c) => c.op === "delete" && c.service === HOST_KEYRING_SERVICE)
+      .map((c) => c.accounts[0]);
+  const landedCopies = (h: ReturnType<typeof harness>): number =>
+    traceIndex(h.trace, (e) => e.startsWith(`copy ${HOST_KEYRING_SERVICE}::`)).length;
+
+  // -- 9a: the stamp moved underneath a stale editor -----------------------
   const boundNow = sshHost({
     id: "h-1",
     credential: { kind: "identity", identityId: "i-existing" },
   });
-  const staleLoad = sshHost({ id: "h-1" }); // pre-conversion, as an editor loaded it earlier
-  const h = harness({
-    hosts: [boundNow],
-    identities: [identity({ id: "i-existing", name: "existing" })],
-    kept: { [`${HOST_KEYRING_SERVICE}::h-1::password`]: "hunter2" },
+  // Pre-conversion, as an editor loaded it earlier, and storing key material so
+  // the refusal has a KEY to strand as well as an identity.
+  const staleLoad = sshHost({
+    id: "h-1",
+    credential: {
+      kind: "inline",
+      hostId: "h-1",
+      user: "root",
+      authMode: "key",
+      hasPassword: true,
+      hasPrivateKey: true,
+      hasKeyPassphrase: true,
+    },
   });
+  const seededIdentity = identity({ id: "i-existing", name: "existing" });
+  const hostKept = {
+    [`${HOST_KEYRING_SERVICE}::h-1::password`]: "hunter2",
+    [`${HOST_KEYRING_SERVICE}::h-1::privateKey`]: "PEM",
+    [`${HOST_KEYRING_SERVICE}::h-1::keyPassphrase`]: "pp",
+  };
+  const h = harness({ hosts: [boundNow], identities: [seededIdentity], kept: hostKept });
 
   let caught: unknown;
   try {
     await convertHostToVault(
       {
         host: staleLoad,
-        identity: {
-          name: "x",
-          username: "root",
-          domain: "",
-          authMode: "password",
-          description: "",
-        },
-        key: null,
+        identity: { name: "x", username: "root", domain: "", authMode: "key", description: "" },
+        key: { name: "k", facts: {} },
       },
       h.deps,
     );
@@ -817,13 +856,85 @@ console.log(
   );
   check("actual, by value - what is really stored now", err?.actual, "identity:i-existing");
 
-  check("no host account was deleted", h.deletes(), []);
-  check("the stored host record is untouched", h.hostRows(), [boundNow]);
-  // The deviation, measured rather than asserted away: a NEW, orphaned vault
-  // identity was written, and the stale account's secret WAS copied onto it -
-  // the opposite of "nothing was written".
-  check("but a new, orphaned vault identity was written anyway", h.identities().length, 2);
-  check("and the stale account's secret WAS copied onto it", h.copies().length, 1);
+  // The undo had something to undo: all three secrets really did land on vault
+  // accounts before `upsertHost` refused.
+  check("all three secrets landed on vault accounts first", landedCopies(h), 3);
+  check("and the cleanup released every one of those accounts", releasedVaultFields(h), [
+    "passphrase",
+    "password",
+    "privateKey",
+  ]);
+
+  check("no vault identity survives except the one already there", h.identities(), [
+    seededIdentity,
+  ]);
+  check("no vault key survives", h.keys(), []);
+  check("no vault account holds a secret", keptFor(h, VAULT_KEYRING_SERVICE), []);
+  check(
+    "the host's own accounts are untouched, values included",
+    keptFor(h, HOST_KEYRING_SERVICE),
+    [
+      `${HOST_KEYRING_SERVICE}::h-1::keyPassphrase=pp`,
+      `${HOST_KEYRING_SERVICE}::h-1::password=hunter2`,
+      `${HOST_KEYRING_SERVICE}::h-1::privateKey=PEM`,
+    ],
+  );
+  check("no host account was deleted", hostDeletes(h), []);
+  check("the stored host record is unchanged", h.hostRows(), [boundNow]);
+  check(
+    "the host store never committed",
+    traceIndex(h.trace, (e) => e === "commit:hosts"),
+    [],
+  );
+
+  // -- 9b: a non-stamp refusal, with no second writer anywhere -------------
+  const orphanJump = sshHost({
+    id: "h-1",
+    proxyJumpId: "h-gone",
+    credential: {
+      kind: "inline",
+      hostId: "h-1",
+      user: "root",
+      authMode: "key",
+      hasPassword: true,
+      hasPrivateKey: true,
+      hasKeyPassphrase: true,
+    },
+  });
+  const h2 = harness({ hosts: [orphanJump], kept: hostKept });
+  await rejects(
+    "convert is refused when the host names a jump host that is gone",
+    () =>
+      convertHostToVault(
+        {
+          host: orphanJump,
+          identity: { name: "x", username: "root", domain: "", authMode: "key", description: "" },
+          key: { name: "k", facts: {} },
+        },
+        h2.deps,
+      ),
+    ["names a jump host", "does not exist"],
+  );
+  check("all three secrets landed on vault accounts first", landedCopies(h2), 3);
+  check("and the cleanup released every one of those accounts", releasedVaultFields(h2), [
+    "passphrase",
+    "password",
+    "privateKey",
+  ]);
+  check("no vault identity survives", h2.identities(), []);
+  check("no vault key survives", h2.keys(), []);
+  check("no vault account holds a secret", keptFor(h2, VAULT_KEYRING_SERVICE), []);
+  check(
+    "the host's own accounts are untouched, values included",
+    keptFor(h2, HOST_KEYRING_SERVICE),
+    [
+      `${HOST_KEYRING_SERVICE}::h-1::keyPassphrase=pp`,
+      `${HOST_KEYRING_SERVICE}::h-1::password=hunter2`,
+      `${HOST_KEYRING_SERVICE}::h-1::privateKey=PEM`,
+    ],
+  );
+  check("no host account was deleted", hostDeletes(h2), []);
+  check("the stored host record is unchanged", h2.hostRows(), [orphanJump]);
 }
 
 // ===========================================================================

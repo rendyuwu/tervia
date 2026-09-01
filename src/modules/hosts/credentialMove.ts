@@ -151,10 +151,19 @@ function hostSecretsFromCopies(copied: Record<string, boolean>): HostSecretInput
 }
 
 export type CredentialMoveDeps = {
-  hosts: Pick<HostsStore, "upsertHost">;
+  /** `identityHostRefs` is here for the compensating delete alone - see
+   *  {@link undoConvertRecords} for why it is the real lookup and not `() => []`. */
+  hosts: Pick<HostsStore, "upsertHost" | "identityHostRefs">;
   vault: Pick<
     VaultStore,
-    "newIdentityId" | "newKeyId" | "upsertIdentity" | "upsertKey" | "findIdentity" | "findKey"
+    | "newIdentityId"
+    | "newKeyId"
+    | "upsertIdentity"
+    | "upsertKey"
+    | "findIdentity"
+    | "findKey"
+    | "deleteIdentity"
+    | "deleteKey"
   >;
   secrets: SecretsIo;
 };
@@ -178,6 +187,63 @@ function inlineNeedsKey(host: Host): boolean {
 }
 
 /**
+ * Remove the vault records a convert just minted, because the host write that
+ * was going to reference them refused.
+ *
+ * WHY DELETING THEM CANNOT COST ANYONE A RECORD THEY OWN: both ids came out of
+ * `newIdentityId()` / `newKeyId()` a few statements earlier, inside this one
+ * call, and nothing outside it has been handed either one - the host write is
+ * the only thing that would have, and it is the call that just threw. So
+ * neither id can name a record that existed before this operation. That is an
+ * argument about where the ids came FROM, not about the delete, and it does not
+ * carry over to an id that arrived from anywhere else: a compensating delete
+ * over a pre-existing record would destroy something the user made.
+ *
+ * IDENTITY FIRST. `deleteKey` refuses while any identity still names the key
+ * (`vault/store.ts:337-347`), and the identity minted above names it, so the
+ * reverse order refuses its own cleanup and leaves both records behind.
+ *
+ * THE ACCOUNTS GO WITH THE RECORDS. Both deletes clear the record's vault
+ * accounts as part of removing it (`vault/store.ts:323-327` and `:348-352`),
+ * which is the half that matters: step 4 put a SECOND copy of the host's secret
+ * at those accounts, and a cleanup that dropped only the records would leave
+ * exactly the extra copy this whole feature exists to avoid.
+ *
+ * `identityHostRefs` is the real lookup, passed by name, rather than a
+ * `() => []` shortcut. It finds no holders on the path this runs on - nothing
+ * binds the new identity - and it is the store's own guard over the one case
+ * the provenance argument does not cover: `upsertHost` throwing at its
+ * `persist` (`./store.ts:798-802`), where the record is already in the plugin's
+ * cache with a debounced retry behind it, so a host DOES name this identity and
+ * the delete is refused rather than stranding that host.
+ *
+ * EVERY FAILURE IN HERE IS SWALLOWED - the same swallow, for the same reason,
+ * as `vault/store.ts`'s key-secret rollback. The caller is already rethrowing
+ * the host write's own error, which is the one the user can act on and the one
+ * `HostEditorDialog`'s recovery arm branches on by instance (VLT-29). A cleanup
+ * failure must never become the error that arrives there.
+ */
+async function undoConvertRecords(
+  deps: CredentialMoveDeps,
+  identityId: string,
+  keyId: string | null,
+): Promise<void> {
+  try {
+    await deps.vault.deleteIdentity(identityId, deps.hosts.identityHostRefs);
+  } catch {
+    // See above: this must not become the error the caller sees.
+  }
+  if (keyId === null) return;
+  try {
+    await deps.vault.deleteKey(keyId);
+  } catch {
+    // Attempted even when the identity delete threw, because the two records
+    // fail independently and stopping here would leave a key holding a copy of
+    // the private material with nothing naming it.
+  }
+}
+
+/**
  * Move an inline host's credentials into a brand-new identity (and, when the
  * host stores key material, a brand-new key), then bind the host to it.
  *
@@ -195,6 +261,18 @@ function inlineNeedsKey(host: Host): boolean {
  * 7. Bind the host. `releaseStaleAccounts` then clears its accounts, because
  *    a non-inline record owns none.
  * 8. Return all three records.
+ *
+ * Steps 4 to 7 do not move: copy-then-write is §4.5's ordering, where an orphan
+ * account after a good write is the lesser evil and a crash between the copy
+ * and the write must never cost a key. What step 7 gained is a FAILURE path.
+ * `upsertHost` is the first call here that can refuse for anything other than
+ * the two cheap pre-checks above - a dangling `proxyJumpId`, a tunnel target
+ * that is not an SSH host, a jump cycle, a stamp that moved underneath the
+ * caller - and until this fix every one of those refusals left the identity, the
+ * key and a second copy of the host's secret behind, in a feature whose own
+ * confirmation copy tells the user the point is fewer copies of one credential.
+ * See {@link undoConvertRecords} for why undoing them is admissible here and
+ * would not be for a record that already existed.
  */
 export async function convertHostToVault(
   args: {
@@ -265,11 +343,22 @@ export async function convertHostToVault(
     identitySecrets,
   );
 
-  const nextHost = await deps.hosts.upsertHost(
-    { ...args.host, credential: { kind: "identity", identityId } },
-    {},
-    credentialStamp(args.host),
-  );
+  let nextHost: Host;
+  try {
+    nextHost = await deps.hosts.upsertHost(
+      { ...args.host, credential: { kind: "identity", identityId } },
+      {},
+      credentialStamp(args.host),
+    );
+  } catch (e) {
+    await undoConvertRecords(deps, identityId, keyId);
+    // The ORIGINAL error, unchanged and by identity: `HostEditorDialog`'s
+    // recovery arm tests `instanceof HostBindingChangedError` and reads
+    // `hostId` / `expected` / `actual` off it (VLT-29), so wrapping this or
+    // replacing it with the cleanup's own would turn a recoverable refusal
+    // into an unrecognised one.
+    throw e;
+  }
 
   return { host: nextHost, identity: identityUpsert.record, key };
 }
