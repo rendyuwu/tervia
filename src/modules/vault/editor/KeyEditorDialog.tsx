@@ -99,6 +99,12 @@ export function KeyEditorDialog({ target, onClose }: KeyEditorDialogProps): Reac
   const [ready, setReady] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Distinct from `error`: this names ONLY the encrypted-key refusal `save`
+  // can produce, so it can render beneath the key field - where the
+  // sentence's "Enter it below" actually points - while everything else the
+  // same `try` can fail with (a store refusal, a keychain error) still lands
+  // in the generic `error` line at the bottom of the form.
+  const [keyRefusal, setKeyRefusal] = useState<string | null>(null);
   const [inspected, setInspected] = useState<KeyInspectState>({ kind: "idle" });
   const [imported, setImported] = useState<ImportState>({ kind: "idle" });
   // What `inspected` currently describes: the (body, passphrase) pair as of the
@@ -124,6 +130,7 @@ export function KeyEditorDialog({ target, onClose }: KeyEditorDialogProps): Reac
     if (!target || !token) return;
 
     setError(null);
+    setKeyRefusal(null);
     setSaving(false);
     setInspected({ kind: "idle" });
     setImported({ kind: "idle" });
@@ -197,6 +204,11 @@ export function KeyEditorDialog({ target, onClose }: KeyEditorDialogProps): Reac
   const invalidateInspection = () => {
     inspectGeneration.current += 1;
     setInspected({ kind: "idle" });
+    // A refusal from the LAST save names a (body, passphrase) pair the user
+    // has since edited - the same staleness `inspected` is guarded against
+    // above, and the same two call sites (body and passphrase `onChange`)
+    // already call this for that reason.
+    setKeyRefusal(null);
   };
 
   const pickKeyFile = async () => {
@@ -249,6 +261,7 @@ export function KeyEditorDialog({ target, onClose }: KeyEditorDialogProps): Reac
 
   const save = async () => {
     setError(null);
+    setKeyRefusal(null);
     const invalid = validateKeyDraft(draft, mode);
     if (invalid) {
       setError(invalid);
@@ -267,7 +280,10 @@ export function KeyEditorDialog({ target, onClose }: KeyEditorDialogProps): Reac
         const info = await inspectSshKey(draft.privateKey, draft.passphrase || undefined);
         const refusal = encryptedKeyRefusal(info.encrypted, draft.passphrase);
         if (refusal) {
-          setError(refusal);
+          // Not `setError`: this refusal names the key field specifically, so
+          // it renders there instead of in the generic line at the bottom of
+          // the form. See `keyRefusal`'s declaration above.
+          setKeyRefusal(refusal);
           return;
         }
         facts = vaultKeyFactsFrom(info);
@@ -395,6 +411,11 @@ export function KeyEditorDialog({ target, onClose }: KeyEditorDialogProps): Reac
                   <KeyInspectPanel state={inspected} />
                 </div>
                 <span className="text-muted-foreground text-[10.5px]">{privateKeyHelp(mode)}</span>
+                {/* The encrypted-key refusal from `save`, not the generic
+                    `error` line at the bottom - it names this field, and its
+                    "Enter it below" points at the passphrase field right
+                    under this one. */}
+                {keyRefusal ? <p className="text-destructive text-[10.5px]">{keyRefusal}</p> : null}
               </Field>
 
               <Field label="Key passphrase (optional)">
