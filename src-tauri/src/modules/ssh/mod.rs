@@ -300,16 +300,34 @@ fn classify(text: &str) -> (KeyFormat, &str) {
 
 /// Everything `SshKeyInfo` can say about a key. Also runs on a still-encrypted
 /// `openssh-key-v1` handle, where the public half is cleartext.
-fn key_info(key: &PrivateKey, encrypted: bool) -> SshKeyInfo {
+///
+/// Fallible, and deliberately the only way a parsed key becomes an `SshKeyInfo`:
+/// the DSA refusal below has to hold at every one of `ssh_key_inspect_inner`'s
+/// returns, and living here means a future fifth return cannot quietly skip it.
+/// There is no infallible constructor left to reach for, so forgetting the check
+/// is a type error at the new call site rather than a silent hole.
+fn key_info(key: &PrivateKey, encrypted: bool) -> Result<SshKeyInfo, String> {
+    // The container format cannot answer "is this DSA?", so `classify` cannot
+    // be where this is decided: it only sees DSA when a PEM `DSA PRIVATE KEY`
+    // label spells it out, and a modern `ssh-keygen -t dsa` writes
+    // `openssh-key-v1` instead - which classifies as `OpenSsh`, parses
+    // perfectly well, and reported `ssh-dss` with a real fingerprint and public
+    // half for a key that can never authenticate (russh is built without its
+    // `dsa` feature - see `KeyFormat::Dsa`), leaving the user to discover that
+    // at dial time instead. So the guard is on the parsed algorithm, and it is
+    // checked before any of the key's facts are read.
+    if key.algorithm().is_dsa() {
+        return Err(ERR_DSA.into());
+    }
     let comment = key.comment().trim();
-    SshKeyInfo {
+    Ok(SshKeyInfo {
         parsed: true,
         encrypted,
         key_type: Some(key.algorithm().to_string()),
         fingerprint: Some(key.fingerprint(russh::keys::HashAlg::Sha256).to_string()),
         public_key: key.public_key().to_openssh().ok(),
         comment: (!comment.is_empty()).then(|| comment.to_string()),
-    }
+    })
 }
 
 /// The container sealed the public half away, so nothing is knowable yet. Not
@@ -400,7 +418,7 @@ fn ssh_key_inspect_inner(pem: &str, passphrase: Option<&str>) -> Result<SshKeyIn
             let key =
                 PrivateKey::from_openssh(key_text).map_err(|_| ERR_OPENSSH_BODY.to_string())?;
             if !key.is_encrypted() {
-                return Ok(key_info(&key, false));
+                return key_info(&key, false);
             }
             return match pass {
                 // Decrypting proves the passphrase before dial time, and is
@@ -409,9 +427,12 @@ fn ssh_key_inspect_inner(pem: &str, passphrase: Option<&str>) -> Result<SshKeyIn
                 // private one.
                 Some(pass) => key
                     .decrypt(pass)
-                    .map(|open| key_info(&open, true))
-                    .map_err(|_| ERR_WRONG_PASSPHRASE.to_string()),
-                None => Ok(key_info(&key, true)),
+                    .map_err(|_| ERR_WRONG_PASSPHRASE.to_string())
+                    .and_then(|open| key_info(&open, true)),
+                // The public half is cleartext here, so the algorithm is
+                // knowable without the passphrase - which means a DSA key is
+                // refused now rather than being reported and deferred.
+                None => key_info(&key, true),
             };
         }
         KeyFormat::Other { encrypted } => encrypted,
@@ -421,7 +442,7 @@ fn ssh_key_inspect_inner(pem: &str, passphrase: Option<&str>) -> Result<SshKeyIn
         return Ok(needs_passphrase());
     }
     match russh::keys::decode_secret_key(key_text, pass) {
-        Ok(key) => Ok(key_info(&key, encrypted)),
+        Ok(key) => key_info(&key, encrypted),
         // Backstop for a container that did not announce its encryption in a
         // header spelling `classify` recognises.
         Err(russh::keys::Error::KeyIsEncrypted) if pass.is_none() => Ok(needs_passphrase()),
@@ -925,6 +946,96 @@ AhwCeWeDtuExuzPD2Rg81xs9YHAnUA1ZGBDZniIh
 -----END DSA PRIVATE KEY-----
 ";
 
+    /// The shape a modern `ssh-keygen -t dsa -N ''` actually writes:
+    /// `openssh-key-v1` carrying `ssh-dss`, NOT the PEM `DSA_KEY` above. This is
+    /// the reachable DSA case - it classifies as `OpenSsh`, parses, and was
+    /// reported with full facts until the guard moved onto the algorithm.
+    /// `-C dsa-plain@tervia`, OpenSSH 9.6p1.
+    const DSA_OPENSSH: &str = "\
+-----BEGIN OPENSSH PRIVATE KEY-----
+b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAABsQAAAAdzc2gtZH
+NzAAAAgQCh0uAznz/kP76VCW0co1cEdLQyl2RFapJztA+v+098InkCxp12YDnv0oXd3CPu
+SFT344Ncy96GaaHJ40xJSktAay5XQJzQ/Ilthf7TRqgs2ozxPVkua9mtD84g81nsrn/mQK
+Ojg+RcVew1r0E8AK26SE6WTzJ7JYF9QpDreKmUyQAAABUAgMSrJyqPBBbDkdIDojnB8Pza
+CZMAAACALUyQt1mYIEdhKyIhJXYO3oVTptIcP9kYD6Mm8CED6EwH7LVmvESIdBMJCy7CiE
+TTRGImWKd//R0WjABMyuhtKoZBlQSiEbi5WsjlCyL9Z28j+OPwPakYSt7dw43qb0CMJvtO
+5bKcy2ZGhV2XM9DChBk5D3ZX42Y3VU63kf2qrdsAAACAaTywEM2QbW94Xi8Y/wVUEIzr9C
+Kv52MsFs7swPWWcGCWwtEylesSWeyWVJP4Ic/lK1czJNIpRDIxOJ8TrxJUaQqu7BK0KyG/
+CJqRwjyR1R3++2RlcvqFATsMnziOsKuiCxlEiiQVcKy4Jrb7lKH1JdOREiRumvjp8hunYH
+Bo3XgAAAHo42Id0uNiHdIAAAAHc3NoLWRzcwAAAIEAodLgM58/5D++lQltHKNXBHS0Mpdk
+RWqSc7QPr/tPfCJ5AsaddmA579KF3dwj7khU9+ODXMvehmmhyeNMSUpLQGsuV0Cc0PyJbY
+X+00aoLNqM8T1ZLmvZrQ/OIPNZ7K5/5kCjo4PkXFXsNa9BPACtukhOlk8yeyWBfUKQ63ip
+lMkAAAAVAIDEqycqjwQWw5HSA6I5wfD82gmTAAAAgC1MkLdZmCBHYSsiISV2Dt6FU6bSHD
+/ZGA+jJvAhA+hMB+y1ZrxEiHQTCQsuwohE00RiJlinf/0dFowATMrobSqGQZUEohG4uVrI
+5Qsi/WdvI/jj8D2pGEre3cON6m9AjCb7TuWynMtmRoVdlzPQwoQZOQ92V+NmN1VOt5H9qq
+3bAAAAgGk8sBDNkG1veF4vGP8FVBCM6/Qir+djLBbO7MD1lnBglsLRMpXrElnsllST+CHP
+5StXMyTSKUQyMTifE68SVGkKruwStCshvwiakcI8kdUd/vtkZXL6hQE7DJ84jrCrogsZRI
+okFXCsuCa2+5Sh9SXTkRIkbpr46fIbp2BwaN14AAAAFCeiDXchxHP4t75NntWOFFHFjj+c
+AAAAEGRzYS1wbGFpbkB0ZXJ2aWEBAgM=
+-----END OPENSSH PRIVATE KEY-----
+";
+
+    /// Same generator, `-N hunter2 -C dsa-enc@tervia`. Sealed with aes256-ctr +
+    /// bcrypt, so the private section is unreadable but the `ssh-dss` public
+    /// half is not - which is exactly why this one has to be refused without a
+    /// passphrase rather than reported and deferred.
+    const DSA_OPENSSH_LOCKED: &str = "\
+-----BEGIN OPENSSH PRIVATE KEY-----
+b3BlbnNzaC1rZXktdjEAAAAACmFlczI1Ni1jdHIAAAAGYmNyeXB0AAAAGAAAABA0EOyftK
+clfaEu5B/FvGK/AAAAGAAAAAEAAAGyAAAAB3NzaC1kc3MAAACBAMUSV3Cr8et+GRDhR2+q
+He3JARPPYMrZm1U/yUoopEuvRcJegg1+GLbecmpAGenmLQo13n7Oo30DY0sPRN+OgR/2z0
+GtbXjBG1x8D0t5XdZao1wHepL8+6sI+fwAfAOvTRi0DR73+s49uAYvfB3M2B5vdm+s/NmV
+FUqY+SaUmxOtAAAAFQCWl4GxBy2YkQrQpi9igWGFgbC1FQAAAIA+PnKWINPPl0koriJHBb
+9U7pN0r1lyEr5IrkG1V6TmrgyTtGpvDN5+sU1ccHZth3DvU0ExD5OPRBpltDi2+65h4eLg
+sFphMUcQzr7+A2myjAHAyrpIBIVSV5xrRJ0CbHz6s3cPWffP/hgwb8EL+KTueCVeRc5dcY
+BFjKw+JJYhAwAAAIEAt4oRSEuTmwI++Hb/fzEZ1ROc/tyfvMVt8Frk8njIcUlIPXxF+Ru8
+WSOTZRBZdLBIwRgbekA0rPrGfSNRzz7G2fk/wHVBiOKvdD8HiUUyP7IrRMwH1npoVKGRd8
+U0uPEm31zsOFiok0Z03qPuEuT7TUQryeeZcVEXJxykp7u+6vIAAAHw35RbSdLAAzvNWdPQ
+k7tE2tpKy+CvdFlzx90gAxTVCoWvnnX2q3hXl9SbAlNmolKLHagUBaKfAZWBPthjtcYJcU
+/9pSP/QlvxUWM0Iat4ZWg4YUSpSGjMx/U9GxpN2EBkBx8Yv1ABw8TiyX+baSpS8sqOAQh3
+WLQ1R7TXoQyv4NoAK7HcKWIwAOJS00YTBOf1vXLqaX/nwUeNdBKqjbob2WwmLM1/iVO9EB
+UPIBpbzwu0obfh/9AKPfqLEsETcY04uSr5kpsngx6G3fUYkRWTW/K4DwCOZiQgpjcqTT2Z
+uXVWaXGuCK8KI51HbXCoKu9NX6dZHD6bnDqtcLT2NrsDeEIJFxnyld8V9IghPt7TKsUPgx
+ZHQGc5BjfBDHwEY7ANHi8GqDbF5i4GBYAKMiCVRZY4udI2kU1P6ROgYCnThfJBEIGSBwHQ
+4OaUoHB9sRFLDC0prg/SEnXc+OomXMAZL00sHKiJguQWVQJMF9/wlRhZt4nmNUWuEQnvgZ
+rEaioGlMcmehAGRKgTcRqivSXnt0kCJYelBOTOGxG53h7lnFAOpGU8yolyMnP1Vi4xNYlk
+DA1Sjyjb6sHqJmJF6w2tgFyJJM5jQkcp31ELgHRP7S0Ip2qn7ylryzlXa0QvVID7QnhX3W
+f+ibVfSVYFrOr5Wg==
+-----END OPENSSH PRIVATE KEY-----
+";
+
+    const DSA_OPENSSH_PASSPHRASE: &str = "hunter2";
+
+    /// A DSA key in the one container that reaches `decode_secret_key`:
+    /// `openssl genpkey -genparam -algorithm DSA` then `openssl genpkey
+    /// -paramfile`, i.e. unencrypted PKCS#8, which `classify` calls
+    /// `Other { encrypted: false }`.
+    const DSA_PKCS8: &str = "\
+-----BEGIN PRIVATE KEY-----
+MIIBSgIBADCCASsGByqGSM44BAEwggEeAoGBAJktnRHPslx0V9BrjjtSycz+7Odz
+NMbv/MBynDzlIbLpx1J9WokI2xKU5eEHhfgwKZQbUETRBKG8cxcjxKk2Xqg7OINI
+MQPtmooAws98kzvDYJ3pWh/KWYVIvx3ymDjH/5T1IOImkbibGR8VIf9Wk88kq3sk
+xda8pdLQZydDK+3BAhUAtPxmLCeChPFSmhKtMc9BjYRi3RECgYBPHBL0ng+XcRTu
+oawx9HBs6ZRfw80iP5lSGJCnwmVxxEYFhk4v4alqr6Pw7Em06Ztggi0nXKIjbfHZ
+AKfC4wSnzqDi9+o+uIJ8odjI70948hH/bL8GJR/yO7cL6KiZfuE0f8L/grHOauZ+
++HhE+149VI8lvOhVL2LmGmoawky17AQWAhQFQ8W3FJqzDvpYkXcKLYgSYZtRaQ==
+-----END PRIVATE KEY-----
+";
+
+    /// The negative control for the DSA refusals, generated by the same
+    /// `ssh-keygen` in the same batch as `DSA_OPENSSH`: `-t ed25519 -N ''
+    /// -C ed-neg@tervia`. Without it, a guard that refused every
+    /// `openssh-key-v1` key would pass the DSA tests just as well.
+    const ED25519_CONTROL: &str = "\
+-----BEGIN OPENSSH PRIVATE KEY-----
+b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
+QyNTUxOQAAACC5x3v+LqbeU+Aqw0+h3FZ6Qxme9fLMj7azlYjEUZ8SqgAAAJC4XCe1uFwn
+tQAAAAtzc2gtZWQyNTUxOQAAACC5x3v+LqbeU+Aqw0+h3FZ6Qxme9fLMj7azlYjEUZ8Sqg
+AAAEBZuBdpyWDn7eNJdlZASctO6ttvCdtTK5CnbOPKJbePcLnHe/4upt5T4CrDT6HcVnpD
+GZ718syPtrOViMRRnxKqAAAADWVkLW5lZ0B0ZXJ2aWE=
+-----END OPENSSH PRIVATE KEY-----
+";
+
     /// Header-only fixture: the cipher name in `DEK-Info` is rejected before
     /// anything reads the body, so the body here is deliberately not a key.
     const PEM_3DES: &str = "\
@@ -1025,6 +1136,84 @@ Ym9ndXMgYm9keSwgbmV2ZXIgcmVhY2hlZA==
     fn dsa_key_gets_its_own_message() {
         let err = ssh_key_inspect_inner(DSA_KEY, None).expect_err("dsa is unsupported");
         assert!(err.contains("DSA"), "{err}");
+    }
+
+    /// The `decode_secret_key` path, which is the only route a PKCS#8 or `.ppk`
+    /// DSA key could take. It never reaches the algorithm guard: russh is built
+    /// without its `dsa` feature, so the decoder rejects the DSA OID outright
+    /// (`Unknown key algorithm: 1.2.840.10040.4.1`) and this surfaces as the
+    /// generic `ERR_UNREADABLE` rather than the DSA message. Pinned anyway, for
+    /// the invariant that actually matters and that holds either way: the key is
+    /// refused, and the refusal describes none of its facts. If russh ever gains
+    /// a DSA branch this key starts parsing, `key_info` catches it, and the
+    /// assertions below still pass - the message simply gets better.
+    #[test]
+    fn pkcs8_dsa_key_is_refused_and_describes_nothing() {
+        let err = ssh_key_inspect_inner(DSA_PKCS8, None).expect_err("dsa never parses here");
+        assert!(!err.contains("ssh-dss"), "{err}");
+        assert!(!err.contains("SHA256:"), "{err}");
+    }
+
+    /// The reachable DSA case, and the one a human hand test caught: a modern
+    /// `ssh-keygen -t dsa` writes `openssh-key-v1`, not PEM, so the container
+    /// says `OpenSsh`, the parse succeeds, and only the parsed algorithm can
+    /// refuse it. Before the guard moved off the header this reported `ssh-dss`
+    /// with a real fingerprint for a key russh cannot authenticate with.
+    #[test]
+    fn openssh_dsa_key_is_refused_not_described() {
+        let err = ssh_key_inspect_inner(DSA_OPENSSH, None).expect_err("dsa is unsupported");
+        assert!(err.contains("DSA"), "{err}");
+        // The facts that used to leak. None of them may reach the caller.
+        assert!(!err.contains("ssh-dss"), "{err}");
+        assert!(!err.contains("SHA256:"), "{err}");
+    }
+
+    /// Case 3: `openssh-key-v1` keeps the public half in cleartext, so the
+    /// algorithm is knowable with no passphrase - which means this must refuse
+    /// here rather than hand back `ssh-dss` facts and defer the failure to the
+    /// passphrase round (or, worse, to dial time).
+    #[test]
+    fn locked_openssh_dsa_key_is_refused_without_a_passphrase() {
+        let err = ssh_key_inspect_inner(DSA_OPENSSH_LOCKED, None)
+            .expect_err("a locked dsa key is still dsa");
+        assert!(err.contains("DSA"), "{err}");
+        assert!(!err.contains("ssh-dss"), "{err}");
+    }
+
+    /// Case 2: the same key with the right passphrase. The decrypt succeeds, so
+    /// this return is only reached after a valid parse - and it must still
+    /// refuse rather than reward the correct passphrase with a saved record.
+    #[test]
+    fn locked_openssh_dsa_key_is_refused_with_the_right_passphrase() {
+        let err = ssh_key_inspect_inner(DSA_OPENSSH_LOCKED, Some(DSA_OPENSSH_PASSPHRASE))
+            .expect_err("the right passphrase does not make dsa supported");
+        assert!(err.contains("DSA"), "{err}");
+        assert!(!err.contains("passphrase"), "{err}");
+    }
+
+    /// The negative control, without which every test above would also pass
+    /// against a guard that simply refused everything. Same `ssh-keygen`, same
+    /// batch, same container as `DSA_OPENSSH` - only the algorithm differs, and
+    /// this one still reports its full facts.
+    #[test]
+    fn a_non_dsa_key_from_the_same_batch_still_inspects() {
+        let info = ssh_key_inspect_inner(ED25519_CONTROL, None).expect("ed25519 is supported");
+        assert!(info.parsed);
+        assert!(!info.encrypted);
+        assert_eq!(info.key_type.as_deref(), Some("ssh-ed25519"));
+        assert_eq!(
+            info.fingerprint.as_deref(),
+            Some("SHA256:dkFoCH+fQkAnq3M7uANqfFkEpS3N3AzFrQMgh63AvcE")
+        );
+        assert_eq!(info.comment.as_deref(), Some("ed-neg@tervia"));
+        assert_eq!(
+            info.public_key.as_deref(),
+            Some(
+                "ssh-ed25519 \
+                 AAAAC3NzaC1lZDI1NTE5AAAAILnHe/4upt5T4CrDT6HcVnpDGZ718syPtrOViMRRnxKq \
+                 ed-neg@tervia"
+            )
+        );
     }
 
     #[test]
