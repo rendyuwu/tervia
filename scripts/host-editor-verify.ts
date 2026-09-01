@@ -357,7 +357,13 @@ function norm(s: string): string {
   return s.replace(/\s+/g, "");
 }
 
-/** The `let`/`const` variable declaration named `name` anywhere under `root`. */
+/** The `let`/`const` variable declaration named `name` anywhere under `root`.
+ *
+ *  IT RETURNS THE LAST ONE, because `result` is overwritten on every match, and
+ *  a caller that roots this at the whole SourceFile is therefore pinning
+ *  whichever declaration traversal reaches last. For a pin that is the ONLY
+ *  guard on a rule, that is defeatable by appending a decoy - see
+ *  {@link findVariableDeclarations} and section [9]'s `boundIdentity` block. */
 function findVariableDeclaration(root: ts.Node, name: string): ts.VariableDeclaration | null {
   let result: ts.VariableDeclaration | null = null;
   const visit = (n: ts.Node): void => {
@@ -368,6 +374,45 @@ function findVariableDeclaration(root: ts.Node, name: string): ts.VariableDeclar
   };
   visit(root);
   return result;
+}
+
+/**
+ * EVERY `let`/`const` declaration named `name` under `root`, so a caller can
+ * assert how many there are instead of silently taking the last.
+ *
+ * The singular above answers "show me one", which is a different question from
+ * "is there exactly one, and is it the one I mean". Reviewer B's executed
+ * evasion is the difference: with §4.3's real break applied to `boundIdentity`
+ * inside the component AND an `export function resolveBoundIdentity(...)`
+ * appended below it whose body declares `boundIdentity` with the pinned
+ * expression verbatim, the singular helper returned the DECOY, the exact-text
+ * pin compared it against itself, and `tsc`, this file (211/211) and
+ * `pnpm verify` (53/53) all stayed green over a host that silently detaches.
+ *
+ * Two things close it, and both are needed: ROOT the search at the component's
+ * own body, which excludes a decoy declared outside it, and ASSERT THE COUNT,
+ * which excludes one declared inside. Both were re-run against the fix and both
+ * redden, `tsc` staying at 0 for each:
+ *
+ *   B1  the break + `export function resolveBoundIdentity` below the component
+ *         -> "boundIdentity's definition is exactly this expression, whitespace
+ *            aside" and the `mode === "create"` arm check. Caught by the ROOTING;
+ *         the count stays 1, because the decoy is outside the body.
+ *   B1b the break + the same decoy as a nested arrow INSIDE the component, which
+ *       rooting cannot exclude
+ *         -> "boundIdentity is declared EXACTLY ONCE ... = 2". Caught by the
+ *            COUNT alone.
+ */
+function findVariableDeclarations(root: ts.Node, name: string): ts.VariableDeclaration[] {
+  const out: ts.VariableDeclaration[] = [];
+  const visit = (n: ts.Node): void => {
+    if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.name.text === name) {
+      out.push(n);
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(root);
+  return out;
 }
 
 /** Every identifier reference to `name` anywhere under `root` - scope `root`
@@ -1699,7 +1744,25 @@ console.log(
   // untouched is the check that widening `boundIdentity` did not drag `save`
   // along with it, not a check on the widening itself.
   // -------------------------------------------------------------------------
-  const boundIdentityDecl = findVariableDeclaration(editorSf, "boundIdentity");
+  // Rooted at the COMPONENT'S OWN BODY, not the SourceFile, and counted.
+  // `findVariableDeclaration` returns the LAST match in traversal order, so the
+  // SourceFile-rooted version of this pin compared a decoy against itself while
+  // the real `boundIdentity` was broken - reviewer B ran exactly that and got
+  // 211/211 here and 53/53 from `pnpm verify`. See
+  // {@link findVariableDeclarations} for the full transcript of the evasion.
+  // The count is the other half: rooting alone still admits a second
+  // declaration added INSIDE the component.
+  const hostEditorFnBody = findFunctionBody(editorSf, "HostEditorDialog");
+  check("HostEditorDialog's function body was found (compiler API)", hostEditorFnBody !== null);
+  const boundIdentityDecls = hostEditorFnBody
+    ? findVariableDeclarations(hostEditorFnBody, "boundIdentity")
+    : [];
+  check(
+    "boundIdentity is declared EXACTLY ONCE inside the component - a second declaration anywhere is what lets this pin compare a decoy against itself",
+    boundIdentityDecls.length === 1,
+    boundIdentityDecls.length,
+  );
+  const boundIdentityDecl = boundIdentityDecls.length === 1 ? boundIdentityDecls[0] : null;
   check("boundIdentity's declaration was found (compiler API)", boundIdentityDecl !== null);
   if (boundIdentityDecl?.initializer) {
     const init = boundIdentityDecl.initializer;
@@ -1753,8 +1816,8 @@ console.log(
   // against the correct, committed code, so this is the check that replaces
   // it rather than one added beside it.
   // -------------------------------------------------------------------------
-  const hostEditorFnBody = findFunctionBody(editorSf, "HostEditorDialog");
-  check("HostEditorDialog's function body was found (compiler API)", hostEditorFnBody !== null);
+  // `hostEditorFnBody` is the one computed above, for the `boundIdentity` pin -
+  // the same component body, found once.
   if (hostEditorFnBody) {
     const newIdentityRefs = findIdentifierUses(hostEditorFnBody, "CREDENTIAL_CHOICE_NEW_IDENTITY");
     check(
