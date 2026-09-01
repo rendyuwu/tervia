@@ -484,6 +484,25 @@ console.log(
 // Protects: a save that read `inspected` would inherit the same
 // still-in-flight question one level deeper, and would silently pass every
 // OTHER check in this section - the negative is what catches it.
+//
+// VLT-93, decided 2026-09-01: this section pins the BRANCH SHAPE around
+// `encryptedKeyRefusal` - one call, the refusal branch returns - and is
+// deliberately agnostic about where the value it sets ends up rendered. That
+// is why renaming `setError` to `setKeyRefusal` needed no update here:
+// correct for what this section claims, and exactly why placement has no
+// cover of its own. What holds `keyRefusal` under the Private key `Field`
+// today is `noUnusedLocals` alone - incidental, and it survives only while
+// `keyRefusal` has exactly one reader; a second reader, or a render routed
+// through a helper the unused-check cannot see through, and a regression that
+// moves or drops the slot passes every gate in this suite.
+//
+// A placement pin was weighed and DECLINED here, not overlooked: the defect
+// it would catch is cosmetic (the hand-test finding D-K2, LOW severity - the
+// message rendering under the wrong field, not a credential loss), and an
+// exact pin over parsed JSX is brittle by design - worth spending only where
+// drift costs a secret. What it would have been, so a later round does not
+// re-derive it: assert over the parsed JSX that the `keyRefusal` reader is a
+// descendant of the key `Field` and not a sibling of the bottom `error` line.
 console.log("\n[3. save inspects fields] KeyEditorDialog's save reads draft.privateKey itself");
 {
   const saveRegion = between(src.keyDialog, "const save = async () => {", "const busy = saving");
@@ -1075,6 +1094,28 @@ console.log(
   check(
     "stripComments drops a TRAILING comment naming a forbidden word too",
     !stripComments('const ok = true; // was: reads as "protected"').includes("protected"),
+  );
+
+  // VLT-83(d): every self-test above only proves a comment is REMOVED. The
+  // direction that actually shipped broken (VLT-83, this file's own header on
+  // `stripComments`) is the other one - the lazy JSX-comment regex let its
+  // match cross an intervening `*/` and kept eating source looking for a
+  // luckier one, and both `> 3000` floors below still cleared on the remainder
+  // while every positive happened to anchor outside the swallowed span.
+  // Measured on `KeyEditorDialog.tsx` with that lazy form, it swallowed 10954
+  // of 22505 characters and this script still passed 151/151.
+  const STRIPPER_PROBE =
+    "type P = { /** c */ x: X };\nconst KEEP = 1;\nconst j = <div>{/* c */}</div>;";
+  check(
+    "stripComments does not over-strip: a doc comment opening inside a type literal does not eat" +
+      " past it to the next unrelated */} it can find",
+    stripComments(STRIPPER_PROBE).includes("KEEP"),
+  );
+  check(
+    // The needle is worded so it cannot be satisfied by the `/** c */` on line
+    // 1 - only the JSX comment expression's own braces spell "{/*".
+    "stripComments does not under-strip: the JSX comment expression {/* c */} is gone",
+    !stripComments(STRIPPER_PROBE).includes("{/*"),
   );
 
   for (const key of ["keyDialog", "identityDialog"] as const) {

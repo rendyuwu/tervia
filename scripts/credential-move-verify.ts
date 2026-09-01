@@ -1676,6 +1676,54 @@ console.log("\n[13b] a refused detach takes its copies back off the host's own a
     `${VAULT_KEYRING_SERVICE}::k-1::passphrase=vault-pp`,
     `${VAULT_KEYRING_SERVICE}::k-1::privateKey=vault-pem`,
   ]);
+
+  // ---------------------------------------------------------------------------
+  // THE GUARD'S OTHER MISTAKE - declining when it should proceed. `h-5` above
+  // covers the direction where `stored` exists and is inline, so the cleanup
+  // must DECLINE. This fixture covers the direction nothing above does: `stored`
+  // is GONE - the host being detached is not in the store at all when the
+  // cleanup re-reads it - and the guard's own doc says the cleanup must still
+  // run, because nothing names the copied accounts either. Mutation J2
+  // (`if (!stored) return;`) breaks both directions at once; only `h-5` used to
+  // redden for it, because every other `[13b]` fixture seeds a stored record.
+  //
+  // Seeded with a DIFFERENT host rather than an empty store, so the absence is
+  // shown to be specific to h-1 rather than an artefact of an empty list. The
+  // refusal is the same dangling `proxyJumpId` the rest of this group uses:
+  // `assertReferences` reads the store's own host list fresh, so it fires
+  // whether or not h-1 itself is in that list, and it fires AFTER `copyMoves`
+  // has already run - which is why `landedCopies` below is checked first, and
+  // must be 3: an undo of nothing passes every absence check for free.
+  // ---------------------------------------------------------------------------
+  const hGone = harness({
+    hosts: [sshHost({ id: "h-other" })],
+    identities: [idn],
+    keys: [key],
+    kept: vaultKept,
+  });
+  await rejects(
+    "detach is refused by the same jump-host check when the host itself is gone from the store",
+    () =>
+      detachHostFromVault(
+        { host: boundHost, inline: { user: "root", authMode: "key" } },
+        hGone.deps,
+      ),
+    ["names a jump host", "does not exist"],
+  );
+  check("all three secrets landed on the host's accounts first", landedCopies(hGone), 3);
+  check(
+    "and the cleanup ran anyway, taking back exactly those three accounts, in order",
+    hostDeletes(hGone),
+    ["h-1::password", "h-1::privateKey", "h-1::keyPassphrase"],
+  );
+  check("no host account holds a secret", keptFor(hGone, HOST_KEYRING_SERVICE), []);
+  check(
+    "the copied PRIVATE KEY was taken back - the one that would be a shared secret stranded with nothing to name it",
+    hGone.kept.has(`${HOST_KEYRING_SERVICE}::h-1::privateKey`),
+    false,
+  );
+  check("the identity record is byte-identical", hGone.identities(), [idn]);
+  check("the key record is byte-identical", hGone.keys(), [key]);
 }
 
 // ===========================================================================
