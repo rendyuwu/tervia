@@ -143,14 +143,16 @@ export type ResolveDeps = { vault: VaultLookup; secrets: SecretsIo };
 export const defaultResolveDeps: ResolveDeps = { vault: vaultStore, secrets: tauriSecretsIo };
 
 /** The three SSH field names on each side. They differ only in the passphrase -
- *  see the constants for why. */
-const HOST_SSH_FIELDS = {
+ *  see the constants for why. Exported so `credentialMove.ts` builds every
+ *  keychain account from these two maps instead of a second spelling of the
+ *  field names. */
+export const HOST_SSH_FIELDS = {
   password: HOST_SSH_PASSWORD_FIELD,
   privateKey: HOST_SSH_PRIVATE_KEY_FIELD,
   keyPassphrase: HOST_SSH_KEY_PASSPHRASE_FIELD,
 } as const;
 
-const VAULT_SSH_FIELDS = {
+export const VAULT_SSH_FIELDS = {
   password: IDENTITY_PASSWORD_FIELD,
   privateKey: KEY_PRIVATE_KEY_FIELD,
   keyPassphrase: KEY_PASSPHRASE_FIELD,
