@@ -204,6 +204,84 @@ console.log("\n[2] identityRecordFrom - keyId is written ONLY when authMode is '
   );
 }
 
+// --- 2b. identityRecordFrom's ONE opt-out, "keep" (wave 4, P0-2) ------------
+console.log('\n[2b] identityRecordFrom("keep") - the documented opt-out, and its default');
+{
+  // `"keep"` exists for exactly one caller: `convertHostToVault`
+  // (`../../hosts/credentialMove.ts`), which mints a `VaultKey` out of a stored
+  // host's PEM and then has to leave something naming it - `deleteKey`'s in-use
+  // guard finds holders by `identity.keyId`, so a key nothing names is one Vault
+  // page click from destroyed. Owner's decision, 2026-09-01: that is worse than
+  // the off-spec record VLT-73 describes, so `"keep"` builds the off-spec one.
+  //
+  // The opt-out lives HERE rather than as a hand-assembled `VaultIdentity` at
+  // that call site, because this function is VLT-73's single normaliser
+  // (wave-3 boundary 6) and a second assembly is the drift it prevents.
+  // `credential-move-verify.ts` sections 4 and 4b are where the caller's own use
+  // of it is pinned; these rows are the rule itself.
+  check(
+    'password auth KEEPS the draft\'s key under "keep" - the exact row section 2 drops',
+    identityRecordFrom("i-1", identityDraft({ authMode: "password", keyId: "k-1" }), "keep"),
+    {
+      id: "i-1",
+      name: "rendy",
+      username: "rendy",
+      domain: undefined,
+      authMode: "password",
+      hasPassword: false,
+      keyId: "k-1",
+      description: undefined,
+    },
+  );
+  check(
+    'agent auth keeps it too under "keep"',
+    identityRecordFrom("i-1", identityDraft({ authMode: "agent", keyId: "k-1" }), "keep").keyId,
+    "k-1",
+  );
+  check(
+    'key auth is unchanged by "keep" - it named the key either way',
+    identityRecordFrom("i-1", identityDraft({ authMode: "key", keyId: "k-1" }), "keep").keyId,
+    "k-1",
+  );
+  // The one place the two rules disagree in the OTHER direction. `"auth-mode"`
+  // writes a blank `keyId` straight through on key auth (section 2's fourth row,
+  // where `validateIdentityDraft` is the guard); `"keep"` cannot, because its
+  // caller passes `keyId ?? ""` and an identity naming the empty string names
+  // nothing - `upsertIdentity`'s dangling-key refusal reads `identity.keyId` as
+  // falsy and lets it through, so the blank would persist onto the record.
+  check(
+    'a blank keyId becomes undefined under "keep", never the empty string',
+    identityRecordFrom("i-1", identityDraft({ authMode: "password", keyId: "" }), "keep").keyId,
+    undefined,
+  );
+  check(
+    'and a blank keyId is still written through on key auth under "auth-mode" - the two rules are not conflated',
+    identityRecordFrom("i-1", identityDraft({ authMode: "key", keyId: "" }), "auth-mode").keyId,
+    "",
+  );
+  // THE DEFAULT IS THE SAFE ONE. A caller that says nothing gets VLT-73's rule;
+  // the opt-out has to be asked for by name. Checked as an equality between the
+  // two-argument and the explicit three-argument call, so this cannot pass by
+  // the default silently becoming "keep" - the row above would fail, and so
+  // would this one.
+  ok(
+    'omitting the third argument is exactly "auth-mode", on the row where the two differ',
+    canonical(identityRecordFrom("i-1", identityDraft({ authMode: "password", keyId: "k-1" }))) ===
+      canonical(
+        identityRecordFrom(
+          "i-1",
+          identityDraft({ authMode: "password", keyId: "k-1" }),
+          "auth-mode",
+        ),
+      ),
+  );
+  check(
+    "and that default drops the key, so the equality above is not between two copies of the opt-out",
+    identityRecordFrom("i-1", identityDraft({ authMode: "password", keyId: "k-1" })).keyId,
+    undefined,
+  );
+}
+
 // --- 3. identitySecretsForSave ----------------------------------------------
 console.log("\n[3] identitySecretsForSave - blank is omitted, never sent as a delete");
 {
@@ -524,3 +602,17 @@ process.exit(failed === 0 ? 0 : 1);
 //                                                        AND this file's section 1
 //   V9: draft.ts - privateKeyHelp changed to return      section 8's distinctness
 //     "Paste a key." unconditionally                       check
+//
+// Wave 4's P0 round added section 2b. Its mutations were run from
+// credential-move-verify's side, where the caller lives - see that file's own
+// table and /tmp/wave4-fix-p0-authmode/MUTATIONS.md. The one that lands here:
+//
+//   H2: credentialMove.ts - the third argument dropped   credential-move-verify
+//     from identityRecordFrom(identityId, draft, "keep")   sections 4 and 4b.
+//                                                        NOT section 2b, which
+//                                                        calls the rule directly
+//                                                        and so cannot see a
+//                                                        caller that stops using
+//                                                        it - which is exactly
+//                                                        why 2b is not the only
+//                                                        check on this rule.

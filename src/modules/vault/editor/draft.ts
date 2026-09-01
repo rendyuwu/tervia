@@ -99,6 +99,42 @@ export function validateIdentityDraft(draft: IdentityDraft): string | null {
 }
 
 /**
+ * How {@link identityRecordFrom} decides `keyId` - the one thing about that
+ * function a caller may vary, named rather than reimplemented.
+ *
+ * `"auth-mode"` is VLT-73's rule and the DEFAULT, so the safe answer is the one
+ * a caller that says nothing gets: only a key-auth identity names a key.
+ *
+ * `"keep"` names whatever key the draft holds, whatever the mode says, and it
+ * exists for exactly ONE caller - `convertHostToVault`
+ * (`../../hosts/credentialMove.ts`), which MINTS a `VaultKey` out of a stored
+ * host's PEM and then has to leave something naming it. A key nothing names is
+ * not merely untidy: `deleteKey`'s in-use guard (`../store.ts:337-347`) has no
+ * holder to refuse over, so one click on the Vault page destroys what may be
+ * the user's only copy of that private key. The record `"keep"` builds is
+ * therefore deliberately the one VLT-73 calls off-spec - a key chip on a
+ * password identity - because the alternative is that delete. The rendering
+ * question VLT-73 deferred to 6g is reopened by it; see the convert function
+ * for the owner's decision and its date.
+ *
+ * The opt-out lives HERE, on the builder, and not as a hand-assembled
+ * `VaultIdentity` at the call site: this function is VLT-73's single normaliser
+ * (wave-3 boundary 6), and a second assembly elsewhere is exactly the drift it
+ * exists to prevent.
+ */
+export type IdentityKeyIdRule = "auth-mode" | "keep";
+
+/** {@link IdentityKeyIdRule} applied - both branches side by side, in the one
+ *  place `keyId` is decided. A blank draft `keyId` becomes `undefined` under
+ *  `"keep"` because an identity naming the empty string names nothing; the
+ *  `"auth-mode"` branch writes it through unchanged, which is the state
+ *  {@link validateIdentityDraft} refuses before the store ever sees it. */
+function identityKeyId(draft: IdentityDraft, rule: IdentityKeyIdRule): string | undefined {
+  if (rule === "keep") return draft.keyId || undefined;
+  return draft.authMode === "key" ? draft.keyId : undefined;
+}
+
+/**
  * The record `upsertIdentity` is handed.
  *
  * `keyId` IS THE POINT OF THIS FUNCTION (VLT-73). `VaultIdentity.keyId`'s doc
@@ -117,11 +153,19 @@ export function validateIdentityDraft(draft: IdentityDraft): string | null {
  * (`page/derive.ts:409-411`). The DRAFT keeps the selection so a toggle inside
  * one sitting costs nothing.
  *
+ * `keyIdRule` is the one documented opt-out from that, defaulted so a caller
+ * has to ASK for it - see {@link IdentityKeyIdRule} for the single caller that
+ * does and the credential it would otherwise leave deletable.
+ *
  * `hasPassword` is a placeholder, not a claim: `upsertIdentity` overwrites it
  * with what it actually stored (`../store.ts:218-227`), the same way
  * `HostEditorDialog.tsx:739-741` hands the host store three `false`s.
  */
-export function identityRecordFrom(id: string, draft: IdentityDraft): VaultIdentity {
+export function identityRecordFrom(
+  id: string,
+  draft: IdentityDraft,
+  keyIdRule: IdentityKeyIdRule = "auth-mode",
+): VaultIdentity {
   return {
     id,
     name: draft.name.trim(),
@@ -129,7 +173,7 @@ export function identityRecordFrom(id: string, draft: IdentityDraft): VaultIdent
     domain: draft.domain.trim() || undefined,
     authMode: draft.authMode,
     hasPassword: false,
-    keyId: draft.authMode === "key" ? draft.keyId : undefined,
+    keyId: identityKeyId(draft, keyIdRule),
     description: draft.description.trim() || undefined,
   };
 }

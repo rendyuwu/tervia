@@ -189,6 +189,37 @@ function inlineNeedsKey(host: Host): boolean {
 }
 
 /**
+ * The new identity's auth mode, read off the STORED inline arm - the SAME place
+ * {@link inlineNeedsKey} reads from, which is the whole point of it existing.
+ *
+ * The two used to come from different places: this from the caller's draft,
+ * `inlineNeedsKey` from the record. Every credential defect this round fixed was
+ * that disagreement. A draft on "key" over a record holding no key made
+ * `upsertIdentity` refuse ("uses key auth but names no key") AFTER the copies
+ * had already landed, stranding a plaintext password at an unenumerable vault
+ * account once per press; a draft on "password" over a record holding a PEM
+ * minted a `VaultKey` that the normaliser then left nameless, and an unnamed key
+ * is one Vault-page click from gone. Reading both from the record removes the
+ * disagreement structurally rather than checking for it.
+ *
+ * Convert is an operation on the STORED record, and §1.4 already settles
+ * "record, not mode" for which accounts travel; this is the same rule applied to
+ * the field that says what those accounts are for. The user's edits to `name`,
+ * `username`, `domain` and `description` still come from the draft: those carry
+ * no invariant against the accounts being moved.
+ *
+ * RDP is `"password"`, as it has always been: an RDP inline arm has no auth mode
+ * of its own, and its one account is a password. The non-inline arm is the
+ * NARROWING and not a decision - `convertHostToVault`'s first pre-check has
+ * already refused a bound host by the time this is called.
+ */
+function inlineAuthMode(host: Host): VaultAuthMode {
+  if (host.protocol !== "ssh") return "password";
+  const credential = host.credential;
+  return credential.kind === "inline" ? credential.authMode : "password";
+}
+
+/**
  * Remove the vault records a convert just minted, because the host write that
  * was going to reference them refused.
  *
@@ -254,38 +285,47 @@ async function undoConvertRecords(
  *
  * 1. Refuse unless the host is inline.
  * 2. Refuse when the host stores key material but no key was given.
- * 3. Mint the new ids.
- * 4. Copy every account, sequentially.
- * 5. Write the key, when there is one, through `keyRecordFrom` - not a
+ * 3. Refuse when the record authenticates BY key and stores none.
+ * 4. Mint the new ids.
+ * 5. Copy every account, sequentially.
+ * 6. Write the key, when there is one, through `keyRecordFrom` - not a
  *    hand-assembled `VaultKey` (wave-3 boundary 7: one builder).
- * 6. Write the identity through `identityRecordFrom`, the single normaliser
+ * 7. Write the identity through `identityRecordFrom`, the single normaliser
  *    of `keyId` (wave-3 boundary 6, VLT-73).
- * 7. Bind the host. `releaseStaleAccounts` then clears its accounts, because
+ * 8. Bind the host. `releaseStaleAccounts` then clears its accounts, because
  *    a non-inline record owns none.
- * 8. Return all three records.
+ * 9. Return all three records.
  *
- * Steps 4 to 7 do not move: copy-then-write is §4.5's ordering, where an orphan
+ * Steps 5 to 8 do not move: copy-then-write is §4.5's ordering, where an orphan
  * account after a good write is the lesser evil and a crash between the copy
- * and the write must never cost a key. What step 7 gained is a FAILURE path.
+ * and the write must never cost a key. What step 8 gained is a FAILURE path.
  * `upsertHost` is the first call here that can refuse for anything other than
- * the two cheap pre-checks above - a dangling `proxyJumpId`, a tunnel target
+ * the three cheap pre-checks above - a dangling `proxyJumpId`, a tunnel target
  * that is not an SSH host, a jump cycle, a stamp that moved underneath the
  * caller - and until this fix every one of those refusals left the identity, the
  * key and a second copy of the host's secret behind, in a feature whose own
  * confirmation copy tells the user the point is fewer copies of one credential.
  * See {@link undoConvertRecords} for why undoing them is admissible here and
  * would not be for a record that already existed.
+ *
+ * THE IDENTITY'S AUTH MODE IS NOT A PARAMETER, deliberately (owner's decision,
+ * 2026-09-01). It is derived from the stored record by {@link inlineAuthMode},
+ * which is where the reasoning lives; the short version is that a caller able to
+ * pass one was able to disagree with `inlineNeedsKey`, and both P0s this round
+ * fixed were that disagreement. Removing the parameter is what makes the class
+ * unreachable rather than merely guarded: no caller can get it wrong.
  */
 export async function convertHostToVault(
   args: {
     /** The STORED record, as the caller loaded it. */
     host: Host;
-    /** The new identity's non-secret fields. */
+    /** The new identity's non-secret fields. NOT `authMode` - see the note
+     *  above and {@link inlineAuthMode}; these four are the ones the user may
+     *  have edited and none of them carries an invariant. */
     identity: {
       name: string;
       username: string;
       domain: string;
-      authMode: VaultAuthMode;
       description: string;
     };
     /** The new key's name and facts. Required when the host stores key
@@ -303,6 +343,19 @@ export async function convertHostToVault(
   if (needsKey && !args.key) {
     throw new Error(
       `hosts: "${args.host.name}" stores a private key, and converting it needs a name for the new key`,
+    );
+  }
+  const authMode = inlineAuthMode(args.host);
+  // Deriving the mode from the record removes every DISAGREEMENT between the two
+  // reads, but not this state, which one record can hold on its own: key auth
+  // with `hasPrivateKey: false`, a key-auth host whose body was never stored.
+  // `upsertIdentity` refuses it ("uses key auth but names no key") - and refuses
+  // it at step 7, after the copies of step 5 have already landed on vault
+  // accounts nothing will ever name. So it is refused HERE, beside the other two
+  // pre-checks and before a single byte moves.
+  if (authMode === "key" && !needsKey) {
+    throw new Error(
+      `hosts: "${args.host.name}" authenticates with a private key but stores none, so the new identity would name no key`,
     );
   }
 
@@ -333,15 +386,32 @@ export async function convertHostToVault(
     name: args.identity.name,
     username: args.identity.username,
     domain: args.identity.domain,
-    authMode: args.identity.authMode,
+    authMode,
     password: "",
     keyId: keyId ?? "",
     description: args.identity.description,
   };
   const identitySecrets: { password?: VaultSecretValue } = {};
   if (copied[HOST_SSH_FIELDS.password]) identitySecrets.password = SECRET_ALREADY_STORED;
+  // `"keep"` - the identity names the key WHENEVER one was minted, and not only
+  // when the mode uses it (owner's decision, 2026-09-01). This is accepted gap
+  // 12's case: a host that once used key auth, now authenticates by password,
+  // still carries its PEM. That PEM must travel (§1.4), and a `VaultKey` nothing
+  // names is one Vault-page click from destroyed - `deleteKey`'s in-use guard
+  // (`vault/store.ts:337-347`) has no holder to refuse over. So the record built
+  // here is deliberately the one VLT-73 called off-spec, a key chip on a
+  // password identity, and the owner took that trade with the consequence
+  // understood: a misleading chip is strictly better than losing the user's only
+  // copy of a private key. It reopens VLT-73's rendering question - what that
+  // chip should say on a non-key identity - EARLIER than 6g, which is where that
+  // was scheduled.
+  //
+  // The opt-out is a named argument on `identityRecordFrom`, never a
+  // `VaultIdentity` assembled here: that function is VLT-73's single normaliser
+  // (wave-3 boundary 6), and a second assembly in this file is the drift it
+  // exists to prevent.
   const identityUpsert = await deps.vault.upsertIdentity(
-    identityRecordFrom(identityId, identityDraft),
+    identityRecordFrom(identityId, identityDraft, "keep"),
     identitySecrets,
   );
 
@@ -534,9 +604,17 @@ export async function detachHostFromVault(
 
   const key = identity.keyId ? await deps.vault.findKey(identity.keyId) : undefined;
   const moves = detachMoves(args.host, identity, key ? key.id : null);
+  // BEFORE the copies, not between them and the write. `buildInlineRecord`
+  // throws when `inline`'s shape does not match the host's protocol, and that
+  // throw sat one statement past `copyMoves` - outside the `try` below, so
+  // `undoDetachCopies` never ran over it. That is the exact orphan class the
+  // rethrow arm exists to prevent, reachable one statement earlier. It is not
+  // reachable from the shipped dialog today (the protocol toggle is create-mode
+  // only, and this path is edit-only), but 6f/6g's callers would arm it, and
+  // building the record first costs nothing: it reads no store and no keychain.
+  const record = buildInlineRecord(args.host, args.inline);
   const copied = await copyMoves(deps.secrets, moves);
   const secrets = hostSecretsFromCopies(copied);
-  const record = buildInlineRecord(args.host, args.inline);
   let host: Host;
   try {
     host = await deps.hosts.upsertHost(record, secrets, credentialStamp(args.host));

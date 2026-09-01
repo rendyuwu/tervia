@@ -1049,13 +1049,18 @@ export function HostEditorDialog({
             facts = {};
           }
         }
+        // No `authMode`: `convertHostToVault` derives it from the STORED record
+        // instead of taking it from here. This dialog used to pass the draft's
+        // radio, which could disagree with what the record actually holds - and
+        // that disagreement was both of this round's P0s, one stranding a
+        // plaintext password per press and one orphaning the host's only private
+        // key. The four fields left are the ones the user may have edited.
         const result = await convertHostToVault({
           host: existing,
           identity: {
             name: convertName.trim() || defaultConvertName(),
             username: (sshCred.user || rdpCred.username).trim(),
             domain: protocol === "rdp" ? rdpCred.domain.trim() : "",
-            authMode: protocol === "rdp" ? "password" : sshCred.authMode,
             description: "",
           },
           key: protocol === "ssh" ? { name: `${shared.name.trim()} key`, facts } : null,

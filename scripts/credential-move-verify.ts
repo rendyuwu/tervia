@@ -19,10 +19,16 @@
  *    name is a keychain account `copyMoves` will actually touch; a field left
  *    out simply never travels, silently.
  *
- * 2. CONVERT COPIES WHAT THE RECORD OWNS, NOT WHAT THE NEW MODE USES. A host on
- *    password auth can still store a stray private key; `inlineNeedsKey` reads
- *    the credential's own flags, never the auth mode a caller is about to pick
- *    for the new identity.
+ * 2. CONVERT READS THE RECORD, AND ONLY THE RECORD. A host on password auth can
+ *    still store a stray private key; `inlineNeedsKey` reads the credential's
+ *    own flags and `inlineAuthMode` reads the mode off the same arm, so the two
+ *    cannot disagree. They used to: the mode arrived from the caller's draft,
+ *    and that single disagreement was both of wave 4's P0s - a stranded
+ *    plaintext password one way (group 8's third arm), a `VaultKey` that nothing
+ *    names and `deleteKey` will happily destroy the other (group 4). The
+ *    identity therefore NAMES whatever key the copy minted, whatever the mode
+ *    says: the record VLT-73 calls off-spec, accepted 2026-09-01 because the
+ *    alternative is losing the user's only copy of a private key.
  *
  * 3. A COPY THAT FOUND NOTHING SETS NO FLAG. `secrets.copy` reports `false` for
  *    an empty source, and that must reach the new record as an ABSENT secret
@@ -38,9 +44,12 @@
  *    the failed convert leaves behind exactly the second copy of the credential
  *    it existed to avoid.
  *
- * 5. CONVERT REFUSES A BOUND HOST, AND A KEY-STORING HOST WITH NO KEY NAME. A
- *    bound host owns nothing to move; a host storing key material needs
- *    somewhere in the vault for it to land.
+ * 5. CONVERT'S THREE PRE-CHECKS ALL REFUSE BEFORE A BYTE MOVES. A bound host
+ *    owns nothing to move; a host storing key material needs somewhere in the
+ *    vault for it to land; and a record on key auth that stores NO key body
+ *    would be refused by `upsertIdentity` two steps after the copies had already
+ *    landed, so it is refused here instead. That last one is the state deriving
+ *    the mode from the record cannot remove, because one record holds it alone.
  *
  * 6. CONVERT WRITES ONLY FRESH VAULT IDS. Reusing a seeded or a host's own id
  *    would silently overwrite an unrelated record instead of minting a new one.
@@ -192,6 +201,17 @@ function harness(
     identities?: VaultIdentity[];
     keys?: VaultKey[];
     kept?: Record<string, string>;
+    /**
+     * Make the HOST store's `commit` throw.
+     *
+     * Not a simulation of the persist-half-landed case, but the case itself:
+     * `persist` (`hosts/store.ts:420-423`) writes every key through `set` and
+     * only THEN commits, so a throw here leaves the new record sitting in the
+     * store while `upsertHost` reports failure - which is exactly the state
+     * `undoDetachCopies`' re-read guard exists to recognise, and the only way to
+     * reach its declining branch through the real store.
+     */
+    hostCommitThrows?: boolean;
   } = {},
 ) {
   const hostsData: Record<string, unknown> = {
@@ -216,6 +236,12 @@ function harness(
       hostsData[key] = value;
     },
     async commit(): Promise<void> {
+      if (seed.hostCommitThrows) {
+        // A distinct marker, so group 7's `e === "commit:hosts"` trace pins
+        // cannot match a commit that threw.
+        trace.push("commit:hosts(threw)");
+        throw new Error("hosts: the store failed to persist");
+      }
       trace.push("commit:hosts");
     },
     // The REAL queue, so serialization runs through the shipped implementation.
@@ -457,13 +483,7 @@ console.log("\n[2] convert: SSH password auth moves the password and binds the h
   const result = await convertHostToVault(
     {
       host,
-      identity: {
-        name: "shared",
-        username: "root",
-        domain: "",
-        authMode: "password",
-        description: "",
-      },
+      identity: { name: "shared", username: "root", domain: "", description: "" },
       key: null,
     },
     h.deps,
@@ -509,7 +529,7 @@ console.log("\n[3] convert: SSH key auth carries the key body and its passphrase
   const result = await convertHostToVault(
     {
       host,
-      identity: { name: "shared", username: "root", domain: "", authMode: "key", description: "" },
+      identity: { name: "shared", username: "root", domain: "", description: "" },
       key: { name: "prod key", facts: {} },
     },
     h.deps,
@@ -541,11 +561,14 @@ console.log("\n[3] convert: SSH key auth carries the key body and its passphrase
 
 // ===========================================================================
 console.log(
-  "\n[4] convert copies what the RECORD owns, independent of the auth mode picked for the new identity",
+  "\n[4] convert copies what the RECORD owns, and the identity it writes NAMES what that copy created",
 );
 {
   // A host on PASSWORD auth that also stores a private key - `inlineNeedsKey`
-  // reads `hasPrivateKey`/`hasKeyPassphrase` off the credential, never the mode.
+  // reads `hasPrivateKey`/`hasKeyPassphrase` off the credential, and
+  // `inlineAuthMode` reads the mode off the same arm, so the two cannot
+  // disagree. This is accepted gap 12's record: key material that outlived the
+  // mode that used it.
   const host = sshHost({
     id: "h-1",
     credential: {
@@ -568,13 +591,7 @@ console.log(
   const result = await convertHostToVault(
     {
       host,
-      identity: {
-        name: "shared",
-        username: "root",
-        domain: "",
-        authMode: "password",
-        description: "",
-      },
+      identity: { name: "shared", username: "root", domain: "", description: "" },
       key: { name: "leftover key", facts: {} },
     },
     h.deps,
@@ -586,15 +603,134 @@ console.log(
     h.kept.get(`${VAULT_KEYRING_SERVICE}::${result.key.id}::privateKey`),
     "PEM-BODY",
   );
-  // `identityRecordFrom` normalises `keyId` to the identity's own AUTH MODE
-  // (VLT-73): a password-mode identity must not carry a `keyId`, even though a
-  // key WAS created and holds real material - the key is a separate record
-  // (§1.4), and a non-key identity naming one renders a grey key chip on a row
-  // that authenticates with a password.
   check(
-    "but the new identity's keyId does not leak it in, since its mode is password",
+    "the new identity's mode is the RECORD's own, which is password",
+    result.identity.authMode,
+    "password",
+  );
+
+  // ---------------------------------------------------------------------------
+  // P0-2's regression check, and this row carries the OPPOSITE claim it used to.
+  //
+  // It read: "the new identity's keyId does not leak it in, since its mode is
+  // password", citing VLT-73 - `identityRecordFrom` drops `keyId` for a non-key
+  // mode so a password row cannot render a grey key chip that reads as "this
+  // identity signs with that key".
+  //
+  // That is right for the identity EDITOR, where dropping the id costs the user
+  // a dropdown selection they can make again. It was wrong here, and it was a
+  // P0: convert MINTS this key out of the host's own PEM and
+  // `releaseStaleAccounts` then deletes the host's copy, so the vault key is the
+  // only copy left - and `deleteKey`'s in-use guard (`vault/store.ts:337-347`)
+  // finds holders by `identity.keyId`. With no identity naming it, the guard has
+  // nothing to refuse over and one click on the Vault page destroys it, from a
+  // convert that reported SUCCESS.
+  //
+  // Owner's decision, 2026-09-01: the identity names the key whenever one was
+  // minted, regardless of mode. That deliberately builds the record VLT-73 calls
+  // off-spec (accepted gap 12's case: a host that once used key auth, now
+  // authenticates by password, still carries its PEM), and reopens VLT-73's
+  // rendering question earlier than 6g. It is strictly better than the delete.
+  // `identityRecordFrom`'s `"keep"` rule is where that opt-out lives - on the
+  // single normaliser, not assembled by hand at the call site.
+  // ---------------------------------------------------------------------------
+  check(
+    "the new identity NAMES the minted key even though its mode is password (P0-2)",
     result.identity.keyId,
-    undefined,
+    result.key.id,
+  );
+  // The part that proves it is not merely present: naming it is what restores
+  // the user-visible protection. An absence check cannot tell "the id is on the
+  // record" from "the id is on the record and the guard reads it".
+  await rejects(
+    "and deleteKey on that key is now REFUSED, because the identity names it",
+    () => h.vault.deleteKey(result.key?.id ?? ""),
+    ["cannot delete", "leftover key", "still used by 1 identity"],
+  );
+  check(
+    "so the only copy of the PEM is still there after the refused delete",
+    h.kept.get(`${VAULT_KEYRING_SERVICE}::${result.key.id}::privateKey`),
+    "PEM-BODY",
+  );
+}
+
+// ===========================================================================
+console.log(
+  "\n[4b] the caller cannot influence the identity's auth mode - it is derived from the STORED record",
+);
+{
+  // Owner's decision, 2026-09-01: `convertHostToVault`'s `args.identity` carries
+  // no `authMode` at all. It used to, and it was the ROOT CAUSE of both P0s -
+  // the mode came from the caller's draft while `inlineNeedsKey` decided whether
+  // a key was needed from the stored record, so the two could disagree in either
+  // direction (group 4 is what a disagreement one way did to a key; group 8's
+  // third arm is what the other way did to a password).
+  //
+  // Three records identical but for their stored `authMode`, converted with the
+  // SAME `args.identity`, produce three different identity modes. `agent` is the
+  // decisive row: it is a mode nothing else in this file converts, and one that
+  // could only ever have arrived from a draft before this change.
+  const stored = async (authMode: "password" | "key" | "agent") => {
+    const host = sshHost({
+      id: "h-1",
+      credential: {
+        kind: "inline",
+        hostId: "h-1",
+        user: "root",
+        authMode,
+        hasPassword: true,
+        hasPrivateKey: true,
+        hasKeyPassphrase: false,
+      },
+    });
+    const h = harness({
+      hosts: [host],
+      kept: {
+        [`${HOST_KEYRING_SERVICE}::h-1::password`]: "hunter2",
+        [`${HOST_KEYRING_SERVICE}::h-1::privateKey`]: "PEM-BODY",
+      },
+    });
+    return convertHostToVault(
+      {
+        host,
+        identity: { name: "shared", username: "root", domain: "", description: "" },
+        key: { name: "carried key", facts: {} },
+      },
+      h.deps,
+    );
+  };
+  const fromPassword = await stored("password");
+  const fromKey = await stored("key");
+  const fromAgent = await stored("agent");
+  check(
+    "the three stored modes come back on the three identities, in order",
+    [fromPassword.identity.authMode, fromKey.identity.authMode, fromAgent.identity.authMode],
+    ["password", "key", "agent"],
+  );
+  // And decision 2 applies across all three, not only to the password row group
+  // 4 pins: whichever mode the record was on, the minted key ends up named.
+  check(
+    "and every one of them names the key that was minted from its PEM",
+    [
+      fromPassword.identity.keyId === fromPassword.key?.id,
+      fromKey.identity.keyId === fromKey.key?.id,
+      fromAgent.identity.keyId === fromAgent.key?.id,
+    ],
+    [true, true, true],
+  );
+
+  // The STRUCTURAL half, and it is a COMPILE-time pin: `pnpm verify` runs under
+  // tsx, which strips types without checking them, so this row can only print
+  // `ok` here - `pnpm typecheck:scripts` is the gate it actually reddens, the
+  // day `authMode` comes back as a parameter and `AuthModeIsNotAParameter`
+  // becomes `never`. Said out loud, because a check that cannot fail where it is
+  // printed is worth exactly what its label admits and no more.
+  type ConvertIdentityArg = Parameters<typeof convertHostToVault>[0]["identity"];
+  type AuthModeIsNotAParameter = "authMode" extends keyof ConvertIdentityArg ? never : true;
+  const authModeIsNotAParameter: AuthModeIsNotAParameter = true;
+  assert(
+    authModeIsNotAParameter,
+    "convertHostToVault's identity argument declares no authMode (compile-time; typecheck:scripts is the gate)",
   );
 }
 
@@ -609,13 +745,7 @@ console.log("\n[5] convert: RDP moves the password alone and carries the domain"
   const result = await convertHostToVault(
     {
       host,
-      identity: {
-        name: "dc",
-        username: "admin",
-        domain: "CORP",
-        authMode: "password",
-        description: "",
-      },
+      identity: { name: "dc", username: "admin", domain: "CORP", description: "" },
       key: null,
     },
     h.deps,
@@ -640,7 +770,7 @@ console.log("\n[6] a copy that found nothing sets no flag");
   const result = await convertHostToVault(
     {
       host,
-      identity: { name: "x", username: "root", domain: "", authMode: "password", description: "" },
+      identity: { name: "x", username: "root", domain: "", description: "" },
       key: null,
     },
     h.deps,
@@ -680,7 +810,7 @@ console.log(
   const result = await convertHostToVault(
     {
       host,
-      identity: { name: "x", username: "root", domain: "", authMode: "key", description: "" },
+      identity: { name: "x", username: "root", domain: "", description: "" },
       key: { name: "k", facts: {} },
     },
     h.deps,
@@ -714,7 +844,9 @@ console.log(
 }
 
 // ===========================================================================
-console.log("\n[8] convert refuses a bound host, and a key-storing host with no key name");
+console.log(
+  "\n[8] convert's three pre-checks refuse BEFORE any copy: a bound host, key material with no key name, key auth storing no key",
+);
 {
   const bound = sshHost({ id: "h-1", credential: { kind: "identity", identityId: "i-1" } });
   const h = harness({ hosts: [bound] });
@@ -724,13 +856,7 @@ console.log("\n[8] convert refuses a bound host, and a key-storing host with no 
       convertHostToVault(
         {
           host: bound,
-          identity: {
-            name: "x",
-            username: "root",
-            domain: "",
-            authMode: "password",
-            description: "",
-          },
+          identity: { name: "x", username: "root", domain: "", description: "" },
           key: null,
         },
         h.deps,
@@ -757,13 +883,88 @@ console.log("\n[8] convert refuses a bound host, and a key-storing host with no 
       convertHostToVault(
         {
           host: keyed,
-          identity: { name: "x", username: "root", domain: "", authMode: "key", description: "" },
+          identity: { name: "x", username: "root", domain: "", description: "" },
           key: null,
         },
         h2.deps,
       ),
     ["stores a private key", "name for the new key"],
   );
+
+  // ---------------------------------------------------------------------------
+  // P0-1's regression check. Deriving the identity's mode from the record
+  // (`inlineAuthMode`) removes every DISAGREEMENT between the mode and
+  // `inlineNeedsKey`, but not this state, which one record holds on its own:
+  // `authMode: "key"` with `hasPrivateKey: false`, a key-auth host whose body
+  // was never stored. `needsKey` is then false, so no key id is minted, and
+  // `upsertIdentity` refuses ("uses key auth but names no key") - at step 7,
+  // AFTER the copies of step 5 have landed.
+  //
+  // Measured before the fix, over two presses of one button: two vault password
+  // accounts written under freshly minted identity ids, no identity on record to
+  // name either, and three copies of "hunter2" in the keychain - unbounded (one
+  // more per press) and unenumerable, since there is no `secrets_list`. The
+  // confirmation the user had just read says the point is fewer copies of one
+  // credential.
+  //
+  // Reachable in three clicks with no gate before the fix: a password-auth host
+  // with a stored password, flip the radio to "Private key", pick "New shared
+  // identity...", confirm. `applyCredentialChange` never calls `validate()`, so
+  // the form's own "key auth needs a key" refusal never ran on this path.
+  // ---------------------------------------------------------------------------
+  const keyAuthNoBody = sshHost({
+    id: "h-3",
+    credential: {
+      kind: "inline",
+      hostId: "h-3",
+      user: "root",
+      authMode: "key",
+      hasPassword: true,
+      hasPrivateKey: false,
+      hasKeyPassphrase: false,
+    },
+  });
+  const h3 = harness({
+    hosts: [keyAuthNoBody],
+    kept: { [`${HOST_KEYRING_SERVICE}::h-3::password`]: "hunter2" },
+  });
+  await rejects(
+    "a host on key auth that stores no private key is refused, naming the host and what is missing",
+    () =>
+      convertHostToVault(
+        {
+          host: keyAuthNoBody,
+          identity: { name: "x", username: "root", domain: "", description: "" },
+          key: null,
+        },
+        h3.deps,
+      ),
+    ["prod", "authenticates with a private key", "stores none"],
+  );
+  // THE assertion this group exists for, and it is over the CALL LOG rather than
+  // over `kept` afterwards: "refused before the copy" is the claim, and an
+  // absence check after the fact cannot tell it apart from "copied, then cleaned
+  // up". Group 9 is what the second one looks like, and it deletes three vault
+  // accounts on its way out; this one issues no copy at all.
+  check("no copy was issued at all - the refusal is a pre-check", h3.copies(), []);
+  check(
+    "so no vault account was written",
+    [...h3.kept.keys()].filter((k) => k.startsWith(`${VAULT_KEYRING_SERVICE}::`)),
+    [],
+  );
+  check("no vault identity exists", h3.identities(), []);
+  check("no vault key exists", h3.keys(), []);
+  check(
+    "the host's own password is untouched, value included",
+    h3.kept.get(`${HOST_KEYRING_SERVICE}::h-3::password`),
+    "hunter2",
+  );
+  check(
+    "and nothing was deleted anywhere",
+    h3.calls.filter((c) => c.op === "delete"),
+    [],
+  );
+  check("the stored host record is unchanged", h3.hostRows(), [keyAuthNoBody]);
 }
 
 // ===========================================================================
@@ -838,7 +1039,7 @@ console.log("\n[9] a refused convert leaves no vault record, no copy of the secr
     await convertHostToVault(
       {
         host: staleLoad,
-        identity: { name: "x", username: "root", domain: "", authMode: "key", description: "" },
+        identity: { name: "x", username: "root", domain: "", description: "" },
         key: { name: "k", facts: {} },
       },
       h.deps,
@@ -911,7 +1112,7 @@ console.log("\n[9] a refused convert leaves no vault record, no copy of the secr
       convertHostToVault(
         {
           host: orphanJump,
-          identity: { name: "x", username: "root", domain: "", authMode: "key", description: "" },
+          identity: { name: "x", username: "root", domain: "", description: "" },
           key: { name: "k", facts: {} },
         },
         h2.deps,
@@ -966,7 +1167,7 @@ console.log("\n[10] convert writes only FRESH vault ids, never reusing a seeded 
   const result = await convertHostToVault(
     {
       host,
-      identity: { name: "x", username: "root", domain: "", authMode: "key", description: "" },
+      identity: { name: "x", username: "root", domain: "", description: "" },
       key: { name: "new key", facts: {} },
     },
     h.deps,
@@ -1287,6 +1488,57 @@ console.log("\n[13b] a refused detach takes its copies back off the host's own a
     `${VAULT_KEYRING_SERVICE}::i-dangling::password=vault-pw`,
   ]);
 
+  // ---------------------------------------------------------------------------
+  // The one refusal that is not `upsertHost`'s, and the reason `buildInlineRecord`
+  // now runs BEFORE `copyMoves` rather than one statement after it.
+  //
+  // It throws when `inline`'s shape does not match the host's own protocol, and
+  // that throw used to sit between the copies and the `try` - so it escaped with
+  // `undoDetachCopies` never running, leaving a plaintext copy of the identity's
+  // password on a host account nothing names. Precisely the orphan class every
+  // other row in this group exists to prevent, reachable one statement earlier
+  // and past the compensation rather than inside it.
+  //
+  // NOT reachable from the shipped dialog today: `HostEditorDialog` picks the
+  // inline shape off the same `protocol` the host carries, and the protocol
+  // toggle is create-mode only while this path is edit-only. It is pinned anyway
+  // because the ordering is the whole guarantee, and 6f/6g's callers arm it.
+  //
+  // The two assertions are the same pair the rest of this group uses, read the
+  // other way round: nothing landed, so there was nothing to take back. Group
+  // 8's third arm makes the identical distinction on convert's side.
+  const rdpBound = rdpHost({ id: "h-rdp", credential: { kind: "identity", identityId: "i-1" } });
+  const hMismatch = harness({
+    hosts: [rdpBound],
+    identities: [idn],
+    keys: [key],
+    kept: vaultKept,
+  });
+  await rejects(
+    "detach refuses an inline credential built for the other protocol",
+    () =>
+      detachHostFromVault(
+        // SSH-shaped `inline` against an RDP host - the union admits it, and
+        // `buildInlineRecord` is the only thing that refuses it.
+        { host: rdpBound, inline: { user: "root", authMode: "key" } },
+        hMismatch.deps,
+      ),
+    ["vps", "inline credential for the other protocol"],
+  );
+  check("no copy was issued at all - the refusal precedes copyMoves", hMismatch.copies(), []);
+  check(
+    "so the identity's password never landed on the host's account, with nothing to take it back",
+    hMismatch.kept.has(`${HOST_KEYRING_SERVICE}::h-rdp::password`),
+    false,
+  );
+  check("and nothing was deleted", hostDeletes(hMismatch), []);
+  check("the vault's own accounts are untouched", keptFor(hMismatch, VAULT_KEYRING_SERVICE), [
+    `${VAULT_KEYRING_SERVICE}::i-1::password=vault-pw`,
+    `${VAULT_KEYRING_SERVICE}::k-1::passphrase=vault-pp`,
+    `${VAULT_KEYRING_SERVICE}::k-1::privateKey=vault-pem`,
+  ]);
+  check("the stored host record is unchanged, and still bound", hMismatch.hostRows(), [rdpBound]);
+
   // The missing-identity arm copies nothing, so a refusal there has nothing to
   // undo - and must still touch no account. Same jump-host refusal.
   const host3 = sshHost({
@@ -1351,6 +1603,79 @@ console.log("\n[13b] a refused detach takes its copies back off the host's own a
     [[key], 2],
   );
   check("the stored host record is unchanged, and still bound", h4.hostRows(), [boundElsewhere]);
+
+  // ---------------------------------------------------------------------------
+  // THE GUARD'S OTHER BRANCH - the one where the cleanup must NOT run, and until
+  // now the one nothing exercised.
+  //
+  // Every refusal above leaves a `kind: "identity"` record in the store, so all
+  // of them take the cleanup's PROCEEDING path. The h4 stamp case looks like the
+  // exception and is not: it is identity -> identity, a re-bind, not the
+  // identity -> inline detach the guard's own doc describes. So the re-read and
+  // the guard could both be deleted outright and this group stayed at 138 ok /
+  // 0 FAIL - and, worse, the compile-clean weakening to `if (!stored) return;`
+  // did too, which declines exactly where it must not and proceeds exactly where
+  // it must refuse. A guard whose two branches are never told apart is not
+  // checked by the fact that its file is.
+  //
+  // The fixture is the persist-half-landed case the guard's comment names, built
+  // from the real store rather than mimed: `persist` writes the record through
+  // `set` and only then commits, so a commit that throws leaves the host stored
+  // and INLINE while `upsertHost` reports failure. `LazyStore` runs with
+  // autoSave, so a debounced retry sits behind that record in production.
+  //
+  // WHY DELETING HERE WOULD BE THE CREDENTIAL LOSS. The stored record is now
+  // inline and NAMES these three accounts (`secretFieldsFor` returns them for an
+  // inline credential), and `releaseStaleAccounts` never ran because persist
+  // threw before it. The bytes at them are the host's own, legitimately. A
+  // cleanup that deleted them would leave a host claiming three secrets it no
+  // longer has, with the vault copy the only survivor - and on the concurrent-
+  // detach variant of this same branch, not even that.
+  // ---------------------------------------------------------------------------
+  const persistHost = sshHost({
+    id: "h-5",
+    credential: { kind: "identity", identityId: "i-1" },
+  });
+  const h5 = harness({
+    hosts: [persistHost],
+    identities: [idn],
+    keys: [key],
+    kept: vaultKept,
+    hostCommitThrows: true,
+  });
+  await rejects(
+    "detach surfaces the persist failure rather than swallowing it",
+    () =>
+      detachHostFromVault(
+        { host: persistHost, inline: { user: "root", authMode: "key" } },
+        h5.deps,
+      ),
+    ["failed to persist"],
+  );
+  // The branch is REACHED, not merely assumed: the stored record really is
+  // inline at the moment the cleanup re-reads it. Without this the two checks
+  // below would pass for a fixture that never got near the guard.
+  check(
+    "the stored record is INLINE when the cleanup re-reads it - the persist landed, the commit did not",
+    h5.hostRows().map((h) => h.credential.kind),
+    ["inline"],
+  );
+  check("all three secrets landed on the host's accounts first", landedCopies(h5), 3);
+  check("and the cleanup deleted NOTHING - the host now names these accounts", hostDeletes(h5), []);
+  check(
+    "so the host keeps all three, values included - this is the credential the guard is protecting",
+    keptFor(h5, HOST_KEYRING_SERVICE),
+    [
+      `${HOST_KEYRING_SERVICE}::h-5::keyPassphrase=vault-pp`,
+      `${HOST_KEYRING_SERVICE}::h-5::password=vault-pw`,
+      `${HOST_KEYRING_SERVICE}::h-5::privateKey=vault-pem`,
+    ],
+  );
+  check("and the vault's own copies are untouched either way", keptFor(h5, VAULT_KEYRING_SERVICE), [
+    `${VAULT_KEYRING_SERVICE}::i-1::password=vault-pw`,
+    `${VAULT_KEYRING_SERVICE}::k-1::passphrase=vault-pp`,
+    `${VAULT_KEYRING_SERVICE}::k-1::privateKey=vault-pem`,
+  ]);
 }
 
 // ===========================================================================
@@ -1567,3 +1892,83 @@ console.log("\n[17] the two new files read no secret and claim no safety");
 // ---------------------------------------------------------------------------
 if (failed > 0) throw new Error(`credential-move-verify: ${failed} FAILED`);
 console.log("\ncredential-move-verify: OK\n");
+
+// --- mutation table (wave 4's P0 round) ------------------------------------
+//
+// The discipline `vault-draft-verify.ts` records at its own tail: a check that
+// has not been watched fail is not a check. Every mutation below was applied to
+// the file named, run, its FAIL lines recorded, and the source restored by hash
+// - see /tmp/wave4-fix-p0-authmode/MUTATIONS.md for the transcript.
+//
+//   Mutation                                          Check(s) it killed
+//   -------------------------------------------------  ---------------------------
+//   H1: credentialMove.ts - the pre-copy key-auth      section 8's third arm: the
+//     refusal deleted                                    refusal itself, "no copy
+//                                                        was issued at all", and
+//                                                        "no vault account was
+//                                                        written". The observed
+//                                                        throw is P0-1's own,
+//                                                        verbatim: `vault:
+//                                                        identity "x" uses key
+//                                                        auth but names no key`,
+//                                                        with the password
+//                                                        already copied.
+//   H2: credentialMove.ts - the `"keep"` argument      section 4's three P0-2
+//     dropped from identityRecordFrom, restoring the     rows and 4b's key-naming
+//     auth-mode normalisation on convert's path          row. Reproduces Oracle
+//                                                        A's measurement exactly:
+//                                                        keyId undefined, and
+//                                                        `deleteKey` DID NOT
+//                                                        REJECT - the PEM was
+//                                                        gone afterwards.
+//   H3: credentialMove.ts - authMode taken from a      section 4b's three-mode
+//     required args.identity.authMode again              row (11 checks across
+//                                                        the file), plus 14
+//                                                        errors in
+//                                                        typecheck:scripts.
+//   H3b: the same, but OPTIONAL, defaulting to the     NOTHING here - `pnpm
+//     derived value, so every call site compiles         verify` stays 0. Caught
+//                                                        ONLY by section 4b's
+//                                                        compile-time pin, which
+//                                                        is why that pin exists
+//                                                        beside the behavioural
+//                                                        rows rather than instead
+//                                                        of them.
+//   H4: credentialMove.ts - buildInlineRecord moved    section 13b's mismatched-
+//     back below copyMoves                               protocol arm: "no copy
+//                                                        was issued" and the
+//                                                        orphan check. NOTHING
+//                                                        before that arm existed
+//                                                        - every other 13b row
+//                                                        uses a fixture where
+//                                                        buildInlineRecord
+//                                                        succeeds, so none of
+//                                                        them can see its throw.
+//   H5: a Prettier-legal reflow of every region this   NOTHING (§4.51), with
+//     round changed, in all five files                   `pnpm format:check`
+//                                                        still at 0 over the
+//                                                        reflowed form.
+//
+// And reviewer B's two, against 13b's new persist-half-landed fixture - the one
+// that reaches `undoDetachCopies`' DECLINING branch. Before it existed, both of
+// these left this file at 138 ok / 0 FAIL and `pnpm verify` at 53/53:
+//
+//   J1: credentialMove.ts - the re-read and the guard   the new fixture's
+//     deleted outright                                   "deleted NOTHING" and
+//                                                        "keeps all three,
+//                                                        values included" rows.
+//                                                        (`tsc` also flags the
+//                                                        now-unused `hostId`.)
+//   J2: credentialMove.ts - the guard weakened to       the same two rows, with
+//     `if (!stored) return;`                             `tsc` at 0. THE REAL
+//                                                        TEST: it is compile-
+//                                                        clean, and it inverts
+//                                                        the guard - declining
+//                                                        where it must proceed
+//                                                        and proceeding where it
+//                                                        must refuse.
+//
+// Residual, stated rather than left to be found: J2's OTHER half - declining
+// when the record is GONE, which the guard's doc says must not stop the cleanup
+// - is still uncovered, because every fixture here has a stored record. It is a
+// register row, not this round's.
