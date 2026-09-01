@@ -82,7 +82,7 @@ import {
 } from "../src/lib/storeRecovery";
 import type { SecretsIo, VaultStoreIo } from "../src/modules/vault/adapters";
 import { resolveRdpAuth, resolveSshAuth, type ResolveDeps } from "../src/modules/vault/resolve";
-import { createVaultStore } from "../src/modules/vault/store";
+import { createVaultStore, SECRET_ALREADY_STORED } from "../src/modules/vault/store";
 import {
   assertBindingOwner,
   VaultInUseError,
@@ -364,6 +364,75 @@ console.log("\n[flags] presence flags track writes, and never read a secret back
   );
   check("and persists the corrected one", (await h.vault.findIdentity("i-1"))?.hasPassword, true);
   check("no read-back on the identity path either", h.reads().length, 0);
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n[secrets] SECRET_ALREADY_STORED writes no keychain call and reports present");
+{
+  // Step 1's fourth secret state (6e wave 4): the caller has already put the
+  // value at this account - a cross-service copy in `credentialMove.ts` - so
+  // `upsertIdentity` / `upsertKey` must not touch the keychain for that field at
+  // all (no read, no set, no delete) and must still report the flag `true`.
+  const h = harness();
+  const before = h.calls.length;
+  const ident = await h.vault.upsertIdentity(identity({ id: "i-already" }), {
+    password: SECRET_ALREADY_STORED,
+  });
+  check("hasPassword comes back true with no write", ident.record.hasPassword, true);
+  check("no keychain call at all was made for it", h.calls.length, before);
+  check(
+    "and nothing landed in the keychain",
+    h.kept.has("tervia-vault::i-already::password"),
+    false,
+  );
+
+  const createdKey = await h.vault.upsertKey(vaultKey({ id: "k-already" }), {
+    privateKey: SECRET_ALREADY_STORED,
+    passphrase: SECRET_ALREADY_STORED,
+  });
+  check(
+    "both key flags come back true with no write",
+    [createdKey.record.hasPrivateKey, createdKey.record.hasPassphrase],
+    [true, true],
+  );
+  check("no keychain call for either field", h.calls.length, before);
+
+  // The mixed case: one field already stored, one blank (the store's ordinary
+  // clear) - in the same call.
+  const before2 = h.calls.length;
+  const mixed = await h.vault.upsertKey(vaultKey({ id: "k-mixed" }), {
+    privateKey: SECRET_ALREADY_STORED,
+    passphrase: "",
+  });
+  check("the already-stored field reports true with no write", mixed.record.hasPrivateKey, true);
+  check("the blank field clears and reports false", mixed.record.hasPassphrase, false);
+  check(
+    "only the blank passphrase field touched the keychain, as a delete",
+    h.calls.slice(before2).map((c) => c.op),
+    ["delete"],
+  );
+
+  // The negatives that must still hold, asserted in the SAME section so the new
+  // branch is not the only thing under test: `undefined` takes the flag from
+  // the existing record, and `""` deletes the account and reports `false`.
+  const first = await h.vault.upsertIdentity(identity({ id: "i-neg" }), { password: "hunter2" });
+  check("a real password writes and sets the flag", first.record.hasPassword, true);
+  const untouchedNeg = await h.vault.upsertIdentity({ ...first.record, hasPassword: false }, {});
+  check("undefined takes the flag from the existing record", untouchedNeg.record.hasPassword, true);
+  const clearedNeg = await h.vault.upsertIdentity(untouchedNeg.record, { password: "" });
+  check(
+    "a blank string deletes the account and reports false",
+    clearedNeg.record.hasPassword,
+    false,
+  );
+  check("and the account is actually gone", h.kept.has("tervia-vault::i-neg::password"), false);
+  // The boundary that actually distinguishes `undefined` from `SECRET_ALREADY_STORED`:
+  // over a record whose flag is genuinely FALSE, `undefined` must still take it
+  // from the store rather than forcing `true` - the mistake M17 makes. The check
+  // above alone cannot catch that mistake, because its existing flag happened to
+  // already be `true`.
+  const stillFalse = await h.vault.upsertIdentity(clearedNeg.record, {});
+  check("undefined over a genuinely FALSE flag stays false", stillFalse.record.hasPassword, false);
 }
 
 // ---------------------------------------------------------------------------
