@@ -151,9 +151,11 @@ function hostSecretsFromCopies(copied: Record<string, boolean>): HostSecretInput
 }
 
 export type CredentialMoveDeps = {
-  /** `identityHostRefs` is here for the compensating delete alone - see
-   *  {@link undoConvertRecords} for why it is the real lookup and not `() => []`. */
-  hosts: Pick<HostsStore, "upsertHost" | "identityHostRefs">;
+  /** `identityHostRefs` and `findHost` are here for the two compensating
+   *  deletes alone - see {@link undoConvertRecords} for why the first is the
+   *  real lookup and not `() => []`, and {@link undoDetachCopies} for why the
+   *  second re-reads rather than reasoning about what is stored. */
+  hosts: Pick<HostsStore, "upsertHost" | "identityHostRefs" | "findHost">;
   vault: Pick<
     VaultStore,
     | "newIdentityId"
@@ -429,6 +431,66 @@ function buildInlineRecord(host: Host, inline: SshInlineArgs | RdpInlineArgs): H
 }
 
 /**
+ * Undo the copies a detach just made onto the host's own accounts, because the
+ * host write that was going to name them refused.
+ *
+ * WHY THESE ACCOUNTS ARE NOT ANYONE'S TO KEEP. The write refused, so the STORED
+ * record is still `kind: "identity"` - and `secretFieldsFor` returns `[]` for a
+ * non-inline credential (`./store.ts:203-207`), so the stored host names none of
+ * these accounts. They hold bytes only because `copyMoves` put them there a few
+ * statements earlier, in this call. The adjacent case lands the same way: if an
+ * earlier `releaseStaleAccounts` failure had left an orphan at one of these
+ * slots, the copy has already overwritten it, so what is deleted here was
+ * unreferenced either way.
+ *
+ * ONLY WHAT ACTUALLY COPIED. `copyMoves` reports `false` for a source that held
+ * nothing, and `secrets.copy` then wrote nothing, so a `false` field's
+ * destination is an account this call never touched. What gets deleted is the
+ * moves' own `to` entries, never a field name spelled out a second time - the
+ * module header's rule - which is also why the RDP arm and the dangling-key arm
+ * need no case of their own here: they carry fewer moves, and that is all.
+ *
+ * THE RE-READ, which is a guard and not a formality. Two paths end with the
+ * stored record already INLINE and naming these very accounts: `upsertHost`
+ * throwing at its `persist` (`./store.ts:798-802`), where the record is in the
+ * plugin's cache with a debounced retry behind it, and a concurrent writer that
+ * detached this host first - which is exactly what a stamp refusal reports.
+ * Deleting there would not strand bytes, it would destroy the host's only copy
+ * of a credential the vault may no longer hold. So the stored record is read
+ * back and the cleanup runs only while it is still bound. A record that is GONE
+ * does not stop it: nothing names the accounts then either. A re-read that
+ * itself throws stops it, because an orphan is the lesser of the two outcomes -
+ * §4.5's own ranking, one level up.
+ *
+ * EVERY FAILURE IN HERE IS SWALLOWED and every field is still attempted, for the
+ * reason {@link undoConvertRecords} gives: the caller is rethrowing the host
+ * write's own error, which is the one the user can act on.
+ */
+async function undoDetachCopies(
+  deps: CredentialMoveDeps,
+  hostId: string,
+  moves: readonly AccountMove[],
+  copied: Record<string, boolean>,
+): Promise<void> {
+  let stored: Host | undefined;
+  try {
+    stored = await deps.hosts.findHost(hostId);
+  } catch {
+    return; // See above: unable to tell, so delete nothing.
+  }
+  if (stored && stored.credential.kind !== "identity") return;
+  for (const move of moves) {
+    if (!copied[move.field]) continue;
+    try {
+      await deps.secrets.delete(move.to.service, move.to.account);
+    } catch {
+      // Swallowed, and the loop carries on: the fields fail independently, and
+      // stopping at the first would leave the rest of a private key behind.
+    }
+  }
+}
+
+/**
  * Detach a host from its bound identity, taking its own copy of that
  * identity's stored secrets.
  *
@@ -439,6 +501,14 @@ function buildInlineRecord(host: Host, inline: SshInlineArgs | RdpInlineArgs): H
  * level down, to a dangling `keyId` on an identity that IS found: the
  * password still copies and the host still detaches, and only the key
  * material is reported missing.
+ *
+ * The copies land BEFORE the host write, the mirror of convert's ordering and
+ * for the same reason (§4.5). So the same failure path applies: a refused
+ * `upsertHost` left a plaintext copy of what may be a SHARED vault key at
+ * `tervia-hosts::<hostId>::privateKey`, named by nothing, and unenumerable
+ * because there is no `secrets_list`. {@link undoDetachCopies} takes them back.
+ * The missing-identity arm below needs none of that: it copies nothing, so a
+ * refusal there leaves nothing behind, and it must stay that way.
  */
 export async function detachHostFromVault(
   args: {
@@ -463,13 +533,21 @@ export async function detachHostFromVault(
   }
 
   const key = identity.keyId ? await deps.vault.findKey(identity.keyId) : undefined;
-  const copied = await copyMoves(
-    deps.secrets,
-    detachMoves(args.host, identity, key ? key.id : null),
-  );
+  const moves = detachMoves(args.host, identity, key ? key.id : null);
+  const copied = await copyMoves(deps.secrets, moves);
   const secrets = hostSecretsFromCopies(copied);
   const record = buildInlineRecord(args.host, args.inline);
-  const host = await deps.hosts.upsertHost(record, secrets, credentialStamp(args.host));
+  let host: Host;
+  try {
+    host = await deps.hosts.upsertHost(record, secrets, credentialStamp(args.host));
+  } catch (e) {
+    await undoDetachCopies(deps, args.host.id, moves, copied);
+    // The ORIGINAL error, unchanged and by identity, for the reason spelled out
+    // at convert's own rethrow: `HostEditorDialog`'s recovery arm branches on
+    // `instanceof HostBindingChangedError` and reads three fields off it
+    // (VLT-29).
+    throw e;
+  }
 
   if (identity.keyId && !key) {
     return {

@@ -48,7 +48,10 @@
  * 7. DETACH TAKES ITS OWN COPY, and a missing identity - or an identity naming
  *    a key that is itself gone - degrades to a WARNING plus an inline record,
  *    never a throw: the host was already unable to connect, and refusing would
- *    leave it that way forever.
+ *    leave it that way forever. It carries convert's corollary too, mirrored
+ *    (group 13b): when the host write refuses, the copies already sitting on
+ *    the host's own accounts are taken back - only the fields that copied, and
+ *    only while the stored record is still bound.
  *
  * 8. BIND COPIES NOTHING and releases the host's own accounts - the one
  *    genuinely destructive path in this file, which is the whole reason
@@ -1160,6 +1163,194 @@ console.log("\n[13] detach with the identity gone, or with a key the identity na
     false,
   );
   check("the host record is inline", result2.host.credential.kind, "inline");
+}
+
+// ===========================================================================
+console.log("\n[13b] a refused detach takes its copies back off the host's own accounts");
+{
+  // The mirror of group 9, one direction over. `copyMoves` writes the
+  // identity's password and the key's two secrets onto the HOST's accounts
+  // before `upsertHost` is called, and `upsertHost` is again the first call
+  // that can refuse - so a refusal used to leave a plaintext copy of a SHARED
+  // vault key at `tervia-hosts::<hostId>::privateKey`, named by nothing, and
+  // unenumerable because there is no `secrets_list`.
+  //
+  // Asserted positively, for group 9's reason: the copies must be shown to have
+  // LANDED first, or an undo of nothing passes every absence check for free.
+  // The delete log is pinned BY VALUE rather than counted, because that is what
+  // separates "took back what it wrote" from "deleted every field it could
+  // name" - the second is invisible in `kept`, since deleting an account that
+  // was never written is a no-op.
+  //
+  // The refusal is the dangling `proxyJumpId` again: no second writer, no stale
+  // load, and reachable today by detaching a host whose jump target was deleted.
+  const keptFor = (hh: ReturnType<typeof harness>, service: string): string[] =>
+    [...hh.kept.entries()]
+      .filter(([k]) => k.startsWith(`${service}::`))
+      .map(([k, v]) => `${k}=${v}`)
+      .sort();
+  const hostDeletes = (hh: ReturnType<typeof harness>): string[] =>
+    hh.calls
+      .filter((c) => c.op === "delete" && c.service === HOST_KEYRING_SERVICE)
+      .map((c) => c.accounts[0]);
+  const landedCopies = (hh: ReturnType<typeof harness>): number =>
+    traceIndex(hh.trace, (e) => e.startsWith(`copy ${VAULT_KEYRING_SERVICE}::`)).length;
+
+  const idn = identity({
+    id: "i-1",
+    name: "shared",
+    username: "root",
+    authMode: "key",
+    keyId: "k-1",
+    hasPassword: true,
+  });
+  const key = vaultKey({ id: "k-1", name: "shared key", hasPrivateKey: true, hasPassphrase: true });
+  const vaultKept = {
+    [`${VAULT_KEYRING_SERVICE}::i-1::password`]: "vault-pw",
+    [`${VAULT_KEYRING_SERVICE}::k-1::privateKey`]: "vault-pem",
+    [`${VAULT_KEYRING_SERVICE}::k-1::passphrase`]: "vault-pp",
+  };
+  const boundHost = sshHost({
+    id: "h-1",
+    proxyJumpId: "h-gone",
+    credential: { kind: "identity", identityId: "i-1" },
+  });
+  const h = harness({ hosts: [boundHost], identities: [idn], keys: [key], kept: vaultKept });
+
+  await rejects(
+    "detach is refused when the host names a jump host that is gone",
+    () =>
+      detachHostFromVault({ host: boundHost, inline: { user: "root", authMode: "key" } }, h.deps),
+    ["names a jump host", "does not exist"],
+  );
+
+  check("all three secrets landed on the host's accounts first", landedCopies(h), 3);
+  check("and the cleanup took back exactly those three accounts, in order", hostDeletes(h), [
+    "h-1::password",
+    "h-1::privateKey",
+    "h-1::keyPassphrase",
+  ]);
+  check("no host account holds a secret", keptFor(h, HOST_KEYRING_SERVICE), []);
+  check(
+    "the copied password was taken back",
+    h.kept.has(`${HOST_KEYRING_SERVICE}::h-1::password`),
+    false,
+  );
+  check(
+    "the copied PRIVATE KEY was taken back - the one that would be a shared secret",
+    h.kept.has(`${HOST_KEYRING_SERVICE}::h-1::privateKey`),
+    false,
+  );
+  check(
+    "the copied key passphrase was taken back",
+    h.kept.has(`${HOST_KEYRING_SERVICE}::h-1::keyPassphrase`),
+    false,
+  );
+  check("the identity record is byte-identical", h.identities(), [idn]);
+  check("the key record is byte-identical", h.keys(), [key]);
+  check("and both still hold their values", keptFor(h, VAULT_KEYRING_SERVICE), [
+    `${VAULT_KEYRING_SERVICE}::i-1::password=vault-pw`,
+    `${VAULT_KEYRING_SERVICE}::k-1::passphrase=vault-pp`,
+    `${VAULT_KEYRING_SERVICE}::k-1::privateKey=vault-pem`,
+  ]);
+  check("the stored host record is unchanged, and still bound", h.hostRows(), [boundHost]);
+
+  // The dangling-key arm, refused: ONE field copied, so exactly one is taken
+  // back. A cleanup that deleted every field the host could name would pass
+  // every check above and fail this one.
+  const dangling = identity({
+    id: "i-dangling",
+    name: "dangling",
+    authMode: "key",
+    keyId: "k-gone",
+    hasPassword: true,
+  });
+  const host2 = sshHost({
+    id: "h-2",
+    proxyJumpId: "h-gone",
+    credential: { kind: "identity", identityId: "i-dangling" },
+  });
+  const h2 = harness({
+    hosts: [host2],
+    identities: [dangling],
+    kept: { [`${VAULT_KEYRING_SERVICE}::i-dangling::password`]: "vault-pw" },
+  });
+  await rejects(
+    "the dangling-key arm is refused by the same jump-host check",
+    () => detachHostFromVault({ host: host2, inline: { user: "root", authMode: "key" } }, h2.deps),
+    ["names a jump host", "does not exist"],
+  );
+  check("only the password landed", landedCopies(h2), 1);
+  check("and only the password was taken back", hostDeletes(h2), ["h-2::password"]);
+  check("no host account holds a secret", keptFor(h2, HOST_KEYRING_SERVICE), []);
+  check("the identity still holds its password", keptFor(h2, VAULT_KEYRING_SERVICE), [
+    `${VAULT_KEYRING_SERVICE}::i-dangling::password=vault-pw`,
+  ]);
+
+  // The missing-identity arm copies nothing, so a refusal there has nothing to
+  // undo - and must still touch no account. Same jump-host refusal.
+  const host3 = sshHost({
+    id: "h-3",
+    proxyJumpId: "h-gone",
+    credential: { kind: "identity", identityId: "i-gone" },
+  });
+  const h3 = harness({ hosts: [host3] });
+  await rejects(
+    "the missing-identity arm is refused by the same jump-host check",
+    () =>
+      detachHostFromVault({ host: host3, inline: { user: "root", authMode: "agent" } }, h3.deps),
+    ["names a jump host", "does not exist"],
+  );
+  check("nothing was copied", h3.copies(), []);
+  check("and nothing was deleted", hostDeletes(h3), []);
+
+  // The stamp refusal, kept for the ERROR rather than for the cleanup: this is
+  // the one that arrives as a `HostBindingChangedError`, and it is checked by
+  // instance and by value (§4.39) because `HostEditorDialog`'s recovery arm
+  // reads those three fields off it (VLT-29). A cleanup failure replacing the
+  // original error would be invisible to a message-text match.
+  const boundElsewhere = sshHost({
+    id: "h-4",
+    credential: { kind: "identity", identityId: "i-other" },
+  });
+  // The record as an editor loaded it before another writer re-bound it.
+  const staleLoad = sshHost({ id: "h-4", credential: { kind: "identity", identityId: "i-1" } });
+  const h4 = harness({
+    hosts: [boundElsewhere],
+    identities: [idn, identity({ id: "i-other", name: "other" })],
+    keys: [key],
+    kept: vaultKept,
+  });
+  let caught: unknown;
+  try {
+    await detachHostFromVault(
+      { host: staleLoad, inline: { user: "root", authMode: "key" } },
+      h4.deps,
+    );
+  } catch (e) {
+    caught = e;
+  }
+  assert(
+    caught instanceof HostBindingChangedError,
+    "the refusal is a HostBindingChangedError, by instance",
+  );
+  const err = caught as HostBindingChangedError;
+  check("hostId, by value", err?.hostId, "h-4");
+  check("expected, by value - the stale caller's own stamp", err?.expected, "identity:i-1");
+  check("actual, by value - what is really stored now", err?.actual, "identity:i-other");
+  check("all three secrets landed on the host's accounts first", landedCopies(h4), 3);
+  check("and the cleanup took back exactly those three accounts, in order", hostDeletes(h4), [
+    "h-4::password",
+    "h-4::privateKey",
+    "h-4::keyPassphrase",
+  ]);
+  check("no host account holds a secret", keptFor(h4, HOST_KEYRING_SERVICE), []);
+  check(
+    "the identity and key records are byte-identical",
+    [h4.keys(), h4.identities().length],
+    [[key], 2],
+  );
+  check("the stored host record is unchanged, and still bound", h4.hostRows(), [boundElsewhere]);
 }
 
 // ===========================================================================
