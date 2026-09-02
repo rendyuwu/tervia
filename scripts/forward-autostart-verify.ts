@@ -57,7 +57,13 @@
  *    `if (s.disposed) return;`: a disposed pane's forwards are as dead as a
  *    live one's, so a release under that guard leaks every entry for every tab
  *    the user closed. Two independent `includes` are both satisfied by a
- *    release written BELOW it, so this compares indices.
+ *    release written BELOW it, so this compares indices. Position is not the
+ *    whole claim, though: the call site also has to be UNCONDITIONAL (wrapped
+ *    in a runtime-false guard the feature is inert for every rule and every
+ *    gate in this repo passes) and the adapter-close release has to be
+ *    UNDEFERRED (queued into a microtask it survives the session it is ending).
+ *    Both are one structural assertion each, and both close an open set of
+ *    spellings that no deny-list could.
  *
  * 9. THE ROW THE TERMINAL'S FORWARD GETS. "Running (with host)", the port that
  *    is actually listening, and a disabled Start/Stop whose tooltip says where
@@ -66,29 +72,43 @@
  * 10. §1.6 IN THE SECOND STORE TOO. Every `useHostOwnedForwards(` selector
  *    returns a primitive: one that builds a fresh object is never `Object.is`
  *    its own last return, and under zustand v5 that is "Maximum update depth
- *    exceeded" (research §12.7).
+ *    exceeded" (research §12.7). The allow-list has to recurse on every
+ *    operator whose VALUE is an operand rather than the operator's own result -
+ *    `??`/`||`/`&&`, and also the comma and the assignments, which is where it
+ *    had a measured hole.
  *
- * 11. TWO PANES ON ONE HOST ARE TWO OWNERS, AND THE SECOND IS REFUSED. The
- *    terminal dials its own session per pane, so two tabs to one host are two
- *    autostart runs; `hostOwned.ts` is keyed by rule id alone and cannot
- *    represent two owners, so `claim` used to OVERWRITE and the first tab's
- *    live listener became untracked. Reachable with no timing at all through
- *    the default rule shape, because a blank Local port binds a second port
- *    successfully.
+ * 11. TWO PANES ON ONE HOST ARE TWO OWNERS, AND THE SECOND IS REFUSED -
+ *    SEQUENTIALLY AND CONCURRENTLY. The terminal dials its own session per
+ *    pane, so two tabs to one host are two autostart runs; `hostOwned.ts` is
+ *    keyed by rule id alone and cannot represent two owners, so `claim` used to
+ *    OVERWRITE and the first tab's live listener became untracked. Reachable
+ *    with no timing at all through the default rule shape, because a blank
+ *    Local port binds a second port successfully. And the two runs are not
+ *    serialised by anything, so the ordering that matters is BOTH STARTED
+ *    BEFORE EITHER IS AWAITED - the one a pre-bind read cannot separate.
  *
- * 12. A CLAIM MUST NOT LAND AFTER THE SESSION'S RELEASE. Both release sites are
- *    one-shot, so an entry written after either has run is never released: the
- *    row reads "Running (with host)" for the app's whole lifetime with a
- *    disabled Stop and a note pointing at a tab that is already gone.
+ * 12. A CLAIM MUST NOT LAND AFTER THE SESSION'S RELEASE, AND A DEAD SESSION
+ *    MUST NOT BIND AT ALL. Both release sites are one-shot, so an entry written
+ *    after either has run is never released: the row reads "Running (with
+ *    host)" for the app's whole lifetime with a disabled Stop and a note
+ *    pointing at a tab that is already gone. `finishSsh` sets its flag
+ *    unconditionally, so a session that ended before this run reached its first
+ *    bind is a real state too - and a bind-then-check loop orphaned one
+ *    listener on it before breaking.
  *
  * 13. NEVER REJECTS, AND STRUCTURALLY SO. The call site is a `void` and there
  *    is no `unhandledrejection` handler in `src/`. Before the fix the claim
  *    held only by another file's ordering.
  *
- * 14. FIRST CLAIM WINS, AND THE LOSER CLOSES ITS OWN FORWARD. The page's status
- *    was read BEFORE the bind and the claim written AFTER it with no re-check,
- *    so a Start clicked mid-bind left two live listeners (auto port) or a row
- *    whose dot, status line and button gave three different answers.
+ * 14. WHOEVER RESOLVES SECOND YIELDS. The page's status was read BEFORE the
+ *    bind and the claim written AFTER it with no re-check, so a Start clicked
+ *    mid-bind left two live listeners (auto port) or a row whose dot, status
+ *    line and button gave three different answers. The re-check yields on
+ *    `running` and CLAIMS on `starting`: a page Start still dialling can fail,
+ *    and both sides yielding to each other leaves the rule down on both, which
+ *    is a wrong answer rather than a louder one. The page's own half of that
+ *    rule lives in `controller.ts` and is checked as C10 in
+ *    `forwards-shell-verify.ts`.
  *
  * 15. THE BANNER SAYS SOMETHING FOR EVERY REJECTION SHAPE. `describeError`'s
  *    raw-string arm (section 4) and `Error` arm (section 7) were covered; its
@@ -806,10 +826,22 @@ function parse(rel: string, src: string): ts.SourceFile {
   );
 }
 
+/**
+ * Every call whose CALLEE text is `name`, whitespace-normalised on both sides.
+ *
+ * NORMALISED AND NOT COMPARED RAW, and the M9 reflow control is what found it:
+ * a member chain long enough to wrap - `useHostOwnedForwards.getState()
+ * .releaseSession(...)`, which Prettier splits over three lines under a
+ * narrower `printWidth` - has a callee whose `getText()` carries the newlines
+ * and the indentation. A raw `===` then finds zero calls, and the assertion
+ * rooted on it reddens over a change that means nothing. Whitespace is
+ * Prettier's; everything else is the claim.
+ */
 function findCallsTo(root: ts.Node, sf: ts.SourceFile, name: string): ts.CallExpression[] {
+  const want = norm(name);
   const out: ts.CallExpression[] = [];
   const visit = (n: ts.Node): void => {
-    if (ts.isCallExpression(n) && n.expression.getText(sf) === name) out.push(n);
+    if (ts.isCallExpression(n) && norm(n.expression.getText(sf)) === want) out.push(n);
     ts.forEachChild(n, visit);
   };
   visit(root);
@@ -862,6 +894,32 @@ function isDirectlyInFunctionBody(node: ts.Node, fnBody: ts.Node): boolean {
     cur = cur.parent;
   }
   return cur === fnBody;
+}
+
+/**
+ * The `ExpressionStatement` this expression is the whole of, or null - walking
+ * up, so it works for a call buried under `void <call>.catch(...)`.
+ *
+ * WHAT THIS ANSWERS THAT {@link isDirectlyInFunctionBody} CANNOT, and it is a
+ * total-feature-loss hole this suite had twice: nesting and CONDITIONALITY are
+ * different questions. `if (sessionEnded) { void startHostForwards(...) }` where
+ * `sessionEnded` is `false` at that point is neither below an exit nor inside a
+ * nested FUNCTION, so the positional and nesting checks both pass while the
+ * statement never runs and the whole feature is inert for every rule -
+ * measured, with 195/195 ok, `forwards-shell` green and `tsc --noEmit` green.
+ * `allowUnreachableCode: false` does not fire either: a runtime-false guard is
+ * REACHABLE code. (Measured which shapes TS7027 actually flags: `if (false)`
+ * yes, `while (false)` yes, `if (0)` no, `if (someBoolean)` no.)
+ *
+ * Comparing this statement's own `parent` against the function BODY closes the
+ * whole wrapper family at once - `if`, `try`, `for`, `switch`, a block written
+ * next year - which is what a positional or nesting check never could, because
+ * each of those is one more member of an open set.
+ */
+function enclosingStatement(node: ts.Node): ts.ExpressionStatement | null {
+  let cur: ts.Node | undefined = node;
+  while (cur && !ts.isExpressionStatement(cur)) cur = cur.parent;
+  return cur ? (cur as ts.ExpressionStatement) : null;
 }
 
 /**
@@ -981,8 +1039,43 @@ function primitiveSelectorBody(
       if (!left.ok) return left;
       return primitiveSelectorBody(cur.right, sf);
     }
+    // THE COMMA OPERATOR PASSES ITS RIGHT OPERAND THROUGH, exactly like `??`
+    // three lines above, and it was the hole the "every other binary operator
+    // yields a primitive" line below used to leave open. Measured with a real
+    // new hook in `hostOwned.ts`:
+    // `useHostOwnedForwards((s) => (s.byRule[ruleId]?.boundPort ?? 0, Object.keys(s.byRule)))`
+    // came back GREEN, with this section printing three fresh PASSING
+    // assertions calling it "returns a primitive" - a fresh array per store
+    // read, which is the "Maximum update depth exceeded" loop the whole section
+    // exists to forbid. `(0, X)` on its own is caught by TS2695; any
+    // non-trivial left operand dodges that, and a return annotation cannot see
+    // it either because the comma form satisfies any declared return type while
+    // still handing back a fresh reference.
+    //
+    // The LEFT operand is evaluated and thrown away, so it cannot be what the
+    // selector returns and does not need to qualify.
+    if (kind === ts.SyntaxKind.CommaToken) return primitiveSelectorBody(cur.right, sf);
+    // THE ASSIGNMENTS - `=`, `+=`, `??=`, `||=`, `&&=` and the rest - the other
+    // operator class whose value is an operand: `(lastIds = Object.keys(s.byRule))`
+    // measured GREEN the same way. `FirstAssignment`..`LastAssignment` is the
+    // whole closed range, so no member of the family is left out by name.
+    //
+    // BOTH operands have to qualify, because `??=`/`||=`/`&&=` yield EITHER
+    // side. In practice that refuses every assignment, since an assignment
+    // TARGET is an identifier or an access chain that does not reach a
+    // primitive field - and refusing is the right answer: nothing legitimate
+    // assigns inside a zustand selector, and the allow-list's polarity is
+    // "guilty until argued".
+    if (kind >= ts.SyntaxKind.FirstAssignment && kind <= ts.SyntaxKind.LastAssignment) {
+      const left = primitiveSelectorBody(cur.left, sf);
+      if (!left.ok) return left;
+      return primitiveSelectorBody(cur.right, sf);
+    }
     // Every other binary operator - the comparisons, the arithmetic, the
-    // bitwise ones - produces a primitive from any pair of operands.
+    // bitwise ones - produces a primitive from any pair of operands. TRUE OF
+    // WHAT IS LEFT, which is what the two arms above are for: the general
+    // sentence was false for exactly the two classes whose value is an operand
+    // rather than the operator's own result.
     return { ok: true };
   }
 
@@ -1053,6 +1146,19 @@ function primitiveSelectorBody(
     ["s.byRule[ruleId]", false],
     ["s.byRule[ruleId] ?? {}", false],
     ["[s.byRule[ruleId]?.boundPort]", false],
+    // THE TWO OPERATOR CLASSES NEITHER THIS TABLE NOR THE HELPER USED TO
+    // REPRESENT, which is why the hole survived a self-test written
+    // specifically to catch this shape. Both were measured passing end-to-end
+    // against a real hook before the classifier was fixed.
+    ["(s.byRule[ruleId]?.boundPort ?? 0, Object.keys(s.byRule))", false],
+    ["(lastIds = Object.keys(s.byRule))", false],
+    // And the paired controls, so each new arm is a RECURSION rather than a
+    // blanket verdict on its operator. The comma one passes because its right
+    // operand qualifies; the assignment one is refused even though its right
+    // operand qualifies, because the target never can - deliberate, and the
+    // helper's own comment says why.
+    ["(s.byRule[ruleId]?.boundPort ?? 0, s.byRule[ruleId]?.boundPort)", true],
+    ["(lastPort = s.byRule[ruleId]?.boundPort)", false],
   ];
   for (const [text, want] of probes) {
     const probeSf = parse("selector-probe.ts", `useHostOwnedForwards((s) => ${text});`);
@@ -1142,22 +1248,42 @@ console.log("\n[8. ssh-session.ts] the call site, and the two releases");
         isDirectlyInFunctionBody(call, body),
         "and the call is a direct statement of openSshForSession's own body, not nested in a decoy",
       );
-      // REACHABILITY, which is a different question and the cheapest
-      // total-feature-loss hole in this wave. `isDirectlyInFunctionBody` tests
-      // NESTING - its own docstring says exactly that - and nothing else here
-      // could see WHERE in the body the statement sits. Measured mutation M-H:
-      // delete this statement and re-add the identical statement AFTER the
-      // `return { ... }` below. A statement after `return` in an async function
-      // typechecks (exit 0), `tsconfig.json` sets neither `noImplicitReturns`
-      // nor `allowUnreachableCode: false`, and with no ESLint there is no
-      // `no-unreachable` either - so every gate in this repo passed while
-      // `startWithHost` never fired for any rule and the entire feature was
-      // inert.
+      // UNCONDITIONAL, which is a THIRD question and the one that closes the
+      // family. `isDirectlyInFunctionBody` tests NESTING (its own docstring says
+      // so) and the index comparison below tests POSITION; neither can see a
+      // statement wrapped in a runtime-false guard. See
+      // `enclosingStatement`'s own doc for the measurement: wrapped as
+      // `if (sessionEnded) { void startHostForwards(...) }` the suite stayed at
+      // 195/195 ok with `forwards-shell` and `tsc --noEmit` both green, and
+      // `startWithHost` was inert for every rule. Comparing the enclosing
+      // statement's PARENT against the body is what refuses every wrapper -
+      // `if`, `try`, `for`, `switch` - in one assertion.
+      const stmt = enclosingStatement(call);
+      assert(stmt !== null, "the call sits inside an expression STATEMENT at all");
+      assert(
+        stmt !== null && stmt.parent === body,
+        "and that statement is an UNCONDITIONAL top-level statement of openSshForSession's body - wrapped in any guard, the feature is inert for every rule and every gate in this repo still passes",
+        stmt === null ? undefined : ts.SyntaxKind[stmt.parent.kind],
+      );
+      // REACHABILITY BY POSITION. Measured mutation M-H: delete this statement
+      // and re-add the identical statement AFTER the `return { ... }` below.
+      // That one is now ALSO caught by `tsconfig.json`'s
+      // `allowUnreachableCode: false` (TS7027), which it was not when this
+      // check was written, so what is left here is the cheap belt: a statement
+      // below the function's final exit.
       //
-      // Compared by INDEX against every exit of the body, the same shape the
-      // `finishSsh` release uses against the disposed guard. Against EVERY exit
-      // rather than the last one, so the statement cannot be slipped below a
-      // freshly added early return either.
+      // AGAINST THE LAST EXIT AND NOT EVERY EXIT, deliberately softened. The
+      // "every exit" form reddened when a CORRECT early return was added above
+      // the call site - measured - and its failure message then told the reader
+      // the feature was silently inert, which was false. With the parent check
+      // above covering the wrapper family and TS7027 covering real
+      // unreachability, "above every exit" bought nothing and cost a
+      // false-positive surface aimed at the next developer. `openSshForSession`
+      // has exactly one direct-body `return` today, so the two forms are
+      // identical on this file and the softening is about the exits somebody
+      // adds later. The seven direct-body `throw`s are deliberately not in the
+      // exit set: they all precede `sshSession`, so the call would not
+      // typecheck below them anyway.
       const exits: ts.ReturnStatement[] = [];
       const visitExits = (n: ts.Node): void => {
         if (ts.isReturnStatement(n) && isDirectlyInFunctionBody(n, body)) exits.push(n);
@@ -1165,11 +1291,11 @@ console.log("\n[8. ssh-session.ts] the call site, and the two releases");
       };
       visitExits(body);
       assert(exits.length > 0, "openSshForSession has an exit to sit above at all", exits.length);
-      const firstExit = exits.length > 0 ? Math.min(...exits.map((r) => r.getStart(sf))) : -1;
+      const lastExit = exits.length > 0 ? Math.max(...exits.map((r) => r.getStart(sf))) : -1;
       assert(
-        exits.length > 0 && call.getStart(sf) < firstExit,
-        "and it sits ABOVE every exit of that body - re-added below the return it is unreachable, typechecks under every gate this repo has, and the feature is silently inert",
-        { call: call.getStart(sf), firstExit, exits: exits.length },
+        exits.length > 0 && call.getStart(sf) < lastExit,
+        "and it sits ABOVE the LAST exit of that body - below the final return the statement is unreachable",
+        { call: call.getStart(sf), lastExit, exits: exits.length },
       );
     }
   }
@@ -1184,12 +1310,24 @@ console.log("\n[8. ssh-session.ts] the call site, and the two releases");
   // a DEFERRAL: measured mutation M-I wrapped this release in
   // `setTimeout(..., 5000)` while leaving it textually above the guard, and the
   // suite stayed green even though the entry then survives five seconds past
-  // the session. Accepted deliberately and not covered, because the check for
-  // it - "this statement is not inside a setTimeout/queueMicrotask/Promise
-  // callback" - is a DENY-LIST OVER AN OPEN SET, which is the exact defect
-  // section 10's allow-list below was rewritten to remove. Low likelihood
-  // (nobody defers a synchronous map delete) and the honest remedy is this
-  // sentence.
+  // the session.
+  //
+  // THE ALLOW-LIST THAT CLOSES THAT FAMILY WAS ALREADY IN THIS FILE, which the
+  // previous version of this comment missed while correctly arguing that a
+  // deny-list over `setTimeout`/`queueMicrotask`/`.then` is a list over an open
+  // set. Every deferral primitive there can ever be - including a scheduler
+  // written next year - has to put the statement inside a NESTED FUNCTION
+  // EXPRESSION, and `isDirectlyInFunctionBody` above refuses exactly that. It
+  // is applied to the ADAPTER-CLOSE release below, where the deferral is the
+  // live risk (measured: `queueMicrotask(() => { ...releaseSession(...) })`
+  // left textually above the close kept all three gates green).
+  //
+  // NOT applied to this `finishSsh` twin, and the reason is that it is covered
+  // by two ACCIDENTS rather than by design: deferring it while keeping
+  // `resolvedSessionId` as the argument trips TS2345 inside the closure, and
+  // hoisting it to a local breaks the exact-text `indexOf` below. Both hold
+  // today; neither is a claim this section makes. If either stops holding, the
+  // remedy is the same structural check the close half now carries.
   const finishSsh = findConstInitializer(sf, "finishSsh");
   check("found finishSsh", finishSsh !== null, true);
   if (finishSsh) {
@@ -1238,6 +1376,7 @@ console.log("\n[8. ssh-session.ts] the call site, and the two releases");
   // reaches `finishSsh` (a user-initiated disconnect, a pane closing).
   const openBody = findFunctionBody(sf, "openSshForSession");
   let closeText: string | null = null;
+  let closeValue: ts.Expression | null = null;
   if (openBody) {
     const visit = (n: ts.Node): void => {
       if (
@@ -1247,7 +1386,10 @@ console.log("\n[8. ssh-session.ts] the call site, and the two releases");
         isDirectlyInFunctionBody(n, openBody)
       ) {
         const value = findPropertyValue(n.expression, "close", sf);
-        if (value) closeText = norm(value.getText(sf));
+        if (value) {
+          closeText = norm(value.getText(sf));
+          closeValue = value;
+        }
       }
       ts.forEachChild(n, visit);
     };
@@ -1278,6 +1420,33 @@ console.log("\n[8. ssh-session.ts] the call site, and the two releases");
       "as is the flag - a claim resolving during the close IPC must already see a dead session",
       { ended, closes },
     );
+  }
+  // AND THE RELEASE IS NOT DEFERRED, which is the half every index comparison
+  // above is blind to. Measured: `queueMicrotask(() => { ...releaseSession(...)
+  // })` keeps the release textually above `sshSession.close()` and every one of
+  // the three index assertions passes, with `tsc` and `forwards-shell` green
+  // too - and the entry then survives past the session the close is ending.
+  //
+  // ONE POSITIVE OVER THE OPEN SET, not a list of the primitives that can defer
+  // it: `setTimeout`, `queueMicrotask`, `.then`, `.finally`,
+  // `requestIdleCallback` and whatever comes next all have to put the statement
+  // inside a nested function expression, and this refuses that whatever its
+  // spelling.
+  if (closeValue !== null) {
+    const arrow = closeValue as ts.Expression;
+    const closeBody = ts.isArrowFunction(arrow) && ts.isBlock(arrow.body) ? arrow.body : null;
+    assert(closeBody !== null, "the close member is an arrow with a block body to root this in");
+    if (closeBody) {
+      const releases = findCallsTo(closeBody, sf, "useHostOwnedForwards.getState().releaseSession");
+      check("exactly one releaseSession(...) call inside close", releases.length, 1);
+      const releaseCall = releases[0];
+      if (releaseCall) {
+        assert(
+          isDirectlyInFunctionBody(releaseCall, closeBody),
+          "and it runs DIRECTLY in close's own body - not deferred into a callback, which would leave the entry alive past the session while every textual-position check above still passed",
+        );
+      }
+    }
   }
 }
 
@@ -1355,15 +1524,24 @@ console.log("\n[9. RuleCard.tsx] the read-only row a terminal-owned forward gets
   }
 
   // -------------------------------------------------------------------------
-  // ONE PRECEDENCE ORDER: `hostOwned` FIRST, at every site in the file.
+  // ONE PRECEDENCE ORDER: `hostOwned` FIRST, at every site that consults it.
   //
-  // The row must not be able to disagree with itself. `hostOwned && starting`
-  // is reachable - the terminal reads the page's status before its bind and
-  // claims after it, and `markStarting` is synchronous - and with the three
-  // orders disagreeing the row rendered a green dot, "Running (with host)", a
-  // note telling the user to close a terminal tab, and a button reading
-  // "Starting…" with a live spinner. A third answer about one rule, and there
-  // is no owner it corresponds to.
+  // The row must not be able to disagree with itself: with the three orders
+  // disagreeing, `hostOwned && starting` rendered a green dot, "Running (with
+  // host)", a note telling the user to close a terminal tab, and a button
+  // reading "Starting…" with a live spinner. A third answer about one rule, and
+  // there is no owner it corresponds to.
+  //
+  // THAT COMBINATION IS CURRENTLY UNCONSTRUCTIBLE, and this section is pinning
+  // defence in depth rather than a live defect - said plainly, because the
+  // previous version of this comment claimed it was reachable and nobody could
+  // build it. `controller.ts:155-161` runs the terminal-owned refusal and
+  // `markStarting` with no `await` between them, so no claim lands in the gap,
+  // and a terminal that reads `"starting"` after its own bind now CLAIMS rather
+  // than yielding. The precedence is pinned anyway because the ROW's own
+  // consistency must not rest on an argument about two other files'
+  // interleavings, and the trigger that would make it reachable is a second
+  // caller of `startRule`/`stopRule`.
   //
   // Every assertion below is POSITIONAL. `.includes` over a function body is
   // position-blind: moving `if (hostOwned)` below the exhaustive `switch`
@@ -1391,6 +1569,14 @@ console.log("\n[9. RuleCard.tsx] the read-only row a terminal-owned forward gets
     // added later is covered without anyone remembering to add it here. `\b`
     // keeps `hostOwnedPort` out of the sweep - a different value with a
     // different question.
+    //
+    // WHAT THE SWEEP DOES NOT SEE: only `ConditionalExpression`s. A future
+    // `hostOwned` site written as an `if` STATEMENT inside a helper is outside
+    // it, and so is a `switch`. Future-facing only - every site that exists
+    // today is either in this sweep or carries its own exact-text pin below -
+    // but a site added as an `if` in a new helper would be uncovered, and the
+    // remedy then is the same shape `statusText`/`statusDotClass` already get
+    // above: an index comparison inside that helper's own body.
     const withHostOwned = findConditionals(sf).filter((c) =>
       /\bhostOwned\b/.test(norm(c.getText(sf))),
     );
@@ -1470,12 +1656,19 @@ console.log("\n[9. RuleCard.tsx] the read-only row a terminal-owned forward gets
     );
   }
 
-  // `onDelete(running)` is deliberately UNCHANGED: it feeds `deleteNote`,
+  // `onDelete` passes BOTH flags, as two arguments and not one folded into the
+  // other. `running` stays strictly the PAGE's notion: it feeds `deleteNote`,
   // whose "deleting a running rule stops it" sentence is true only of a rule
-  // this page can stop. Pinned so the next reader does not "fix" it.
+  // this page can stop (and true at all only because `ForwardsPage.tsx`'s
+  // `confirmDelete` stops it first). `hostOwned` rides alongside because the
+  // dialog has its own, different sentence for a terminal-owned rule - the one
+  // that says deleting the record does NOT stop that forward. Folding them into
+  // `running || hostOwned` is the mutation this pins: the dialog would then
+  // promise a stop it cannot perform, which is the false promise in a
+  // destructive confirm this round exists to remove.
   assert(
-    ruleCardStripped.includes("onDelete(running)"),
-    "onDelete still passes the PAGE's notion of running, not hostOwned",
+    ruleCardStripped.includes("onDelete(running, hostOwned)"),
+    "onDelete passes the PAGE's notion of running AND hostOwned, as two separate arguments",
   );
 }
 
@@ -1557,7 +1750,7 @@ console.log("\n[10. §1.6 in the second store] every useHostOwnedForwards( selec
 
 // ===========================================================================
 console.log(
-  "\n[11. two panes, one host] a rule another SESSION already owns is refused, not overwritten",
+  "\n[11. two panes, one host] a rule another SESSION already owns is refused, not overwritten - sequentially AND concurrently",
 );
 // ===========================================================================
 {
@@ -1601,26 +1794,133 @@ console.log(
   check("and closing tab A clears it", useHostOwnedForwards.getState().byRule, {});
 }
 {
-  // The paired positive for the `!== sessionId` half. UNREACHABLE in
-  // production - `next_id` is a monotonic `AtomicU32` from 1
-  // (`src-tauri/src/modules/ssh/mod.rs:52,59,476`) - so this pins what the
-  // comparison MEANS rather than a case the app can reach: the skip is about
-  // ANOTHER owner, and a bare presence test would refuse a session its own
-  // entry.
+  // PRESENCE ALONE, and this fixture is the one that changed direction. It used
+  // to pin `owner !== sessionId` - "a rule THIS session already owns is not
+  // refused" - as correct behaviour. That case is UNREACHABLE in production
+  // (`next_id` is a monotonic `AtomicU32` from 1,
+  // `src-tauri/src/modules/ssh/mod.rs:52,59,476`), so what the fixture was
+  // really pinning was the UNSAFE half of an unreachable branch: if the
+  // comparison ever did fire, the same session would bind a SECOND listener and
+  // overwrite its own entry, orphaning the first port for the app's lifetime.
+  // `if (owner !== undefined) continue;` is the same code with a safe failure
+  // mode, and a check should pin the safe one.
   resetHostOwned();
   const same = rule({ id: "f-same", name: "same session", localPort: 18080 });
   const first = world({ rules: [same] });
   await startHostForwards("h-1", 41, first.writeBanner, first.deps);
+  check("the first run claims it", useHostOwnedForwards.getState().byRule, {
+    "f-same": { sessionId: 41, boundPort: 18080 },
+  });
   const again = world({ rules: [same] });
   await startHostForwards("h-1", 41, again.writeBanner, again.deps);
-  check("a rule THIS session already owns is not refused", again.openCalls.length, 1);
-  check("it is re-claimed, not banner-skipped", again.banners, [
-    forwardingBanner(18080, "10.0.0.9:5432", "same session"),
+  check(
+    "a rule ANY session already owns - this one included - never reaches a second bind",
+    again.openCalls.length,
+    0,
+  );
+  check("and nothing was re-claimed over the live entry", again.claims.length, 0);
+  // The same sentence as the other-pane case, and correctly so: the entry it
+  // refuses in favour of does name a live listener for this rule, whichever
+  // session opened it.
+  check("it is banner-skipped, not re-claimed", again.banners, [
+    otherTerminalBanner("same session"),
   ]);
+  check(
+    "the entry is byte-identical to the one the first run wrote",
+    useHostOwnedForwards.getState().byRule,
+    {
+      "f-same": { sessionId: 41, boundPort: 18080 },
+    },
+  );
+}
+{
+  // ---------------------------------------------------------------------
+  // THE CONCURRENT CASE, and it is the one that matters: two runs started
+  // BEFORE either is awaited. This is the DEFAULT shape for two panes, not an
+  // unlucky one - each pane runs its own connect and nothing serialises across
+  // panes - and `localPort: 0` from `EMPTY_RULE_DRAFT` is what makes the second
+  // bind SUCCEED rather than fail EADDRINUSE, so nothing fails and nothing
+  // warns.
+  //
+  // The two blocks above cannot see it: both drive their runs with an `await`
+  // between them, which is the only ordering a PRE-BIND read wins. Before the
+  // post-bind `hostOwnedBy` re-read existed, this fixture's outcome was two
+  // listeners, zero closes and one named - the pre-fix defect verbatim, against
+  // a suite that was green.
+  //
+  // §4.60's second half: the suspension point is one the FIXTURE controls. Each
+  // run's bind is a deferred this block resolves by hand, never an
+  // already-settled promise, so every counter below is read after an ordering
+  // this file chose.
+  // ---------------------------------------------------------------------
+  resetHostOwned();
+  const shared = rule({ id: "f-race", name: "raced", localPort: 0 });
+  let releaseA: (p: number) => void = () => {};
+  let releaseB: (p: number) => void = () => {};
+  const a = world({
+    rules: [shared],
+    open: () =>
+      new Promise<number>((res) => {
+        releaseA = res;
+      }),
+  });
+  const b = world({
+    rules: [shared],
+    open: () =>
+      new Promise<number>((res) => {
+        releaseB = res;
+      }),
+  });
+  // BOTH STARTED, THEN awaited. Reversing these two lines is the fixture the
+  // section already had.
+  const runA = startHostForwards("h-1", 41, a.writeBanner, a.deps);
+  const runB = startHostForwards("h-1", 42, b.writeBanner, b.deps);
+  await tick();
+  check(
+    "both runs passed their pre-bind reads and are parked on a bind - the pre-bind check cannot separate them",
+    [a.openCalls.length, b.openCalls.length],
+    [1, 1],
+  );
+  check("and neither has claimed anything yet", useHostOwnedForwards.getState().byRule, {});
+
+  releaseA(54321);
+  await tick();
+  check("A resolves first and claims", useHostOwnedForwards.getState().byRule, {
+    "f-race": { sessionId: 41, boundPort: 54321 },
+  });
+
+  releaseB(54322);
+  await Promise.all([runA, runB]);
+  check(
+    "B's post-bind re-read finds A's claim and B CLOSES THE LISTENER IT JUST BOUND",
+    b.closeCalls,
+    [{ id: 42, boundPort: 54322 }],
+  );
+  check("B claimed nothing", b.claims.length, 0);
+  check("A closed nothing - the winner keeps its listener", a.closeCalls, []);
+  check(
+    "the map still names session 41, with the port A actually bound",
+    useHostOwnedForwards.getState().byRule,
+    { "f-race": { sessionId: 41, boundPort: 54321 } },
+  );
+  check("A said it was forwarding", a.banners, [forwardingBanner(54321, "10.0.0.9:5432", "raced")]);
+  check("B said why it did not", b.banners, [otherTerminalBanner("raced")]);
+  // The leak's other end, and the assertion that used to fail: closing the tab
+  // the store NAMES must clear it. With B's overwrite in place the map named
+  // session 42, so releasing 41 left an entry standing for a listener nothing
+  // could reach and the row read "Running (with host)" for the app's lifetime.
+  useHostOwnedForwards.getState().releaseSession(41);
+  check(
+    "and closing the tab the store names clears it",
+    useHostOwnedForwards.getState().byRule,
+    {},
+  );
 }
 
 // ===========================================================================
-console.log("\n[12. a session that ended mid-bind] no claim, and the loop STOPS");
+console.log(
+  "\n[12. a session that ended mid-bind] no claim, and the loop STOPS - and one already dead never binds at all",
+);
 // ===========================================================================
 {
   resetHostOwned();
@@ -1701,6 +2001,32 @@ console.log("\n[12. a session that ended mid-bind] no claim, and the loop STOPS"
     "f-k1": { sessionId: 41, boundPort: 18080 },
     "f-k2": { sessionId: 41, boundPort: 18081 },
   });
+}
+{
+  // ALREADY DEAD BEFORE THE FIRST BIND, which the fixture above cannot reach:
+  // it kills the session between bind 1 and bind 2, so it only ever exercises
+  // the post-bind check. `finishSsh` sets `sessionEnded` UNCONDITIONALLY
+  // (`ssh-session.ts:218`) - before `openSsh` has resolved an id - so a session
+  // that ended while this run was still awaiting `listRules` is a real state,
+  // and with the loop shaped bind-then-check it issued ONE bind on a dead
+  // session and orphaned that listener before breaking.
+  //
+  // Zero opens, not "one fewer": the check is at the TOP of the loop body, so
+  // the very first rule is refused too.
+  resetHostOwned();
+  const one = rule({ id: "f-d1", name: "one", localPort: 18080 });
+  const two = rule({ id: "f-d2", name: "two", localPort: 18081 });
+  const w = world({ rules: [one, two], stillLive: () => false });
+  await startHostForwards("h-1", 41, w.writeBanner, w.deps);
+  check("a session already dead on entry asks the bridge for NOTHING", w.openCalls.length, 0);
+  check("claims nothing", useHostOwnedForwards.getState().byRule, {});
+  check("and writes no banner about a forward it never opened", w.banners, []);
+  // The paired control, so the zero above is the GUARD biting and not the
+  // fixture failing to drive anything: the identical two rules with the session
+  // alive bind both.
+  const alive = world({ rules: [one, two], stillLive: () => true });
+  await startHostForwards("h-1", 41, alive.writeBanner, alive.deps);
+  check("the same two rules on a live session bind both", alive.openCalls.length, 2);
 }
 
 // ===========================================================================
@@ -1843,40 +2169,75 @@ console.log("\n[13. NEVER REJECTS, structurally] every throw site outside the pe
 }
 
 // ===========================================================================
-console.log("\n[14. the page took it mid-bind] first claim wins, and the loser closes its own");
+console.log(
+  "\n[14. the page took it mid-bind] whoever resolves SECOND yields - so `running` yields and `starting` CLAIMS",
+);
 // ===========================================================================
-for (const taken of ["running", "starting"] as const) {
+{
   resetHostOwned();
   const r = rule({ id: "f-yield", name: "yielded", localPort: 0 });
   // THE STALE READ, which the seam could not express before this round: the
   // status is answered "stopped" on the FIRST read (before the bind) and
-  // `taken` on the second (after it). That is the user clicking Start while
+  // "running" on the second (after it). That is the user clicking Start while
   // this bind was in flight, and `controller.ts`'s `markStarting` is
   // synchronous, so no timing trick is needed to reach it.
   const w = world({
     rules: [r],
-    statusFn: (_id, nth) => (nth === 0 ? "stopped" : taken),
+    statusFn: (_id, nth) => (nth === 0 ? "stopped" : "running"),
     open: async () => 54321,
   });
   await startHostForwards("h-1", 41, w.writeBanner, w.deps);
 
-  check(`("${taken}") the bind DID happen - the first read said stopped`, w.openCalls.length, 1);
-  check(`("${taken}") and the status was re-read AFTER it, which is the whole fix`, w.statusCalls, [
+  check("the bind DID happen - the first read said stopped", w.openCalls.length, 1);
+  check("and the status was re-read AFTER it, which is the whole fix", w.statusCalls, [
     "f-yield",
     "f-yield",
   ]);
+  check("the just-bound listener was closed, by session and BOUND port", w.closeCalls, [
+    { id: 41, boundPort: 54321 },
+  ]);
+  check("no claim was written - the page's forward is genuinely up", w.claims.length, 0);
+  check("and the terminal's map is untouched", useHostOwnedForwards.getState().byRule, {});
+  check("the banner names the rule", w.banners, [yieldedBanner("yielded")]);
+}
+{
+  // `"starting"` IS THE INVERSE, and this fixture is written against the new
+  // behaviour: the terminal CLAIMS rather than yielding. `autostart.ts:141-145`
+  // already reasoned this way about the very same status for the PRE-bind
+  // banner - "a page Start still dialling, which can then FAIL" - and the
+  // post-bind path had not absorbed it.
+  //
+  // The sequence it fixes has DEFAULT step ordering, not unlucky ordering: the
+  // terminal's bind wins in the backend because it arrived first, the page's
+  // bind returns EADDRINUSE, the terminal's `await` resolves first and reads
+  // `"starting"`. Yielding there closed the terminal's listener; then the
+  // page's rejection landed and marked the row failed. No owner on either side,
+  // and the row read "Failed - port 18080 is already in use" naming a port
+  // nothing held.
+  //
+  // The page is the side that gives up its duplicate now, in `controller.ts`'s
+  // post-dial read - one rule seen from two sides, checked there as C10.
+  resetHostOwned();
+  const r = rule({ id: "f-starting", name: "still dialling", localPort: 0 });
+  const w = world({
+    rules: [r],
+    statusFn: (_id, nth) => (nth === 0 ? "stopped" : "starting"),
+    open: async () => 54321,
+  });
+  await startHostForwards("h-1", 41, w.writeBanner, w.deps);
+
+  check("the status was still re-read after the bind", w.statusCalls, ["f-starting", "f-starting"]);
   check(
-    `("${taken}") the just-bound listener was closed, by session and BOUND port`,
+    "NOTHING was closed - the terminal bound first and the page's dial may still fail",
     w.closeCalls,
-    [{ id: 41, boundPort: 54321 }],
+    [],
   );
-  check(`("${taken}") no claim was written - the page's claim was first`, w.claims.length, 0);
-  check(
-    `("${taken}") and the terminal's map is untouched`,
-    useHostOwnedForwards.getState().byRule,
-    {},
-  );
-  check(`("${taken}") the banner names the rule`, w.banners, [yieldedBanner("yielded")]);
+  check("the terminal CLAIMS", useHostOwnedForwards.getState().byRule, {
+    "f-starting": { sessionId: 41, boundPort: 54321 },
+  });
+  check("with the ordinary forwarding banner, not a yield", w.banners, [
+    forwardingBanner(54321, "10.0.0.9:5432", "still dialling"),
+  ]);
 }
 {
   // The paired control: both reads say "stopped", so nothing is closed and the
@@ -1954,3 +2315,83 @@ console.log("\n[16. VLT-94's load-bearing half] autostart never writes the PAGE'
 
 if (failed > 0) throw new Error(`forward-autostart-verify: ${failed} FAILED`);
 console.log("\nforward-autostart-verify: OK\n");
+
+// ----------------------------------------------------------------------------
+// Mutation table - fix round 3. Every mutation below was actually applied to a
+// byte-identical copy of `src/` AND `scripts/` (both trees reset each time, and
+// the ok-count printed on every run - a harness that silently stops asserting
+// reports GREEN for everything), the three verify scripts and both `tsc`
+// projects run, and the result recorded. Baseline: fa 219 ok, fs 141 ok, fp 79
+// ok, both tsc green.
+//
+//   Id    Mutation                                       Result
+//   ----  ---------------------------------------------  --------------------------
+//   Y1    autostart.ts: the post-bind `hostOwnedBy`      RED, 5 checks in section
+//           re-check block deleted                         11's CONCURRENT block -
+//                                                          and only that block. The
+//                                                          two sequential blocks
+//                                                          stayed green, which is
+//                                                          the whole reason the
+//                                                          concurrent one exists.
+//   Y2    autostart.ts: `taken === "starting"` restored  RED, 3 checks in section
+//           to the post-bind yield condition               14's `starting` block
+//   Y6    autostart.ts: the top-of-loop `stillLive`      RED, section 12's
+//           check deleted                                  already-dead-on-entry
+//                                                          check. Its paired live
+//                                                          control stayed green.
+//   Y7    autostart.ts: `owner !== undefined &&          RED, 1 check - section
+//           owner !== sessionId` restored for the          11's second block's
+//           PRE-bind read                                  "never reaches a second
+//                                                          bind". Only one, and the
+//                                                          reason is worth keeping:
+//                                                          the new POST-bind
+//                                                          presence check catches
+//                                                          the same entry a moment
+//                                                          later, so the damage the
+//                                                          mutation still does is
+//                                                          exactly one wasted bind
+//                                                          plus its close. The two
+//                                                          checks are layered, not
+//                                                          redundant.
+//   Y9    ssh-session.ts: the call site wrapped as       RED, section 8's
+//           `if (sessionEnded) { void ... }`, textually    UNCONDITIONAL check.
+//           unchanged otherwise                            Measured GREEN across all
+//                                                          three gates before the
+//                                                          parent check existed,
+//                                                          with the feature inert
+//                                                          for every rule.
+//   Y10   hostOwned.ts: a new selector hook returning    RED, section 10's
+//           `(s.byRule[id]?.boundPort ?? 0,                primitive verdict for
+//           Object.keys(s.byRule))`                        that selector. Measured
+//                                                          GREEN before the comma
+//                                                          arm existed - the section
+//                                                          printed it as "returns a
+//                                                          primitive".
+//   Y11   ssh-session.ts: the adapter-close release      RED, section 8's
+//           wrapped in `queueMicrotask(() => ...)`,        undeferred check.
+//           still textually above `sshSession.close()`     Measured GREEN across all
+//                                                          three gates before it -
+//                                                          every index comparison
+//                                                          passed.
+//   Y8    `prettier --write --print-width 60` over all   GREEN, the paired control
+//           seven src files this round pins (770             - BUT ONLY AFTER
+//           changed lines; at this repo's printWidth of      `findCallsTo` was
+//           100 the reflow would have been a no-op, so       fixed to normalise the
+//           the narrower width is what makes the            CALLEE text. On the
+//           control measure anything)                       first run it reddened
+//                                                          section 8's new
+//                                                          releaseSession lookup,
+//                                                          because Prettier splits
+//                                                          `useHostOwnedForwards
+//                                                          .getState()
+//                                                          .releaseSession(...)`
+//                                                          over three lines and the
+//                                                          raw `===` on the callee
+//                                                          then found zero calls.
+//                                                          An exact-text pin needs
+//                                                          its reformat control, and
+//                                                          this is the second time
+//                                                          in this wave that the
+//                                                          control is what found the
+//                                                          defect.
+// ----------------------------------------------------------------------------

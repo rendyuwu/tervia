@@ -177,6 +177,47 @@ console.log("[1] ruleRows: hostName and hostDangling resolve independently, rout
     )[0].route,
     "Auto → bastion → 10.0.0.9:5432",
   );
+
+  // N2: `hostDangling` must never mean "the hosts have not loaded yet".
+  // `useForwards()` and `useHosts()` are two INDEPENDENT async loads that both
+  // start from an empty `Map`, so there is a render on EVERY MOUNT where the
+  // rules have arrived and the hosts have not - and reporting `hostDangling`
+  // there rendered a self-contradicting row that was reachable every single
+  // time: "Running" + a green dot + a red "Host missing" badge + a note telling
+  // the user to stop it + a DISABLED Stop whose tooltip said to edit the rule
+  // before starting it. Four wrong answers about one rule, on the first frame.
+  //
+  // Pre-existing rather than a regression from the hostOwned work - the flag
+  // itself was always `host === undefined` - but on the hand-test path, which
+  // is why it is fixed here.
+  {
+    const orphan = rule("r-preload", { hostId: "h-not-loaded-yet" });
+    check(
+      "an EMPTY host map is the pre-load state, not a dangling row",
+      ruleRows([orphan], new Map<string, Host>()).map((r) => r.hostDangling),
+      [false],
+    );
+    // The paired positive, and it is what stops the fix from being an
+    // off-switch: with the hosts KNOWN, a rule naming one that is not among
+    // them is dangling exactly as before.
+    check(
+      "with the hosts known, a rule naming a missing one is still dangling",
+      ruleRows([orphan], hosts).map((r) => r.hostDangling),
+      [true],
+    );
+    // And the label is unchanged either way: `hostName` has always been
+    // "Unknown host" for a host this map does not hold, and during the pre-load
+    // frame that is the only honest thing it can say. What the fix removes is
+    // the destructive badge and the disabled buttons, not the label.
+    check(
+      "the label is UNKNOWN_HOST_LABEL in both cases - only the structural flag changed",
+      [
+        ruleRows([orphan], new Map<string, Host>())[0].hostName,
+        ruleRows([orphan], hosts)[0].hostName,
+      ],
+      [UNKNOWN_HOST_LABEL, UNKNOWN_HOST_LABEL],
+    );
+  }
 }
 
 // --- 2. rankRules: five tiers, one row per tier, and the drop rule ----------
@@ -616,34 +657,86 @@ console.log("\n[9] stopNote: exact two-sentence copy");
   );
 }
 
-// --- 10. deleteNote: running/startWithHost, all four combinations (D8) -----
+// --- 10. deleteNote: running/startWithHost/hostOwned, all eight (D8) --------
 
 console.log(
-  "\n[10] deleteNote: running and startWithHost are independent facts, both named when both are true",
+  "\n[10] deleteNote: running, startWithHost and hostOwned are independent facts; hostOwned takes precedence over running",
 );
 {
-  const runningOnly: DeleteNoteSubject = { running: true, startWithHost: false };
-  const startOnly: DeleteNoteSubject = { running: false, startWithHost: true };
-  const both: DeleteNoteSubject = { running: true, startWithHost: true };
-  const neither: DeleteNoteSubject = { running: false, startWithHost: false };
+  const STOPPING = "Stopping it first is not required — deleting a running rule stops it.";
+  const HOST_OWNED =
+    "Deleting the rule does not stop its forward — that one dies with the terminal tab that opened it.";
+  const START = "It will no longer start automatically with its host.";
+  const FALLBACK = "Deleting it changes nothing else.";
+
+  const subject = (over: Partial<DeleteNoteSubject> = {}): DeleteNoteSubject => ({
+    running: false,
+    startWithHost: false,
+    hostOwned: false,
+    ...over,
+  });
+
+  // ALL EIGHT COMBINATIONS, exhaustively rather than the four the two-flag
+  // version needed - three independent booleans, and the interesting cell is
+  // the one where two of them are true at once.
+  const runningOnly = subject({ running: true });
+  const startOnly = subject({ startWithHost: true });
+  const both = subject({ running: true, startWithHost: true });
+  const neither = subject();
+  const hostOwnedOnly = subject({ hostOwned: true });
+  const hostOwnedAndStart = subject({ hostOwned: true, startWithHost: true });
+  const hostOwnedAndRunning = subject({ hostOwned: true, running: true });
+  const allThree = subject({ hostOwned: true, running: true, startWithHost: true });
 
   check(
     "running, does not start with host: the stopping sentence alone",
     deleteNote(runningOnly),
-    "Stopping it first is not required — deleting a running rule stops it.",
+    STOPPING,
   );
   check(
     "not running, starts with host: the start-with-host sentence alone",
     deleteNote(startOnly),
-    "It will no longer start automatically with its host.",
+    START,
+  );
+  check("running AND starts with host: both sentences", deleteNote(both), `${STOPPING} ${START}`);
+  check("neither: the fallback sentence", deleteNote(neither), FALLBACK);
+
+  // THE NEW ARM. `store.ts`'s `deleteRule` is a pure persistence filter and
+  // `ForwardsPage.tsx`'s `confirmDelete` can only stop what the PAGE started -
+  // a terminal-owned forward dies with its tab and with nothing else. Before
+  // this arm existed the dialog said "deleting a running rule stops it" for
+  // such a rule, which is a false promise inside a destructive confirm.
+  //
+  // `hostOwned` WITHOUT `startWithHost` looks contradictory and is not:
+  // `autostart.ts` only ever claims a rule flagged `startWithHost`, but the
+  // user can edit that flag off while the terminal's forward is still up, and
+  // the confirm then has to be right about both facts at once.
+  check(
+    "terminal-owned: the delete does NOT stop it, and says so",
+    deleteNote(hostOwnedOnly),
+    HOST_OWNED,
   );
   check(
-    "running AND starts with host: both sentences",
-    deleteNote(both),
-    "Stopping it first is not required — deleting a running rule stops it. " +
-      "It will no longer start automatically with its host.",
+    "terminal-owned AND starts with host: both sentences",
+    deleteNote(hostOwnedAndStart),
+    `${HOST_OWNED} ${START}`,
   );
-  check("neither: the fallback sentence", deleteNote(neither), "Deleting it changes nothing else.");
+  // THE PRECEDENCE CELL, and the reason `hostOwned` is its own field rather
+  // than folded into `running`. The two maps are kept exclusive by checks and
+  // not by construction (`hostOwned.ts`'s header), so if both ever said yes the
+  // sentence that must win is the one about the owner this dialog cannot act
+  // on - the same `hostOwned`-first order `page/RuleCard.tsx` applies at all
+  // nine of its own sites.
+  check(
+    "terminal-owned AND page-running: the terminal sentence wins, never the stop promise",
+    deleteNote(hostOwnedAndRunning),
+    HOST_OWNED,
+  );
+  check(
+    "all three: the terminal sentence plus the start-with-host one",
+    deleteNote(allThree),
+    `${HOST_OWNED} ${START}`,
+  );
 
   // D8: the running/not-running pair must differ. A `deleteNote` that
   // branched on `startWithHost` alone (or ignored `running` altogether) would
@@ -652,12 +745,31 @@ console.log(
     "the running and not-running sentences are NOT the same text",
     deleteNote(runningOnly) !== deleteNote(neither),
   );
+  // And the same claim for the new flag, which is the mutation "drop the
+  // hostOwned arm" - it collapses this pair onto one sentence.
+  ok(
+    "the terminal-owned and page-running sentences are NOT the same text",
+    deleteNote(hostOwnedOnly) !== deleteNote(runningOnly),
+  );
+  ok(
+    "nor is the terminal-owned sentence the fallback",
+    deleteNote(hostOwnedOnly) !== deleteNote(neither),
+  );
 
   // No claim about how well the secret was kept, or that this delete makes
   // anything "safer" - a forward rule holds no secret at all (see the
   // module's own header), so this is a copy check, not a security claim
   // check, but the same two needles are run over every string anyway.
-  const everyNote = [runningOnly, startOnly, both, neither].map((s) => deleteNote(s));
+  const everyNote = [
+    runningOnly,
+    startOnly,
+    both,
+    neither,
+    hostOwnedOnly,
+    hostOwnedAndStart,
+    hostOwnedAndRunning,
+    allThree,
+  ].map((s) => deleteNote(s));
   for (const note of everyNote) {
     ok(
       `${JSON.stringify(note)} makes no protection claim`,
@@ -760,3 +872,15 @@ process.exit(failed === 0 ? 0 : 1);
 //   D8    deleteNote: `subject.running` read replaced        section 10's running-vs-
 //           with `false` (the sentence never fires)             not-running inequality
 //                                                                check
+//   Y5    deleteNote's hostOwned arm collapsed into         section 10's four
+//           `subject.running || subject.hostOwned`, both        hostOwned sentences AND
+//           arms taking the stopping sentence - the             the hostOwned-vs-running
+//           false promise this round removed                    inequality (5 checks)
+//   Y12   ruleRows: hostDangling back to                    section 1's empty-host-map
+//           `host === undefined`, `hostsKnown` dropped          pre-load check ONLY -
+//                                                                the paired positive and
+//                                                                the label check stayed
+//                                                                green, which is exactly
+//                                                                what having them is for
+//                                                                (the fix is not an
+//                                                                off-switch)

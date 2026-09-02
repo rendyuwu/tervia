@@ -16,8 +16,8 @@ import type { ForwardRule } from "../types";
 // the SSH runtime (`modules/forwards/runtime.ts`), not from anything
 // persisted, and a `ForwardRule` on its own cannot say it - this file only
 // ever sees a `ForwardRule` and a host map. Every function that needs a
-// runtime fact - `localPortLabel`'s `boundPort`, `deleteNote`'s `running` -
-// takes it as a plain argument instead of reaching for a store.
+// runtime fact - `localPortLabel`'s `boundPort`, `deleteNote`'s `running` and
+// `hostOwned` - takes it as a plain argument instead of reaching for a store.
 
 /** What {@link ruleRows} reports for a `hostId` naming a host the store does
  *  not have. A named label rather than `undefined`, because a rule's host is
@@ -29,11 +29,12 @@ export type ForwardRuleRow = {
   rule: ForwardRule;
   /** The SSH host's display name, or {@link UNKNOWN_HOST_LABEL}. */
   hostName: string;
-  /** `hostId` names a host the store does not have. A separate field from the
-   *  label, for the reason `IdentityRow.keyDangling` (`vault/page/derive.ts:69`)
-   *  is separate from `keyName`: a host genuinely named "Unknown host" would
-   *  render identically to a dangling reference, and only a structural flag
-   *  can tell the two apart. */
+  /** `hostId` names a host the store does not have, AND the host list has been
+   *  loaded at all. A separate field from the label, for the reason
+   *  `IdentityRow.keyDangling` (`vault/page/derive.ts:69`) is separate from
+   *  `keyName`: a host genuinely named "Unknown host" would render identically
+   *  to a dangling reference, and only a structural flag can tell the two
+   *  apart. See {@link ruleRows} for why the empty host map is excluded. */
   hostDangling: boolean;
   /** The route, ready to render: `localhost:18080 → bastion → 10.0.0.9:5432`. */
   route: string;
@@ -60,18 +61,39 @@ export type ForwardRuleRow = {
  * A page that knows a rule is running and wants the row to say the ACTUAL
  * bound port must recompute that one field itself; this row is the
  * configuration's own route, not a live one.
+ *
+ * AN EMPTY HOST MAP IS NOT N DANGLING ROWS. `hostDangling` has to mean "the
+ * hosts are known AND this one is not among them", never "the hosts are not
+ * known yet" - the two callers of this function feed it from `useForwards()`
+ * and `useHosts()`, which are two INDEPENDENT async loads both starting from an
+ * empty `Map` (`useForwards.ts:26-38`, `hosts/useHosts.ts:15-27`), so there is
+ * a render on every single mount where the rules have arrived and the hosts
+ * have not. Reporting `hostDangling` there made every row flicker a red "Host
+ * missing" badge with Start and Stop disabled and a tooltip telling the user to
+ * edit the rule - all four of them false, and all four on the first frame.
+ *
+ * NEITHER HOOK EXPOSES A LOADED FLAG, so `hosts.size` is what stands in for
+ * one, and the case it gets wrong is worth naming rather than hiding: a store
+ * with rules and genuinely ZERO hosts shows no badge and an enabled Start,
+ * which then fails at the dial with a toast. That state needs every host to
+ * have gone while a rule naming one survived - `deleteHost` drops a host's
+ * rules through `dropRulesForHost` and `upsertRule` refuses a rule whose host
+ * is not saved, so it takes a torn store or a cross-window delete to reach at
+ * all, and its cost is one failed Start rather than four wrong answers per
+ * mount.
  */
 export function ruleRows(
   rules: readonly ForwardRule[],
   hosts: ReadonlyMap<string, Host>,
 ): ForwardRuleRow[] {
+  const hostsKnown = hosts.size > 0;
   return rules.map((rule) => {
     const host = hosts.get(rule.hostId);
     const hostName = host ? host.name : UNKNOWN_HOST_LABEL;
     return {
       rule,
       hostName,
-      hostDangling: host === undefined,
+      hostDangling: hostsKnown && host === undefined,
       route: `${localPortLabel(rule, undefined)} → ${hostName} → ${rule.remoteHost}:${rule.remotePort}`,
     };
   });
@@ -274,17 +296,25 @@ export function stopNote(): string {
 }
 
 /**
- * The facts {@link deleteNote} needs, and no more - the page's own pending-delete
- * state carries `id` and `name` too (for the title and any refusal message),
- * but this type only takes what decides which sentence is TRUE. A structural
- * subset on purpose, for the same reason `DeleteNoteSubject`
+ * The facts {@link deleteNote} needs, and no more - the page's own
+ * pending-delete state also carries the whole `ForwardRule` (for the title, and
+ * because stopping a page-running rule before deleting it needs its host and
+ * both endpoints), but this type only takes what decides which sentence is
+ * TRUE. A structural subset on purpose, for the same reason `DeleteNoteSubject`
  * (`vault/page/derive.ts:368`) is one: this file is store-free by design (see
  * the header above), so it has no way to ask a `ForwardRuleRow` whether the
- * rule is currently running - that answer lives in the runtime layer, not in
- * anything persisted. The page's wider type is assignable here without a
- * cast.
+ * rule is currently running, or whether a terminal owns it - both answers live
+ * in the runtime layer, not in anything persisted.
  */
-export type DeleteNoteSubject = { running: boolean; startWithHost: boolean };
+export type DeleteNoteSubject = {
+  running: boolean;
+  startWithHost: boolean;
+  /** A TERMINAL owns this rule's forward (`modules/forwards/hostOwned.ts`).
+   *  Its own field and not folded into `running`, because the two describe
+   *  different owners and only one of them is stopped by this delete - which is
+   *  the whole of the sentence below. */
+  hostOwned: boolean;
+};
 
 /**
  * What the confirm dialog says about deleting this rule, said in terms of
@@ -295,11 +325,22 @@ export type DeleteNoteSubject = { running: boolean; startWithHost: boolean };
  * same reason: a single sentence would be one thing for every rule, but a
  * running rule and a rule that starts with its host each have something
  * specific and true to say, and neither fact implies the other.
+ *
+ * `hostOwned` FIRST, the same precedence order `page/RuleCard.tsx`'s header
+ * states and for the same reason: the two maps are kept exclusive by checks
+ * rather than by construction, and if they ever both said yes, the sentence
+ * that matters is the one about the owner this dialog CANNOT act on. A false
+ * promise in a destructive confirm is worse than the leak it describes, and
+ * "deleting a running rule stops it" is a false promise for a rule the page
+ * holds no reference to - `ForwardsPage.tsx`'s `confirmDelete` can only stop
+ * what the page itself started.
  */
 export function deleteNote(subject: DeleteNoteSubject): string {
-  const runningNote = subject.running
-    ? "Stopping it first is not required — deleting a running rule stops it."
-    : null;
+  const runningNote = subject.hostOwned
+    ? "Deleting the rule does not stop its forward — that one dies with the terminal tab that opened it."
+    : subject.running
+      ? "Stopping it first is not required — deleting a running rule stops it."
+      : null;
   const startNote = subject.startWithHost
     ? "It will no longer start automatically with its host."
     : null;

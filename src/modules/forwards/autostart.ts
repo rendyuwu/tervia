@@ -47,17 +47,27 @@ export type AutostartDeps = {
     remoteHost: string,
     remotePort: number,
   ) => Promise<number>;
-  /** `ssh/bridge.ts`'s `closeSshForward`. Needed for exactly one case: a bind
-   *  that resolved into a rule the PAGE took while it was in flight. First
-   *  claim wins (VLT-94), so the loser closes the listener it just bound rather
-   *  than leaving a second one standing that nothing on either side names. */
+  /** `ssh/bridge.ts`'s `closeSshForward`. Needed for the two cases where a bind
+   *  RESOLVED into a rule somebody else had meanwhile taken - the PAGE (its
+   *  `markStarting` is synchronous) or ANOTHER PANE's own autostart run, which
+   *  is not staggered by anything and so passes its own pre-bind read before
+   *  either side claims. First claim wins (VLT-94), so the loser closes the
+   *  listener it just bound rather than leaving a second one standing that
+   *  nothing on either side names. */
   closeForward: (id: number, boundPort: number) => Promise<boolean>;
+  /** The page's status for this rule. READ TWICE per rule - once before the
+   *  bind and once immediately before the claim - because the user can click
+   *  Start at any point during a bind. */
   runtimeStatus: (ruleId: string) => ForwardStatus;
   /** The session id that already owns this rule on some terminal, or
    *  `undefined`. The TERMINAL side of the exclusion, and symmetric with
-   *  `runtimeStatus`: that one answers for the page, this one for every other
-   *  pane. `hostOwned.ts` is keyed by rule id alone and so cannot represent two
-   *  owners, which is why the answer to a second owner is to refuse it. */
+   *  `runtimeStatus` in both senses: that one answers for the page and this one
+   *  for every other pane, and BOTH are read twice, before the bind and again
+   *  immediately before the claim. Two panes connecting at once are two
+   *  autostart runs with nothing serialising them, so a pre-bind read alone is
+   *  a read both of them pass. `hostOwned.ts` is keyed by rule id alone and so
+   *  cannot represent two owners, which is why the answer to a second owner is
+   *  to refuse it. */
   hostOwnedBy: (ruleId: string) => number | undefined;
   claimHostOwned: (ruleId: string, entry: HostOwnedEntry) => void;
   /**
@@ -153,7 +163,14 @@ function skippedBanner(rule: ForwardRule, status: "running" | "starting"): strin
 /** The other half of the exclusion: another PANE's session already has this
  *  rule open on this host. The terminal deliberately dials its own session per
  *  pane (`ssh/tunnel.ts:31-35`), so two tabs to one host are two autostart
- *  runs. Deliberately does NOT say the page owns it - it does not. */
+ *  runs. Deliberately does NOT say the page owns it - it does not.
+ *
+ *  ONE SENTENCE FOR BOTH ARMS of that half - the pre-bind refusal and the
+ *  post-bind yield, which also closes the listener it just bound. The outcome
+ *  the sentence describes is the same either way: no second forward for this
+ *  rule, and the one that is up belongs to another tab. Spelling the two
+ *  differently would be two ways of saying one fact, and the terminal is not
+ *  the surface on which to explain a race. */
 function otherTerminalBanner(rule: ForwardRule): string {
   return `\x1b[33m[tervia] forward "${rule.name}" is already open on another terminal for this host; not starting a second one.\x1b[0m\r\n`;
 }
@@ -211,20 +228,31 @@ export async function startHostForwards(
 
     const mine = rules.filter((rule) => rule.hostId === hostId && rule.startWithHost);
     for (const rule of mine) {
+      // THE SESSION MAY ALREADY BE GONE BEFORE THE FIRST BIND, not only during
+      // a later one. `finishSsh` sets `sessionEnded` UNCONDITIONALLY
+      // (`ssh-session.ts:218`), before `openSsh` has resolved an id - so a
+      // session that ended while this run was still reading the store would
+      // otherwise issue one bind on a dead session and orphan that listener
+      // before the post-bind check below breaks the loop. Same `break` and same
+      // reasoning as that one; it just costs nothing to ask first.
+      if (!(deps.stillLive?.() ?? true)) break;
       // THE TERMINAL'S OWN MAP FIRST, then the page's. Two exclusions, neither
       // implying the other, and this one is checked first for two reasons: it is
       // the more specific claim (a rule another pane holds is not a rule the
       // page is running), and the page's banner would name the wrong owner if it
       // won the race to be printed.
       //
-      // `!== sessionId` and not a bare presence test: a rule THIS session
-      // already owns is the reconnect-with-the-same-id case, and that cannot
+      // PRESENCE ALONE, and not `owner !== sessionId`. A rule THIS session
+      // already owns is the reconnect-with-the-same-id case, and it cannot
       // happen - `next_id` is a monotonic `AtomicU32` from 1
-      // (`src-tauri/src/modules/ssh/mod.rs:52,59,476`). The comparison is
-      // written anyway so the code says what it means instead of resting on
-      // that.
+      // (`src-tauri/src/modules/ssh/mod.rs:52,59,476`). The difference is what
+      // each version does IF IT EVER DID: presence refuses, which loses nothing
+      // (the entry already names a live listener for this rule); the comparison
+      // binds a SECOND listener and overwrites its own entry, orphaning the
+      // first port for the app's lifetime. Same code, and one of the two has a
+      // safe failure mode.
       const owner = deps.hostOwnedBy(rule.id);
-      if (owner !== undefined && owner !== sessionId) {
+      if (owner !== undefined) {
         writeBanner(otherTerminalBanner(rule));
         continue;
       }
@@ -259,19 +287,44 @@ export async function startHostForwards(
         // and the `Drop` at `:627-643`), so what leaks here is only frontend
         // state.
         if (!(deps.stillLive?.() ?? true)) break;
-        // RE-READ THE PAGE'S STATUS, because the read above happened before the
-        // await and `controller.ts`'s `markStarting` is synchronous: the user
-        // can click Start at any point during this bind. First claim wins
-        // (VLT-94), so the loser closes its own listener - anything else leaves
-        // two live listeners for one rule, or a row whose button and status line
-        // disagree about who owns it.
-        const taken = deps.runtimeStatus(rule.id);
-        if (taken === "running" || taken === "starting") {
+        // RE-READ BOTH MAPS, in the same order as the pre-bind pair above, and
+        // for the same reason each of them exists. The pre-bind reads happened
+        // before an `await`, and neither of the two owners they ask about is
+        // serialised against this run: `controller.ts`'s `markStarting` is
+        // synchronous, so the user can click Start at any point during this
+        // bind, and another pane's autostart is a whole second run of THIS
+        // function with nothing ordering it against this one. Two concurrent
+        // runs both pass their pre-bind `hostOwnedBy` read, so a pre-bind read
+        // alone is a read both of them pass. `hostOwnedBy` and `claimHostOwned`
+        // are synchronous with no suspension point between them, which is what
+        // makes a re-read immediately before the claim unraceable in turn.
+        const laterOwner = deps.hostOwnedBy(rule.id);
+        if (laterOwner !== undefined) {
           // Not awaited into the per-rule catch below: a close that reports a
           // failure must not print `failedBanner`, which would say the forward
           // could not be opened when in fact it opened and was handed over.
           // `.catch` and not a bare `void`, matching this file's call site and
           // `ssh-session.ts:336`.
+          void deps.closeForward(sessionId, bound).catch(() => {});
+          writeBanner(otherTerminalBanner(rule));
+          continue;
+        }
+        // `"running"` ONLY, and NOT `"starting"` - this is the one place the
+        // post-bind rule differs from the pre-bind one, and `:141-145`'s
+        // argument about the very same status is why. A page Start that is still
+        // DIALLING can fail, and a rule that is down on both sides because each
+        // one yielded to the other is a wrong answer rather than a louder one:
+        // the terminal's bind has already succeeded here, so it CLAIMS, and the
+        // page's dial gives up its own duplicate if it lands after that.
+        //
+        // THE TWO YIELDS ARE ONE RULE SEEN FROM TWO SIDES - "whoever resolves
+        // SECOND yields". This one is the terminal's half; `controller.ts`'s
+        // `startRule` carries the page's half, releasing the reference its dial
+        // just received when it finds the rule terminal-owned. Neither side ever
+        // takes the other's listener down, so the window closes without a
+        // both-down state.
+        const taken = deps.runtimeStatus(rule.id);
+        if (taken === "running") {
           void deps.closeForward(sessionId, bound).catch(() => {});
           writeBanner(yieldedBanner(rule));
           continue;

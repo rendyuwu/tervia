@@ -19,12 +19,18 @@
  *
  * - **This map against `useForwardRuntime`.** `autostart.ts` reads
  *   `runtimeStatus` before the bind AND again immediately before the claim, and
- *   yields (closes its own just-bound listener) if the page took the rule in
- *   between; `controller.ts`'s `startRule` refuses outright a rule that is
- *   already in here. First claim wins, from either side.
+ *   yields (closes its own just-bound listener) if the page has the rule
+ *   RUNNING by then; `controller.ts`'s `startRule` refuses outright a rule that
+ *   is already in here, and also yields - releasing the reference its own dial
+ *   just received - when it finds one here on the way back. One rule, seen from
+ *   two sides: whoever resolves SECOND gives up the duplicate it created, so
+ *   neither side can take the other's listener down and leave the rule down on
+ *   both.
  * - **This map against ITSELF.** Two panes on one host are two sessions and two
- *   autostart runs (`ssh/tunnel.ts:31-35`), so `autostart.ts` also skips a rule
- *   `hostOwnedBy` says another session already owns.
+ *   autostart runs (`ssh/tunnel.ts:31-35`), with nothing serialising them, so
+ *   `autostart.ts` reads `hostOwnedBy` TWICE as well - before the bind and again
+ *   immediately before the claim. The pre-bind read alone is a read two
+ *   concurrent runs both pass.
  *
  * The page's Start/Stop never writes here at all. The page reads this map
  * read-only: it shows such a rule as "Running (with host)" with a disabled
@@ -48,10 +54,16 @@ type HostOwnedState = {
    * keyed by rule id and a lost entry is a listener nothing names.
    *
    * A LIVE first owner never reaches here twice: `autostart.ts` asks
-   * `hostOwnedBy` first and refuses a rule another session already holds. What
-   * is left for the overwrite is the STALE entry - a session whose release
-   * never ran - where last-writer-wins is the right fallback and the newer
-   * write is the one that describes something listening.
+   * `hostOwnedBy` before its bind and AGAIN immediately before this call, with
+   * no suspension point between that second read and this one, and refuses a
+   * rule any other session already holds. Both reads are load-bearing and the
+   * second one is the one that covers CONCURRENCY - two panes connecting at once
+   * are two autostart runs that both pass the first read, and before the second
+   * read existed the later of them overwrote a live entry here and left the
+   * first pane's listener untracked for the app's lifetime. What is left for the
+   * overwrite is the STALE entry - a session whose release never ran - where
+   * last-writer-wins is the right fallback and the newer write is the one that
+   * describes something listening.
    */
   claim(ruleId: string, entry: HostOwnedEntry): void;
   /**

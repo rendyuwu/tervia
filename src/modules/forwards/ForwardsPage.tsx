@@ -40,24 +40,34 @@ import { useHosts } from "@/modules/hosts/useHosts";
 import { Plus, Search, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
+import { stopRule } from "./controller";
 import { RuleEditorDialog, type RuleEditorTarget } from "./editor/RuleEditorDialog";
 import { RuleCard } from "./page/RuleCard";
 import { deleteNote, rankRules, ruleRows } from "./page/derive";
 import { deleteRule } from "./store";
+import type { ForwardRule } from "./types";
 import { useForwards } from "./useForwards";
 
 /**
- * Which delete is awaiting confirmation. `id` and `name` are carried
- * alongside the two `deleteNote` inputs for the same reason
- * `VaultPage.tsx`'s `PendingDelete` carries its own record fields: the
- * confirm dialog's title needs `name`, and the record may be gone from the
- * store by the time either renders, so nothing here is looked up a second
- * time. `running` is captured from `RuleCard`'s own `useForwardStatus`
- * selector, at the moment the row's Delete button was clicked - this page
- * never reads runtime status itself (§1.6: the card is the one place that
- * needs it, and it already has it).
+ * Which delete is awaiting confirmation. The WHOLE `ForwardRule` is carried
+ * alongside the two runtime flags, for the same reason `VaultPage.tsx`'s
+ * `PendingDelete` carries its own record fields: the confirm dialog's title
+ * needs the name, and the record may be gone from the store by the time
+ * either renders, so nothing here is looked up a second time.
+ *
+ * THE WHOLE RECORD AND NOT JUST `id`/`name`, because `confirmDelete` below
+ * has to be able to STOP a page-running rule before deleting it, and
+ * `stopRule` needs the host and both endpoints to name the entry it is
+ * releasing (`controller.ts`'s note on `closeForwardForConnection`'s
+ * arguments). A rule looked up again at confirm time is exactly the record
+ * that may already be gone.
+ *
+ * `running` and `hostOwned` are captured from `RuleCard`'s own
+ * `useForwardStatus` and `useIsHostOwned` selectors, at the moment the row's
+ * Delete button was clicked - this page never reads either store itself
+ * (§1.6: the card is the one place that needs them, and it already has them).
  */
-type PendingDelete = { id: string; name: string; running: boolean; startWithHost: boolean };
+type PendingDelete = { rule: ForwardRule; running: boolean; hostOwned: boolean };
 
 export function ForwardsPage(): ReactNode {
   const forwardsById = useForwards();
@@ -113,11 +123,43 @@ export function ForwardsPage(): ReactNode {
 
   const confirmDelete = useCallback((target: PendingDelete) => {
     setPendingDelete(null);
-    // `deleteRule` refuses nothing (`store.ts`'s own comment on the export)
-    // - nothing references a rule the way a host references an identity -
-    // but the write can still fail (an I/O error, a torn store), so this
-    // still routes a rejection to `toast()` rather than dropping it.
-    void deleteRule(target.id).catch((e: unknown) =>
+    void (async () => {
+      try {
+        // STOPPED BEFORE IT IS DELETED, and this is what makes
+        // `deleteNote`'s "deleting a running rule stops it" sentence TRUE
+        // rather than a false promise in a destructive confirm. Deleting the
+        // record alone leaves `runtime.ts`'s entry naming a rule no row
+        // renders, so no Stop is ever offered again; `ssh/tunnel.ts`'s entry
+        // keeps `refs: 1`, so the SSH session never closes for the rest of
+        // the app's life; the local port stays bound, and re-creating a rule
+        // on the same pinned port then fails EADDRINUSE with no in-app
+        // recovery.
+        //
+        // Guarded on the PAGE's `running` only, and that is the whole scope
+        // of what this page can do: a terminal-owned rule's forward is not
+        // this page's to stop (`page/RuleCard.tsx`'s header), and
+        // `deleteNote` says so instead of promising otherwise. Calling
+        // `stopRule` for a rule that is not running would be harmless
+        // (`controller.ts`: a Stop with no claim recorded closes nothing),
+        // but it would also be a Stop nobody asked for.
+        if (target.running) await stopRule(target.rule);
+      } finally {
+        // THE DELETE THE USER CONFIRMED HAPPENS EITHER WAY. A `stopRule`
+        // that rejected must not swallow the delete - the user would be left
+        // with the rule they asked to remove AND the forward they asked to
+        // stop. Nothing reaches this today (`closeForwardForConnection`'s
+        // chain ends in `.catch(() => {})` and `markStopped` is a
+        // synchronous store write), which is exactly why it is a `finally`
+        // rather than an argument about another module's ordering.
+        //
+        // `deleteRule` refuses nothing (`store.ts`'s own comment on the
+        // export) - nothing references a rule the way a host references an
+        // identity - but the write can still fail (an I/O error, a torn
+        // store), so a rejection from either half lands on the one `toast()`
+        // below rather than being dropped.
+        await deleteRule(target.rule.id);
+      }
+    })().catch((e: unknown) =>
       toast(e instanceof Error ? e.message : String(e), { variant: "error" }),
     );
   }, []);
@@ -197,13 +239,8 @@ export function ForwardsPage(): ReactNode {
                 key={row.rule.id}
                 row={row}
                 onEdit={() => setEditorTarget({ mode: "edit", ruleId: row.rule.id })}
-                onDelete={(running) =>
-                  setPendingDelete({
-                    id: row.rule.id,
-                    name: row.rule.name,
-                    running,
-                    startWithHost: row.rule.startWithHost,
-                  })
+                onDelete={(running, hostOwned) =>
+                  setPendingDelete({ rule: row.rule, running, hostOwned })
                 }
               />
             ))}
@@ -219,9 +256,22 @@ export function ForwardsPage(): ReactNode {
       >
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Delete rule &quot;{shownDelete?.name}&quot;?</AlertDialogTitle>
+            <AlertDialogTitle>Delete rule &quot;{shownDelete?.rule.name}&quot;?</AlertDialogTitle>
             <AlertDialogDescription>
-              {shownDelete ? deleteNote(shownDelete) : null} This cannot be undone.
+              {/* The three `deleteNote` inputs spelled out rather than
+                  `deleteNote(shownDelete)`: `startWithHost` lives on the
+                  captured RULE and the other two are the runtime flags the
+                  row handed over, so one source of truth per field and no
+                  copy of `startWithHost` kept beside the record it came
+                  from. */}
+              {shownDelete
+                ? deleteNote({
+                    running: shownDelete.running,
+                    hostOwned: shownDelete.hostOwned,
+                    startWithHost: shownDelete.rule.startWithHost,
+                  })
+                : null}{" "}
+              This cannot be undone.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

@@ -14,17 +14,31 @@
  * READ-ONLY here - shown as "Running (with host)" with Start/Stop disabled,
  * because its lifetime belongs to the tab that opened it.
  *
- * ONE PRECEDENCE ORDER, SAID ONCE: `hostOwned` is tested FIRST, in every
- * derived value and every branch below - the status text, the dot, the button's
- * label, its variant, its icon, its disabled flag, its tooltip, the click
- * handler and the status line. The two maps are kept exclusive by the checks
- * `../hostOwned.ts`'s header names, and the window that remains is one bind
- * long, but the ROW's own consistency must not depend on that: whatever the
- * store pair says, the row must not be able to disagree with itself - a green
- * dot reading "Running (with host)" above a button reading "Starting…" is a
- * third answer about one rule, and there is no owner it corresponds to. Where
- * `hostOwned` shares a branch with another flag it is the FIRST operand, so
- * the order is readable off the source rather than argued about.
+ * ONE PRECEDENCE ORDER, SAID ONCE: `hostOwned` is tested FIRST at all NINE
+ * sites that consult it - the status text, the dot, the button's label, its
+ * variant, its icon, its disabled flag, its tooltip, the click handler and the
+ * status line. The one derived value that does NOT consult it is the "Host
+ * missing" badge, deliberately: that badge is about the host RECORD, which is
+ * gone or not regardless of who holds a forward, and the tooltip beside it
+ * already says the dangling note is advice about editing.
+ *
+ * DEFENCE IN DEPTH AGAINST A COMBINATION THE CODE CURRENTLY MAKES
+ * UNCONSTRUCTIBLE, which is the honest description and not an admission. Every
+ * `hostOwned && <page status>` pair is presently unreachable:
+ * `controller.ts:155-161` runs the terminal-owned refusal and `markStarting`
+ * with no `await` between them, so no claim can land in that gap, and a
+ * terminal that reads `"starting"` after its own bind now CLAIMS rather than
+ * yielding (`autostart.ts`'s note on that branch). The precedence is written
+ * anyway because the ROW's own consistency must not rest on an argument about
+ * two other files' interleavings: whatever the store pair says, the row must
+ * not be able to disagree with itself - a green dot reading "Running (with
+ * host)" above a button reading "Starting…" is a third answer about one rule,
+ * and there is no owner it corresponds to. THE TRIGGER that would make it
+ * reachable is a second caller of `startRule`/`stopRule` - anything that starts
+ * a rule from outside this row, where the refusal's read and `markStarting` are
+ * no longer adjacent. Where `hostOwned` shares a branch with another flag it is
+ * the FIRST operand, so the order is readable off the source rather than argued
+ * about.
  *
  * A LIST ROW, not a grid cell - one per line, full width. So this file adds
  * no responsive grid className of its own; `ForwardsPage.tsx` stacks these in
@@ -57,13 +71,17 @@ export type RuleCardProps = {
    *  surface lists these rows without being able to edit one. */
   onEdit: () => void;
   /**
-   * Ask the page to confirm a delete. Takes `running` rather than nothing,
-   * because the page's confirm dialog needs it for `deleteNote`
+   * Ask the page to confirm a delete. Takes BOTH owners' flags rather than
+   * nothing, because the page's confirm dialog needs both for `deleteNote`
    * (`../page/derive.ts`) and this card is the only place that already holds
-   * it - through its own `useForwardStatus` selector, not a second lookup the
-   * page would have to make.
+   * them - through its own `useForwardStatus` and `useIsHostOwned` selectors,
+   * not two more lookups the page would have to make.
+   *
+   * Two parameters and not one flag folded into the other: only a
+   * page-running rule is stopped by the delete, and the dialog's whole job
+   * here is to say which of the two it is looking at.
    */
-  onDelete: (running: boolean) => void;
+  onDelete: (running: boolean, hostOwned: boolean) => void;
 };
 
 /** What the status dot renders as, sharing `ssh/status.ts`'s tone vocabulary
@@ -119,11 +137,13 @@ export function RuleCard({ row, onEdit, onDelete }: RuleCardProps): ReactNode {
   const hostOwned = useIsHostOwned(rule.id);
   const hostOwnedPort = useHostOwnedPort(rule.id);
 
-  // `running` stays the PAGE's notion of running - `onDelete(running)` below
-  // feeds `deleteNote`, whose "deleting a running rule stops it" sentence is
-  // true only of a rule this page can stop. A terminal-owned rule is stopped
-  // there, and the dialog correctly says only that it will no longer start
-  // automatically with its host.
+  // `running` stays the PAGE's notion of running - `onDelete(running,
+  // hostOwned)` below feeds `deleteNote`, whose "deleting a running rule stops
+  // it" sentence is true only of a rule this page can stop, and true of one
+  // BECAUSE `ForwardsPage.tsx`'s `confirmDelete` stops it first. A
+  // terminal-owned rule is stopped by closing its tab, which is why
+  // `hostOwned` rides along as its own argument rather than being folded in
+  // here: the dialog has a different sentence for it, not a missing one.
   const running = status === "running";
   const starting = status === "starting";
   // The port that is ACTUALLY LISTENING, whichever owner bound it -
@@ -192,7 +212,20 @@ export function RuleCard({ row, onEdit, onDelete }: RuleCardProps): ReactNode {
           brought up is running whatever that attempt did. A red line under
           "Running (with host)" would be two contradictory answers about one
           rule. The note itself is shared with the button's tooltip, the same
-          way `stopNote()` already is - one sentence, two places. */}
+          way `stopNote()` already is - one sentence, two places.
+
+          WHAT THIS SUPPRESSION DOES NOT REACH, and it is a decision rather
+          than an oversight: the TOAST for that same failure
+          (`controller.ts`'s `markFailed` arm) has already fired and outlives
+          this row, so a red "port 18080 is already in use" can sit on screen
+          beside "Running (with host)". Both sentences are true and together
+          they read as a bug. Not fixed here - a toast that retracts itself is
+          a different mechanism from a conditional render, VLT-36 (this page
+          owning its own error surface) is untouched by this wave, and the
+          reachable window is narrow: the page yields to a mid-dial terminal
+          claim with `markStopped` and a warning rather than `markFailed`
+          (`controller.ts`), so what is left is a page Start that genuinely
+          failed on its own and a terminal that came up afterwards. */}
       {hostOwned ? (
         <div className="text-muted-foreground text-[11px] leading-relaxed opacity-70">
           {HOST_OWNED_NOTE}
@@ -267,7 +300,7 @@ export function RuleCard({ row, onEdit, onDelete }: RuleCardProps): ReactNode {
                 variant="ghost"
                 size="icon-xs"
                 aria-label={`Delete ${rule.name}`}
-                onClick={() => onDelete(running)}
+                onClick={() => onDelete(running, hostOwned)}
                 className={DESTRUCTIVE_ACTION}
               >
                 <Trash2 size={12} strokeWidth={1.75} />

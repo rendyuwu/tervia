@@ -121,6 +121,17 @@ function hostOwnedRefusalText(rule: ForwardRule): string {
   return `"${rule.name}" is already open on its terminal. Close that terminal tab to stop it.`;
 }
 
+/** What a Start says when it dialled successfully and found, on the way back,
+ *  that the rule had meanwhile come up on its TERMINAL. A different sentence
+ *  from {@link hostOwnedRefusalText} because a different thing happened: that
+ *  one never dialled, this one dialled and then gave the reference back. Not an
+ *  error - nothing failed - so the row goes to `stopped` and this is a warning.
+ *  Ends in the same sentence as the refusal, because the answer to "how do I
+ *  stop it now" is the same. */
+function hostOwnedYieldText(rule: ForwardRule): string {
+  return `"${rule.name}" came up on its terminal while this Start was dialling. Close that terminal tab to stop it.`;
+}
+
 /**
  * Bring `rule` up, and record the bound port and the claim its Stop will need.
  *
@@ -132,11 +143,14 @@ function hostOwnedRefusalText(rule: ForwardRule): string {
  * NEVER REJECTS. The caller is a click handler with nowhere to put an
  * exception, so a failure reports through the store and a toast instead.
  *
- * REFUSES A TERMINAL-OWNED RULE, ahead of everything else. `RuleCard` disables
- * the button for one, but a disabled button is a rendering and not an
- * invariant - and the row's `hostOwned` can become true while this page's own
- * Start is in flight, so the guard has to live where the dial does. First claim
- * wins (VLT-94), and the terminal's claim is the one already taken.
+ * REFUSES A TERMINAL-OWNED RULE, ahead of everything else, AND YIELDS TO ONE
+ * THAT ARRIVES MID-DIAL. `RuleCard` disables the button for one, but a disabled
+ * button is a rendering and not an invariant - and the row's `hostOwned` can
+ * become true while this page's own Start is in flight, so the guard has to live
+ * where the dial does and it has to be read on BOTH sides of the await. First
+ * claim wins (VLT-94): if the terminal's claim was already taken this never
+ * dials, and if it lands during the dial this hands the reference it just
+ * received straight back.
  */
 export async function startRule(
   rule: ForwardRule,
@@ -178,6 +192,39 @@ export async function startRule(
         rule.localPort,
         forward.claim,
       );
+      return;
+    }
+    // THE PAGE'S HALF OF THE YIELD, and it is the same rule as `autostart.ts`'s
+    // post-bind one seen from the other side: whoever resolves SECOND gives up
+    // the duplicate it created. The refusal at the top of this function is the
+    // pre-dial read; this is the post-dial one, and it is needed for the same
+    // reason every pre-await read in this pair needs a partner - the terminal's
+    // claim is synchronous and can land at any point during this dial.
+    //
+    // The terminal now CLAIMS on `starting` rather than yielding
+    // (`autostart.ts`'s note on that branch), which is what makes this side's
+    // yield the one that closes the window: without it the terminal keeps its
+    // listener, this dial's EADDRINUSE marks the row failed, and the row reads
+    // "Failed - port N is already in use" beside a forward that is up. With it,
+    // the reference this dial just took goes straight back and nothing is left
+    // that no store names.
+    //
+    // `markStopped` and NOT `markFailed`: nothing failed. The forward the user
+    // asked for is up; it is simply up somewhere this store cannot see, and
+    // `RuleCard` renders that off `hostOwned` alone.
+    if (useHostOwnedForwards.getState().byRule[rule.id] !== undefined) {
+      // Awaited, for the same reason the superseded-attempt release above is:
+      // a close that landed later could land on a listener a subsequent Start
+      // has since bound on that port.
+      await runtime.closeForward(
+        rule.hostId,
+        rule.remoteHost,
+        rule.remotePort,
+        rule.localPort,
+        forward.claim,
+      );
+      useForwardRuntime.getState().markStopped(rule.id);
+      runtime.toast(hostOwnedYieldText(rule), { variant: "warning" });
       return;
     }
     useForwardRuntime.getState().markRunning(rule.id, {

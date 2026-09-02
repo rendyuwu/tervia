@@ -817,9 +817,129 @@ for (const key of ["ruleCard", "forwardsPage"] as const) {
 }
 check("RuleCard.tsx reaches the Stop copy through stopNote(", /stopNote\(/.test(src.ruleCard));
 
+// ============================================================================
+// 11. DELETE STOPS FIRST. `deleteRule` is a pure persistence filter and there
+//     is no reconciler anywhere in `src/` - `grep stopRule` finds exactly the
+//     two callers this section and `RuleCard.tsx` name - so deleting a
+//     page-running rule used to leave `runtime.ts`'s entry naming a rule no row
+//     renders (no Stop ever offered again), `ssh/tunnel.ts`'s entry at
+//     `refs: 1` (the SSH session never closes for the rest of the app's life)
+//     and the local port bound, with re-creating a rule on the same pinned port
+//     failing EADDRINUSE and no in-app recovery. `derive.ts`'s confirm copy
+//     said "deleting a running rule stops it" throughout, which was FALSE - a
+//     false promise inside a destructive confirm.
+//
+//     ORDER, not presence. Both calls being in the same function is satisfied
+//     by `deleteRule` first, which is the same leak with an extra IPC; and the
+//     await is what separates "stops it" from "asks for a stop and races the
+//     delete against it". A nested-arrow decoy (`() => { void stopRule(r); }`)
+//     keeps the text and the order and drops the await, which is why the
+//     awaited-parent check is here too.
+// ============================================================================
+console.log(
+  "\n[11. delete stops first] confirmDelete awaits stopRule for a page-running rule BEFORE deleteRule",
+);
+{
+  const sf = ts.createSourceFile(
+    FILES.forwardsPage,
+    src.forwardsPage,
+    ts.ScriptTarget.ESNext,
+    true,
+    ts.ScriptKind.TSX,
+  );
+
+  /** The factory handed to `useCallback` in `const <name> = useCallback(fn,
+   *  deps)`, or null. Copied from `vault-shell-verify.ts:402`. */
+  function useCallbackFactory(root: ts.Node, name: string): ts.Node | null {
+    let result: ts.Node | null = null;
+    const visit = (n: ts.Node): void => {
+      if (
+        ts.isVariableDeclaration(n) &&
+        ts.isIdentifier(n.name) &&
+        n.name.text === name &&
+        n.initializer &&
+        ts.isCallExpression(n.initializer) &&
+        n.initializer.expression.getText(sf) === "useCallback"
+      ) {
+        const fn = n.initializer.arguments[0];
+        if (fn) result = fn;
+      }
+      ts.forEachChild(n, visit);
+    };
+    visit(root);
+    return result;
+  }
+
+  const confirmDelete = useCallbackFactory(sf, "confirmDelete");
+  check("found confirmDelete's useCallback factory", confirmDelete !== null);
+  if (confirmDelete) {
+    const stopCalls = findCallsTo(confirmDelete, "stopRule", sf);
+    const deleteCalls = findCallsTo(confirmDelete, "deleteRule", sf);
+    check(
+      "exactly one stopRule( call inside confirmDelete",
+      stopCalls.length === 1,
+      stopCalls.length,
+    );
+    check(
+      "exactly one deleteRule( call inside confirmDelete",
+      deleteCalls.length === 1,
+      deleteCalls.length,
+    );
+    const stop = stopCalls[0];
+    const del = deleteCalls[0];
+    if (stop && del) {
+      check(
+        "the stopRule call is ORDERED BEFORE the deleteRule call - both being present is satisfied by the leak with an extra IPC",
+        stop.getStart(sf) < del.getStart(sf),
+        { stop: stop.getStart(sf), delete: del.getStart(sf) },
+      );
+      // AWAITED, and read off the AST rather than by looking for the word:
+      // `void stopRule(r)` and `() => { void stopRule(r) }` both keep the text
+      // and the order while racing the delete against the stop (or never
+      // running it at all).
+      check(
+        "and it is AWAITED, not fired off - a stop that has not landed is not a stop",
+        stop.parent !== undefined && ts.isAwaitExpression(stop.parent),
+        stop.parent === undefined ? undefined : ts.SyntaxKind[stop.parent.kind],
+      );
+      check(
+        "the deleteRule call is awaited too, so a rejection from either half reaches the one toast",
+        del.parent !== undefined && ts.isAwaitExpression(del.parent),
+        del.parent === undefined ? undefined : ts.SyntaxKind[del.parent.kind],
+      );
+      // It is the PAGE's rule that gets stopped - the whole record, not an id.
+      // `stopRule` needs the host and both endpoints to name the entry it is
+      // releasing, so a `PendingDelete` carrying only `id`/`name` cannot do
+      // this at all, which is why that state was widened.
+      check(
+        "stopRule is handed the captured RULE record, not an id",
+        norm(stop.arguments.map((a) => a.getText(sf)).join(",")) === norm("target.rule"),
+        stop.arguments.map((a) => a.getText(sf)),
+      );
+    }
+  }
+  // NO RECONCILER, said as a check rather than as prose: `stopRule` has exactly
+  // two CALLERS in `src/`, the row's own button and the confirm above (its own
+  // declaration in `controller.ts` is excluded by path, not by a cleverer
+  // needle). If a third appears, the `hostOwned && starting` combination
+  // `RuleCard.tsx`'s header calls unconstructible becomes constructible - that
+  // file names this as its trigger - and the delete path may need to consult it
+  // too. Comment-stripped, so this file's own prose about `stopRule` in another
+  // module would not count as a caller.
+  const controllerAbs = join(repoRoot, FILES.controller);
+  const stopRuleCallers = walkSrcFiles(join(repoRoot, "src")).filter(
+    (f) => f !== controllerAbs && stripComments(readFileSync(f, "utf8")).includes("stopRule("),
+  );
+  check(
+    "stopRule( is called from exactly two files: the row's button and the page's confirm",
+    stopRuleCallers.length === 2,
+    stopRuleCallers.map((f) => f.slice(repoRoot.length)),
+  );
+}
+
 console.log(
   failed === 0
-    ? "\nAll forwards-shell sections 1-10 passed."
+    ? "\nAll forwards-shell sections 1-11 passed."
     : `\n${failed} check(s) FAILED so far.`,
 );
 
@@ -1390,6 +1510,131 @@ console.log(
   check("C9: and nothing was toasted", toastCalls.length === 0, toastCalls);
 }
 
+// ---------------------------------------------------------------------------
+console.log(
+  "\n[C10] startRule's dial resolves into a rule the TERMINAL claimed meanwhile - the page releases its own reference, marks STOPPED (not failed) and says so once",
+);
+// THE PAGE'S HALF OF ONE RULE SEEN FROM TWO SIDES. `autostart.ts`'s post-bind
+// re-read used to yield on `taken === "starting"`, and the sequence that
+// exposed it has DEFAULT step ordering rather than unlucky ordering: the
+// terminal's bind wins in the backend because it arrived first, the page's bind
+// returns EADDRINUSE, the terminal's `await` resolves first and reads
+// `"starting"`. With the terminal yielding there, it closed its own live
+// listener and the page's rejection then marked the row failed - no owner on
+// either side, and a row reading "Failed - port 18080 is already in use" naming
+// a port nothing held.
+//
+// So the terminal CLAIMS on `starting` (`forward-autostart-verify.ts`'s section
+// 14) and the PAGE gives up the duplicate when its own dial lands into a rule
+// the terminal now owns. Whoever resolves SECOND yields, on both sides, and
+// neither side ever takes the other's listener down.
+//
+// `markStopped` and NOT `markFailed` is the load-bearing half of this fixture:
+// nothing failed. The forward the user asked for is up, and `RuleCard` renders
+// that off `hostOwned` alone.
+{
+  resetFakes();
+  resetStores();
+  const rule = fakeRule({ id: "c10", localPort: 0 });
+  autoAnswerFakeOpen = false;
+  const starting = startRule(rule, FAKE_RUNTIME);
+  await settle();
+  check(
+    "C10: the dial is parked mid-handshake",
+    parkedFakeOpens.length === 1,
+    parkedFakeOpens.length,
+  );
+  check(
+    "C10: the page's row is starting - the pre-dial refusal did not fire, the map was empty",
+    useForwardRuntime.getState().byRule["c10"]?.status === "starting",
+    useForwardRuntime.getState().byRule["c10"],
+  );
+
+  // The terminal's autostart claims WHILE this dial is in flight. Synchronous
+  // in production too - `claimHostOwned` is a plain store write - so no timing
+  // trick is needed to reach it.
+  useHostOwnedForwards.setState({ byRule: { c10: { sessionId: 41, boundPort: 54321 } } });
+
+  const landedClaim = nextFakeClaim;
+  parkedFakeOpens[0].resolve({
+    sessionId: nextFakeSessionId++,
+    localPort: 30000,
+    claim: landedClaim,
+  });
+  nextFakeClaim++;
+  await starting;
+  await settle();
+
+  check(
+    "C10: the reference this dial just received went straight back, with ITS OWN claim",
+    closeCalls.length === 1 && closeCalls[0]?.claim === landedClaim,
+    closeCalls[0],
+  );
+  check(
+    "C10: and the close named rule.localPort, the value that finds the entry",
+    closeCalls[0]?.localPort === rule.localPort,
+    closeCalls[0],
+  );
+  check(
+    "C10: the row is STOPPED, never failed - nothing failed",
+    useForwardRuntime.getState().byRule["c10"]?.status === "stopped",
+    useForwardRuntime.getState().byRule["c10"],
+  );
+  check(
+    "C10: and it published no claim - the page holds nothing it would have to spend",
+    useForwardRuntime.getState().byRule["c10"]?.claim === undefined &&
+      useForwardRuntime.getState().byRule["c10"]?.boundPort === undefined,
+    useForwardRuntime.getState().byRule["c10"],
+  );
+  check(
+    "C10: exactly ONE toast, naming the rule and pointing at the terminal tab",
+    toastCalls.length === 1 &&
+      (toastCalls[0]?.message ?? "").includes(`"${rule.name}"`) &&
+      /terminal tab/.test(toastCalls[0]?.message ?? ""),
+    toastCalls,
+  );
+  check(
+    "C10: and it is a WARNING, not an error - an error is what the old code said",
+    toastCalls[0]?.variant === "warning",
+    toastCalls[0],
+  );
+  check(
+    "C10: the terminal's entry is left exactly as it was - the page never touches that map",
+    useHostOwnedForwards.getState().byRule["c10"]?.sessionId === 41 &&
+      useHostOwnedForwards.getState().byRule["c10"]?.boundPort === 54321,
+    useHostOwnedForwards.getState().byRule["c10"],
+  );
+}
+{
+  // The paired control, and it is what tells "the post-dial guard bites" from
+  // "the park bites": the SAME parked dial, resolved the same way, with the
+  // terminal's map left EMPTY. The row runs and nothing is released.
+  resetFakes();
+  resetStores();
+  const rule = fakeRule({ id: "c10b", localPort: 0 });
+  autoAnswerFakeOpen = false;
+  const starting = startRule(rule, FAKE_RUNTIME);
+  await settle();
+  const landedClaim = nextFakeClaim;
+  parkedFakeOpens[0].resolve({
+    sessionId: nextFakeSessionId++,
+    localPort: 30000,
+    claim: landedClaim,
+  });
+  nextFakeClaim++;
+  await starting;
+  await settle();
+  check(
+    "C10: with no terminal claim the same dial marks running, with its own claim and bound port",
+    useForwardRuntime.getState().byRule["c10b"]?.status === "running" &&
+      useForwardRuntime.getState().byRule["c10b"]?.claim === landedClaim &&
+      useForwardRuntime.getState().byRule["c10b"]?.boundPort === 30000,
+    useForwardRuntime.getState().byRule["c10b"],
+  );
+  check("C10: and released nothing", closeCalls.length === 0, closeCalls);
+  check("C10: and said nothing", toastCalls.length === 0, toastCalls);
+}
+
 console.log(failed === 0 ? "\nAll forwards-shell checks passed." : `\n${failed} check(s) FAILED.`);
 
 // ----------------------------------------------------------------------------
@@ -1536,6 +1781,18 @@ console.log(failed === 0 ? "\nAll forwards-shell checks passed." : `\n${failed} 
 //                                                          every superseded-
 //                                                          resolve interleaving,
 //                                                          not only C7's)
+//   Y3: startRule's post-dial hostOwned check deleted    C10, all six of its
+//     (the page's half of the two-sided yield)             checks; C10's paired
+//                                                          control, which has the
+//                                                          terminal's map empty,
+//                                                          stayed green
+//   Y4: confirmDelete's `await stopRule(target.rule)`     [11]'s ORDER check and
+//     and `await deleteRule(target.rule.id)`               nothing else - both
+//     statements swapped                                   calls are still
+//                                                          present, still awaited
+//                                                          and still one each,
+//                                                          which is the asymmetry
+//                                                          the section exists for
 //   C8m: stopRule's try/finally replaced with a bare     NOTHING changed - all
 //     sequence (close, then markStopped)                   114 checks stayed
 //                                                          green, exactly as
