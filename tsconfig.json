@@ -19,6 +19,15 @@
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true,
+    /* There is no ESLint in this project, so `no-unreachable` does not exist
+       and a statement moved below a `return` is legal, silent and invisible to
+       every gate. That is not hypothetical: a 6f wave-3 review measured it by
+       moving `void startHostForwards(...)` below `openSshForSession`'s return,
+       which left `startWithHost` inert with the whole suite green. tsc reports
+       it as an editor-only hint unless this is set, and setting it turns the
+       whole class into TS7027 repo-wide rather than one source pin per call
+       site. Zero existing violations when it was turned on. */
+    "allowUnreachableCode": false,
     "paths": {
       "@/*": ["./src/*"]
     }

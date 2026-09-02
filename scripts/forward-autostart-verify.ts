@@ -7,7 +7,7 @@
  * Run: `pnpm verify forward-autostart` (or `npx tsx
  * scripts/forward-autostart-verify.ts` to iterate).
  *
- * Sections 1-7 and 11-15 are BEHAVIOURAL: they drive the real
+ * Sections 1-7 and 11-16 are BEHAVIOURAL: they drive the real
  * `startHostForwards` through the `AutostartDeps` seam that module exports for
  * exactly this purpose, so no Tauri IPC and no DOM is needed for the properties
  * that matter. Sections 8-10 are source pins, because a call site inside
@@ -90,12 +90,18 @@
  *    so a Start clicked mid-bind left two live listeners (auto port) or a row
  *    whose dot, status line and button gave three different answers.
  *
- * 15. AUTOSTART NEVER WRITES THE PAGE'S STORE. The load-bearing half of VLT-94,
+ * 15. THE BANNER SAYS SOMETHING FOR EVERY REJECTION SHAPE. `describeError`'s
+ *    raw-string arm (section 4) and `Error` arm (section 7) were covered; its
+ *    `JSON.stringify` and `String(e)` fallbacks were not. Banner text only, so
+ *    low stakes - but arms nothing exercises is the shape that has produced
+ *    real defects against a green suite twice in this wave.
+ *
+ * 16. AUTOSTART NEVER WRITES THE PAGE'S STORE. The load-bearing half of VLT-94,
  *    and the one thing the `AutostartDeps` seam cannot see: `claimHostOwned` is
  *    injected, a direct `useForwardRuntime.getState().markRunning(...)` is not.
  */
 
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -110,6 +116,22 @@ const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const read = (rel: string) => readFileSync(join(repoRoot, rel), "utf8");
 
 let failed = 0;
+/**
+ * HAZARD, named here rather than fixed here: this compares
+ * `JSON.stringify(got) === JSON.stringify(want)`, and `JSON.stringify(undefined)`
+ * is itself `undefined` - so an UNDEFINED `want` also matches every value that
+ * does not serialise (a function, a symbol, `undefined` itself). Such a call
+ * reads as if it proved something and is inert.
+ *
+ * Not rewritten, because THREE different `check()` signatures exist across this
+ * verify suite - `check(label, got, want)` here and in `rdp-tunnel-verify.ts`,
+ * `check(name, ok, detail?)` in `vault-shell-verify.ts:32`, `check(label, cond)`
+ * in `hosts-header-narrow-verify.ts:47` - and changing one is a cross-script
+ * change with no relation to this step. The rule instead: an assertion whose
+ * `want` could be `undefined` uses `assert(... === undefined, ...)`, which
+ * compares the value rather than its serialisation. The `[wiring]` block's
+ * `hostOwnedBy` claim is the one place in this file that needed it.
+ */
 function check(label: string, got: unknown, want: unknown): void {
   if (JSON.stringify(got) === JSON.stringify(want)) {
     console.log(`  ok: ${label}`);
@@ -155,6 +177,13 @@ const { useHostOwnedForwards } = await import("../src/modules/forwards/hostOwned
 // `startHostForwards` is invisible to every dep-injected assertion in this
 // file. `claimHostOwned` is behind the seam; a store write is not.
 const { useForwardRuntime } = await import("../src/modules/forwards/runtime");
+// Imported for REFERENCE IDENTITY in the `[wiring]` block, not to be called:
+// `typeof defaultAutostartDeps.openForward === "function"` is satisfied by any
+// function at all, including `openForwardForConnection` - which takes a HOST id
+// and DIALS if there is no session. Loadable here only because the stand-in
+// above is already installed and `autostart.ts` has already pulled this module
+// in for its own defaults.
+const { closeSshForward, openSshForward } = await import("../src/modules/ssh/bridge");
 
 // ---------------------------------------------------------------------------
 // The fixtures.
@@ -639,10 +668,16 @@ console.log("\n[wiring] defaultAutostartDeps is complete");
     defaultAutostartDeps.runtimeStatus("f-never-started"),
     "stopped",
   );
-  check(
-    "hostOwnedBy answers undefined for a rule no terminal owns",
+  // `assert` rather than `check`, and the reason is the hazard named at
+  // `check`'s own definition: it compares `JSON.stringify(got) ===
+  // JSON.stringify(want)`, `JSON.stringify(undefined)` IS `undefined`, and this
+  // is the one call site in this file with an undefined WANT - so as a `check`
+  // it also passed for a returned function or symbol. `=== undefined` compares
+  // the value.
+  assert(
+    defaultAutostartDeps.hostOwnedBy("f-never-started") === undefined,
+    "hostOwnedBy answers undefined (strictly, not merely unserialisable) for a rule no terminal owns",
     defaultAutostartDeps.hostOwnedBy("f-never-started"),
-    undefined,
   );
   // Module scope knows of no session, so the DEFAULT must answer "alive": a
   // default of false would stop every autostart run on its first rule for any
@@ -651,6 +686,32 @@ console.log("\n[wiring] defaultAutostartDeps is complete");
     "the default stillLive answers true - the session-scoped one is the call site's to supply",
     defaultAutostartDeps.stillLive?.(),
     true,
+  );
+  // REFERENCE IDENTITY, which is the commit's headline claim and the one thing
+  // `typeof === "function"` cannot see. VLT-11 and research §5.4 rest on
+  // autostart calling `openSshForward` - a forward on a LIVE SESSION ID - and
+  // never `openForwardForConnection`, which takes a HOST id and DIALS a
+  // connection if there is none. Wired to that one, a `startWithHost` rule
+  // opens an SSH connection nobody asked for, on a host with no terminal.
+  // `tsc` gives partial cover because the two signatures differ, but a
+  // SAME-SHAPED wrong function typechecks and passes a `typeof` check outright
+  // (mutations M-W1, M-W2).
+  check(
+    "openForward IS ssh/bridge's openSshForward, by reference - not a same-shaped stand-in",
+    defaultAutostartDeps.openForward === openSshForward,
+    true,
+  );
+  check(
+    "closeForward IS closeSshForward, by reference - the yield path closes ONE listener, not the session",
+    defaultAutostartDeps.closeForward === closeSshForward,
+    true,
+  );
+  // The control for the pair above: two identity checks against the same
+  // function would both pass while the deps held one function twice.
+  check(
+    "and those are two different functions, so neither check above can pass by accident",
+    (openSshForward as unknown) === (closeSshForward as unknown),
+    false,
   );
 }
 {
@@ -854,6 +915,157 @@ function findPropertyValue(
   return null;
 }
 
+/** Every `.ts`/`.tsx` file under `dir`, recursively. Copied from
+ *  `scripts/forwards-shell-verify.ts:322-332`, for the repo-wide selector
+ *  sweep section 10 needs. */
+function walkSrcFiles(dir: string): string[] {
+  const out: string[] = [];
+  for (const entry of readdirSync(dir)) {
+    const full = join(dir, entry);
+    if (statSync(full).isDirectory()) out.push(...walkSrcFiles(full));
+    else if (/\.(ts|tsx)$/.test(entry)) out.push(full);
+  }
+  return out;
+}
+
+/**
+ * Can this selector body only ever yield a PRIMITIVE?
+ *
+ * AN ALLOW-LIST, AND THE POLARITY IS THE CLAIM. The failure mode is "the
+ * selector returns a FRESH REFERENCE", and the set of ways to produce one is
+ * OPEN - an object literal, an array literal, `Object.keys(...)`,
+ * `Object.values(...).map(...)`, `Object.entries(...)`, `new Set(...)`,
+ * `structuredClone(...)`, `[...x]`, any helper written next year. The set of
+ * shapes that can only produce a primitive is small and CLOSED. So anything not
+ * named below is guilty until argued, INCLUDING EVERY CALL EXPRESSION: a fresh
+ * collection is exactly what a call returns.
+ *
+ * What this replaced, and why the polarity had to flip rather than the list
+ * grow. The deny-list here named four forms and TWO OF THEM COULD NEVER FIRE:
+ * an object-literal arrow body must be parenthesised, so the node in this
+ * position is a `ParenthesizedExpression` and never an
+ * `ObjectLiteralExpression`; and `(s) => ...x` is a syntax error, so a
+ * `SpreadElement` can never occupy this position at all. That left
+ * `useHostOwnedForwards((s) => ({ a, b }))` - the exact case this section exists
+ * to forbid - PASSING, alongside `Object.keys(s.byRule)`, `Object.entries(...)`,
+ * `new Set(...)`, `structuredClone(s.byRule)` and bare `s.byRule`, every one of
+ * them the same "Maximum update depth exceeded" failure under zustand v5
+ * (research §12.7). Measured, not argued.
+ *
+ * Returns the REASON as well as the verdict, so a failure names the shape it
+ * refused instead of only echoing the text.
+ */
+function primitiveSelectorBody(
+  expr: ts.Expression,
+  sf: ts.SourceFile,
+): { ok: true } | { ok: false; why: string } {
+  // Parentheses FIRST and to a fixed point, because parenthesising is how an
+  // object-literal arrow body has to be written at all - unwrapping later would
+  // leave the headline case looking like a shape nobody named.
+  let cur: ts.Expression = expr;
+  while (ts.isParenthesizedExpression(cur)) cur = cur.expression;
+
+  // `!x`, `-x`, `+x`, `~x`, `typeof x`: a primitive whatever the operand is.
+  if (ts.isPrefixUnaryExpression(cur) || ts.isTypeOfExpression(cur)) return { ok: true };
+
+  if (ts.isBinaryExpression(cur)) {
+    const kind = cur.operatorToken.kind;
+    // `??`, `||` and `&&` PASS AN OPERAND THROUGH, so each side has to qualify
+    // on its own: `s.byRule[id] ?? {}` is a fresh object on every miss.
+    if (
+      kind === ts.SyntaxKind.QuestionQuestionToken ||
+      kind === ts.SyntaxKind.BarBarToken ||
+      kind === ts.SyntaxKind.AmpersandAmpersandToken
+    ) {
+      const left = primitiveSelectorBody(cur.left, sf);
+      if (!left.ok) return left;
+      return primitiveSelectorBody(cur.right, sf);
+    }
+    // Every other binary operator - the comparisons, the arithmetic, the
+    // bitwise ones - produces a primitive from any pair of operands.
+    return { ok: true };
+  }
+
+  // A ternary is its two arms, for the same reason `??` is.
+  if (ts.isConditionalExpression(cur)) {
+    const whenTrue = primitiveSelectorBody(cur.whenTrue, sf);
+    if (!whenTrue.ok) return whenTrue;
+    return primitiveSelectorBody(cur.whenFalse, sf);
+  }
+
+  if (
+    ts.isNumericLiteral(cur) ||
+    ts.isStringLiteral(cur) ||
+    ts.isNoSubstitutionTemplateLiteral(cur) ||
+    ts.isTemplateExpression(cur) ||
+    cur.kind === ts.SyntaxKind.TrueKeyword ||
+    cur.kind === ts.SyntaxKind.FalseKeyword ||
+    cur.kind === ts.SyntaxKind.NullKeyword ||
+    (ts.isIdentifier(cur) && cur.text === "undefined")
+  ) {
+    return { ok: true };
+  }
+
+  if (ts.isPropertyAccessExpression(cur) || ts.isElementAccessExpression(cur)) {
+    // `.length` / `.size` is a number however the thing it counts was reached.
+    if (
+      ts.isPropertyAccessExpression(cur) &&
+      (cur.name.text === "length" || cur.name.text === "size")
+    ) {
+      return { ok: true };
+    }
+    // Otherwise the chain has to reach PAST the entry, to one of its own
+    // fields. `s.byRule` is the whole map and `s.byRule[id]` is the whole
+    // entry; both are objects `claim` and `releaseSession` rebuild, so neither
+    // is ever `Object.is` its own last return. `HostOwnedEntry` has only
+    // `number` fields, which is what makes one field off one entry primitive.
+    const text = norm(cur.getText(sf));
+    if (/^s\.byRule\[[^\]]+\]\??\.[A-Za-z_$][\w$]*$/.test(text)) return { ok: true };
+    return { ok: false, why: `access chain \`${text}\` does not reach a primitive field` };
+  }
+
+  return {
+    ok: false,
+    why: `${ts.SyntaxKind[cur.kind]} \`${norm(cur.getText(sf)).slice(0, 60)}\` is not a shape that can only yield a primitive`,
+  };
+}
+
+// The allow-list's own self-test, over SYNTHETIC selectors, so its verdicts are
+// pinned here rather than only by whatever `hostOwned.ts` happens to contain
+// today. Without it the helper is only ever exercised on two inputs that both
+// pass, and every refusal it is supposed to make is unmeasured.
+{
+  const probes: Array<[string, boolean]> = [
+    // The two real ones, plus a reordered comparison that means the same thing.
+    ["s.byRule[ruleId] !== undefined", true],
+    ["undefined !== s.byRule[ruleId]", true],
+    ["s.byRule[ruleId]?.boundPort", true],
+    ["s.byRule[ruleId]?.boundPort ?? 0", true],
+    ["Object.keys(s.byRule).length", true],
+    // The refusals. The first is the case the old deny-list could not see.
+    ["({ a: 1, b: 2 })", false],
+    ["Object.keys(s.byRule)", false],
+    ["Object.entries(s.byRule)", false],
+    ["Object.values(s.byRule).map((e) => e.boundPort)", false],
+    ["new Set(Object.keys(s.byRule))", false],
+    ["structuredClone(s.byRule)", false],
+    ["s.byRule", false],
+    ["s.byRule[ruleId]", false],
+    ["s.byRule[ruleId] ?? {}", false],
+    ["[s.byRule[ruleId]?.boundPort]", false],
+  ];
+  for (const [text, want] of probes) {
+    const probeSf = parse("selector-probe.ts", `useHostOwnedForwards((s) => ${text});`);
+    const arg = findCallsTo(probeSf, probeSf, "useHostOwnedForwards")[0]?.arguments[0];
+    const body = arg && ts.isArrowFunction(arg) && !ts.isBlock(arg.body) ? arg.body : null;
+    check(
+      `allow-list self-test: \`${text}\` is ${want ? "primitive" : "REFUSED"}`,
+      body === null ? "no selector body parsed" : primitiveSelectorBody(body, probeSf).ok,
+      want,
+    );
+  }
+}
+
 // ===========================================================================
 console.log("\n[8. ssh-session.ts] the call site, and the two releases");
 // ===========================================================================
@@ -898,6 +1110,29 @@ console.log("\n[8. ssh-session.ts] the call site, and the two releases");
       "and the fire-and-forget call carries its own .catch, like every other void-ed promise in this file",
       call.parent?.getText(sf).slice(0, 120),
     );
+    // THE `void` ITSELF, which nothing pinned. `openSshForSession` is `async`,
+    // so `await` in place of `void` compiles, and there is NO ESLINT IN THIS
+    // PROJECT AT ALL - no `eslint.config.*`, and `package.json` has only
+    // `lint:imports` and `lint:rust` - so `no-floating-promises` does not
+    // exist here to notice either. Measured mutation M-G: the whole suite
+    // stayed green with the pane's first prompt held behind N sequential
+    // binds, which is exactly what the comment above the call site says must
+    // not happen and the reason the call is fire-and-forget at all.
+    //
+    // The shape round 1 landed is `void <call>.catch(() => {})`, so the walk
+    // up from the call is: call -> `.catch` property access -> `.catch(...)`
+    // call -> VoidExpression. `await` at that outermost position is an
+    // AwaitExpression and reddens here.
+    const catchCall = call.parent?.parent;
+    const outer = catchCall?.parent;
+    assert(
+      catchCall !== undefined &&
+        ts.isCallExpression(catchCall) &&
+        outer !== undefined &&
+        ts.isVoidExpression(outer),
+      "and the whole `<call>.catch(...)` is VOID-ed rather than awaited - an await holds the pane's first prompt behind every bind",
+      outer?.getText(sf).slice(0, 140),
+    );
     // Structural position, not a count: a deletion whose decoy re-adds the
     // call inside a nested arrow keeps the count at 1 and never runs.
     const body = findFunctionBody(sf, "openSshForSession");
@@ -907,12 +1142,54 @@ console.log("\n[8. ssh-session.ts] the call site, and the two releases");
         isDirectlyInFunctionBody(call, body),
         "and the call is a direct statement of openSshForSession's own body, not nested in a decoy",
       );
+      // REACHABILITY, which is a different question and the cheapest
+      // total-feature-loss hole in this wave. `isDirectlyInFunctionBody` tests
+      // NESTING - its own docstring says exactly that - and nothing else here
+      // could see WHERE in the body the statement sits. Measured mutation M-H:
+      // delete this statement and re-add the identical statement AFTER the
+      // `return { ... }` below. A statement after `return` in an async function
+      // typechecks (exit 0), `tsconfig.json` sets neither `noImplicitReturns`
+      // nor `allowUnreachableCode: false`, and with no ESLint there is no
+      // `no-unreachable` either - so every gate in this repo passed while
+      // `startWithHost` never fired for any rule and the entire feature was
+      // inert.
+      //
+      // Compared by INDEX against every exit of the body, the same shape the
+      // `finishSsh` release uses against the disposed guard. Against EVERY exit
+      // rather than the last one, so the statement cannot be slipped below a
+      // freshly added early return either.
+      const exits: ts.ReturnStatement[] = [];
+      const visitExits = (n: ts.Node): void => {
+        if (ts.isReturnStatement(n) && isDirectlyInFunctionBody(n, body)) exits.push(n);
+        ts.forEachChild(n, visitExits);
+      };
+      visitExits(body);
+      assert(exits.length > 0, "openSshForSession has an exit to sit above at all", exits.length);
+      const firstExit = exits.length > 0 ? Math.min(...exits.map((r) => r.getStart(sf))) : -1;
+      assert(
+        exits.length > 0 && call.getStart(sf) < firstExit,
+        "and it sits ABOVE every exit of that body - re-added below the return it is unreachable, typechecks under every gate this repo has, and the feature is silently inert",
+        { call: call.getStart(sf), firstExit, exits: exits.length },
+      );
     }
   }
 
   // Release 1: inside `finishSsh`, ABOVE the disposed guard. Compared by
   // INDEX - two independent `includes` are both satisfied by a release written
   // below the guard, which is the leak this half exists to catch.
+  //
+  // WHAT THE INDEX COMPARISON DOES NOT ESTABLISH, said here because the
+  // alternative is a reader assuming it does. The claim is TEXTUAL POSITION
+  // RELATIVE TO THE GUARD, and that is the claim it is right for. It cannot see
+  // a DEFERRAL: measured mutation M-I wrapped this release in
+  // `setTimeout(..., 5000)` while leaving it textually above the guard, and the
+  // suite stayed green even though the entry then survives five seconds past
+  // the session. Accepted deliberately and not covered, because the check for
+  // it - "this statement is not inside a setTimeout/queueMicrotask/Promise
+  // callback" - is a DENY-LIST OVER AN OPEN SET, which is the exact defect
+  // section 10's allow-list below was rewritten to remove. Low likelihood
+  // (nobody defers a synchronous map delete) and the honest remedy is this
+  // sentence.
   const finishSsh = findConstInitializer(sf, "finishSsh");
   check("found finishSsh", finishSsh !== null, true);
   if (finishSsh) {
@@ -1009,13 +1286,42 @@ console.log("\n[9. RuleCard.tsx] the read-only row a terminal-owned forward gets
 // ===========================================================================
 {
   const ruleCardRaw = read("src/modules/forwards/page/RuleCard.tsx");
-  const sf = parse("RuleCard.tsx", stripComments(ruleCardRaw));
+  const ruleCardStripped = stripComments(ruleCardRaw);
+  const sf = parse("RuleCard.tsx", ruleCardStripped);
 
+  // The two terminal-map reads, pinned at their OWN BINDINGS and not as a
+  // substring. What the substring establishes, and the label below says only
+  // this now: the text appears in CODE rather than in a comment. It does NOT
+  // establish that the call is reached - `if (false) useIsHostOwned(x)`
+  // satisfies `.includes` - and it says nothing at all about the value the
+  // binding ends up holding. Measured mutation M-E:
+  // `const hostOwned = useIsHostOwned(rule.id) && !row.hostDangling;` left the
+  // substring intact, kept the whole suite green, and silently took the
+  // read-only treatment off a dangling-host row - the row then offers a Start
+  // for a listener the page holds no reference to.
+  //
+  // The previous label claimed "reachable, not merely mentioned in a comment".
+  // Half of that was true. A LABEL THAT OVERCLAIMS IS WORSE THAN NO LABEL: it
+  // is what stopped the next reader from looking.
   for (const hook of ["useIsHostOwned(", "useHostOwnedPort("]) {
     assert(
-      stripComments(ruleCardRaw).includes(hook),
-      `RuleCard.tsx calls ${hook}) - reachable, not merely mentioned in a comment`,
+      ruleCardStripped.includes(hook),
+      `RuleCard.tsx names ${hook} in code rather than in a comment - presence only; the binding's own initializer is pinned below`,
     );
+  }
+  for (const [name, want] of [
+    ["hostOwned", "useIsHostOwned(rule.id)"],
+    ["hostOwnedPort", "useHostOwnedPort(rule.id)"],
+  ] as const) {
+    const init = findConstInitializer(sf, name);
+    check(`found ${name}'s own binding`, init !== null, true);
+    if (init) {
+      check(
+        `${name} is EXACTLY ${want} - nothing ANDed, ORed or defaulted into it`,
+        norm((init as ts.Expression).getText(sf)),
+        want,
+      );
+    }
   }
 
   const note = findConstInitializer(sf, "HOST_OWNED_NOTE");
@@ -1137,7 +1443,12 @@ console.log("\n[9. RuleCard.tsx] the read-only row a terminal-owned forward gets
   }
 
   // The three derived values, each read off its own binding's definition:
-  // pinning the NAME would be satisfied by an alias or a rebind.
+  // pinning the NAME would be satisfied by an alias or a rebind. TRUE OF THESE
+  // THREE AND NOW ALSO OF THEIR INPUTS - `hostOwned` and `hostOwnedPort` have
+  // their own initializers pinned at the top of this section, so the chain is
+  // closed at both ends. Before that it was not: this sentence read as if it
+  // covered the whole file while the two values everything below derives from
+  // were pinned by name only (M-E).
   const cases: Array<[string, string]> = [
     ["startDisabled", "hostOwned||row.hostDangling||starting"],
     ["toggleLabel", 'hostOwned?"Stop":starting?"Starting…":running?"Stop":"Start"'],
@@ -1163,7 +1474,7 @@ console.log("\n[9. RuleCard.tsx] the read-only row a terminal-owned forward gets
   // whose "deleting a running rule stops it" sentence is true only of a rule
   // this page can stop. Pinned so the next reader does not "fix" it.
   assert(
-    stripComments(ruleCardRaw).includes("onDelete(running)"),
+    ruleCardStripped.includes("onDelete(running)"),
     "onDelete still passes the PAGE's notion of running, not hostOwned",
   );
 }
@@ -1185,20 +1496,62 @@ console.log("\n[10. §1.6 in the second store] every useHostOwnedForwards( selec
       const expr = ts.isBlock(body) ? null : body;
       assert(expr !== null, `found ${call.getText(sf)}'s selector body`);
       if (expr) {
-        const forbidden =
-          ts.isObjectLiteralExpression(expr) ||
-          ts.isArrayLiteralExpression(expr) ||
-          ts.isSpreadElement(expr) ||
-          // The whole entry is an OBJECT: a selector returning it is never
-          // `Object.is` its own last return once `claim` rebuilds `byRule`.
-          /^s\.byRule\[[^\]]+\]$/.test(norm(expr.getText(sf)));
-        assert(!forbidden, `${call.getText(sf)} returns a primitive`, expr.getText(sf));
+        const verdict = primitiveSelectorBody(expr, sf);
+        assert(
+          verdict.ok,
+          `${call.getText(sf)} returns a primitive`,
+          verdict.ok ? undefined : verdict.why,
+        );
       }
     }
   }
+
+  // The negative, over COMMENT-STRIPPED source. Stripped because this file's
+  // own note at `hostOwned.ts:85-89` explains IN PROSE why `useShallow` is
+  // avoided, so a sentence there naming the module path would falsely redden a
+  // raw-source regex - the same exception `forwards-shell-verify.ts:417-420`
+  // already carves out for its own copy of this claim. Inconsistent with
+  // sections 8 and 9, which strip, until now.
   assert(
-    !/from ["']zustand\/react\/shallow["']/.test(hostOwnedSrc),
-    "hostOwned.ts imports nothing from zustand/react/shallow",
+    !/from ["']zustand\/react\/shallow["']/.test(stripComments(hostOwnedSrc)),
+    "hostOwned.ts imports nothing from zustand/react/shallow (comment-stripped text)",
+  );
+  // And the same claim STRUCTURALLY, which is what makes it immune to both
+  // polarities of the comment problem: an import declaration is a statement
+  // about this module's graph, and neither a comment nor a string literal can
+  // forge or hide one.
+  const shallowImports = sf.statements
+    .filter(ts.isImportDeclaration)
+    .filter(
+      (st) =>
+        ts.isStringLiteral(st.moduleSpecifier) &&
+        /zustand\/react\/shallow/.test(st.moduleSpecifier.text),
+    );
+  check("and no import DECLARATION names it either (AST, not text)", shallowImports.length, 0);
+
+  // REPO-WIDE, and this is the half that was missing entirely: the section only
+  // ever read `hostOwned.ts`, so a bad selector written in a `.tsx` sat outside
+  // its parse and outside every other script's. Same shape as
+  // `scripts/forwards-shell-verify.ts:431-438` uses for `useForwardRuntime(`.
+  // Currently clean - the only two calls are the two above - and keeping it
+  // that way is what keeps the two checks above total. Comment-stripped, so a
+  // note discussing the hook is not an offender; `useHostOwnedForwards.getState()`
+  // does not contain `useHostOwnedForwards(`, which is why `ssh-session.ts` and
+  // `controller.ts` are not caught by it.
+  const hostOwnedAbs = join(repoRoot, "src/modules/forwards/hostOwned.ts");
+  const selectorOffenders = walkSrcFiles(join(repoRoot, "src")).filter(
+    (f) =>
+      f !== hostOwnedAbs &&
+      stripComments(readFileSync(f, "utf8")).includes("useHostOwnedForwards("),
+  );
+  check(
+    "useHostOwnedForwards( is called ONLY from hostOwned.ts - so every selector in src/ is inside this section's parse",
+    selectorOffenders.map((f) => f.slice(repoRoot.length)),
+    [],
+  );
+  assert(
+    hostOwnedSrc.includes("useHostOwnedForwards("),
+    "sanity: the sweep's needle does appear in hostOwned.ts itself",
   );
 }
 
@@ -1543,7 +1896,45 @@ for (const taken of ["running", "starting"] as const) {
 }
 
 // ===========================================================================
-console.log("\n[15. VLT-94's load-bearing half] autostart never writes the PAGE's store");
+console.log("\n[15. describeError] the two FALLBACK arms, not only the two already covered");
+// ===========================================================================
+// Banner text only, so the stakes are low - but two of four arms untested is
+// the §4.59 shape, and it costs two fixtures. The RAW-STRING arm is covered by
+// section 4 and correctly so: a Tauri `invoke` rejects with a raw string, and
+// that is how the backend's own `ssh: bind ... failed` text reaches the banner
+// at all. The `Error` arm is covered by section 7. These are the other two.
+{
+  resetHostOwned();
+  const r = rule({ id: "f-json", name: "json rule", localPort: 18080 });
+  const w = world({ rules: [r], open: () => Promise.reject({ kind: "bind", port: 18080 }) });
+  await startHostForwards("h-1", 7, w.writeBanner, w.deps);
+  check(
+    "a rejection that is neither a string nor an Error is JSON-stringified into the banner",
+    w.banners,
+    [failedBanner("json rule", '{"kind":"bind","port":18080}')],
+  );
+}
+{
+  resetHostOwned();
+  // A CYCLE, which is what makes `JSON.stringify` itself throw and leaves the
+  // `String(e)` arm as the only one left. Not contrived: a structured payload
+  // carrying a back-reference is a shape an IPC rejection can have, and the
+  // point of the arm is that the throw inside `describeError` must not become
+  // the failed connect that section 4 exists to prevent.
+  const cyclic: Record<string, unknown> = { kind: "bind" };
+  cyclic.self = cyclic;
+  const r = rule({ id: "f-cyclic", name: "cyclic rule", localPort: 18080 });
+  const w = world({ rules: [r], open: () => Promise.reject(cyclic) });
+  await startHostForwards("h-1", 7, w.writeBanner, w.deps);
+  check(
+    "and one JSON.stringify throws on falls through to String(e) rather than taking the run down",
+    w.banners,
+    [failedBanner("cyclic rule", "[object Object]")],
+  );
+}
+
+// ===========================================================================
+console.log("\n[16. VLT-94's load-bearing half] autostart never writes the PAGE's store");
 // ===========================================================================
 {
   // Read after every section above has run, with NO reset in between - the
