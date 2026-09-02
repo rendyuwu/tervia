@@ -5,8 +5,16 @@
  * also the ONE place `startRule`/`stopRule` (`../controller`, step 9) are
  * called from a component - the page hands over `row` and two callbacks for
  * Edit and Delete, and this file reads the rule's live status for itself
- * through the three primitive selectors `../runtime` exports (§1.6: one
- * selector per primitive, never one object selector).
+ * through the three primitive selectors `../runtime` exports plus the two
+ * `../hostOwned` exports (§1.6: one selector per primitive, never one object
+ * selector).
+ *
+ * TWO OWNERS, ONE ROW. A rule started from this page lives in `../runtime`; a
+ * rule the terminal started for itself lives in `../hostOwned` and is
+ * READ-ONLY here - shown as "Running (with host)" with Start/Stop disabled,
+ * because its lifetime belongs to the tab that opened it. The two maps are
+ * mutually exclusive by construction (`../hostOwned.ts`'s header), so this
+ * file never has to reconcile them, only render whichever one has the rule.
  *
  * A LIST ROW, not a grid cell - one per line, full width. So this file adds
  * no responsive grid className of its own; `ForwardsPage.tsx` stacks these in
@@ -22,8 +30,15 @@ import { CircleAlert, Pencil, Play, SquareStop, Trash2 } from "lucide-react";
 import type { ReactNode } from "react";
 
 import { startRule, stopRule } from "../controller";
+import { useHostOwnedPort, useIsHostOwned } from "../hostOwned";
 import { useForwardBoundPort, useForwardError, useForwardStatus } from "../runtime";
 import { localPortLabel, stopNote, type ForwardRuleRow } from "./derive";
+
+/** What the Start/Stop button says about a forward this page did not start and
+ *  cannot stop - the terminal that opened it owns it, and it dies with that
+ *  tab. See `../hostOwned.ts`: a Stop here would spend a reference nobody on
+ *  this page ever took. */
+const HOST_OWNED_NOTE = "Started with its terminal. Close that terminal tab to stop it.";
 
 export type RuleCardProps = {
   row: ForwardRuleRow;
@@ -48,7 +63,12 @@ export type RuleCardProps = {
  *  has no tone for, because it is not a hop's outcome, it is the rule simply
  *  not running, so it gets the neutral dot instead of borrowing one of the
  *  other three. */
-function statusDotClass(status: ReturnType<typeof useForwardStatus>): string {
+function statusDotClass(status: ReturnType<typeof useForwardStatus>, hostOwned: boolean): string {
+  // A terminal-owned forward IS running, it is simply running somewhere this
+  // store cannot see (`../hostOwned.ts`), so it gets the running tone. Checked
+  // ahead of `status`, which for such a rule reads "stopped" - the page's
+  // runtime store never hears about a forward the terminal opened.
+  if (hostOwned) return "bg-icon-idle";
   switch (status) {
     case "starting":
       return "bg-icon-working animate-pulse";
@@ -61,7 +81,11 @@ function statusDotClass(status: ReturnType<typeof useForwardStatus>): string {
   }
 }
 
-function statusText(status: ReturnType<typeof useForwardStatus>): string {
+function statusText(status: ReturnType<typeof useForwardStatus>, hostOwned: boolean): string {
+  // Named as its own state rather than a bare "Running": the difference is
+  // what the user can DO about it, and the disabled button below is only
+  // legible next to a status line that says who owns the forward.
+  if (hostOwned) return "Running (with host)";
   switch (status) {
     case "starting":
       return "Starting…";
@@ -79,21 +103,42 @@ export function RuleCard({ row, onEdit, onDelete }: RuleCardProps): ReactNode {
   const status = useForwardStatus(rule.id);
   const boundPort = useForwardBoundPort(rule.id);
   const error = useForwardError(rule.id);
+  // The terminal's own map, read-only from here (`../hostOwned.ts`). Two more
+  // primitive selectors beside the three above, per §1.6 - never one object
+  // selector for the pair.
+  const hostOwned = useIsHostOwned(rule.id);
+  const hostOwnedPort = useHostOwnedPort(rule.id);
 
+  // `running` stays the PAGE's notion of running - `onDelete(running)` below
+  // feeds `deleteNote`, whose "deleting a running rule stops it" sentence is
+  // true only of a rule this page can stop. A terminal-owned rule is stopped
+  // there, and the dialog correctly says only that it will no longer start
+  // automatically with its host.
   const running = status === "running";
   const starting = status === "starting";
-  const localLabel = localPortLabel(rule, boundPort);
+  // The port that is ACTUALLY LISTENING, whichever owner bound it. The two are
+  // mutually exclusive by construction (`../hostOwned.ts`), so this is a
+  // two-way choice and not a precedence rule.
+  const localLabel = localPortLabel(rule, hostOwnedPort ?? boundPort);
 
   // A dangling row's host is gone, so there is no credential and no route left
   // to dial - Start is refused at the UI rather than left to fail at
   // `startRule`, and the reason rides the tooltip rather than a second toast.
-  const startDisabled = row.hostDangling || starting;
-  const toggleLabel = starting ? "Starting…" : running ? "Stop" : "Start";
-  const toggleTooltip = row.hostDangling
-    ? `${row.hostName} no longer exists. Edit this rule to pick another host before starting it.`
-    : running
-      ? stopNote()
-      : toggleLabel;
+  // A terminal-owned rule is refused for the opposite reason: it is already up,
+  // and stopping it is the terminal tab's to do.
+  const startDisabled = row.hostDangling || starting || hostOwned;
+  const toggleLabel = starting ? "Starting…" : running || hostOwned ? "Stop" : "Start";
+  // `hostOwned` first: for a rule whose host record was deleted mid-session
+  // both facts are true, and the one worth saying is why the live forward
+  // cannot be stopped from here - the dangling note is advice about EDITING,
+  // which the Edit button beside it still offers.
+  const toggleTooltip = hostOwned
+    ? HOST_OWNED_NOTE
+    : row.hostDangling
+      ? `${row.hostName} no longer exists. Edit this rule to pick another host before starting it.`
+      : running
+        ? stopNote()
+        : toggleLabel;
 
   return (
     <div
@@ -112,7 +157,7 @@ export function RuleCard({ row, onEdit, onDelete }: RuleCardProps): ReactNode {
     >
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
         <span
-          className={cn("size-2 shrink-0 rounded-full", statusDotClass(status))}
+          className={cn("size-2 shrink-0 rounded-full", statusDotClass(status, hostOwned))}
           aria-hidden="true"
         />
         <span className="min-w-0 flex-1 truncate text-sm font-medium">{rule.name}</span>
@@ -130,8 +175,19 @@ export function RuleCard({ row, onEdit, onDelete }: RuleCardProps): ReactNode {
       {/* The row's own status line - `useForwardError` for a failed bind, or
           `stopNote()` for a running one, never a third error surface of its
           own (VLT-36 is untouched by this wave: failures already reach
-          `toast()` through `startRule`/`stopRule` themselves). */}
-      {error ? (
+          `toast()` through `startRule`/`stopRule` themselves).
+
+          `hostOwned` is checked FIRST and suppresses `error`: that error is
+          this page's last failed Start, and a rule the terminal has since
+          brought up is running whatever that attempt did. A red line under
+          "Running (with host)" would be two contradictory answers about one
+          rule. The note itself is shared with the button's tooltip, the same
+          way `stopNote()` already is - one sentence, two places. */}
+      {hostOwned ? (
+        <div className="text-muted-foreground text-[11px] leading-relaxed opacity-70">
+          {HOST_OWNED_NOTE}
+        </div>
+      ) : error ? (
         <div className="text-destructive text-xs">{error}</div>
       ) : running ? (
         <div className="text-muted-foreground text-[11px] leading-relaxed opacity-70">
@@ -140,13 +196,13 @@ export function RuleCard({ row, onEdit, onDelete }: RuleCardProps): ReactNode {
       ) : null}
 
       <div className="flex min-h-6 flex-wrap items-center justify-between gap-x-2 gap-y-1">
-        <span className="text-muted-foreground text-xs">{statusText(status)}</span>
+        <span className="text-muted-foreground text-xs">{statusText(status, hostOwned)}</span>
         <div className="flex shrink-0 items-center gap-1">
           <IconTooltip label={toggleTooltip}>
             <span>
               <Button
                 type="button"
-                variant={running ? "outline" : "default"}
+                variant={running || hostOwned ? "outline" : "default"}
                 size="sm"
                 className="gap-1.5"
                 disabled={startDisabled}
@@ -158,7 +214,7 @@ export function RuleCard({ row, onEdit, onDelete }: RuleCardProps): ReactNode {
               >
                 {starting ? (
                   <Spinner className="size-3.5" />
-                ) : running ? (
+                ) : running || hostOwned ? (
                   <SquareStop size={13} strokeWidth={2} />
                 ) : (
                   <Play size={13} strokeWidth={2} />

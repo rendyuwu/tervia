@@ -1,3 +1,5 @@
+import { startHostForwards } from "@/modules/forwards/autostart";
+import { useHostOwnedForwards } from "@/modules/forwards/hostOwned";
 import { listHosts, markConnected, pinFingerprint } from "@/modules/hosts/store";
 import { resolveJumpHops } from "@/modules/hosts/jumps";
 import { isSshHost, type SshHost } from "@/modules/hosts/types";
@@ -195,6 +197,15 @@ export async function openSshForSession(
   const finishSsh = (ending: SshEnding) => {
     if (terminated) return;
     terminated = true;
+    // The forwards this session's autostart opened die WITH the session, so
+    // they are released here - ABOVE the disposed guard below, deliberately. A
+    // disposed pane's forwards are exactly as dead as a live one's, and a
+    // release under that guard would leak every entry for every tab the user
+    // closed. `resolvedSessionId` is null until `openSsh` resolves, and an
+    // attempt that never got that far claimed nothing.
+    if (resolvedSessionId !== null) {
+      useHostOwnedForwards.getState().releaseSession(resolvedSessionId);
+    }
     if (s.disposed) return;
     // SSH dropped. Reset the AI CLI detector so its state doesn't ghost into the next reconnect.
     s.aiCliDetector?.reset();
@@ -438,8 +449,14 @@ export async function openSshForSession(
 
   // Saved `ssh -L` rules used to be re-opened here on every fresh session.
   // `Host` carries no `forwards` field any more - a forward rule is its own
-  // `ForwardRule` record (6f), started with `startWithHost` instead of being
-  // read off the connection on every reconnect.
+  // `ForwardRule` record (6f), so this reads the rules that name THIS host and
+  // starts the ones flagged `startWithHost` on the session just opened.
+  //
+  // Fire-and-forget on purpose, and safe because `startHostForwards` never
+  // rejects: a rule that cannot bind writes a banner and the connect carries
+  // on. Awaiting it would hold the pane's first prompt behind N binds, and
+  // letting it throw would turn a busy local port into a failed SSH connect.
+  void startHostForwards(sshConnectionId, sshSession.id, (text) => writeSshBanner(s, text));
 
   // Adapter so SSH looks like a PtySession to the rest of the file. SSH
   // sessions are not persisted via daemon UUIDs (`pty_attach` is local
@@ -451,7 +468,13 @@ export async function openSshForSession(
     alive: true,
     write: (data) => sshSession.write(data),
     resize: (cols, rows) => sshSession.resize(cols, rows),
-    close: () => sshSession.close(),
+    close: () => {
+      // The second release site, for the ending that never reaches `finishSsh`
+      // - a user-initiated `disconnectSsh`, or a pane closing under a session
+      // that reports nothing back. Idempotent, so firing both is harmless.
+      useHostOwnedForwards.getState().releaseSession(sshSession.id);
+      return sshSession.close();
+    },
   };
 }
 
