@@ -40,6 +40,7 @@ import {
 import { InputGroup, InputGroupAddon, InputGroupInput } from "@/components/ui/input-group";
 import { paneCaret } from "@/lib/paneCaret";
 import { toast } from "@/components/ui/toast";
+import { dropRulesForHost } from "@/modules/forwards/store";
 import { identityRows } from "@/modules/vault/page/derive";
 import { VaultInUseError } from "@/modules/vault/types";
 import { useVault } from "@/modules/vault/useVault";
@@ -64,14 +65,7 @@ import {
   useHostEditorRequest,
   type HostEditorTarget,
 } from "./pendingEditor";
-import {
-  deleteGroup,
-  deleteHost,
-  duplicateHost,
-  newGroupId,
-  noForwardRules,
-  upsertGroup,
-} from "./store";
+import { deleteGroup, deleteHost, duplicateHost, newGroupId, upsertGroup } from "./store";
 import type { Host } from "./types";
 import { useHostGroups, useHosts } from "./useHosts";
 
@@ -267,9 +261,11 @@ export function HostsPage({ onConnect, onScreen }: HostsPageProps): ReactNode {
 
   const confirmDelete = useCallback((host: Host) => {
     setPendingDelete(null);
-    // `noForwardRules` is passed by NAME, never as an inline `() => {}`, so 6f
-    // finds every call site with one grep when `modules/forwards` lands.
-    void deleteHost(host.id, noForwardRules).catch((e: unknown) =>
+    // `dropRulesForHost` is passed by NAME, never as an inline `() => {}`, so
+    // "what happens to a host's rules on delete" has one greppable answer -
+    // and it is `deleteHost`'s REQUIRED parameter, so no caller can skip the
+    // cleanup by omitting it.
+    void deleteHost(host.id, dropRulesForHost).catch((e: unknown) =>
       toast(deleteRefusalText(host, e), { variant: "error" }),
     );
   }, []);

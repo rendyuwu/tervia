@@ -39,15 +39,33 @@
  * 5. `newRuleId()` IS OPAQUE AND UNIQUE, with the `f-` prefix every other
  *    accessor and every keychain-free assumption in this module rests on.
  *
+ * 6. `HostsPage.tsx`'s `confirmDelete` WIRES THIS MODULE IN: `deleteHost`'s
+ *    second argument is the bare `dropRulesForHost` identifier, passed by
+ *    name, not a wrapper that could silently un-await it -
+ *    `hosts/store.ts`'s `deleteHost` awaits it FIRST and unconditionally
+ *    (`hosts/store.ts:961`), and a wrapper that swallows the promise defeats
+ *    that ordering without failing `tsc`. Source-text over `HostsPage.tsx`,
+ *    because nothing about this store changes here; the property is about
+ *    the caller.
+ *
  * The store's only ever port is the recovered-store file; there is no
  * `SecretsIo` for this script to inject, because a forward rule holds no secret
  * of its own - see `modules/forwards/adapters.ts`'s header.
  */
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+import ts from "typescript";
+
 import { createWriteQueue } from "../src/lib/recoveredStore";
 import type { ForwardsStoreIo } from "../src/modules/forwards/adapters";
 import { createForwardStore, type HostLookup } from "../src/modules/forwards/store";
 import type { ForwardRule } from "../src/modules/forwards/types";
 import type { Host, RdpHost, SshHost } from "../src/modules/hosts/types";
+
+const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+const read = (p: string) => readFileSync(join(root, p), "utf8");
 
 let failed = 0;
 function check(label: string, got: unknown, want: unknown): void {
@@ -70,6 +88,68 @@ async function rejectsWith(label: string, fn: () => Promise<unknown>, want: stri
     const msg = e instanceof Error ? e.message : String(e);
     check(label, msg, want);
   }
+}
+
+/** A line with its trailing `//` comment removed, string literals respected -
+ *  quote-aware rather than a regex because a `//` inside a string is not a
+ *  comment. Copied from `scripts/host-editor-verify.ts`. */
+function stripLineComment(line: string): string {
+  let quote = "";
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (quote) {
+      if (c === "\\") i++;
+      else if (c === quote) quote = "";
+      continue;
+    }
+    if (c === '"' || c === "'" || c === "`") {
+      quote = c;
+      continue;
+    }
+    if (c === "/" && line[i + 1] === "/") return line.slice(0, i);
+  }
+  return line;
+}
+
+/**
+ * The same source with comments removed, for the POSITIVE half of property 6
+ * below - a positive over raw source is satisfied by a comment that merely
+ * CLAIMS the wiring, so it must run over text a comment cannot survive.
+ *
+ * Copied from `scripts/host-editor-verify.ts:191`, including its JSX branch:
+ * a JSX comment expression is the only comment syntax legal INSIDE JSX
+ * children, and the negative-lookahead form below is deliberate - the lazy
+ * form `\{\s*\/\*[\s\S]*?\*\/\s*\}` reads as equivalent but is allowed to
+ * cross an intervening close-comment marker while searching for one followed
+ * by `}`, and on a real file it swallowed 50752 characters between two
+ * unrelated comments, silencing a negative check that then ran blind over
+ * deleted text. The negative lookahead forbids the inner group from ever
+ * crossing a close-comment marker at all, so the first one found is final.
+ */
+function stripComments(src: string): string {
+  const withoutJsxComments = src.replace(/\{\s*\/\*(?:(?!\*\/)[\s\S])*\*\/\s*\}/g, "");
+  return withoutJsxComments
+    .split("\n")
+    .filter((line) => {
+      const t = line.trim();
+      return !(t.startsWith("//") || t.startsWith("/*") || t.startsWith("*"));
+    })
+    .map(stripLineComment)
+    .join("\n");
+}
+
+/** Every `CallExpression` whose callee's own text is one of `calleeNames`,
+ *  found by walking the whole tree - the same shape `vault-editor-verify.ts`'s
+ *  `findCalls` uses for the same reason: "is this the call I mean" is a
+ *  question about the parsed callee, not about a substring of the file. */
+function findCalls(root: ts.Node, sf: ts.SourceFile, calleeNames: string[]): ts.CallExpression[] {
+  const out: ts.CallExpression[] = [];
+  const visit = (n: ts.Node): void => {
+    if (ts.isCallExpression(n) && calleeNames.includes(n.expression.getText(sf))) out.push(n);
+    ts.forEachChild(n, visit);
+  };
+  visit(root);
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -345,6 +425,75 @@ console.log("\n[ids] newRuleId returns distinct, f-prefixed ids");
   const b = h.forwards.newRuleId();
   check("both are f-prefixed", [/^f-/.test(a), /^f-/.test(b)], [true, true]);
   check("and distinct", a !== b, true);
+}
+
+// ---------------------------------------------------------------------------
+console.log(
+  "\n[cascade wiring] HostsPage.confirmDelete passes dropRulesForHost, not noForwardRules",
+);
+{
+  // Self-test for `stripComments`, per the plan's §3 preamble: a comment that
+  // is NOT a JSX comment expression (a plain block comment mid-line, inside a
+  // type literal) must survive, and code that follows it must too; a JSX
+  // comment expression must not.
+  const probe = stripComments(
+    "type P = { /** c */ x: X };\nconst KEEP = 1;\nconst j = <div>{/* c */}</div>;",
+  );
+  check(
+    "stripComments self-test: code after a non-JSX comment survives",
+    probe.includes("KEEP"),
+    true,
+  );
+  check(
+    "stripComments self-test: the JSX comment expression is gone",
+    probe.includes("{/* c */}"),
+    false,
+  );
+
+  const hostsPageRaw = read("src/modules/hosts/HostsPage.tsx");
+
+  // NEGATIVE, over RAW source: a negative over raw source is what catches a
+  // comment that still CLAIMS the old wiring even after the call site itself
+  // was fixed - stripping comments first would blind this half to exactly
+  // that (§3 preamble). `noForwardRules` stays exported from `hosts/store.ts`
+  // and stays in `hosts-store-verify.ts`'s fixtures; this checks only that
+  // `HostsPage.tsx` no longer names it, anywhere.
+  check(
+    "HostsPage.tsx contains no reference to noForwardRules at all",
+    hostsPageRaw.includes("noForwardRules"),
+    false,
+  );
+
+  // POSITIVE, over COMMENT-STRIPPED source and the PARSED call: a positive
+  // over raw source is satisfied by a comment that merely claims the wiring
+  // is right (§3 preamble), and a substring check on top of that
+  // (`src.includes("dropRulesForHost")`) is satisfied by
+  // `(id) => { dropRulesForHost(id); return; }` - one line, compiles, and
+  // silently un-awaits the cleanup, so `deleteHost`'s fail-closed ordering
+  // (`hosts/store.ts:954-961`) is gone. Reading the second argument's own
+  // expression text off the AST, whitespace-normalised only, is what W2 below
+  // exists to prove catches it.
+  const stripped = stripComments(hostsPageRaw);
+  const sf = ts.createSourceFile(
+    "HostsPage.tsx",
+    stripped,
+    ts.ScriptTarget.ESNext,
+    true,
+    ts.ScriptKind.TSX,
+  );
+  const deleteHostCalls = findCalls(sf, sf, ["deleteHost"]);
+  check("exactly one deleteHost(...) call site in HostsPage.tsx", deleteHostCalls.length, 1);
+
+  const call = deleteHostCalls[0];
+  const secondArgText =
+    call && call.arguments.length >= 2
+      ? call.arguments[1].getText(sf).replace(/\s+/g, "")
+      : "<deleteHost call or its second argument is missing>";
+  check(
+    "deleteHost's second argument is the bare identifier dropRulesForHost, whitespace-normalised",
+    secondArgText,
+    "dropRulesForHost",
+  );
 }
 
 if (failed > 0) throw new Error(`forward-rules-verify: ${failed} FAILED`);

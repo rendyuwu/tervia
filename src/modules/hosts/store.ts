@@ -130,6 +130,10 @@ export type ForwardRuleCleanup = (hostId: string) => void | Promise<void>;
  * Named rather than an inline `() => {}` at each call site so 6f finds every one
  * of them with a single grep, and so "no rules were cleaned up here" is a
  * deliberate statement rather than an omission.
+ *
+ * `modules/forwards` now exists and `HostsPage.tsx`'s production call site
+ * passes `dropRulesForHost` instead; this stub is for tests of the host store
+ * itself, which have no forward-rules store to reach for.
  */
 export const noForwardRules: ForwardRuleCleanup = () => {};
 
