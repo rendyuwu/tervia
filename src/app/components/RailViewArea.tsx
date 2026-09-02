@@ -1,4 +1,4 @@
-import { PagePlaceholder } from "@/components/PagePlaceholder";
+import { ForwardsPage } from "@/modules/forwards/ForwardsPage";
 import { type RailViewKind } from "@/modules/tabs";
 import { VaultPage } from "@/modules/vault/VaultPage";
 
@@ -22,7 +22,8 @@ export function RailViewArea({ view }: { view: RailViewKind }) {
       // - see `VaultPage.tsx` for why its caret claim is keyed on `[]`, not onScreen.
       return <VaultPage />;
     case "forwards":
-      // 6f replaces this with the real port-forwarding UI.
-      return <PagePlaceholder page="forwards" />;
+      // No props, for the same reason `case "vault"` above has none - see
+      // `ForwardsPage.tsx` for why its caret claim is keyed on `[]`, not onScreen.
+      return <ForwardsPage />;
   }
 }
