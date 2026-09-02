@@ -143,8 +143,13 @@ export function confirmHostKey(promptId: string, accept: boolean): Promise<void>
 /**
  * Start an `ssh -L` local forward on a live session: bind `127.0.0.1:localPort`
  * and tunnel it to `remoteHost:remotePort` as resolved from the server.
- * `localPort` 0 picks a free port. Resolves with the port actually bound.
- * Forwards close with the session, so there is no counterpart teardown call.
+ * `localPort` 0 picks a free port. Resolves with the port actually bound, which
+ * is the only thing {@link closeSshForward} accepts - so a caller that asked for
+ * 0 must keep the answer rather than the request.
+ *
+ * A forward still dies with its session, but that is no longer the only way one
+ * ends: {@link closeSshForward} drops a single listener while the session and
+ * its other forwards stay up.
  */
 export function openSshForward(
   id: number,
@@ -153,6 +158,13 @@ export function openSshForward(
   remotePort: number,
 ): Promise<number> {
   return invoke<number>("ssh_forward_open", { id, localPort, remoteHost, remotePort });
+}
+
+/** Close ONE `ssh -L` listener on a live session. `false` means there was no
+ *  such forward - an unknown session, or a port already closed. Not an error:
+ *  a teardown fires this without knowing whether the open finished. */
+export function closeSshForward(id: number, boundPort: number): Promise<boolean> {
+  return invoke<boolean>("ssh_forward_close", { id, boundPort });
 }
 
 export type SshSession = {

@@ -82,7 +82,11 @@ export async function openRdpDialTarget(
       // `forward.claim` names the entry this dial took its reference from, so a
       // release that arrives after the bastion died and somebody else re-opened
       // the same target is a no-op instead of spending their reference.
-      void closeForwardForConnection(sshHostId, conn.host, conn.port, forward.claim).catch(
+      //
+      // `0` because the RDP path never pins a local port and lets the OS pick -
+      // the same fact `LOOPBACK` above establishes for the address - so 0 is
+      // what named the entry on the way in.
+      void closeForwardForConnection(sshHostId, conn.host, conn.port, 0, forward.claim).catch(
         () => {},
       );
     },

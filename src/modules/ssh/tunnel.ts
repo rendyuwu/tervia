@@ -35,7 +35,13 @@
  * sessions today; unifying them means moving the terminal onto this module.
  */
 
-import { openSsh, openSshForward, type SshJumpHop, type SshSession } from "./bridge";
+import {
+  closeSshForward,
+  openSsh,
+  openSshForward,
+  type SshJumpHop,
+  type SshSession,
+} from "./bridge";
 import { listHosts, pinFingerprint } from "@/modules/hosts/store";
 import { resolveJumpHops } from "@/modules/hosts/jumps";
 import { isSshHost } from "@/modules/hosts/types";
@@ -45,7 +51,9 @@ import { hostKeyOwners, useHostKeyPrompt } from "./hostKeyPrompt";
 export type SshForward = {
   /** Runtime SSH session id, as used by `ssh_list_sessions` / `ssh_close`. */
   sessionId: number;
-  /** Loopback port the caller should connect to. */
+  /** Loopback port the caller should connect to. The port the backend BOUND,
+   *  which is the requested one when a caller pinned it and an OS-chosen one
+   *  when it asked for 0 - and the only form `ssh_forward_close` accepts. */
   localPort: number;
   /**
    * Opaque token naming the forward ENTRY this call took its reference from.
@@ -114,6 +122,27 @@ export type SshForwardOptions = {
    * meant to protect.
    */
   onHostKeyPrompt?: (promptId: string) => void;
+  /**
+   * Bind this local port instead of letting the OS choose. 0 or absent means
+   * the OS picks, which is what every caller that only wants "a port to connect
+   * to" should send; a pinned value is bound literally, and a bind failure
+   * surfaces as the backend's own
+   * `ssh: bind 127.0.0.1:<port> failed: <io error>` string rather than being
+   * retried somewhere else.
+   *
+   * Part of a forward's IDENTITY, not decoration: two rules onto the same
+   * remote target through different local ports are two forwards, and a key
+   * that left this out made them one - the second caller took the reuse branch,
+   * was handed the first one's bound port and the first one's claim, and
+   * nothing reported it.
+   *
+   * Note the asymmetry with {@link closeForwardForConnection}, which takes the
+   * local port positionally and REQUIRED. Omitting it here means "any port the
+   * OS likes", which is a sensible default; omitting it there would mean "some
+   * other entry", which is never what a release wants. So the two spellings are
+   * deliberate and not an oversight to be tidied up.
+   */
+  localPort?: number;
 };
 
 /**
@@ -175,16 +204,20 @@ const sessions = new Map<
   { session: Promise<SshSession>; refs: number; prompts: PromptFanout }
 >();
 /**
- * Forwards already open on a session, keyed by `connId|host|port`, so a second
- * consumer of the same target reuses its port instead of binding another.
+ * Forwards already open on a session, keyed by `connId|host|port|localPort`, so
+ * a second consumer of the same target through the same local port reuses its
+ * port instead of binding another.
  *
  * Refcounted per target as well as per session, because reuse used to hand back
  * a port without taking a reference: two panes tunnelling to the same host
  * shared ONE reference, and the first one to close tore the session out from
- * under the second. An entry at zero references is kept rather than deleted -
- * the forward is still bound on the backend for as long as the session lives, so
- * reusing it later is both free and correct, and `ssh_forward_open` has no
- * counterpart to close one on its own.
+ * under the second. An entry whose last reference goes is DELETED, and its
+ * backend listener closed with it. It used to be kept at zero references
+ * instead - the port stayed bound while the session lived, so reusing it later
+ * was free, and `ssh_forward_open` had no counterpart to close one on its own.
+ * It has one now (`ssh_forward_close`), and a rule that has been stopped has to
+ * give its port back: kept, the next Start asks for a port this map is still
+ * holding and the bind fails.
  *
  * Each entry also carries a `claim`, the generation a consumer must hand back to
  * release: an entry can be DELETED and re-created under the same key when the
@@ -197,8 +230,26 @@ const forwards = new Map<string, { forward: Promise<SshForward>; refs: number; c
  *  from a deleted entry can never match a live one. */
 let nextClaim = 1;
 
-function forwardKey(connectionId: string, remoteHost: string, remotePort: number): string {
-  return `${connectionId}|${remoteHost}|${remotePort}`;
+/**
+ * The identity of one forward ENTRY.
+ *
+ * The requested local port is part of it, not decoration: two rules onto the
+ * same remote target through DIFFERENT local ports are two forwards, and a
+ * three-part key made them one. The second caller took the reuse branch, was
+ * handed the first one's bound port and the first one's claim, and nothing
+ * reported it - so a rule pinned to 18081 ran on 18080 and looked fine.
+ *
+ * `0` is a value like any other here and means "the OS picks": two auto-port
+ * callers onto one target legitimately share one forward, which is what the RDP
+ * path has always done.
+ */
+function forwardKey(
+  connectionId: string,
+  remoteHost: string,
+  remotePort: number,
+  localPort: number,
+): string {
+  return `${connectionId}|${remoteHost}|${remotePort}|${localPort}`;
 }
 
 /**
@@ -335,9 +386,10 @@ function dropSession(connectionId: string): void {
 
 /**
  * Tunnel `remoteHost:remotePort` (as resolved from the SSH server) to a
- * loopback port. Repeat calls for the same target reuse the existing forward and
- * take their own reference to the session, so each one must be matched by a
- * `closeForwardForConnection` for the same target.
+ * loopback port - `opts.localPort` if it names one, otherwise whichever the OS
+ * picks. Repeat calls for the same target THROUGH THE SAME LOCAL PORT reuse the
+ * existing forward and take their own reference to the session, so each one must
+ * be matched by a `closeForwardForConnection` naming that same local port.
  */
 export function openForwardForConnection(
   connectionId: string,
@@ -350,7 +402,8 @@ export function openForwardForConnection(
   if (!Number.isInteger(remotePort) || remotePort <= 0 || remotePort > 65535) {
     return Promise.reject(new Error("ssh: port forward needs a valid remote port"));
   }
-  const key = forwardKey(connectionId, host, remotePort);
+  const localPort = opts.localPort ?? 0;
+  const key = forwardKey(connectionId, host, remotePort, localPort);
 
   /**
    * One caller's view of a shared forward: it fails on its own if the bind does,
@@ -399,8 +452,12 @@ export function openForwardForConnection(
   const claim = nextClaim++;
   const pending = (async () => {
     const live = await session;
-    const localPort = await openSshForward(live.id, 0, host, remotePort);
-    return { sessionId: live.id, localPort, claim };
+    // `boundPort` and not `localPort`: what comes back is the port the backend
+    // actually bound, which for a request of 0 is not the number that was sent.
+    // That answer is the only one `closeSshForward` accepts, so it - and not the
+    // request - is what {@link SshForward} carries.
+    const boundPort = await openSshForward(live.id, localPort, host, remotePort);
+    return { sessionId: live.id, localPort: boundPort, claim };
   })();
   forwards.set(key, { forward: pending, refs: 1, claim });
   return claimed(pending);
@@ -427,6 +484,16 @@ function releaseSession(connectionId: string): void {
  * Release the tunnel a caller opened, naming the entry it took its reference
  * from with the `claim` its {@link SshForward} carried.
  *
+ * `localPort` is the port the open ASKED FOR - `opts.localPort`, or 0 for a
+ * caller that let the OS choose - because that is what names the entry
+ * alongside the target: two rules onto one target through different local ports
+ * are two forwards, and a release has to say which one it is giving up.
+ *
+ * Positional and required, unlike open's optional `opts.localPort`, and the
+ * asymmetry is deliberate. Omitting it on open means "any port the OS likes",
+ * which is a reasonable default; omitting it on close would mean "the wrong
+ * entry", which is never what a caller wants and which nothing would report.
+ *
  * Safe to call for an unknown target, for one whose references are already
  * spent, and for one that has since been re-created by somebody else - so a
  * teardown can fire it without tracking whether the open succeeded or whether
@@ -436,9 +503,11 @@ export async function closeForwardForConnection(
   connectionId: string,
   remoteHost: string,
   remotePort: number,
+  localPort: number,
   claim: number,
 ): Promise<void> {
-  const entry = forwards.get(forwardKey(connectionId, remoteHost.trim(), remotePort));
+  const key = forwardKey(connectionId, remoteHost.trim(), remotePort, localPort);
+  const entry = forwards.get(key);
   if (!entry) return;
   // A different generation under the same key means this caller's entry was
   // deleted (the bastion dropped, `dropSession` cleared it) and somebody else
@@ -446,11 +515,26 @@ export async function closeForwardForConnection(
   // would tear down a session they are still using, which is the whole reason
   // the release names an entry rather than a target.
   if (entry.claim !== claim) return;
-  // Refs at zero means every consumer of this target has let go already. The
-  // entry stays (the port is still bound while the session lives), but there is
-  // no reference left here to spend, and spending someone else's would close a
-  // session another target is still using.
+  // Refs at zero means every consumer of this target has let go already: there
+  // is no reference left here to spend, and spending someone else's would close
+  // a session another target is still using. Kept above the decrement even
+  // though the entry is now deleted the moment it reaches zero - a release
+  // against an already-spent entry has to hold whether or not the delete below
+  // is the only thing standing between it and a stray decrement.
   if (entry.refs === 0) return;
   entry.refs -= 1;
+  if (entry.refs === 0) {
+    // The entry used to be KEPT at zero refs, because the port stayed bound
+    // while the session lived and `ssh_forward_open` had no counterpart. It has
+    // one now (`ssh_forward_close`), so a released forward gives its port back
+    // and the entry goes with it - otherwise a Stop on the page would leave a
+    // rule's own port bound and the next Start would fail to rebind it, which
+    // is the exact complaint the command was added for.
+    //
+    // Deleted BEFORE the await, and only if it is still ours: an entry
+    // re-created by another caller in the meantime is theirs.
+    if (forwards.get(key) === entry) forwards.delete(key);
+    void entry.forward.then((f) => closeSshForward(f.sessionId, f.localPort)).catch(() => {});
+  }
   releaseSession(connectionId);
 }
