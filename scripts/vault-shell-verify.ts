@@ -48,6 +48,10 @@ const FILES = {
   draft: "src/modules/vault/editor/draft.ts",
   hostCard: "src/modules/hosts/page/HostCard.tsx",
   hostsPage: "src/modules/hosts/HostsPage.tsx",
+  // Section 16's fourth containment root (step 10, 6f wave 2) - see that
+  // section for why this grows the parity check instead of the file getting
+  // its own copy of it.
+  ruleCard: "src/modules/forwards/page/RuleCard.tsx",
 } as const;
 
 const src = Object.fromEntries(Object.entries(FILES).map(([k, p]) => [k, read(p)])) as Record<
@@ -225,10 +229,19 @@ function findConstDeclaration(root: ts.Node, name: string): ts.VariableDeclarati
 // ============================================================================
 // Protects: `RailViewArea.tsx`'s `vault` case renders `<VaultPage />`, its
 // `PagePlaceholder` call is gone, and - the negative control - the `forwards`
-// case (6f's, untouched) still renders its placeholder. The third check is
-// what stops an edit that replaced BOTH branches from reading as correct: M2
-// below flips `forwards` to `<VaultPage />` too, and only the third check can
-// notice.
+// case (6f wave 2's own, landed at step 8) still renders `<ForwardsPage />`.
+// The third check is what stops an edit that replaced BOTH branches from
+// reading as correct: M2 below flips `forwards` to `<VaultPage />` too, and
+// only the third check can notice.
+//
+// RE-AIMED (step 10, closing the red window step 8 opened on purpose): this
+// check used to read `<PagePlaceholder page="forwards"`, which was correct
+// while 6f wave 2 had not yet replaced that branch and deliberately wrong
+// (a FAIL on purpose) from the moment `RailViewArea.tsx`'s `forwards` case
+// itself changed - the orchestrator measured the window as exactly this one
+// check, `vault-shell` going 165 ok -> 164 ok + 1 FAIL, and nothing else in
+// this file. Kept as its own check, separate from the vault positives above,
+// so a failure here names WHICH page's branch drifted.
 console.log("[1. rail branch] only the vault case was replaced");
 {
   const r = src.railViewArea;
@@ -241,8 +254,8 @@ console.log("[1. rail branch] only the vault case was replaced");
     !/case "vault":[\s\S]{0,200}PagePlaceholder/.test(r),
   );
   check(
-    'NEGATIVE CONTROL: the forwards case still renders <PagePlaceholder page="forwards"',
-    /case "forwards":[\s\S]{0,200}<PagePlaceholder page="forwards"/.test(r),
+    "NEGATIVE CONTROL: the forwards case renders <ForwardsPage /> (its own branch, landed 6f wave 2)",
+    /case "forwards":[\s\S]{0,200}<ForwardsPage\s*\/>/.test(r),
   );
 }
 
@@ -1029,15 +1042,22 @@ console.log("    missingPrivateKey -> the row Badge's variant AND its label");
 // differing only in its noun, a drift in it is visible on screen rather than
 // silent, and a check per duplicated helper is the "one check per copy" this
 // section exists to avoid.
+//
+// GROWN A FOURTH ROOT (step 10, 6f wave 2): `RuleCard.tsx` carries the
+// identical containment pair too (§4(a) Q3) - "this is the fourth root that
+// carries it", per that file's own comment on the pair. If a future owner
+// picks the shared shell instead of a fourth hand-written copy, THIS is the
+// line where this section is deleted on purpose, per that same decision.
 console.log("\n[16. VLT-75 parity] the containment pair and the responsive grid still agree");
 {
-  // --- the containment pair: IdentityCard, KeyCard, HostCard ---
+  // --- the containment pair: IdentityCard, KeyCard, HostCard, RuleCard ---
   const CONTAINMENT_TOKEN = /^\[(contain-intrinsic-size|content-visibility):/;
   const containmentTexts: string[] = [];
   for (const [key, functionName] of [
     ["identityCard", "IdentityCard"],
     ["keyCard", "KeyCard"],
     ["hostCard", "HostCard"],
+    ["ruleCard", "RuleCard"],
   ] as const) {
     const sf = ts.createSourceFile(
       FILES[key],
@@ -1070,7 +1090,7 @@ console.log("\n[16. VLT-75 parity] the containment pair and the responsive grid 
     containmentTexts.push(tokens.join(" "));
   }
   check(
-    "the containment pair is identical across IdentityCard, KeyCard and HostCard",
+    "the containment pair is identical across IdentityCard, KeyCard, HostCard and RuleCard",
     containmentTexts.every((t) => t === containmentTexts[0]),
     containmentTexts.join(" | "),
   );
@@ -1219,4 +1239,15 @@ console.log(failed === 0 ? "\nAll vault-shell checks passed." : `\n${failed} che
 //     "text-muted-foreground"` collapsed to just        className no longer
 //     `"text-muted-foreground"`                         mentions
 //                                                       keyDangling)
+//
+// STEP 10 (6f wave 2) - two extensions, not new mutations of THIS file's own
+// logic: section 1's third check was RE-AIMED (see that section's comment for
+// the red window it closes) and section 16 grew a fourth root:
+//
+//   P1 (forwards-shell-verify.ts's table): both RailViewArea branches to     section 1's re-aimed
+//     <ForwardsPage />                                                       third check
+//   RuleCard.tsx's containment pair                                          section 16's new
+//     ([contain-intrinsic-size:auto_100px]                                    per-root check for
+//     [content-visibility:auto]) deleted                                      ruleCard, and the
+//                                                                              4-way equality
 process.exit(failed === 0 ? 0 : 1);

@@ -127,6 +127,16 @@ check(
   "exactly one InputGroup in VaultPage.tsx",
   (vaultPageSrc.match(/<InputGroup /g) ?? []).length === 1,
 );
+const forwardsPageSrc = read("src/modules/forwards/ForwardsPage.tsx");
+const forwardsSearchInputGroupClass = findClass(
+  forwardsPageSrc,
+  /<InputGroup className="([^"]*)">\s*\n\s*<InputGroupAddon>\s*\n\s*<Search \/>/,
+  "Port Forwarding page search InputGroup",
+);
+check(
+  "exactly one InputGroup in ForwardsPage.tsx",
+  (forwardsPageSrc.match(/<InputGroup /g) ?? []).length === 1,
+);
 const newIdentityLabelClass = findClass(
   vaultPageSrc,
   /<span className="([^"]*)">New identity<\/span>/,
@@ -294,6 +304,44 @@ console.log("\n[vault header] the same wrap rule and floor, on the second page t
   }
 }
 
+// --- the Port Forwarding page reuses the same header too (DCR-2) -----------
+
+console.log("\n[forwards header] the same wrap rule and floor, on the third page that has one");
+{
+  // Three-way, not just a second pairwise check: the Vault equality above
+  // stays its OWN check (so a failure names which page drifted) and this adds
+  // the forwards page as its own leg, so a break in either pairing is
+  // reported against the right page rather than a single combined "one of
+  // three disagrees" line. DCR-2 (settled): three adjacent unlabelled search
+  // fields was accepted on the condition that every later page copies this
+  // header rather than re-deriving it - a later page has to diverge on
+  // purpose (K1/K2 name exactly that: a change to only the forwards copy
+  // breaks this equality; a change to all three together does not, because
+  // the equality is a PARITY check, not a restatement of the literal).
+  check(
+    "the Port Forwarding page's search box carries the identical className string",
+    forwardsSearchInputGroupClass === searchInputGroupClass,
+  );
+
+  const forwardsAt400 = activeAt(forwardsSearchInputGroupClass, 400);
+  check("basis-full (wrap rule) active at 400px", forwardsAt400.has("basis-full"));
+  check("min-w-40 (floor) active at 400px", forwardsAt400.has("min-w-40"));
+  const forwardsAt420 = activeAt(forwardsSearchInputGroupClass, 420);
+  check(
+    "both active at the 420px boundary (inclusive)",
+    forwardsAt420.has("basis-full") && forwardsAt420.has("min-w-40"),
+  );
+  const forwardsAt421 = activeAt(forwardsSearchInputGroupClass, 421);
+  check("basis-full NOT active at 421px", !forwardsAt421.has("basis-full"));
+  check(
+    "min-w-40 NOT active at 421px (the same pre-existing 420-480px gap)",
+    !forwardsAt421.has("min-w-40"),
+  );
+  const forwardsAt480 = activeAt(forwardsSearchInputGroupClass, 480);
+  check("min-w-40 active again at 480px", forwardsAt480.has("min-w-40"));
+  check("basis-full NOT active at 480px", !forwardsAt480.has("basis-full"));
+}
+
 // --- gate: what this check would catch, and what it was watched to catch ---
 //
 // Mutation                                            Check it killed
@@ -314,6 +362,20 @@ console.log("\n[vault header] the same wrap rule and floor, on the second page t
 //   InputGroup                                           the Vault 400px wrap check
 // Rename `InputGroup` to `InputGroupX` in VaultPage.tsx  "anchor found: Vault page
 //                                                         search InputGroup"
+//
+// K1 (step 10): change the forwards search           The three-way equality
+//   InputGroup's className by one utility only          FAILs, and the width
+//   (e.g. drop @max-[420px]:basis-full)                 assertions FAIL at the
+//                                                        widths that utility
+//                                                        governs
+// K2 (step 10): change all THREE search classNames     The equality stays
+//   identically (hosts, vault, forwards alike)           GREEN and the width
+//                                                        assertions FAIL - the
+//                                                        pairing that makes the
+//                                                        equality a PARITY
+//                                                        check, not a
+//                                                        restatement of the
+//                                                        literal
 //
 // See the report for this pass for the actual mutate -> red -> restore ->
 // `diff` transcript; it is not duplicated here because a stale transcript
