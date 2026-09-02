@@ -267,58 +267,6 @@ function arrowBodyExpression(arrow: ts.ArrowFunction): ts.Expression | null {
   return null;
 }
 
-/**
- * Is `expr` a FORBIDDEN selector-body shape - an object/array literal, a
- * spread, or a call to `.map(`/`Object.keys(`/`Object.values(`/`Object.entries(`
- * - UNLESS the whole expression ends in `.length` (§1.6's exemption: building
- * an array INSIDE the selector is fine when the RETURNED value, compared by
- * `Object.is`, is the length - a primitive).
- */
-function isForbiddenSelectorBody(
-  expr: ts.Expression,
-  sf: ts.SourceFile,
-): { forbidden: boolean; reason?: string } {
-  // The .length exemption applies to the WHOLE expression only - checked
-  // before anything else, exactly once, against `expr` itself.
-  if (ts.isPropertyAccessExpression(expr) && expr.name.text === "length") {
-    return { forbidden: false };
-  }
-  if (ts.isObjectLiteralExpression(expr)) return { forbidden: true, reason: "object literal" };
-  if (ts.isArrayLiteralExpression(expr)) return { forbidden: true, reason: "array literal" };
-  if (ts.isSpreadElement(expr)) return { forbidden: true, reason: "spread" };
-
-  // Walk the PRIMARY CHAIN - repeatedly unwrapping a CallExpression's own
-  // callee through any PropertyAccessExpression in between - for a forbidden
-  // call ANYWHERE in it, not only as the outermost call. Found by mutation Z4:
-  // `Object.values(s.byRule).filter(...)` (no `.length`) is still forbidden,
-  // but `.filter(` itself is not one of the four named forms - only checking
-  // the OUTERMOST call's callee text (`Object.values(s.byRule).filter`)
-  // missed the `Object.values(` sitting one level further down the chain, and
-  // this mutation reddened nothing until the walk was added.
-  let cur: ts.Node = expr;
-  for (;;) {
-    if (ts.isCallExpression(cur)) {
-      const callee = cur.expression.getText(sf);
-      if (
-        /\.map$/.test(callee) ||
-        callee === "Object.keys" ||
-        callee === "Object.values" ||
-        callee === "Object.entries"
-      ) {
-        return { forbidden: true, reason: `call to ${callee}(` };
-      }
-      cur = cur.expression;
-      continue;
-    }
-    if (ts.isPropertyAccessExpression(cur)) {
-      cur = cur.expression;
-      continue;
-    }
-    break;
-  }
-  return { forbidden: false };
-}
-
 /** Every `.ts`/`.tsx` file under `dir`, recursively. */
 function walkSrcFiles(dir: string): string[] {
   const out: string[] = [];
@@ -339,6 +287,231 @@ function walkSrcFiles(dir: string): string[] {
 // changed nothing the claim cares about, the exact trap the brief's mutation
 // discipline section names.
 const norm = (s: string): string => s.replace(/\s+/g, "").replace(/,+([)\]}])/g, "$1");
+
+// ============================================================================
+// The selector allow-list - A COPY of `scripts/forward-autostart-verify.ts`'s
+// `selectorParamName` + `primitiveSelectorBody`, the eleventh copied helper in
+// this suite. There is no `scripts/lib` to share it through and creating one is
+// VLT-33's extraction, not this round's; the copy is noted here so the two
+// cannot silently diverge unremarked.
+//
+// WHAT IT REPLACED, AND WHY THE POLARITY HAD TO FLIP. This section used to run
+// a four-name DENY-LIST (`isForbiddenSelectorBody`: object literal, array
+// literal, spread, and a call to `.map`/`Object.keys`/`Object.values`/
+// `Object.entries`) over `useForwardRuntime`'s selectors, while its twin in
+// `forward-autostart-verify.ts` had already flipped to this allow-list for
+// `useHostOwnedForwards`. So the store EVERY ROW READS was the one still behind
+// the weaker check. Measured against four fresh-reference hooks added to
+// `runtime.ts`, each of which came back GREEN with a fresh PASSING assertion
+// calling it "a primitive shape" (141 -> 157 ok, `tsc` and `prettier` clean):
+//
+//   useForwardRuntime((s) => ({ port: …, sid: … }))
+//   useForwardRuntime((s) => (s.byRule[id]?.status ?? "x", Object.keys(s.byRule)))
+//   useForwardRuntime((s) => s.byRule[ruleId] ?? {})
+//   useForwardRuntime((s) => new Set(Object.getOwnPropertyNames(s.byRule)))
+//
+// Two of the deny-list's four names could never fire at all (an object-literal
+// arrow body must be parenthesised, so the node here is a
+// `ParenthesizedExpression`; `(s) => ...x` is a syntax error, so a
+// `SpreadElement` cannot occupy this position), and the set of ways to build a
+// fresh reference is OPEN while the set of shapes that can only yield a
+// primitive is small and CLOSED. Hence: anything not named below is guilty until
+// argued, INCLUDING EVERY CALL EXPRESSION.
+//
+// The live code was fine throughout - `runtime.ts`'s four real selectors all
+// return primitives - so this was a check hole, not a defect.
+// ============================================================================
+
+/** The selector arrow's own parameter name, whitespace-normalised, or `""` when
+ *  it has none. What {@link primitiveSelectorBody}'s access-chain arm is ROOTED
+ *  ON: the letter `s` is this codebase's habit and not the claim, and a check
+ *  that reddens when somebody writes `(state) => state.byRule[id]?.status` is a
+ *  check the next reader weakens rather than reads. */
+function selectorParamName(arrow: ts.ArrowFunction, sf: ts.SourceFile): string {
+  const p = arrow.parameters[0];
+  return p ? norm(p.name.getText(sf)) : "";
+}
+
+/**
+ * Can this selector body only ever yield a PRIMITIVE? Returns the REASON as
+ * well as the verdict, so a failure names the shape it refused instead of only
+ * echoing the text. See the block comment above for why this is an allow-list.
+ */
+function primitiveSelectorBody(
+  expr: ts.Expression,
+  sf: ts.SourceFile,
+  param: string,
+): { ok: true } | { ok: false; why: string } {
+  // Parentheses FIRST and to a fixed point, because parenthesising is how an
+  // object-literal arrow body has to be written at all - unwrapping later would
+  // leave the headline case looking like a shape nobody named.
+  let cur: ts.Expression = expr;
+  while (ts.isParenthesizedExpression(cur)) cur = cur.expression;
+
+  // `!x`, `-x`, `+x`, `~x`, `typeof x`: a primitive whatever the operand is.
+  if (ts.isPrefixUnaryExpression(cur) || ts.isTypeOfExpression(cur)) return { ok: true };
+
+  if (ts.isBinaryExpression(cur)) {
+    const kind = cur.operatorToken.kind;
+    // `??`, `||` and `&&` PASS AN OPERAND THROUGH, so each side has to qualify
+    // on its own: `s.byRule[id] ?? {}` is a fresh object on every miss.
+    if (
+      kind === ts.SyntaxKind.QuestionQuestionToken ||
+      kind === ts.SyntaxKind.BarBarToken ||
+      kind === ts.SyntaxKind.AmpersandAmpersandToken
+    ) {
+      const left = primitiveSelectorBody(cur.left, sf, param);
+      if (!left.ok) return left;
+      return primitiveSelectorBody(cur.right, sf, param);
+    }
+    // THE COMMA OPERATOR PASSES ITS RIGHT OPERAND THROUGH, exactly like `??`,
+    // and the LEFT one is evaluated and thrown away so it need not qualify.
+    // `(0, X)` alone is caught by TS2695; any non-trivial left operand dodges
+    // that, and a return annotation cannot see it either.
+    if (kind === ts.SyntaxKind.CommaToken) return primitiveSelectorBody(cur.right, sf, param);
+    // THE ASSIGNMENTS - `=`, `+=`, `??=`, `||=`, `&&=` and the rest - the other
+    // operator class whose value is an operand. BOTH operands have to qualify,
+    // because `??=`/`||=`/`&&=` yield EITHER side; in practice that refuses
+    // every assignment, since a target is an identifier or an access chain that
+    // does not reach a primitive field - and refusing is the right answer:
+    // nothing legitimate assigns inside a zustand selector.
+    if (kind >= ts.SyntaxKind.FirstAssignment && kind <= ts.SyntaxKind.LastAssignment) {
+      const left = primitiveSelectorBody(cur.left, sf, param);
+      if (!left.ok) return left;
+      return primitiveSelectorBody(cur.right, sf, param);
+    }
+    // Every other binary operator - the comparisons, the arithmetic, the
+    // bitwise ones - produces a primitive from any pair of operands. TRUE OF
+    // WHAT IS LEFT, which is what the two arms above are for.
+    return { ok: true };
+  }
+
+  // A ternary is its two arms, for the same reason `??` is.
+  if (ts.isConditionalExpression(cur)) {
+    const whenTrue = primitiveSelectorBody(cur.whenTrue, sf, param);
+    if (!whenTrue.ok) return whenTrue;
+    return primitiveSelectorBody(cur.whenFalse, sf, param);
+  }
+
+  if (
+    ts.isNumericLiteral(cur) ||
+    ts.isStringLiteral(cur) ||
+    ts.isNoSubstitutionTemplateLiteral(cur) ||
+    ts.isTemplateExpression(cur) ||
+    cur.kind === ts.SyntaxKind.TrueKeyword ||
+    cur.kind === ts.SyntaxKind.FalseKeyword ||
+    cur.kind === ts.SyntaxKind.NullKeyword ||
+    (ts.isIdentifier(cur) && cur.text === "undefined")
+  ) {
+    return { ok: true };
+  }
+
+  if (ts.isPropertyAccessExpression(cur) || ts.isElementAccessExpression(cur)) {
+    // `.length` / `.size` is a number however the thing it counts was reached -
+    // and this arm passes UNCONDITIONALLY ON THE NAME, which is the honest
+    // description of a LEXICAL guess. This script builds no `ts.Program`, so
+    // there is no checker here that could tell `array.length` from a
+    // user-defined field named `length` holding an object. What makes the guess
+    // sound for the store it is applied to: `ForwardRuntimeEntry`
+    // (`runtime.ts:38-48`) is a status string plus numbers, `byRule` is a plain
+    // `Record`, and a `.length`/`.size` written against either is a TS error
+    // rather than a selector this arm waves through. Kept as a comment rather
+    // than tightened - the tightening that would close it is a type lookup, and
+    // refusing the two names outright would refuse `useRunningCount`, the one
+    // real selector here that builds a collection inside itself.
+    if (
+      ts.isPropertyAccessExpression(cur) &&
+      (cur.name.text === "length" || cur.name.text === "size")
+    ) {
+      return { ok: true };
+    }
+    // Otherwise the chain has to reach PAST the entry, to one of its own
+    // fields. `<param>.byRule` is the whole map and `<param>.byRule[id]` is the
+    // whole entry; both are objects the four actions rebuild, so neither is
+    // ever `Object.is` its own last return.
+    const text = norm(cur.getText(sf));
+    if (!/^[A-Za-z_$][\w$]*$/.test(param)) {
+      return {
+        ok: false,
+        why: `the selector's parameter \`${param}\` is not a plain identifier, so no access chain can be rooted on it`,
+      };
+    }
+    const entryField = new RegExp(`^${param}\\.byRule\\[[^\\]]+\\]\\??\\.[A-Za-z_$][\\w$]*$`);
+    if (entryField.test(text)) return { ok: true };
+    return {
+      ok: false,
+      why: `access chain \`${text}\` does not reach a primitive field off \`${param}.byRule[…]\``,
+    };
+  }
+
+  return {
+    ok: false,
+    why: `${ts.SyntaxKind[cur.kind]} \`${norm(cur.getText(sf)).slice(0, 60)}\` is not a shape that can only yield a primitive`,
+  };
+}
+
+// The allow-list's own self-test, over SYNTHETIC selectors, so its verdicts are
+// pinned here rather than only by whatever `runtime.ts` happens to contain
+// today - without it the helper is only ever exercised on four inputs that all
+// pass, and every refusal it is supposed to make is unmeasured. The four
+// measured-green mutations from the block comment above are each in the table.
+{
+  const probes: Array<[string, boolean, string?]> = [
+    // The four real ones, plus a reordered comparison that means the same.
+    ['s.byRule[ruleId]?.status ?? "stopped"', true],
+    ["s.byRule[ruleId]?.boundPort", true],
+    ["s.byRule[ruleId]?.error", true],
+    ['Object.values(s.byRule).filter((e) => e.status === "running").length', true],
+    ["s.byRule[ruleId] !== undefined", true],
+    // The refusals, headed by the four that came back GREEN under the deny-list
+    // with a fresh hook in `runtime.ts` for each.
+    ["({ port: s.byRule[ruleId]?.boundPort, sid: s.byRule[ruleId]?.sessionId })", false],
+    ['(s.byRule[ruleId]?.status ?? "x", Object.keys(s.byRule))', false],
+    ["s.byRule[ruleId] ?? {}", false],
+    ["new Set(Object.getOwnPropertyNames(s.byRule))", false],
+    // And the rest of the family, so the polarity is pinned rather than the
+    // four names the deny-list happened to hold.
+    ["Object.keys(s.byRule)", false],
+    ["Object.entries(s.byRule)", false],
+    ["Object.values(s.byRule).map((e) => e.boundPort)", false],
+    ["structuredClone(s.byRule)", false],
+    ["s.byRule", false],
+    ["s.byRule[ruleId]", false],
+    ["[s.byRule[ruleId]?.boundPort]", false],
+    ["(lastIds = Object.keys(s.byRule))", false],
+    ["(s.byRule[ruleId]?.boundPort ?? 0, s.byRule[ruleId]?.boundPort)", true],
+    // THE PARAMETER NAME IS NOT THE LETTER `s`. The first is the legal selector
+    // a rename produces - accepted, and REFUSED before the arm was
+    // parameterised. The second proves the rename does not blanket-accept. The
+    // third proves the arm is rooted on the PARAMETER rather than on any
+    // identifier that happens to read `.byRule`: here `s` is a free variable
+    // the selector never received.
+    ['state.byRule[ruleId]?.status ?? "stopped"', true, "state"],
+    ["state.byRule[ruleId] ?? {}", false, "state"],
+    ['s.byRule[ruleId]?.status ?? "stopped"', false, "state"],
+  ];
+  for (const [text, want, paramName = "s"] of probes) {
+    const probeSf = ts.createSourceFile(
+      "selector-probe.ts",
+      `useForwardRuntime((${paramName}) => ${text});`,
+      ts.ScriptTarget.ESNext,
+      true,
+      ts.ScriptKind.TS,
+    );
+    const arg = findCallsTo(probeSf, "useForwardRuntime", probeSf)[0]?.arguments[0];
+    const arrow = arg && ts.isArrowFunction(arg) ? arg : null;
+    const body = arrow ? arrowBodyExpression(arrow) : null;
+    const got =
+      arrow === null || body === null
+        ? "no selector body parsed"
+        : primitiveSelectorBody(body, probeSf, selectorParamName(arrow, probeSf)).ok;
+    check(
+      `allow-list self-test: \`${text}\` under \`(${paramName}) =>\` is ${want ? "primitive" : "REFUSED"}`,
+      got === want,
+      got,
+    );
+  }
+}
 
 // ============================================================================
 // 1. The rail branch: forwards renders <ForwardsPage />, not a placeholder -
@@ -397,12 +570,15 @@ console.log(
       const body = arrowBodyExpression(arg as ts.ArrowFunction);
       check(`found ${call.getText(sf)}'s selector body`, body !== null, arg.getText(sf));
       if (body) {
-        const verdict = isForbiddenSelectorBody(body, sf);
+        const verdict = primitiveSelectorBody(
+          body,
+          sf,
+          selectorParamName(arg as ts.ArrowFunction, sf),
+        );
         check(
-          `${call.getText(sf)}'s selector body is a primitive shape` +
-            (verdict.reason ? ` (not ${verdict.reason})` : ""),
-          !verdict.forbidden,
-          body.getText(sf),
+          `${call.getText(sf)}'s selector body is a shape that can ONLY yield a primitive`,
+          verdict.ok,
+          verdict.ok ? body.getText(sf) : verdict.why,
         );
       }
     }
@@ -916,30 +1092,207 @@ console.log(
         norm(stop.arguments.map((a) => a.getText(sf)).join(",")) === norm("target.rule"),
         stop.arguments.map((a) => a.getText(sf)),
       );
+      // THE PREDICATE, which nothing pinned and which is where this section's
+      // own fix left a hole. Presence, order, the awaits and the argument were
+      // all pinned; the CONDITION was not. Measured: with the guard rewritten
+      // to `if (target.running && target.hostOwned)` - a combination
+      // `RuleCard.tsx:25-41` argues is unconstructible, so `stopRule` becomes
+      // unreachable for every rule - this section stayed at 57/57 scripts with
+      // `tsc` and `prettier` clean. That is the runtime-false-guard shape, newly
+      // created by the commit that fixed the old one.
+      //
+      // The whole condition NODE, whitespace-normalised, so `false &&
+      // pageMustStopFirst(...)` and `pageMustStopFirst(other.id)` are both
+      // different text. `pageMustStopFirst` itself is pinned BEHAVIOURALLY as
+      // C11 against the real stores - an AST-only pin is what let the last one
+      // through.
+      const enclosingIf = (node: ts.Node): ts.IfStatement | null => {
+        let cur: ts.Node | undefined = node;
+        while (cur && !ts.isIfStatement(cur)) cur = cur.parent;
+        return cur ? (cur as ts.IfStatement) : null;
+      };
+      const guard = enclosingIf(stop);
+      check("the stopRule call sits inside an if statement at all", guard !== null);
+      check(
+        "and that if's condition is EXACTLY pageMustStopFirst(target.rule.id) - the LIVE read, not the flag captured at Delete-click time",
+        guard !== null &&
+          norm(guard.expression.getText(sf)) === norm("pageMustStopFirst(target.rule.id)"),
+        guard === null ? undefined : guard.expression.getText(sf),
+      );
     }
+    // AND THE CAPTURED FLAGS ARE NOT CONSULTED HERE AT ALL. `target.running`
+    // and `target.hostOwned` are the dialog's copy of what the user was TOLD
+    // (`deleteNote`, in the JSX below), and reading either one to decide
+    // whether to stop is the P0 this round fixed - the row is `starting` for the
+    // whole dial and the Delete button is not disabled during it, so the
+    // ordinary ordering has the dial resolving before the confirm click.
+    //
+    // Read off the AST rather than as a substring, deliberately: the code's own
+    // comment there NAMES `target.running` in order to say it must not be used,
+    // and a raw-text negative would fail on the sentence documenting the rule.
+    // A comment is not a `PropertyAccessExpression`.
+    const capturedReads: string[] = [];
+    const visitReads = (n: ts.Node): void => {
+      if (ts.isPropertyAccessExpression(n)) {
+        const t = norm(n.getText(sf));
+        if (t === "target.running" || t === "target.hostOwned") capturedReads.push(t);
+      }
+      ts.forEachChild(n, visitReads);
+    };
+    visitReads(confirmDelete);
+    check(
+      "confirmDelete reads NEITHER captured flag (AST, so its own comment naming target.running does not count)",
+      capturedReads.length === 0,
+      capturedReads,
+    );
   }
-  // NO RECONCILER, said as a check rather than as prose: `stopRule` has exactly
-  // two CALLERS in `src/`, the row's own button and the confirm above (its own
+  // NO RECONCILER, said as a check rather than as prose. `stopRule` has exactly
+  // THREE callers in `src/` and they are NAMED rather than counted: the row's
+  // own button, the confirm above, and the editor's save (section 12). Its own
   // declaration in `controller.ts` is excluded by path, not by a cleverer
-  // needle). If a third appears, the `hostOwned && starting` combination
-  // `RuleCard.tsx`'s header calls unconstructible becomes constructible - that
-  // file names this as its trigger - and the delete path may need to consult it
-  // too. Comment-stripped, so this file's own prose about `stopRule` in another
-  // module would not count as a caller.
+  // needle. Comment-stripped, so this file's own prose about `stopRule` in
+  // another module would not count as a caller.
+  //
+  // A SET AND NOT A COUNT, because a count of three is satisfied by a caller
+  // MOVED to a file that has no business stopping a forward - and a fourth
+  // caller is exactly the kind of thing this check exists to make somebody
+  // argue for.
+  //
+  // WHICH NEW CALLER WOULD ACTUALLY MATTER, corrected here because the previous
+  // version of this comment said "a third" and meant something narrower.
+  // `RuleCard.tsx`'s header names its trigger as a second caller that STARTS a
+  // rule from outside that row: the unconstructibility argument is about
+  // `controller.ts:169-175` running the terminal-owned refusal and
+  // `markStarting` with no `await` between them, so it is a new `startRule`
+  // caller that opens that gap. The editor's caller added this round only ever
+  // STOPS, which takes a rule out of `running` and cannot manufacture the
+  // `hostOwned && <page status>` pair. `startRule(` is swept for separately
+  // below, and it is still the row's button alone.
   const controllerAbs = join(repoRoot, FILES.controller);
-  const stopRuleCallers = walkSrcFiles(join(repoRoot, "src")).filter(
-    (f) => f !== controllerAbs && stripComments(readFileSync(f, "utf8")).includes("stopRule("),
+  const callersOf = (needle: string): string[] =>
+    walkSrcFiles(join(repoRoot, "src"))
+      .filter((f) => f !== controllerAbs && stripComments(readFileSync(f, "utf8")).includes(needle))
+      .map((f) => f.slice(repoRoot.length))
+      .sort();
+  check(
+    "stopRule( is called from exactly these three files: the row's button, the page's confirm, the editor's save",
+    JSON.stringify(callersOf("stopRule(")) ===
+      JSON.stringify([
+        "/src/modules/forwards/ForwardsPage.tsx",
+        "/src/modules/forwards/editor/RuleEditorDialog.tsx",
+        "/src/modules/forwards/page/RuleCard.tsx",
+      ]),
+    callersOf("stopRule("),
   );
   check(
-    "stopRule( is called from exactly two files: the row's button and the page's confirm",
-    stopRuleCallers.length === 2,
-    stopRuleCallers.map((f) => f.slice(repoRoot.length)),
+    "and startRule( is still called from the row's button ALONE - the caller whose addition makes RuleCard.tsx's unconstructible combination reachable",
+    JSON.stringify(callersOf("startRule(")) ===
+      JSON.stringify(["/src/modules/forwards/page/RuleCard.tsx"]),
+    callersOf("startRule("),
   );
+  // And the live-read helper both record-changing paths go through, swept the
+  // same way: a fourth reader of it is a fourth place that removes or rewrites
+  // the record under a live forward.
+  check(
+    "pageMustStopFirst( is read by exactly the two record-changing paths",
+    JSON.stringify(callersOf("pageMustStopFirst(")) ===
+      JSON.stringify([
+        "/src/modules/forwards/ForwardsPage.tsx",
+        "/src/modules/forwards/editor/RuleEditorDialog.tsx",
+      ]),
+    callersOf("pageMustStopFirst("),
+  );
+}
+
+// ============================================================================
+// 12. THE EDITOR'S SAVE STOPS FIRST TOO - the same leak on the sibling path,
+//     and it is a pure-click route with no timing in it at all.
+//     `ssh/tunnel.ts`'s `forwardKey` is
+//     `connectionId|remoteHost|remotePort|localPort` (`tunnel.ts:246-252`) and
+//     this form edits ALL FOUR, so: Start on 18080, Edit, Local port 18081,
+//     Save, Stop -> the close names `h|10.0.0.9|5432|18081`, there is no entry
+//     under that key, `markStopped` discards the claim in its `finally`, and
+//     the row reads "Stopped" with no Stop that can ever be issued again while
+//     18080 stays bound for the rest of the app's life.
+//
+//     ORDER AND IDENTITY, not presence. The stop has to land BEFORE the write
+//     (after it, the record no longer names the entry) and it has to be handed
+//     `existing`, the record as LOADED - `ruleRecordFrom(id, draft)` is the new
+//     identity and closing with it is the defect itself. C13 below is the
+//     behavioural half: the same close, once with each record, against a fake
+//     that models `forwardKey`.
+// ============================================================================
+console.log(
+  "\n[12. the editor stops first] save awaits stopRule(existing) BEFORE upsertRule, guarded on the live read",
+);
+{
+  const sf = ts.createSourceFile(
+    FILES.ruleEditorDialog,
+    src.ruleEditorDialog,
+    ts.ScriptTarget.ESNext,
+    true,
+    ts.ScriptKind.TSX,
+  );
+  const save = findConstArrowDeclaration(sf, "save");
+  const saveBody = save && ts.isBlock(save.body) ? save.body : null;
+  check("found RuleEditorDialog's save block to check", saveBody !== null);
+  if (saveBody) {
+    const stopCalls = findCallsTo(saveBody, "stopRule", sf);
+    const upsertCalls = findCallsTo(saveBody, "upsertRule", sf);
+    check("exactly one stopRule( call inside save", stopCalls.length === 1, stopCalls.length);
+    check("exactly one upsertRule( call inside save", upsertCalls.length === 1, upsertCalls.length);
+    const stop = stopCalls[0];
+    const upsert = upsertCalls[0];
+    if (stop && upsert) {
+      check(
+        "the stopRule call is ORDERED BEFORE the upsertRule call - after the write, the record no longer names the entry its Stop would close",
+        stop.getStart(sf) < upsert.getStart(sf),
+        { stop: stop.getStart(sf), upsert: upsert.getStart(sf) },
+      );
+      check(
+        "and it is AWAITED - a stop that has not landed has not landed before the write either",
+        stop.parent !== undefined && ts.isAwaitExpression(stop.parent),
+        stop.parent === undefined ? undefined : ts.SyntaxKind[stop.parent.kind],
+      );
+      // THE OLD RECORD. `existing` is what was loaded; `ruleRecordFrom(id,
+      // draft)` is the identity being written. Handing the NEW one to
+      // `stopRule` reproduces the defect exactly - the close names a key
+      // nothing is stored under - so this is an exact-node pin, not a
+      // "mentions existing" one.
+      check(
+        "stopRule is handed `existing`, the record as LOADED - never the one being written",
+        norm(stop.arguments.map((a) => a.getText(sf)).join(",")) === norm("existing"),
+        stop.arguments.map((a) => a.getText(sf)),
+      );
+      const enclosingIf = (node: ts.Node): ts.IfStatement | null => {
+        let cur: ts.Node | undefined = node;
+        while (cur && !ts.isIfStatement(cur)) cur = cur.parent;
+        return cur ? (cur as ts.IfStatement) : null;
+      };
+      const guard = enclosingIf(stop);
+      check("the stopRule call sits inside an if statement at all", guard !== null);
+      check(
+        "and that if's condition is EXACTLY `existing && pageMustStopFirst(existing.id)` - the whole node, so a runtime-false operator cannot be slipped in front of it",
+        guard !== null &&
+          norm(guard.expression.getText(sf)) === norm("existing && pageMustStopFirst(existing.id)"),
+        guard === null ? undefined : guard.expression.getText(sf),
+      );
+      // Structural position, for the reason section 3 gives about its own
+      // `upsertRule` statement: a deletion whose decoy re-adds the guarded stop
+      // inside a nested arrow keeps every count and every index above intact
+      // and never runs.
+      check(
+        "and the guarded stop is a DIRECT statement of save's own body, not nested in a decoy",
+        guard !== null && isDirectlyInFunctionBody(guard, saveBody),
+        guard === null ? undefined : guard.getText(sf).slice(0, 80),
+      );
+    }
+  }
 }
 
 console.log(
   failed === 0
-    ? "\nAll forwards-shell sections 1-11 passed."
+    ? "\nAll forwards-shell sections 1-12 passed."
     : `\n${failed} check(s) FAILED so far.`,
 );
 
@@ -1005,7 +1358,8 @@ async function handleBridgeInvoke(cmd: string, args: Record<string, unknown>): P
   },
 };
 
-const { startRule, stopRule } = await import("../src/modules/forwards/controller");
+const { pageMustStopFirst, startRule, stopRule } =
+  await import("../src/modules/forwards/controller");
 type RuntimeDepsType = NonNullable<Parameters<typeof startRule>[1]>;
 const { useForwardRuntime } = await import("../src/modules/forwards/runtime");
 const { useHostKeyPrompt } = await import("../src/modules/ssh/hostKeyPrompt");
@@ -1635,6 +1989,301 @@ console.log(
   check("C10: and said nothing", toastCalls.length === 0, toastCalls);
 }
 
+// ---------------------------------------------------------------------------
+console.log(
+  "\n[C11] pageMustStopFirst answers about NOW, over the real stores - every status in, both owners",
+);
+// The predicate `ForwardsPage.tsx`'s confirm and `RuleEditorDialog.tsx`'s save
+// both gate on. Driven against the REAL `useForwardRuntime` and
+// `useHostOwnedForwards` rather than a table of booleans, which is what also
+// pins WHICH KEYS it reads: a version consulting `boundPort`, or the wrong
+// store, or `"starting"`, disagrees with a row of this table.
+//
+// Why it exists at all, rather than the flag `RuleCard` hands over: that flag
+// is captured when the trash icon is clicked, the row is on screen as
+// `starting` for the whole dial, and the Delete button is not disabled during
+// it - so the ordinary ordering has the dial resolving before the confirm
+// click. C12 drives exactly that sequence.
+/** `runtime.ts`'s own `ForwardStatus`, read off the store's state type rather
+ *  than imported - this file reaches every module under test through the
+ *  dynamic imports above, because the Tauri stand-in has to be installed
+ *  first, and taking the type off the value keeps the two from drifting. */
+type ForwardStatusType = NonNullable<
+  ReturnType<typeof useForwardRuntime.getState>["byRule"][string]
+>["status"];
+{
+  resetStores();
+  const cases: Array<{ status?: ForwardStatusType; hostOwned: boolean; want: boolean }> = [
+    { status: undefined, hostOwned: false, want: false },
+    { status: "stopped", hostOwned: false, want: false },
+    { status: "starting", hostOwned: false, want: false },
+    { status: "running", hostOwned: false, want: true },
+    { status: "failed", hostOwned: false, want: false },
+    // `hostOwned` FIRST, the one precedence order `RuleCard.tsx`'s header
+    // states for all nine of its own sites: a forward the TERMINAL opened is
+    // not this page's to stop, and the page holds no reference to spend on it.
+    // The `running` row here is the combination that header calls
+    // unconstructible; the arm is written anyway, and this is what measures it.
+    { status: undefined, hostOwned: true, want: false },
+    { status: "stopped", hostOwned: true, want: false },
+    { status: "starting", hostOwned: true, want: false },
+    { status: "running", hostOwned: true, want: false },
+    { status: "failed", hostOwned: true, want: false },
+  ];
+  for (const c of cases) {
+    useForwardRuntime.setState({
+      byRule: c.status === undefined ? {} : { c11: { status: c.status } },
+    });
+    useHostOwnedForwards.setState({
+      byRule: c.hostOwned ? { c11: { sessionId: 41, boundPort: 54321 } } : {},
+    });
+    check(
+      `C11: status=${c.status ?? "(no entry)"} hostOwned=${c.hostOwned} -> ${c.want}`,
+      pageMustStopFirst("c11") === c.want,
+      pageMustStopFirst("c11"),
+    );
+  }
+  // And it is keyed by the rule it was asked about, not by "anything is
+  // running": without this, a predicate ignoring its argument passes every row
+  // of the table above whose answer is `true`.
+  useForwardRuntime.setState({ byRule: { c11: { status: "running" } } });
+  useHostOwnedForwards.setState({ byRule: {} });
+  check(
+    "C11: and it answers about the rule it was ASKED about - a different id is not running",
+    pageMustStopFirst("c11") === true && pageMustStopFirst("c11-other") === false,
+    { c11: pageMustStopFirst("c11"), other: pageMustStopFirst("c11-other") },
+  );
+}
+
+// ---------------------------------------------------------------------------
+console.log(
+  "\n[C12] THE P0, driven end to end: a dial that resolves while the confirm dialog is up, stopped before the delete - and the same interleaving under the old guard, which releases nothing",
+);
+// The sequence, and none of it is unlucky timing: click Start (the row goes
+// `starting`), click Delete (`RuleCard.tsx:303` hands over `running: false`),
+// the dial resolves - connect, host key, bind, routinely 1-3 seconds, against a
+// confirm click that adds about a second - and only then is Delete rule
+// pressed. Under the old guard the record went away while `runtime.ts` kept an
+// entry naming a rule no row renders, `ssh/tunnel.ts`'s entry stayed at
+// `refs: 1` so the SSH session never closed again, and the local port stayed
+// bound with no in-app recovery.
+//
+// `confirmDelete` is a `useCallback` inside a component whose import graph
+// reaches React and Radix, so it is not drivable here; what IS drivable is
+// every part of it that decides anything - the live guard and the real
+// `stopRule` - and its call site is pinned structurally as section 11.
+{
+  resetFakes();
+  resetStores();
+  const rule = fakeRule({ id: "c12", localPort: 18080 });
+  autoAnswerFakeOpen = false;
+  const starting = startRule(rule, FAKE_RUNTIME);
+  await settle();
+
+  // THE DELETE CLICK. Exactly what `RuleCard`'s own selectors say at that
+  // moment, computed the way that file computes them.
+  const capturedRunning = useForwardRuntime.getState().byRule["c12"]?.status === "running";
+  const capturedHostOwned = useHostOwnedForwards.getState().byRule["c12"] !== undefined;
+  check(
+    "C12: at Delete-click time the row is `starting`, so the captured flags say not-running and not-terminal-owned",
+    useForwardRuntime.getState().byRule["c12"]?.status === "starting" &&
+      capturedRunning === false &&
+      capturedHostOwned === false,
+    { status: useForwardRuntime.getState().byRule["c12"]?.status, capturedRunning },
+  );
+
+  // The dial lands while the dialog is on screen.
+  const landedClaim = nextFakeClaim;
+  parkedFakeOpens[0].resolve({
+    sessionId: nextFakeSessionId++,
+    localPort: rule.localPort,
+    claim: landedClaim,
+  });
+  nextFakeClaim++;
+  await starting;
+  await settle();
+  check(
+    "C12: by confirm time the forward is UP - the captured flag is now a wrong answer about a live listener",
+    useForwardRuntime.getState().byRule["c12"]?.status === "running" &&
+      useForwardRuntime.getState().byRule["c12"]?.claim === landedClaim,
+    useForwardRuntime.getState().byRule["c12"],
+  );
+  check(
+    "C12: and the live guard DISAGREES with the captured flag, which is the whole defect in one line",
+    capturedRunning === false && pageMustStopFirst("c12") === true,
+    { capturedRunning, live: pageMustStopFirst("c12") },
+  );
+
+  // confirmDelete's own two statements, in its own order.
+  resetCallLogs();
+  if (pageMustStopFirst(rule.id)) await stopRule(rule, FAKE_RUNTIME);
+  check(
+    "C12: the forward was released before the delete, with the claim this dial recorded",
+    closeCalls.length === 1 && closeCalls[0]?.claim === landedClaim,
+    closeCalls[0],
+  );
+  check(
+    "C12: named by rule.localPort - the value that finds the entry",
+    closeCalls[0]?.localPort === rule.localPort,
+    closeCalls[0],
+  );
+  check(
+    "C12: and the row ends stopped, with no claim left behind",
+    useForwardRuntime.getState().byRule["c12"]?.status === "stopped" &&
+      useForwardRuntime.getState().byRule["c12"]?.claim === undefined,
+    useForwardRuntime.getState().byRule["c12"],
+  );
+}
+{
+  // THE OLD GUARD ON THE SAME INTERLEAVING, measured rather than argued - and
+  // this is the control that makes the fixture above mean something. Identical
+  // steps; the only difference is that the guard is the captured flag.
+  resetFakes();
+  resetStores();
+  const rule = fakeRule({ id: "c12b", localPort: 18080 });
+  autoAnswerFakeOpen = false;
+  const starting = startRule(rule, FAKE_RUNTIME);
+  await settle();
+  const capturedRunning = useForwardRuntime.getState().byRule["c12b"]?.status === "running";
+  const landedClaim = nextFakeClaim;
+  parkedFakeOpens[0].resolve({
+    sessionId: nextFakeSessionId++,
+    localPort: rule.localPort,
+    claim: landedClaim,
+  });
+  nextFakeClaim++;
+  await starting;
+  await settle();
+
+  resetCallLogs();
+  if (capturedRunning) await stopRule(rule, FAKE_RUNTIME);
+  check(
+    "C12: CONTROL - guarded on the captured flag, closeForward is called ZERO times",
+    closeCalls.length === 0,
+    closeCalls,
+  );
+  check(
+    "C12: CONTROL - and runtime.ts is left naming the rule as running, holding a claim nothing will ever spend",
+    useForwardRuntime.getState().byRule["c12b"]?.status === "running" &&
+      useForwardRuntime.getState().byRule["c12b"]?.claim === landedClaim,
+    useForwardRuntime.getState().byRule["c12b"],
+  );
+}
+
+// ---------------------------------------------------------------------------
+console.log(
+  "\n[C13] the editor's leak: a Stop issued with the EDITED record MISSES its entry, and the record as loaded HITS it",
+);
+// `ssh/tunnel.ts`'s `forwardKey` is `connectionId|remoteHost|remotePort|localPort`
+// (`tunnel.ts:246-252`) and `RuleEditorDialog.tsx` edits all four, so the write
+// invalidates the key that rule's own Stop names. Pure clicks, no timing: Start
+// on 18080, Edit, Local port 18081, Save, Stop.
+//
+// `FAKE_RUNTIME`'s `closeForward` only LOGS, so it cannot tell a close that
+// found its entry from one that did not - a mock that cannot distinguish its
+// input from its output is the fidelity trap this file's header names, and it
+// would make this fixture a tautology. So this one keeps a keyed map and
+// reports the hit.
+{
+  const keyOf = (
+    connectionId: string,
+    remoteHost: string,
+    remotePort: number,
+    localPort: number,
+  ): string => `${connectionId}|${remoteHost}|${remotePort}|${localPort}`;
+  const entries = new Map<string, { claim: number }>();
+  const closeResults: Array<{ key: string; hit: boolean }> = [];
+  const KEYED_RUNTIME = {
+    openForward: (
+      connectionId: string,
+      remoteHost: string,
+      remotePort: number,
+      opts: OpenCall["opts"] = {},
+    ): Promise<FakeForward> => {
+      const asked = opts.localPort ?? 0;
+      const forward = {
+        sessionId: nextFakeSessionId++,
+        localPort: asked || nextFakeAutoPort++,
+        claim: nextFakeClaim++,
+      };
+      // Keyed on the port ASKED FOR, exactly as `tunnel.ts` keys it - the
+      // asymmetry with the port it resolves is that file's own doc.
+      entries.set(keyOf(connectionId, remoteHost, remotePort, asked), { claim: forward.claim });
+      return Promise.resolve(forward);
+    },
+    closeForward: (
+      connectionId: string,
+      remoteHost: string,
+      remotePort: number,
+      localPort: number,
+    ): Promise<void> => {
+      const key = keyOf(connectionId, remoteHost, remotePort, localPort);
+      const hit = entries.delete(key);
+      closeResults.push({ key, hit });
+      return Promise.resolve();
+    },
+    toast: (): void => {},
+  } satisfies RuntimeDepsType;
+
+  const original = fakeRule({ id: "c13", localPort: 18080 });
+  const edited = { ...original, localPort: 18081 };
+
+  resetFakes();
+  resetStores();
+  await startRule(original, KEYED_RUNTIME);
+  check(
+    "C13: the entry is stored under the key the open asked for",
+    entries.has(keyOf(original.hostId, original.remoteHost, original.remotePort, 18080)),
+    [...entries.keys()],
+  );
+
+  // THE DEFECT: the save wrote first, so the only record left to stop with is
+  // the edited one.
+  await stopRule(edited, KEYED_RUNTIME);
+  const missed = closeResults[closeResults.length - 1];
+  check(
+    "C13: a Stop issued with the EDITED record MISSES - there is no entry under its new key",
+    missed?.hit === false && missed?.key.endsWith("|18081"),
+    missed,
+  );
+  check(
+    "C13: the original entry is STILL OPEN, and markStopped has discarded the claim - no Stop can ever be issued again",
+    entries.size === 1 &&
+      entries.has(keyOf(original.hostId, original.remoteHost, original.remotePort, 18080)) &&
+      useForwardRuntime.getState().byRule["c13"]?.status === "stopped" &&
+      useForwardRuntime.getState().byRule["c13"]?.claim === undefined,
+    { keys: [...entries.keys()], row: useForwardRuntime.getState().byRule["c13"] },
+  );
+
+  // THE FIX: the save's guarded stop, with the record as LOADED, while it is
+  // still the identity the entry is under. Its ORDER against the write is
+  // section 12's claim - the write itself is the dialog's and is not drivable
+  // from here.
+  entries.clear();
+  closeResults.length = 0;
+  resetFakes();
+  resetStores();
+  await startRule(original, KEYED_RUNTIME);
+  check("C13: the page is running it, so the live guard says stop", pageMustStopFirst("c13"));
+  if (pageMustStopFirst(original.id)) await stopRule(original, KEYED_RUNTIME);
+  const landed = closeResults[closeResults.length - 1];
+  check(
+    "C13: the close HIT its entry - `existing` is the identity the forward was opened under",
+    landed?.hit === true && landed?.key.endsWith("|18080"),
+    landed,
+  );
+  check(
+    "C13: and nothing is left bound",
+    entries.size === 0 && useForwardRuntime.getState().byRule["c13"]?.status === "stopped",
+    { keys: [...entries.keys()], row: useForwardRuntime.getState().byRule["c13"] },
+  );
+  check(
+    "C13: CONTROL - a rule the page is NOT running is left alone by the same guard",
+    pageMustStopFirst("c13") === false,
+    pageMustStopFirst("c13"),
+  );
+}
+
 console.log(failed === 0 ? "\nAll forwards-shell checks passed." : `\n${failed} check(s) FAILED.`);
 
 // ----------------------------------------------------------------------------
@@ -1805,6 +2454,74 @@ console.log(failed === 0 ? "\nAll forwards-shell checks passed." : `\n${failed} 
 //                                                          exercised by anything
 //                                                          this harness can
 //                                                          observe today
+// ----------------------------------------------------------------------------
+// Mutation table - FIX ROUND 4. Applied to a byte-identical copy of `src/` AND
+// `scripts/` (both trees reset each time), with the ok-COUNT printed on every
+// run rather than the exit code alone - a harness that silently stops asserting
+// reports GREEN for everything. Baseline: fa 238 ok, fs 202 ok, fp 79 ok, both
+// tsc projects and `prettier --check` green.
+//
+//   Id    Mutation                                       Result
+//   ----  ---------------------------------------------  --------------------------
+//   Z1    ForwardsPage.tsx: the delete guard restored    RED, fs 199/202 - the
+//           to `if (target.running)`, the flag             exact-condition pin, the
+//           captured at Delete-CLICK time                  captured-flag AST
+//                                                          negative, and the
+//                                                          pageMustStopFirst caller
+//                                                          sweep. Plus tsc RED
+//                                                          (TS6133, the now-unused
+//                                                          import) - a second,
+//                                                          accidental tripwire.
+//   Z2    controller.ts: pageMustStopFirst rewritten to  RED, fs 192/202 - C11's two
+//           `status === "running" && hostOwned` (the       `running` rows, C11's
+//           runtime-false shape this round's own pin       keyed-by-rule check, and
+//           was written for)                                every C12 and C13 check
+//                                                          downstream of the guard.
+//                                                          `tsc` and `prettier`
+//                                                          stayed GREEN, which is
+//                                                          why the pin had to be
+//                                                          behavioural.
+//   Z4a   runtime.ts: a new hook returning               RED (each, separately), fs
+//    -d     ({ port, sid }) / (…, Object.keys(s.byRule))   205/202 - section 2's
+//           / s.byRule[id] ?? {} /                         primitive-shape check for
+//           new Set(Object.getOwnPropertyNames(…))         that selector, each with
+//                                                          the refused shape NAMED.
+//                                                          All four were GREEN under
+//                                                          the deny-list this round
+//                                                          replaced, each printing a
+//                                                          fresh PASSING "primitive
+//                                                          shape" assertion.
+//   Z5    runtime.ts AND hostOwned.ts: a legal           GREEN, as predicted - the
+//           selector's parameter renamed `s` -> `state`    control for the
+//                                                          parameterisation.
+//   Z5c   the same rename with the parameterised regex   RED, fa 235/238 and fs
+//           reverted to a hardcoded `^s\.byRule`          199/202 - so the
+//                                                          parameterisation is
+//                                                          load-bearing rather than
+//                                                          cosmetic: without it a
+//                                                          rename reddens BOTH
+//                                                          copies.
+//   Z6    RuleEditorDialog.tsx: the guarded stop        RED, fs 193/202 - section
+//           deleted from save                              12's stopRule count, the
+//                                                          three-file caller SET and
+//                                                          the pageMustStopFirst
+//                                                          sweep. NOT caught by C13,
+//                                                          which drives `stopRule`
+//                                                          rather than the dialog -
+//                                                          the editor's ORDER claim
+//                                                          is AST, and this says so.
+//   Z8    a legal Prettier reflow at --print-width 60   GREEN (all three scripts,
+//           over all ten source files carrying a          both tsc projects). The
+//           source-text or exact-node pin                 reflow is real: the
+//                                                          autostart call site split
+//                                                          across five lines and both
+//                                                          new `if` guards split from
+//                                                          their `await`. `prettier
+//                                                          --check` reddens, which is
+//                                                          the point - a reflow at a
+//                                                          width the repo does not
+//                                                          use is what makes it a
+//                                                          reflow.
 // ----------------------------------------------------------------------------
 
 process.exit(failed === 0 ? 0 : 1);

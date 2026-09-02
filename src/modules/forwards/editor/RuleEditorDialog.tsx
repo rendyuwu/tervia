@@ -18,6 +18,7 @@ import { isSshHost, type Host } from "@/modules/hosts/types";
 import type { ReactNode } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
+import { pageMustStopFirst, stopRule } from "../controller";
 import { privilegedPortWarning } from "../page/derive";
 import { findRule, newRuleId, upsertRule } from "../store";
 import type { ForwardRule } from "../types";
@@ -46,6 +47,12 @@ import {
 // unreachable from a FRESH selection in this editor. It cannot reach a host
 // picked in an earlier sitting and then deleted or reprotocolled out from
 // under a saved rule - see `save` below for that case.
+//
+// THE ONE THING THIS FORM DOES BEYOND WRITING A RECORD: it stops a forward
+// this page is running for the rule being edited, before the write. Every
+// component of `ssh/tunnel.ts`'s `forwardKey` is a field on this form, so the
+// write invalidates the key that rule's own Stop would name - see `save`
+// below. That is why `../controller` is in this file's import graph at all.
 //
 // VLT-90's placement rule, applied: `privilegedPortWarning` renders under the
 // Local port field; the store's refusal for a non-SSH or missing host renders
@@ -172,6 +179,31 @@ export function RuleEditorDialog({ target, onClose, hosts }: RuleEditorDialogPro
     setSaving(true);
     try {
       const id = existing?.id ?? newRuleId();
+      // STOPPED BEFORE THE RECORD IT WAS OPENED UNDER CHANGES, and this side
+      // of `upsertRule` rather than the other side is the whole claim.
+      // `ssh/tunnel.ts`'s `forwardKey` is
+      // `connectionId|remoteHost|remotePort|localPort` (`tunnel.ts:246-252`)
+      // and this form can edit ALL FOUR, so a Stop issued after the write
+      // names an entry that does not exist: the row reads "Stopped",
+      // `markStopped` has discarded the claim, so no Stop can ever be issued
+      // again - and the old port stays bound for the rest of the app's life,
+      // exactly the leak `ForwardsPage.tsx`'s confirm closes on the delete
+      // path. `existing` and NOT the record being written, for the same
+      // reason: the identity `stopRule` needs is the one the forward was
+      // opened under.
+      //
+      // UNCONDITIONAL ON WHICH FIELDS CHANGED, with the cost named rather
+      // than hidden: saving a rename on a running rule stops it too, and the
+      // row then reads "Stopped" with Start offered. Comparing just the four
+      // key fields would spare that and would go stale the moment
+      // `forwardKey` grows a fifth component - one visible, recoverable row
+      // state against a port bound with no in-app recovery.
+      //
+      // `pageMustStopFirst` reads BOTH owners live (`../controller`): a
+      // forward a terminal opened is not this dialog's to stop, and the
+      // page's own status has to be read now rather than when the form
+      // loaded.
+      if (existing && pageMustStopFirst(existing.id)) await stopRule(existing);
       // `ruleRecordFrom(id, draft)` is handed to `upsertRule` UNMODIFIED - no
       // spread, no override, no second call to it anywhere else in this
       // function. See `./draft.ts`'s header for why a second assembly here

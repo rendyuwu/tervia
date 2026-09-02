@@ -300,12 +300,21 @@ export async function startHostForwards(
         // makes a re-read immediately before the claim unraceable in turn.
         const laterOwner = deps.hostOwnedBy(rule.id);
         if (laterOwner !== undefined) {
-          // Not awaited into the per-rule catch below: a close that reports a
-          // failure must not print `failedBanner`, which would say the forward
-          // could not be opened when in fact it opened and was handed over.
-          // `.catch` and not a bare `void`, matching this file's call site and
-          // `ssh-session.ts:336`.
-          void deps.closeForward(sessionId, bound).catch(() => {});
+          // AWAITED, and `controller.ts:188-194` and `:219-225` carry the
+          // argument for the identical hazard on the page's side of this same
+          // yield: "a close that landed later could land on a listener a
+          // subsequent Start has since bound on that port". Two files, one
+          // rule, and they now agree. A CONSISTENCY change - nothing here was
+          // measured against the Rust side, so this claims no more than that
+          // the two frontend halves of one yield wait in the same way.
+          //
+          // `.catch(() => {})` is what keeps the awaited close out of the
+          // per-rule catch below: a close that reports a failure must not
+          // print `failedBanner`, which would say the forward could not be
+          // opened when in fact it opened and was handed over. Awaiting a
+          // chain that ends in `.catch` cannot throw, so the two properties
+          // are not in tension.
+          await deps.closeForward(sessionId, bound).catch(() => {});
           writeBanner(otherTerminalBanner(rule));
           continue;
         }
@@ -325,7 +334,9 @@ export async function startHostForwards(
         // both-down state.
         const taken = deps.runtimeStatus(rule.id);
         if (taken === "running") {
-          void deps.closeForward(sessionId, bound).catch(() => {});
+          // Awaited and `.catch`-ed for exactly the reasons the
+          // other-terminal arm above gives - one rule, one spelling.
+          await deps.closeForward(sessionId, bound).catch(() => {});
           writeBanner(yieldedBanner(rule));
           continue;
         }

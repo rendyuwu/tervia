@@ -40,7 +40,7 @@ import { useHosts } from "@/modules/hosts/useHosts";
 import { Plus, Search, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
-import { stopRule } from "./controller";
+import { pageMustStopFirst, stopRule } from "./controller";
 import { RuleEditorDialog, type RuleEditorTarget } from "./editor/RuleEditorDialog";
 import { RuleCard } from "./page/RuleCard";
 import { deleteNote, rankRules, ruleRows } from "./page/derive";
@@ -64,8 +64,18 @@ import { useForwards } from "./useForwards";
  *
  * `running` and `hostOwned` are captured from `RuleCard`'s own
  * `useForwardStatus` and `useIsHostOwned` selectors, at the moment the row's
- * Delete button was clicked - this page never reads either store itself
- * (§1.6: the card is the one place that needs them, and it already has them).
+ * Delete button was clicked.
+ *
+ * BOTH ARE FOR `deleteNote` AND FOR NOTHING ELSE, and the next reader should
+ * not "fix" that to match `confirmDelete` below. The dialog's sentence is a
+ * claim about what the user was TOLD when they opened it, so captured is what
+ * makes it correct; the DECISION to stop the forward is a claim about now, so
+ * `confirmDelete` re-reads both owners live through `pageMustStopFirst`
+ * (`./controller`) instead of trusting either field. The page still reads
+ * neither store during a RENDER (§1.6: the card is the one place that needs
+ * them, and it already has them) - that live read is inside an event handler
+ * and goes through `getState()`, the idiom `controller.ts` and `runtime.ts`
+ * both spell out.
  */
 type PendingDelete = { rule: ForwardRule; running: boolean; hostOwned: boolean };
 
@@ -135,14 +145,25 @@ export function ForwardsPage(): ReactNode {
         // on the same pinned port then fails EADDRINUSE with no in-app
         // recovery.
         //
-        // Guarded on the PAGE's `running` only, and that is the whole scope
-        // of what this page can do: a terminal-owned rule's forward is not
-        // this page's to stop (`page/RuleCard.tsx`'s header), and
-        // `deleteNote` says so instead of promising otherwise. Calling
-        // `stopRule` for a rule that is not running would be harmless
-        // (`controller.ts`: a Stop with no claim recorded closes nothing),
-        // but it would also be a Stop nobody asked for.
-        if (target.running) await stopRule(target.rule);
+        // GUARDED ON LIVE STATE AND NEVER ON `target.running`, which is a
+        // flag captured when the trash icon was clicked. The row is on
+        // screen as `starting` for the whole dial and the Delete button is
+        // not disabled during it (`page/RuleCard.tsx`'s `startDisabled`
+        // gates the toggle only), so Start, Delete, dial-resolves, confirm
+        // is the ORDINARY ordering rather than the unlucky one - and on it
+        // the captured flag says "not running" about a forward that is up.
+        // `pageMustStopFirst` (`./controller`) is that read, both owners and
+        // in the order every other site uses; its own doc carries the full
+        // reasoning and the cost of getting it wrong.
+        //
+        // Still guarded rather than unconditional, because the guard now
+        // answers about NOW: a Stop for a rule that is genuinely not running
+        // would be harmless (`controller.ts`: a Stop with no claim recorded
+        // closes nothing and still marks the rule stopped) but it would also
+        // be a Stop nobody asked for, and a terminal-owned rule's forward is
+        // not this page's to stop at all - `deleteNote` says so instead of
+        // promising otherwise.
+        if (pageMustStopFirst(target.rule.id)) await stopRule(target.rule);
       } finally {
         // THE DELETE THE USER CONFIRMED HAPPENS EITHER WAY. A `stopRule`
         // that rejected must not swallow the delete - the user would be left

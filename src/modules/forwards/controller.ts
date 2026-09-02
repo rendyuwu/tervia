@@ -251,6 +251,45 @@ export async function startRule(
 }
 
 /**
+ * Is this rule's forward THIS PAGE's to stop, RIGHT NOW?
+ *
+ * READ LIVE, and that is the whole of why the function exists: both facts it
+ * asks about change while a dialog is on screen. `page/RuleCard.tsx` hands the
+ * page a `running` flag captured at CLICK time, and the row is on screen as
+ * `starting` for the whole dial - connect, host key, bind, routinely 1-3
+ * seconds - so the ORDINARY sequence is Start, Delete, the dial resolves, then
+ * the confirm click. That is not the unlucky ordering, it is the common one.
+ *
+ * A guard on the captured flag therefore removes (or rewrites) the record of a
+ * forward that came up in between, and the cost of that is not a stale label:
+ * `runtime.ts` keeps an entry naming a rule no row renders, so no Stop is ever
+ * offered again; `ssh/tunnel.ts`'s entry stays at `refs: 1`, so the SSH session
+ * never closes for the rest of the app's life; and the local port stays bound,
+ * with re-creating a rule on the same pinned port then failing EADDRINUSE and
+ * no in-app recovery.
+ *
+ * `getState()` and not a selector, for the reason this file's header gives:
+ * every caller is an event handler and not a render. The two owners are read in
+ * the SAME ORDER `page/RuleCard.tsx`'s header states for all nine of its own
+ * sites - `hostOwned` FIRST. A forward a TERMINAL opened is never this page's to
+ * stop (it dies with that tab, and this page holds no reference it could spend),
+ * and while the combination that arm refuses - a terminal owning a rule the page
+ * also has `running` - is unconstructible today for exactly the reasons that
+ * header sets out, the answer here must not rest on an argument about two other
+ * files' interleavings.
+ *
+ * THE TWO CALLERS are the page's delete confirm and the editor's save: the two
+ * places that REMOVE or REWRITE the record a live forward was opened under.
+ * `RuleCard`'s own Start/Stop button deliberately does not use it - that button
+ * reads its status through selectors and re-renders on every change, so it has
+ * no stale flag to correct.
+ */
+export function pageMustStopFirst(ruleId: string): boolean {
+  if (useHostOwnedForwards.getState().byRule[ruleId] !== undefined) return false;
+  return useForwardRuntime.getState().byRule[ruleId]?.status === "running";
+}
+
+/**
  * Take `rule` down: answer anything its Start is still parked on, hand the
  * reference back, and mark it stopped once the backend has heard.
  *

@@ -62,8 +62,11 @@
  *    in a runtime-false guard the feature is inert for every rule and every
  *    gate in this repo passes) and the adapter-close release has to be
  *    UNDEFERRED (queued into a microtask it survives the session it is ending).
- *    Both are one structural assertion each, and both close an open set of
- *    spellings that no deny-list could.
+ *    Two structural assertions each, and the second of each pair is the one a
+ *    reviewer generation found the first one blind to: an EXPRESSION guard
+ *    (`sessionEnded && void startHostForwards(...)`) is a direct top-level
+ *    statement, and `await` defers without a callback. Every one of them closes
+ *    an open set of spellings that no deny-list could.
  *
  * 9. THE ROW THE TERMINAL'S FORWARD GETS. "Running (with host)", the port that
  *    is actually listening, and a disabled Start/Stop whose tooltip says where
@@ -75,7 +78,13 @@
  *    exceeded" (research §12.7). The allow-list has to recurse on every
  *    operator whose VALUE is an operand rather than the operator's own result -
  *    `??`/`||`/`&&`, and also the comma and the assignments, which is where it
- *    had a measured hole.
+ *    had a measured hole. Its access-chain arm is rooted on the selector's own
+ *    PARAMETER NAME, read off the arrow: rooted on the letter `s` it refused
+ *    `(state) => state.byRule[id]?.boundPort`, and a check that reddens on a
+ *    rename is a check the next reader weakens. `forwards-shell-verify.ts`
+ *    carries a COPY of the same helper for `useForwardRuntime`, whose selectors
+ *    were still behind the deny-list this one replaced (no `scripts/lib` exists
+ *    yet - VLT-33).
  *
  * 11. TWO PANES ON ONE HOST ARE TWO OWNERS, AND THE SECOND IS REFUSED -
  *    SEQUENTIALLY AND CONCURRENTLY. The terminal dials its own session per
@@ -912,9 +921,19 @@ function isDirectlyInFunctionBody(node: ts.Node, fnBody: ts.Node): boolean {
  * yes, `while (false)` yes, `if (0)` no, `if (someBoolean)` no.)
  *
  * Comparing this statement's own `parent` against the function BODY closes the
- * whole wrapper family at once - `if`, `try`, `for`, `switch`, a block written
- * next year - which is what a positional or nesting check never could, because
- * each of those is one more member of an open set.
+ * STATEMENT wrapper family at once - `if`, `try`, `for`, `switch`, a block
+ * written next year - which is what a positional or nesting check never could,
+ * because each of those is one more member of an open set.
+ *
+ * WHAT IT DOES NOT CLOSE, and the previous version of this sentence claimed
+ * otherwise: the EXPRESSION family. `sessionEnded && void startHostForwards(...)`
+ * is an expression statement whose parent IS the body, so this walk returns it
+ * and the parent comparison passes - and with `sessionEnded` false at that point
+ * the whole feature is inert for every rule again (measured: 57/57 scripts, this
+ * file 219/219 ok, `tsc` and `prettier` clean). `&&`, `||`, `?:` and `??` are all
+ * that shape. Section 8 closes them with a SECOND assertion, that the
+ * statement's own `expression` IS the `void <call>.catch(...)` the shape checks
+ * already located - not merely something inside it.
  */
 function enclosingStatement(node: ts.Node): ts.ExpressionStatement | null {
   let cur: ts.Node | undefined = node;
@@ -986,6 +1005,17 @@ function walkSrcFiles(dir: string): string[] {
   return out;
 }
 
+/** The selector arrow's own parameter name, whitespace-normalised, or `""` when
+ *  it has none. What {@link primitiveSelectorBody}'s access-chain arm has to be
+ *  ROOTED ON: the letter `s` is this codebase's habit and not the claim, and a
+ *  check that reddens when somebody writes `(state) => state.byRule[id]?.status`
+ *  is a check the next reader weakens rather than reads. Taken off the AST so
+ *  the name the arm tests and the name the arrow declares cannot disagree. */
+function selectorParamName(arrow: ts.ArrowFunction, sf: ts.SourceFile): string {
+  const p = arrow.parameters[0];
+  return p ? norm(p.name.getText(sf)) : "";
+}
+
 /**
  * Can this selector body only ever yield a PRIMITIVE?
  *
@@ -1016,6 +1046,7 @@ function walkSrcFiles(dir: string): string[] {
 function primitiveSelectorBody(
   expr: ts.Expression,
   sf: ts.SourceFile,
+  param: string,
 ): { ok: true } | { ok: false; why: string } {
   // Parentheses FIRST and to a fixed point, because parenthesising is how an
   // object-literal arrow body has to be written at all - unwrapping later would
@@ -1035,9 +1066,9 @@ function primitiveSelectorBody(
       kind === ts.SyntaxKind.BarBarToken ||
       kind === ts.SyntaxKind.AmpersandAmpersandToken
     ) {
-      const left = primitiveSelectorBody(cur.left, sf);
+      const left = primitiveSelectorBody(cur.left, sf, param);
       if (!left.ok) return left;
-      return primitiveSelectorBody(cur.right, sf);
+      return primitiveSelectorBody(cur.right, sf, param);
     }
     // THE COMMA OPERATOR PASSES ITS RIGHT OPERAND THROUGH, exactly like `??`
     // three lines above, and it was the hole the "every other binary operator
@@ -1054,7 +1085,7 @@ function primitiveSelectorBody(
     //
     // The LEFT operand is evaluated and thrown away, so it cannot be what the
     // selector returns and does not need to qualify.
-    if (kind === ts.SyntaxKind.CommaToken) return primitiveSelectorBody(cur.right, sf);
+    if (kind === ts.SyntaxKind.CommaToken) return primitiveSelectorBody(cur.right, sf, param);
     // THE ASSIGNMENTS - `=`, `+=`, `??=`, `||=`, `&&=` and the rest - the other
     // operator class whose value is an operand: `(lastIds = Object.keys(s.byRule))`
     // measured GREEN the same way. `FirstAssignment`..`LastAssignment` is the
@@ -1067,9 +1098,9 @@ function primitiveSelectorBody(
     // assigns inside a zustand selector, and the allow-list's polarity is
     // "guilty until argued".
     if (kind >= ts.SyntaxKind.FirstAssignment && kind <= ts.SyntaxKind.LastAssignment) {
-      const left = primitiveSelectorBody(cur.left, sf);
+      const left = primitiveSelectorBody(cur.left, sf, param);
       if (!left.ok) return left;
-      return primitiveSelectorBody(cur.right, sf);
+      return primitiveSelectorBody(cur.right, sf, param);
     }
     // Every other binary operator - the comparisons, the arithmetic, the
     // bitwise ones - produces a primitive from any pair of operands. TRUE OF
@@ -1081,9 +1112,9 @@ function primitiveSelectorBody(
 
   // A ternary is its two arms, for the same reason `??` is.
   if (ts.isConditionalExpression(cur)) {
-    const whenTrue = primitiveSelectorBody(cur.whenTrue, sf);
+    const whenTrue = primitiveSelectorBody(cur.whenTrue, sf, param);
     if (!whenTrue.ok) return whenTrue;
-    return primitiveSelectorBody(cur.whenFalse, sf);
+    return primitiveSelectorBody(cur.whenFalse, sf, param);
   }
 
   if (
@@ -1100,7 +1131,23 @@ function primitiveSelectorBody(
   }
 
   if (ts.isPropertyAccessExpression(cur) || ts.isElementAccessExpression(cur)) {
-    // `.length` / `.size` is a number however the thing it counts was reached.
+    // `.length` / `.size` is a number however the thing it counts was reached -
+    // an array, a string, a `Map`, a `Set`, or the result of any call in front
+    // of it.
+    //
+    // AND THIS ARM PASSES UNCONDITIONALLY ON THE NAME, which is the honest
+    // description: it is a LEXICAL guess, not a typed one. `x.length` where
+    // `length` is a user-defined field holding an object would be accepted, and
+    // this script builds no `ts.Program`, so there is no checker here that could
+    // tell the two apart. What makes the guess sound for the two stores it is
+    // applied to is that neither entry type HAS such a field: `ForwardRuntimeEntry`
+    // (`runtime.ts:38-48`) and `HostOwnedEntry` (`hostOwned.ts:47`) are a status
+    // string plus numbers, `byRule` is a plain `Record`, and a `.length` or
+    // `.size` written against any of them is a TS error rather than a selector
+    // this arm would wave through. Kept as a comment rather than tightened: the
+    // tightening that would actually close it is a type lookup, and refusing
+    // `.length`/`.size` outright would refuse `useRunningCount`, the one real
+    // selector in either store that builds a collection inside itself.
     if (
       ts.isPropertyAccessExpression(cur) &&
       (cur.name.text === "length" || cur.name.text === "size")
@@ -1108,13 +1155,30 @@ function primitiveSelectorBody(
       return { ok: true };
     }
     // Otherwise the chain has to reach PAST the entry, to one of its own
-    // fields. `s.byRule` is the whole map and `s.byRule[id]` is the whole
-    // entry; both are objects `claim` and `releaseSession` rebuild, so neither
-    // is ever `Object.is` its own last return. `HostOwnedEntry` has only
-    // `number` fields, which is what makes one field off one entry primitive.
+    // fields. `<param>.byRule` is the whole map and `<param>.byRule[id]` is the
+    // whole entry; both are objects `claim` and `releaseSession` rebuild, so
+    // neither is ever `Object.is` its own last return. Both entry types hold
+    // only `number`/string-literal fields, which is what makes one field off
+    // one entry primitive.
+    //
+    // ROOTED ON THE SELECTOR'S OWN PARAMETER NAME rather than on the letter
+    // `s`: `(state) => state.byRule[id]?.boundPort` is the same claim spelled
+    // differently, and it was REFUSED before this - a check that reddens on a
+    // rename is a check the next reader weakens. The name arrives from
+    // {@link selectorParamName}, off the arrow itself.
     const text = norm(cur.getText(sf));
-    if (/^s\.byRule\[[^\]]+\]\??\.[A-Za-z_$][\w$]*$/.test(text)) return { ok: true };
-    return { ok: false, why: `access chain \`${text}\` does not reach a primitive field` };
+    if (!/^[A-Za-z_$][\w$]*$/.test(param)) {
+      return {
+        ok: false,
+        why: `the selector's parameter \`${param}\` is not a plain identifier, so no access chain can be rooted on it`,
+      };
+    }
+    const entryField = new RegExp(`^${param}\\.byRule\\[[^\\]]+\\]\\??\\.[A-Za-z_$][\\w$]*$`);
+    if (entryField.test(text)) return { ok: true };
+    return {
+      ok: false,
+      why: `access chain \`${text}\` does not reach a primitive field off \`${param}.byRule[…]\``,
+    };
   }
 
   return {
@@ -1128,7 +1192,7 @@ function primitiveSelectorBody(
 // today. Without it the helper is only ever exercised on two inputs that both
 // pass, and every refusal it is supposed to make is unmeasured.
 {
-  const probes: Array<[string, boolean]> = [
+  const probes: Array<[string, boolean, string?]> = [
     // The two real ones, plus a reordered comparison that means the same thing.
     ["s.byRule[ruleId] !== undefined", true],
     ["undefined !== s.byRule[ruleId]", true],
@@ -1159,14 +1223,31 @@ function primitiveSelectorBody(
     // helper's own comment says why.
     ["(s.byRule[ruleId]?.boundPort ?? 0, s.byRule[ruleId]?.boundPort)", true],
     ["(lastPort = s.byRule[ruleId]?.boundPort)", false],
+    // `new Set(...)` reached through a different builder than the one above,
+    // because the refusal has to come from "a call returns a fresh reference"
+    // and not from a list of builder NAMES.
+    ["new Set(Object.getOwnPropertyNames(s.byRule))", false],
+    // THE PARAMETER NAME IS NOT THE LETTER `s`, and these three are what make
+    // that a claim rather than an accident. The first is the legal selector a
+    // rename produces - accepted, and REFUSED before the arm was parameterised.
+    // The second proves the rename does not blanket-accept: the same refusal
+    // still fires under the new name. The third proves the arm is rooted on the
+    // PARAMETER and not on any identifier that happens to read `.byRule` - here
+    // `s` is a free variable the selector never received.
+    ["state.byRule[ruleId]?.boundPort", true, "state"],
+    ["state.byRule[ruleId] ?? {}", false, "state"],
+    ["s.byRule[ruleId]?.boundPort", false, "state"],
   ];
-  for (const [text, want] of probes) {
-    const probeSf = parse("selector-probe.ts", `useHostOwnedForwards((s) => ${text});`);
+  for (const [text, want, paramName = "s"] of probes) {
+    const probeSf = parse("selector-probe.ts", `useHostOwnedForwards((${paramName}) => ${text});`);
     const arg = findCallsTo(probeSf, probeSf, "useHostOwnedForwards")[0]?.arguments[0];
-    const body = arg && ts.isArrowFunction(arg) && !ts.isBlock(arg.body) ? arg.body : null;
+    const arrow = arg && ts.isArrowFunction(arg) ? arg : null;
+    const body = arrow && !ts.isBlock(arrow.body) ? arrow.body : null;
     check(
-      `allow-list self-test: \`${text}\` is ${want ? "primitive" : "REFUSED"}`,
-      body === null ? "no selector body parsed" : primitiveSelectorBody(body, probeSf).ok,
+      `allow-list self-test: \`${text}\` under \`(${paramName}) =>\` is ${want ? "primitive" : "REFUSED"}`,
+      arrow === null || body === null
+        ? "no selector body parsed"
+        : primitiveSelectorBody(body, probeSf, selectorParamName(arrow, probeSf)).ok,
       want,
     );
   }
@@ -1264,6 +1345,29 @@ console.log("\n[8. ssh-session.ts] the call site, and the two releases");
         stmt !== null && stmt.parent === body,
         "and that statement is an UNCONDITIONAL top-level statement of openSshForSession's body - wrapped in any guard, the feature is inert for every rule and every gate in this repo still passes",
         stmt === null ? undefined : ts.SyntaxKind[stmt.parent.kind],
+      );
+      // AND THE STATEMENT IS NOTHING BUT THAT CALL. The parent comparison
+      // above closes the STATEMENT wrapper family and leaves the EXPRESSION
+      // one wide open - measured, after `prettier --write` so the formatting
+      // is what a developer would actually commit:
+      //
+      //   sessionEnded &&
+      //     void startHostForwards(sshConnectionId, sshSession.id, ..., {
+      //       ...defaultAutostartDeps,
+      //       stillLive: () => !sessionEnded,
+      //     }).catch(() => {});
+      //
+      // `sessionEnded` is `false` at `:206`, so terminal autostart was inert
+      // for every rule with 57/57 scripts, this file 219/219 ok, and `tsc` and
+      // `prettier --check` both green. `&&`, `||`, `?:` and `??` are all this
+      // shape, and each is one more member of an open set - so this compares
+      // the statement's own expression against `outer`, the `void <call>.catch(...)`
+      // the two assertions above already located by walking UP from the call.
+      // A guard in front of it, in any spelling, makes them different nodes.
+      assert(
+        stmt !== null && outer !== undefined && stmt.expression === outer,
+        "and the statement IS that `void <call>.catch(...)` and nothing else - `sessionEnded && void startHostForwards(...)` is a direct top-level statement too, and with that flag false the feature is inert for every rule",
+        stmt === null ? undefined : norm(stmt.expression.getText(sf)).slice(0, 90),
       );
       // REACHABILITY BY POSITION. Measured mutation M-H: delete this statement
       // and re-add the identical statement AFTER the `return { ... }` below.
@@ -1427,15 +1531,31 @@ console.log("\n[8. ssh-session.ts] the call site, and the two releases");
   // the three index assertions passes, with `tsc` and `forwards-shell` green
   // too - and the entry then survives past the session the close is ending.
   //
-  // ONE POSITIVE OVER THE OPEN SET, not a list of the primitives that can defer
-  // it: `setTimeout`, `queueMicrotask`, `.then`, `.finally`,
-  // `requestIdleCallback` and whatever comes next all have to put the statement
-  // inside a nested function expression, and this refuses that whatever its
-  // spelling.
+  // ONE POSITIVE OVER MOST OF THE OPEN SET, and the previous version of this
+  // comment claimed the whole of it. `setTimeout`, `queueMicrotask`, `.then`,
+  // `.finally`, `requestIdleCallback` and whatever comes next all have to put
+  // the statement inside a nested function expression, and the nesting check
+  // refuses that whatever its spelling.
+  //
+  // `await` DOES NOT, and it is the most idiomatic deferral of the lot.
+  // Measured: making `close` `async` and inserting `await Promise.resolve()`
+  // above the release keeps the release a DIRECT statement of `close`'s own
+  // body and textually above `sshSession.close()`, so every index comparison
+  // and the nesting check all passed - 57/57 scripts, `tsc` and `prettier`
+  // clean - while the entry survived the session the close was ending. So two
+  // more assertions: `close` is not an async function, and no `await` sits
+  // above the release. Neither is a list over an open set; both are the
+  // absence of a language feature.
   if (closeValue !== null) {
     const arrow = closeValue as ts.Expression;
     const closeBody = ts.isArrowFunction(arrow) && ts.isBlock(arrow.body) ? arrow.body : null;
     assert(closeBody !== null, "the close member is an arrow with a block body to root this in");
+    assert(
+      ts.isArrowFunction(arrow) &&
+        !(arrow.modifiers ?? []).some((m) => m.kind === ts.SyntaxKind.AsyncKeyword),
+      "and close is NOT an async function - an async close can suspend before the release with the release still a direct statement of its own body",
+      ts.isArrowFunction(arrow) ? norm(arrow.getText(sf)).slice(0, 60) : undefined,
+    );
     if (closeBody) {
       const releases = findCallsTo(closeBody, sf, "useHostOwnedForwards.getState().releaseSession");
       check("exactly one releaseSession(...) call inside close", releases.length, 1);
@@ -1444,6 +1564,21 @@ console.log("\n[8. ssh-session.ts] the call site, and the two releases");
         assert(
           isDirectlyInFunctionBody(releaseCall, closeBody),
           "and it runs DIRECTLY in close's own body - not deferred into a callback, which would leave the entry alive past the session while every textual-position check above still passed",
+        );
+        // Every `await` anywhere under close's body, positioned against the
+        // release. Not "no await at all": one BELOW the release would be
+        // harmless, and refusing it would redden a correct future edit.
+        const awaits: ts.AwaitExpression[] = [];
+        const visitAwaits = (n: ts.Node): void => {
+          if (ts.isAwaitExpression(n)) awaits.push(n);
+          ts.forEachChild(n, visitAwaits);
+        };
+        visitAwaits(closeBody);
+        const above = awaits.filter((a) => a.getStart(sf) < releaseCall.getStart(sf));
+        check(
+          "and NO await precedes it - a suspension point above the release defers it just as surely as a callback does, and leaves it a direct statement",
+          above.map((a) => norm(a.getText(sf)).slice(0, 40)),
+          [],
         );
       }
     }
@@ -1689,7 +1824,11 @@ console.log("\n[10. §1.6 in the second store] every useHostOwnedForwards( selec
       const expr = ts.isBlock(body) ? null : body;
       assert(expr !== null, `found ${call.getText(sf)}'s selector body`);
       if (expr) {
-        const verdict = primitiveSelectorBody(expr, sf);
+        const verdict = primitiveSelectorBody(
+          expr,
+          sf,
+          selectorParamName(arg as ts.ArrowFunction, sf),
+        );
         assert(
           verdict.ok,
           `${call.getText(sf)} returns a primitive`,
@@ -2313,6 +2452,71 @@ console.log("\n[16. VLT-94's load-bearing half] autostart never writes the PAGE'
   );
 }
 
+// ===========================================================================
+console.log(
+  "\n[17. the two halves of one yield wait the same way] every release in autostart.ts and controller.ts is awaited, and each carries its own .catch",
+);
+// ===========================================================================
+// A CONSISTENCY CHECK AND NOTHING MORE, said plainly because the finding it
+// came from claimed nothing more either. `controller.ts:188-194` and `:219-225`
+// argue that a release must be awaited - "a close that landed later could land
+// on a listener a subsequent Start has since bound on that port" - while
+// `autostart.ts`'s two yield releases fired UN-awaited on the identical hazard.
+// Nothing here was measured against the Rust side, so the claim is that the two
+// frontend halves of one rule now wait in the same way, not that the race was
+// observed.
+//
+// The `.catch(() => {})` half is what keeps the awaited close out of
+// `autostart.ts`'s per-rule catch: a close that reports a failure must not
+// print `failedBanner`, which would say the forward could not be opened when in
+// fact it opened and was handed over. Awaiting a chain ending in `.catch`
+// cannot throw, so the two properties are not in tension - and pinning both
+// together is what stops the next reader from restoring the bare `void` to get
+// the second one back.
+//
+// Source pins over COMMENT-STRIPPED text: every claim is a positive, and a
+// positive over raw source is satisfied by a comment describing the code it
+// wants.
+{
+  for (const [rel, callee, wantCatch, wantCount] of [
+    // autostart.ts: the pre-claim other-terminal yield and the page-took-it
+    // yield. controller.ts: the superseded-attempt release, the post-dial yield
+    // and `stopRule`'s own close - THREE, and the count is asserted so a
+    // release added or deleted has to be argued for rather than skipped.
+    ["src/modules/forwards/autostart.ts", "deps.closeForward", true, 2],
+    ["src/modules/forwards/controller.ts", "runtime.closeForward", false, 3],
+  ] as const) {
+    const sf = parse(rel, stripComments(read(rel)));
+    const calls = findCallsTo(sf, sf, callee);
+    check(`${rel}: found all ${wantCount} ${callee}(...) releases`, calls.length, wantCount);
+    for (const call of calls) {
+      // The AWAIT, read off the AST and walking up through the `.catch(...)`
+      // wrapper when there is one: `void x.catch(...)` keeps every substring a
+      // text check would look for.
+      const chainTop =
+        call.parent !== undefined &&
+        ts.isPropertyAccessExpression(call.parent) &&
+        call.parent.name.text === "catch" &&
+        call.parent.parent !== undefined &&
+        ts.isCallExpression(call.parent.parent)
+          ? call.parent.parent
+          : call;
+      assert(
+        chainTop.parent !== undefined && ts.isAwaitExpression(chainTop.parent),
+        `${rel}: and the release is AWAITED, not fired off - the same rule ${callee === "deps.closeForward" ? "controller.ts" : "autostart.ts"} follows on the other half of this yield`,
+        chainTop.parent === undefined ? undefined : ts.SyntaxKind[chainTop.parent.kind],
+      );
+      assert(
+        wantCatch ? chainTop !== call : chainTop === call,
+        wantCatch
+          ? `${rel}: and it carries its own .catch(...), so the awaited close cannot reach the per-rule catch and print failedBanner`
+          : `${rel}: and it carries NO .catch - a release that reported here has nowhere else to go, and this file's own stopRule uses a finally instead`,
+        norm(chainTop.getText(sf)).slice(0, 70),
+      );
+    }
+  }
+}
+
 if (failed > 0) throw new Error(`forward-autostart-verify: ${failed} FAILED`);
 console.log("\nforward-autostart-verify: OK\n");
 
@@ -2394,4 +2598,52 @@ console.log("\nforward-autostart-verify: OK\n");
 //                                                          in this wave that the
 //                                                          control is what found the
 //                                                          defect.
+// ----------------------------------------------------------------------------
+// Mutation table - FIX ROUND 4. Same discipline and the same both-trees reset;
+// baseline fa 238 ok, fs 202 ok, fp 79 ok, both tsc projects and
+// `prettier --check` green.
+//
+//   Id    Mutation                                       Result
+//   ----  ---------------------------------------------  --------------------------
+//   Z3    ssh-session.ts: the autostart call site        RED, fa 237/238 - the NEW
+//           wrapped in an EXPRESSION guard,                `stmt.expression === outer`
+//           `sessionEnded && void startHostForwards(…)`,   assertion, and nothing
+//           then `prettier --write` so the formatting      else. GREEN across every
+//           is what a developer would actually commit      gate before it: the
+//                                                          statement's parent IS the
+//                                                          body, so enclosingStatement
+//                                                          returned it and the wrapper
+//                                                          check passed while the whole
+//                                                          feature was inert for every
+//                                                          rule (`sessionEnded` is
+//                                                          false at `:206`).
+//   Z7    ssh-session.ts: `close: async () => {` with    RED, fa 236/238 - both new
+//           `await Promise.resolve();` above the           assertions, the not-async
+//           release                                        one and the no-await-above
+//                                                          one. `tsc` and `prettier`
+//                                                          clean, and the release
+//                                                          stays a DIRECT statement of
+//                                                          close's own body, which is
+//                                                          why the nesting check could
+//                                                          not see it.
+//   Z7b   `close: async () => {` with NO await added     RED on the not-async
+//                                                          assertion ALONE - so the two
+//                                                          are independent rather than
+//                                                          one claim written twice.
+//   Z7c   `close: async () => {` with the await placed   RED on the not-async
+//           BELOW the release                              assertion alone; the
+//                                                          position assertion stayed
+//                                                          GREEN, which is the scoping
+//                                                          it was written with - an
+//                                                          await after the release
+//                                                          defers nothing, and
+//                                                          refusing it would redden a
+//                                                          correct future edit.
+//   Z4    the four fresh-reference selectors, Z5 the     see forwards-shell-verify.ts's
+//    Z5     rename control, Z5c the reverted               own round-4 table. Z5c
+//    Z5c    parameterisation, Z8 the reflow control       reddens THIS file too (fa
+//    Z8                                                   235/238): the allow-list here
+//                                                          is the original that copy
+//                                                          was taken from, so a rename
+//                                                          breaks both.
 // ----------------------------------------------------------------------------
