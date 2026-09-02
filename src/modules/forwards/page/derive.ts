@@ -16,8 +16,11 @@ import type { ForwardRule } from "../types";
 // the SSH runtime (`modules/forwards/runtime.ts`), not from anything
 // persisted, and a `ForwardRule` on its own cannot say it - this file only
 // ever sees a `ForwardRule` and a host map. Every function that needs a
-// runtime fact - `localPortLabel`'s `boundPort`, `deleteNote`'s `running` and
+// runtime fact - `localPortLabel`'s `boundPort`, `deleteNote`'s `pageStops` and
 // `hostOwned` - takes it as a plain argument instead of reaching for a store.
+// It does not know the STATUS VOCABULARY either: `pageStops` arrives as one
+// already-decided boolean rather than as a `ForwardStatus`, which is what keeps
+// `../runtime` out of this file's import graph (the specifier set is pinned).
 
 /** What {@link ruleRows} reports for a `hostId` naming a host the store does
  *  not have. A named label rather than `undefined`, because a rule's host is
@@ -64,7 +67,7 @@ export type ForwardRuleRow = {
  *
  * AN EMPTY HOST MAP IS NOT N DANGLING ROWS. `hostDangling` has to mean "the
  * hosts are known AND this one is not among them", never "the hosts are not
- * known yet" - its one caller today (`ForwardsPage.tsx:121`, and the paragraph
+ * known yet" - its one caller today (`ForwardsPage.tsx:131`, and the paragraph
  * above says why the contract is written for every future one) feeds it from
  * `useForwards()` and `useHosts()`, which are two INDEPENDENT async loads both
  * starting from an empty `Map` (`useForwards.ts:26-38`,
@@ -309,10 +312,34 @@ export function stopNote(): string {
  * in the runtime layer, not in anything persisted.
  */
 export type DeleteNoteSubject = {
-  running: boolean;
+  /**
+   * THIS DELETE STOPS A FORWARD THE PAGE HOLDS: the rule is `running`, or it is
+   * still mid-dial as `starting`. One already-decided boolean and not the
+   * status, per the header above - this file does not know the status
+   * vocabulary.
+   *
+   * `starting` IS IN and that is the whole reason this field is not called
+   * `running`. The row is on screen as `starting` for the entire dial and the
+   * trash button is not disabled during it, so "the user clicked Delete on a
+   * rule that is coming up" is an ordinary sequence rather than an unlucky one -
+   * and on it `ForwardsPage.tsx`'s confirm DOES stop the forward, because
+   * `pageMustStopFirst` (`../controller`) answers `true` for `starting` too. A
+   * field that only meant `running` therefore sent the fallback sentence
+   * ("Deleting it changes nothing else.") to a dialog that was about to close a
+   * live bind - a destructive confirm saying the opposite of what it does.
+   *
+   * SO THE TWO MUST NAME THE SAME STATUSES. This is the CAPTURED half (what the
+   * user was told when the dialog opened) and `pageMustStopFirst` is the LIVE
+   * half (what the confirm does); they are separate on purpose
+   * (`ForwardsPage.tsx`'s `PendingDelete`), and drift between the two status
+   * sets is exactly how the sentence becomes false again. `failed` and
+   * `stopped` are out of both, for the reason `pageMustStopFirst`'s own doc
+   * gives: neither retains a claim, so there is nothing to stop.
+   */
+  pageStops: boolean;
   startWithHost: boolean;
   /** A TERMINAL owns this rule's forward (`modules/forwards/hostOwned.ts`).
-   *  Its own field and not folded into `running`, because the two describe
+   *  Its own field and not folded into `pageStops`, because the two describe
    *  different owners and only one of them is stopped by this delete - which is
    *  the whole of the sentence below. */
   hostOwned: boolean;
@@ -328,6 +355,12 @@ export type DeleteNoteSubject = {
  * running rule and a rule that starts with its host each have something
  * specific and true to say, and neither fact implies the other.
  *
+ * THREE SENTENCES AND NOT FOUR: a rule the page is still DIALLING gets the
+ * same "stopping it first is not required" sentence a running one does, rather
+ * than an arm of its own. That is a claim about what the confirm DOES, and it
+ * does the same thing to both - see {@link DeleteNoteSubject.pageStops}, which
+ * is the one field carrying that fact.
+ *
  * `hostOwned` FIRST, the same precedence order `page/RuleCard.tsx`'s header
  * states and for the same reason: the two maps are kept exclusive by checks
  * rather than by construction, and if they ever both said yes, the sentence
@@ -340,7 +373,7 @@ export type DeleteNoteSubject = {
 export function deleteNote(subject: DeleteNoteSubject): string {
   const runningNote = subject.hostOwned
     ? "Deleting the rule does not stop its forward — that one dies with the terminal tab that opened it."
-    : subject.running
+    : subject.pageStops
       ? "Stopping it first is not required — deleting a running rule stops it."
       : null;
   const startNote = subject.startWithHost
@@ -350,9 +383,11 @@ export function deleteNote(subject: DeleteNoteSubject): string {
   if (runningNote && startNote) return `${runningNote} ${startNote}`;
   if (runningNote) return runningNote;
   if (startNote) return startNote;
-  // Neither running nor starting with its host: deleting it changes nothing
-  // else. Said outright rather than omitted - a blank space where the other
-  // three cases all say something reads as an unfinished dialog, not as
-  // "nothing to see", the same reasoning vault's own fallback arm gives.
+  // No forward to stop on either side, and no autostart to lose: deleting it
+  // changes nothing else. Said outright rather than omitted - a blank space
+  // where the other three cases all say something reads as an unfinished
+  // dialog, not as "nothing to see", the same reasoning vault's own fallback
+  // arm gives. This arm is where a `pageStops` that had stayed narrow would
+  // land a mid-dial rule, which is why that field's own doc is the long one.
   return "Deleting it changes nothing else.";
 }

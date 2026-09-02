@@ -268,6 +268,29 @@ export async function startRule(
  * with re-creating a rule on the same pinned port then failing EADDRINUSE and
  * no in-app recovery.
  *
+ * `"starting"` COUNTS, AND NOT ONLY `"running"`. Reading live closes the
+ * ordering where the dial resolves BETWEEN the trash click and the confirm
+ * click; it leaves open the one where it resolves AFTER the confirm, which is
+ * the same two clicks with a faster second one or a slower connect (and neither
+ * the trash nor the Edit button is disabled while the row dials - only the
+ * toggle is). On that ordering a `running`-only guard says no, the caller
+ * removes or rewrites the record, nothing clears {@link startAttempts}, and the
+ * dial that lands afterwards is still the CURRENT attempt: `markRunning` runs
+ * for a rule no row can render, and every cost the paragraph above names is
+ * back.
+ *
+ * `"failed"` AND `"stopped"` MUST STAY OUT. `markFailed` only ever runs when
+ * the open REJECTED, and neither it nor `markStopped` retains a claim
+ * (`runtime.ts`'s note on the reset), so there is nothing for a Stop to spend
+ * and a Stop nobody asked for is what including them would buy.
+ *
+ * INCLUDING `"starting"` IS SAFE AND NOT MERELY DIFFERENT, which is the half
+ * worth writing down: `stopRule` deletes the attempt Set and abandons the
+ * host-key questions, so the dial that resolves next finds itself superseded
+ * (`:182-196`) and hands the reference it just took straight back. One close,
+ * the row `stopped`, no claim retained - the same release path a Stop clicked
+ * mid-dial has always taken.
+ *
  * `getState()` and not a selector, for the reason this file's header gives:
  * every caller is an event handler and not a render. The two owners are read in
  * the SAME ORDER `page/RuleCard.tsx`'s header states for all nine of its own
@@ -286,7 +309,8 @@ export async function startRule(
  */
 export function pageMustStopFirst(ruleId: string): boolean {
   if (useHostOwnedForwards.getState().byRule[ruleId] !== undefined) return false;
-  return useForwardRuntime.getState().byRule[ruleId]?.status === "running";
+  const status = useForwardRuntime.getState().byRule[ruleId]?.status;
+  return status === "running" || status === "starting";
 }
 
 /**

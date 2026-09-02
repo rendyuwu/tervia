@@ -657,11 +657,24 @@ console.log("\n[9] stopNote: exact two-sentence copy");
   );
 }
 
-// --- 10. deleteNote: running/startWithHost/hostOwned, all eight (D8) --------
+// --- 10. deleteNote: pageStops/startWithHost/hostOwned, all eight (D8) ------
 
 console.log(
-  "\n[10] deleteNote: running, startWithHost and hostOwned are independent facts; hostOwned takes precedence over running",
+  "\n[10] deleteNote: pageStops, startWithHost and hostOwned are independent facts; hostOwned takes precedence over pageStops",
 );
+// `pageStops` AND NOT `running`, moved with the field. It means "this delete
+// stops a forward the PAGE holds", which is `running` OR still mid-dial as
+// `starting` - `DeleteNoteSubject.pageStops` carries the reasoning, and the
+// short version is that the trash button is not disabled while a row dials, so
+// a mid-dial delete is an ordinary sequence and the confirm DOES stop that
+// bind (`pageMustStopFirst` answers `true` for `starting`).
+//
+// WHAT THIS SECTION CAN AND CANNOT SEE, said here so the next reader does not
+// assume the wider half is covered by these eight cells. `deleteNote` is a pure
+// function of an already-decided boolean, so the WIDENING itself - `RuleCard`
+// computing `running || starting` rather than `running` - is invisible from
+// here whatever this table says. That half is pinned at its own binding in
+// `forwards-shell-verify.ts`'s section 11.
 {
   const STOPPING = "Stopping it first is not required — deleting a running rule stops it.";
   const HOST_OWNED =
@@ -670,7 +683,7 @@ console.log(
   const FALLBACK = "Deleting it changes nothing else.";
 
   const subject = (over: Partial<DeleteNoteSubject> = {}): DeleteNoteSubject => ({
-    running: false,
+    pageStops: false,
     startWithHost: false,
     hostOwned: false,
     ...over,
@@ -679,26 +692,30 @@ console.log(
   // ALL EIGHT COMBINATIONS, exhaustively rather than the four the two-flag
   // version needed - three independent booleans, and the interesting cell is
   // the one where two of them are true at once.
-  const runningOnly = subject({ running: true });
+  const pageStopsOnly = subject({ pageStops: true });
   const startOnly = subject({ startWithHost: true });
-  const both = subject({ running: true, startWithHost: true });
+  const both = subject({ pageStops: true, startWithHost: true });
   const neither = subject();
   const hostOwnedOnly = subject({ hostOwned: true });
   const hostOwnedAndStart = subject({ hostOwned: true, startWithHost: true });
-  const hostOwnedAndRunning = subject({ hostOwned: true, running: true });
-  const allThree = subject({ hostOwned: true, running: true, startWithHost: true });
+  const hostOwnedAndPageStops = subject({ hostOwned: true, pageStops: true });
+  const allThree = subject({ hostOwned: true, pageStops: true, startWithHost: true });
 
   check(
-    "running, does not start with host: the stopping sentence alone",
-    deleteNote(runningOnly),
+    "the page stops it, does not start with host: the stopping sentence alone",
+    deleteNote(pageStopsOnly),
     STOPPING,
   );
   check(
-    "not running, starts with host: the start-with-host sentence alone",
+    "no forward to stop, starts with host: the start-with-host sentence alone",
     deleteNote(startOnly),
     START,
   );
-  check("running AND starts with host: both sentences", deleteNote(both), `${STOPPING} ${START}`);
+  check(
+    "the page stops it AND it starts with host: both sentences",
+    deleteNote(both),
+    `${STOPPING} ${START}`,
+  );
   check("neither: the fallback sentence", deleteNote(neither), FALLBACK);
 
   // THE NEW ARM. `store.ts`'s `deleteRule` is a pure persistence filter and
@@ -728,8 +745,8 @@ console.log(
   // on - the same `hostOwned`-first order `page/RuleCard.tsx` applies at all
   // nine of its own sites.
   check(
-    "terminal-owned AND page-running: the terminal sentence wins, never the stop promise",
-    deleteNote(hostOwnedAndRunning),
+    "terminal-owned AND the page would stop it: the terminal sentence wins, never the stop promise",
+    deleteNote(hostOwnedAndPageStops),
     HOST_OWNED,
   );
   check(
@@ -738,18 +755,18 @@ console.log(
     `${HOST_OWNED} ${START}`,
   );
 
-  // D8: the running/not-running pair must differ. A `deleteNote` that
-  // branched on `startWithHost` alone (or ignored `running` altogether) would
-  // return byte-identical text for `runningOnly` and `neither` here.
+  // D8: the stops-it/does-not pair must differ. A `deleteNote` that branched on
+  // `startWithHost` alone (or ignored `pageStops` altogether) would return
+  // byte-identical text for `pageStopsOnly` and `neither` here.
   ok(
-    "the running and not-running sentences are NOT the same text",
-    deleteNote(runningOnly) !== deleteNote(neither),
+    "the stops-it and nothing-to-stop sentences are NOT the same text",
+    deleteNote(pageStopsOnly) !== deleteNote(neither),
   );
   // And the same claim for the new flag, which is the mutation "drop the
   // hostOwned arm" - it collapses this pair onto one sentence.
   ok(
-    "the terminal-owned and page-running sentences are NOT the same text",
-    deleteNote(hostOwnedOnly) !== deleteNote(runningOnly),
+    "the terminal-owned and page-stops-it sentences are NOT the same text",
+    deleteNote(hostOwnedOnly) !== deleteNote(pageStopsOnly),
   );
   ok(
     "nor is the terminal-owned sentence the fallback",
@@ -761,13 +778,13 @@ console.log(
   // module's own header), so this is a copy check, not a security claim
   // check, but the same two needles are run over every string anyway.
   const everyNote = [
-    runningOnly,
+    pageStopsOnly,
     startOnly,
     both,
     neither,
     hostOwnedOnly,
     hostOwnedAndStart,
-    hostOwnedAndRunning,
+    hostOwnedAndPageStops,
     allThree,
   ].map((s) => deleteNote(s));
   for (const note of everyNote) {
@@ -869,13 +886,15 @@ process.exit(failed === 0 ? 0 : 1);
 //           `localPort >= 1` to `localPort >= 0`
 //   D7    ruleMatchTier: `localPort.startsWith(query) ||`    section 3's tier-2-outranks
 //           inserted ahead of the substring tier                -every-port-match check
-//   D8    deleteNote: `subject.running` read replaced        section 10's running-vs-
-//           with `false` (the sentence never fires)             not-running inequality
-//                                                                check
+//   D8    deleteNote: `subject.pageStops` read replaced      section 10's stops-it-vs-
+//           with `false` (the sentence never fires)             nothing-to-stop
+//           [`subject.running` when D8 was run - the            inequality check
+//           field was renamed in round 5]
 //   Y5    deleteNote's hostOwned arm collapsed into         section 10's four
-//           `subject.running || subject.hostOwned`, both        hostOwned sentences AND
-//           arms taking the stopping sentence - the             the hostOwned-vs-running
-//           false promise this round removed                    inequality (5 checks)
+//           `subject.pageStops || subject.hostOwned`, both      hostOwned sentences AND
+//           arms taking the stopping sentence - the             the hostOwned-vs-
+//           false promise that round removed                    page-stops-it inequality
+//                                                                (5 checks)
 //   Y12   ruleRows: hostDangling back to                    section 1's empty-host-map
 //           `host === undefined`, `hostsKnown` dropped          pre-load check ONLY -
 //                                                                the paired positive and
@@ -884,3 +903,17 @@ process.exit(failed === 0 ? 0 : 1);
 //                                                                what having them is for
 //                                                                (the fix is not an
 //                                                                off-switch)
+//   W6b   deleteNote's `subject.pageStops` read replaced   section 10's three
+//           with `false` - "drop the starting arm", as        page-stops-it checks
+//           far as this file can express it (fp 76/79)
+//   W6a   the WIDENING dropped instead, at its only        GREEN HERE, and that is the
+//           definition: `RuleCard.tsx`'s                     finding rather than the
+//           `const pageStops = running || starting;`         check. This file sees an
+//           narrowed to `running`                            already-decided boolean, so
+//                                                                no fixture over
+//                                                                `deleteNote` can reach the
+//                                                                caller that decides it.
+//                                                                Pinned at the binding in
+//                                                                forwards-shell-verify.ts's
+//                                                                section 11, which reddens
+//                                                                at 227/228.

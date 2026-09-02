@@ -202,7 +202,17 @@ export function RuleEditorDialog({ target, onClose, hosts }: RuleEditorDialogPro
       // `pageMustStopFirst` reads BOTH owners live (`../controller`): a
       // forward a terminal opened is not this dialog's to stop, and the
       // page's own status has to be read now rather than when the form
-      // loaded.
+      // loaded. It answers `true` for a row still DIALLING as well as for a
+      // running one, so a Save landed mid-dial stops that bind instead of
+      // leaving the resolving open to publish itself under a key the write has
+      // already invalidated - its own doc carries that argument.
+      //
+      // AND IF THE WRITE BELOW THROWS, the rule is left stopped with its
+      // record unchanged and the message the catch shows says nothing about
+      // it: reachable only on the host-deleted-in-another-window case `:215-221`
+      // describes, recoverable with one Start click on the row, and the
+      // alternative is holding the stop until after a write whose whole point
+      // is that it invalidates the key that stop needs.
       if (existing && pageMustStopFirst(existing.id)) await stopRule(existing);
       // `ruleRecordFrom(id, draft)` is handed to `upsertRule` UNMODIFIED - no
       // spread, no override, no second call to it anywhere else in this

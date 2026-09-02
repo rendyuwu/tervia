@@ -1583,6 +1583,73 @@ console.log("\n[8. ssh-session.ts] the call site, and the two releases");
       }
     }
   }
+
+  // THE FLAG'S WHOLE ASSIGNMENT SET, which is the family every check above is
+  // blind to. The call-site pin closes the GUARD family - a wrapper around the
+  // `void startHostForwards(...)` statement - and this is the FLAG family,
+  // which reaches the same result without touching that statement at all.
+  //
+  // Measured: `sessionEnded = true;` inserted immediately ABOVE the call site
+  // leaves the statement unconditional, a direct top-level statement of
+  // `openSshForSession`'s own body, `stmt.expression === outer`, above the last
+  // exit, with the argument node's text byte-identical - 238/202/79/36 ok,
+  // `tsc --noEmit` and `prettier --check` green - while `stillLive()` answers
+  // `false` for the whole run and terminal autostart is INERT FOR EVERY RULE.
+  // Not closable behaviourally either: this file's import graph reaches
+  // `@xterm/xterm` and `@tauri-apps/plugin-os`, so it cannot be imported here.
+  //
+  // So the honest form is a claim about WHERE THE FLAG MAY BE WRITTEN - the two
+  // release sites and nowhere else - plus what it starts out as. A third
+  // assignment is what the mutation needs, and it is also exactly the kind of
+  // edit that deserves an argument rather than a green suite.
+  //
+  // ASSIGNMENT TARGETS OFF THE AST, never a substring: `stillLive: () =>
+  // !sessionEnded` is a READ of the same name and must not count, and the
+  // `let` DECLARATION is deliberately not in the set either - it is pinned
+  // separately below, because `let sessionEnded = true;` is the same defect in
+  // a different spelling.
+  const sessionEndedWrites: ts.BinaryExpression[] = [];
+  const visitWrites = (n: ts.Node): void => {
+    if (
+      ts.isBinaryExpression(n) &&
+      ts.isIdentifier(n.left) &&
+      n.left.text === "sessionEnded" &&
+      n.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
+      n.operatorToken.kind <= ts.SyntaxKind.LastAssignment
+    ) {
+      sessionEndedWrites.push(n);
+    }
+    ts.forEachChild(n, visitWrites);
+  };
+  visitWrites(sf);
+  check("sessionEnded is assigned in EXACTLY two places", sessionEndedWrites.length, 2);
+  const declaration = findConstInitializer(sf, "sessionEnded");
+  check(
+    "and it starts out `false` - a declaration initialised true is the same inert feature in one fewer statement",
+    declaration === null ? null : norm((declaration as ts.Expression).getText(sf)),
+    "false",
+  );
+  /** Is `n` inside `container`'s own span? Span containment rather than a
+   *  parent walk, because the two containers here are an arrow's initializer
+   *  and an object member's value, which have no common ancestor kind. */
+  const inside = (n: ts.Node, container: ts.Node | null): boolean =>
+    container !== null &&
+    n.getStart(sf) >= container.getStart(sf) &&
+    n.getEnd() <= container.getEnd();
+  assert(
+    sessionEndedWrites.length > 0 &&
+      sessionEndedWrites.every(
+        (w) => inside(w, finishSsh as ts.Expression | null) || inside(w, closeValue),
+      ),
+    "and every one of them is a RELEASE SITE - finishSsh, or the PtySession adapter's close - so nothing between the declaration and the autostart call site can pre-set the flag and leave the feature inert for every rule",
+    sessionEndedWrites.map((w) => norm(w.getText(sf))),
+  );
+  assert(
+    sessionEndedWrites.some((w) => inside(w, finishSsh as ts.Expression | null)) &&
+      sessionEndedWrites.some((w) => inside(w, closeValue)),
+    "ONE IN EACH, not two in one - a release site that stopped setting it leaves the endings it handles able to claim after the session is gone",
+    sessionEndedWrites.map((w) => norm(w.getText(sf))),
+  );
 }
 
 // ===========================================================================
@@ -1792,18 +1859,25 @@ console.log("\n[9. RuleCard.tsx] the read-only row a terminal-owned forward gets
   }
 
   // `onDelete` passes BOTH flags, as two arguments and not one folded into the
-  // other. `running` stays strictly the PAGE's notion: it feeds `deleteNote`,
-  // whose "deleting a running rule stops it" sentence is true only of a rule
-  // this page can stop (and true at all only because `ForwardsPage.tsx`'s
-  // `confirmDelete` stops it first). `hostOwned` rides alongside because the
-  // dialog has its own, different sentence for a terminal-owned rule - the one
-  // that says deleting the record does NOT stop that forward. Folding them into
-  // `running || hostOwned` is the mutation this pins: the dialog would then
+  // other. `pageStops` is strictly the PAGE's own ownership - `running` or
+  // still mid-dial as `starting`: it feeds `deleteNote`, whose "deleting a
+  // running rule stops it" sentence is true only of a rule this page can stop
+  // (and true at all only because `ForwardsPage.tsx`'s `confirmDelete` stops it
+  // first). `hostOwned` rides alongside because the dialog has its own,
+  // different sentence for a terminal-owned rule - the one that says deleting
+  // the record does NOT stop that forward. Folding them into
+  // `pageStops || hostOwned` is the mutation this pins: the dialog would then
   // promise a stop it cannot perform, which is the false promise in a
   // destructive confirm this round exists to remove.
+  //
+  // THIS IS THE `hostOwned`-IS-NOT-FOLDED-IN CLAIM AND NOTHING WIDER, which is
+  // all a substring can carry: it says the two names appear in that order in
+  // CODE. What `pageStops` is DEFINED as - and that an alias or a rebind has
+  // not quietly narrowed it back to `running` - is pinned off the AST at its
+  // own binding, in `forwards-shell-verify.ts`'s section 11.
   assert(
-    ruleCardStripped.includes("onDelete(running, hostOwned)"),
-    "onDelete passes the PAGE's notion of running AND hostOwned, as two separate arguments",
+    ruleCardStripped.includes("onDelete(pageStops, hostOwned)"),
+    "onDelete passes the PAGE's own ownership flag AND hostOwned, as two separate arguments",
   );
 }
 
@@ -2646,4 +2720,34 @@ console.log("\nforward-autostart-verify: OK\n");
 //                                                          is the original that copy
 //                                                          was taken from, so a rename
 //                                                          breaks both.
+//
+//   Round 5 - the flag family the call-site pin could not see
+//   ----  -------------------------------------------      ----------------------------
+//   W4    ssh-session.ts: `sessionEnded = true;`         RED, fa 240/242 - the new
+//           inserted immediately ABOVE the                 two-assignment count and
+//           `void startHostForwards(...)` statement        the release-site
+//                                                          membership assert. Every
+//                                                          check the call-site pin
+//                                                          makes still passed: the
+//                                                          statement is unconditional,
+//                                                          a direct top-level statement
+//                                                          of the body, `stmt.expression
+//                                                          === outer`, above the last
+//                                                          exit, argument text
+//                                                          byte-identical. tsc green,
+//                                                          and autostart inert for
+//                                                          EVERY rule.
+//   W4b   the same defect in one fewer statement:        RED, fa 241/242 - the
+//           `let sessionEnded = true;` at the              declaration assert alone.
+//           declaration                                    The count stays at 2, so
+//                                                          this is the paired mutation
+//                                                          that arm needs.
+//   W5    this file's own classifier tightened (its      GREEN HERE at 242, RED in
+//           prefix-unary arm deleted)                      forwards-shell at 227/228.
+//                                                          The drift is invisible from
+//                                                          inside the file that drifted
+//                                                          - which is the finding, and
+//                                                          the reason the equality
+//                                                          assert lives one file over.
+//   W7    a legal Prettier reflow at --print-width 60   GREEN, fa 242 with tsc clean.
 // ----------------------------------------------------------------------------

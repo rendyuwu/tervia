@@ -254,6 +254,99 @@ function isDirectlyInFunctionBody(node: ts.Node, fnBody: ts.Node): boolean {
   return cur === fnBody;
 }
 
+/** The source text of `const <name> = <expr>`'s initializer, or `null`. Pins a
+ *  derived flag at ITS OWN DEFINITION - a check on the identifier handed to a
+ *  callback is defeated by an alias (`const pageStops = running;`), which is
+ *  the rebind trap §4's trap list names. */
+function findConstInitializerText(root: ts.Node, name: string, sf: ts.SourceFile): string | null {
+  let result: string | null = null;
+  const visit = (n: ts.Node): void => {
+    if (
+      ts.isVariableDeclaration(n) &&
+      ts.isIdentifier(n.name) &&
+      n.name.text === name &&
+      n.initializer
+    ) {
+      result = n.initializer.getText(sf);
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(root);
+  return result;
+}
+
+/** The property names of `type <name> = { … }`, or `null` when there is no such
+ *  alias with an object-literal type. Used to keep an AST negative over
+ *  `x.<field>` from going vacuous when `<field>` is renamed away. */
+function findTypeAliasMembers(root: ts.Node, name: string, sf: ts.SourceFile): string[] | null {
+  let result: string[] | null = null;
+  const visit = (n: ts.Node): void => {
+    if (ts.isTypeAliasDeclaration(n) && n.name.text === name && ts.isTypeLiteralNode(n.type)) {
+      result = n.type.members.filter(ts.isPropertySignature).map((m) => m.name.getText(sf));
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(root);
+  return result;
+}
+
+/**
+ * Walking out from `stmt`, does anything DECIDE whether it runs before the
+ * enclosing function's own body is reached? `true` only when every step out is
+ * an unconditional one - a plain block, or a `try`'s own `tryBlock` - so an
+ * `if`, `switch`, loop or `catch` anywhere on that path answers `false`.
+ *
+ * Transplanted from `forward-autostart-verify.ts:1342-1348`'s
+ * `stmt.parent === body`, with the one extra hop this file's two call sites
+ * need: each guarded stop is a direct statement of its function's own `try`, so
+ * a bare parent comparison against the function body is `false` for the code as
+ * written. Self-terminating on the nearest function so neither caller has to
+ * hand it a body - the `if` at `ForwardsPage.tsx`'s confirm sits inside an
+ * async IIFE, not inside the `useCallback` factory.
+ *
+ * WHY IT IS NEEDED BESIDE {@link isDirectlyInFunctionBody}, which is the
+ * distinction the comment on section 12's use of that helper used to blur:
+ * that one refuses NESTING inside another function and nothing else - its own
+ * docstring says so - and neither a count, an index order, an awaited parent
+ * nor an exact-condition pin can see a wrapper. Measured against round 4:
+ *
+ *   // ForwardsPage.tsx        if (target.rule.id === "") {
+ *   // RuleEditorDialog.tsx    if (id === "") {
+ *
+ * around either guarded stop left all four scripts, `tsc --noEmit` and
+ * `prettier --check` green with the stop unreachable for every rule. Everything
+ * else survives by construction: the count stays 1, the index order holds,
+ * `ts.isAwaitExpression(stop.parent)` holds, the argument node is unchanged, and
+ * `enclosingIf` walks to the NEAREST `if`, so the exact-condition pin still
+ * matches the inner one.
+ */
+function isUnguardedToItsFunctionBody(stmt: ts.Statement): boolean {
+  let cur: ts.Node = stmt;
+  for (;;) {
+    const block: ts.Node | undefined = cur.parent;
+    // Not a block at all means a braceless `if (x) <stmt>` / `for (…) <stmt>`,
+    // which is a guard written without the braces.
+    if (block === undefined || !ts.isBlock(block)) return false;
+    const owner: ts.Node | undefined = block.parent;
+    if (owner === undefined) return false;
+    if (
+      ts.isFunctionDeclaration(owner) ||
+      ts.isFunctionExpression(owner) ||
+      ts.isArrowFunction(owner) ||
+      ts.isMethodDeclaration(owner)
+    ) {
+      return true;
+    }
+    // A `try` runs its own block unconditionally; `catch` and `finally` do not,
+    // so only `tryBlock` continues the walk.
+    if (ts.isTryStatement(owner) && owner.tryBlock === block) {
+      cur = owner;
+      continue;
+    }
+    return false;
+  }
+}
+
 /** The arrow function's own returned expression: the concise body directly,
  *  or a block body's single `return <expr>;` statement's expression. `null`
  *  for anything else (multi-statement blocks, no return) - every selector in
@@ -448,6 +541,34 @@ function primitiveSelectorBody(
     ok: false,
     why: `${ts.SyntaxKind[cur.kind]} \`${norm(cur.getText(sf)).slice(0, 60)}\` is not a shape that can only yield a primitive`,
   };
+}
+
+// AND THE TWO COPIES STILL AGREE, said as a check rather than as the paragraph
+// above's promise. Both are live and both guard a store every row reads, so a
+// tightening applied to one alone leaves the other passing what its twin now
+// refuses - which is how the polarity hole above survived in the first place,
+// one script ahead of the other. Compared as CODE: both files are
+// comment-stripped first (the two copies' comments differ deliberately, each
+// naming its own store) and whitespace-normalised after, so a legal reformat of
+// either is invisible here. VLT-33's extraction into a shared module is the real
+// remedy and is not this round's; until then this is what makes "cannot silently
+// diverge" true.
+{
+  const twin = "scripts/forward-autostart-verify.ts";
+  const bodyOf = (fileSrc: string, rel: string, name: string): string | null => {
+    const sf = ts.createSourceFile(rel, stripComments(fileSrc), ts.ScriptTarget.ESNext, true);
+    const found = findFunctionBody(sf, name);
+    return found === null ? null : norm(found.getText(sf));
+  };
+  for (const name of ["selectorParamName", "primitiveSelectorBody"]) {
+    const mine = bodyOf(read("scripts/forwards-shell-verify.ts"), "self", name);
+    const theirs = bodyOf(read(twin), twin, name);
+    check(
+      `${name}'s body is byte-identical (comments aside) to ${twin}'s copy`,
+      mine !== null && theirs !== null && mine === theirs,
+      { mine: mine?.slice(0, 80), theirs: theirs?.slice(0, 80) },
+    );
+  }
 }
 
 // The allow-list's own self-test, over SYNTHETIC selectors, so its verdicts are
@@ -1119,31 +1240,58 @@ console.log(
           norm(guard.expression.getText(sf)) === norm("pageMustStopFirst(target.rule.id)"),
         guard === null ? undefined : guard.expression.getText(sf),
       );
+      // AND THAT IF IS THE ONLY THING DECIDING IT. `enclosingIf` walks to the
+      // NEAREST `if`, so every check above still matches with the whole guarded
+      // statement wrapped in a second, runtime-false one - measured green at
+      // this exact site. See {@link isUnguardedToItsFunctionBody}.
+      check(
+        "and nothing above it decides whether it runs - the guarded stop is unconditional within its own function, so a runtime-false wrapper cannot make it dead code",
+        guard !== null && isUnguardedToItsFunctionBody(guard),
+        guard === null ? undefined : ts.SyntaxKind[guard.parent.kind],
+      );
     }
-    // AND THE CAPTURED FLAGS ARE NOT CONSULTED HERE AT ALL. `target.running`
+    // AND THE CAPTURED FLAGS ARE NOT CONSULTED HERE AT ALL. `target.pageStops`
     // and `target.hostOwned` are the dialog's copy of what the user was TOLD
     // (`deleteNote`, in the JSX below), and reading either one to decide
     // whether to stop is the P0 this round fixed - the row is `starting` for the
     // whole dial and the Delete button is not disabled during it, so the
     // ordinary ordering has the dial resolving before the confirm click.
     //
+    // `pageStops` AND NOT `running`, moved with the field it names. A needle
+    // left on the old name is a negative that can never fire again, which is
+    // strictly worse than no check: it reads as covering the captured half
+    // while the field it watches no longer exists.
+    //
     // Read off the AST rather than as a substring, deliberately: the code's own
-    // comment there NAMES `target.running` in order to say it must not be used,
-    // and a raw-text negative would fail on the sentence documenting the rule.
-    // A comment is not a `PropertyAccessExpression`.
+    // comment there NAMES `target.pageStops` in order to say it must not be
+    // used, and a raw-text negative would fail on the sentence documenting the
+    // rule. A comment is not a `PropertyAccessExpression`.
     const capturedReads: string[] = [];
     const visitReads = (n: ts.Node): void => {
       if (ts.isPropertyAccessExpression(n)) {
         const t = norm(n.getText(sf));
-        if (t === "target.running" || t === "target.hostOwned") capturedReads.push(t);
+        if (t === "target.pageStops" || t === "target.hostOwned") capturedReads.push(t);
       }
       ts.forEachChild(n, visitReads);
     };
     visitReads(confirmDelete);
     check(
-      "confirmDelete reads NEITHER captured flag (AST, so its own comment naming target.running does not count)",
+      "confirmDelete reads NEITHER captured flag (AST, so its own comment naming target.pageStops does not count)",
       capturedReads.length === 0,
       capturedReads,
+    );
+    // AND THE FIELD IT WOULD READ EXISTS UNDER THAT NAME. The negative above is
+    // vacuous for any name `PendingDelete` does not carry, and a rename is
+    // exactly what makes a negative vacuous without reddening anything - so the
+    // positive that keeps it honest is pinned here, off the type declaration
+    // itself rather than off a use of it.
+    const pendingDelete = findTypeAliasMembers(sf, "PendingDelete", sf);
+    check(
+      "PendingDelete still carries `pageStops` and `hostOwned`, so the negative above is watching fields that exist",
+      pendingDelete !== null &&
+        pendingDelete.includes("pageStops") &&
+        pendingDelete.includes("hostOwned"),
+      pendingDelete,
     );
   }
   // NO RECONCILER, said as a check rather than as prose. `stopRule` has exactly
@@ -1190,6 +1338,64 @@ console.log(
       JSON.stringify(["/src/modules/forwards/page/RuleCard.tsx"]),
     callersOf("startRule("),
   );
+  // THE CAPTURED FLAG'S OWN DEFINITION, in the row that hands it over - the
+  // other half of the claim the live read above makes, and nothing pinned it.
+  // `RuleCard` computes what the CONFIRM DIALOG IS TOLD, so a definition
+  // narrower than `pageMustStopFirst`'s own status set is a destructive confirm
+  // reading "Deleting it changes nothing else." over a bind it is about to
+  // close. `deleteNote` is a pure function of its argument, so no fixture in
+  // `forwards-page-verify.ts` can see this: that script only ever sees the
+  // boolean already decided.
+  //
+  // PINNED AT THE BINDING AND COMPARED WHOLE. `onDelete(running, hostOwned)`
+  // and `onDelete(pageStops, hostOwned)` both satisfy a needle for `onDelete(`,
+  // and pinning the ARGUMENT NAME alone is defeated by an alias
+  // (`const pageStops = running;`) - so the argument list and the initializer
+  // of each binding it is built from are read off the AST and compared whole.
+  // Whitespace-normalised, and only whitespace: that part is Prettier's, the
+  // rest is the claim.
+  {
+    const cardSf = ts.createSourceFile(
+      FILES.ruleCard,
+      stripComments(src.ruleCard),
+      ts.ScriptTarget.ESNext,
+      true,
+      ts.ScriptKind.TSX,
+    );
+    const onDeleteCalls = findCallsTo(cardSf, "onDelete", cardSf);
+    check(
+      "RuleCard.tsx calls onDelete( exactly once - the row's trash button",
+      onDeleteCalls.length === 1,
+      onDeleteCalls.length,
+    );
+    const onDelete = onDeleteCalls[0];
+    check(
+      "and it hands over EXACTLY `pageStops, hostOwned` - both owners, hostOwned second to match the prop",
+      onDelete !== undefined &&
+        norm(onDelete.arguments.map((a) => a.getText(cardSf)).join(",")) ===
+          norm("pageStops,hostOwned"),
+      onDelete?.arguments.map((a) => a.getText(cardSf)),
+    );
+    const bindings: Array<[string, string]> = [
+      // THE WIDENING ITSELF. Narrowed back to `running`, the dialog's sentence
+      // is false for every rule the user deletes mid-dial - and every other
+      // check in this file, all four scripts, `tsc` and `prettier` stay green,
+      // because the flag is only ever read by a sentence.
+      ["pageStops", "running || starting"],
+      // The two it is built from, so `pageStops` cannot be re-rooted onto
+      // something that merely reads the same today.
+      ["running", 'status === "running"'],
+      ["starting", 'status === "starting"'],
+    ];
+    for (const [name, want] of bindings) {
+      const initializer = findConstInitializerText(cardSf, name, cardSf);
+      check(
+        `and \`${name}\` is EXACTLY \`${want}\` at its own binding`,
+        initializer !== null && norm(initializer) === norm(want),
+        initializer,
+      );
+    }
+  }
   // And the live-read helper both record-changing paths go through, swept the
   // same way: a fourth reader of it is a fourth place that removes or rewrites
   // the record under a live forward.
@@ -1281,10 +1487,28 @@ console.log(
       // `upsertRule` statement: a deletion whose decoy re-adds the guarded stop
       // inside a nested arrow keeps every count and every index above intact
       // and never runs.
+      //
+      // WHAT THIS ONE ESTABLISHES AND WHAT IT DOES NOT. It refuses NESTING
+      // INSIDE ANOTHER FUNCTION - the deletion-with-a-decoy family - and that
+      // is all; `isDirectlyInFunctionBody`'s own docstring says "tests
+      // NESTING". The previous version of this comment claimed it closed the
+      // decoy family full stop, which is the kind of overclaiming label that
+      // stops the next reader looking: a runtime-false STATEMENT wrapper is
+      // nesting-free, so this check passes over it. The assertion below is the
+      // one that refuses that.
       check(
         "and the guarded stop is a DIRECT statement of save's own body, not nested in a decoy",
         guard !== null && isDirectlyInFunctionBody(guard, saveBody),
         guard === null ? undefined : guard.getText(sf).slice(0, 80),
+      );
+      // THE WRAPPER FAMILY, transplanted from `forward-autostart-verify.ts`'s
+      // own call-site pin. Measured green at this exact site with the guarded
+      // stop wrapped in `if (id === "") { … }` - `save` then never stops
+      // anything, and the editor's whole half of the leak is back.
+      check(
+        "and nothing above it decides whether it runs - the guarded stop is unconditional within save, so a runtime-false wrapper cannot make it dead code",
+        guard !== null && isUnguardedToItsFunctionBody(guard),
+        guard === null ? undefined : ts.SyntaxKind[guard.parent.kind],
       );
     }
   }
@@ -1997,13 +2221,24 @@ console.log(
 // both gate on. Driven against the REAL `useForwardRuntime` and
 // `useHostOwnedForwards` rather than a table of booleans, which is what also
 // pins WHICH KEYS it reads: a version consulting `boundPort`, or the wrong
-// store, or `"starting"`, disagrees with a row of this table.
+// store, disagrees with a row of this table.
+//
+// THE STATUS SET IS THE CLAIM, and the sentence here used to have it backwards:
+// `"starting"` must answer `true` and a version consulting `"running"` ALONE is
+// what disagrees with a row of this table. That inversion is not a typo with no
+// consequence - the row below asserted `want: false` for `starting`, so this
+// table certified the defect G1/G2 measure as correct behaviour. `"failed"` and
+// `"stopped"` stay `false`, and those two rows are what stop the fix from being
+// "answer true for anything that is not stopped": `markFailed` only runs when
+// the open rejected and neither it nor `markStopped` retains a claim, so there
+// is nothing for a Stop to spend.
 //
 // Why it exists at all, rather than the flag `RuleCard` hands over: that flag
 // is captured when the trash icon is clicked, the row is on screen as
-// `starting` for the whole dial, and the Delete button is not disabled during
-// it - so the ordinary ordering has the dial resolving before the confirm
-// click. C12 drives exactly that sequence.
+// `starting` for the whole dial, and neither the trash nor the Edit button is
+// disabled during it - so BOTH orderings of the same two clicks are ordinary.
+// The dial resolving BEFORE the confirm is C12; the dial resolving AFTER it is
+// G1, and only the `starting` row of this table separates them.
 /** `runtime.ts`'s own `ForwardStatus`, read off the store's state type rather
  *  than imported - this file reaches every module under test through the
  *  dynamic imports above, because the Tauri stand-in has to be installed
@@ -2016,7 +2251,10 @@ type ForwardStatusType = NonNullable<
   const cases: Array<{ status?: ForwardStatusType; hostOwned: boolean; want: boolean }> = [
     { status: undefined, hostOwned: false, want: false },
     { status: "stopped", hostOwned: false, want: false },
-    { status: "starting", hostOwned: false, want: false },
+    // THE ROW THIS ROUND FLIPPED. A bind is in flight and the page owns it, so
+    // the record must not go until it has been stopped - G1 and G2 drive both
+    // callers on exactly this status.
+    { status: "starting", hostOwned: false, want: true },
     { status: "running", hostOwned: false, want: true },
     { status: "failed", hostOwned: false, want: false },
     // `hostOwned` FIRST, the one precedence order `RuleCard.tsx`'s header
@@ -2060,13 +2298,22 @@ console.log(
   "\n[C12] THE P0, driven end to end: a dial that resolves while the confirm dialog is up, stopped before the delete - and the same interleaving under the old guard, which releases nothing",
 );
 // The sequence, and none of it is unlucky timing: click Start (the row goes
-// `starting`), click Delete (`RuleCard.tsx:303` hands over `running: false`),
-// the dial resolves - connect, host key, bind, routinely 1-3 seconds, against a
-// confirm click that adds about a second - and only then is Delete rule
-// pressed. Under the old guard the record went away while `runtime.ts` kept an
-// entry naming a rule no row renders, `ssh/tunnel.ts`'s entry stayed at
-// `refs: 1` so the SSH session never closed again, and the local port stayed
-// bound with no in-app recovery.
+// `starting`), click Delete, the dial resolves - connect, host key, bind,
+// routinely 1-3 seconds, against a confirm click that adds about a second - and
+// only then is Delete rule pressed. Under the old guard the record went away
+// while `runtime.ts` kept an entry naming a rule no row renders,
+// `ssh/tunnel.ts`'s entry stayed at `refs: 1` so the SSH session never closed
+// again, and the local port stayed bound with no in-app recovery.
+//
+// `capturedRunning` BELOW IS THE NARROW FLAG, computed here as
+// `status === "running"` because that is what `RuleCard` handed over before
+// this round widened it to `pageStops` (`running || starting`) - so it is now a
+// historical control rather than a reading of today's row, and it is kept
+// because the claim it measures is not about that flag's width. THE CLAIM IS
+// THAT A CAPTURED FLAG IS A CLAIM ABOUT A MOMENT THAT HAS PASSED, which no
+// widening fixes: the guard has to be the live read whatever the row handed
+// over. G1 is the interleaving where the widened flag and the live read agree
+// and the OLD PREDICATE is what leaks.
 //
 // `confirmDelete` is a `useCallback` inside a component whose import graph
 // reaches React and Radix, so it is not drivable here; what IS drivable is
@@ -2080,12 +2327,12 @@ console.log(
   const starting = startRule(rule, FAKE_RUNTIME);
   await settle();
 
-  // THE DELETE CLICK. Exactly what `RuleCard`'s own selectors say at that
-  // moment, computed the way that file computes them.
+  // THE DELETE CLICK. The NARROW captured flag, computed the way `RuleCard`
+  // computed it before this round - see the note above on why it is kept.
   const capturedRunning = useForwardRuntime.getState().byRule["c12"]?.status === "running";
   const capturedHostOwned = useHostOwnedForwards.getState().byRule["c12"] !== undefined;
   check(
-    "C12: at Delete-click time the row is `starting`, so the captured flags say not-running and not-terminal-owned",
+    "C12: at Delete-click time the row is `starting`, so the NARROW captured flag says not-running and neither store reports a terminal owner",
     useForwardRuntime.getState().byRule["c12"]?.status === "starting" &&
       capturedRunning === false &&
       capturedHostOwned === false,
@@ -2109,7 +2356,7 @@ console.log(
     useForwardRuntime.getState().byRule["c12"],
   );
   check(
-    "C12: and the live guard DISAGREES with the captured flag, which is the whole defect in one line",
+    "C12: and the live guard DISAGREES with the narrow captured flag, which is the whole defect in one line",
     capturedRunning === false && pageMustStopFirst("c12") === true,
     { capturedRunning, live: pageMustStopFirst("c12") },
   );
@@ -2137,7 +2384,7 @@ console.log(
 {
   // THE OLD GUARD ON THE SAME INTERLEAVING, measured rather than argued - and
   // this is the control that makes the fixture above mean something. Identical
-  // steps; the only difference is that the guard is the captured flag.
+  // steps; the only difference is that the guard is the narrow captured flag.
   resetFakes();
   resetStores();
   const rule = fakeRule({ id: "c12b", localPort: 18080 });
@@ -2158,7 +2405,7 @@ console.log(
   resetCallLogs();
   if (capturedRunning) await stopRule(rule, FAKE_RUNTIME);
   check(
-    "C12: CONTROL - guarded on the captured flag, closeForward is called ZERO times",
+    "C12: CONTROL - guarded on the narrow captured flag, closeForward is called ZERO times",
     closeCalls.length === 0,
     closeCalls,
   );
@@ -2281,6 +2528,312 @@ console.log(
     "C13: CONTROL - a rule the page is NOT running is left alone by the same guard",
     pageMustStopFirst("c13") === false,
     pageMustStopFirst("c13"),
+  );
+}
+
+// ---------------------------------------------------------------------------
+console.log(
+  "\n[G1] DELETE CONFIRMED WHILE THE ROW IS STILL `starting` - the other ordering of C12's two clicks, and the one a `running`-only guard leaks",
+);
+// SAME TWO CLICKS AS C12, with a faster second one or a slower connect. C12 has
+// the dial resolving BETWEEN the trash click and the confirm click; this has it
+// resolving AFTER the confirm, and reading live closes only the first of the
+// two. The trash button carries no `disabled` at all (`RuleCard.tsx`'s
+// `startDisabled` gates the toggle alone), so neither ordering is unlucky.
+//
+// WHAT A `running`-ONLY GUARD DOES HERE, which the CONTROL below measures: the
+// guard says no, `deleteRule` removes the record, and nothing cleared
+// `startAttempts` - so the dial that lands afterwards is still the CURRENT
+// attempt, `hostOwned` is absent, and `markRunning` runs for a rule no row can
+// ever render. `runtime.ts` then names a deleted rule as running, `tunnel.ts`'s
+// entry stays at `refs: 1`, and the port is bound with no in-app recovery.
+//
+// AND THE FIXED PREDICATE IS SAFE RATHER THAN MERELY DIFFERENT, which is the
+// half worth measuring: `stopRule` deletes the attempt Set, so the resolving
+// dial finds itself superseded and hands its reference straight back
+// (`controller.ts:182-196`) - one close, the row `stopped`, no claim retained.
+{
+  resetFakes();
+  resetStores();
+  const rule = fakeRule({ id: "g1", localPort: 18080 });
+  autoAnswerFakeOpen = false;
+  const starting = startRule(rule, FAKE_RUNTIME);
+  await settle();
+  check(
+    "G1: the row is still `starting` when Delete rule is pressed - the dial has not landed",
+    useForwardRuntime.getState().byRule["g1"]?.status === "starting",
+    useForwardRuntime.getState().byRule["g1"],
+  );
+  check(
+    "G1: and the live guard says STOP FIRST for a mid-dial rule - a bind in flight is this page's forward too",
+    pageMustStopFirst("g1") === true,
+    pageMustStopFirst("g1"),
+  );
+
+  // `confirmDelete`'s own two statements, in its own order. `deleteRule` is a
+  // `LazyStore` write and is not drivable here; what it does - remove the
+  // record, so no row can render this rule again - is what makes the CONTROL's
+  // leak unrecoverable, and section 11 pins the call itself.
+  resetCallLogs();
+  if (pageMustStopFirst(rule.id)) await stopRule(rule, FAKE_RUNTIME);
+  check(
+    "G1: that stop had no claim to spend - `markRunning` has not run, so nothing is bound YET and nothing is closed",
+    closeCalls.length === 0 && useForwardRuntime.getState().byRule["g1"]?.status === "stopped",
+    { closes: closeCalls.length, row: useForwardRuntime.getState().byRule["g1"] },
+  );
+
+  // AND ONLY NOW DOES THE BIND LAND, into a rule the user has already deleted.
+  const landedClaim = nextFakeClaim;
+  parkedFakeOpens[0].resolve({
+    sessionId: nextFakeSessionId++,
+    localPort: rule.localPort,
+    claim: landedClaim,
+  });
+  nextFakeClaim++;
+  await starting;
+  await settle();
+  check(
+    "G1: the dial handed its reference straight back - exactly one close, carrying the claim that dial received",
+    closeCalls.length === 1 && closeCalls[0]?.claim === landedClaim,
+    closeCalls,
+  );
+  check(
+    "G1: named by rule.localPort - the value that finds the entry",
+    closeCalls[0]?.localPort === rule.localPort,
+    closeCalls[0],
+  );
+  check(
+    "G1: and the row is left `stopped` with no claim retained - nothing names a rule the user deleted",
+    useForwardRuntime.getState().byRule["g1"]?.status === "stopped" &&
+      useForwardRuntime.getState().byRule["g1"]?.claim === undefined,
+    useForwardRuntime.getState().byRule["g1"],
+  );
+}
+{
+  // THE `running`-ONLY PREDICATE ON THE SAME INTERLEAVING - what round 4
+  // landed, measured rather than argued. Identical steps; the only difference
+  // is the guard.
+  resetFakes();
+  resetStores();
+  const rule = fakeRule({ id: "g1b", localPort: 18080 });
+  autoAnswerFakeOpen = false;
+  const starting = startRule(rule, FAKE_RUNTIME);
+  await settle();
+  const runningOnlyGuard = useForwardRuntime.getState().byRule["g1b"]?.status === "running";
+  check(
+    "G1: CONTROL - the `running`-only predicate says DO NOT STOP, because the status is `starting` and not `running`",
+    runningOnlyGuard === false,
+    { status: useForwardRuntime.getState().byRule["g1b"]?.status, guard: runningOnlyGuard },
+  );
+  resetCallLogs();
+  if (runningOnlyGuard) await stopRule(rule, FAKE_RUNTIME);
+  const landedClaim = nextFakeClaim;
+  parkedFakeOpens[0].resolve({
+    sessionId: nextFakeSessionId++,
+    localPort: rule.localPort,
+    claim: landedClaim,
+  });
+  nextFakeClaim++;
+  await starting;
+  await settle();
+  check(
+    "G1: CONTROL - THE LEAK: closeForward was never called, so the listener on 18080 is still up",
+    closeCalls.length === 0,
+    closeCalls,
+  );
+  check(
+    "G1: CONTROL - THE LEAK: runtime.ts now names a rule the delete removed as running, holding a claim nothing will ever spend",
+    useForwardRuntime.getState().byRule["g1b"]?.status === "running" &&
+      useForwardRuntime.getState().byRule["g1b"]?.claim === landedClaim,
+    useForwardRuntime.getState().byRule["g1b"],
+  );
+}
+
+// ---------------------------------------------------------------------------
+console.log(
+  "\n[G2] SAVE WHILE THE ROW IS STILL `starting` - C13's own sequence with one difference, and the editor's half of G1",
+);
+// C13 drives Start, Edit, Save, Stop with the dial already landed, where the
+// fix is correct. This drives the SAME clicks with the Save landing mid-dial,
+// where a `running`-only guard is inert: the record is rewritten, the bind
+// lands under the OLD `forwardKey`, and the row's Stop - all the user has left -
+// names the NEW one and misses, while `markStopped` discards the claim.
+//
+// `FAKE_RUNTIME` cannot express this: its `closeForward` only logs, so it
+// cannot tell a close that found its entry from one that did not, and the trap
+// this file's header names would make the fixture a tautology. So this block
+// keeps C13's keyed map and adds the one thing C13 has no need of - a PARKED
+// open, so the entry appears when the bind lands rather than when it was asked
+// for.
+{
+  const keyOf = (
+    connectionId: string,
+    remoteHost: string,
+    remotePort: number,
+    localPort: number,
+  ): string => `${connectionId}|${remoteHost}|${remotePort}|${localPort}`;
+  const entries = new Map<string, { claim: number }>();
+  const closeResults: Array<{ key: string; hit: boolean }> = [];
+  const landParkedOpen: Array<() => void> = [];
+  const PARKED_KEYED_RUNTIME = {
+    openForward: (
+      connectionId: string,
+      remoteHost: string,
+      remotePort: number,
+      opts: OpenCall["opts"] = {},
+    ): Promise<FakeForward> => {
+      const asked = opts.localPort ?? 0;
+      return new Promise<FakeForward>((resolve) => {
+        landParkedOpen.push(() => {
+          const forward = {
+            sessionId: nextFakeSessionId++,
+            localPort: asked || nextFakeAutoPort++,
+            claim: nextFakeClaim++,
+          };
+          // Keyed on the port ASKED FOR, exactly as `tunnel.ts` keys it, and
+          // created HERE rather than at call time - the listener does not exist
+          // until the bind lands, which is the whole of what "mid-dial" means.
+          entries.set(keyOf(connectionId, remoteHost, remotePort, asked), {
+            claim: forward.claim,
+          });
+          resolve(forward);
+        });
+      });
+    },
+    closeForward: (
+      connectionId: string,
+      remoteHost: string,
+      remotePort: number,
+      localPort: number,
+    ): Promise<void> => {
+      const key = keyOf(connectionId, remoteHost, remotePort, localPort);
+      const hit = entries.delete(key);
+      closeResults.push({ key, hit });
+      return Promise.resolve();
+    },
+    toast: (): void => {},
+  } satisfies RuntimeDepsType;
+
+  // The edited record is never handed to a Stop in THIS half - that is the
+  // point of the fix. The CONTROL below is where it is, and where it misses.
+  const original = fakeRule({ id: "g2", localPort: 18080 });
+
+  resetFakes();
+  resetStores();
+  const starting = startRule(original, PARKED_KEYED_RUNTIME);
+  await settle();
+  check(
+    "G2: nothing is bound yet - the open is still parked, so there is no entry under any key",
+    entries.size === 0 && useForwardRuntime.getState().byRule["g2"]?.status === "starting",
+    { keys: [...entries.keys()], row: useForwardRuntime.getState().byRule["g2"] },
+  );
+  // `save`'s own guarded stop, with `existing` - the record as LOADED, which is
+  // still the identity the open asked under. The `upsertRule` beside it is the
+  // dialog's and is not drivable from here; section 12 pins the order.
+  check("G2: the live guard says stop, because the row is mid-dial", pageMustStopFirst("g2"));
+  if (pageMustStopFirst(original.id)) await stopRule(original, PARKED_KEYED_RUNTIME);
+  // THE BIND LANDS, under the OLD key, after the write has replaced the record.
+  landParkedOpen[0]?.();
+  await starting;
+  await settle();
+  const landed = closeResults[closeResults.length - 1];
+  check(
+    "G2: the superseded dial released what it had bound, HITTING the old key - `existing` is the identity the open asked under",
+    landed?.hit === true && landed?.key.endsWith("|18080"),
+    { landed, all: closeResults },
+  );
+  check(
+    "G2: so nothing is left bound and the row holds no claim - the user's next Start binds 18081 cleanly",
+    entries.size === 0 &&
+      useForwardRuntime.getState().byRule["g2"]?.status === "stopped" &&
+      useForwardRuntime.getState().byRule["g2"]?.claim === undefined,
+    { keys: [...entries.keys()], row: useForwardRuntime.getState().byRule["g2"] },
+  );
+}
+{
+  // THE `running`-ONLY PREDICATE ON THE SAME SEQUENCE. The save declines, the
+  // dial lands under the old key and publishes itself, and the only Stop the
+  // user has left reads the record the save WROTE.
+  const keyOf = (
+    connectionId: string,
+    remoteHost: string,
+    remotePort: number,
+    localPort: number,
+  ): string => `${connectionId}|${remoteHost}|${remotePort}|${localPort}`;
+  const entries = new Map<string, { claim: number }>();
+  const closeResults: Array<{ key: string; hit: boolean }> = [];
+  const landParkedOpen: Array<() => void> = [];
+  const PARKED_KEYED_RUNTIME = {
+    openForward: (
+      connectionId: string,
+      remoteHost: string,
+      remotePort: number,
+      opts: OpenCall["opts"] = {},
+    ): Promise<FakeForward> => {
+      const asked = opts.localPort ?? 0;
+      return new Promise<FakeForward>((resolve) => {
+        landParkedOpen.push(() => {
+          const forward = {
+            sessionId: nextFakeSessionId++,
+            localPort: asked || nextFakeAutoPort++,
+            claim: nextFakeClaim++,
+          };
+          entries.set(keyOf(connectionId, remoteHost, remotePort, asked), {
+            claim: forward.claim,
+          });
+          resolve(forward);
+        });
+      });
+    },
+    closeForward: (
+      connectionId: string,
+      remoteHost: string,
+      remotePort: number,
+      localPort: number,
+    ): Promise<void> => {
+      const key = keyOf(connectionId, remoteHost, remotePort, localPort);
+      const hit = entries.delete(key);
+      closeResults.push({ key, hit });
+      return Promise.resolve();
+    },
+    toast: (): void => {},
+  } satisfies RuntimeDepsType;
+
+  const original = fakeRule({ id: "g2b", localPort: 18080 });
+  const edited = { ...original, localPort: 18081 };
+
+  resetFakes();
+  resetStores();
+  const starting = startRule(original, PARKED_KEYED_RUNTIME);
+  await settle();
+  const runningOnlyGuard = useForwardRuntime.getState().byRule["g2b"]?.status === "running";
+  check(
+    "G2: CONTROL - the `running`-only guard declines, because the row is `starting`",
+    runningOnlyGuard === false,
+    { status: useForwardRuntime.getState().byRule["g2b"]?.status, guard: runningOnlyGuard },
+  );
+  if (runningOnlyGuard) await stopRule(original, PARKED_KEYED_RUNTIME);
+  landParkedOpen[0]?.();
+  await starting;
+  await settle();
+  check(
+    "G2: CONTROL - the dial published itself under the OLD key, so the row reads running over a listener the saved record no longer names",
+    entries.size === 1 &&
+      entries.has(keyOf(original.hostId, original.remoteHost, original.remotePort, 18080)) &&
+      useForwardRuntime.getState().byRule["g2b"]?.status === "running",
+    { keys: [...entries.keys()], row: useForwardRuntime.getState().byRule["g2b"] },
+  );
+  // The row's own Stop - all the user has left, and it reads the record from
+  // the store, which is the one the save wrote.
+  await stopRule(edited, PARKED_KEYED_RUNTIME);
+  const missed = closeResults[closeResults.length - 1];
+  check(
+    "G2: CONTROL - THE LEAK: that Stop MISSES its entry (the new key), and markStopped has discarded the claim - no Stop can ever be issued again",
+    missed?.hit === false &&
+      missed?.key.endsWith("|18081") &&
+      entries.size === 1 &&
+      useForwardRuntime.getState().byRule["g2b"]?.claim === undefined,
+    { missed, keys: [...entries.keys()], row: useForwardRuntime.getState().byRule["g2b"] },
   );
 }
 
@@ -2522,6 +3075,43 @@ console.log(failed === 0 ? "\nAll forwards-shell checks passed." : `\n${failed} 
 //                                                          width the repo does not
 //                                                          use is what makes it a
 //                                                          reflow.
+//
+//   Round 5 - the `starting` arm, and the two families the AST pins could not see
+//   ----  -------------------------------------------      ----------------------------
+//   W1    controller.ts: pageMustStopFirst back to        RED, fs 219/228 - C11's
+//           `=== "running"` only                            flipped `starting` row
+//                                                          plus 8 of G1/G2. Nothing
+//                                                          else in the suite saw it,
+//                                                          which is why G1/G2 exist.
+//   W2    the same predicate widened to include            RED, fs 227/228 - C11's
+//           `"failed"` as well                              `failed` row. The two
+//                                                          excluded statuses are a
+//                                                          claim, not a leftover.
+//   W3a   ForwardsPage.tsx: the guarded stop wrapped     RED, fs 227/228 - section
+//           in `if (target.rule.id === "") { … }`           11's new unconditional
+//                                                          assert, and ONLY that one.
+//                                                          tsc green.
+//   W3b   RuleEditorDialog.tsx: the same wrapper,        RED, fs 227/228 - section
+//           `if (id === "") { … }`                          12's new one, and only it.
+//   W5    forward-autostart-verify.ts: the twin           RED, fs 227/228 - the new
+//           classifier's prefix-unary arm deleted           cross-script equality
+//           (one copy only)                                 assert. `fa` ITSELF stayed
+//                                                          GREEN at 242 with the
+//                                                          tightened copy, which is
+//                                                          the whole reason the assert
+//                                                          is worth three lines.
+//   W6a   RuleCard.tsx: `pageStops` narrowed back to      RED, fs 227/228 - section
+//           `running` (the widening, dropped at its         11's new binding pin.
+//           only definition)                                `forwards-page` stayed
+//                                                          GREEN at 79 and `fa` at
+//                                                          242: `deleteNote` is a pure
+//                                                          function of an
+//                                                          already-decided boolean, so
+//                                                          no fixture over it can see
+//                                                          the caller narrow.
+//   W7    a legal Prettier reflow at --print-width 60   GREEN, 228/79/242/36 with
+//           over all fifteen source files these four       tsc clean - the paired
+//           scripts read                                    control, as predicted.
 // ----------------------------------------------------------------------------
 
 process.exit(failed === 0 ? 0 : 1);

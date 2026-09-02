@@ -62,9 +62,11 @@ import { useForwards } from "./useForwards";
  * arguments). A rule looked up again at confirm time is exactly the record
  * that may already be gone.
  *
- * `running` and `hostOwned` are captured from `RuleCard`'s own
+ * `pageStops` and `hostOwned` are captured from `RuleCard`'s own
  * `useForwardStatus` and `useIsHostOwned` selectors, at the moment the row's
- * Delete button was clicked.
+ * Delete button was clicked. `pageStops` is `running || starting`, not
+ * `running` - `RuleCard`'s own note on that binding says why, and
+ * `DeleteNoteSubject.pageStops` carries the full reasoning.
  *
  * BOTH ARE FOR `deleteNote` AND FOR NOTHING ELSE, and the next reader should
  * not "fix" that to match `confirmDelete` below. The dialog's sentence is a
@@ -76,8 +78,14 @@ import { useForwards } from "./useForwards";
  * them, and it already has them) - that live read is inside an event handler
  * and goes through `getState()`, the idiom `controller.ts` and `runtime.ts`
  * both spell out.
+ *
+ * SEPARATE, BUT NOT FREE TO DISAGREE ABOUT WHICH STATUSES COUNT. Captured and
+ * live answer about different MOMENTS, which is the split; they answer the same
+ * QUESTION, so `pageStops` and `pageMustStopFirst` name the same two statuses.
+ * A `pageStops` that had stayed at `running` alone would have the dialog say
+ * "Deleting it changes nothing else." while the confirm below closed a bind.
  */
-type PendingDelete = { rule: ForwardRule; running: boolean; hostOwned: boolean };
+type PendingDelete = { rule: ForwardRule; pageStops: boolean; hostOwned: boolean };
 
 export function ForwardsPage(): ReactNode {
   const forwardsById = useForwards();
@@ -145,16 +153,26 @@ export function ForwardsPage(): ReactNode {
         // on the same pinned port then fails EADDRINUSE with no in-app
         // recovery.
         //
-        // GUARDED ON LIVE STATE AND NEVER ON `target.running`, which is a
+        // GUARDED ON LIVE STATE AND NEVER ON `target.pageStops`, which is a
         // flag captured when the trash icon was clicked. The row is on
         // screen as `starting` for the whole dial and the Delete button is
         // not disabled during it (`page/RuleCard.tsx`'s `startDisabled`
         // gates the toggle only), so Start, Delete, dial-resolves, confirm
         // is the ORDINARY ordering rather than the unlucky one - and on it
-        // the captured flag says "not running" about a forward that is up.
+        // the captured flag is about a moment that has passed.
         // `pageMustStopFirst` (`./controller`) is that read, both owners and
         // in the order every other site uses; its own doc carries the full
         // reasoning and the cost of getting it wrong.
+        //
+        // AND IT ANSWERS FOR A ROW STILL DIALLING, which is the other
+        // ordering of the same two clicks: the confirm can land BEFORE the
+        // dial resolves just as easily as after it, and a guard that only
+        // said `running` let the record go while the bind was in flight -
+        // `startAttempts` was never cleared, so the dial that landed
+        // afterwards marked a deleted rule running and left the port bound.
+        // Stopping a mid-dial rule is the same release path a Stop clicked
+        // mid-dial takes: the attempt is superseded and hands its reference
+        // straight back.
         //
         // Still guarded rather than unconditional, because the guard now
         // answers about NOW: a Stop for a rule that is genuinely not running
@@ -260,8 +278,8 @@ export function ForwardsPage(): ReactNode {
                 key={row.rule.id}
                 row={row}
                 onEdit={() => setEditorTarget({ mode: "edit", ruleId: row.rule.id })}
-                onDelete={(running, hostOwned) =>
-                  setPendingDelete({ rule: row.rule, running, hostOwned })
+                onDelete={(pageStops, hostOwned) =>
+                  setPendingDelete({ rule: row.rule, pageStops, hostOwned })
                 }
               />
             ))}
@@ -287,7 +305,7 @@ export function ForwardsPage(): ReactNode {
                   from. */}
               {shownDelete
                 ? deleteNote({
-                    running: shownDelete.running,
+                    pageStops: shownDelete.pageStops,
                     hostOwned: shownDelete.hostOwned,
                     startWithHost: shownDelete.rule.startWithHost,
                   })

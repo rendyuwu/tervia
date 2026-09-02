@@ -314,6 +314,15 @@ export async function startHostForwards(
           // opened when in fact it opened and was handed over. Awaiting a
           // chain that ends in `.catch` cannot throw, so the two properties
           // are not in tension.
+          //
+          // WHAT THE AWAIT COSTS, and it is the price of the ordering above
+          // rather than an oversight: this loop is sequential and there is no
+          // timeout, and `.catch` does not cover a promise that never settles -
+          // so an `ssh_forward_close` that hangs now parks every LATER rule's
+          // bind and banner behind this one rather than only this one's.
+          // Bounded because the whole run is fire-and-forget from
+          // `openSshForSession`, so the pane's first prompt is not held either
+          // way; a per-close timeout would be the remedy if it is ever seen.
           await deps.closeForward(sessionId, bound).catch(() => {});
           writeBanner(otherTerminalBanner(rule));
           continue;

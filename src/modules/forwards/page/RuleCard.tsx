@@ -77,11 +77,15 @@ export type RuleCardProps = {
    * them - through its own `useForwardStatus` and `useIsHostOwned` selectors,
    * not two more lookups the page would have to make.
    *
-   * Two parameters and not one flag folded into the other: only a
-   * page-running rule is stopped by the delete, and the dialog's whole job
-   * here is to say which of the two it is looking at.
+   * Two parameters and not one flag folded into the other: only a forward the
+   * PAGE holds is stopped by the delete, and the dialog's whole job here is to
+   * say which of the two owners it is looking at.
+   *
+   * `pageStops` and NOT `running`, which is `DeleteNoteSubject.pageStops`'s
+   * own name for the same reason: a row still dialling is one this delete
+   * stops too.
    */
-  onDelete: (running: boolean, hostOwned: boolean) => void;
+  onDelete: (pageStops: boolean, hostOwned: boolean) => void;
 };
 
 /** What the status dot renders as, sharing `ssh/status.ts`'s tone vocabulary
@@ -137,15 +141,30 @@ export function RuleCard({ row, onEdit, onDelete }: RuleCardProps): ReactNode {
   const hostOwned = useIsHostOwned(rule.id);
   const hostOwnedPort = useHostOwnedPort(rule.id);
 
-  // `running` stays the PAGE's notion of running - `onDelete(running,
-  // hostOwned)` below feeds `deleteNote`, whose "deleting a running rule stops
-  // it" sentence is true only of a rule this page can stop, and true of one
-  // BECAUSE `ForwardsPage.tsx`'s `confirmDelete` stops it first. A
-  // terminal-owned rule is stopped by closing its tab, which is why
-  // `hostOwned` rides along as its own argument rather than being folded in
-  // here: the dialog has a different sentence for it, not a missing one.
+  // `running` stays the PAGE's notion of running, and it is the RENDERING
+  // flag: the label, the icon, the variant and the status line all read it,
+  // and none of those may say "Running" about a row that is still dialling.
   const running = status === "running";
   const starting = status === "starting";
+  // WHAT THE DELETE STOPS, which is a wider question than what the row says,
+  // and the two must not be collapsed into one flag. `onDelete(pageStops,
+  // hostOwned)` below feeds `deleteNote`, whose "deleting a running rule stops
+  // it" sentence is true BECAUSE `ForwardsPage.tsx`'s `confirmDelete` stops the
+  // forward first - and that confirm goes through `pageMustStopFirst`
+  // (`../controller`), which answers `true` for `starting` as well as for
+  // `running`. So a mid-dial row handed `running` alone told the user "Deleting
+  // it changes nothing else." about a bind the confirm was about to close.
+  //
+  // KEPT IN STEP WITH `pageMustStopFirst` BY NAME AND NOT BY LUCK: this is the
+  // flag captured at click time and that predicate is the live read, they are
+  // deliberately separate (`ForwardsPage.tsx`'s `PendingDelete`), and the two
+  // status sets have to match or the sentence goes false again. `failed` and
+  // `stopped` are out of both - neither retains a claim.
+  //
+  // A terminal-owned rule is stopped by closing its tab, which is why
+  // `hostOwned` rides along as its own argument rather than being folded in
+  // here: the dialog has a different sentence for it, not a missing one.
+  const pageStops = running || starting;
   // The port that is ACTUALLY LISTENING, whichever owner bound it -
   // `hostOwnedPort` first, the same order as everything below.
   const localLabel = localPortLabel(rule, hostOwnedPort ?? boundPort);
@@ -300,7 +319,7 @@ export function RuleCard({ row, onEdit, onDelete }: RuleCardProps): ReactNode {
                 variant="ghost"
                 size="icon-xs"
                 aria-label={`Delete ${rule.name}`}
-                onClick={() => onDelete(running, hostOwned)}
+                onClick={() => onDelete(pageStops, hostOwned)}
                 className={DESTRUCTIVE_ACTION}
               >
                 <Trash2 size={12} strokeWidth={1.75} />
