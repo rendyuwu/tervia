@@ -760,6 +760,7 @@ pub fn run() {
             ssh::ssh_agent_keys,
             ssh::ssh_key_inspect,
             ssh::ssh_forward_open,
+            ssh::ssh_forward_close,
             ssh::ssh_list_sessions,
             ssh::ssh_attach,
             ssh::ssh_git_status,

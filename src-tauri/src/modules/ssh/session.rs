@@ -307,6 +307,27 @@ pub struct SshSession {
     alive: Arc<AtomicBool>,
 }
 
+/// Abort ONE forward's accept loop, freeing its local port, and report whether
+/// there was one to abort.
+///
+/// A free function over the map rather than a method, so it is testable without
+/// an `SshSession`: the only two constructors (`:1183`, `:1323`) are the tail of
+/// a live handshake, and the only existing forward test is `#[ignore]`. This is
+/// the whole decision `ssh_forward_close` makes, so this is where it is pinned.
+///
+/// `false` is not an error: the forward may have gone with a reconnect, or a
+/// teardown may be firing twice. Idempotent on purpose - a caller must be able
+/// to Stop without tracking whether Start finished.
+async fn abort_forward(forwards: &Mutex<HashMap<u16, JoinHandle<()>>>, bound_port: u16) -> bool {
+    match forwards.lock().await.remove(&bound_port) {
+        Some(task) => {
+            task.abort();
+            true
+        }
+        None => false,
+    }
+}
+
 impl SshSession {
     pub async fn write(&self, data: &[u8]) -> Result<(), String> {
         self.write_half.data(data).await.map_err(|e| e.to_string())
@@ -474,6 +495,12 @@ impl SshSession {
         self.forwards.lock().await.insert(bound, task);
         log::info!("ssh -L {label}");
         Ok(bound)
+    }
+
+    /// Stop the one `ssh -L` listener bound to `bound_port`, leaving the session
+    /// and every other forward up. `false` means there was no such forward.
+    pub async fn close_forward(&self, bound_port: u16) -> bool {
+        abort_forward(&self.forwards, bound_port).await
     }
 
     /// Return the cached SFTP session, opening a fresh subsystem channel on
@@ -1466,6 +1493,125 @@ mod credential_guard_tests {
     }
 }
 
+/// `abort_forward` is the whole decision `ssh_forward_close` makes: which entry
+/// leaves the map, whether its accept loop is actually aborted, and what a
+/// second Stop on the same port reports. Tested here over a bare map because an
+/// `SshSession` cannot be built without a live handshake - a test that needed
+/// one would have to be `#[ignore]`d like `forwards_a_local_port` below, and
+/// would give CI nothing.
+#[cfg(test)]
+mod forward_abort_tests {
+    use super::*;
+
+    /// Spawn an accept loop that OWNS the listener, the way `open_forward`'s
+    /// task does: the local port stays bound for exactly as long as the task
+    /// lives, so the port is a readable proxy for "is the forward still up".
+    async fn bound_accept_loop() -> (u16, JoinHandle<()>) {
+        // 0 = ephemeral, so a busy dev machine can't fail the test on a port
+        // collision that has nothing to do with forwarding.
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind an ephemeral loopback port");
+        let port = listener.local_addr().expect("read the bound port").port();
+        let task = tokio::spawn(async move {
+            loop {
+                if listener.accept().await.is_err() {
+                    return;
+                }
+            }
+        });
+        (port, task)
+    }
+
+    /// Poll `bind` rather than testing it once: `abort()` only MARKS the task,
+    /// and the listener is not dropped until the runtime next polls it, so a
+    /// single immediate bind would flake. Same 20 x 50ms shape as the live
+    /// `forwards_a_local_port`.
+    async fn port_rebinds_within_a_second(port: u16) -> bool {
+        for _ in 0..20 {
+            if tokio::net::TcpListener::bind(("127.0.0.1", port))
+                .await
+                .is_ok()
+            {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        false
+    }
+
+    /// The port is in the assertion and not just the return value because
+    /// removing the handle from the map without aborting the task ALSO returns
+    /// `true`: Stop would report success while the port stayed unusable for the
+    /// rest of the session and no reconnect could re-open the forward.
+    #[tokio::test]
+    async fn abort_forward_frees_the_port() {
+        let (port, task) = bound_accept_loop().await;
+        let forwards = Mutex::new(HashMap::from([(port, task)]));
+
+        assert!(
+            abort_forward(&forwards, port).await,
+            "a registered forward must report that there was one to abort"
+        );
+        assert!(
+            port_rebinds_within_a_second(port).await,
+            "port {port} is still bound a second after its forward was closed"
+        );
+        assert!(
+            forwards.lock().await.is_empty(),
+            "the closed forward must leave the map, or the next open would collide with a dead entry"
+        );
+    }
+
+    /// Stop is idempotent on purpose: the frontend can fire it for a forward a
+    /// reconnect already took away, or twice on a double-click, and neither is
+    /// an error - `false` is the state the caller asked for, already reached.
+    #[tokio::test]
+    async fn abort_forward_reports_an_unknown_port() {
+        let empty: Mutex<HashMap<u16, JoinHandle<()>>> = Mutex::new(HashMap::new());
+        assert!(
+            !abort_forward(&empty, 4242).await,
+            "an unknown port must report that there was nothing to abort"
+        );
+
+        let (port, task) = bound_accept_loop().await;
+        let forwards = Mutex::new(HashMap::from([(port, task)]));
+        assert!(
+            abort_forward(&forwards, port).await,
+            "the first close of a live forward reports true"
+        );
+        assert!(
+            !abort_forward(&forwards, port).await,
+            "the second close of the same port must report false, not repeat true"
+        );
+    }
+
+    /// The defect this pins is `close_forward` being written the way `close`
+    /// is - `close` drains every forward deliberately, and one Stop button
+    /// taking the whole session's other tunnels down with it would look
+    /// identical from the caller's side.
+    #[tokio::test]
+    async fn abort_forward_leaves_the_other_forwards_alone() {
+        let (closed_port, closed_task) = bound_accept_loop().await;
+        let (kept_port, kept_task) = bound_accept_loop().await;
+        let forwards = Mutex::new(HashMap::from([
+            (closed_port, closed_task),
+            (kept_port, kept_task),
+        ]));
+
+        assert!(abort_forward(&forwards, closed_port).await);
+
+        let guard = forwards.lock().await;
+        let survivor = guard
+            .get(&kept_port)
+            .expect("the forward that was not closed must still be in the map");
+        assert!(
+            !survivor.is_finished(),
+            "closing one forward must not abort another forward's accept loop"
+        );
+    }
+}
+
 #[cfg(test)]
 mod chain_tests {
     use super::*;
@@ -1556,12 +1702,36 @@ mod chain_tests {
         });
     }
 
+    /// Poll `bind` for up to a second: `abort()` only marks the accept loop, so
+    /// the listener is not dropped until the runtime next polls it and a single
+    /// immediate bind would flake.
+    async fn port_rebinds_within_a_second(port: u16) -> bool {
+        for _ in 0..20 {
+            if tokio::net::TcpListener::bind(("127.0.0.1", port))
+                .await
+                .is_ok()
+            {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        false
+    }
+
     /// Live end-to-end check for `ssh -L`: forward a local port to the remote's
     /// OWN sshd (the one service we know is listening over there), then read the
     /// version banner back through the tunnel. `SSH-` on the wire proves the
     /// listener bound, the `direct-tcpip` channel opened, and bytes copy in both
-    /// directions. Same env fixture as the chain test above; run with
-    /// `cargo test --release forward -- --ignored`.
+    /// directions. Then closes that ONE forward while the session stays up -
+    /// the Stop button's path - before checking the session teardown still frees
+    /// a port of its own.
+    ///
+    /// NOT CI COVERAGE. This is `#[ignore]`d and needs a live VPS plus the env
+    /// fixture above, so none of it runs on a pull request. `close_forward`'s CI
+    /// coverage is `forward_abort_tests` over `abort_forward`; what this test
+    /// adds is that the same decision holds against a real listener with a real
+    /// `direct-tcpip` channel on it. Same env fixture as the chain test above;
+    /// run with `cargo test --release forward -- --ignored`.
     #[test]
     #[ignore]
     fn forwards_a_local_port() {
@@ -1593,26 +1763,37 @@ mod chain_tests {
                 .expect("read through tunnel failed");
             assert_eq!(&banner, b"SSH-", "expected the remote sshd banner");
 
+            // Stop this one forward with the session still up. Everything after
+            // this point would also hold if `close_forward` had closed the
+            // session, so the re-open below is what separates the two.
+            assert!(
+                session.close_forward(local).await,
+                "closing a live forward must report there was one to close"
+            );
+            assert!(
+                port_rebinds_within_a_second(local).await,
+                "close_forward left port {local} bound"
+            );
+            assert!(
+                !session.close_forward(local).await,
+                "a second close of port {local} must report false, not repeat true"
+            );
+
+            // The session survived, so it can still open forwards - and the
+            // teardown check below now has a listener of its own to free
+            // instead of passing on a port close_forward already released.
+            let second = session
+                .open_forward(0, "127.0.0.1".into(), remote_port)
+                .await
+                .expect("re-open after close_forward failed - it closed the session");
+
             session.close().await;
             // close() must free the port, or every reconnect would fail to bind.
-            // `abort()` only marks the accept loop, so give the runtime a beat
-            // to actually drop the listener before calling it stuck.
-            let mut freed = false;
-            for _ in 0..20 {
-                if tokio::net::TcpListener::bind(("127.0.0.1", local))
-                    .await
-                    .is_ok()
-                {
-                    freed = true;
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
             assert!(
-                freed,
-                "forward listener still holds port {local} after close"
+                port_rebinds_within_a_second(second).await,
+                "forward listener still holds port {second} after close"
             );
-            eprintln!("[forward_tests] OK: localhost:{local} tunneled to the remote sshd");
+            eprintln!("[forward_tests] OK: localhost:{local} tunneled to the remote sshd, closed on its own, and localhost:{second} freed by teardown");
         });
     }
 

@@ -550,9 +550,9 @@ pub async fn ssh_close(state: tauri::State<'_, SshState>, id: u32) -> Result<(),
 /// the live session `id` (so a ProxyJump chain applies for free). `local_port`
 /// 0 picks a free port; the bound port is returned for the caller to report.
 ///
-/// No close command on purpose: forwards are declared on the saved connection
-/// and re-opened on every connect, so the session's own teardown is the only
-/// lifecycle they need.
+/// One forward at a time: `ssh_forward_close` below stops a single listener
+/// without touching the session, and the session's own teardown drops whatever
+/// is left.
 #[tauri::command]
 pub async fn ssh_forward_open(
     state: tauri::State<'_, SshState>,
@@ -588,6 +588,38 @@ pub async fn ssh_forward_open(
         })
         .await
         .map_err(|e| format!("ssh forward task join failed: {e}"))?
+}
+
+/// Close ONE `ssh -L` listener without touching the session.
+///
+/// `ssh_forward_open`'s doc comment above used to say a close command did not
+/// exist on purpose. That was true while forwards were declared on a saved
+/// connection and re-opened on every connect; a Port Forwarding page with a
+/// Stop button needs one listener to go away while the session and its other
+/// forwards stay up.
+///
+/// Returns `false` for an unknown session or an unknown port, rather than
+/// `Err`. That is the opposite of `ssh_forward_open`, which errors on an
+/// unknown id, and the asymmetry is the point: an open that cannot find its
+/// session has failed at the thing it was asked to do, while a close that
+/// cannot find its forward has arrived at the state it was asked for.
+///
+/// What this does NOT do, and the UI has to say so: aborting the accept task
+/// drops the listener, so the local port is immediately rebindable and no new
+/// connection is accepted - but every connection already established runs in
+/// its own `copy_bidirectional` task (`session.rs:484`) until one side closes.
+/// That is what OpenSSH does when a `-L` is cancelled at runtime.
+#[tauri::command]
+pub async fn ssh_forward_close(
+    state: tauri::State<'_, SshState>,
+    id: u32,
+    bound_port: u16,
+) -> Result<bool, String> {
+    let Some(session) = state.sessions.read().await.get(&id).cloned() else {
+        log::debug!("ssh_forward_close: unknown id={id}");
+        return Ok(false);
+    };
+    Ok(session.close_forward(bound_port).await)
 }
 
 /// Answer a first-connect `HostKeyPrompt`. `accept = true` lets the paused
