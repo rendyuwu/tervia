@@ -12,9 +12,19 @@
  * TWO OWNERS, ONE ROW. A rule started from this page lives in `../runtime`; a
  * rule the terminal started for itself lives in `../hostOwned` and is
  * READ-ONLY here - shown as "Running (with host)" with Start/Stop disabled,
- * because its lifetime belongs to the tab that opened it. The two maps are
- * mutually exclusive by construction (`../hostOwned.ts`'s header), so this
- * file never has to reconcile them, only render whichever one has the rule.
+ * because its lifetime belongs to the tab that opened it.
+ *
+ * ONE PRECEDENCE ORDER, SAID ONCE: `hostOwned` is tested FIRST, in every
+ * derived value and every branch below - the status text, the dot, the button's
+ * label, its variant, its icon, its disabled flag, its tooltip, the click
+ * handler and the status line. The two maps are kept exclusive by the checks
+ * `../hostOwned.ts`'s header names, and the window that remains is one bind
+ * long, but the ROW's own consistency must not depend on that: whatever the
+ * store pair says, the row must not be able to disagree with itself - a green
+ * dot reading "Running (with host)" above a button reading "Starting…" is a
+ * third answer about one rule, and there is no owner it corresponds to. Where
+ * `hostOwned` shares a branch with another flag it is the FIRST operand, so
+ * the order is readable off the source rather than argued about.
  *
  * A LIST ROW, not a grid cell - one per line, full width. So this file adds
  * no responsive grid className of its own; `ForwardsPage.tsx` stacks these in
@@ -116,18 +126,18 @@ export function RuleCard({ row, onEdit, onDelete }: RuleCardProps): ReactNode {
   // automatically with its host.
   const running = status === "running";
   const starting = status === "starting";
-  // The port that is ACTUALLY LISTENING, whichever owner bound it. The two are
-  // mutually exclusive by construction (`../hostOwned.ts`), so this is a
-  // two-way choice and not a precedence rule.
+  // The port that is ACTUALLY LISTENING, whichever owner bound it -
+  // `hostOwnedPort` first, the same order as everything below.
   const localLabel = localPortLabel(rule, hostOwnedPort ?? boundPort);
 
   // A dangling row's host is gone, so there is no credential and no route left
   // to dial - Start is refused at the UI rather than left to fail at
   // `startRule`, and the reason rides the tooltip rather than a second toast.
   // A terminal-owned rule is refused for the opposite reason: it is already up,
-  // and stopping it is the terminal tab's to do.
-  const startDisabled = row.hostDangling || starting || hostOwned;
-  const toggleLabel = starting ? "Starting…" : running || hostOwned ? "Stop" : "Start";
+  // and stopping it is the terminal tab's to do. `hostOwned` FIRST, per the
+  // header - the one order, in every branch in this file.
+  const startDisabled = hostOwned || row.hostDangling || starting;
+  const toggleLabel = hostOwned ? "Stop" : starting ? "Starting…" : running ? "Stop" : "Start";
   // `hostOwned` first: for a rule whose host record was deleted mid-session
   // both facts are true, and the one worth saying is why the live forward
   // cannot be stopped from here - the dangling note is advice about EDITING,
@@ -202,19 +212,32 @@ export function RuleCard({ row, onEdit, onDelete }: RuleCardProps): ReactNode {
             <span>
               <Button
                 type="button"
-                variant={running || hostOwned ? "outline" : "default"}
+                variant={hostOwned || running ? "outline" : "default"}
                 size="sm"
                 className="gap-1.5"
                 disabled={startDisabled}
                 aria-label={`${toggleLabel} ${rule.name}`}
                 onClick={() => {
+                  // The handler AGREES WITH THE LABEL rather than resting on
+                  // `disabled` above. For a terminal-owned rule the label says
+                  // "Stop" while `running` is false, so without this the click
+                  // would reach `startRule` - and neither call is right: this
+                  // page holds no claim for such a rule, so `startRule` dials a
+                  // second listener and `stopRule` marks it `stopped` in the
+                  // page's store, which is a lie about a live listener nobody
+                  // here can free. Kept as an explicit branch and not deleted
+                  // along with the dead path, because `disabled` is a rendering
+                  // and this is the invariant.
+                  if (hostOwned) return;
                   if (running) void stopRule(rule);
                   else void startRule(rule);
                 }}
               >
-                {starting ? (
+                {hostOwned ? (
+                  <SquareStop size={13} strokeWidth={2} />
+                ) : starting ? (
                   <Spinner className="size-3.5" />
-                ) : running || hostOwned ? (
+                ) : running ? (
                   <SquareStop size={13} strokeWidth={2} />
                 ) : (
                   <Play size={13} strokeWidth={2} />

@@ -7,14 +7,16 @@
  * Run: `pnpm verify forward-autostart` (or `npx tsx
  * scripts/forward-autostart-verify.ts` to iterate).
  *
- * Sections 1-7 are BEHAVIOURAL: they drive the real `startHostForwards`
- * through the `AutostartDeps` seam that module exports for exactly this
- * purpose, so no Tauri IPC and no DOM is needed for the properties that
- * matter. Sections 8-10 are source pins, because a call site inside
+ * Sections 1-7 and 11-15 are BEHAVIOURAL: they drive the real
+ * `startHostForwards` through the `AutostartDeps` seam that module exports for
+ * exactly this purpose, so no Tauri IPC and no DOM is needed for the properties
+ * that matter. Sections 8-10 are source pins, because a call site inside
  * `ssh-session.ts` cannot be imported at all (that file's own import graph
  * reaches `@xterm/xterm` and `@tauri-apps/plugin-os`, which throw on load
  * outside the app) and a React component's rendered text is not reachable
- * from node either.
+ * from node either. 11-15 sit AFTER the pins rather than beside 1-7 so the
+ * numbering stays in file order; they are the fix round's additions and each
+ * one names the blocker it closes.
  *
  * What each section pins, and why it is a bug that has already happened once
  * in this codebase or is one wrong character away:
@@ -65,6 +67,32 @@
  *    returns a primitive: one that builds a fresh object is never `Object.is`
  *    its own last return, and under zustand v5 that is "Maximum update depth
  *    exceeded" (research §12.7).
+ *
+ * 11. TWO PANES ON ONE HOST ARE TWO OWNERS, AND THE SECOND IS REFUSED. The
+ *    terminal dials its own session per pane, so two tabs to one host are two
+ *    autostart runs; `hostOwned.ts` is keyed by rule id alone and cannot
+ *    represent two owners, so `claim` used to OVERWRITE and the first tab's
+ *    live listener became untracked. Reachable with no timing at all through
+ *    the default rule shape, because a blank Local port binds a second port
+ *    successfully.
+ *
+ * 12. A CLAIM MUST NOT LAND AFTER THE SESSION'S RELEASE. Both release sites are
+ *    one-shot, so an entry written after either has run is never released: the
+ *    row reads "Running (with host)" for the app's whole lifetime with a
+ *    disabled Stop and a note pointing at a tab that is already gone.
+ *
+ * 13. NEVER REJECTS, AND STRUCTURALLY SO. The call site is a `void` and there
+ *    is no `unhandledrejection` handler in `src/`. Before the fix the claim
+ *    held only by another file's ordering.
+ *
+ * 14. FIRST CLAIM WINS, AND THE LOSER CLOSES ITS OWN FORWARD. The page's status
+ *    was read BEFORE the bind and the claim written AFTER it with no re-check,
+ *    so a Start clicked mid-bind left two live listeners (auto port) or a row
+ *    whose dot, status line and button gave three different answers.
+ *
+ * 15. AUTOSTART NEVER WRITES THE PAGE'S STORE. The load-bearing half of VLT-94,
+ *    and the one thing the `AutostartDeps` seam cannot see: `claimHostOwned` is
+ *    injected, a direct `useForwardRuntime.getState().markRunning(...)` is not.
  */
 
 import { readFileSync } from "node:fs";
@@ -121,6 +149,12 @@ function assert(cond: boolean, msg: string, detail?: unknown): void {
 const { defaultAutostartDeps, startHostForwards } =
   await import("../src/modules/forwards/autostart");
 const { useHostOwnedForwards } = await import("../src/modules/forwards/hostOwned");
+// Imported as a VALUE, not `import type`, and that is the whole of section 15:
+// `autostart.ts` already holds a live reference to this store for its own
+// `defaultAutostartDeps.runtimeStatus`, so a direct `markRunning` inside
+// `startHostForwards` is invisible to every dep-injected assertion in this
+// file. `claimHostOwned` is behind the seam; a store write is not.
+const { useForwardRuntime } = await import("../src/modules/forwards/runtime");
 
 // ---------------------------------------------------------------------------
 // The fixtures.
@@ -138,6 +172,7 @@ const rule = (over: Partial<ForwardRule> = {}): ForwardRule => ({
 });
 
 type OpenCall = { id: number; localPort: number; remoteHost: string; remotePort: number };
+type CloseCall = { id: number; boundPort: number };
 
 let nextAutoPort = 45000;
 
@@ -152,18 +187,31 @@ let nextAutoPort = 45000;
  * mock-fidelity defect `rdp-tunnel-verify.ts:151-155` names and which would
  * turn section 5 into a tautology.
  *
- * `claimHostOwned` writes to the REAL store as well as recording, so section 6
- * reads what the shipped `claim`/`releaseSession` actually did rather than
- * what a copy of them in this file would have done.
+ * `claimHostOwned` writes to the REAL store as well as recording, and
+ * `hostOwnedBy` READS the real store by default - the same pair
+ * `defaultAutostartDeps` wires up. That is what lets section 12 drive two
+ * sequential runs and have the second one actually see the first one's claim,
+ * rather than testing a copy of the map kept in this file.
+ *
+ * `statusFn` exists because the page's status is read TWICE per rule now, once
+ * before the bind and once after it, and the interesting case is the two reads
+ * DISAGREEING (`status`, a flat record, cannot express that). `statusCalls`
+ * records every read so a fixture can prove the second one happened at all.
  */
 function world(over: {
   rules?: ForwardRule[];
   listRules?: () => Promise<ForwardRule[]>;
   status?: Record<string, ForwardStatus>;
+  statusFn?: (ruleId: string, nth: number) => ForwardStatus;
   open?: (call: OpenCall) => Promise<number>;
+  close?: (call: CloseCall) => Promise<boolean>;
+  hostOwnedBy?: (ruleId: string) => number | undefined;
+  stillLive?: () => boolean;
 }) {
   const banners: string[] = [];
   const openCalls: OpenCall[] = [];
+  const closeCalls: CloseCall[] = [];
+  const statusCalls: string[] = [];
   const claims: Array<{ ruleId: string; entry: HostOwnedEntry }> = [];
   const deps: AutostartDeps = {
     listRules: over.listRules ?? (async () => over.rules ?? []),
@@ -172,13 +220,36 @@ function world(over: {
       openCalls.push(call);
       return over.open ? await over.open(call) : localPort || nextAutoPort++;
     },
-    runtimeStatus: (ruleId) => over.status?.[ruleId] ?? "stopped",
+    closeForward: async (id, boundPort) => {
+      const call = { id, boundPort };
+      closeCalls.push(call);
+      return over.close ? await over.close(call) : true;
+    },
+    runtimeStatus: (ruleId) => {
+      const nth = statusCalls.filter((seen) => seen === ruleId).length;
+      statusCalls.push(ruleId);
+      if (over.statusFn) return over.statusFn(ruleId, nth);
+      return over.status?.[ruleId] ?? "stopped";
+    },
+    hostOwnedBy: (ruleId) =>
+      over.hostOwnedBy
+        ? over.hostOwnedBy(ruleId)
+        : useHostOwnedForwards.getState().byRule[ruleId]?.sessionId,
     claimHostOwned: (ruleId, entry) => {
       claims.push({ ruleId, entry });
       useHostOwnedForwards.getState().claim(ruleId, entry);
     },
+    ...(over.stillLive ? { stillLive: over.stillLive } : {}),
   };
-  return { deps, banners, openCalls, claims, writeBanner: (t: string) => banners.push(t) };
+  return {
+    deps,
+    banners,
+    openCalls,
+    closeCalls,
+    statusCalls,
+    claims,
+    writeBanner: (t: string) => banners.push(t),
+  };
 }
 
 /** Empty the shared map between sections. Test-only: production has exactly
@@ -193,7 +264,7 @@ async function tick(): Promise<void> {
   for (let i = 0; i < 4; i++) await new Promise((r) => setTimeout(r, 0));
 }
 
-/** The three banners, written out by value rather than imported: a check that
+/** The banners, written out by value rather than imported: a check that
  *  reached for the module's own template would pass with the template
  *  rewritten. `->` is ASCII deliberately - see `autostart.ts`'s note, and
  *  `ssh-session.ts:498-501`'s existing forward banner. */
@@ -201,8 +272,17 @@ const forwardingBanner = (bound: number, target: string, name: string) =>
   `\x1b[2m[tervia] forwarding localhost:${bound} -> ${target} (${name})\x1b[0m\r\n`;
 const failedBanner = (name: string, message: string) =>
   `\x1b[33m[tervia] forward "${name}" failed: ${message}\x1b[0m\r\n`;
-const skippedBanner = (name: string) =>
-  `\x1b[33m[tervia] forward "${name}" is already running from the Port Forwarding page; not starting a second one.\x1b[0m\r\n`;
+/** Split by status on purpose. `starting` is a page Start still DIALLING, which
+ *  can then fail - telling the user it was already up elsewhere is then a wrong
+ *  answer, not a louder one. */
+const skippedBanner = (name: string, status: "running" | "starting") =>
+  status === "running"
+    ? `\x1b[33m[tervia] forward "${name}" is already running from the Port Forwarding page; not starting a second one.\x1b[0m\r\n`
+    : `\x1b[33m[tervia] forward "${name}" is starting from the Port Forwarding page; not starting a second one.\x1b[0m\r\n`;
+const otherTerminalBanner = (name: string) =>
+  `\x1b[33m[tervia] forward "${name}" is already open on another terminal for this host; not starting a second one.\x1b[0m\r\n`;
+const yieldedBanner = (name: string) =>
+  `\x1b[33m[tervia] forward "${name}" was started from the Port Forwarding page while this one was binding; closing the one this terminal just opened.\x1b[0m\r\n`;
 
 // ===========================================================================
 console.log("[1. startWithHost] a rule that does not start with its host is never opened");
@@ -227,6 +307,18 @@ console.log("[1. startWithHost] a rule that does not start with its host is neve
   check("and it produced no banner of its own", w.banners, [
     forwardingBanner(18080, "10.0.0.9:5432", "db tunnel"),
   ]);
+  // THE LOAD-BEARING HALF OF VLT-94, and nothing else in this suite asserts it.
+  // `autostart.ts` holds a live `useForwardRuntime` reference for its own
+  // default `runtimeStatus`, so `useForwardRuntime.getState().markRunning(...)`
+  // inside `startHostForwards` would satisfy every dep-injected check in this
+  // file. If it ever happened the page would believe it can Stop a
+  // terminal-owned rule, and would spend a claim nobody took. Read here rather
+  // than after a reset, because the claim is that autostart NEVER writes it.
+  check(
+    "autostart left the PAGE's runtime store completely untouched",
+    useForwardRuntime.getState().byRule,
+    {},
+  );
 }
 
 // ===========================================================================
@@ -260,12 +352,17 @@ console.log("\n[2. hostId] a rule bound to another host is never opened on this 
 // ===========================================================================
 console.log("\n[3. mutual exclusion] a rule the PAGE owns is skipped, and the loop carries on");
 // ===========================================================================
+/** The skip banner the MODULE actually wrote, per page status - kept so the two
+ *  wordings can be compared against each other rather than against this file's
+ *  own copy of them. */
+const skipBannersWritten: Record<string, string | undefined> = {};
 for (const pageStatus of ["running", "starting"] as const) {
   resetHostOwned();
   const owned = rule({ id: "f-page", name: "page rule", localPort: 18080 });
   const free = rule({ id: "f-free", name: "free rule", localPort: 18081 });
   const w = world({ rules: [owned, free], status: { "f-page": pageStatus } });
   await startHostForwards("h-1", 7, w.writeBanner, w.deps);
+  skipBannersWritten[pageStatus] = w.banners[0];
 
   check(
     `a "${pageStatus}" rule is not opened a second time`,
@@ -283,9 +380,9 @@ for (const pageStatus of ["running", "starting"] as const) {
     ["f-free"],
   );
   check(
-    `the skip banner names the rule, by exact text ("${pageStatus}")`,
+    `the skip banner names the rule AND its status, by exact text ("${pageStatus}")`,
     w.banners[0],
-    skippedBanner("page rule"),
+    skippedBanner("page rule", pageStatus),
   );
   check(
     `and the rule AFTER the skip still came up ("${pageStatus}") - a continue, not a return`,
@@ -310,6 +407,24 @@ for (const pageStatus of ["running", "starting"] as const) {
     "a failed or stopped rule is the terminal's to start",
     w.openCalls.map((c) => c.localPort),
     [18080, 18081],
+  );
+}
+{
+  // Read off what the MODULE wrote, not off this file's copy of it: a check
+  // comparing `skippedBanner("x", "running")` with `skippedBanner("x",
+  // "starting")` is a statement about the fixture and stays green while the
+  // module answers one sentence for both.
+  assert(
+    skipBannersWritten["running"] !== undefined &&
+      skipBannersWritten["starting"] !== undefined &&
+      skipBannersWritten["running"] !== skipBannersWritten["starting"],
+    'the "running" and "starting" skips are not the same sentence',
+    skipBannersWritten,
+  );
+  assert(
+    !(skipBannersWritten["starting"] ?? "").includes("is already running"),
+    'a rule the page is still DIALLING is not described as "already running" - it can still fail, and a rule that is then down on BOTH sides was told it was up elsewhere',
+    skipBannersWritten["starting"],
   );
 }
 
@@ -446,10 +561,18 @@ console.log(
   // A reconnect: the same rule, a new session id. The claim overwrites, and
   // the OLD session's release must not take the new session's entry with it -
   // which is what a `releaseSession` keyed on the rule instead would do.
+  //
+  // THE RELEASE COMES FIRST, and that is the real order rather than a
+  // convenience: `finishSsh` releases at the TOP of itself and only then
+  // dispatches `scheduleSshReconnect`, and `runSshReconnect`'s disposed branch
+  // goes through `pty.close()`, which releases too. Without a release in
+  // between, the second run is now correctly REFUSED - section 11's skip - so
+  // this fixture would be asserting a state the app cannot reach.
   resetHostOwned();
   const r = rule({ id: "f-re", name: "reconnecting", localPort: 18080 });
   const first = world({ rules: [r] });
   await startHostForwards("h-1", 31, first.writeBanner, first.deps);
+  useHostOwnedForwards.getState().releaseSession(31);
   const second = world({ rules: [r] });
   await startHostForwards("h-1", 32, second.writeBanner, second.deps);
   check("the newer session owns the rule", useHostOwnedForwards.getState().byRule, {
@@ -498,15 +621,50 @@ console.log("\n[wiring] defaultAutostartDeps is complete");
   // touches.
   check(
     "every dep the production caller relies on is present and callable",
-    (["listRules", "openForward", "runtimeStatus", "claimHostOwned"] as const).map(
-      (k) => typeof defaultAutostartDeps[k],
-    ),
-    ["function", "function", "function", "function"],
+    (
+      [
+        "listRules",
+        "openForward",
+        "closeForward",
+        "runtimeStatus",
+        "hostOwnedBy",
+        "claimHostOwned",
+        "stillLive",
+      ] as const
+    ).map((k) => typeof defaultAutostartDeps[k]),
+    ["function", "function", "function", "function", "function", "function", "function"],
   );
   check(
     'runtimeStatus answers "stopped" for a rule the page has never heard of',
     defaultAutostartDeps.runtimeStatus("f-never-started"),
     "stopped",
+  );
+  check(
+    "hostOwnedBy answers undefined for a rule no terminal owns",
+    defaultAutostartDeps.hostOwnedBy("f-never-started"),
+    undefined,
+  );
+  // Module scope knows of no session, so the DEFAULT must answer "alive": a
+  // default of false would stop every autostart run on its first rule for any
+  // caller that did not pass a session-scoped one.
+  check(
+    "the default stillLive answers true - the session-scoped one is the call site's to supply",
+    defaultAutostartDeps.stillLive?.(),
+    true,
+  );
+}
+{
+  // And the OMITTED case, which is what the `?? true` in the loop covers: a
+  // deps object with no `stillLive` key at all must behave as "alive", not stop
+  // the run on its first rule.
+  resetHostOwned();
+  const bare = world({ rules: [rule({ id: "f-bare", localPort: 18080 })] });
+  delete bare.deps.stillLive;
+  await startHostForwards("h-1", 7, bare.writeBanner, bare.deps);
+  check(
+    "a deps object with no stillLive at all still starts rules",
+    Object.keys(useHostOwnedForwards.getState().byRule),
+    ["f-bare"],
   );
 }
 
@@ -645,6 +803,46 @@ function isDirectlyInFunctionBody(node: ts.Node, fnBody: ts.Node): boolean {
   return cur === fnBody;
 }
 
+/**
+ * The leftmost operand of a `&&`/`||` chain, parentheses unwrapped - or the
+ * expression itself when it is not one.
+ *
+ * What turns "`hostOwned` is tested FIRST" into a claim about POSITION rather
+ * than about presence. `.includes("hostOwned")` over a function body or a
+ * ternary is position-blind: `starting ? … : hostOwned ? …` contains the name
+ * and tests it second, and `if (hostOwned)` moved below an exhaustive `switch`
+ * is dead code that typechecks under every flag this repo sets.
+ */
+function leftmostOperand(node: ts.Expression, sf: ts.SourceFile): string {
+  let cur: ts.Expression = node;
+  for (;;) {
+    if (ts.isParenthesizedExpression(cur)) {
+      cur = cur.expression;
+      continue;
+    }
+    if (
+      ts.isBinaryExpression(cur) &&
+      (cur.operatorToken.kind === ts.SyntaxKind.BarBarToken ||
+        cur.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken)
+    ) {
+      cur = cur.left;
+      continue;
+    }
+    return norm(cur.getText(sf));
+  }
+}
+
+/** Every conditional expression under `root`, nested ones included. */
+function findConditionals(root: ts.Node): ts.ConditionalExpression[] {
+  const out: ts.ConditionalExpression[] = [];
+  const visit = (n: ts.Node): void => {
+    if (ts.isConditionalExpression(n)) out.push(n);
+    ts.forEachChild(n, visit);
+  };
+  visit(root);
+  return out;
+}
+
 function findPropertyValue(
   obj: ts.ObjectLiteralExpression,
   name: string,
@@ -674,10 +872,31 @@ console.log("\n[8. ssh-session.ts] the call site, and the two releases");
   check("exactly one startHostForwards(...) call site", calls.length, 1);
   const call = calls[0];
   if (call) {
+    // THE FOURTH ARGUMENT IS THE WIRING, and it is the only thing that catches
+    // `stillLive: () => true` written here while the loop's own check stays
+    // exactly as it is: every behavioural section drives its own deps, so a
+    // dead flag at the production call site is invisible to all of them. Pinned
+    // as the ARGUMENT NODE's whole text, not by `includes("sessionEnded")` -
+    // `stillLive: () => !sessionEnded && false` would satisfy a substring.
     check(
-      "it is handed the host id, the LIVE session id, and a banner writer bound to this pane",
+      "it is handed the host id, the LIVE session id, a banner writer bound to this pane, and a session-scoped stillLive",
       call.arguments.map((a) => norm(a.getText(sf))),
-      ["sshConnectionId", "sshSession.id", "(text)=>writeSshBanner(s,text)"],
+      [
+        "sshConnectionId",
+        "sshSession.id",
+        "(text)=>writeSshBanner(s,text)",
+        "{...defaultAutostartDeps,stillLive:()=>!sessionEnded}",
+      ],
+    );
+    // R1's second half: the file's own idiom at `:336`, `:346` and `:384`.
+    // There is no `unhandledrejection` handler anywhere in `src/`, so a bare
+    // `void` here rests entirely on reading another function's body.
+    assert(
+      call.parent !== undefined &&
+        ts.isPropertyAccessExpression(call.parent) &&
+        call.parent.name.text === "catch",
+      "and the fire-and-forget call carries its own .catch, like every other void-ed promise in this file",
+      call.parent?.getText(sf).slice(0, 120),
     );
     // Structural position, not a count: a deletion whose decoy re-adds the
     // call inside a nested arrow keeps the count at 1 and never runs.
@@ -713,6 +932,29 @@ console.log("\n[8. ssh-session.ts] the call site, and the two releases");
       body.includes("if(resolvedSessionId!==null)"),
       "guarded on a session id having been resolved at all",
     );
+    // The `stillLive` flag, set here as well as at the adapter's close. Both
+    // release sites are ONE-SHOT, so a claim landing after either has run is
+    // never released - the row then reads "Running (with host)" for the rest of
+    // the app's life with a disabled Stop.
+    const ended = body.indexOf("sessionEnded=true");
+    assert(
+      ended >= 0,
+      "finishSsh marks the session ENDED as well as releasing",
+      body.slice(0, 240),
+    );
+    assert(
+      ended >= 0 && ended < guard,
+      "and it does so above the disposed guard too - a disposed pane's in-flight claim is just as unwanted",
+      { ended, guard },
+    );
+    // UNCONDITIONAL, unlike the release: a session that ended before `openSsh`
+    // ever resolved an id is still one an in-flight autostart must not claim
+    // against.
+    assert(
+      release >= 0 && ended < release,
+      "the flag is set BEFORE (and so outside) the resolved-session-id guard",
+      { ended, release },
+    );
   }
 
   // Release 2: the PtySession adapter's own `close`, for the ending that never
@@ -736,17 +978,28 @@ console.log("\n[8. ssh-session.ts] the call site, and the two releases");
   }
   assert(closeText !== null, "found the PtySession adapter's close member");
   if (closeText !== null) {
+    // INDEX-COMPARED, like the `finishSsh` twin above and for the same reason.
+    // Two independent `includes` are both satisfied by
+    // `close: () => sshSession.close().finally(() => ...releaseSession(...))`,
+    // which mentions everything this section names while moving the release
+    // AFTER the close IPC resolves - and that widens exactly the window an
+    // in-flight autostart claim slips through.
+    const text = closeText as string;
+    const release = text.indexOf("useHostOwnedForwards.getState().releaseSession(sshSession.id)");
+    const closes = text.indexOf("sshSession.close()");
+    const ended = text.indexOf("sessionEnded=true");
+    assert(release >= 0, "the adapter's close releases this session's forwards too", text);
+    assert(closes >= 0, "and still closes the session itself", text);
+    assert(ended >= 0, "and marks the session ENDED, like finishSsh does", text);
     assert(
-      (closeText as string).includes(
-        "useHostOwnedForwards.getState().releaseSession(sshSession.id)",
-      ),
-      "the adapter's close releases this session's forwards too",
-      closeText,
+      release >= 0 && closes >= 0 && release < closes,
+      "the release is ORDERED BEFORE the close IPC, not chained off its resolution",
+      { release, closes },
     );
     assert(
-      (closeText as string).includes("sshSession.close()"),
-      "and still closes the session itself",
-      closeText,
+      ended >= 0 && closes >= 0 && ended < closes,
+      "as is the flag - a claim resolving during the close IPC must already see a dead session",
+      { ended, closes },
     );
   }
 }
@@ -784,10 +1037,6 @@ console.log("\n[9. RuleCard.tsx] the read-only row a terminal-owned forward gets
       (statusText as ts.Node).getText(sf).includes('return "Running (with host)";'),
       'statusText answers "Running (with host)" for a terminal-owned rule',
     );
-    assert(
-      norm((statusText as ts.Node).getText(sf)).includes("if(hostOwned)"),
-      "on the hostOwned branch, ahead of the status switch",
-    );
   }
 
   const dot = findFunctionBody(sf, "statusDotClass");
@@ -799,10 +1048,99 @@ console.log("\n[9. RuleCard.tsx] the read-only row a terminal-owned forward gets
     );
   }
 
+  // -------------------------------------------------------------------------
+  // ONE PRECEDENCE ORDER: `hostOwned` FIRST, at every site in the file.
+  //
+  // The row must not be able to disagree with itself. `hostOwned && starting`
+  // is reachable - the terminal reads the page's status before its bind and
+  // claims after it, and `markStarting` is synchronous - and with the three
+  // orders disagreeing the row rendered a green dot, "Running (with host)", a
+  // note telling the user to close a terminal tab, and a button reading
+  // "Starting…" with a live spinner. A third answer about one rule, and there
+  // is no owner it corresponds to.
+  //
+  // Every assertion below is POSITIONAL. `.includes` over a function body is
+  // position-blind: moving `if (hostOwned)` below the exhaustive `switch`
+  // leaves the branch dead, typechecks, and keeps every substring intact.
+  // -------------------------------------------------------------------------
+  for (const fn of ["statusText", "statusDotClass"] as const) {
+    const fnBody = findFunctionBody(sf, fn);
+    check(`found ${fn}'s body for the precedence check`, fnBody !== null, true);
+    if (fnBody) {
+      const body = norm((fnBody as ts.Node).getText(sf));
+      const first = body.indexOf("if(hostOwned)");
+      const sw = body.indexOf("switch(status)");
+      assert(first >= 0, `${fn} has a hostOwned branch at all`, body.slice(0, 160));
+      assert(sw >= 0, `${fn} still has its exhaustive status switch`, body.slice(0, 160));
+      assert(
+        first >= 0 && sw >= 0 && first < sw,
+        `${fn} tests hostOwned ABOVE that switch - below it the branch is unreachable and still typechecks`,
+        { first, sw },
+      );
+    }
+  }
+  {
+    // The ternaries: `toggleLabel`, `toggleTooltip`, the button's `variant`,
+    // its icon, and the JSX status line. Swept rather than listed, so a site
+    // added later is covered without anyone remembering to add it here. `\b`
+    // keeps `hostOwnedPort` out of the sweep - a different value with a
+    // different question.
+    const withHostOwned = findConditionals(sf).filter((c) =>
+      /\bhostOwned\b/.test(norm(c.getText(sf))),
+    );
+    assert(
+      withHostOwned.length >= 5,
+      "found the hostOwned ternaries to check (label, tooltip, variant, icon, status line)",
+      withHostOwned.length,
+    );
+    for (const cond of withHostOwned) {
+      const leftmost = leftmostOperand(cond.condition, sf);
+      assert(
+        leftmost === "hostOwned",
+        `every ternary mentioning hostOwned tests it FIRST: ${norm(cond.getText(sf)).slice(0, 80)}`,
+        leftmost,
+      );
+    }
+  }
+  {
+    // The click handler must AGREE WITH THE LABEL. `toggleLabel` says "Stop"
+    // for a terminal-owned rule while `running` is false, so without the early
+    // return the button's own handler calls `startRule` - and neither call is
+    // right: the page holds no claim for such a rule, so `startRule` dials a
+    // second listener and `stopRule` marks it `stopped` in the page's store,
+    // which is a lie about a live listener nobody here can free. Unreachable
+    // today only because `startDisabled` includes `hostOwned`, and a disabled
+    // button is a rendering rather than an invariant.
+    let handler: string | null = null;
+    const visit = (n: ts.Node): void => {
+      if (
+        ts.isJsxAttribute(n) &&
+        n.name.getText(sf) === "onClick" &&
+        n.initializer &&
+        ts.isJsxExpression(n.initializer) &&
+        n.initializer.expression &&
+        n.initializer.expression.getText(sf).includes("startRule")
+      ) {
+        handler = norm(n.initializer.expression.getText(sf));
+      }
+      ts.forEachChild(n, visit);
+    };
+    visit(sf);
+    check("found the Start/Stop button's click handler", handler !== null, true);
+    if (handler !== null) {
+      check(
+        "it returns early for a terminal-owned rule, ahead of both calls",
+        handler,
+        "()=>{if(hostOwned)return;if(running)voidstopRule(rule);elsevoidstartRule(rule);}",
+      );
+    }
+  }
+
   // The three derived values, each read off its own binding's definition:
   // pinning the NAME would be satisfied by an alias or a rebind.
   const cases: Array<[string, string]> = [
-    ["startDisabled", "row.hostDangling||starting||hostOwned"],
+    ["startDisabled", "hostOwned||row.hostDangling||starting"],
+    ["toggleLabel", 'hostOwned?"Stop":starting?"Starting…":running?"Stop":"Start"'],
     ["localLabel", "localPortLabel(rule,hostOwnedPort??boundPort)"],
   ];
   for (const [name, want] of cases) {
@@ -861,6 +1199,365 @@ console.log("\n[10. §1.6 in the second store] every useHostOwnedForwards( selec
   assert(
     !/from ["']zustand\/react\/shallow["']/.test(hostOwnedSrc),
     "hostOwned.ts imports nothing from zustand/react/shallow",
+  );
+}
+
+// ===========================================================================
+console.log(
+  "\n[11. two panes, one host] a rule another SESSION already owns is refused, not overwritten",
+);
+// ===========================================================================
+{
+  resetHostOwned();
+  // LOCAL PORT BLANK, which is the DEFAULT rule shape: `EMPTY_RULE_DRAFT` has
+  // `localPort: ""` (`editor/draft.ts:46-54`), which saves as 0 and renders
+  // "Auto". That is what makes this reachable with no timing whatsoever - the
+  // second bind SUCCEEDS on a different port, so nothing fails and nothing
+  // warns. A pinned port would have failed EADDRINUSE and left tab A's entry
+  // standing by accident.
+  const shared = rule({ id: "f-shared", name: "shared", localPort: 0 });
+  let nextPort = 54321;
+  const a = world({ rules: [shared], open: async () => nextPort++ });
+  await startHostForwards("h-1", 41, a.writeBanner, a.deps);
+  check("tab A owns the rule", useHostOwnedForwards.getState().byRule, {
+    "f-shared": { sessionId: 41, boundPort: 54321 },
+  });
+
+  const b = world({ rules: [shared], open: async () => nextPort++ });
+  await startHostForwards("h-1", 42, b.writeBanner, b.deps);
+  check("tab B never asked the bridge for a second listener", b.openCalls.length, 0);
+  check("tab B claimed nothing", b.claims.length, 0);
+  check("and it says why, without claiming the PAGE owns it", b.banners, [
+    otherTerminalBanner("shared"),
+  ]);
+  check(
+    "the map still names session 41 - the live first owner was not overwritten",
+    useHostOwnedForwards.getState().byRule,
+    { "f-shared": { sessionId: 41, boundPort: 54321 } },
+  );
+
+  // The consequence the overwrite used to have, pinned from the other end:
+  // tab B closing must not take tab A's live forward out of the page, and tab
+  // A closing must still clear it (before the fix its entry had been
+  // overwritten, so its own release was a no-op and the row leaked).
+  useHostOwnedForwards.getState().releaseSession(42);
+  check("closing tab B leaves tab A's forward standing", useHostOwnedForwards.getState().byRule, {
+    "f-shared": { sessionId: 41, boundPort: 54321 },
+  });
+  useHostOwnedForwards.getState().releaseSession(41);
+  check("and closing tab A clears it", useHostOwnedForwards.getState().byRule, {});
+}
+{
+  // The paired positive for the `!== sessionId` half. UNREACHABLE in
+  // production - `next_id` is a monotonic `AtomicU32` from 1
+  // (`src-tauri/src/modules/ssh/mod.rs:52,59,476`) - so this pins what the
+  // comparison MEANS rather than a case the app can reach: the skip is about
+  // ANOTHER owner, and a bare presence test would refuse a session its own
+  // entry.
+  resetHostOwned();
+  const same = rule({ id: "f-same", name: "same session", localPort: 18080 });
+  const first = world({ rules: [same] });
+  await startHostForwards("h-1", 41, first.writeBanner, first.deps);
+  const again = world({ rules: [same] });
+  await startHostForwards("h-1", 41, again.writeBanner, again.deps);
+  check("a rule THIS session already owns is not refused", again.openCalls.length, 1);
+  check("it is re-claimed, not banner-skipped", again.banners, [
+    forwardingBanner(18080, "10.0.0.9:5432", "same session"),
+  ]);
+}
+
+// ===========================================================================
+console.log("\n[12. a session that ended mid-bind] no claim, and the loop STOPS");
+// ===========================================================================
+{
+  resetHostOwned();
+  const one = rule({ id: "f-l1", name: "one", localPort: 18080 });
+  const two = rule({ id: "f-l2", name: "two", localPort: 18081 });
+  const three = rule({ id: "f-l3", name: "three", localPort: 18082 });
+
+  // A deferred the FIXTURE controls, so every counter below is read after a
+  // suspension point this file chose. A count taken after awaiting an
+  // already-settled promise proves nothing about who waited.
+  let resolveTwo: (p: number) => void = () => {};
+  const parked = new Promise<number>((res) => {
+    resolveTwo = res;
+  });
+  let live = true;
+  const w = world({
+    rules: [one, two, three],
+    open: (call) => (call.localPort === 18081 ? parked : Promise.resolve(call.localPort)),
+    stillLive: () => live,
+  });
+  const settled = startHostForwards("h-1", 41, w.writeBanner, w.deps).then(
+    () => "resolved" as const,
+    (e) => `rejected: ${e instanceof Error ? e.message : String(e)}`,
+  );
+
+  await tick();
+  check("the first rule is up and the loop is parked on the second's bind", w.openCalls.length, 2);
+  check("the first rule's claim is on file", useHostOwnedForwards.getState().byRule, {
+    "f-l1": { sessionId: 41, boundPort: 18080 },
+  });
+
+  // The session ends while the bind is in flight. This is the REAL order:
+  // `disposeSession` sets `disposed`, then `pty.close()` releases
+  // SYNCHRONOUSLY, and only then issues `invoke("ssh_close")` - while this
+  // loop is already parked on an `ssh_forward_open` issued earlier, which
+  // takes a read lock and usually wins.
+  useHostOwnedForwards.getState().releaseSession(41);
+  live = false;
+  resolveTwo(18081);
+
+  check("startHostForwards still RESOLVES", await settled, "resolved");
+  check(
+    "the late bind claimed NOTHING - both release sites are one-shot, so an entry written now is never released",
+    useHostOwnedForwards.getState().byRule,
+    {},
+  );
+  check("nor was it recorded through the seam", w.claims.length, 1);
+  check(
+    "and the loop STOPPED rather than binding the third rule on a dead session",
+    w.openCalls.length,
+    2,
+  );
+  check("no banner told the user about a forward with no owner left", w.banners, [
+    forwardingBanner(18080, "10.0.0.9:5432", "one"),
+  ]);
+}
+{
+  // The paired control, and it is what tells "the guard bites" from "the
+  // suspension bites": the SAME parked bind, the same resolve, with the
+  // session still alive. Everything proceeds.
+  resetHostOwned();
+  const one = rule({ id: "f-k1", name: "one", localPort: 18080 });
+  const two = rule({ id: "f-k2", name: "two", localPort: 18081 });
+  let resolveTwo: (p: number) => void = () => {};
+  const parked = new Promise<number>((res) => {
+    resolveTwo = res;
+  });
+  const w = world({
+    rules: [one, two],
+    open: (call) => (call.localPort === 18081 ? parked : Promise.resolve(call.localPort)),
+    stillLive: () => true,
+  });
+  const settled = startHostForwards("h-1", 41, w.writeBanner, w.deps).then(() => "resolved");
+  await tick();
+  resolveTwo(18081);
+  await settled;
+  check("a live session claims both rules", useHostOwnedForwards.getState().byRule, {
+    "f-k1": { sessionId: 41, boundPort: 18080 },
+    "f-k2": { sessionId: 41, boundPort: 18081 },
+  });
+}
+
+// ===========================================================================
+console.log("\n[13. NEVER REJECTS, structurally] every throw site outside the per-rule try");
+// ===========================================================================
+// The doc comment says the function never rejects; the call site is a `void`
+// and there is no `unhandledrejection` handler anywhere in `src/`. Before the
+// fix that claim held only because `writeSshBanner` guards `s.disposed` and
+// `s.term.dispose()` runs after that flag is set - true by another file's
+// ordering rather than by construction.
+//
+// Every scenario is parked on a `listRules` the FIXTURE releases, so the
+// resolve/reject verdict is read after a suspension point this file controls.
+{
+  const boom = new Error("banner: this pane is already gone");
+  const throwingBanner = (): void => {
+    throw boom;
+  };
+  const quietBanner = (): void => {};
+  const t = rule({ id: "f-throw", name: "throwing", localPort: 18080 });
+
+  type Site = {
+    name: string;
+    over: Parameters<typeof world>[0];
+    banner: (text: string) => void;
+    listFails?: boolean;
+    mutate?: (deps: AutostartDeps) => void;
+  };
+  const sites: Site[] = [
+    // The four the reviewer named.
+    {
+      name: "the unreadable-store banner throws",
+      over: {},
+      banner: throwingBanner,
+      listFails: true,
+    },
+    {
+      name: "deps.runtimeStatus throws",
+      over: {
+        rules: [t],
+        statusFn: () => {
+          throw boom;
+        },
+      },
+      banner: quietBanner,
+    },
+    {
+      name: "the page-skip banner throws",
+      over: { rules: [t], status: { "f-throw": "running" } },
+      banner: throwingBanner,
+    },
+    {
+      name: "the failed banner throws after a rejected bind",
+      over: { rules: [t], open: () => Promise.reject("ssh: bind 127.0.0.1:18080 failed") },
+      banner: throwingBanner,
+    },
+    // And the sites this round's own fixes added.
+    {
+      name: "deps.hostOwnedBy throws",
+      over: {
+        rules: [t],
+        hostOwnedBy: () => {
+          throw boom;
+        },
+      },
+      banner: quietBanner,
+    },
+    {
+      name: "the other-terminal banner throws",
+      over: { rules: [t], hostOwnedBy: () => 99 },
+      banner: throwingBanner,
+    },
+    {
+      name: "deps.stillLive throws",
+      over: {
+        rules: [t],
+        stillLive: () => {
+          throw boom;
+        },
+      },
+      banner: quietBanner,
+    },
+    {
+      name: "the yielding banner throws",
+      over: { rules: [t], statusFn: (_id, nth) => (nth === 0 ? "stopped" : "running") },
+      banner: throwingBanner,
+    },
+    {
+      name: "deps.closeForward rejects while yielding",
+      over: {
+        rules: [t],
+        statusFn: (_id, nth) => (nth === 0 ? "stopped" : "running"),
+        close: () => Promise.reject(boom),
+      },
+      banner: quietBanner,
+    },
+    // The success banner throwing is the compound case: the per-rule catch
+    // reaches for `failedBanner`, which throws again with no handler left.
+    {
+      name: "the success banner throws, and so does the failed banner the catch reaches for",
+      over: { rules: [t] },
+      banner: throwingBanner,
+    },
+    {
+      name: "deps.claimHostOwned throws and the failed banner throws too",
+      over: { rules: [t] },
+      banner: throwingBanner,
+      mutate: (deps) => {
+        deps.claimHostOwned = () => {
+          throw boom;
+        };
+      },
+    },
+  ];
+
+  for (const site of sites) {
+    resetHostOwned();
+    let release: () => void = () => {};
+    const parkedList = new Promise<ForwardRule[]>((res, rej) => {
+      release = () =>
+        site.listFails
+          ? rej(new Error("forwards: store file is unreadable"))
+          : res(site.over.rules ?? []);
+    });
+    const w = world({ ...site.over, listRules: () => parkedList });
+    site.mutate?.(w.deps);
+    const settled = startHostForwards("h-1", 7, site.banner, w.deps).then(
+      () => "resolved" as const,
+      (e) => `rejected: ${e instanceof Error ? e.message : String(e)}`,
+    );
+    await tick();
+    check(
+      `${site.name}: nothing has settled while the store read is parked`,
+      w.openCalls.length,
+      0,
+    );
+    release();
+    check(`${site.name}: startHostForwards RESOLVES`, await settled, "resolved");
+  }
+}
+
+// ===========================================================================
+console.log("\n[14. the page took it mid-bind] first claim wins, and the loser closes its own");
+// ===========================================================================
+for (const taken of ["running", "starting"] as const) {
+  resetHostOwned();
+  const r = rule({ id: "f-yield", name: "yielded", localPort: 0 });
+  // THE STALE READ, which the seam could not express before this round: the
+  // status is answered "stopped" on the FIRST read (before the bind) and
+  // `taken` on the second (after it). That is the user clicking Start while
+  // this bind was in flight, and `controller.ts`'s `markStarting` is
+  // synchronous, so no timing trick is needed to reach it.
+  const w = world({
+    rules: [r],
+    statusFn: (_id, nth) => (nth === 0 ? "stopped" : taken),
+    open: async () => 54321,
+  });
+  await startHostForwards("h-1", 41, w.writeBanner, w.deps);
+
+  check(`("${taken}") the bind DID happen - the first read said stopped`, w.openCalls.length, 1);
+  check(`("${taken}") and the status was re-read AFTER it, which is the whole fix`, w.statusCalls, [
+    "f-yield",
+    "f-yield",
+  ]);
+  check(
+    `("${taken}") the just-bound listener was closed, by session and BOUND port`,
+    w.closeCalls,
+    [{ id: 41, boundPort: 54321 }],
+  );
+  check(`("${taken}") no claim was written - the page's claim was first`, w.claims.length, 0);
+  check(
+    `("${taken}") and the terminal's map is untouched`,
+    useHostOwnedForwards.getState().byRule,
+    {},
+  );
+  check(`("${taken}") the banner names the rule`, w.banners, [yieldedBanner("yielded")]);
+}
+{
+  // The paired control: both reads say "stopped", so nothing is closed and the
+  // claim lands. Without this the section passes with a re-check widened to
+  // "always yield".
+  resetHostOwned();
+  const r = rule({ id: "f-keep", name: "kept", localPort: 0 });
+  const w = world({ rules: [r], statusFn: () => "stopped", open: async () => 54321 });
+  await startHostForwards("h-1", 41, w.writeBanner, w.deps);
+  check("a rule the page never took is not closed", w.closeCalls, []);
+  check("and it is claimed", useHostOwnedForwards.getState().byRule, {
+    "f-keep": { sessionId: 41, boundPort: 54321 },
+  });
+  check("with the ordinary forwarding banner", w.banners, [
+    forwardingBanner(54321, "10.0.0.9:5432", "kept"),
+  ]);
+}
+
+// ===========================================================================
+console.log("\n[15. VLT-94's load-bearing half] autostart never writes the PAGE's store");
+// ===========================================================================
+{
+  // Read after every section above has run, with NO reset in between - the
+  // claim is that `startHostForwards` never writes this store at all, on any
+  // path: not the happy one, not the skip, not the yield, not the failure.
+  // `claimHostOwned` is behind the `AutostartDeps` seam and every fixture
+  // substitutes it; a direct `useForwardRuntime.getState().markRunning(...)`
+  // is not, and `autostart.ts` already holds a live reference to that store.
+  // If it ever happened the page would believe it can Stop a terminal-owned
+  // rule, and would spend a claim nobody took.
+  check(
+    "after every run in this file, the page's runtime store is still empty",
+    useForwardRuntime.getState().byRule,
+    {},
   );
 }
 

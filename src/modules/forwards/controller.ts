@@ -34,6 +34,7 @@ import { toast } from "@/components/ui/toast";
 import { useHostKeyPrompt } from "@/modules/ssh/hostKeyPrompt";
 import { closeForwardForConnection, openForwardForConnection } from "@/modules/ssh/tunnel";
 
+import { useHostOwnedForwards } from "./hostOwned";
 import { bindFailureText } from "./page/derive";
 import { useForwardRuntime } from "./runtime";
 import type { ForwardRule } from "./types";
@@ -111,6 +112,15 @@ function describeError(e: unknown): string {
   }
 }
 
+/** What a Start refused because a terminal already holds the rule says. Not the
+ *  same sentence as `RuleCard`'s `HOST_OWNED_NOTE`, and not shared with it: that
+ *  file is a `.tsx` and importing it here would cost this module the
+ *  "exercisable under plain node" property the header exists for. This one also
+ *  names the rule, because a toast outlives the row it came from. */
+function hostOwnedRefusalText(rule: ForwardRule): string {
+  return `"${rule.name}" is already open on its terminal. Close that terminal tab to stop it.`;
+}
+
 /**
  * Bring `rule` up, and record the bound port and the claim its Stop will need.
  *
@@ -121,11 +131,31 @@ function describeError(e: unknown): string {
  *
  * NEVER REJECTS. The caller is a click handler with nowhere to put an
  * exception, so a failure reports through the store and a toast instead.
+ *
+ * REFUSES A TERMINAL-OWNED RULE, ahead of everything else. `RuleCard` disables
+ * the button for one, but a disabled button is a rendering and not an
+ * invariant - and the row's `hostOwned` can become true while this page's own
+ * Start is in flight, so the guard has to live where the dial does. First claim
+ * wins (VLT-94), and the terminal's claim is the one already taken.
  */
 export async function startRule(
   rule: ForwardRule,
   runtime: RuntimeDeps = defaultRuntimeDeps,
 ): Promise<void> {
+  // `useHostOwnedForwards` imported directly rather than routed through
+  // `RuntimeDeps`, exactly as `useForwardRuntime` and `useHostKeyPrompt`
+  // already are and for the reason this file's header gives: a zustand store
+  // runs fine under `tsx`, so a check reads what the REAL store says, and a
+  // seam wide enough to fake one would be a seam that can pass while the real
+  // store disagrees.
+  //
+  // Before `markStarting`, so a refused Start leaves the page's own store
+  // untouched: it took no claim, so it must not publish a status it would then
+  // have to spend a claim to leave.
+  if (useHostOwnedForwards.getState().byRule[rule.id] !== undefined) {
+    runtime.toast(hostOwnedRefusalText(rule), { variant: "warning" });
+    return;
+  }
   const prompts = new Set<string>();
   startAttempts.set(rule.id, prompts);
   useForwardRuntime.getState().markStarting(rule.id);

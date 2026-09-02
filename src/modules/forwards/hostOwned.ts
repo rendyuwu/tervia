@@ -10,14 +10,26 @@
  * and a reconnect comes back with a new session id and claims afresh.
  *
  * THE OTHER SIDE OF `runtime.ts:12-20`. That store is the PAGE's and is keyed
- * by `ruleId` alone; this one is the TERMINAL's. A rule in here is never in
- * `useForwardRuntime`'s `byRule`, and a rule in there is never started here -
- * the two are mutually exclusive BY CONSTRUCTION rather than by a check either
- * side makes, because the only writer to this map (`autostart.ts`) skips a rule
- * the page already owns, and the page's Start/Stop never writes here at all.
- * The page reads this map read-only: it shows such a rule as "Running (with
- * host)" with a disabled Start/Stop, because a Stop offered here would spend a
- * reference nobody on the page ever took.
+ * by `ruleId` alone; this one is the TERMINAL's, and it is keyed by `ruleId`
+ * alone too - which is exactly why it CANNOT REPRESENT TWO OWNERS, and why the
+ * answer to a second owner is to refuse it rather than to record it. VLT-94:
+ * a forward rule runs under one owner at a time.
+ *
+ * TWO EXCLUSIONS, EACH WITH ITS OWN CHECK, and neither is "by construction":
+ *
+ * - **This map against `useForwardRuntime`.** `autostart.ts` reads
+ *   `runtimeStatus` before the bind AND again immediately before the claim, and
+ *   yields (closes its own just-bound listener) if the page took the rule in
+ *   between; `controller.ts`'s `startRule` refuses outright a rule that is
+ *   already in here. First claim wins, from either side.
+ * - **This map against ITSELF.** Two panes on one host are two sessions and two
+ *   autostart runs (`ssh/tunnel.ts:31-35`), so `autostart.ts` also skips a rule
+ *   `hostOwnedBy` says another session already owns.
+ *
+ * The page's Start/Stop never writes here at all. The page reads this map
+ * read-only: it shows such a rule as "Running (with host)" with a disabled
+ * Start/Stop, because a Stop offered here would spend a reference nobody on the
+ * page ever took.
  */
 
 import { create } from "zustand";
@@ -30,9 +42,17 @@ export type HostOwnedEntry = { sessionId: number; boundPort: number };
 
 type HostOwnedState = {
   byRule: Record<string, HostOwnedEntry>;
-  /** Record a forward this session just opened. Overwrites: a rule reaching
-   *  here twice means the first session's entry is stale, and the write that
-   *  proves the newer one is live is the one to keep. */
+  /**
+   * Record a forward this session just opened. Overwrites, and the overwrite is
+   * NOT how two live owners are resolved - it cannot be, because this map is
+   * keyed by rule id and a lost entry is a listener nothing names.
+   *
+   * A LIVE first owner never reaches here twice: `autostart.ts` asks
+   * `hostOwnedBy` first and refuses a rule another session already holds. What
+   * is left for the overwrite is the STALE entry - a session whose release
+   * never ran - where last-writer-wins is the right fallback and the newer
+   * write is the one that describes something listening.
+   */
   claim(ruleId: string, entry: HostOwnedEntry): void;
   /**
    * Drop every entry `sessionId` opened, whatever rule it belongs to.

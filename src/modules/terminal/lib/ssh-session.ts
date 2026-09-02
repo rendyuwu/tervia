@@ -1,4 +1,4 @@
-import { startHostForwards } from "@/modules/forwards/autostart";
+import { defaultAutostartDeps, startHostForwards } from "@/modules/forwards/autostart";
 import { useHostOwnedForwards } from "@/modules/forwards/hostOwned";
 import { listHosts, markConnected, pinFingerprint } from "@/modules/hosts/store";
 import { resolveJumpHops } from "@/modules/hosts/jumps";
@@ -194,6 +194,16 @@ export async function openSshForSession(
   // `decideSshEnding` (module scope, above) - kept pure and separate from
   // these side effects so it stays unit-testable on its own.
   let terminated = false;
+  // Has this session ENDED? Read by `startHostForwards`'s `stillLive` below,
+  // and the reason it exists at all is that BOTH release sites are one-shot:
+  // `finishSsh` is behind `terminated` and the adapter's `close` fires once, so
+  // an entry claimed after either has run is never released, and the row then
+  // reads "Running (with host)" for the rest of the app's life with a disabled
+  // Stop and a note pointing at a tab that is already gone. Autostart is N
+  // sequential IPC round trips, and `disposeSession` releases synchronously
+  // before its own `ssh_close` invoke lands, so the window is real and it
+  // favours the leak.
+  let sessionEnded = false;
   const finishSsh = (ending: SshEnding) => {
     if (terminated) return;
     terminated = true;
@@ -202,7 +212,10 @@ export async function openSshForSession(
     // disposed pane's forwards are exactly as dead as a live one's, and a
     // release under that guard would leak every entry for every tab the user
     // closed. `resolvedSessionId` is null until `openSsh` resolves, and an
-    // attempt that never got that far claimed nothing.
+    // attempt that never got that far claimed nothing - but the FLAG is set
+    // unconditionally, because a session that ended without ever resolving an
+    // id is still one an in-flight autostart must not claim against.
+    sessionEnded = true;
     if (resolvedSessionId !== null) {
       useHostOwnedForwards.getState().releaseSession(resolvedSessionId);
     }
@@ -456,7 +469,19 @@ export async function openSshForSession(
   // rejects: a rule that cannot bind writes a banner and the connect carries
   // on. Awaiting it would hold the pane's first prompt behind N binds, and
   // letting it throw would turn a busy local port into a failed SSH connect.
-  void startHostForwards(sshConnectionId, sshSession.id, (text) => writeSshBanner(s, text));
+  // `.catch(() => {})` regardless, matching this file's own idiom at `:336`,
+  // `:346` and `:384`: "never rejects" is now structural in that function, and
+  // this is the belt that does not depend on reading it.
+  //
+  // The deps object exists for ONE key. `stillLive` is the only dep whose
+  // answer lives in this scope - autostart's loop has to be able to ask whether
+  // the session it is binding on is still the one that started, and nothing at
+  // that module's scope can answer. Everything else is spread straight off the
+  // default.
+  void startHostForwards(sshConnectionId, sshSession.id, (text) => writeSshBanner(s, text), {
+    ...defaultAutostartDeps,
+    stillLive: () => !sessionEnded,
+  }).catch(() => {});
 
   // Adapter so SSH looks like a PtySession to the rest of the file. SSH
   // sessions are not persisted via daemon UUIDs (`pty_attach` is local
@@ -472,6 +497,13 @@ export async function openSshForSession(
       // The second release site, for the ending that never reaches `finishSsh`
       // - a user-initiated `disconnectSsh`, or a pane closing under a session
       // that reports nothing back. Idempotent, so firing both is harmless.
+      //
+      // BOTH BEFORE `sshSession.close()`, and that order is the claim. Written
+      // as `sshSession.close().finally(() => release)` this file would still
+      // mention both calls while moving the release AFTER the close IPC
+      // resolves - which is exactly the window an in-flight autostart claim
+      // slips through.
+      sessionEnded = true;
       useHostOwnedForwards.getState().releaseSession(sshSession.id);
       return sshSession.close();
     },

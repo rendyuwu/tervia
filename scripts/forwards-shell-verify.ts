@@ -889,6 +889,10 @@ const { startRule, stopRule } = await import("../src/modules/forwards/controller
 type RuntimeDepsType = NonNullable<Parameters<typeof startRule>[1]>;
 const { useForwardRuntime } = await import("../src/modules/forwards/runtime");
 const { useHostKeyPrompt } = await import("../src/modules/ssh/hostKeyPrompt");
+// The TERMINAL's map, read by `startRule` directly rather than through
+// `RuntimeDeps` - see C9, and `controller.ts`'s own note on why: a zustand
+// store runs fine under `tsx`, so a check reads what the REAL store says.
+const { useHostOwnedForwards } = await import("../src/modules/forwards/hostOwned");
 
 /** Let queued microtasks settle, the same shape `rdp-tunnel-verify.ts`'s
  *  `settle()` gives the real bridge. */
@@ -1027,6 +1031,9 @@ function fakeRule(over: {
 function resetStores(): void {
   useForwardRuntime.setState({ byRule: {} });
   useHostKeyPrompt.setState({ queue: [] });
+  // `startRule` refuses a rule in here outright, so a fixture that left an
+  // entry behind would silently turn every later Start into a no-op.
+  useHostOwnedForwards.setState({ byRule: {} });
 }
 
 // ---------------------------------------------------------------------------
@@ -1317,6 +1324,70 @@ console.log(
     "C8: the row ends stopped",
     useForwardRuntime.getState().byRule["c8"]?.status === "stopped",
   );
+}
+
+// ---------------------------------------------------------------------------
+console.log(
+  "\n[C9] startRule REFUSES a rule a terminal already owns - no dial, a toast, and the page's store untouched",
+);
+// `controller.ts` had zero `hostOwned` awareness: `RuleCard`'s `startDisabled`
+// was the entire defence, and a disabled button is a rendering rather than an
+// invariant. `hostOwned` can also become true while this page's own Start is in
+// flight (the terminal reads the page's status before its bind and claims after
+// it), so the guard has to live where the dial does. First claim wins (VLT-94),
+// and the terminal's is the one already taken.
+//
+// This lives here and NOT in `rdp-tunnel-verify.ts`, which the brief named:
+// that script has no reference to `startRule`, `stopRule` or `controller` at
+// all. This file is the one that owns the `RuntimeDeps` seam.
+{
+  resetFakes();
+  resetStores();
+  const rule = fakeRule({ id: "c9", localPort: 18080 });
+  useHostOwnedForwards.setState({ byRule: { c9: { sessionId: 41, boundPort: 54321 } } });
+  await startRule(rule, FAKE_RUNTIME);
+  check(
+    "C9: nothing was dialled - the refusal is ahead of the open",
+    openCalls.length === 0,
+    openCalls,
+  );
+  check(
+    "C9: the user was told why, naming the rule",
+    toastCalls.length === 1 && (toastCalls[0]?.message ?? "").includes(`"${rule.name}"`),
+    toastCalls,
+  );
+  check(
+    "C9: and it points at the terminal tab rather than at this page",
+    /terminal tab/.test(toastCalls[0]?.message ?? ""),
+    toastCalls[0]?.message,
+  );
+  // The refusal sits ABOVE `markStarting`, so the page publishes no status it
+  // would then need a claim to leave. A row left "starting" for a rule this
+  // page never dialled is the third self-contradiction B3 describes.
+  check(
+    "C9: the page's own store is untouched - it took no claim, so it holds none",
+    useForwardRuntime.getState().byRule["c9"] === undefined,
+    useForwardRuntime.getState().byRule["c9"],
+  );
+  check(
+    "C9: and the terminal's entry is left exactly as it was",
+    useHostOwnedForwards.getState().byRule["c9"]?.sessionId === 41,
+    useHostOwnedForwards.getState().byRule["c9"],
+  );
+}
+{
+  // The paired positive: the same rule dials normally once no terminal holds
+  // it. Without this the guard passes with the refusal widened to "always".
+  resetFakes();
+  resetStores();
+  const rule = fakeRule({ id: "c9b", localPort: 18080 });
+  await startRule(rule, FAKE_RUNTIME);
+  check(
+    "C9: with the terminal's map empty the same Start dials and the row runs",
+    openCalls.length === 1 && useForwardRuntime.getState().byRule["c9b"]?.status === "running",
+    { opens: openCalls.length, row: useForwardRuntime.getState().byRule["c9b"] },
+  );
+  check("C9: and nothing was toasted", toastCalls.length === 0, toastCalls);
 }
 
 console.log(failed === 0 ? "\nAll forwards-shell checks passed." : `\n${failed} check(s) FAILED.`);
