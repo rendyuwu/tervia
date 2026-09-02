@@ -546,6 +546,33 @@ console.log(
     pinnedTo10048,
   );
 
+  // An AUTO-PORT rule (`localPort: 0`) must never be told about "Port 0". Both
+  // sentences that name the port are guarded on the requested port being a real
+  // one, and 0 is not: nothing is listening on it and "pick a port above 1024"
+  // is advice a rule that asked for any port has already taken. The honest
+  // answer for an auto rule is the raw message, since the port the OS actually
+  // picked is not knowable from a bind that bound nothing.
+  const autoInUse = "ssh: bind 127.0.0.1:0 failed: Address already in use (os error 98)";
+  check(
+    "an auto-port rule in-use failure falls through, never 'Port 0 is already in use'",
+    bindFailureText(autoInUse, 0),
+    autoInUse,
+  );
+  const autoDenied = "ssh: bind 127.0.0.1:0 failed: Permission denied (os error 13)";
+  check(
+    "an auto-port rule permission failure falls through, never 'Port 0 needs administrator rights'",
+    bindFailureText(autoDenied, 0),
+    autoDenied,
+  );
+  // And the paired positive, so the guards are a RANGE check and not an
+  // off-switch: port 1 is the smallest real privileged port and still gets the
+  // sentence.
+  check(
+    "port 1 still gets the administrator-rights sentence - the guard is a range, not an off-switch",
+    bindFailureText("ssh: bind 127.0.0.1:1 failed: Permission denied (os error 13)", 1),
+    "Port 1 needs administrator rights. Pick a port above 1024.",
+  );
+
   // D5: the fallback is the important arm - an io error this table has never
   // seen must reach the reader UNCHANGED, not behind a generic "could not
   // bind".

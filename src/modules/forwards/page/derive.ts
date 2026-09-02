@@ -214,7 +214,15 @@ export function bindFailureText(error: string, localPort: number): string {
     );
   }
   const permissionDenied = io.includes("eacces") || io.includes("permission denied");
-  if (permissionDenied && localPort < 1024) {
+  // `>= 1` and not just `< 1024`, matching {@link privilegedPortWarning}'s own
+  // guard exactly. `localPort` here is the port the rule ASKED FOR, and 0 means
+  // "let the OS pick" - so `0 < 1024` is true and an auto-port rule would be
+  // told "Port 0 needs administrator rights. Pick a port above 1024.", which
+  // names a port that does not exist and prescribes something the rule already
+  // does. The two functions share `needsAdminRightsSentence` precisely so they
+  // cannot disagree about the words; they have to agree about the RANGE too, or
+  // the shared sentence is just a shared way of being wrong.
+  if (permissionDenied && localPort >= 1 && localPort < 1024) {
     return needsAdminRightsSentence(localPort);
   }
   // "address in use" is a SUBSTRING of neither real message - Linux and macOS
@@ -222,13 +230,19 @@ export function bindFailureText(error: string, localPort: number): string {
   // Windows says none of those words at all. So all three spellings are
   // needed; the port-number forms are `os error`-qualified so a rule pinned to
   // port 10048 cannot read its own number as an error code.
-  if (
+  const addressInUse =
     io.includes("eaddrinuse") ||
     io.includes("address already in use") ||
     io.includes("address in use") ||
     io.includes("os error 10048") ||
-    io.includes("only one usage of each socket address")
-  ) {
+    io.includes("only one usage of each socket address");
+  // `localPort !== 0` for the same reason the permission arm needs `>= 1`: this
+  // sentence NAMES the port, and for an auto-port rule the number it would name
+  // is 0, which nothing was ever listening on. An auto rule that somehow gets
+  // this failure falls through to the raw message instead, which is the one
+  // honest thing available - the port the OS actually picked is not knowable
+  // here, because a bind that failed bound nothing.
+  if (addressInUse && localPort !== 0) {
     return `Port ${localPort} is already in use on this machine.`;
   }
   return error;
