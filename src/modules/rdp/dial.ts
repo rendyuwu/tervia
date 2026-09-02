@@ -67,7 +67,12 @@ export async function openRdpDialTarget(
   }
   const forward = await openForwardForConnection(sshHostId, conn.host, conn.port, {
     // The RDP connect flow has a dialog on screen anyway, so an unverified
-    // bastion asks instead of refusing. This is the ONLY caller that passes it.
+    // bastion asks instead of refusing. One of the two callers that pass it -
+    // the other is the Port Forwarding page's Start
+    // (`modules/forwards/controller.ts`) - and both meet the flag's one
+    // precondition, stated in `SshForwardOptions.promptForHostKey`: a UI
+    // already on screen that can answer, so the handshake is never parked on a
+    // question with no audience.
     promptForHostKey: true,
     onHostKeyPrompt: opts.onHostKeyPrompt,
   });

@@ -76,6 +76,14 @@
  *    `ssh_forward_close` closes one listener without touching the session, and
  *    it takes the BOUND port - which for an auto-port rule is not the one that
  *    was asked for.
+ *
+ * 11. AND THE RELEASE WAITS FOR IT. `ssh_forward_close` is keyed by bound port
+ *    with no generation, so a close fired and forgotten can land on a listener
+ *    that a re-open has since bound on that same port: a Stop returning before
+ *    the backend heard it, then a Start on the same pinned port, reads from the
+ *    page as "Start silently does nothing every other time" (VLT-96). Only a
+ *    stop while the dial is STILL IN FLIGHT can tell the two forms apart, which
+ *    is what the last `[stop]` fixture sets up.
  */
 
 export {};
@@ -612,6 +620,65 @@ console.log("\n[stop] releasing the last reference frees the port");
   await closeForwardForConnection("c-bastion", "10.0.0.9", 22, 18443, keep.claim);
   await settle();
   check("and every listener is closed once", countOf("ssh_forward_close"), 3);
+}
+{
+  // The release WAITS for the backend, rather than firing the close and
+  // resolving on the spot. `ssh_forward_close` is keyed by bound port with no
+  // generation, so a close still in flight names whatever is listening on that
+  // port - a re-open's brand-new listener included. A Stop that resolved before
+  // the backend heard it, followed by a Start on the same pinned port, is
+  // therefore "Start silently does nothing every other time" (VLT-96).
+  //
+  // Every fixture above closes a forward whose open has already RESOLVED, and
+  // for those the fire-and-forget form is INDISTINGUISHABLE from this one: its
+  // `.then` callback is queued on an already-settled promise, so it runs before
+  // the caller's own `await` resumes and the count has arrived either way. What
+  // separates them is a stop while the dial is still IN FLIGHT - which is the
+  // honest reading of the port's lifetime, since the port is not free until the
+  // open that binds it has finished.
+  reset([row({ id: "c-bastion" }), row({ id: "c-parked" })]);
+  // A claim only ever comes out of a RESOLVED `SshForward`, so an entry whose
+  // open is still parked has none that a caller could be holding. Claims are
+  // monotonic and never reused (`tunnel.ts:229-231`), so the entry built next
+  // carries this one's plus one - which is how this fixture can name an entry it
+  // cannot await. The page reaches the same state legitimately: its Start
+  // publishes nothing until the open resolves, and its Stop then finds no claim
+  // recorded at all.
+  const probe = await openForwardForConnection("c-bastion", "10.0.0.9", 22, { localPort: 18443 });
+  autoAnswerOpen = false;
+  const opening = openForwardForConnection("c-parked", "10.0.0.9", 5432, { localPort: 18080 });
+  await settle();
+  check("a second bastion's dial is parked mid-handshake", parkedOpens.length, 2);
+
+  const stopping = closeForwardForConnection("c-parked", "10.0.0.9", 5432, 18080, probe.claim + 1);
+  // The parked handshake finishes, the way it does when the user finally answers
+  // a host-key question - or when a teardown abandons it and the dial fails.
+  const parkedSession = nextSessionId++;
+  parkedOpens[1].resolve(parkedSession);
+  await stopping;
+  // No `settle()` here on purpose: a settle would let the fire-and-forget form's
+  // microtask land too, and the claim is about WHEN this call resolves.
+  check("the close is awaited, not fired and forgotten", countOf("ssh_forward_close"), 1);
+  check("naming the port the parked open went on to bind", lastOf("ssh_forward_close")?.args, {
+    id: parkedSession,
+    boundPort: 18080,
+  });
+
+  // The abandoned Start still resolves - it bound its port before the release
+  // reached it - and its claim now names an entry nobody holds, which is
+  // exactly why the page's Start hands it straight back.
+  const late = await opening;
+  check(
+    "the open it was racing still resolves",
+    [late.localPort, late.claim],
+    [18080, probe.claim + 1],
+  );
+  await settle();
+  check("and the abandoned dial's session is closed with it", countOf("ssh_close"), 1);
+
+  await closeForwardForConnection("c-bastion", "10.0.0.9", 22, 18443, probe.claim);
+  await settle();
+  check("the other bastion closes on its own release", countOf("ssh_close"), 2);
 }
 
 // ---------------------------------------------------------------------------

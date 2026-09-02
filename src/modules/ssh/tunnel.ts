@@ -498,6 +498,16 @@ function releaseSession(connectionId: string): void {
  * spent, and for one that has since been re-created by somebody else - so a
  * teardown can fire it without tracking whether the open succeeded or whether
  * the bastion died in between.
+ *
+ * RESOLVES ONLY ONCE THE LISTENER IS ACTUALLY CLOSED, when this release is the
+ * last one: the returned promise is what a caller awaits to know the port is
+ * free again, and the page's Stop relies on it before it lets the row offer
+ * Start. The cost, deliberately accepted: releasing a reference on an open that
+ * is STILL IN FLIGHT waits for that dial to resolve or fail, because the port
+ * is not free until the open that binds it has finished. A caller that can
+ * shorten that wait should abandon the dial's host-key prompt first (see
+ * {@link SshForwardOptions.onHostKeyPrompt}); a caller that does not care can
+ * drop the promise on the floor, which is what the RDP pane's teardown does.
  */
 export async function closeForwardForConnection(
   connectionId: string,
@@ -534,7 +544,21 @@ export async function closeForwardForConnection(
     // Deleted BEFORE the await, and only if it is still ours: an entry
     // re-created by another caller in the meantime is theirs.
     if (forwards.get(key) === entry) forwards.delete(key);
-    void entry.forward.then((f) => closeSshForward(f.sessionId, f.localPort)).catch(() => {});
+    // AWAITED, so this call resolves only once the backend has actually been
+    // told. `ssh_forward_close` is keyed by BOUND PORT with no generation of its
+    // own, so a close still in flight names whatever is listening on that port -
+    // including a listener a re-open has bound in the meantime. Firing and
+    // forgetting made that window reachable from one caller: a Stop that
+    // returned before the backend heard it, followed by a Start on the same
+    // pinned port, has the stale close tear down the NEW listener, which from
+    // the page looks like "Start silently does nothing every other time".
+    // Awaiting serialises Stop-then-Start for callers that await (the page's
+    // `stopRule` does); two concurrent callers that do not still need the
+    // backend to carry a generation, which is what VLT-96 stays open against.
+    //
+    // The `.catch` stays: a dial that died has no listener to close, and that is
+    // not a failure for whoever is letting go of it.
+    await entry.forward.then((f) => closeSshForward(f.sessionId, f.localPort)).catch(() => {});
   }
   releaseSession(connectionId);
 }
