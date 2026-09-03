@@ -320,20 +320,16 @@ export function RuleCard({ row, onEdit, onDelete }: RuleCardProps): ReactNode {
             are one answer read together.
 
             WHAT THE CLASSES DO, stated as the mechanism rather than as the
-            outcome someone would like: this group is a `flex: 0 1 auto` item
-            beside a `shrink-0` button cluster, so it SHRINKS first and wraps
-            its two spans onto separate lines only once shrinking has run out.
-            Both spans `truncate`, so a span still wider than the shrunk group
-            ends in an ellipsis instead of forcing that wrap. "Running (with
-            host)" is the longest of the five status strings and the one whose
-            whole point is the parenthetical, so it is the one to look at.
-
-            AND IT IS A LOOK, not a settled claim: at the narrowest cell
-            (~249px of content) the Stop + Edit + Delete cluster is roughly
-            130px, leaving the pair ~110px, and the string at `text-xs` is
-            around the same - an estimate against an estimate. The four-column
-            grid with a terminal-owned rule in it is therefore a HAND-TEST
-            step, and the hand check carries it. */}
+            outcome someone would like: WRAP HAPPENS BEFORE SHRINK. This
+            group is `flex-wrap`, and flex line-breaking runs on each item's
+            max-content size before any shrinking is distributed, so two
+            spans that do not fit side by side go onto separate lines - each
+            line then holds one span that does fit, and `truncate` has
+            nothing left to do. Measured on the shipped build at four
+            column counts: "Running (with host)", the longest of the five
+            status strings, keeps `localLabel` on a second line under it and
+            neither span ellipsizes. So `truncate` here guards a SINGLE span
+            wider than a whole line, not a width budget the two share. */}
         <div className="text-muted-foreground flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs">
           <span className="truncate">{statusText(status, hostOwned)}</span>
           <span className="truncate tabular-nums">{localLabel}</span>
