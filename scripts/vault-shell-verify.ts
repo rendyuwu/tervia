@@ -256,20 +256,80 @@ function findConstDeclaration(root: ts.Node, name: string): ts.VariableDeclarati
 // check, `vault-shell` going 165 ok -> 164 ok + 1 FAIL, and nothing else in
 // this file. Kept as its own check, separate from the vault positives above,
 // so a failure here names WHICH page's branch drifted.
+//
+// RE-ANCHORED (VLT-101 fix round) FROM A CHARACTER BUDGET ONTO THE `return`
+// ITSELF. All three checks used to be a regex of the shape
+// `/case "vault":[\s\S]{0,200}<VaultPage\s*\/>/` over the RAW source, and the
+// `{0,200}` was standing in for "the next thing this case returns". It is the
+// wrong shape for that question, because what sits in those 200 characters is
+// mostly PROSE: the vault arm's comment plus its `return` measured 183, so
+// seventeen more characters of explanation - one clause - turned this check red
+// while naming an element that had not moved. That is a check that punishes
+// commenting and misreports what broke, and it fired for real during this fix
+// round.
+//
+// The AST answers the actual question. `caseReturnsTag` walks to the
+// `CaseClause` whose expression is the string literal, reads its own `return`,
+// and hands back the JSX tag name - so the answer cannot depend on how long the
+// comment above the return is, and a comment that merely MENTIONS
+// `PagePlaceholder` can no longer fail the negative either (the same flank the
+// shared compiler-API helpers below were written to close). The regex form is
+// not merely widened, because a bigger budget is the same bug with a later
+// trigger date.
 console.log("[1. rail branch] only the vault case was replaced");
 {
-  const r = src.railViewArea;
-  check(
-    "the vault case renders <VaultPage />",
-    /case "vault":[\s\S]{0,200}<VaultPage\s*\/>/.test(r),
+  const sf = ts.createSourceFile(
+    FILES.railViewArea,
+    src.railViewArea,
+    ts.ScriptTarget.ESNext,
+    /* setParentNodes */ true,
+    ts.ScriptKind.TSX,
   );
+
+  /** The JSX tag name a `case "<kind>":` arm of `RailViewArea`'s switch
+   *  RETURNS, or `null` if that arm has no returned JSX at all. Parentheses are
+   *  unwrapped the same way `findReturnedJsxRoot` above does it, so a `return (
+   *  <VaultPage /> )` reads identically to the one-liner this file has today.
+   *
+   *  THIS IS THE CANONICAL COPY (VLT-33). `forwards-shell-verify.ts`'s section 1
+   *  asks the same question about the same file from the other side and carries
+   *  a byte-identical body; keep them the same shape, so a diff between the two
+   *  is the whole review. Duplicated rather than shared, because these scripts
+   *  have no common module. */
+  function caseReturnsTag(kind: string): string | null {
+    let out: string | null = null;
+    const visit = (n: ts.Node): void => {
+      if (ts.isCaseClause(n) && ts.isStringLiteral(n.expression) && n.expression.text === kind) {
+        for (const stmt of n.statements) {
+          if (!ts.isReturnStatement(stmt) || !stmt.expression) continue;
+          let expr: ts.Expression = stmt.expression;
+          while (ts.isParenthesizedExpression(expr)) expr = expr.expression;
+          if (ts.isJsxSelfClosingElement(expr)) out = expr.tagName.getText(sf);
+          else if (ts.isJsxElement(expr)) out = expr.openingElement.tagName.getText(sf);
+        }
+      }
+      ts.forEachChild(n, visit);
+    };
+    visit(sf);
+    return out;
+  }
+
+  const vaultTag = caseReturnsTag("vault");
+  const forwardsTag = caseReturnsTag("forwards");
+  // The tag name is passed as each check's DETAIL, so a failure prints what the
+  // arm actually returns instead of a bare `false`; `?? "(none)"` covers the arm
+  // that returns no JSX at all, which is a different failure from one returning
+  // the wrong page and the detail is the only place that distinction shows.
+  check("the vault case renders <VaultPage />", vaultTag === "VaultPage", vaultTag ?? "(none)");
   check(
     "the vault case no longer renders PagePlaceholder",
-    !/case "vault":[\s\S]{0,200}PagePlaceholder/.test(r),
+    vaultTag !== "PagePlaceholder",
+    vaultTag ?? "(none)",
   );
   check(
     "NEGATIVE CONTROL: the forwards case renders <ForwardsPage /> (its own branch, landed 6f wave 2)",
-    /case "forwards":[\s\S]{0,200}<ForwardsPage\s*\/>/.test(r),
+    forwardsTag === "ForwardsPage",
+    forwardsTag ?? "(none)",
   );
 }
 

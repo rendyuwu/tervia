@@ -986,8 +986,9 @@ console.log("\n[VaultPage.tsx] the rail view claims the caret, and mount is its 
   const sf = parse("src/modules/vault/VaultPage.tsx");
   const effects = effectsIn(sf);
 
-  // A rail view is UNMOUNTED when it is not showing (`WorkspaceArea.tsx:142`),
-  // so mount IS the visibility transition and the claim effect has no deps.
+  // A rail view is UNMOUNTED when it is not showing (`WorkspaceArea.tsx`'s
+  // `railView !== null` branch), so mount IS the visibility transition and the
+  // claim effect has no deps.
   // That is the opposite of HostsPage's `[onScreen]` above, and the reason the
   // two differ is the reason this section exists at all rather than reusing
   // that one.

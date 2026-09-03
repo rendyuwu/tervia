@@ -67,13 +67,12 @@ export type ForwardRuleRow = {
  *
  * AN EMPTY HOST MAP IS NOT N DANGLING ROWS. `hostDangling` has to mean "the
  * hosts are known AND this one is not among them", never "the hosts are not
- * known yet" - its one caller today (`ForwardsPage.tsx:131`, and the paragraph
- * above says why the contract is written for every future one) feeds it from
- * `useForwards()` and `useHosts()`, which are two INDEPENDENT async loads both
- * starting from an empty `Map` (`useForwards.ts:26-38`,
- * `hosts/useHosts.ts:15-27`), so there is
- * a render on every single mount where the rules have arrived and the hosts
- * have not. Reporting `hostDangling` there made every row flicker a red "Host
+ * known yet" - its one caller today (`ForwardsPage.tsx`'s `ruleRows(rules,
+ * hostsById)` memo, and the paragraph above says why the contract is written
+ * for every future one) feeds it from `useForwards()` and `useHosts()`, which
+ * are two INDEPENDENT async loads both starting from an empty `Map`
+ * (`useForwards.ts:26-38`, `hosts/useHosts.ts:15-27`), so there is a render on
+ * every single mount where the rules have arrived and the hosts have not. Reporting `hostDangling` there made every row flicker a red "Host
  * missing" badge with Start and Stop disabled and a tooltip telling the user to
  * edit the rule - all four of them false, and all four on the first frame.
  *

@@ -303,9 +303,9 @@ export function HostsPage({ onConnect, onScreen }: HostsPageProps): ReactNode {
     // EVERY size floor between here and the window edge is a PERCENTAGE, not
     // a px minimum: the sidebar (`AppSidebar.tsx:215`, `minSize="8%"`, capped
     // at `maxSize="450px"`), this workspace column
-    // (`WorkspaceArea.tsx:73`, `minSize="25%"`), the right slot
+    // (`WorkspaceArea.tsx:97`, `minSize="25%"`), the right slot
     // (`AppRightSlot.tsx:178`, `minSize="18%"`), and a pane split inside the
-    // column (`PaneTreeView.tsx:1057`, `minSize="10%"`) - all deliberately
+    // column (`PaneTreeView.tsx:1068`, `minSize="10%"`) - all deliberately
     // container-invariant, for the reason `AppSidebar.tsx`'s own comment on
     // `minSize="8%"` gives: a PERCENTAGE floor can't misbehave across a
     // minimize/restore the way a px one did. (`SectionStack.tsx`'s
