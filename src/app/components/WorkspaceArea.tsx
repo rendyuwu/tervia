@@ -1,3 +1,4 @@
+import { PAGE_ICONS } from "@/components/LeafIcon";
 import { ResizablePanel } from "@/components/ui/resizable";
 import { cn } from "@/lib/utils";
 import { PaneStack } from "@/modules/panes";
@@ -7,6 +8,7 @@ import { type PaneTab, type RailViewKind, type Tab } from "@/modules/tabs";
 import { PAGE_LABELS } from "@/modules/terminal/lib/panes";
 import type { Host } from "@/modules/hosts/types";
 import type { SearchAddon } from "@xterm/addon-search";
+import { useId } from "react";
 import { type TabsApi } from "../hooks/tabsApi";
 import { type usePaneHandles } from "../hooks/usePaneHandles";
 import { RailViewArea } from "./RailViewArea";
@@ -75,6 +77,13 @@ export function WorkspaceArea({
   setLeafTerminalTheme,
   railView,
 }: Props) {
+  // The rail view's heading, named by its region's `aria-labelledby` below.
+  // `useId()` rather than a module constant because a constant is only unique
+  // while exactly one WorkspaceArea is mounted - two of them (a second window's
+  // tree, a future split workspace) would both label their region with the same
+  // id, and `aria-labelledby` resolves a duplicate id to whichever element comes
+  // first in the document, i.e. the OTHER workspace's heading.
+  const railHeadingId = useId();
   return (
     <ResizablePanel id="workspace" defaultSize="58%" minSize="25%">
       {/* Counter the body-level UI zoom so the panes (terminal,
@@ -141,11 +150,73 @@ export function WorkspaceArea({
               visible above it to click back to. */}
           {railView !== null && (
             <div
-              className="bg-background absolute inset-0 overflow-hidden rounded-md border shadow-sm"
+              className="bg-background absolute inset-0 flex flex-col overflow-hidden rounded-md border shadow-sm"
               role="region"
-              aria-label={PAGE_LABELS[railView]}
+              // Labelled BY the heading rather than by an `aria-label` repeating
+              // the same string: the name is then one thing on screen and in the
+              // accessibility tree, so it cannot be renamed in one and not the
+              // other, and a screen reader announces the region with the title
+              // the user can actually see.
+              aria-labelledby={railHeadingId}
             >
-              <RailViewArea view={railView} />
+              {/* The page says its own name. Hosts already did - not by anyone's
+                  design, but because a Hosts TAB is a page leaf, so it inherits
+                  the per-pane header every leaf gets (`PaneTreeView.tsx:703`).
+                  A rail view is deliberately not a leaf, so it inherited
+                  nothing and Vault / Port Forwarding arrived nameless.
+
+                  Written ONCE, here in the container, rather than as a bar
+                  added inside `VaultPage` and `ForwardsPage`: that is two
+                  copies of the same chrome to keep in sync by hand, which is
+                  DCR-5's exact failure mode.
+
+                  The pane header's TYPOGRAPHY, and none of its controls: no
+                  grip, close, split, float or gear. A rail view cannot be
+                  dragged, split or closed as a leaf, and an affordance that
+                  does nothing when pressed is D-NAV1's complaint in another
+                  costume. */}
+              <div className="border-border/60 bg-card @container flex h-7 shrink-0 items-center gap-1 border-b px-1 select-none">
+                {(() => {
+                  // `PAGE_ICONS` is a map of components, and a computed member
+                  // expression is not valid JSX, so the glyph has to be bound to
+                  // a capitalised local first - the same IIFE shape the pane
+                  // header uses for its own conditional pieces. Sized and tinted
+                  // like that header's `LeafIcon`, and it is the same glyph the
+                  // rail button the user just pressed shows (`ActivityRail.tsx`).
+                  const PageIcon = PAGE_ICONS[railView];
+                  return (
+                    <PageIcon
+                      size={13}
+                      strokeWidth={2}
+                      className="text-muted-foreground/80 shrink-0"
+                    />
+                  );
+                })()}
+                {/* A real heading, not a styled span: it is the only title on
+                    this surface, so it is what "jump to the next heading" and
+                    the region label above both need to find. */}
+                <h2
+                  id={railHeadingId}
+                  className="text-muted-foreground min-w-0 flex-1 truncate text-xs"
+                >
+                  {PAGE_LABELS[railView]}
+                </h2>
+              </div>
+              {/* The container is `absolute inset-0`, so it is a fixed box that
+                  the header now takes 28px out of - and the page below has to be
+                  told about that rather than left to size itself against the
+                  whole box. `flex flex-col` here plus `min-h-0 flex-1` on this
+                  wrapper is what gives each page's root `h-full` a definite
+                  height to resolve against, so `VaultPage`'s and
+                  `ForwardsPage`'s own `min-h-0 flex-1 overflow-y-auto` list
+                  still scrolls INSIDE the card instead of running off the bottom
+                  of it. `min-h-0` is the load-bearing half: a flex item's
+                  default `min-height: auto` lets a long list grow the item past
+                  its parent, which is a page that scrolls the whole card at a
+                  narrow width rather than scrolling its list. */}
+              <div className="min-h-0 flex-1">
+                <RailViewArea view={railView} />
+              </div>
             </div>
           )}
         </div>
