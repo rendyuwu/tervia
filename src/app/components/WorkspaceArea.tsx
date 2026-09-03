@@ -79,10 +79,19 @@ export function WorkspaceArea({
 }: Props) {
   // The rail view's heading, named by its region's `aria-labelledby` below.
   // `useId()` rather than a module constant because a constant is only unique
-  // while exactly one WorkspaceArea is mounted - two of them (a second window's
-  // tree, a future split workspace) would both label their region with the same
-  // id, and `aria-labelledby` resolves a duplicate id to whichever element comes
-  // first in the document, i.e. the OTHER workspace's heading.
+  // while exactly one WorkspaceArea is mounted, and a future split workspace
+  // would mount two - both labelling their region with the same id, and
+  // `aria-labelledby` resolves a duplicate id to whichever element comes first
+  // in the document, i.e. the OTHER workspace's heading.
+  //
+  // NOT about a second WINDOW, which is the tempting second example and is not
+  // one: each Tauri window is its own document with its own root
+  // (`main.tsx:42`, `settings/main.tsx:20`, `float/main.tsx:30` are three
+  // separate `createRoot` calls), so ids cannot collide across them at all.
+  // And the case that IS left - two roots inside ONE document - `useId()` does
+  // not solve either: React numbers ids per ROOT, so two roots rendering the
+  // same shape hand out the same ones unless each is given `createRoot`'s
+  // `identifierPrefix`, which nothing here sets.
   const railHeadingId = useId();
   return (
     <ResizablePanel id="workspace" defaultSize="58%" minSize="25%">
@@ -174,8 +183,16 @@ export function WorkspaceArea({
                   grip, close, split, float or gear. A rail view cannot be
                   dragged, split or closed as a leaf, and an affordance that
                   does nothing when pressed is D-NAV1's complaint in another
-                  costume. */}
-              <div className="border-border/60 bg-card @container flex h-7 shrink-0 items-center gap-1 border-b px-1 select-none">
+                  costume.
+
+                  Its `@container` is the one token of that bar NOT copied:
+                  the pane header carries it so the per-file cluster inside it
+                  can shed itself on a narrow pane (`PaneTreeView.tsx:705-706`),
+                  and this bar has no `@[…]` descendant to shed - an icon and a
+                  truncating heading, both of which already fit at any width. A
+                  container query with nothing querying it is dead weight that
+                  reads like a rule someone forgot to write. */}
+              <div className="border-border/60 bg-card flex h-7 shrink-0 items-center gap-1 border-b px-1 select-none">
                 {(() => {
                   // `PAGE_ICONS` is a map of components, and a computed member
                   // expression is not valid JSX, so the glyph has to be bound to

@@ -2,14 +2,14 @@
  * The Vault page: a header with its own search box, then two sections -
  * Identities and Keys (research §5.6).
  *
- * A RAIL VIEW, not a pane leaf. `app/components/WorkspaceArea.tsx:142-150`
- * mounts this only while the rail's Vault button is pressed and unmounts it on
- * the way out, which is the opposite of a page leaf: `PaneStack` keeps a
- * background tab's leaves mounted behind `visibility:hidden`. Two consequences
- * run through this file, both marked where they land - there is no `onScreen`
- * prop to take (mount IS the transition), and the caret claim's effect is
- * therefore keyed on `[]`, which is exactly what `HostsPage.tsx:170-175` warns
- * against for a leaf.
+ * A RAIL VIEW, not a pane leaf. `app/components/WorkspaceArea.tsx:160-238`'s
+ * `railView !== null` branch mounts this only while the rail's Vault button is
+ * pressed and unmounts it on the way out, which is the opposite of a page
+ * leaf: `PaneStack` keeps a background tab's leaves mounted behind
+ * `visibility:hidden`. Two consequences run through this file, both marked
+ * where they land - there is no `onScreen` prop to take (mount IS the
+ * transition), and the caret claim's effect is therefore keyed on `[]`, which
+ * is exactly what `HostsPage.tsx:170-175` warns against for a leaf.
  *
  * Everything it draws lives somewhere else: the two cards are their own
  * components, and every derived value comes from `page/derive.ts` as a pure
@@ -91,12 +91,12 @@ export function VaultPage(): ReactNode {
   const pageRef = useRef<HTMLDivElement>(null);
 
   // "Still on screen" for a rail view means "still mounted", because
-  // `WorkspaceArea.tsx:142` renders this only while the Vault view is the one
-  // showing. Written at RENDER scope and falsified in the effect cleanup below,
-  // so the claim - which is decided one animation frame after it is made - can
-  // never act on a world that has already moved. A closure over a value, or a
-  // literal `() => true`, is the stale-claim half of VLT-39 written a different
-  // way.
+  // `WorkspaceArea.tsx`'s `railView !== null` branch renders this only while
+  // the Vault view is the one showing. Written at RENDER scope and falsified in
+  // the effect cleanup below, so the claim - which is decided one animation
+  // frame after it is made - can never act on a world that has already moved. A
+  // closure over a value, or a literal `() => true`, is the stale-claim half of
+  // VLT-39 written a different way.
   const onScreenRef = useRef(true);
   onScreenRef.current = true;
 
@@ -219,7 +219,7 @@ export function VaultPage(): ReactNode {
     // `@container`, not viewport breakpoints: this page renders inside the
     // workspace column, whose width comes from the sidebar drag and the right
     // slot, not from the window. Every size floor between here and the window
-    // edge is a PERCENTAGE (`WorkspaceArea.tsx:79` 25%, `AppSidebar.tsx:215`
+    // edge is a PERCENTAGE (`WorkspaceArea.tsx:97` 25%, `AppSidebar.tsx:215`
     // 8%, `AppRightSlot.tsx:178` 18%), and a percentage floor shrinks with the
     // window - so the narrow rules below are reachable only by shrinking the
     // window itself toward `tauri.conf.json`'s `minWidth: 420`, and

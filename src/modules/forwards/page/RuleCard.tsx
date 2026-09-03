@@ -317,11 +317,23 @@ export function RuleCard({ row, onEdit, onDelete }: RuleCardProps): ReactNode {
             a second arrangement invented for this card. The status text comes
             first because it is the one that decides what the button beside it
             does; `localLabel` follows it because "Running" and "which port"
-            are one answer read together. Both `truncate` and the group wraps
-            rather than shrinks, so at 249px the pair stacks onto two lines
-            with both legible instead of ellipsing "Running (with host)" - the
-            longest of the five status strings, and the one whose whole point
-            is the parenthetical. */}
+            are one answer read together.
+
+            WHAT THE CLASSES DO, stated as the mechanism rather than as the
+            outcome someone would like: this group is a `flex: 0 1 auto` item
+            beside a `shrink-0` button cluster, so it SHRINKS first and wraps
+            its two spans onto separate lines only once shrinking has run out.
+            Both spans `truncate`, so a span still wider than the shrunk group
+            ends in an ellipsis instead of forcing that wrap. "Running (with
+            host)" is the longest of the five status strings and the one whose
+            whole point is the parenthetical, so it is the one to look at.
+
+            AND IT IS A LOOK, not a settled claim: at the narrowest cell
+            (~249px of content) the Stop + Edit + Delete cluster is roughly
+            130px, leaving the pair ~110px, and the string at `text-xs` is
+            around the same - an estimate against an estimate. The four-column
+            grid with a terminal-owned rule in it is therefore a HAND-TEST
+            step, and the hand check carries it. */}
         <div className="text-muted-foreground flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs">
           <span className="truncate">{statusText(status, hostOwned)}</span>
           <span className="truncate tabular-nums">{localLabel}</span>

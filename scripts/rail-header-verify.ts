@@ -164,12 +164,21 @@ check(
 // ---- 1. one header, serving both pages ----------------------------------
 console.log("\n[once] the header is written once, in the container, not once per page");
 check("exactly one heading in the file", countOf(src, "<h2") === 1, countOf(src, "<h2"));
+const HEADER_BAR = "border-border/60 bg-card flex h-7";
 check(
   // The bar's own vocabulary, taken from `PaneTreeView.tsx:707`. Two of these is
   // the DCR-5 shape arriving by copy-paste.
+  //
+  // The pane header's `@container` is deliberately NOT in this literal, because
+  // it is deliberately not on the bar: it is there so the pane header's per-file
+  // cluster can shed itself on a narrow pane (`PaneTreeView.tsx:705-706`) and
+  // this bar has no `@[…]` descendant to shed. Pinning it here would have made a
+  // dead class unremovable without a red check - a pin's job is to hold what is
+  // load-bearing, so this one stops at the border, the card background and the
+  // 28px height, and section [4] below pins the `shrink-0` beside them.
   "exactly one header bar",
-  countOf(src, "bg-card @container flex h-7") === 1,
-  countOf(src, "bg-card @container flex h-7"),
+  countOf(src, HEADER_BAR) === 1,
+  countOf(src, HEADER_BAR),
 );
 check(
   "the page name is read from PAGE_LABELS exactly once",

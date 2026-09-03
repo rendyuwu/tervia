@@ -18,7 +18,7 @@ import { VaultPage } from "@/modules/vault/VaultPage";
 export function RailViewArea({ view }: { view: RailViewKind }) {
   switch (view) {
     case "vault":
-      // No props: mounted only while this view is shown (`WorkspaceArea.tsx:142`)
+      // No props: shown only in `WorkspaceArea.tsx`'s `railView !== null` branch
       // - see `VaultPage.tsx` for why its caret claim is keyed on `[]`, not onScreen.
       return <VaultPage />;
     case "forwards":

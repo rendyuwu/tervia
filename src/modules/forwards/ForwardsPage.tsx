@@ -5,11 +5,11 @@
  * the grid literal itself - see that file's header for the fuller reasoning
  * behind the first two, and the grid's own comment below for the third).
  *
- * A RAIL VIEW, not a pane leaf. `app/components/WorkspaceArea.tsx:142-150`
- * mounts this only while the rail's Port Forwarding button is pressed and
- * unmounts it on the way out - there is no `onScreen` prop to take (mount IS
- * the transition), and the caret claim's effect below is therefore keyed on
- * `[]`, exactly as `VaultPage.tsx:120-135` is and for the same reason.
+ * A RAIL VIEW, not a pane leaf. `app/components/WorkspaceArea.tsx:160-238`'s
+ * `railView !== null` branch mounts this only while the rail's Port Forwarding
+ * button is pressed and unmounts it on the way out - there is no `onScreen`
+ * prop to take (mount IS the transition), and the caret claim's effect below
+ * is keyed on `[]`, as `VaultPage.tsx:120-135` is and for the same reason.
  *
  * Everything it draws lives somewhere else: `RuleCard` is its own component
  * and reads its own live status (`../runtime`), and every derived value that
