@@ -640,20 +640,78 @@ function primitiveSelectorBody(
 //    is the branch that changed this wave. Vault is now the negative control:
 //    without it, an edit that replaced BOTH branches reads as correct.
 // ============================================================================
+//
+// RE-ANCHORED (VLT-101 fix round) FROM A CHARACTER BUDGET ONTO THE `return`
+// ITSELF, in step with `vault-shell-verify.ts`'s section 1 and for the reason
+// its own note spells out: all three checks here used to be a regex of the
+// shape `/case "forwards":[\s\S]{0,200}<ForwardsPage\s*\/>/` over the RAW
+// source, and the `{0,200}` was standing in for "the next thing this case
+// returns". What actually sits in those 200 characters is mostly PROSE, so the
+// budget made a check about an ELEMENT answer to the LENGTH OF A COMMENT.
+//
+// MEASURED, NOT FEARED: the negative control below reads the vault arm, which
+// measured 183 of its 200 characters during this fix round - seventeen spare.
+// Fixing only `vault-shell-verify.ts` would have moved the failure here rather
+// than removing it, and this section going red would have blamed the vault
+// branch for a sentence added to a comment.
 console.log("[1. rail branch] only the forwards case was replaced");
 {
-  const r = src.railViewArea;
+  const sf = ts.createSourceFile(
+    FILES.railViewArea,
+    src.railViewArea,
+    ts.ScriptTarget.ESNext,
+    /* setParentNodes */ true,
+    ts.ScriptKind.TSX,
+  );
+
+  /** The JSX tag name a `case "<kind>":` arm of `RailViewArea`'s switch
+   *  RETURNS, or `null` if that arm has no returned JSX at all. Parentheses are
+   *  unwrapped the same way `findReturnedJsxRoot` above does it, so a `return (
+   *  <VaultPage /> )` reads identically to the one-liner this file has today.
+   *
+   *  A COPY (VLT-33); the canonical one lives in `scripts/vault-shell-verify.ts`
+   *  section 1, which asks the same question about the same file from the other
+   *  side. Kept byte-identical to it, so a diff between the two is the whole
+   *  review. Duplicated rather than shared, because these scripts have no common
+   *  module. */
+  function caseReturnsTag(kind: string): string | null {
+    let out: string | null = null;
+    const visit = (n: ts.Node): void => {
+      if (ts.isCaseClause(n) && ts.isStringLiteral(n.expression) && n.expression.text === kind) {
+        for (const stmt of n.statements) {
+          if (!ts.isReturnStatement(stmt) || !stmt.expression) continue;
+          let expr: ts.Expression = stmt.expression;
+          while (ts.isParenthesizedExpression(expr)) expr = expr.expression;
+          if (ts.isJsxSelfClosingElement(expr)) out = expr.tagName.getText(sf);
+          else if (ts.isJsxElement(expr)) out = expr.openingElement.tagName.getText(sf);
+        }
+      }
+      ts.forEachChild(n, visit);
+    };
+    visit(sf);
+    return out;
+  }
+
+  const forwardsTag = caseReturnsTag("forwards");
+  const vaultTag = caseReturnsTag("vault");
+  // The tag name is passed as each check's DETAIL, so a failure prints what the
+  // arm actually returns instead of a bare `false`; `?? "(none)"` covers the arm
+  // that returns no JSX at all, which is a different failure from one returning
+  // the wrong page and the detail is the only place that distinction shows.
   check(
     "the forwards case renders <ForwardsPage />",
-    /case "forwards":[\s\S]{0,200}<ForwardsPage\s*\/>/.test(r),
+    forwardsTag === "ForwardsPage",
+    forwardsTag ?? "(none)",
   );
   check(
     "the forwards case no longer renders PagePlaceholder",
-    !/case "forwards":[\s\S]{0,200}PagePlaceholder/.test(r),
+    forwardsTag !== "PagePlaceholder",
+    forwardsTag ?? "(none)",
   );
   check(
     "NEGATIVE CONTROL: the vault case still renders <VaultPage />",
-    /case "vault":[\s\S]{0,200}<VaultPage\s*\/>/.test(r),
+    vaultTag === "VaultPage",
+    vaultTag ?? "(none)",
   );
 }
 
