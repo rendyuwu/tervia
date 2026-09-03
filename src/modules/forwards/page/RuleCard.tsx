@@ -40,9 +40,45 @@
  * the FIRST operand, so the order is readable off the source rather than argued
  * about.
  *
- * A LIST ROW, not a grid cell - one per line, full width. So this file adds
- * no responsive grid className of its own; `ForwardsPage.tsx` stacks these in
- * a plain `flex flex-col` list.
+ * A GRID CELL, not the full-width list row this was: `ForwardsPage.tsx` now
+ * lays these out in the same `grid … @[1140px]:grid-cols-4` literal
+ * `HostsPage.tsx` and `VaultPage.tsx` carry, so a card is ~273px wide at the
+ * narrowest (the thresholds are `columns × ~280px + gaps`), ~249px of it
+ * inside the `p-3`. This file still adds no grid className of its own - the
+ * page owns the grid, the card owns what fits in a cell - but WHAT IT SHOWS
+ * had to be re-laid out for that width, and both decisions were about which
+ * of two true things gets the room:
+ *
+ * THE LIVE BOUND PORT LEFT THE NAME'S ROW. `localLabel` used to sit top-right
+ * beside the name and the "Host missing" badge. At 249px the dot, that badge
+ * and that label are ~224px of `shrink-0` content between them, which left
+ * the name - the one string that says WHICH rule this is - the ~25px
+ * remainder and an ellipsis. It moved to the status row, beside the status
+ * text, because those two are the same KIND of fact: what this rule is doing
+ * right now. What that leaves behind is the row `HostCard.tsx` and
+ * `IdentityCard.tsx` already have (a `flex-1 truncate` name and one
+ * `shrink-0` badge), plus the status dot, which stays here rather than
+ * following its text down: at four columns the top-left corner is where a
+ * reader's eye runs down the grid, and the dot is 16px of it.
+ *
+ * THE ROUTE WRAPS TO TWO LINES INSTEAD OF TRUNCATING TO ONE. It is the
+ * longest string on the page - `localhost:18084 → bastion → 10.0.0.9:5432` is
+ * ~258px at `text-xs`, wider than the cell it has to live in - and it is also
+ * the rule's whole definition, so the `truncate` its two sibling cards use on
+ * their detail line would make it fit by dropping the destination, which is
+ * the half a reader came for. `line-clamp-2` breaks it at the spaces around
+ * the arrows, which is where it wants to break anyway. CLAMPED and not left
+ * to wrap freely, because these cells stretch to the tallest card in their
+ * grid row: one pathological remote host would take five lines and three
+ * innocent neighbours would grow with it.
+ *
+ * THE ROUTE AND `localLabel` ARE STILL BOTH HERE, and neither was the one to
+ * drop for room (6f script E1). The route is what the rule is CONFIGURED as -
+ * `ruleRows` (`./derive`) builds it with no runtime state at all - and
+ * `localLabel` is the port something is ACTUALLY LISTENING on. They read
+ * identically for a stopped rule, and they differ for exactly the rule where
+ * it matters: an auto-port rule that is up, whose route says "Auto" and whose
+ * label says the port you can connect to.
  */
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -196,11 +232,25 @@ export function RuleCard({ row, onEdit, onDelete }: RuleCardProps): ReactNode {
       className={cn(
         "group border-border hover:bg-muted/30 flex flex-col gap-2 rounded-lg border p-3 text-left transition-colors",
         // Same reasoning as `HostCard.tsx`/`IdentityCard.tsx`: content-visibility
-        // skips layout and paint for an off-screen row (search-first keeps the
+        // skips layout and paint for an off-screen card (search-first keeps the
         // steady-state DOM small, this covers the unfiltered case), and WITHOUT
-        // contain-intrinsic-size an off-screen row lays out at 0px and the
+        // contain-intrinsic-size an off-screen card lays out at 0px and the
         // scrollbar jumps while the user scrolls. The pair is load-bearing;
         // neither half works alone. This is the fourth root that carries it.
+        //
+        // THE 100px NOW UNDERSTATES THIS CARD, and it stays anyway.
+        // `vault-shell-verify.ts` section 16 asserts all four roots carry an
+        // IDENTICAL pair, so this number cannot move here alone; HostCard's
+        // 100px is HostCard's own measurement (24 of `p-3` + 20 name row + 16
+        // detail row + 24 action row + 16 of gaps) and a forwards card in a
+        // quarter-width cell is ~128px with nothing running, ~144px once the
+        // route takes its second line, and ~205px while a running rule shows
+        // its three-line stop note and the status row wraps its buttons under
+        // the status. An estimate that is too SMALL only makes the scrollbar
+        // grow as cards paint in - it never jumps backwards, which is the
+        // failure the pair exists to prevent - so the honest fix is to
+        // re-measure all four roots and move them together, which is a change
+        // to four files and not this one.
         "[contain-intrinsic-size:auto_100px] [content-visibility:auto]",
       )}
     >
@@ -216,10 +266,14 @@ export function RuleCard({ row, onEdit, onDelete }: RuleCardProps): ReactNode {
             Host missing
           </Badge>
         )}
-        <span className="text-muted-foreground shrink-0 text-xs tabular-nums">{localLabel}</span>
       </div>
 
-      <div className="text-muted-foreground truncate text-xs">{row.route}</div>
+      {/* `line-clamp-2`, not the `truncate` the two sibling cards use on their
+          own detail line - see the header for why this one string is the
+          exception. `break-words` is for the remote host with no space in it:
+          a clamp on its own has nowhere to break such a token and would clip
+          it mid-line with no ellipsis to say so. */}
+      <div className="text-muted-foreground line-clamp-2 text-xs break-words">{row.route}</div>
 
       {/* The row's own status line - `useForwardError` for a failed bind, or
           `stopNote()` for a running one, never a third error surface of its
@@ -258,7 +312,20 @@ export function RuleCard({ row, onEdit, onDelete }: RuleCardProps): ReactNode {
       ) : null}
 
       <div className="flex min-h-6 flex-wrap items-center justify-between gap-x-2 gap-y-1">
-        <span className="text-muted-foreground text-xs">{statusText(status, hostOwned)}</span>
+        {/* THE TWO LIVE FACTS, in one `min-w-0 flex-wrap` group - the shape
+            `IdentityCard.tsx`'s own bottom-left pair already has, rather than
+            a second arrangement invented for this card. The status text comes
+            first because it is the one that decides what the button beside it
+            does; `localLabel` follows it because "Running" and "which port"
+            are one answer read together. Both `truncate` and the group wraps
+            rather than shrinks, so at 249px the pair stacks onto two lines
+            with both legible instead of ellipsing "Running (with host)" - the
+            longest of the five status strings, and the one whose whole point
+            is the parenthetical. */}
+        <div className="text-muted-foreground flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs">
+          <span className="truncate">{statusText(status, hostOwned)}</span>
+          <span className="truncate tabular-nums">{localLabel}</span>
+        </div>
         <div className="flex shrink-0 items-center gap-1">
           <IconTooltip label={toggleTooltip}>
             <span>

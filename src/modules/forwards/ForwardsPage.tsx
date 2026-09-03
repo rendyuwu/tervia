@@ -1,8 +1,9 @@
 /**
- * The Port Forwarding page: a header with its own search box, then one list
- * of saved forward rules (mirrors `modules/vault/VaultPage.tsx` in shape and
- * purpose, down to the caret claim and the delete-confirmation pattern - see
- * that file's header for the fuller reasoning behind both).
+ * The Port Forwarding page: a header with its own search box, then one card
+ * grid of saved forward rules (mirrors `modules/vault/VaultPage.tsx` in shape
+ * and purpose, down to the caret claim, the delete-confirmation pattern and
+ * the grid literal itself - see that file's header for the fuller reasoning
+ * behind the first two, and the grid's own comment below for the third).
  *
  * A RAIL VIEW, not a pane leaf. `app/components/WorkspaceArea.tsx:142-150`
  * mounts this only while the rail's Port Forwarding button is pressed and
@@ -272,7 +273,26 @@ export function ForwardsPage(): ReactNode {
             noMatch="No rules match."
           />
         ) : (
-          <div className="flex flex-col gap-2">
+          // THE SAME GRID LITERAL `HostsPage.tsx:490` and `VaultPage.tsx`'s two
+          // sections carry, byte for byte - see HostsPage's own comment there
+          // for why the thresholds are `@[…]` container widths and not
+          // `sm:`/`xl:` viewport ones, and why `@container` sits on the page
+          // root above rather than here. This page listed one full-width row
+          // per rule until now: three sibling surfaces showing records as a
+          // card grid and this one showing them as a column was a difference
+          // the user had to learn per page, not a difference about forwards.
+          //
+          // A NARROWER BREAKPOINT SET WAS THE TEMPTING COMPROMISE and it is
+          // rejected: a rule's route is the longest string any of these four
+          // card types renders, so stopping at two columns would have bought
+          // that one line its room by giving up the parity this change is
+          // for. Finding the room is `page/RuleCard.tsx`'s job instead, and
+          // its header says where it found it.
+          //
+          // `vault-shell-verify.ts` section 16 pins this string across all
+          // four sites, so a divergence is a red check rather than a page
+          // that quietly drifts out of the set.
+          <div className="grid grid-cols-1 gap-2 @[580px]:grid-cols-2 @[860px]:grid-cols-3 @[1140px]:grid-cols-4">
             {visibleRules.map((row) => (
               <RuleCard
                 key={row.rule.id}

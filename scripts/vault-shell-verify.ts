@@ -52,6 +52,20 @@ const FILES = {
   // section for why this grows the parity check instead of the file getting
   // its own copy of it.
   ruleCard: "src/modules/forwards/page/RuleCard.tsx",
+  // Section 16's FOURTH GRID CALL SITE (VLT-101(b)) - Port Forwarding stopped
+  // being a full-width list and took the same grid literal. Added here and to
+  // section 16 alone: the only thing that walks every key of this map is the
+  // `read` below, and every section that sweeps a SET names it as its own
+  // explicit list (`NEW_FILES`, `SAFETY_CLAIM_FILES`, section 16's own
+  // containment tuple), so a new key joins no sweep by accident.
+  //
+  // CHECKED RATHER THAN ASSUMED, and worth checking again the next time this
+  // map grows, because the sections sweep RAW SOURCE and a file can fail one
+  // on its prose: section 9's `/\b(sm|md|lg|xl|2xl):/` ban would match this
+  // page today purely on the `sm:`/`xl:` inside the comment above its grid,
+  // which says those are the breakpoints it is NOT using. That is a false FAIL
+  // one careless `...NEW_FILES` away, not a hypothetical one.
+  forwardsPage: "src/modules/forwards/ForwardsPage.tsx",
 } as const;
 
 const src = Object.fromEntries(Object.entries(FILES).map(([k, p]) => [k, read(p)])) as Record<
@@ -1026,7 +1040,7 @@ console.log("    missingPrivateKey -> the row Badge's variant AND its label");
 // ============================================================================
 // 16. The duplicated layout strings still agree with each other.
 // ============================================================================
-// Protects: three files carry the identical containment pair and three call
+// Protects: four files carry the identical containment pair and four call
 // sites carry the identical responsive grid, and nothing asserted that they
 // match. The remedy a review proposed was one shared shell; the reason it is
 // not here is that a vault-only shell would cut three copies to two -
@@ -1048,6 +1062,23 @@ console.log("    missingPrivateKey -> the row Badge's variant AND its label");
 // carries it", per that file's own comment on the pair. If a future owner
 // picks the shared shell instead of a fourth hand-written copy, THIS is the
 // line where this section is deleted on purpose, per that same decision.
+//
+// AND A FOURTH GRID CALL SITE (VLT-101(b)): `ForwardsPage.tsx` swapped its
+// `flex flex-col gap-2` list for the same literal, so the containment tuple
+// and the grid tuple now cover the same four modules. The two halves of this
+// section stayed the same size for three waves and grew together in this one,
+// which is the argument FOR the shared shell getting stronger rather than the
+// argument against it changing - a fifth surface should take that trade,
+// not a fifth hand-written copy.
+//
+// THE 100px IN THAT PAIR IS NOW WRONG FOR `RuleCard`, and this section is why
+// it was not fixed here: a quarter-width forwards card measures ~128px empty
+// and ~205px with a running rule's stop note (`RuleCard.tsx`'s own comment on
+// the pair does the arithmetic), but the check below demands all four roots be
+// IDENTICAL, so moving one is a red check and moving all four is a re-measure
+// of `HostCard`, `IdentityCard` and `KeyCard` as well. Deliberately deferred:
+// an under-estimate grows the scrollbar as cards paint in and never jumps it
+// backwards, which is the failure the pair exists for.
 console.log("\n[16. VLT-75 parity] the containment pair and the responsive grid still agree");
 {
   // --- the containment pair: IdentityCard, KeyCard, HostCard, RuleCard ---
@@ -1095,10 +1126,21 @@ console.log("\n[16. VLT-75 parity] the containment pair and the responsive grid 
     containmentTexts.join(" | "),
   );
 
-  // --- the responsive grid: two call sites on VaultPage, one on HostsPage ---
+  // --- the responsive grid: two call sites on VaultPage, one on HostsPage,
+  //     one on ForwardsPage ---
+  //
+  // GRID_RE ONLY SEES A SINGLE-LINE `<div className="grid …">`, which is a
+  // shape rather than an accident: prettier (printWidth 100) never breaks a
+  // JSX element whose sole attribute is a string literal, so all four of these
+  // stay on one line at 114-116 columns. Give any of those divs a SECOND
+  // attribute and prettier splits it across lines, this regex stops seeing it,
+  // and the file's count drops. The counts below are what make that loud - a
+  // section that only compared the strings it found would go green on finding
+  // none, which is the failure mode this shape has to be paired with.
   const GRID_RE = /<div className="(grid [^"]*)">/g;
   const vaultGridMatches = [...src.vaultPage.matchAll(GRID_RE)].map((m) => m[1]);
   const hostsGridMatches = [...src.hostsPage.matchAll(GRID_RE)].map((m) => m[1]);
+  const forwardsGridMatches = [...src.forwardsPage.matchAll(GRID_RE)].map((m) => m[1]);
   check(
     "VaultPage.tsx has exactly 2 responsive-grid divs",
     vaultGridMatches.length === 2,
@@ -1109,7 +1151,23 @@ console.log("\n[16. VLT-75 parity] the containment pair and the responsive grid 
     hostsGridMatches.length === 1,
     hostsGridMatches.length,
   );
-  if (vaultGridMatches.length === 2 && hostsGridMatches.length === 1) {
+  // VLT-101(b): Port Forwarding used to render `flex flex-col gap-2`, one
+  // full-width row per rule, and this section could not tell - it named the
+  // files it swept, and that page was not one of them, so the fourth surface
+  // in the set was free to be laid out any way at all. DCR-5's row is exactly
+  // "the cross-module decision that nothing pins decays silently"; this is the
+  // check that stops the decay being invisible rather than the one that stops
+  // it happening.
+  check(
+    "ForwardsPage.tsx has exactly 1 responsive-grid div",
+    forwardsGridMatches.length === 1,
+    forwardsGridMatches.length,
+  );
+  if (
+    vaultGridMatches.length === 2 &&
+    hostsGridMatches.length === 1 &&
+    forwardsGridMatches.length === 1
+  ) {
     check(
       "VaultPage's two grid strings are equal to each other",
       vaultGridMatches[0] === vaultGridMatches[1],
@@ -1120,19 +1178,36 @@ console.log("\n[16. VLT-75 parity] the containment pair and the responsive grid 
       vaultGridMatches[0] === hostsGridMatches[0],
       [vaultGridMatches[0], hostsGridMatches[0]].join(" | "),
     );
-    // VLT-80/7d(d): a LITERAL pin, not merely agreement between the three call
-    // sites. The two checks above pass a coordinated edit that changes all
-    // three grids together - exactly the mutation withheld from this step
+    check(
+      "VaultPage's grid string equals ForwardsPage's",
+      vaultGridMatches[0] === forwardsGridMatches[0],
+      [vaultGridMatches[0], forwardsGridMatches[0]].join(" | "),
+    );
+    // VLT-80/7d(d): a LITERAL pin, not merely agreement between the four call
+    // sites. The three checks above pass a coordinated edit that changes all
+    // four grids together - exactly the mutation withheld from this step
     // (P14, run by the orchestrator once step 4 has retired) - because they
     // never compare against a value nobody can move for free. Nothing else in
     // this 53-script suite anchors this string, so without this pin a
-    // coordinated three-site change passes every one of them.
+    // coordinated four-site change passes every one of them.
     const PINNED_GRID =
       "grid grid-cols-1 gap-2 @[580px]:grid-cols-2 @[860px]:grid-cols-3 @[1140px]:grid-cols-4";
+    // AGAINST ALL FOUR STRINGS AND NOT JUST VaultPage'S, which is what it
+    // compared while there were three sites. Transitively the two were the
+    // same claim - if every equality above holds and VaultPage matches the
+    // pin, so does everyone - but that made this check's verdict depend on
+    // OTHER checks passing, and the first mutation run of the ForwardsPage
+    // arm proved what that costs: moving ForwardsPage's `@[1140px]` to
+    // `@[1200px]` turned the equality red and left the PIN green, so the one
+    // check whose name says "the grid className is pinned" was reporting ok
+    // about a call site that was off the literal. Reading `.every` here makes
+    // each check answer its own question. The equalities stay because they
+    // name WHICH pair diverged, which a single `.every` cannot.
+    const allGridMatches = [...vaultGridMatches, ...hostsGridMatches, ...forwardsGridMatches];
     check(
-      "the responsive grid className is pinned to its current literal value",
-      vaultGridMatches[0] === PINNED_GRID,
-      vaultGridMatches[0],
+      "every responsive grid className, at all four call sites, is pinned to its current literal value",
+      allGridMatches.every((g) => g === PINNED_GRID),
+      allGridMatches.join(" | "),
     );
   }
 }
@@ -1250,4 +1325,35 @@ console.log(failed === 0 ? "\nAll vault-shell checks passed." : `\n${failed} che
 //     ([contain-intrinsic-size:auto_100px]                                    per-root check for
 //     [content-visibility:auto]) deleted                                      ruleCard, and the
 //                                                                              4-way equality
+//
+// VLT-101(b) - section 16's grid half grew its fourth call site
+// (`ForwardsPage.tsx`), and the pin check was re-aimed at all four strings
+// because M1 caught it answering for one:
+//
+//   M1: ForwardsPage.tsx's grid literal moved from            RED, exit 1. FIRST RUN killed
+//     @[1140px]:grid-cols-4 to @[1200px]:grid-cols-4           the vault==forwards equality
+//                                                              ALONE - the pin compared
+//                                                              vaultGridMatches[0] to
+//                                                              PINNED_GRID and VaultPage was
+//                                                              untouched, so the one check
+//                                                              named "the grid className is
+//                                                              pinned" stayed GREEN over a
+//                                                              call site that was off the
+//                                                              literal. The pin now reads
+//                                                              `.every` over all four; RE-RUN
+//                                                              kills both.
+//   M2: ForwardsPage.tsx's grid div reverted to              RED, exit 1 - "ForwardsPage.tsx
+//     <div className="flex flex-col gap-2">                    has exactly 1 responsive-grid
+//                                                              div", reporting 0. The three
+//                                                              string checks went SILENT, not
+//                                                              green: the count guard skips
+//                                                              them. That is the check that
+//                                                              proves GRID_RE actually sees
+//                                                              this file's div, and the reason
+//                                                              a count has to sit in front of
+//                                                              every comparison here.
+//   M3: RuleCard.tsx's root className narrowed to            RED, exit 1 - both the per-root
+//     "[content-visibility:auto]"                              "exactly two containment
+//                                                              tokens" check for ruleCard and
+//                                                              the 4-way equality
 process.exit(failed === 0 ? 0 : 1);
