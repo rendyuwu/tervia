@@ -627,18 +627,35 @@ export function useTabs() {
    * does: every caller is a deliberate "put me in that pane" - a pane click, the
    * header's entry list, `focusLeafInTab` - and a focus that lands under a rail
    * view is a focus the user cannot see.
+   *
+   * Hands `curr` straight back when no tab moved. `.map` alone will not: it
+   * allocates a new array whether or not any element changed, and a fresh `tabs`
+   * IDENTITY is exactly what `useWorkspacePersistence`'s `[tabs, activeId, ...]`
+   * effect watches. D-NAV1 is what made that cost real - a strip chip now
+   * reaches here TWICE per click (Radix activates on `mousedown`, then the
+   * chip's own unconditional `onClick` runs), so without this every click on a
+   * terminal or editor chip re-ran `serializeTabs` + `wsSaveTabs` and
+   * re-rendered the strip twice. The three early `return t` branches already say
+   * when nothing changes; this only makes the array agree with them.
+   *
+   * `showTabs()` above stays unconditional and stays first - section 8 of
+   * `scripts/rail-views-verify.ts` enumerates `focusPane` as a route that must
+   * funnel, and `showTabsIn` already returns `curr` for the no-op case itself.
    */
   const focusPane = useCallback(
     (tabId: number, leafId: number) => {
       showTabs();
-      setTabs((curr) =>
-        curr.map((t) => {
+      setTabs((curr) => {
+        let moved = false;
+        const next = curr.map((t) => {
           if (t.id !== tabId || t.kind !== "pane") return t;
           if (!hasLeaf(t.paneTree, leafId)) return t;
           if (t.activeLeafId === leafId) return t;
+          moved = true;
           return syncPaneMirror({ ...t, activeLeafId: leafId });
-        }),
-      );
+        });
+        return moved ? next : curr;
+      });
     },
     [showTabs],
   );

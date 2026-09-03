@@ -55,9 +55,15 @@ import {
   showTabsIn,
   toggleRailViewIn,
 } from "../src/modules/tabs/lib/tabView";
-// Type-only, so tsx never has to resolve the hook at runtime (it pulls in
-// `@xterm/xterm`, which Node cannot resolve outside a bundler - see
-// `serialize.ts`'s note). The probe below is checked by `pnpm typecheck:scripts`.
+// Type-only, because the probe below only ever asks a question about the hook's
+// TYPE and a value import would buy nothing. The reason this comment used to
+// give was wrong and is corrected rather than dropped, because it was being read
+// as a constraint: it said the hook "pulls in `@xterm/xterm`, which Node cannot
+// resolve outside a bundler". It does not - `grep -rn "@xterm" src/modules/tabs/`
+// is empty, and `tsx` resolves `useTabs.ts` and `tabHelpers.ts` as value imports
+// fine (measured, 2026-09-03, while pricing section 8d's lift). That hazard is
+// real but belongs to another module; `serialize.ts`'s own note is about
+// something else. The probe below is checked by `pnpm typecheck:scripts`.
 import type { Tab, useTabs } from "../src/modules/tabs/lib/useTabs";
 // A VALUE import, and it can be one only because `selectEntry.ts` is a leaf: its
 // single import is `import type { Entry }`, which is erased. Section 9 executes
@@ -188,9 +194,29 @@ const stripComments = (src: string): string =>
 // a `{/* ... */}` expression. A bare `//` there renders as literal text, so
 // the line-based filter above never had a reason to know about it - and it
 // does not match a line starting `{` either. Required by every POSITIVE check
-// over a `.tsx` file: without this, deleting the trigger's select spread and
-// leaving `{/* ...entrySelectHandlers(e, onSelectEntry) */}` behind still
-// satisfies section 9(ii), which is the exact failure VLT-83 is about.
+// over a `.tsx` file.
+//
+// The mutation it is required FOR is N4 in the table at the foot of this file:
+// the trigger's OPENING TAG left behind inside a `{/* ... */}` in a fragment,
+// children dropped. That is well-formed JSX, esbuild accepts it, and the
+// line-based filter above leaves every line of the tag standing - measured, six
+// of section 9(ii)'s checks then PASS off a trigger that no longer renders
+// ("found the TabsTrigger opening tag to scan", plus the five that scan inside
+// what it returned). With this stripper the tag is gone and all six fail
+// instead. That is the VLT-83 failure, in the direction that matters.
+//
+// It has to be the opening tag ALONE. Commenting out the whole
+// `<TabsTrigger>...</TabsTrigger>` does not work: the element carries
+// `{/* ... */}` children of its own, and the first of those `*/`s closes the
+// outer comment early - esbuild reports "Unexpected closing TabsTrigger tag
+// does not match opening fragment tag" and nothing reaches a checker.
+//
+// Nor is it the mutation this comment used to name, which fails the same way
+// for a different reason: deleting the trigger's select spread and leaving
+// `{/* ...entrySelectHandlers(e, onSelectEntry) */}` behind puts an empty JSX
+// expression container in an ATTRIBUTE list, which is a syntax error. A
+// stripper justified by a mutation nobody can run is a stripper nobody can
+// check.
 //
 // The regex is the FIXED one from `scripts/host-editor-verify.ts` (around
 // `:216`), NOT the lazy `\{\s*\/\*[\s\S]*?\*\/\s*\}` that
@@ -1229,23 +1255,82 @@ console.log("\n[funnel] no route into the tab area writes activeId on its own");
     "nor clamps an index against the restored tab list",
     !/Math\.min\(/.test(switching) && !/Math\.min\(/.test(persistence),
   );
+
+  // ---- 8d. focusPane hands back the SAME array when nothing moved --------
+  // The one thing in this file that is about identity rather than about which
+  // writes exist, and it is here because §5 decision 3's neighbour cost is real:
+  // `curr.map(...)` allocates a new array whether or not any element changed, so
+  // an updater that always maps always gives `tabs` a new identity.
+  //
+  // What makes that expensive is the consumer 8c already reads:
+  // `useWorkspacePersistence.ts`'s auto-snapshot effect is keyed on
+  // `[tabs, activeId, ...]` (`:105-117`), so every fresh identity is a
+  // `serializeTabs` + `wsSaveTabs` and a re-render of the strip.
+  //
+  // And what makes the no-change path the COMMON case rather than a rarity is
+  // D-NAV1: a strip chip now reaches `focusPane` TWICE per click - Radix
+  // activates on `mousedown`, then the chip's own unconditional `onClick` runs -
+  // and the second arrival never moves anything. Before the guard, one click on
+  // a terminal chip wrote the workspace twice.
+  //
+  // Pinned as the EXPRESSION, not the name (§5 decision 17): the updater must
+  // hand `curr` back on its no-change path. Both spellings are accepted (a
+  // ternary tail or an early `return curr;`) because either is the same promise;
+  // what neither of them is, is the always-allocate `curr.map(...)` this came
+  // from, which the second check names directly.
+  //
+  // It is NOT lifted into a leaf module and executed, which is the shape section
+  // 9 uses for the click route. The blocker is not module resolution - `tsx`
+  // resolves `useTabs.ts` and `tabHelpers.ts` fine, measured - it is 8b above:
+  // its taxonomy finds a pane-tree writer by matching `activeLeafId:` INSIDE a
+  // callback's body, so moving that expression anywhere at all turns
+  // "focusPane writes a pane tree - the reason it is on this list" red and drops
+  // the lifted function into the unaccounted-for bucket. The sweep and the lift
+  // want the code in two different places; the sweep is load-bearing for §4.29
+  // and wins.
+  {
+    const focusPaneBody = tabsBodies.get("focusPane") ?? "";
+    check(
+      // Non-vacuity: an empty body satisfies the negative check below for free.
+      "found focusPane's body to scan",
+      /setTabs\(/.test(focusPaneBody) && /activeLeafId/.test(focusPaneBody),
+      focusPaneBody,
+    );
+    check(
+      "focusPane's updater returns curr unchanged when no tab moved",
+      /:\s*curr;|\breturn curr;/.test(focusPaneBody),
+      focusPaneBody,
+    );
+    check(
+      // The exact shape it came from, named so a tidy-up back to it fails by
+      // description rather than by a regex nobody can read.
+      "and is not the always-allocate curr.map updater it replaced",
+      !/setTabs\(\s*\(curr\)\s*=>\s*curr\.map\(/.test(focusPaneBody),
+      focusPaneBody,
+    );
+  }
 }
 
 // ---- 9. the chip's own click route --------------------------------------
 // D-NAV1, and the reason this section exists at all: the table in section 7
 // proves the funnel's ARITHMETIC, and a table cannot see a route that never
 // calls it. It did not. With a rail view up, `activeKey` still names the tab
-// underneath, so clicking that tab's own chip is not a value CHANGE - and the
-// controlled Radix `Tabs` in `TabBar` only activates a trigger when
-// `value !== context.value`. `focusTabView` was correct, unconditional in the
-// id, and simply never reached. Clicking the HOSTS chip first worked, and only
-// then did the terminal's chip respond.
+// underneath, so clicking that tab's own chip is not a value CHANGE - and while
+// controlled, `@radix-ui/react-use-controllable-state`'s `setValue` forwards to
+// `onValueChange` only `if (value2 !== prop)`. (Down THERE, not in the trigger:
+// `TabsTrigger`'s `onMouseDown` and `onKeyDown` both call
+// `context.onValueChange(value)` with no test at all.) `focusTabView` was
+// correct, unconditional in the id, and simply never reached. Clicking the
+// HOSTS chip first worked, and only then did the terminal's chip respond.
 //
 // Two halves, because one alone would have passed before the fix. The click
 // route is EXECUTED (§5 decision 17: pin the expression, not the name) and then
 // fed through the real `focusTabView`; and the wiring - which is the part that
 // was missing, and which no behavioural check on a leaf module can see - is
-// pinned in the source of the two components that carry it.
+// pinned in the source of the three components that carry it: `renderEntryBody`
+// spreads the handler, `TabBar` threads the callback and composes the key the
+// fixture below imitates, and `TrailingIconButton` stops the three events that
+// would otherwise activate a tab on its way to closing it.
 console.log("\n[chip] a chip selects its own entry, even when it is already the active one");
 {
   // Same idiom as section 7, and non-vacuity is pinned there: an emptied
@@ -1257,6 +1342,10 @@ console.log("\n[chip] a chip selects its own entry, even when it is already the 
   // for the active pane tab (`leaf-${activeLeafId}`). That is the fixture the
   // defect lives in: every OTHER chip always worked, because for those the
   // value genuinely changed.
+  //
+  // The format is hand-copied here, so 9(ii) pins `TabBar`'s own `activeKey`
+  // expression to keep the copy honest - see "TabBar still composes an
+  // activeKey the way this fixture spells it" below.
   const leafEntry: PaneEntry = {
     kind: "pane-leaf",
     key: "leaf-42",
@@ -1414,10 +1503,14 @@ console.log("\n[chip] a chip selects its own entry, even when it is already the 
     dragListenersAt,
   });
   check(
-    // dnd-kit's attributes are a plain object. Spread AFTER this handler, one of
-    // them silently overwrites `onClick` and the chip is inert again - with
-    // every behavioural check in 9(i) still green, because the leaf module is
-    // untouched.
+    // DEFENSIVE, and worth saying so: in @dnd-kit/core 6.3.1 neither object
+    // carries an `onClick` (`attributes` is `{role, tabIndex, aria-*}`,
+    // `listeners` is `{onPointerDown}` for the one sensor `TabBar` registers),
+    // so re-ordering these today breaks nothing. Both are plain objects spread
+    // into the same props, though, so whatever grows one - a dnd-kit version, a
+    // second sensor with a click activator - silently overwrites `onClick` and
+    // the chip is inert again, with every behavioural check in 9(i) still green
+    // because the leaf module is untouched. The order is the cheap half.
     "and the select handler is spread after both, so neither can clobber it",
     spreadAt > dragAttrsAt && spreadAt > dragListenersAt,
     { dragAttrsAt, dragListenersAt, spreadAt },
@@ -1444,6 +1537,57 @@ console.log("\n[chip] a chip selects its own entry, even when it is already the 
     renameSpan,
   );
 
+  // The close X's three propagation stops. Pinned for the same reason as the
+  // rename span's, and more urgently: nothing else in the suite reads this file
+  // at all, so before this block any one of them could be deleted with all 58
+  // scripts still green.
+  //
+  // What they protect is §5 decision 3 - closing a tab must not throw the user
+  // out of the rail view they are reading. `tabView.ts`'s `rehomeTabView`
+  // deliberately leaves `railView` alone for a removal, and that is no help if
+  // something ACTIVATES the tab on the way to closing it. Three separate native
+  // events reach the enclosing trigger from the X, each with its own route:
+  //
+  //   pointerdown  dnd-kit's `PointerSensor` activator - a press on the X
+  //                starts a tab drag.
+  //   mousedown    Radix's own activation. `TabsTrigger`'s `onMouseDown` calls
+  //                `context.onValueChange(value)` unguarded, so for a
+  //                BACKGROUND chip the value really does change,
+  //                `useControllableState` lets it through, and `focusTabView`
+  //                clears `railView` before `onCloseEntry` ever runs. A
+  //                separate event from pointerdown: stopping that one does not
+  //                stop this one, which is how it went missing.
+  //   click        the trigger's own select route, unconditional by design
+  //                (that is the D-NAV1 fix), so it fires on the X too.
+  const closeBtnSrc = stripTsxComments(read("src/modules/tabs/components/TrailingIconButton.tsx"));
+  const closeBtnTag = openingTag(closeBtnSrc, "button");
+  check(
+    // Non-vacuity: `openingTag` takes the FIRST `<button`, and a slice that
+    // found some other element would satisfy nothing below rather than fail
+    // loudly here.
+    "found the trailing icon button's opening tag to scan",
+    closeBtnTag !== null && /aria-label=\{label\}/.test(closeBtnTag),
+    closeBtnTag === null ? null : closeBtnTag.slice(0, 80),
+  );
+  for (const handler of ["onPointerDown", "onMouseDown"] as const) {
+    check(
+      `the close button stops ${handler}, so closing a tab cannot first activate it`,
+      closeBtnTag !== null && closeBtnTag.includes(`${handler}={(ev) => ev.stopPropagation()}`),
+      closeBtnTag,
+    );
+  }
+  const closeOnClick = closeBtnTag === null ? null : propValue(closeBtnTag, "onClick");
+  check(
+    // Matched separately from the two one-liners above because this stop shares
+    // a handler with the close itself. It is the only thing keeping the
+    // trigger's unconditional select route off the X.
+    "and stops the click in the same handler that runs the close",
+    closeOnClick !== null &&
+      closeOnClick.includes("ev.stopPropagation()") &&
+      closeOnClick.includes("onClick()"),
+    closeOnClick,
+  );
+
   const groupTag = openingTag(barSrc, "SortableTabGroup");
   check(
     "found the SortableTabGroup element to scan",
@@ -1458,6 +1602,31 @@ console.log("\n[chip] a chip selects its own entry, even when it is already the 
     groupTag,
   );
 
+  // What keeps 9(i)'s fixture honest. That fixture spells the covered chip's key
+  // as `leaf-42` and its `activeKey` as `leaf-${leafId}` BY HAND, and until this
+  // pin nothing tied either to the formula `TabBar` actually uses. Change the
+  // composite-key format and section 9 stays green while the fixture quietly
+  // stops representing D-NAV1: the chip is no longer the covered one, so every
+  // assertion below it runs against the case that never broke.
+  const activeKeyMemo = (() => {
+    const at = barSrc.indexOf("const activeKey");
+    return at === -1 ? null : barSrc.slice(at, at + 320);
+  })();
+  check(
+    "found TabBar's activeKey to scan",
+    activeKeyMemo !== null && /useMemo<string \| null>/.test(activeKeyMemo),
+    activeKeyMemo,
+  );
+  check(
+    // Both arms, because 9(i) fixtures both: `leaf-42` for the pane chip and
+    // `tab-9` for the standalone one.
+    "TabBar still composes an activeKey the way this fixture spells it",
+    activeKeyMemo !== null &&
+      activeKeyMemo.includes("return `leaf-${active.activeLeafId}`") &&
+      activeKeyMemo.includes("return `tab-${active.id}`"),
+    activeKeyMemo,
+  );
+
   const onValueChange = propValue(barSrc, "onValueChange");
   check(
     "found TabBar's onValueChange to scan",
@@ -1465,9 +1634,19 @@ console.log("\n[chip] a chip selects its own entry, even when it is already the 
     onValueChange,
   );
   check(
-    // Both routes through one expression. Radix's route survives for the
-    // keyboard, so a second hand-written `entry.kind === "pane-leaf" ? ... :
-    // null` here is a second place to get a standalone tab's `null` wrong.
+    // Both routes through one expression. Radix's route survives for the ARROW
+    // keys - the roving tabindex moves focus, `TabsTrigger`'s `onFocus` sees
+    // `!isSelected` under the default automatic activation, and that genuinely
+    // is a value change - so a second hand-written
+    // `entry.kind === "pane-leaf" ? ... : null` here is a second place to get a
+    // standalone tab's `null` wrong.
+    //
+    // Enter and Space are NOT that route, which is worth stating because it
+    // looks like they are: they go `onKeyDown` -> `onValueChange` and are
+    // dropped on the covered chip exactly like the mouse. They work because
+    // Radix renders a real `<button>` and the browser dispatches a native
+    // `click`, so the chips' own handler runs - an accident of the element type
+    // that an `asChild` onto a non-button would take away silently.
     "onValueChange resolves its target through entrySelectTarget",
     onValueChange !== null && /entrySelectTarget\(/.test(onValueChange),
     onValueChange,
@@ -1486,3 +1665,69 @@ console.log("\n[chip] a chip selects its own entry, even when it is already the 
 
 if (failed > 0) throw new Error(`${failed} check(s) FAILED`);
 console.log("\nALL PASS");
+
+// --- mutation table ------------------------------------------------------
+//
+// A check that has not been watched fail is not a check. Every mutation below
+// was run against this suite, its exit code recorded, and the source restored
+// by hash (`git hash-object -w` before, `git cat-file blob` after). The VLT-101
+// fix round is what added them: section 9's source-text half had grown three
+// pins that nothing in the suite had ever seen redden.
+//
+//   Mutation                                        Check(s) it killed
+//   ---------------------------------------------   ---------------------------
+//   N1  TrailingIconButton.tsx: delete the           "the close button stops
+//       `onPointerDown` stop (EXIT=1)                 onPointerDown, so closing
+//                                                     a tab cannot first
+//                                                     activate it"
+//   N2  TrailingIconButton.tsx: delete the           "the close button stops
+//       `onMouseDown` stop (EXIT=1)                   onMouseDown, ..."
+//   N3  TrailingIconButton.tsx: collapse the         "and stops the click in the
+//       click handler to `onClick={() => onClick()}`  same handler that runs the
+//       - the stop gone, the close kept (EXIT=1)      close"
+//
+//       N1-N3 are the point of that block. Before it, `grep -rn
+//       TrailingIconButton scripts/` returned nothing: all three stops could be
+//       deleted with every script in the suite still green, and §5 decision 3
+//       (a close must not throw the user out of a rail view) held only by
+//       accident. N2 was the live one - `mousedown` was NOT being stopped, and
+//       a background chip's X really did activate its tab first.
+//
+//   N4  renderEntryBody.tsx: the TabsTrigger         all six trigger checks,
+//       OPENING TAG left behind inside a              from "found the TabsTrigger
+//       `{/* ... */}` in a fragment, children         opening tag to scan" down
+//       dropped (EXIT=1, 8 checks red)                to "spread after both".
+//                                                     Plus the two rename-span
+//                                                     checks, collateral: the
+//                                                     same edit removes the
+//                                                     `<InlineInput>` they read.
+//   N4b N4 still applied, and section 9(ii)'s        NOTHING. Those six checks
+//       `bodySrc` switched from `stripTsxComments`    go GREEN off a trigger
+//       to the line-based `stripComments`             that no longer renders.
+//       (EXIT=1, only the 2 collateral red)           Only the two collateral
+//                                                     ones survive.
+//
+//       N4/N4b are the pair that justifies `stripTsxComments`. The example that
+//       comment carried before was not runnable at all (see the note up there).
+//
+//   N5  TabBar.tsx: `activeKey`'s pane arm changed   "TabBar still composes an
+//       to `leaf:${active.activeLeafId}` (EXIT=1,     activeKey the way this
+//       exactly 1 check red)                          fixture spells it"
+//
+//       The gap N5 closes: 9(i)'s fixture hand-copies the `leaf-${leafId}`
+//       format, so before this pin the same edit left all of section 9 green
+//       while the fixture had quietly stopped being the covered chip - the one
+//       case D-NAV1 is about.
+//
+//   N6  useTabs.ts: `focusPane` reverted to the         both of section 8d's
+//       always-allocate `setTabs((curr) =>              assertions - "returns
+//       curr.map(...))` it came from - the exact        curr unchanged when no
+//       tidy-up 8d exists to catch (EXIT=1)             tab moved" and "is not
+//                                                        the always-allocate
+//                                                        curr.map updater it
+//                                                        replaced"
+//
+//       Section 8d was added for this one. The identity guard is a behaviour
+//       change with a real cost behind it (two `wsSaveTabs` per chip click), and
+//       until N6 it was the only thing in this round that could be undone with
+//       all 58 scripts still green.

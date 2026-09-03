@@ -25,7 +25,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { Tab } from "./lib/useTabs";
 import { canCloseLeaf, canCloseTab } from "./lib/closable";
 import { type Entry, type PaneEntry, buildEntries } from "./lib/entries";
-import { entrySelectTarget } from "./lib/selectEntry";
+import { entrySelectTarget, type SelectEntry } from "./lib/selectEntry";
 import { EntryIcon } from "./components/EntryIcon";
 import { NewTabMenu } from "./components/NewTabMenu";
 import { SortableTabGroup } from "./components/SortableTabGroup";
@@ -34,8 +34,12 @@ import { ChevronLeft, ChevronRight } from "lucide-react";
 type Props = {
   tabs: Tab[];
   activeId: number;
-  /** Activate a pane entry. `leafId` is null for standalone tabs. */
-  onSelectEntry: (tabId: number, leafId: number | null) => void;
+  /** Activate a pane entry. `leafId` is null for standalone tabs. Named by
+   *  `SelectEntry` rather than re-spelled, like every other hop inside this
+   *  module - this prop is handed straight to `SortableTabGroup`, which names
+   *  it that way, so a hand-written copy here is a signature free to drift from
+   *  the one it feeds. */
+  onSelectEntry: SelectEntry;
   /** Close a pane leaf or standalone tab. `leafId` is null for standalone. */
   onCloseEntry: (tabId: number, leafId: number | null) => void;
   onNewTerminal: () => void;
@@ -387,12 +391,22 @@ export function TabBar({
         <div data-tauri-drag-region="false" className="flex w-max items-center gap-0.5">
           <Tabs
             value={activeKey ?? ""}
-            // Radix's route in, kept for the keyboard: arrow keys move the
-            // roving tabindex and activate through here. It is NOT the only
-            // route any more - it cannot be, because Radix suppresses it when
-            // the clicked chip's value already equals `value`, which under a
-            // rail view is the covered tab (D-NAV1). The chips carry their own
-            // unconditional `onClick`; both go through `entrySelectTarget` so
+            // Radix's route in, and it is the ARROW keys that keep it alive:
+            // the roving tabindex moves focus, `TabsTrigger`'s `onFocus` sees
+            // `!isSelected` under the default automatic activation mode, and
+            // that genuinely is a value change, so it lands here.
+            //
+            // Enter and Space do NOT come through here, which this comment used
+            // to imply. They go `onKeyDown` -> `context.onValueChange(value)`
+            // with no guard at all, and on the covered chip - the D-NAV1 case -
+            // `useControllableState` drops it for `value2 === prop`, exactly
+            // like the mouse. What makes them work is that Radix renders a real
+            // `<button>`, so the browser dispatches a native `click` and the
+            // chip's own unconditional handler runs. That is an accident of the
+            // element type: an `asChild` on something that is not a button
+            // would take Enter/Space away without touching a line of this file.
+            //
+            // Both routes resolve their target through `entrySelectTarget`, so
             // the pair they select cannot drift apart.
             onValueChange={(k) => {
               const entry = entries.find((e) => e.key === k);

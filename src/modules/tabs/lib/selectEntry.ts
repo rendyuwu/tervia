@@ -15,9 +15,14 @@ import type { Entry } from "./entries";
  * Activate a tab-strip entry. `leafId` is null for a standalone tab.
  *
  * Named once here rather than re-spelled at every hop: `TabBar`,
- * `SortableTabGroup` and `renderEntryBody` all thread the same callback down, and
- * a chip wired to a subtly different signature is then a compile error rather
- * than a click that goes somewhere else.
+ * `SortableTabGroup` and `renderEntryBody` all thread the same callback down and
+ * all three name it by THIS type, so a chip wired to a subtly different signature
+ * is a compile error rather than a click that goes somewhere else.
+ *
+ * `Header` holds a fourth copy, still hand-written, and it stays that way for now:
+ * it is outside this module, so pulling it in would make the header import from
+ * `tabs/lib`. Stated rather than left to be discovered - the reuse is real up to
+ * the module boundary and stops there.
  */
 export type SelectEntry = (tabId: number, leafId: number | null) => void;
 
@@ -40,11 +45,18 @@ export function entrySelectTarget(entry: Entry): { tabId: number; leafId: number
  * D-NAV1: with a rail view (Vault, Port Forwarding) covering the tab area, the
  * strip stays on screen but `activeKey` still names the tab underneath it - so
  * clicking that tab's own chip is not a value CHANGE, and the controlled Radix
- * `Tabs` in `TabBar` never calls `onValueChange` (each of its trigger's
- * activation handlers is guarded by `value !== context.value`). The click that
- * most plainly means "show me that tab again" was the one click the strip
- * ignored: the user had to click some OTHER chip first, and only then could they
- * click back.
+ * `Tabs` in `TabBar` never calls `onValueChange`. The click that most plainly
+ * means "show me that tab again" was the one click the strip ignored: the user
+ * had to click some OTHER chip first, and only then could they click back.
+ *
+ * The suppression is NOT in the trigger, which is where this comment used to
+ * point. `TabsTrigger`'s `onMouseDown` and `onKeyDown` both call
+ * `context.onValueChange(value)` with no test against the current value; only
+ * `onFocus` checks `!isSelected`. It is one layer down, in
+ * `@radix-ui/react-use-controllable-state`'s `setValue`: while controlled, it
+ * calls `onChangeRef.current?.(value2)` only `if (value2 !== prop)`. Located
+ * exactly, because a reader who opens `react-tabs` to check the old claim finds
+ * the opposite and concludes the whole paragraph is wrong.
  *
  * So this is deliberately UNCONDITIONAL in the entry's key. It fires on every
  * click and hands the pair straight to `onSelectEntry`, whose funnel

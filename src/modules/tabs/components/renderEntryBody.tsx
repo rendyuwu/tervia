@@ -129,9 +129,15 @@ export function renderEntryBody(args: RenderEntryArgs): ReactNode {
       // Drag attrs/listeners supplied by caller. Nullish spreads preserve default click semantics when absent.
       {...(dragAttrs ?? {})}
       {...(dragListeners ?? {})}
-      // D-NAV1: the chip's own click route, and it must sit AFTER the two drag
-      // spreads - dnd-kit's attributes are a plain object, so a later spread of
-      // one would silently clobber this `onClick` and put the defect back.
+      // D-NAV1: the chip's own click route. It sits AFTER the two drag spreads
+      // DEFENSIVELY - not to repair a collision that exists today. In
+      // @dnd-kit/core 6.3.1 neither object carries an `onClick`: `attributes` is
+      // `{role, tabIndex, aria-*}` and `listeners` is `{onPointerDown}`, since
+      // `PointerSensor` is the only sensor `TabBar` registers. So the order
+      // changes nothing right now, and it is pinned anyway because whatever
+      // grows one - a dnd-kit version, or a second sensor whose activator is a
+      // click - would overwrite this handler silently, with every behavioural
+      // check on the leaf module still green.
       //
       // Unconditional, on purpose. Radix skips `onValueChange` when the clicked
       // trigger's value already equals the current one, which under a rail view
