@@ -20,6 +20,7 @@ import { useSortable } from "@dnd-kit/sortable";
 import { Fragment } from "react";
 import type { ReactNode } from "react";
 import { type Entry, type PaneEntry, entryLabelClass, tabAccentClass } from "../lib/entries";
+import { type SelectEntry, entrySelectHandlers } from "../lib/selectEntry";
 import { InlineInput } from "@/modules/explorer/InlineInput";
 import { EntryIcon } from "./EntryIcon";
 import { TrailingIconButton } from "./TrailingIconButton";
@@ -52,6 +53,11 @@ export type RenderEntryArgs = {
   dragStyle?: React.CSSProperties;
   /** True when this entry is being dragged. Drives ghost opacity. */
   selfDragging?: boolean;
+  /** Activate this entry. Required, not optional: the trigger's own click route
+   *  (`lib/selectEntry.ts`) is the ONLY thing that reaches a chip whose key is
+   *  already the active one, so an entry rendered without it would be the exact
+   *  chip D-NAV1 was about - inert under a rail view. Every caller has one. */
+  onSelectEntry: SelectEntry;
   onPinLeaf: (tabId: number, leafId: number) => void;
   onCloseEntry: (tabId: number, leafId: number | null) => void;
   onCloseEntriesAfter: (entry: Entry) => void;
@@ -85,6 +91,7 @@ export function renderEntryBody(args: RenderEntryArgs): ReactNode {
     dragRef,
     dragStyle,
     selfDragging,
+    onSelectEntry,
     onPinLeaf,
     onCloseEntry,
     onCloseEntriesAfter,
@@ -122,6 +129,19 @@ export function renderEntryBody(args: RenderEntryArgs): ReactNode {
       // Drag attrs/listeners supplied by caller. Nullish spreads preserve default click semantics when absent.
       {...(dragAttrs ?? {})}
       {...(dragListeners ?? {})}
+      // D-NAV1: the chip's own click route, and it must sit AFTER the two drag
+      // spreads - dnd-kit's attributes are a plain object, so a later spread of
+      // one would silently clobber this `onClick` and put the defect back.
+      //
+      // Unconditional, on purpose. Radix skips `onValueChange` when the clicked
+      // trigger's value already equals the current one, which under a rail view
+      // is precisely the covered tab the user is asking to see again; see
+      // `lib/selectEntry.ts` for why this is a click handler rather than a
+      // `value` the rail view unsets. The drag hazard is already handled by
+      // dnd-kit (a capture-phase `click` listener on `document` swallows the
+      // click that ends an activated drag), so no `isDragging` guard belongs
+      // here - it would be dead code.
+      {...entrySelectHandlers(e, onSelectEntry)}
       // Inline style set by per-leaf sortables. Undefined for non-leaf paths (wrapper carries the transform).
       // eslint-disable-next-line react/forbid-dom-props
       style={dragStyle}
@@ -169,11 +189,21 @@ export function renderEntryBody(args: RenderEntryArgs): ReactNode {
           // `stopPropagation` on pointerdown so a drag-to-reorder gesture cannot
           // start from inside the field: the drag listeners live on the trigger
           // this input sits in, and text selection would otherwise reorder tabs.
+          // And on click for the same reason, one layer up: the trigger's select
+          // handler is unconditional, so clicking or selecting text INSIDE the
+          // rename field would otherwise activate the tab and throw the user out
+          // of the rail view they opened the rename from. Stopped here rather
+          // than by teaching the trigger's handler about `renaming` - that
+          // handler stays unconditional, which is the whole of the D-NAV1 fix.
           // InlineInput is the explorer's rename field, reused here because it
           // already survives the hazard this flow creates - the context menu's
           // Radix portal steals focus as it unmounts, and it re-focuses through
           // that instead of committing an empty name.
-          <span className="flex min-w-0 flex-1" onPointerDown={(ev) => ev.stopPropagation()}>
+          <span
+            className="flex min-w-0 flex-1"
+            onPointerDown={(ev) => ev.stopPropagation()}
+            onClick={(ev) => ev.stopPropagation()}
+          >
             <InlineInput
               // The kind tag ("ssh", "SQL", "API") is core's, not the user's;
               // it is re-applied around whatever they type.

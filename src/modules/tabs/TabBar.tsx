@@ -25,6 +25,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { Tab } from "./lib/useTabs";
 import { canCloseLeaf, canCloseTab } from "./lib/closable";
 import { type Entry, type PaneEntry, buildEntries } from "./lib/entries";
+import { entrySelectTarget } from "./lib/selectEntry";
 import { EntryIcon } from "./components/EntryIcon";
 import { NewTabMenu } from "./components/NewTabMenu";
 import { SortableTabGroup } from "./components/SortableTabGroup";
@@ -386,14 +387,18 @@ export function TabBar({
         <div data-tauri-drag-region="false" className="flex w-max items-center gap-0.5">
           <Tabs
             value={activeKey ?? ""}
+            // Radix's route in, kept for the keyboard: arrow keys move the
+            // roving tabindex and activate through here. It is NOT the only
+            // route any more - it cannot be, because Radix suppresses it when
+            // the clicked chip's value already equals `value`, which under a
+            // rail view is the covered tab (D-NAV1). The chips carry their own
+            // unconditional `onClick`; both go through `entrySelectTarget` so
+            // the pair they select cannot drift apart.
             onValueChange={(k) => {
               const entry = entries.find((e) => e.key === k);
               if (!entry) return;
-              if (entry.kind === "pane-leaf") {
-                onSelectEntry(entry.tabId, entry.leafId);
-              } else {
-                onSelectEntry(entry.tabId, null);
-              }
+              const { tabId, leafId } = entrySelectTarget(entry);
+              onSelectEntry(tabId, leafId);
             }}
           >
             <DndContext
@@ -420,6 +425,7 @@ export function TabBar({
                       leafSortable={!!onReorderLeafInGroup}
                       groupDragging={activeDragId !== null}
                       isDragging={activeDragId === `tab:${group.tabId}`}
+                      onSelectEntry={onSelectEntry}
                       onPinLeaf={onPinLeaf}
                       onCloseEntry={onCloseEntry}
                       onCloseEntriesAfter={closeEntriesAfter}

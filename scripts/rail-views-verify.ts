@@ -31,6 +31,12 @@
  *     rather than a rule ten callers remember - nine of eleven did not - so the
  *     checks are the transition itself, plus a source-text sweep proving every
  *     `activeId` write in `useTabs` / `useAuxTabs` goes through the funnel.
+ *  5. AND THE ROUTE THAT NEVER REACHED IT (D-NAV1, section 9). The funnel was
+ *     right and the tab strip's own chip never called it: Radix suppresses
+ *     `onValueChange` when the clicked trigger's value already equals the
+ *     current one, which under a rail view is exactly the covered tab. Sections
+ *     4 and 7 could not see that, because a check on a transition cannot notice
+ *     a caller that stops asking for it - the same lesson as 3, one layer up.
  */
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -53,6 +59,17 @@ import {
 // `@xterm/xterm`, which Node cannot resolve outside a bundler - see
 // `serialize.ts`'s note). The probe below is checked by `pnpm typecheck:scripts`.
 import type { Tab, useTabs } from "../src/modules/tabs/lib/useTabs";
+// A VALUE import, and it can be one only because `selectEntry.ts` is a leaf: its
+// single import is `import type { Entry }`, which is erased. Section 9 executes
+// the click route rather than pinning a substring of it, which is the half a
+// source-text sweep cannot do. The entry types beside it stay type-only -
+// `entries.ts` reaches `@/`-aliased modules this script has no bundler for.
+import {
+  entrySelectHandlers,
+  entrySelectTarget,
+  type SelectEntry,
+} from "../src/modules/tabs/lib/selectEntry";
+import type { Entry, PaneEntry } from "../src/modules/tabs/lib/entries";
 import {
   isPageKind,
   PAGE_KINDS,
@@ -106,6 +123,87 @@ function check(name: string, ok: boolean, detail?: unknown): void {
   console.error(`  FAIL: ${name}`, detail === undefined ? "" : JSON.stringify(detail));
   failed++;
 }
+
+// ---- source-text helpers --------------------------------------------------
+// Shared by sections 8 and 9. At module scope rather than inside section 8's
+// block because section 9 needs the SAME scanner over `.tsx` files; a fourth
+// copy of it in this one file would be the way the two drift apart. Section 8
+// keeps calling `stripComments`, unchanged, so nothing about its behaviour
+// moves with them.
+const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+const read = (p: string) => readFileSync(join(root, p), "utf8");
+
+/**
+ * Comments stripped so a doc comment naming a call is not read AS one. (The
+ * third copy of this pair in the suite - VLT-33. Canonical copy lives in
+ * `scripts/host-editor-verify.ts`; keep them the same shape. Duplicated
+ * rather than shared, because these scripts have no common module.)
+ *
+ * QUOTE-AWARE, and a character scan rather than a regex: a `//` inside a
+ * string is not a comment, and a regex alternation over string literals
+ * desyncs on the first unbalanced quote - after which it eats real code. The
+ * scan loses the strip for a line with an unclosed quote instead, which fails
+ * towards KEEPING text. That is the safe direction: the failure this exists
+ * to prevent is a positive check going green off `// was: <deleted code>`.
+ */
+const stripLineComment = (line: string): string => {
+  let quote = "";
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (quote) {
+      if (c === "\\") i++;
+      else if (c === quote) quote = "";
+      continue;
+    }
+    if (c === '"' || c === "'" || c === "`") {
+      quote = c;
+      continue;
+    }
+    if (c === "/" && line[i + 1] === "/") return line.slice(0, i);
+  }
+  return line;
+};
+// VLT-83: no JSX-comment branch in THIS one, and that is deliberate rather
+// than an oversight. It does run over `.tsx` files (section 8 reads
+// `src/app/App.tsx`), so a `{/* ... */}` left behind by a deletion survives
+// it - but every check section 8 makes over a `.tsx` file is a NEGATIVE
+// (`!/setRailView/`, `!/useState<RailViewKind/`, `!/openPageTabInTabs/`), and
+// an un-stripped JSX comment there can only cause a FALSE FAILURE (the
+// forbidden text still present, inertly, inside a comment), never a silenced
+// pass - the unsafe direction this bug is about. Section 9 writes POSITIVE
+// checks over `.tsx` files, where the direction reverses, so it uses
+// `stripTsxComments` below. Section 8 is left on this one so its behaviour is
+// unchanged by that addition.
+const stripComments = (src: string): string =>
+  src
+    .split("\n")
+    .filter((line) => {
+      const t = line.trim();
+      return !(t.startsWith("//") || t.startsWith("/*") || t.startsWith("*"));
+    })
+    .map(stripLineComment)
+    .join("\n");
+
+// The same, plus the one comment syntax that is legal INSIDE JSX children:
+// a `{/* ... */}` expression. A bare `//` there renders as literal text, so
+// the line-based filter above never had a reason to know about it - and it
+// does not match a line starting `{` either. Required by every POSITIVE check
+// over a `.tsx` file: without this, deleting the trigger's select spread and
+// leaving `{/* ...entrySelectHandlers(e, onSelectEntry) */}` behind still
+// satisfies section 9(ii), which is the exact failure VLT-83 is about.
+//
+// The regex is the FIXED one from `scripts/host-editor-verify.ts` (around
+// `:216`), NOT the lazy `\{\s*\/\*[\s\S]*?\*\/\s*\}` that
+// `vault-editor-verify.ts` carries. Lazy is not a substitute: it is still
+// ALLOWED to skip over an intervening `*/` while hunting for one that happens
+// to be followed by `}`, and a type literal opening `{ /** null = closed. */
+// target: ... }` is exactly that shape - measured over there to eat 50KB of
+// file between the two. The negative lookahead forbids the inner group from
+// crossing a `*/` at all, so the first one found is final: either `}` follows
+// it and this is a real JSX comment, or the match fails HERE rather than
+// searching on for a luckier closer.
+const stripTsxComments = (src: string): string =>
+  stripComments(src.replace(/\{\s*\/\*(?:(?!\*\/)[\s\S])*\*\/\s*\}/g, ""));
 
 // ---- fixtures -------------------------------------------------------------
 
@@ -610,60 +708,6 @@ console.log("\n[exit] activating a tab leaves the rail view, and a removal does 
 // proof that nothing writes `activeId` around it.
 console.log("\n[funnel] no route into the tab area writes activeId on its own");
 {
-  const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-  const read = (p: string) => readFileSync(join(root, p), "utf8");
-  /**
-   * Comments stripped so a doc comment naming a call is not read AS one. (The
-   * third copy of this pair in the suite - VLT-33. Canonical copy lives in
-   * `scripts/host-editor-verify.ts`; keep them the same shape. Duplicated
-   * rather than shared, because these scripts have no common module.)
-   *
-   * QUOTE-AWARE, and a character scan rather than a regex: a `//` inside a
-   * string is not a comment, and a regex alternation over string literals
-   * desyncs on the first unbalanced quote - after which it eats real code. The
-   * scan loses the strip for a line with an unclosed quote instead, which fails
-   * towards KEEPING text. That is the safe direction: the failure this exists
-   * to prevent is a positive check going green off `// was: <deleted code>`.
-   */
-  const stripLineComment = (line: string): string => {
-    let quote = "";
-    for (let i = 0; i < line.length; i++) {
-      const c = line[i];
-      if (quote) {
-        if (c === "\\") i++;
-        else if (c === quote) quote = "";
-        continue;
-      }
-      if (c === '"' || c === "'" || c === "`") {
-        quote = c;
-        continue;
-      }
-      if (c === "/" && line[i + 1] === "/") return line.slice(0, i);
-    }
-    return line;
-  };
-  // VLT-83: no JSX-comment branch here - but not for the reason the other
-  // Group B files have. This stripper DOES run over a `.tsx` file (`appSrc`
-  // below reads `src/app/App.tsx`), so a `{/* ... */}` left behind by a
-  // deletion would survive it. What makes that safe here is that every check
-  // over `appSrc` is a NEGATIVE (`!/setRailView/`, `!/useState<RailViewKind/`,
-  // `!/openPageTabInTabs/`): an un-stripped JSX comment can only cause a
-  // FALSE FAILURE (the forbidden text still present, inertly, inside a
-  // comment), never a silenced pass - the unsafe direction this bug is about.
-  // The branch must be added the MOMENT a positive check is written over a
-  // `.tsx` file here. Copy it from `host-editor-verify.ts:191` (fixed there)
-  // and `vault-editor-verify.ts:101`, and not the lazy form
-  // `\{\s*\/\*[\s\S]*?\*\/\s*\}`, which is not a substitute: it can still
-  // cross an intervening `*/` while hunting for one followed by `}`.
-  const stripComments = (src: string): string =>
-    src
-      .split("\n")
-      .filter((line) => {
-        const t = line.trim();
-        return !(t.startsWith("//") || t.startsWith("/*") || t.startsWith("*"));
-      })
-      .map(stripLineComment)
-      .join("\n");
   const stripQuotesAwareComments = stripComments;
   /**
    * Each top-level declaration body, keyed by name. The chunk runs to the next
@@ -1184,6 +1228,259 @@ console.log("\n[funnel] no route into the tab area writes activeId on its own");
   check(
     "nor clamps an index against the restored tab list",
     !/Math\.min\(/.test(switching) && !/Math\.min\(/.test(persistence),
+  );
+}
+
+// ---- 9. the chip's own click route --------------------------------------
+// D-NAV1, and the reason this section exists at all: the table in section 7
+// proves the funnel's ARITHMETIC, and a table cannot see a route that never
+// calls it. It did not. With a rail view up, `activeKey` still names the tab
+// underneath, so clicking that tab's own chip is not a value CHANGE - and the
+// controlled Radix `Tabs` in `TabBar` only activates a trigger when
+// `value !== context.value`. `focusTabView` was correct, unconditional in the
+// id, and simply never reached. Clicking the HOSTS chip first worked, and only
+// then did the terminal's chip respond.
+//
+// Two halves, because one alone would have passed before the fix. The click
+// route is EXECUTED (§5 decision 17: pin the expression, not the name) and then
+// fed through the real `focusTabView`; and the wiring - which is the part that
+// was missing, and which no behavioural check on a leaf module can see - is
+// pinned in the source of the two components that carry it.
+console.log("\n[chip] a chip selects its own entry, even when it is already the active one");
+{
+  // Same idiom as section 7, and non-vacuity is pinned there: an emptied
+  // `RAIL_VIEW_KINDS` would leave only the `null` row here too.
+  const RAIL: (RailViewKind | null)[] = [null, ...RAIL_VIEW_KINDS];
+
+  // ---- 9(i) executed: the handler, then the funnel it hands off to -------
+  // A terminal leaf whose key is exactly what `TabBar`'s `activeKey` computes
+  // for the active pane tab (`leaf-${activeLeafId}`). That is the fixture the
+  // defect lives in: every OTHER chip always worked, because for those the
+  // value genuinely changed.
+  const leafEntry: PaneEntry = {
+    kind: "pane-leaf",
+    key: "leaf-42",
+    tabId: 7,
+    leafId: 42,
+    leafKind: "terminal",
+    label: "zsh",
+    renameSeed: "zsh",
+  };
+  const activeKey = `leaf-${leafEntry.leafId}`;
+  check(
+    // Non-vacuity, and it is the whole point of the fixture: if this stopped
+    // being the active chip, every assertion below would run against the case
+    // that never broke.
+    "the fixture chip is the one activeKey already names",
+    leafEntry.key === activeKey,
+    { key: leafEntry.key, activeKey },
+  );
+
+  const calls: { tabId: number; leafId: number | null }[] = [];
+  const spy: SelectEntry = (tabId, leafId) => {
+    calls.push({ tabId, leafId });
+  };
+  entrySelectHandlers(leafEntry, spy).onClick();
+  check("clicking it calls onSelectEntry exactly once", calls.length === 1, calls);
+  check("with its own tab id", calls[0]?.tabId === leafEntry.tabId, calls[0]);
+  check("and its own leaf id", calls[0]?.leafId === leafEntry.leafId, calls[0]);
+  const leafTarget = entrySelectTarget(leafEntry);
+  check(
+    // ONE expression for both routes. Asserted rather than assumed, because the
+    // pair was hand-written at each call site before, which is how they were
+    // free to drift.
+    "and the pair it passed is the one entrySelectTarget names",
+    calls[0]?.tabId === leafTarget.tabId && calls[0]?.leafId === leafTarget.leafId,
+    { click: calls[0], target: leafTarget },
+  );
+  // `?? -1` so a handler that never fired fails the rows below rather than
+  // throwing a TypeError out of the whole section - which would take 9(ii),
+  // the source-text half, down with it and report nothing about the wiring.
+  const clickedTabId = calls[0]?.tabId ?? -1;
+  for (const railView of RAIL) {
+    // The spied id, through the REAL funnel: the click is only a fix if what it
+    // reaches leaves the view. `activeId` starts as the chip's own tab, which is
+    // the state the defect happened in.
+    const next = focusTabView({ activeId: leafEntry.tabId, railView }, clickedTabId);
+    check(
+      `chip click over ${railView ?? "no view"}: the tabs are showing`,
+      next.railView === null,
+      next,
+    );
+    check(
+      `chip click over ${railView ?? "no view"}: its own tab is active`,
+      next.activeId === leafEntry.tabId,
+      next,
+    );
+  }
+
+  // The standalone arm, so `leafId` cannot come back 0 or undefined for a tab
+  // that has no leaves - `onCloseEntry` and `onSelectEntry` both read `null` as
+  // "the whole tab".
+  const boardEntry: Entry = { kind: "board", key: "tab-9", tabId: 9, label: "Board" };
+  const boardCalls: { tabId: number; leafId: number | null }[] = [];
+  entrySelectHandlers(boardEntry, (tabId, leafId) => {
+    boardCalls.push({ tabId, leafId });
+  }).onClick();
+  check("a standalone chip selects its tab", boardCalls[0]?.tabId === boardEntry.tabId, boardCalls);
+  check("with no leaf at all, not leaf 0", boardCalls[0]?.leafId === null, boardCalls);
+  check("and entrySelectTarget agrees", entrySelectTarget(boardEntry).leafId === null);
+
+  // ---- 9(ii) source text: the wiring is what was missing -----------------
+  // VLT-83: these are POSITIVE checks over `.tsx` files, so they run on
+  // `stripTsxComments` - the line-based stripper would let a deletion pass by
+  // leaving the code behind as a JSX comment expression.
+  const bodySrc = stripTsxComments(read("src/modules/tabs/components/renderEntryBody.tsx"));
+  const barSrc = stripTsxComments(read("src/modules/tabs/TabBar.tsx"));
+
+  /**
+   * The text of `<Tag ...>`'s OPENING TAG, brace- and quote-aware.
+   *
+   * Not "up to the first `>`": every arrow function in a prop
+   * (`onDoubleClick={() => {`) contains one, and the tag would be cut off before
+   * the props this section is about. The depth counter matters for the ORDER
+   * check below too - the assertion is about where inside the tag the spread
+   * sits, so the slice has to be the whole tag and nothing after it.
+   */
+  const openingTag = (src: string, tag: string): string | null => {
+    const at = src.indexOf(`<${tag}`);
+    if (at === -1) return null;
+    let depth = 0;
+    let quote = "";
+    for (let i = at; i < src.length; i++) {
+      const c = src[i];
+      if (quote) {
+        if (c === "\\") i++;
+        else if (c === quote) quote = "";
+        continue;
+      }
+      if (c === '"' || c === "'" || c === "`") quote = c;
+      else if (c === "{") depth++;
+      else if (c === "}") depth--;
+      else if (c === ">" && depth === 0) return src.slice(at, i + 1);
+    }
+    return null;
+  };
+
+  /** The braced value of prop `name`, brace-matched and quote-aware. */
+  const propValue = (src: string, name: string): string | null => {
+    const start = src.indexOf(`${name}={`) === -1 ? -1 : src.indexOf("{", src.indexOf(`${name}={`));
+    if (start === -1) return null;
+    let depth = 0;
+    let quote = "";
+    for (let i = start; i < src.length; i++) {
+      const c = src[i];
+      if (quote) {
+        if (c === "\\") i++;
+        else if (c === quote) quote = "";
+        continue;
+      }
+      if (c === '"' || c === "'" || c === "`") quote = c;
+      else if (c === "{") depth++;
+      else if (c === "}" && --depth === 0) return src.slice(start, i + 1);
+    }
+    return null;
+  };
+
+  const triggerTag = openingTag(bodySrc, "TabsTrigger");
+  check(
+    // Non-vacuity: a slice that found nothing satisfies no positive below by
+    // failing them all, but a slice that found the WRONG element would.
+    "found the TabsTrigger opening tag to scan",
+    triggerTag !== null && /value=\{e\.key\}/.test(triggerTag),
+    triggerTag === null ? null : triggerTag.slice(0, 80),
+  );
+  const spreadAt = triggerTag === null ? -1 : triggerTag.indexOf("entrySelectHandlers(");
+  check("the trigger spreads entrySelectHandlers", spreadAt >= 0, triggerTag);
+  check(
+    // A BARE spread. The fix is only a fix if it is unconditional: wrapped in
+    // `renaming ? ... :` or `isDragging && ...` it goes back to being a chip
+    // that sometimes does nothing, which is the defect.
+    "as a bare spread, with no condition in front of it",
+    spreadAt > 0 && /\{\s*\.\.\.\s*$/.test(triggerTag!.slice(0, spreadAt)),
+    triggerTag === null ? null : triggerTag.slice(Math.max(0, spreadAt - 60), spreadAt),
+  );
+  check(
+    // Exactly one, so a guarded second copy cannot sit beside the bare one and
+    // satisfy the check above while shadowing it.
+    "and exactly once in the tag",
+    (triggerTag?.match(/entrySelectHandlers/g) ?? []).length === 1,
+    triggerTag,
+  );
+  const dragAttrsAt = triggerTag === null ? -1 : triggerTag.indexOf("...(dragAttrs");
+  const dragListenersAt = triggerTag === null ? -1 : triggerTag.indexOf("...(dragListeners");
+  check("the two drag spreads are still on the trigger", dragAttrsAt >= 0 && dragListenersAt >= 0, {
+    dragAttrsAt,
+    dragListenersAt,
+  });
+  check(
+    // dnd-kit's attributes are a plain object. Spread AFTER this handler, one of
+    // them silently overwrites `onClick` and the chip is inert again - with
+    // every behavioural check in 9(i) still green, because the leaf module is
+    // untouched.
+    "and the select handler is spread after both, so neither can clobber it",
+    spreadAt > dragAttrsAt && spreadAt > dragListenersAt,
+    { dragAttrsAt, dragListenersAt, spreadAt },
+  );
+
+  const renameSpan = (() => {
+    const at = bodySrc.indexOf("<InlineInput");
+    if (at === -1) return null;
+    const open = bodySrc.lastIndexOf("<span", at);
+    return open === -1 ? null : bodySrc.slice(open, at);
+  })();
+  check(
+    "found the inline rename field's wrapper span",
+    renameSpan !== null && /onPointerDown=\{\(ev\) => ev\.stopPropagation\(\)\}/.test(renameSpan),
+    renameSpan,
+  );
+  check(
+    // The one place an unconditional trigger handler is wrong, and it is fixed
+    // at the field rather than in the handler: clicking into the rename field
+    // must not activate the tab and throw the user out of the rail view they
+    // opened the rename from.
+    "which stops the click too, so renaming does not navigate",
+    renameSpan !== null && /onClick=\{\(ev\) => ev\.stopPropagation\(\)\}/.test(renameSpan),
+    renameSpan,
+  );
+
+  const groupTag = openingTag(barSrc, "SortableTabGroup");
+  check(
+    "found the SortableTabGroup element to scan",
+    groupTag !== null && /entries=\{group\.entries\}/.test(groupTag),
+    groupTag === null ? null : groupTag.slice(0, 80),
+  );
+  check(
+    // The thread. Without it the leaf module is correct, imported, and reaches
+    // no chip.
+    "TabBar hands onSelectEntry to every group, so the chips have a route of their own",
+    groupTag !== null && /onSelectEntry=\{onSelectEntry\}/.test(groupTag),
+    groupTag,
+  );
+
+  const onValueChange = propValue(barSrc, "onValueChange");
+  check(
+    "found TabBar's onValueChange to scan",
+    onValueChange !== null && /entries\.find\(/.test(onValueChange),
+    onValueChange,
+  );
+  check(
+    // Both routes through one expression. Radix's route survives for the
+    // keyboard, so a second hand-written `entry.kind === "pane-leaf" ? ... :
+    // null` here is a second place to get a standalone tab's `null` wrong.
+    "onValueChange resolves its target through entrySelectTarget",
+    onValueChange !== null && /entrySelectTarget\(/.test(onValueChange),
+    onValueChange,
+  );
+  check(
+    "and keeps none of its own kind test, so the two routes cannot drift",
+    onValueChange !== null && !/pane-leaf/.test(onValueChange),
+    onValueChange,
+  );
+  check(
+    "and still bails on a key no entry has",
+    onValueChange !== null && /if \(!entry\) return;/.test(onValueChange),
+    onValueChange,
   );
 }
 

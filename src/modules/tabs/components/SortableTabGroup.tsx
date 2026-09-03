@@ -5,6 +5,7 @@ import { horizontalListSortingStrategy, SortableContext, useSortable } from "@dn
 import { CSS } from "@dnd-kit/utilities";
 import { useMemo } from "react";
 import { type Entry, type PaneEntry } from "../lib/entries";
+import { type SelectEntry } from "../lib/selectEntry";
 import { type PaneGroupForMove, type RenderEntryArgs, renderEntryBody } from "./renderEntryBody";
 import { EllipsisVertical } from "lucide-react";
 
@@ -31,6 +32,10 @@ type SortableTabGroupProps = {
   groupDragging: boolean;
   /** True when this group is being dragged. */
   isDragging: boolean;
+  /** Activate an entry. Threaded through to every entry rather than left to the
+   *  `Tabs` root's `onValueChange`, which Radix skips when the clicked chip is
+   *  already the active one - the D-NAV1 case under a rail view. */
+  onSelectEntry: SelectEntry;
   onPinLeaf: (tabId: number, leafId: number) => void;
   onCloseEntry: (tabId: number, leafId: number | null) => void;
   /** Close every entry to the right of `entry`. Lives in TabBar for the flattened entry list. */
@@ -70,6 +75,7 @@ export function SortableTabGroup({
   leafSortable,
   groupDragging,
   isDragging: isThisDragging,
+  onSelectEntry,
   onPinLeaf,
   onCloseEntry,
   onCloseEntriesAfter,
@@ -123,6 +129,7 @@ export function SortableTabGroup({
           lastEntryKey={lastEntryKey}
           compact={compact}
           canClose={canClose}
+          onSelectEntry={onSelectEntry}
           onPinLeaf={onPinLeaf}
           onCloseEntry={onCloseEntry}
           onCloseEntriesAfter={onCloseEntriesAfter}
@@ -151,6 +158,7 @@ export function SortableTabGroup({
       canClose,
       dragAttrs: isGroupDragHandle ? attributes : undefined,
       dragListeners: isGroupDragHandle ? listeners : undefined,
+      onSelectEntry,
       onPinLeaf,
       onCloseEntry,
       onCloseEntriesAfter,
