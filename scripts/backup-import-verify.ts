@@ -4,19 +4,17 @@
  * Run: `pnpm verify backup-import` (or `npx tsx
  * scripts/backup-import-verify.ts` to iterate).
  *
- * SOURCE-TEXT for both halves, and for the same reason `hosts-error-toast-
+ * SOURCE-TEXT for most of it, and for the same reason `hosts-error-toast-
  * verify.ts` is: there is no DOM/layout engine in this repo's check suite, and
  * neither half of VLT-60 is about what one render call produces - it is about
  * WHICH code path a failure or a passphrase prompt runs through, which is a
- * property of the source rather than of any one render. The one piece that IS
- * ordinary behaviour (does `parseBackupFile` actually accept what it should,
- * and reject what it should not) is already exercised in `backup-verify.ts`'s
- * `[envelope]`/`[v1 envelope]`/`[v2 envelope]` sections; this file
- * reuses that function directly for two checks specific to VLT-60's claims
- * (a v1 envelope is not rejected, a v2 envelope with garbage ciphertext is
- * not rejected pre-passphrase) rather than re-deriving that coverage.
+ * property of the source rather than of any one render. Whether the envelope
+ * rules themselves are right (which sentence each refused format gets, what a
+ * good file parses to) is `backup-verify.ts`'s `[refusals]` and `[v3 envelope]`
+ * sections; this file reuses `parseBackupFile` only to establish WHAT the
+ * pre-check decides at the point it runs, which is VLT-60's own claim.
  *
- * Two files, two concerns:
+ * Three concerns:
  *
  *   `BackupDialog.tsx` - Import's run() failure must toast(), not setError()
  *   into the dialog's own inline line (VLT-36 left this one surface out:
@@ -25,10 +23,16 @@
  *
  *   `HostsBackupActions.tsx` - openImport() must establish the envelope shape
  *   (kind/version/payload presence) BEFORE opening the dialog that asks for a
- *   passphrase, so a plainly non-Tervia file is rejected on the pick rather
+ *   passphrase, so a file this build cannot read is rejected on the pick rather
  *   than after a secret has been typed for it. A plain Cancel must still fall
  *   through to nothing - no toast, no dialog - which is checked by asserting
  *   the pre-existing `if (!path) return;` line survives untouched.
+ *
+ *   THE PLAINTEXT READ PATH STAYS DELETED. `backup_open` returned a decrypted
+ *   credential map to the webview, and it is gone from both sides: nothing in
+ *   `src/` calls it, and `lib.rs` does not register it. Neither half is visible
+ *   anywhere else - an unregistered command fails only at runtime, as "command
+ *   not found", and nothing in this repo otherwise reads the handler list.
  *
  * COMMENTS ARE REMOVED FIRST, quote-aware, before any source-text scan below
  * runs - handoff §4.17. A commented-out call (`// was: parseBackupFile(raw);`)
@@ -36,7 +40,7 @@
  * own prose above names both guarded calls in the same identifiers the code
  * uses, so raw source is not safe to scan directly either way.
  */
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
@@ -257,10 +261,102 @@ check(
   actionsSrc.indexOf("if (!path) return;") < idx.readFile,
 );
 
-// --- Functional: the SAME function used for the pre-check still tells v1 ---
-// --- from v2 the way VLT-60 requires: neither format is wrongly rejected ---
+// --- Part 3: the plaintext read path stays deleted, on both sides -----------
 
-console.log("\n[functional] the pre-check function itself does not reject what must still import");
+/** Every `.ts`/`.tsx` under `dir`, recursively, as repo-relative paths. */
+function sourceFiles(dir: string): string[] {
+  const out: string[] = [];
+  for (const entry of readdirSync(join(root, dir), { withFileTypes: true })) {
+    const rel = `${dir}/${entry.name}`;
+    if (entry.isDirectory()) out.push(...sourceFiles(rel));
+    else if (rel.endsWith(".ts") || rel.endsWith(".tsx")) out.push(rel);
+  }
+  return out;
+}
+
+/**
+ * How many times `name` appears in `src` WITHOUT being the start of `longer`.
+ *
+ * The shared prefix is the whole difficulty here. `backup_open` is the command
+ * that must be gone and `backup_open_payload` is the command that must be there,
+ * so `src.includes("backup_open")` is satisfied by the survivor: it passes
+ * forever while saying nothing at all, which is exactly the check a reader would
+ * write and then trust.
+ *
+ * Counted rather than located, because the only source these callers have is
+ * COMMENT-STRIPPED - a line number off it does not name a line of the file, and
+ * one that looked like it did would send the next reader to the wrong place.
+ * The file's name is what a failure reports, which is one grep from the line.
+ */
+function bareUses(src: string, name: string, longer: string): number {
+  let found = 0;
+  for (let at = src.indexOf(name); at !== -1; at = src.indexOf(name, at + 1)) {
+    if (!src.startsWith(longer, at)) found++;
+  }
+  return found;
+}
+
+console.log("\n[webview] nothing in src/ asks the host process for a plaintext credential map");
+// Comments are stripped first, and here that is load-bearing rather than
+// defensive: `apply.ts`'s module header says out loud that the `backup_open`
+// call is gone, which is the correct thing for it to say and the exact literal
+// an un-stripped scan would trip on.
+const bareCallers: string[] = [];
+let payloadCalls = 0;
+for (const file of sourceFiles("src")) {
+  const src = stripComments(read(file));
+  payloadCalls += src.split("backup_open_payload").length - 1;
+  if (bareUses(src, "backup_open", "backup_open_payload") > 0) bareCallers.push(file);
+}
+// Vacuity guard: a scan that read nothing, or a stripper that emptied every
+// file, would report no offenders and read as a pass. The one call that must
+// still be there is what says the scan reached real source.
+check(
+  `the scan reached the one backup_open_payload call there is (found ${payloadCalls})`,
+  payloadCalls === 1,
+);
+check(
+  bareCallers.length === 0
+    ? "and nothing under src/ names backup_open except as part of backup_open_payload"
+    : `src/ names backup_open bare, in ${bareCallers.join(", ")}`,
+  bareCallers.length === 0,
+);
+
+console.log(
+  "\n[handlers] lib.rs registers the four sealed-path commands and not the plaintext one",
+);
+// Read by path because nothing else in the repo reads the handler list: an
+// unregistered command is a compile-clean file that fails at runtime with
+// "command not found", and a re-registered one is a compile-clean file that
+// hands a decrypted credential map back to the webview.
+const libSrc = stripComments(read("src-tauri/src/lib.rs"));
+for (const command of [
+  "backup_seal_payload",
+  "backup_open_payload",
+  "backup_apply_secrets",
+  "backup_release",
+]) {
+  const count = libSrc.split(`backup::${command}`).length - 1;
+  check(`lib.rs registers backup::${command} (found ${count})`, count === 1);
+}
+const bareHandlers = bareUses(libSrc, "backup::backup_open", "backup::backup_open_payload");
+check(
+  bareHandlers === 0
+    ? "and does NOT register backup::backup_open, whose whole job was returning that map"
+    : `lib.rs registers backup::backup_open (found ${bareHandlers})`,
+  bareHandlers === 0,
+);
+
+// --- Functional: WHAT the pre-check decides, at the point it runs -----------
+
+console.log("\n[functional] the pre-check decides the envelope BEFORE a passphrase is asked for");
+// This section's property did not change when v1 and v2 stopped being readable,
+// it got stricter. The pre-check still has to settle the envelope on the pick,
+// and it now has three answers to settle it with: the one readable format goes
+// through untouched, and each unreadable one is named rather than left to fail
+// after a secret has been typed for it. The refusal SENTENCES are pinned whole
+// in `backup-verify.ts`; what is pinned here is only that each refusal names the
+// format the file actually is, so the two cannot swap.
 const SEALED = {
   kdf: "pbkdf2-hmac-sha256",
   iterations: 600000,
@@ -277,30 +373,45 @@ function noThrow(label: string, fn: () => void): void {
     failed++;
   }
 }
-noThrow("a v1 envelope (BACKUP_EXTENSION_V1's format) is not rejected by the pre-check", () =>
-  parseBackupFile({
-    kind: BACKUP_KIND_V1,
-    version: 1,
-    exportedAt: 1,
-    connections: [],
-    secrets: SEALED,
-  }),
-);
+function throwsMentioning(label: string, fn: () => void, needle: string): void {
+  try {
+    fn();
+    console.error(`  FAIL: ${label} did not throw`);
+    failed++;
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (msg.includes(needle)) console.log(`  ok: ${label}`);
+    else {
+      console.error(`  FAIL: ${label} threw "${msg}", expected it to mention "${needle}"`);
+      failed++;
+    }
+  }
+}
 noThrow(
-  "a well-formed v2 envelope is not rejected pre-passphrase, whatever the ciphertext holds",
+  "a well-formed v3 envelope is not rejected pre-passphrase, whatever the ciphertext holds",
+  () => parseBackupFile({ kind: BACKUP_KIND, version: 3, exportedAt: 1, payload: SEALED }),
+);
+// `.tervia-ssh` is still offered by the open dialog's filter, so a v1 file can be
+// picked at all; being picked, it has to be told what it is here rather than at
+// the passphrase prompt. The needle is the extension because that is the half of
+// the v1 sentence the v2 sentence cannot also satisfy.
+throwsMentioning(
+  "a v1 envelope is refused on the pick, by a message naming the format it is",
+  () => parseBackupFile({ kind: BACKUP_KIND_V1, version: 1, exportedAt: 1 }),
+  "(.tervia-ssh)",
+);
+throwsMentioning(
+  "a v2 envelope likewise, and by the other sentence rather than v1's",
   () => parseBackupFile({ kind: BACKUP_KIND, version: 2, exportedAt: 1, payload: SEALED }),
+  "is format v2",
 );
 // The negative case the whole feature is FOR: a file that is plainly not a
 // Tervia backup must be caught by the same function the pre-check calls.
-try {
-  parseBackupFile({ kind: "some-other-app-file", version: 1 });
-  console.error("  FAIL: a non-Tervia file did not throw");
-  failed++;
-} catch {
-  console.log("  ok: a non-Tervia file still throws, which is what the pre-check surfaces early");
-}
-
-console.log(
-  failed === 0 ? "\nAll ssh-backup-import checks passed." : `\n${failed} check(s) FAILED.`,
+throwsMentioning(
+  "a non-Tervia file still throws, which is what the pre-check surfaces early",
+  () => parseBackupFile({ kind: "some-other-app-file", version: 1 }),
+  "Not a Tervia connection backup file.",
 );
+
+console.log(failed === 0 ? "\nAll backup-import checks passed." : `\n${failed} check(s) FAILED.`);
 process.exit(failed === 0 ? 0 : 1);

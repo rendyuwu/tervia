@@ -1,6 +1,6 @@
 /**
- * Self-check for the connection backup parser, both format generations.
- * Run: `npx tsx scripts/backup-verify.ts`.
+ * Self-check for the connection backup parser.
+ * Run: `pnpm verify backup` (or `npx tsx scripts/backup-verify.ts` to iterate).
  *
  * Importing a backup is a TRUST BOUNDARY: the file arrives from a USB stick or
  * a chat, and everything that survives it is written into the host store and
@@ -11,12 +11,19 @@
  * ANOTHER host, which would have the imported row resolve that host's keychain
  * accounts.
  *
- * The v1/v2 split matters here because the boundary MOVED. In v1 the inventory
- * is plaintext, so `parseBackupFile` validates it; in v2 the whole payload is
- * sealed, so `parseBackupFile` can only check the envelope and
- * `sanitizePayload` does the per-host work after the host process has decrypted.
- * Both halves are exercised below - a v2 file that got only the envelope check
- * would write unvalidated rows into the store.
+ * ONE FORMAT IS READ, and the envelope/payload split follows from it. v3 seals
+ * the whole payload, so `parseBackupFile` can only reach the ENVELOPE and
+ * `sanitizePayload` does the per-record work after the host process has
+ * decrypted. Both halves are exercised below - a file that got only the envelope
+ * check would write unvalidated rows into the store.
+ *
+ * v1 and v2 are REFUSED rather than converted, and the two refusals are pinned
+ * by their WHOLE sentence rather than by a substring. The two sentences share
+ * "format v3 only" and "There is no converter", so a substring pin on either is
+ * satisfied by the other, and one of the two refusals could then be deleted
+ * outright with this suite still green. There is no v1 parsing left to check:
+ * the plaintext-inventory arm, its `sanitizeLegacyHost` row validator and its
+ * `sanitizeSecrets` credential-map validator are gone with the format.
  *
  * Three things are checked here that did not need checking against the two old
  * connection stores, because one merged store can express what two separate ones
@@ -34,24 +41,30 @@
  * (owning fewer) deletes the saved host's secrets, with nothing copied first and
  * no `secrets_list` to find what is left (§9.7).
  *
- * `hostRefs` and `storedFields` are reached from `backup.ts` rather than from
- * `backupFile.ts`, and they are the producing half of the `SECRET_ALREADY_STORED`
- * contract: one decides what travels, the other decides which flags the store is
- * told to claim. The consuming half is pinned in `hosts-store-verify.ts`. Nothing
- * here calls `invoke`, so importing that module is safe under plain node.
+ * `hostRefs` and `storedFields` are reached from `backup/apply.ts` rather than
+ * from `backup/file.ts`, and they are the producing half of the
+ * `SECRET_ALREADY_STORED` contract: one decides what travels, the other decides
+ * which flags the store is told to claim. The consuming half is pinned in
+ * `hosts-store-verify.ts`. Nothing here calls `invoke`, so importing that module
+ * is safe under plain node.
  *
- * The crypto itself, and the v2 payload assembly that keeps credentials out of
- * the webview, are checked on the Rust side (`modules/backup.rs` tests: round
- * trip, wrong passphrase, tampered ciphertext, nonce reuse, group merge/split,
- * the parked-handle lifecycle).
+ * The crypto itself, and the payload assembly that keeps credentials out of the
+ * webview, are checked on the Rust side (`modules/backup.rs` tests: round trip,
+ * wrong passphrase, tampered ciphertext, nonce reuse, group merge/split, the
+ * parked-handle lifecycle). That the plaintext read path stays DELETED - no
+ * `backup_open` call in `src/`, no `backup_open` handler registered - is pinned
+ * in `backup-import-verify.ts`, which already reads source text by path.
  */
 import { jumpChain, MAX_JUMP_HOPS } from "../src/modules/hosts/jumps";
 import { SECRET_ALREADY_STORED } from "../src/modules/hosts/store";
 import { hostFingerprint, type Host, type RdpHost, type SshHost } from "../src/modules/hosts/types";
 import { arrivedWithoutSecret, hostRefs, storedFields } from "../src/modules/backup/apply";
 import {
+  BACKUP_EXTENSION_V1,
   BACKUP_KIND,
   BACKUP_KIND_V1,
+  BACKUP_VERSION,
+  SECRET_GROUPS,
   carryPins,
   clearDanglingJumps,
   clearDanglingTunnels,
@@ -62,9 +75,7 @@ import {
   resolveIdentityBindings,
   sanitizeGroup,
   sanitizeHost,
-  sanitizeLegacyHost,
   sanitizePayload,
-  sanitizeSecrets,
 } from "../src/modules/backup/file";
 import { sshCredentialValues } from "../src/modules/vault/resolve";
 
@@ -120,6 +131,31 @@ function throws(label: string, fn: () => unknown, needle: string): void {
   }
 }
 
+/**
+ * The message a refusal produced, matched WHOLE.
+ *
+ * {@link throws} matches a substring, case-insensitively, which is the right
+ * shape for a check about WHICH failure fired. It is the wrong shape for the two
+ * format refusals: their sentences share "format v3 only" and "There is no
+ * converter", so a substring pin on either one is satisfied by the other, and
+ * either refusal could then be deleted outright with this suite still green.
+ */
+function throwsExactly(label: string, fn: () => unknown, message: string): void {
+  try {
+    fn();
+    console.error(`  FAIL: ${label} did not throw`);
+    failed++;
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (msg === message) {
+      console.log(`  ok: ${label}`);
+    } else {
+      console.error(`  FAIL: ${label} threw "${msg}", expected exactly "${message}"`);
+      failed++;
+    }
+  }
+}
+
 const SEALED = {
   kdf: "pbkdf2-hmac-sha256",
   iterations: 600000,
@@ -127,16 +163,15 @@ const SEALED = {
   nonce: "bm9uY2U=",
   ciphertext: "Y2lwaGVy",
 };
-/** A v1 envelope: SSH only, plaintext `connections`, sealed `secrets`. */
+/** A v1 envelope. Only the kind and the version are read now - the refusal fires
+ *  before anything looks for `connections` or `secrets`. */
 const v1 = (over: Record<string, unknown> = {}) => ({
   kind: BACKUP_KIND_V1,
   version: 1,
   exportedAt: 1,
-  connections: [],
-  secrets: SEALED,
   ...over,
 });
-/** A v2 envelope: nothing but the sealed payload. */
+/** A v2 envelope, refused the same way and by its own sentence. */
 const v2 = (over: Record<string, unknown> = {}) => ({
   kind: BACKUP_KIND,
   version: 2,
@@ -144,9 +179,25 @@ const v2 = (over: Record<string, unknown> = {}) => ({
   payload: SEALED,
   ...over,
 });
+/**
+ * The one readable envelope: nothing but the sealed payload.
+ *
+ * The version is the LITERAL 3 rather than `BACKUP_VERSION`, so that "a v3 file
+ * parses" stays a claim about v3. Written off the constant, this fixture would
+ * follow a bumped constant into being a file about some other format while every
+ * check below still read as green. The constant's own value is pinned once, in
+ * `[format version]`.
+ */
+const v3 = (over: Record<string, unknown> = {}) => ({
+  kind: BACKUP_KIND,
+  version: 3,
+  exportedAt: 1,
+  payload: SEALED,
+  ...over,
+});
 
 /**
- * An SSH row as it appears inside a v2 payload. The credential's `hostId`
+ * An SSH row as it appears inside a sealed payload. The credential's `hostId`
  * follows the row's own id by default, which is the well-formed case; a check
  * that wants the mismatch passes `credential` explicitly.
  */
@@ -177,17 +228,21 @@ const rdp = (over: Record<string, unknown> = {}) => {
     ...over,
   };
 };
-/** A v1 row: the old SSH-only shape, with `user` and `authMode` at the top
- *  level and no `protocol` or `credential` anywhere. */
-const legacy = (over: Record<string, unknown> = {}) => ({
+/**
+ * The old SSH-only row: `user` and `authMode` at the top level, no `protocol`
+ * and no `credential`. Nothing validates this shape any more, and it survives
+ * here for one check only - that an envelope numbered v3 carrying a PLAINTEXT
+ * inventory instead of a sealed payload is still refused. Renumbering a file is
+ * the cheapest way to try to reopen the leak sealing closed.
+ */
+const LEGACY_ROW = {
   id: "c-1",
   name: "prod",
   host: "example.com",
   port: 22,
   user: "root",
   authMode: "password",
-  ...over,
-});
+};
 
 /** A validated host, for the passes that work on records rather than on raw file
  *  data. Throws rather than returning null so a bad fixture fails loudly instead
@@ -233,7 +288,20 @@ function rdpInline(h: Host | null) {
   return row && row.credential.kind === "inline" ? row.credential : null;
 }
 
-console.log("[envelope] a file that is not a backup must be rejected outright");
+console.log("[format version] one number, and the whole compatibility story with it");
+check("BACKUP_VERSION is 3", BACKUP_VERSION, 3);
+// Neither of these is read for its CONTENTS any more. Both survive so the v1
+// refusal can name the shape it is refusing, and so the open dialog can still
+// offer the extension - a `.tervia-ssh` file gets picked and told what it is
+// rather than being filtered out of the picker with no explanation. Pinned here
+// because without a check the next reader deletes them as dead.
+check(
+  "the v1 kind and extension are still exported, so a refusal can name what it refuses",
+  [BACKUP_KIND_V1, BACKUP_EXTENSION_V1],
+  ["tervia-ssh-connections", "tervia-ssh"],
+);
+
+console.log("\n[envelope] a file that is not a backup must be rejected outright");
 throws("a plain object", () => parseBackupFile({}), "not a Tervia connection backup");
 throws("null", () => parseBackupFile(null), "not a Tervia connection backup");
 throws("an array", () => parseBackupFile([]), "not a Tervia connection backup");
@@ -242,53 +310,103 @@ throws(
   () => parseBackupFile({ kind: "tervia-theme" }),
   "not a Tervia connection backup",
 );
-throws("no version", () => parseBackupFile(v2({ version: "2" })), "version");
+throws("no version", () => parseBackupFile(v3({ version: "3" })), "version");
 // A newer Tervia may add fields this build would silently drop, so refuse rather
 // than import a partial host.
-throws("a newer format", () => parseBackupFile(v2({ version: 99 })), "newer Tervia");
-// A half-converted file is worse than an unreadable one: guessing which of the
-// kind and the version to believe decides whether the inventory is read as
-// plaintext or as ciphertext.
-throws("v1 kind claiming v2", () => parseBackupFile(v2({ kind: BACKUP_KIND_V1 })), "not a");
-throws("v2 kind claiming v1", () => parseBackupFile(v1({ kind: BACKUP_KIND })), "not a");
+throws("a newer format", () => parseBackupFile(v3({ version: 99 })), "newer Tervia");
 
-console.log("\n[v2 envelope] everything of substance is inside the sealed payload");
-check("a good v2 file parses", parseBackupFile(v2()), { version: 2, payload: SEALED });
-throws("no payload", () => parseBackupFile(v2({ payload: undefined })), "encrypted payload");
+console.log("\n[refusals] a format this build cannot read is NAMED, not converted");
+// WHOLE-SENTENCE pins, and that is the point of them rather than tidiness. The
+// two sentences share "format v3 only" and "There is no converter", so a
+// substring pin on either one is also satisfied by the other: either refusal
+// could be deleted outright and this suite would stay green on the survivor's
+// text. There is no converter for either format - a v1 file's sealed block IS a
+// credential map, and reading it would mean holding plaintext credentials in the
+// webview - so the sentence is the only thing left to tell the user what they
+// are holding, and it has to be the right one.
+throwsExactly(
+  "a v1 file is refused by the v1 sentence",
+  () => parseBackupFile(v1()),
+  "This is a Tervia v1 backup (.tervia-ssh). This build reads format v3 only, and there is no converter — the hosts in it have to be entered again.",
+);
+throwsExactly(
+  "a v2 file is refused by its own, different sentence",
+  () => parseBackupFile(v2()),
+  "This backup is format v2 and this build reads format v3 only. There is no converter, and nothing in it can be imported.",
+);
+// This one pins BACKUP_VERSION's VALUE as well as the sentence, and deliberately:
+// the message templates `v${BACKUP_VERSION}`, so "up to v3" is the constant
+// rendered rather than a literal in the source. Bumping the constant without
+// bumping the format is what this catches.
+throwsExactly(
+  "a v4 file is refused as newer, and the ceiling the message names is v3",
+  () => parseBackupFile(v3({ version: 4 })),
+  "This backup was written by a newer Tervia (format v4); this build reads up to v3.",
+);
+// The kind and the version have to AGREE, and that check runs before the two
+// refusals above. A half-edited file is worse than an unreadable one, so it is
+// told it is half-edited rather than being named as a format it never was -
+// which is what these three pin: each one would read as a plain v1 or v2 refusal
+// if the order were the other way round.
+throwsExactly(
+  "the v1 kind carrying a v2 version is called half-edited, not named as v2",
+  () => parseBackupFile(v2({ kind: BACKUP_KIND_V1 })),
+  `Backup file says format v2 but is not a ${BACKUP_KIND} file.`,
+);
+throwsExactly(
+  "and the current kind carrying a v1 version, the same the other way round",
+  () => parseBackupFile(v1({ kind: BACKUP_KIND })),
+  `Backup file says format v1 but is not a ${BACKUP_KIND_V1} file.`,
+);
+throwsExactly(
+  "and the READABLE version under the old kind, which a rename alone produces",
+  () => parseBackupFile(v3({ kind: BACKUP_KIND_V1 })),
+  `Backup file says format v3 but is not a ${BACKUP_KIND} file.`,
+);
+
+console.log("\n[v3 envelope] everything of substance is inside the sealed payload");
+check("a good v3 file parses", parseBackupFile(v3()), { version: 3, payload: SEALED });
+throws("no payload", () => parseBackupFile(v3({ payload: undefined })), "encrypted payload");
 throws(
   "half a payload block",
-  () => parseBackupFile(v2({ payload: { kdf: "x" } })),
+  () => parseBackupFile(v3({ payload: { kdf: "x" } })),
   "encrypted payload",
 );
 throws(
   "non-integer iterations",
-  () => parseBackupFile(v2({ payload: { ...SEALED, iterations: 1.5 } })),
+  () => parseBackupFile(v3({ payload: { ...SEALED, iterations: 1.5 } })),
   "encrypted payload",
 );
-// The v1 shape must NOT be accepted under a v2 version: `connections` beside a
-// sealed `secrets` is exactly the leak v2 exists to close.
+// A plaintext inventory must NOT be accepted under the readable version:
+// `connections` beside a sealed `secrets` is exactly the leak sealing closed, and
+// renumbering a file is the cheapest way to try to reopen it.
 throws(
-  "a v2 file carrying v1's plaintext inventory instead of a payload",
-  () => parseBackupFile(v2({ payload: undefined, connections: [legacy()], secrets: SEALED })),
+  "a v3 file carrying v1's plaintext inventory instead of a payload",
+  () => parseBackupFile(v3({ payload: undefined, connections: [LEGACY_ROW], secrets: SEALED })),
   "encrypted payload",
 );
 
-console.log("\n[v1 envelope] old files still import");
-const v1parsed = parseBackupFile(v1({ connections: [legacy()] }));
-check("version is reported", v1parsed.version, 1);
+console.log("\n[secret groups] a credential group may not be an inventory collection");
+// The JS-side statement of the Rust guard. `merge_secrets` in `modules/backup.rs`
+// checks EVERY reference's group before inserting any and refuses to write into a
+// group the payload already carries - so a colliding name fails the whole seal
+// rather than replacing an inventory list with a credential map partway through.
+// Named here and passed to `backup_open_payload`, a group missing from this list
+// is not withheld from the metadata handed back to the webview.
 check(
-  "the plaintext inventory is validated at parse time",
-  v1parsed.version === 1 ? v1parsed.hosts.map((h) => h.id) : null,
-  ["c-1"],
+  "SECRET_GROUPS is exactly these three, in this order",
+  [...SECRET_GROUPS],
+  ["hostSecrets", "identitySecrets", "keySecrets"],
 );
+// The half that matters, and it survives a deliberate edit of the literal above:
+// a rename that collided would replace an inventory collection with a credential
+// map and report success.
+const INVENTORY_KEYS: string[] = ["hosts", "groups", "identities", "keys", "rules"];
 check(
-  "a v1 row lands as an ordinary SSH host with an inline credential",
-  v1parsed.version === 1 ? sshInline(v1parsed.hosts[0])?.user : null,
-  "root",
+  "and none of them is a payload key that carries inventory",
+  SECRET_GROUPS.filter((group) => INVENTORY_KEYS.includes(group)),
+  [],
 );
-throws("no connections list", () => parseBackupFile(v1({ connections: {} })), "connections");
-throws("no secrets block", () => parseBackupFile(v1({ secrets: undefined })), "credentials");
-throws("half a secrets block", () => parseBackupFile(v1({ secrets: { kdf: "x" } })), "credentials");
 
 console.log("\n[ports] what would otherwise reach TcpStream::connect");
 check("22 is fine", sanitizeHost(ssh())?.port, 22);
@@ -300,7 +418,6 @@ check("a float is dropped", sanitizeHost(ssh({ port: 22.5 })), null);
 check("a string is dropped", sanitizeHost(ssh({ port: "22" })), null);
 check("NaN is dropped", sanitizeHost(ssh({ port: Number.NaN })), null);
 check("and the same on the RDP side", sanitizeHost(rdp({ port: 0 })), null);
-check("and on a v1 row", sanitizeLegacyHost(legacy({ port: 0 })), null);
 
 console.log("\n[required fields]");
 check("no id", sanitizeHost(ssh({ id: "" })), null);
@@ -348,15 +465,6 @@ check(
   )?.hostId,
   "h-mine",
 );
-check("a v1 row's binding is owned by the row too", sanitizeLegacyHost(legacy())?.credential, {
-  kind: "inline",
-  hostId: "c-1",
-  user: "root",
-  authMode: "password",
-  hasPassword: false,
-  hasPrivateKey: false,
-  hasKeyPassphrase: false,
-});
 // The PARSER preserves it, so the pass below can see what the file asked for.
 // Nothing applies it - see [vault bindings].
 check(
@@ -413,11 +521,6 @@ check(
   )?.hasPassword,
   false,
 );
-check(
-  "and a v1 row's top-level flags do not carry over either",
-  sshInline(sanitizeLegacyHost(legacy({ hasPassword: true, hasPrivateKey: true })))?.hasPassword,
-  false,
-);
 
 console.log("\n[carried fields]");
 check(
@@ -460,19 +563,9 @@ console.log("\n[dropped fields] a field the store has no home for must not ride 
 // A forward rule is its own record now (decision 7), so `Host` has no
 // `forwards` and the store would carry a key nothing ever reads or edits.
 check(
-  "`forwards` does not survive a v2 row",
+  "`forwards` does not survive a payload row",
   Object.prototype.hasOwnProperty.call(
     host(ssh({ forwards: [{ localPort: 8080, remoteHost: "127.0.0.1", remotePort: 80 }] })),
-    "forwards",
-  ),
-  false,
-);
-check(
-  "nor a v1 row, which is the format that had them",
-  Object.prototype.hasOwnProperty.call(
-    sanitizeLegacyHost(
-      legacy({ forwards: [{ localPort: 1, remoteHost: "db", remotePort: 5432 }] }),
-    ) ?? {},
     "forwards",
   ),
   false,
@@ -835,11 +928,6 @@ check(
   host(rdp({ host: "r.example", certFingerprint: "SHA256:CERT" })).pins,
   { "r.example": "SHA256:CERT" },
 );
-check(
-  "and a v1 row, which is the format that only ever had a flat pin",
-  sanitizeLegacyHost(legacy({ host: "v1.example", lastFingerprint: "SHA256:V1" }))?.pins,
-  { "v1.example": "SHA256:V1" },
-);
 // ABSENT, never `{}`. An empty map is Forget's spelling - "discard every pin for
 // this host" - and a file that carries no pins may not say that on this machine's
 // behalf. `undefined` is what the store reads as "leave what is stored alone".
@@ -1168,7 +1256,7 @@ check(
   undefined,
 );
 
-console.log("\n[v2 payload] the same validation, after decryption instead of before");
+console.log("\n[payload] the same validation, after decryption instead of before");
 const payload = sanitizePayload({
   hosts: [ssh(), ssh({ id: "h-2", port: 0 }), ssh({ id: "h-3" }), ssh()],
   groups: [
@@ -1211,8 +1299,8 @@ throws("a payload that is not an object", () => sanitizePayload([1, 2]), "did no
 throws("a payload that is null", () => sanitizePayload(null), "did not contain");
 throws("a host inventory that is not a list", () => sanitizePayload({ hosts: {} }), "not a list");
 throws("a group list that is not a list", () => sanitizePayload({ groups: "g-1" }), "not a list");
-// v2 credentials never come back to JS: the payload the host process returns has
-// the secret group removed, and nothing here reads it even if a hand-made file
+// Credentials never come back to JS: the payload the host process returns has
+// the secret groups removed, and nothing here reads one even if a hand-made file
 // puts it back.
 check(
   "the secret group in the payload is ignored, not imported",
@@ -1220,38 +1308,6 @@ check(
     sanitizePayload({ hosts: [ssh()], hostSecrets: { "h-1": { password: "pw" } } }),
   ).sort(),
   ["groups", "hosts", "skipped"],
-);
-
-console.log("\n[v1 list handling] bad entries are skipped and counted, not fatal");
-const mixed = parseBackupFile(
-  v1({ connections: [legacy(), legacy({ id: "c-2", port: 0 }), null, legacy({ id: "c-3" })] }),
-);
-check("two good entries survive", mixed.version === 1 ? mixed.hosts.map((h) => h.id) : null, [
-  "c-1",
-  "c-3",
-]);
-check("two bad entries counted", mixed.version === 1 ? mixed.skipped : null, 2);
-// A duplicate id would import twice and the second would silently win.
-const dupes = parseBackupFile(v1({ connections: [legacy(), legacy({ name: "other" })] }));
-check("a duplicate id is skipped", dupes.version === 1 ? dupes.hosts.length : null, 1);
-check("the first one wins", dupes.version === 1 ? dupes.hosts[0].name : null, "prod");
-check("and it is counted", dupes.version === 1 ? dupes.skipped : null, 1);
-
-console.log("\n[secrets] the decrypted v1 payload is validated before it reaches the keychain");
-check(
-  "well-formed entries survive",
-  sanitizeSecrets({ "c-1": { password: "pw", privateKey: "k", keyPassphrase: "p" } }),
-  { "c-1": { password: "pw", privateKey: "k", keyPassphrase: "p" } },
-);
-check("non-string values are dropped", sanitizeSecrets({ "c-1": { password: 123 } }), {});
-check("empty strings are dropped", sanitizeSecrets({ "c-1": { password: "" } }), {});
-check("a non-object entry is skipped", sanitizeSecrets({ "c-1": "pw" }), {});
-check("junk is not fatal", sanitizeSecrets(null), {});
-check("an array is not fatal", sanitizeSecrets([1, 2]), {});
-check(
-  "a partial entry keeps only what is there",
-  sanitizeSecrets({ "c-1": { privateKey: "k", password: null } }),
-  { "c-1": { privateKey: "k" } },
 );
 
 console.log("\n[round trip] the shape an export actually writes");
@@ -1307,11 +1363,6 @@ check(
   )?.authMode,
   "password",
 );
-check(
-  "and a v1 row's top-level mode is read the same way",
-  sshInline(sanitizeLegacyHost(legacy({ authMode: "agent" })))?.authMode,
-  "agent",
-);
 // `sshCredentialValues` is the ONE place that turns a saved mode into credentials
 // on the wire (it backs `resolveSshAuth`, so terminal session, tunnel, jump hops
 // and the dialog's Test all reach it). The agent case matters most: it must send
@@ -1336,5 +1387,5 @@ check(
   "{}",
 );
 
-console.log(failed === 0 ? "\nAll ssh-backup checks passed." : `\n${failed} check(s) FAILED.`);
+console.log(failed === 0 ? "\nAll backup checks passed." : `\n${failed} check(s) FAILED.`);
 process.exit(failed === 0 ? 0 : 1);
