@@ -2581,5 +2581,159 @@ console.log(
   //          touched them.
 }
 
+/**
+ * [11] REUSING A VAULT KEY IS THE USER'S ANSWER, AND A STALE LOOKUP MAY NOT
+ * ANSWER FOR THEM.
+ *
+ * Convert offers to point the new identity at a key the vault already holds
+ * rather than minting a second record for the same private key. The whole
+ * reason the module takes `{reuseKeyId}` and performs no lookup of its own is
+ * that reuse hands the new identity a record whose name, description and
+ * passphrase belong to an earlier import, and getting it wrong is SILENT - the
+ * connect works, using someone else's record. So the decision is the user's,
+ * and this section is the only thing in the suite that says so.
+ *
+ * It exists because the property was measured UNCOVERED. Dropping the checkbox
+ * from the conjunct below - reusing whenever a candidate exists - left this
+ * script and all fifty-eight in the suite green, with `tsc` at 0. The module's
+ * own checks cannot see it: they are handed a `reuseKeyId` and asked what
+ * happens next, which is a different question from who decided to send one.
+ *
+ * The second half is the lookup's generation guard. It runs across two awaits -
+ * an inspection and a vault read - so a second convert opened while the first
+ * is in flight can land its answer on the wrong host. Deleting it is caught by
+ * `tsc` today, but only because the binding it compares goes unused; a
+ * regression that removed the binding with it compiles clean, which is exactly
+ * the kind of cover that prices a pin wrong.
+ */
+console.log(
+  "\n[11] reusing a vault key is the user's answer, and a stale lookup cannot answer for them",
+);
+{
+  const applyBody = findConstArrowBody(editorSf, "applyCredentialChange");
+  const offerBody = findConstArrowBody(editorSf, "offerKeyReuse");
+  // Asserted rather than assumed: a rename otherwise leaves every check below
+  // running over `null` and reporting nothing, which is a pass for free.
+  check("applyCredentialChange's body was found", applyBody !== null);
+  check("offerKeyReuse's body was found", offerBody !== null);
+
+  if (applyBody) {
+    // Rooted at the function body AND counted. Rooting excludes a decoy
+    // declared outside the component; only the count excludes one declared as
+    // a nested arrow inside it.
+    const reusedDecls = findVariableDeclarations(applyBody, "reused");
+    check(
+      "`reused` is declared EXACTLY ONCE inside applyCredentialChange",
+      reusedDecls.length === 1,
+      reusedDecls.length,
+    );
+    const init = reusedDecls.length === 1 ? reusedDecls[0].initializer : undefined;
+    check("and that declaration has an initializer to pin", init !== undefined);
+    if (init) {
+      check(
+        "`reused` is exactly this expression, whitespace aside - the checkbox is a CONJUNCT, so reuse cannot happen because a candidate merely exists",
+        norm(init.getText(editorSf)) ===
+          norm('reuseExistingKey && reuseOffer.kind === "candidate" ? reuseOffer.key : null'),
+        init.getText(editorSf),
+      );
+    }
+    // A belt on the pin above: the checkbox state has to be READ in this
+    // function. An exact-text pin that someone re-points at a different
+    // identifier of the same shape still passes; a state that is never read
+    // cannot decide anything.
+    check(
+      "and `reuseExistingKey` is read inside applyCredentialChange at all",
+      findIdentifierUses(applyBody, "reuseExistingKey").length >= 1,
+      findIdentifierUses(applyBody, "reuseExistingKey").length,
+    );
+
+    const convertCalls = findCalls(applyBody, editorSf, ["convertHostToVault"]);
+    check(
+      "exactly one convertHostToVault call in applyCredentialChange",
+      convertCalls.length === 1,
+      convertCalls.length,
+    );
+    if (convertCalls.length === 1) {
+      const args = argTexts(convertCalls[0], editorSf);
+      check("and it is called with exactly one argument", args.length === 1, args.length);
+      check(
+        "whose `key` arm names only what `reused` resolved to - an id read straight off the offer would route around the choice above",
+        args[0]?.includes(norm("reused ? { reuseKeyId: reused.id }")) === true,
+        args[0],
+      );
+    }
+  }
+
+  if (offerBody && ts.isBlock(offerBody)) {
+    const statements = [...offerBody.statements];
+    const guardIdx = statements.findIndex(
+      (s) =>
+        ts.isIfStatement(s) &&
+        norm(s.expression.getText(editorSf)) === norm("reuseGeneration.current !== generation"),
+    );
+    // A DIRECT statement of the body, not merely somewhere under it: parked
+    // inside an `if` or a callback the guard still parses and still never runs
+    // on the path that matters, and a count would read exactly 1 either way.
+    check(
+      "the lookup's generation guard is a direct statement of offerKeyReuse's own body",
+      guardIdx !== -1,
+      statements.map((s) => norm(s.getText(editorSf)).slice(0, 40)),
+    );
+    const publishIdx = statements.findIndex((s) =>
+      norm(s.getText(editorSf)).startsWith(norm("setReuseOffer(candidate")),
+    );
+    check("and the statement that publishes the answer was found", publishIdx !== -1, publishIdx);
+    if (guardIdx !== -1 && publishIdx !== -1) {
+      check(
+        "and it runs BEFORE the answer is published - a guard after the write has already painted the wrong host's key",
+        guardIdx < publishIdx,
+        { guardIdx, publishIdx },
+      );
+    }
+    if (guardIdx !== -1) {
+      const guard = statements[guardIdx] as ts.IfStatement;
+      check(
+        "and its branch is a bare return, so nothing can be smuggled into the discard path",
+        norm(guard.thenStatement.getText(editorSf)).replace(/[{}]/g, "") === "return;",
+        guard.thenStatement.getText(editorSf),
+      );
+      check(
+        "and it has no else arm - a superseded lookup is DISCARDED, never published down another route",
+        guard.elseStatement === undefined,
+        guard.elseStatement?.getText(editorSf),
+      );
+    }
+  }
+
+  // --- what was watched fail, and what `tsc` did while it did ---------------
+  //
+  // K7  `const reused = reuseOffer.kind === "candidate" ? reuseOffer.key : null`
+  //     - reuse whenever a candidate exists, ignoring the checkbox
+  //       -> TWO: the exact-expression pin on `reused`, AND the "is read at
+  //          all" belt at 0. The belt was written expecting to need its own
+  //          mutation and it does not: dropping the conjunct removes the only
+  //          read of `reuseExistingKey` in this function, so both fire
+  //          together. `tsc` at 0. This whole script was green under K7 before
+  //          the section existed, which is why it exists.
+  // K8  `if (reuseGeneration.current !== generation) return;` deleted
+  //       -> ONE: the direct-statement check. The ordering and branch checks
+  //          are guarded on having found the statement, so they do not run -
+  //          correct, and worth knowing before reading their silence as cover.
+  //          `tsc` reddens TS6133, but only because `generation` then goes
+  //          unused: a deletion that took the binding with it compiles clean.
+  // K8b the same guard moved BELOW `setReuseOffer(candidate ...)`, which is
+  //     the shape a presence check and a count both miss - the statement is
+  //     still there, still direct, still exactly one
+  //       -> the ordering check alone, `{"guardIdx":7,"publishIdx":6}`.
+  //          `tsc` at 0. This is the mutation only the position half catches.
+  // K9  `prettier --print-width 60 --write` over the dialog - the reformat pair
+  //     these exact-text pins owe
+  //       -> nothing in this section, which is the point: every pin above reads
+  //          a node's own span rather than a whole call's, so a trailing comma
+  //          Prettier adds when it wraps sits outside the claim. It DID redden
+  //          24 checks in sections [1], [2], [4], [6] and [8], whose anchors
+  //          and regexes are line-shaped. Those are pre-existing and untouched.
+}
+
 console.log(failed === 0 ? "\nAll host-editor checks passed." : `\n${failed} check(s) FAILED.`);
 process.exit(failed === 0 ? 0 : 1);
