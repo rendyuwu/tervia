@@ -17,6 +17,16 @@
  * Every anchored region is asserted to have been FOUND before anything is
  * checked over it: `between()` returns `""` for a missing anchor, and an
  * empty string satisfies a negative check for free.
+ *
+ * Sections 14-16 (VLT-78) reach past the two dialogs, because the contract they
+ * cover does: the stamp the editors pass is only worth passing if the store
+ * still compares it, and a source-text check on the CONSUMER stays green while
+ * three separate mutations to the PRODUCER disable it (a plain `Error` of the
+ * same message, `actual` set to `expected`, an empty id). So the stamps are
+ * exercised as functions, the refusal is caught and its fields read by value,
+ * and the compare's POSITION in the write body is asserted structurally - a
+ * present-and-counted pin cannot tell a compare before the secret write from
+ * one moved after it.
  */
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -24,11 +34,24 @@ import { fileURLToPath } from "node:url";
 
 import ts from "typescript";
 
+import { createWriteQueue } from "../src/lib/recoveredStore";
+import type { SecretsIo, VaultStoreIo } from "../src/modules/vault/adapters";
 import {
   identityPasswordHelp,
   passphraseHelp,
   privateKeyHelp,
 } from "../src/modules/vault/editor/draft";
+import { createVaultStore } from "../src/modules/vault/store";
+import {
+  VAULT_KEYRING_SERVICE,
+  VAULT_STAMP_ABSENT,
+  VaultRecordChangedError,
+  vaultAccount,
+  vaultIdentityStamp,
+  vaultKeyStamp,
+  type VaultIdentity,
+  type VaultKey,
+} from "../src/modules/vault/types";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const read = (p: string) => readFileSync(join(root, p), "utf8");
@@ -48,6 +71,10 @@ function check(name: string, ok: boolean, detail?: unknown): void {
 const FILES = {
   keyDialog: "src/modules/vault/editor/KeyEditorDialog.tsx",
   identityDialog: "src/modules/vault/editor/IdentityEditorDialog.tsx",
+  // Section 16's subject only. Every section that sweeps "both dialogs" names
+  // its two keys explicitly rather than iterating `FILES`, so adding a third
+  // entry here widens nothing by accident.
+  store: "src/modules/vault/store.ts",
 } as const;
 const src = Object.fromEntries(Object.entries(FILES).map(([k, p]) => [k, read(p)])) as Record<
   keyof typeof FILES,
@@ -333,8 +360,20 @@ function findAncestorJsxElementByTag(node: ts.Node, tag: string, sf: ts.SourceFi
   return false;
 }
 
+/** TSX for the dialogs, TS for `store.ts`, and the difference is not cosmetic:
+ *  parsed as TSX, `store.ts`'s own `const enqueueWrite = <T>(op: ...) => ...`
+ *  reads as an unclosed JSX element and everything after it is recovered
+ *  garbage - the compare statement section 16 looks for lands in no block at
+ *  all. Chosen off the extension so a file added to `FILES` cannot get it
+ *  wrong. */
 const sourceFile = (key: keyof typeof FILES): ts.SourceFile =>
-  ts.createSourceFile(FILES[key], src[key], ts.ScriptTarget.ESNext, true, ts.ScriptKind.TSX);
+  ts.createSourceFile(
+    FILES[key],
+    src[key],
+    ts.ScriptTarget.ESNext,
+    true,
+    FILES[key].endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
+  );
 
 // ============================================================================
 // 1. Anchors - every region the sections below depend on is located, on its
@@ -849,10 +888,17 @@ console.log(
   "\n[5. shared pure functions] save calls the draft.ts builders, and assembles nothing itself",
 );
 {
+  // VLT-78 added a THIRD argument - the stamp of the record the form loaded -
+  // so the arity, the `continue` guarding the argument loop, the tuple type and
+  // the expected list all moved from 2 to 3 together. They have to: leaving the
+  // arity at 2 makes the `continue` below skip EVERY argument pin for that call,
+  // so the section reports one FAIL where it should report three and the two
+  // surviving pins silently do not run at all - a pass for free (the §4.38
+  // shape, one level in).
   const pinUpsertArgs = (
     fileKey: keyof typeof FILES,
     calleeName: string,
-    expectedArgs: readonly [string, string],
+    expectedArgs: readonly [string, string, string],
   ): void => {
     const sf = sourceFile(fileKey);
     const calls = findCalls(sf, sf, [calleeName]);
@@ -868,11 +914,11 @@ console.log(
     );
     for (const c of calls) {
       check(
-        `${FILES[fileKey]}: ${calleeName}( is called with exactly 2 arguments`,
-        c.arguments.length === 2,
+        `${FILES[fileKey]}: ${calleeName}( is called with exactly 3 arguments`,
+        c.arguments.length === 3,
         c.arguments.length,
       );
-      if (c.arguments.length !== 2) continue;
+      if (c.arguments.length !== 3) continue;
       for (const [i, expected] of expectedArgs.entries()) {
         const actual = c.arguments[i].getText(sf);
         check(
@@ -884,13 +930,21 @@ console.log(
     }
   };
 
+  // Argument 2 is pinned to `existing` specifically, not merely to "a call to
+  // the stamp function": `vaultKeyStamp(keyRecordFrom(id, draft, existing,
+  // facts))` type-checks, reads as a stamp, and stamps the record ABOUT TO BE
+  // WRITTEN rather than the one this form loaded - which makes the compare
+  // compare a value against itself and pass always. So the argument's whole
+  // expression text is the claim, the same way arguments 0 and 1 are.
   pinUpsertArgs("keyDialog", "upsertKey", [
     "keyRecordFrom(id, draft, existing, facts)",
     "keySecretsForSave(draft)",
+    "vaultKeyStamp(existing)",
   ]);
   pinUpsertArgs("identityDialog", "upsertIdentity", [
     "identityRecordFrom(id, draft)",
     "identitySecretsForSave(draft)",
+    "vaultIdentityStamp(existing)",
   ]);
 
   const smellKeys = [
@@ -1267,6 +1321,531 @@ console.log(
       }
     }
   }
+}
+
+// ============================================================================
+// 14. The stamps are pure, and NARROW. (VLT-78, the functions themselves.)
+// ============================================================================
+// Protects: the whole design turns on what is OUTSIDE the stamp. A stamp
+// widened to the record's other fields still passes every "it changed when the
+// secret changed" check while refusing ordinary concurrent RENAMES - which is
+// last-write-wins working correctly, not a conflict - so the invariance checks
+// below are the load-bearing half of this section, not the padding.
+console.log("\n[14. VLT-78 stamps] secret material moves the stamp; a rename does not");
+{
+  const aKey = (over: Partial<VaultKey> = {}): VaultKey => ({
+    id: "k-1",
+    name: "id_ed25519",
+    keyType: "ed25519",
+    fingerprint: "SHA256:aaa",
+    publicKey: "ssh-ed25519 AAAA",
+    hasPrivateKey: true,
+    hasPassphrase: false,
+    description: "",
+    ...over,
+  });
+  const anIdentity = (over: Partial<VaultIdentity> = {}): VaultIdentity => ({
+    id: "i-1",
+    name: "root @ prod",
+    username: "root",
+    authMode: "password",
+    hasPassword: true,
+    description: "",
+    ...over,
+  });
+
+  check(`VAULT_STAMP_ABSENT is exactly "absent"`, VAULT_STAMP_ABSENT === "absent");
+  check("vaultKeyStamp(null) is absent", vaultKeyStamp(null) === VAULT_STAMP_ABSENT);
+  check("vaultKeyStamp(undefined) is absent", vaultKeyStamp(undefined) === VAULT_STAMP_ABSENT);
+  check("vaultIdentityStamp(null) is absent", vaultIdentityStamp(null) === VAULT_STAMP_ABSENT);
+  check(
+    "vaultIdentityStamp(undefined) is absent",
+    vaultIdentityStamp(undefined) === VAULT_STAMP_ABSENT,
+  );
+
+  // Two DISTINCT objects with the same fields, not the same object twice: a
+  // stamp that closed over anything per-instance would pass the latter.
+  check(
+    "the same key twice, as two separate objects, stamps the same",
+    vaultKeyStamp(aKey()) === vaultKeyStamp(aKey()),
+    vaultKeyStamp(aKey()),
+  );
+  check(
+    "the same identity twice, as two separate objects, stamps the same",
+    vaultIdentityStamp(anIdentity()) === vaultIdentityStamp(anIdentity()),
+    vaultIdentityStamp(anIdentity()),
+  );
+  // A present record's stamp is never the absent one, and the two kinds never
+  // collide: one prefix each, so an identity stamp handed to `upsertKey` is a
+  // mismatch rather than an accidental match.
+  check("a present key does not stamp as absent", vaultKeyStamp(aKey()) !== VAULT_STAMP_ABSENT);
+  check(
+    "a present identity does not stamp as absent",
+    vaultIdentityStamp(anIdentity()) !== VAULT_STAMP_ABSENT,
+  );
+  check(
+    "a key stamp and an identity stamp are never the same string",
+    vaultKeyStamp(aKey()) !== vaultIdentityStamp(anIdentity()),
+  );
+
+  const keyMoves: { label: string; over: Partial<VaultKey> }[] = [
+    { label: "hasPrivateKey flips", over: { hasPrivateKey: false } },
+    { label: "hasPassphrase flips", over: { hasPassphrase: true } },
+    { label: "the fingerprint changes", over: { fingerprint: "SHA256:bbb" } },
+    { label: "the fingerprint is dropped", over: { fingerprint: undefined } },
+  ];
+  for (const { label, over } of keyMoves) {
+    check(
+      `vaultKeyStamp changes when ${label}`,
+      vaultKeyStamp(aKey(over)) !== vaultKeyStamp(aKey()),
+      { moved: vaultKeyStamp(aKey(over)), base: vaultKeyStamp(aKey()) },
+    );
+  }
+  // The narrowness, said positively - and the check the "widen it to include
+  // `name`" mutation exists to redden.
+  const keyStays: { label: string; over: Partial<VaultKey> }[] = [
+    { label: "renamed", over: { name: "id_ed25519 (work laptop)" } },
+    { label: "re-described", over: { description: "opens the bastion" } },
+    { label: "given a keyType it lacked", over: { keyType: "rsa" } },
+    { label: "given a different public half", over: { publicKey: "ssh-ed25519 BBBB" } },
+  ];
+  for (const { label, over } of keyStays) {
+    check(
+      `vaultKeyStamp does NOT change when the key is ${label} - a rename is last-write-wins' job`,
+      vaultKeyStamp(aKey(over)) === vaultKeyStamp(aKey()),
+      { moved: vaultKeyStamp(aKey(over)), base: vaultKeyStamp(aKey()) },
+    );
+  }
+
+  const identityMoves: { label: string; over: Partial<VaultIdentity> }[] = [
+    { label: "hasPassword flips", over: { hasPassword: false } },
+    { label: "the auth mode changes", over: { authMode: "agent" } },
+    { label: "a keyId appears", over: { authMode: "key", keyId: "k-1" } },
+  ];
+  for (const { label, over } of identityMoves) {
+    check(
+      `vaultIdentityStamp changes when ${label}`,
+      vaultIdentityStamp(anIdentity(over)) !== vaultIdentityStamp(anIdentity()),
+      { moved: vaultIdentityStamp(anIdentity(over)), base: vaultIdentityStamp(anIdentity()) },
+    );
+  }
+  // Re-pointing a key is a move even though the mode is unchanged - the
+  // material this identity signs with is a different key afterwards.
+  check(
+    "vaultIdentityStamp changes when the keyId is re-pointed at another key",
+    vaultIdentityStamp(anIdentity({ authMode: "key", keyId: "k-2" })) !==
+      vaultIdentityStamp(anIdentity({ authMode: "key", keyId: "k-1" })),
+  );
+  const identityStays: { label: string; over: Partial<VaultIdentity> }[] = [
+    { label: "renamed", over: { name: "root @ production" } },
+    { label: "given a different username", over: { username: "admin" } },
+    { label: "given a domain", over: { domain: "CORP" } },
+    { label: "re-described", over: { description: "the prod bastion account" } },
+  ];
+  for (const { label, over } of identityStays) {
+    check(
+      `vaultIdentityStamp does NOT change when the identity is ${label}`,
+      vaultIdentityStamp(anIdentity(over)) === vaultIdentityStamp(anIdentity()),
+      { moved: vaultIdentityStamp(anIdentity(over)), base: vaultIdentityStamp(anIdentity()) },
+    );
+  }
+}
+
+// ============================================================================
+// 15. The store actually refuses, and refuses BEFORE it writes a secret.
+//     (VLT-78, behaviour - a real `createVaultStore` on in-memory ports.)
+// ============================================================================
+// Protects: the seam between the two files. Everything above this line is
+// source text over the CONSUMER, and stays green while the producer is
+// disabled three separate ways - the compare deleted, `actual` set to
+// `expected`, an empty id passed to the error - none of which changes a
+// character in either dialog. So the refusal is caught here and read by
+// INSTANCE and by FIELD VALUE, never by message text, which all three of those
+// mutations leave identical.
+console.log(
+  "\n[15. VLT-78 refusal] the store refuses a moved record, touching no keychain account",
+);
+{
+  type SecretCall = { op: "getAll" | "set" | "delete" | "copy"; account: string };
+
+  const vaultHarness = () => {
+    const data: Record<string, unknown> = { identities: [], keys: [] };
+    const kept = new Map<string, string>();
+    const calls: SecretCall[] = [];
+
+    const store: VaultStoreIo = {
+      async get<T>(key: string): Promise<T | null> {
+        return (data[key] as T | undefined) ?? null;
+      },
+      async set(key: string, value: unknown): Promise<void> {
+        data[key] = value;
+      },
+      async commit(): Promise<void> {},
+      // The REAL queue, so "inside the write queue" is exercised against the
+      // shipped one rather than a copy living in this file.
+      enqueueWrite: createWriteQueue(),
+      async onChanged(): Promise<() => void> {
+        return () => {};
+      },
+      ensureLoaded: async () => null,
+      takeRecoveryNotice: () => null,
+    };
+
+    // Every call is logged, because "the refusal wrote no secret" is the only
+    // way the BEFORE half of the compare's placement can be observed from
+    // outside: a compare moved after `writeKeySecrets` still throws, still
+    // throws the right class, and still carries the right fields.
+    const secrets: SecretsIo = {
+      async getAll(service, accounts) {
+        for (const account of accounts) calls.push({ op: "getAll", account });
+        return accounts.map((a) => kept.get(`${service}::${a}`) ?? null);
+      },
+      async set(service, account, value) {
+        calls.push({ op: "set", account });
+        kept.set(`${service}::${account}`, value);
+      },
+      async delete(service, account) {
+        calls.push({ op: "delete", account });
+        kept.delete(`${service}::${account}`);
+      },
+      async copy(from, to) {
+        calls.push({ op: "copy", account: to.account });
+        const value = kept.get(`${from.service}::${from.account}`);
+        if (value === undefined) return false;
+        kept.set(`${to.service}::${to.account}`, value);
+        return true;
+      },
+    };
+
+    return { vault: createVaultStore({ store, secrets }), kept, calls };
+  };
+
+  const at = (id: string, field: string) => `${VAULT_KEYRING_SERVICE}::${vaultAccount(id, field)}`;
+  const aKey = (over: Partial<VaultKey> = {}): VaultKey => ({
+    id: "k-1",
+    name: "id_ed25519",
+    fingerprint: "SHA256:aaa",
+    hasPrivateKey: false,
+    hasPassphrase: false,
+    ...over,
+  });
+  const anIdentity = (over: Partial<VaultIdentity> = {}): VaultIdentity => ({
+    id: "i-1",
+    name: "root @ prod",
+    username: "root",
+    authMode: "password",
+    hasPassword: false,
+    ...over,
+  });
+  /** What `fn` threw, or `null` if it resolved - so "did not reject at all" is
+   *  a distinguishable outcome rather than a silently absent check. */
+  const thrownBy = async (fn: () => Promise<unknown>): Promise<unknown> => {
+    try {
+      await fn();
+      return null;
+    } catch (e) {
+      return e;
+    }
+  };
+
+  // -- a key whose secret material moved under the caller ------------------
+  {
+    const h = vaultHarness();
+    const loaded = (await h.vault.upsertKey(aKey(), { privateKey: "PEM-ONE" })).record;
+    const stamp = vaultKeyStamp(loaded);
+    // Another writer adds a passphrase. No expectation passed, which is what an
+    // import is.
+    await h.vault.upsertKey(aKey(), { passphrase: "s3cret" });
+    h.calls.length = 0;
+
+    const thrown = await thrownBy(() =>
+      h.vault.upsertKey(aKey({ name: "renamed" }), { privateKey: "PEM-TWO" }, stamp),
+    );
+    check(
+      "a save against moved secret material is refused, by INSTANCE not by message",
+      thrown instanceof VaultRecordChangedError,
+      thrown instanceof Error ? thrown.message : thrown,
+    );
+    const stored = await h.vault.findKey("k-1");
+    if (thrown instanceof VaultRecordChangedError) {
+      check("it carries the id of the record it was refused against", thrown.recordId === "k-1", {
+        got: thrown.recordId,
+      });
+      check("it carries what the caller expected", thrown.expected === stamp, {
+        got: thrown.expected,
+        want: stamp,
+      });
+      check(
+        "it carries what is actually stored now - which is NOT what was expected",
+        thrown.actual === vaultKeyStamp(stored) && thrown.actual !== thrown.expected,
+        { actual: thrown.actual, expected: thrown.expected, stored: vaultKeyStamp(stored) },
+      );
+    }
+    // The BEFORE half of the placement, observed from outside: this save
+    // carries a private key, so a compare moved after `writeKeySecrets` has
+    // already put `PEM-TWO` at the account before refusing.
+    check(
+      "the refusal touched no keychain account at all",
+      h.calls.length === 0,
+      h.calls.map((c) => `${c.op} ${c.account}`),
+    );
+    check(
+      "and the private key stored before it is untouched",
+      h.kept.get(at("k-1", "privateKey")) === "PEM-ONE",
+      h.kept.get(at("k-1", "privateKey")),
+    );
+    check("the name the stale save proposed did not land", stored?.name === "id_ed25519", {
+      got: stored?.name,
+    });
+  }
+
+  // -- the demonstrated failure: resurrection of a deleted key --------------
+  {
+    const h = vaultHarness();
+    const loaded = (await h.vault.upsertKey(aKey(), { privateKey: "PEM-ONE" })).record;
+    const stamp = vaultKeyStamp(loaded);
+    await h.vault.deleteKey("k-1");
+    h.calls.length = 0;
+
+    // A BLANK-BODY save - `{}` means "leave the stored secret alone" - which is
+    // exactly the shape that used to bring the row back as
+    // `hasPrivateKey: false, hasPassphrase: false` while still carrying the
+    // deleted key's fingerprint and public half.
+    const thrown = await thrownBy(() => h.vault.upsertKey(aKey(), {}, stamp));
+    check(
+      "a blank-body save against a DELETED key is refused",
+      thrown instanceof VaultRecordChangedError,
+      thrown instanceof Error ? thrown.message : thrown,
+    );
+    if (thrown instanceof VaultRecordChangedError) {
+      check(
+        "and it reports the record as absent, not merely as different",
+        thrown.actual === VAULT_STAMP_ABSENT,
+        thrown.actual,
+      );
+    }
+    check("nothing was put back", (await h.vault.listKeys()).length === 0);
+    check("and `findKey` still finds nothing", (await h.vault.findKey("k-1")) === undefined);
+  }
+
+  // -- create mode: `absent` is enforced, not read as "no expectation" ------
+  {
+    // The editors never special-case create mode: `existing` is null there, so
+    // the stamp they pass is `VAULT_STAMP_ABSENT` on every create. A guard
+    // rewritten to skip the compare whenever `expect === "absent"` - on the
+    // theory that absent means "no expectation" - leaves every other group in
+    // this section green. This is the group that closes it.
+    const h = vaultHarness();
+    await h.vault.upsertKey(aKey({ name: "someone else's key" }), { privateKey: "THEIRS" });
+    h.calls.length = 0;
+
+    const thrown = await thrownBy(() =>
+      h.vault.upsertKey(aKey({ name: "my new key" }), { privateKey: "MINE" }, VAULT_STAMP_ABSENT),
+    );
+    check(
+      "a create against an id someone else already claimed is refused",
+      thrown instanceof VaultRecordChangedError,
+      thrown instanceof Error ? thrown.message : thrown,
+    );
+    const stored = await h.vault.findKey("k-1");
+    check(
+      "the id's actual owner survived the refused create",
+      stored?.name === "someone else's key",
+      {
+        got: stored?.name,
+      },
+    );
+    check(
+      "and their private key was not overwritten - the refusal wrote nothing",
+      h.kept.get(at("k-1", "privateKey")) === "THEIRS" && h.calls.length === 0,
+      { stored: h.kept.get(at("k-1", "privateKey")), calls: h.calls.length },
+    );
+  }
+
+  // -- the control: an unchanged record still saves ------------------------
+  {
+    // Without this, a compare that simply always threw would pass every group
+    // above.
+    const h = vaultHarness();
+    const loaded = (await h.vault.upsertKey(aKey(), { privateKey: "PEM-ONE" })).record;
+    const saved = (await h.vault.upsertKey(aKey({ name: "renamed" }), {}, vaultKeyStamp(loaded)))
+      .record;
+    check("an unchanged record saves normally", saved.name === "renamed", saved.name);
+    check(
+      "and the untouched private key is still there",
+      h.kept.get(at("k-1", "privateKey")) === "PEM-ONE",
+    );
+  }
+
+  // -- the other control: no expectation means no check --------------------
+  {
+    // The four v3-import call sites pass two arguments deliberately: an import
+    // holds no earlier snapshot, so a required third parameter would only make
+    // it invent one. This is the positive evidence for the parameter being
+    // optional, and it is why those call sites need no edit.
+    const h = vaultHarness();
+    await h.vault.upsertKey(aKey(), { privateKey: "PEM-ONE" });
+    await h.vault.upsertKey(aKey({ fingerprint: "SHA256:bbb" }), { privateKey: "PEM-TWO" });
+    const forced = (await h.vault.upsertKey(aKey({ name: "by import" }), {})).record;
+    check("an import with no expectation still writes", forced.name === "by import", forced.name);
+  }
+
+  // -- the identity twin ---------------------------------------------------
+  {
+    const h = vaultHarness();
+    const loaded = (await h.vault.upsertIdentity(anIdentity(), { password: "pw-one" })).record;
+    const stamp = vaultIdentityStamp(loaded);
+    await h.vault.upsertIdentity(anIdentity({ authMode: "agent" }), {});
+    h.calls.length = 0;
+
+    const thrown = await thrownBy(() =>
+      h.vault.upsertIdentity(anIdentity({ name: "renamed" }), { password: "pw-two" }, stamp),
+    );
+    check(
+      "an identity whose auth moved under the caller is refused, by INSTANCE",
+      thrown instanceof VaultRecordChangedError,
+      thrown instanceof Error ? thrown.message : thrown,
+    );
+    const stored = await h.vault.findIdentity("i-1");
+    if (thrown instanceof VaultRecordChangedError) {
+      check("it carries the identity's own id", thrown.recordId === "i-1", thrown.recordId);
+      check("it carries what the caller expected", thrown.expected === stamp, {
+        got: thrown.expected,
+        want: stamp,
+      });
+      check(
+        "and what is stored now, which differs from it",
+        thrown.actual === vaultIdentityStamp(stored) && thrown.actual !== thrown.expected,
+        { actual: thrown.actual, expected: thrown.expected },
+      );
+    }
+    check(
+      "the refusal touched no keychain account at all",
+      h.calls.length === 0,
+      h.calls.map((c) => `${c.op} ${c.account}`),
+    );
+    check(
+      "and the stored password is untouched",
+      h.kept.get(at("i-1", "password")) === "pw-one",
+      h.kept.get(at("i-1", "password")),
+    );
+  }
+
+  // -- an identity deleted under the caller, and the identity control ------
+  {
+    const h = vaultHarness();
+    const loaded = (await h.vault.upsertIdentity(anIdentity(), { password: "pw-one" })).record;
+    await h.vault.deleteIdentity("i-1", () => []);
+    const thrown = await thrownBy(() =>
+      h.vault.upsertIdentity(anIdentity(), {}, vaultIdentityStamp(loaded)),
+    );
+    check(
+      "a save against a DELETED identity is refused and says it is absent",
+      thrown instanceof VaultRecordChangedError && thrown.actual === VAULT_STAMP_ABSENT,
+      thrown instanceof VaultRecordChangedError ? thrown.actual : thrown,
+    );
+    check("nothing was put back", (await h.vault.findIdentity("i-1")) === undefined);
+  }
+  {
+    const h = vaultHarness();
+    const loaded = (await h.vault.upsertIdentity(anIdentity(), { password: "pw-one" })).record;
+    const saved = (
+      await h.vault.upsertIdentity(anIdentity({ name: "renamed" }), {}, vaultIdentityStamp(loaded))
+    ).record;
+    check("an unchanged identity saves normally", saved.name === "renamed", saved.name);
+    check(
+      "and its untouched password is still there",
+      h.kept.get(at("i-1", "password")) === "pw-one",
+    );
+  }
+}
+
+// ============================================================================
+// 16. WHERE the compare sits in each write body. (VLT-78, COMPILER API.)
+// ============================================================================
+// Protects: the half section 15 cannot see for the blank-body case, and the
+// half no rooted-and-counted pin can see at all. A compare MOVED after the
+// secret write is still present, still exactly one, still inside the right
+// function - the count reads 1 before and after - and a deletion leaves the
+// count at 1 too if anything replaces it. Only its INDEX among the block's own
+// direct statements distinguishes the three.
+console.log("\n[16. VLT-78 placement] the compare is a direct statement of the queued write body");
+{
+  const sf = sourceFile("store");
+
+  /** The block `enqueueWrite(async () => { ... })` runs for the named store
+   *  function - the statement list the compare has to be a member of. Not the
+   *  function's own body: a compare sitting outside the queue entry is the
+   *  window another writer fits into, and it would still be "inside
+   *  `upsertKey`". */
+  const queuedWriteBody = (fnName: string): ts.Block | null => {
+    const fnBody = findFunctionBody(sf, fnName);
+    if (!fnBody) return null;
+    const [queued] = findCalls(fnBody, sf, ["enqueueWrite"]);
+    if (!queued || queued.arguments.length !== 1) return null;
+    const arrow = queued.arguments[0];
+    if (!ts.isArrowFunction(arrow) || !ts.isBlock(arrow.body)) return null;
+    return arrow.body;
+  };
+
+  /** The index of the block's own direct statement that `node` sits inside, or
+   *  -1 if `node` is nested in something that is not one (a callback, a nested
+   *  function). Walking up beats matching source text: a comment naming
+   *  `writeKeySecrets(` must not be able to stand in for the call. */
+  const directStatementIndex = (block: ts.Block, node: ts.Node): number => {
+    let n: ts.Node | undefined = node;
+    while (n && n.parent !== block) n = n.parent;
+    if (!n) return -1;
+    return block.statements.findIndex((s) => s === n);
+  };
+
+  const isCompare = (s: ts.Statement): boolean =>
+    ts.isIfStatement(s) && norm(s.expression.getText(sf)) === norm("expect !== undefined");
+
+  const pinPlacement = (fnName: string, stampFn: string, writeFn: string): void => {
+    const body = queuedWriteBody(fnName);
+    check(`${fnName}: its queued write body was located`, body !== null);
+    if (!body) return;
+
+    const compares = body.statements.filter(isCompare);
+    check(
+      `${fnName}: exactly one \`if (expect !== undefined)\` compare, as a DIRECT statement of that body`,
+      compares.length === 1,
+      compares.length,
+    );
+    const [writeCall] = findCalls(body, sf, [writeFn]);
+    check(`${fnName}: the ${writeFn}( call was located`, writeCall !== undefined);
+    if (compares.length !== 1 || !writeCall) return;
+
+    const compareIdx = body.statements.indexOf(compares[0]);
+    const writeIdx = directStatementIndex(body, writeCall);
+    check(`${fnName}: the ${writeFn}( call is a direct statement of that body too`, writeIdx >= 0, {
+      writeIdx,
+    });
+    if (writeIdx < 0) return;
+    check(
+      `${fnName}: the compare runs BEFORE ${writeFn}( - a refusal after it has already written a secret`,
+      compareIdx < writeIdx,
+      { compareIdx, writeIdx },
+    );
+
+    // What the compare is made of, so a compare left in the right PLACE but
+    // stamping the wrong thing does not pass on position alone.
+    const compareText = compares[0].getText(sf);
+    check(
+      `${fnName}: it stamps the record found in the store, as ${stampFn}(existing)`,
+      norm(compareText).includes(norm(`${stampFn}(existing)`)),
+      compareText,
+    );
+    check(
+      `${fnName}: and refuses with the shared VaultRecordChangedError`,
+      norm(compareText).includes(norm("throw new VaultRecordChangedError(")),
+      compareText,
+    );
+  };
+
+  pinPlacement("upsertKey", "vaultKeyStamp", "writeKeySecrets");
+  pinPlacement("upsertIdentity", "vaultIdentityStamp", "writeSecret");
 }
 
 console.log(`\n${checked - failed}/${checked} vault-editor checks passed`);

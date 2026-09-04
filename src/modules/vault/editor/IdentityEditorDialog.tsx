@@ -18,7 +18,12 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import type { KeyRow } from "../page/derive";
 import { findIdentity, newIdentityId, upsertIdentity } from "../store";
-import type { VaultIdentity } from "../types";
+import {
+  VAULT_STAMP_ABSENT,
+  VaultRecordChangedError,
+  vaultIdentityStamp,
+  type VaultIdentity,
+} from "../types";
 import {
   EMPTY_IDENTITY_DRAFT,
   identityDraftFrom,
@@ -170,14 +175,35 @@ export function IdentityEditorDialog({
     setSaving(true);
     try {
       const id = existing?.id ?? newIdentityId();
-      // `upsertIdentity` REFUSES key auth that names no key and a `keyId`
-      // naming a key that does not exist (`../store.ts:208-213`) - as rejected
-      // promises. The second is reachable here only by a key deleted in another
-      // window between opening this form and pressing Save, and it lands in the
-      // error line below rather than the console.
-      await upsertIdentity(identityRecordFrom(id, draft), identitySecretsForSave(draft));
+      // `upsertIdentity` REFUSES key auth that names no key and a `keyId` naming
+      // a key that does not exist (`../store.ts`'s own `upsertIdentity`) - as
+      // rejected promises. The second is reachable here only by a key deleted in
+      // another window between opening this form and pressing Save, and it lands
+      // in the error line below rather than the console.
+      // The third argument is the secret material this form LOADED, handed to
+      // the store so it can refuse a save whose record has moved underneath.
+      // Always passed, including in create mode - see `KeyEditorDialog`'s twin
+      // of this call for why that needs no `mode` branch.
+      await upsertIdentity(
+        identityRecordFrom(id, draft),
+        identitySecretsForSave(draft),
+        vaultIdentityStamp(existing),
+      );
       onClose();
     } catch (e) {
+      if (e instanceof VaultRecordChangedError) {
+        // Rendered so the user can act on it, and NO recovery is offered - see
+        // `KeyEditorDialog`'s twin of this arm for why a second press cannot
+        // help and neither message may invite one.
+        setError(
+          e.actual === VAULT_STAMP_ABSENT
+            ? `${e.message} Close this editor - pressing Save again will not help: this form ` +
+                `still names the deleted record, so the write is refused the same way every time.`
+            : `${e.message} Close and reopen this identity to edit it against what is stored ` +
+                `now; anything typed here has to be entered again.`,
+        );
+        return;
+      }
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setSaving(false);

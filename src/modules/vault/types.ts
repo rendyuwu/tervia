@@ -258,3 +258,98 @@ export class VaultInUseError extends Error {
     this.holders = holders;
   }
 }
+
+/** The value {@link vaultKeyStamp} and {@link vaultIdentityStamp} report for a
+ *  record that is not in the store at all. */
+export const VAULT_STAMP_ABSENT = "absent";
+
+/**
+ * What a key's SECRET MATERIAL is, as one comparable string.
+ *
+ * A string rather than a structural comparison for the reason `modules/hosts`'s
+ * own `credentialStamp` gives: the only question anyone asks of it is "is this
+ * still the same thing it was", and a string makes that one `!==` at the write
+ * instead of a deep compare each caller writes for itself.
+ *
+ * Deliberately NOT a hash of the whole record. It answers one question - has the
+ * secret material moved under a form that loaded this record - and widening it to
+ * every field would refuse ordinary concurrent RENAMES, which last-write-wins
+ * already handles correctly. So `name`, `description`, `keyType` and `publicKey`
+ * are all outside it, on purpose.
+ *
+ * The fingerprint IS inside it, and is not a rename in disguise: it is what the
+ * stored private key is, so a change to it means the material this record names
+ * is a different key.
+ */
+export function vaultKeyStamp(key: VaultKey | null | undefined): string {
+  if (!key) return VAULT_STAMP_ABSENT;
+  return `key:${key.hasPrivateKey ? 1 : 0}${key.hasPassphrase ? 1 : 0}:${key.fingerprint ?? ""}`;
+}
+
+/**
+ * The same, for an identity: the password flag, the auth mode, and the key it
+ * names.
+ *
+ * `authMode` and `keyId` sit alongside the flag because both decide WHICH secret
+ * a connect reaches for - a mode flipped to `key` under a form that loaded
+ * `password`, or a `keyId` re-pointed at another key, moves the material this
+ * record authenticates with as surely as clearing the password does. `name`,
+ * `username`, `domain` and `description` stay outside it, for the narrowness
+ * {@link vaultKeyStamp} states.
+ */
+export function vaultIdentityStamp(identity: VaultIdentity | null | undefined): string {
+  if (!identity) return VAULT_STAMP_ABSENT;
+  return `identity:${identity.hasPassword ? 1 : 0}:${identity.authMode}:${identity.keyId ?? ""}`;
+}
+
+/** The stamp in words, so a refusal names what changed rather than printing an
+ *  internal token at the user. */
+function describeVaultStamp(stamp: string): string {
+  return stamp === VAULT_STAMP_ABSENT ? "deleted" : "holding different secret material";
+}
+
+/**
+ * A save refused because the stored record's secret material is no longer the
+ * one the caller loaded.
+ *
+ * Refuse, never overwrite. The write this stops is silent and unrecoverable:
+ * an editor loads a key; another writer DELETES that key underneath it; the
+ * stale form saves with a blank body, which means "leave the stored secret
+ * alone", so the store reads both presence flags off the record as it stands
+ * NOW - which is nothing - and writes them back as `false`, while the form's own
+ * draft still carries the deleted key's fingerprint and public half. The row
+ * comes back from the dead naming a private key nobody holds, with no error
+ * anywhere. That resurrection is why {@link VAULT_STAMP_ABSENT} is a distinct
+ * value and not folded into "no match".
+ *
+ * Reached today by: opening a key or identity in the Vault page's editor, having
+ * that record deleted or its secret material replaced in the meantime - another
+ * window, the Hosts page's credential picker, or a v3 import - and then pressing
+ * Save.
+ *
+ * Carries `recordId` so a caller can re-read the record it was refused against
+ * without having to hold one, and both stamps so it can tell a deleted record
+ * from a changed one: the two need different advice.
+ */
+export class VaultRecordChangedError extends Error {
+  readonly recordId: string;
+  readonly expected: string;
+  readonly actual: string;
+
+  constructor(
+    kind: "key" | "identity",
+    recordId: string,
+    recordName: string,
+    expected: string,
+    actual: string,
+  ) {
+    super(
+      `vault: the ${kind} "${recordName}" changed while this editor was open - it is now ` +
+        `${describeVaultStamp(actual)}. Nothing was saved.`,
+    );
+    this.name = "VaultRecordChangedError";
+    this.recordId = recordId;
+    this.expected = expected;
+    this.actual = actual;
+  }
+}

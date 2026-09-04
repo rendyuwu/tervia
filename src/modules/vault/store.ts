@@ -12,7 +12,10 @@ import {
   VAULT_KEYS_KEY,
   VAULT_KEY_SECRET_FIELDS,
   VaultInUseError,
+  VaultRecordChangedError,
   vaultAccount,
+  vaultIdentityStamp,
+  vaultKeyStamp,
   type IdentityHostRefs,
   type VaultIdentity,
   type VaultKey,
@@ -67,13 +70,28 @@ export type VaultStore = {
   findKey(id: string): Promise<VaultKey | undefined>;
   newIdentityId(): string;
   newKeyId(): string;
+  /**
+   * `expect` is the stamp the caller loaded, from {@link vaultIdentityStamp}.
+   * Supplied, the write is refused unless the stored record still carries that
+   * secret material; omitted, the write is unconditional.
+   *
+   * Optional, and that is a statement rather than an oversight: an import holds
+   * no earlier snapshot of the record, so a required parameter would only make
+   * it invent one - the v3 import route passes two arguments deliberately. The
+   * caller that DOES hold a snapshot is an editor, and
+   * `scripts/vault-editor-verify.ts` is what proves it still passes one.
+   */
   upsertIdentity(
     identity: VaultIdentity,
     secrets: { password?: VaultSecretValue },
+    expect?: string,
   ): Promise<VaultUpsert<VaultIdentity>>;
+  /** `expect` is the stamp from {@link vaultKeyStamp} - see
+   *  {@link VaultStore.upsertIdentity} for why it is optional. */
   upsertKey(
     key: VaultKey,
     secrets: { privateKey?: VaultSecretValue; passphrase?: VaultSecretValue },
+    expect?: string,
   ): Promise<VaultUpsert<VaultKey>>;
   deleteIdentity(id: string, hostRefs: IdentityHostRefs): Promise<void>;
   deleteKey(id: string): Promise<void>;
@@ -233,6 +251,7 @@ export function createVaultStore(io: VaultIo): VaultStore {
   async function upsertIdentity(
     identity: VaultIdentity,
     secrets: { password?: VaultSecretValue },
+    expect?: string,
   ): Promise<VaultUpsert<VaultIdentity>> {
     return enqueueWrite(async () => {
       const [identities, keys] = await Promise.all([listIdentities(), listKeys()]);
@@ -249,6 +268,22 @@ export function createVaultStore(io: VaultIo): VaultStore {
       }
 
       const existing = identities.find((i) => i.id === identity.id);
+
+      // INSIDE the write queue, and before any secret is written - the placement
+      // `upsertKey`'s own copy of this block explains in full.
+      if (expect !== undefined) {
+        const current = vaultIdentityStamp(existing);
+        if (current !== expect) {
+          throw new VaultRecordChangedError(
+            "identity",
+            identity.id,
+            identity.name,
+            expect,
+            current,
+          );
+        }
+      }
+
       // No rollback here, and none needed: an identity owns ONE secret, so a write
       // that throws wrote nothing. The multi-write hole is `upsertKey`'s alone.
       const record: VaultIdentity = {
@@ -274,6 +309,7 @@ export function createVaultStore(io: VaultIo): VaultStore {
   async function upsertKey(
     key: VaultKey,
     secrets: { privateKey?: VaultSecretValue; passphrase?: VaultSecretValue },
+    expect?: string,
   ): Promise<VaultUpsert<VaultKey>> {
     return enqueueWrite(async () => {
       // Required, unlike an identity's name: a key is chosen by name from a
@@ -284,6 +320,21 @@ export function createVaultStore(io: VaultIo): VaultStore {
 
       const keys = await listKeys();
       const existing = keys.find((k) => k.id === key.id);
+
+      // INSIDE the write queue, and BEFORE any secret is written. Both halves are
+      // load-bearing. Inside, because a check the caller ran before calling has a
+      // window between its read and this write that another writer fits into -
+      // this body runs as one queue entry, so the record read here is the record
+      // about to be replaced, with nothing able to land in between. Before,
+      // because a refusal must leave the keychain exactly as it was:
+      // `writeKeySecrets` below writes up to two accounts, and a refusal after
+      // that has already mutated the thing it was refusing to touch.
+      if (expect !== undefined) {
+        const current = vaultKeyStamp(existing);
+        if (current !== expect) {
+          throw new VaultRecordChangedError("key", key.id, key.name, expect, current);
+        }
+      }
 
       // Warned, not refused: a key is referenced by name across many hosts, so a
       // duplicate is a real usability failure - but it is the user's file and the

@@ -51,7 +51,12 @@ import {
   type VaultKeyFacts,
 } from "../keyInspect";
 import { findKey, newKeyId, upsertKey } from "../store";
-import type { VaultKey } from "../types";
+import {
+  VAULT_STAMP_ABSENT,
+  VaultRecordChangedError,
+  vaultKeyStamp,
+  type VaultKey,
+} from "../types";
 import {
   EMPTY_KEY_DRAFT,
   encryptedKeyRefusal,
@@ -289,12 +294,19 @@ export function KeyEditorDialog({ target, onClose }: KeyEditorDialogProps): Reac
         facts = vaultKeyFactsFrom(info);
       }
       const id = existing?.id ?? newKeyId();
-      // `upsertKey` REFUSES a nameless key and rolls both accounts back for a
-      // key it has never seen if either secret write throws (`../store.ts:238-272`).
-      // Caught below so the reason lands in the form instead of the console.
+      // `upsertKey` REFUSES a nameless key and rolls both accounts back for a key
+      // it has never seen if either secret write throws (`../store.ts`'s own
+      // `upsertKey`). Caught below so the reason lands in the form instead of the
+      // console.
+      // The third argument is the secret material this form LOADED, handed to the
+      // store so it can refuse a save whose record has moved underneath. Always
+      // passed, including in create mode: `existing` is null there, the stamp is
+      // "absent", and the store finds no record under a freshly minted id either -
+      // so the check passes and there is no `mode` branch here to get wrong.
       const { warning } = await upsertKey(
         keyRecordFrom(id, draft, existing, facts),
         keySecretsForSave(draft),
+        vaultKeyStamp(existing),
       );
       // A duplicate NAME is warned about, not refused - the store's own call
       // (`../store.ts:252-256`), because the name is not an identifier and it is
@@ -304,6 +316,21 @@ export function KeyEditorDialog({ target, onClose }: KeyEditorDialogProps): Reac
       if (warning) toast(warning, { variant: "warning" });
       onClose();
     } catch (e) {
+      if (e instanceof VaultRecordChangedError) {
+        // Rendered so the user can act on it, and NO recovery is offered:
+        // nothing here calls `setExisting`, so `existing` - and with it the id
+        // and the stamp this form sends - stays exactly as it was. A second
+        // press is refused the same way whichever direction the record moved,
+        // so neither arm may invite one.
+        setError(
+          e.actual === VAULT_STAMP_ABSENT
+            ? `${e.message} Close this editor - pressing Save again will not help: this form ` +
+                `still names the deleted record, so the write is refused the same way every time.`
+            : `${e.message} Close and reopen this key to edit it against what is stored now; ` +
+                `anything typed here has to be entered again.`,
+        );
+        return;
+      }
       // `describeKeyError` strips a leading `ssh: ` and leaves everything else
       // alone (`../keyInspect.ts:73-77`), which is right for both sources here:
       // an inspection failure carries that prefix and a store refusal
