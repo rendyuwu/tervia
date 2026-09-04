@@ -36,6 +36,7 @@
  */
 import { invoke } from "@tauri-apps/api/core";
 
+import { releaseRule } from "@/modules/forwards/controller";
 import { listRules, upsertRule } from "@/modules/forwards/store";
 import {
   findHost,
@@ -769,6 +770,27 @@ async function applyV3(payload: SealedBlob, passphrase: string): Promise<ImportR
     const ruleIds = new Set(existingRules.map((r) => r.id));
     for (const rule of ruled.rules) {
       try {
+        // A REWRITE OF A RULE THAT IS UP RIGHT NOW HAS TO RELEASE IT FIRST, and
+        // the release has to name the record as SAVED. `ssh/tunnel.ts` keys its
+        // entry by host, remote host, remote port and local port, and an import
+        // may rewrite any of those four under a live page-owned forward - after
+        // which nothing left in the app names that entry: the close misses, the
+        // session stays at `refs: 1`, and the local port stays bound for the
+        // rest of the app's life. `existing` and never `rule`, because the
+        // incoming row is precisely the one whose fields may differ.
+        // `forwards/editor/RuleEditorDialog.tsx`'s save guards the same hazard
+        // on the editor's path.
+        //
+        // ONLY FOR AN ID ALREADY SAVED. A rule id absent from `existingRules`
+        // is a create; nothing is running under it, and releasing it would read
+        // as if something might be.
+        //
+        // Inside the `try`, so a stop that reports costs this ONE rule and is
+        // reported against it, the same containment every other write in this
+        // function has - a close that fails must not abandon the rules behind
+        // it.
+        const existing = existingRules.find((r) => r.id === rule.id);
+        if (existing) await releaseRule(existing);
         // `findHost` and not a list assembled here: `upsertRule` is asking whether
         // the host is SAVED, and answering out of the file would let a rule ride a
         // host the store just refused. `clearDanglingRuleHosts` has already turned

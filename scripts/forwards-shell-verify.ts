@@ -50,6 +50,16 @@ const FILES = {
   derive: "src/modules/forwards/page/derive.ts",
   ruleCard: "src/modules/forwards/page/RuleCard.tsx",
   railViewArea: "src/app/components/RailViewArea.tsx",
+  // Section 11b's three-part caller-set pin. The store is here for its WRITE
+  // ROUTES (a fourth one is a fourth way to remove or rewrite a record under a
+  // live forward), and the Hosts page for its IMPORT SET - it is the only
+  // `src/` reference to the forwards store outside `modules/forwards`.
+  forwardsStore: "src/modules/forwards/store.ts",
+  hostsPage: "src/modules/hosts/HostsPage.tsx",
+  // The import's rule pass, which is the OTHER `src/` caller of a forwards
+  // write route outside `modules/forwards` - and the one that can rewrite a
+  // live forward's identity rather than merely remove it.
+  backupApply: "src/modules/backup/apply.ts",
 } as const;
 
 const src = Object.fromEntries(Object.entries(FILES).map(([k, p]) => [k, read(p)])) as Record<
@@ -1173,16 +1183,29 @@ for (const key of ["ruleCard", "forwardsPage"] as const) {
 check("RuleCard.tsx reaches the Stop copy through stopNote(", /stopNote\(/.test(src.ruleCard));
 
 // ============================================================================
-// 11. DELETE STOPS FIRST. `deleteRule` is a pure persistence filter and there
-//     is no reconciler anywhere in `src/` - `grep stopRule` finds exactly the
-//     two callers this section and `RuleCard.tsx` name - so deleting a
-//     page-running rule used to leave `runtime.ts`'s entry naming a rule no row
-//     renders (no Stop ever offered again), `ssh/tunnel.ts`'s entry at
-//     `refs: 1` (the SSH session never closes for the rest of the app's life)
-//     and the local port bound, with re-creating a rule on the same pinned port
-//     failing EADDRINUSE and no in-app recovery. `derive.ts`'s confirm copy
-//     said "deleting a running rule stops it" throughout, which was FALSE - a
-//     false promise inside a destructive confirm.
+// 11. DELETE STOPS FIRST. `deleteRule` and `dropRulesForHost` are both pure
+//     persistence filters and there is no reconciler anywhere in `src/`, so
+//     deleting a page-running rule used to leave `runtime.ts`'s entry naming a
+//     rule no row renders (no Stop ever offered again), `ssh/tunnel.ts`'s entry
+//     at `refs: 1` (the SSH session never closes for the rest of the app's
+//     life) and the local port bound, with re-creating a rule on the same
+//     pinned port failing EADDRINUSE and no in-app recovery. `derive.ts`'s
+//     confirm copy said "deleting a running rule stops it" throughout, which
+//     was FALSE - a false promise inside a destructive confirm.
+//
+//     THE CALLER SET IS PINNED AS A SET, AND IS NOT A SENTENCE ABOUT A GREP.
+//     This comment used to claim that `grep stopRule` finds exactly the two
+//     callers this section and `RuleCard.tsx` name. That claim went false the
+//     moment `controller.ts` grew a release of its own for the HOST delete -
+//     which is what a prose count of call sites is always one commit away from,
+//     and it is why the count now lives in checks. Section 11b states it in
+//     three parts that together say "nothing in `src/` removes or rewrites a
+//     forward's record without releasing it first": the forwards store's own
+//     members as an exact set (a fourth write route reddens), `HostsPage.tsx`'s
+//     import set (it reaches the drop only through the release), and the set of
+//     files that CALL `stopRule`. A count is satisfied by a caller MOVED to a
+//     file with no business stopping a forward; a set is not, and a set reddens
+//     on a removal as well as on an addition.
 //
 //     ORDER, not presence. Both calls being in the same function is satisfied
 //     by `deleteRule` first, which is the same leak with an extra IPC; and the
@@ -1466,6 +1489,476 @@ console.log(
       ]),
     callersOf("pageMustStopFirst("),
   );
+}
+
+// ============================================================================
+// 11b. THE HOST DELETE RELEASES FIRST, AND THE CALLER SET IS A SET.
+//
+//      Deleting a HOST drops N rules through `dropRulesForHost`, and dropping
+//      the records releases nothing: it is section 11's single-rule leak times
+//      N, reached from a page that never mentions forwards. `deleteHost` takes
+//      the cleanup as a REQUIRED parameter, so the fix is to make the parameter
+//      the release rather than the drop - `releaseRulesForHost`, which awaits a
+//      release for every rule riding the host and only then drops them.
+//
+//      ORDER IS THE PROPERTY, NOT PRESENCE, the same way it is one section up.
+//      Dropping first is the same leak with an extra IPC: the RECORD is what
+//      carries the host and both endpoints `stopRule` needs to name the entry
+//      it is releasing, and once the record is gone nothing can name it.
+//
+//      AND THE DEFERRAL FAMILY IS REFUSED STRUCTURALLY, not by a list of
+//      primitives. A nested-arrow decoy (`riding.forEach((r) => { void
+//      releaseRule(r); })`) keeps the text AND the order and drops the await,
+//      so what is asserted is that the awaited release is a DIRECT statement of
+//      `releaseRulesForHost`'s own body or of a loop in it. `setTimeout`,
+//      `queueMicrotask`, `.then` and any scheduler written after this all have
+//      to nest the statement inside a function expression, so that one property
+//      refuses every one of them; a list of primitives never can.
+//
+//      THE THREE-PART CALLER SET. Part 1: the forwards store's members as an
+//      exact set, read off the object literal `createForwardStore` RETURNS and
+//      off the `ForwardsStore` type, so a fourth write route added to either
+//      side is as loud as one added to both. Part 2: `HostsPage.tsx`'s IMPORT
+//      SET, read off the import declarations rather than as a substring - the
+//      file's own comment names the release in prose, and a substring ban would
+//      fail on correct code. Part 3: the files that CALL `stopRule`, as an
+//      exact set so a removal reddens as loudly as an addition.
+//
+//      PART 3 COUNTS CALLS AND NOT MENTIONS, and that distinction is now
+//      load-bearing rather than tidy: `controller.ts` holds `stopRule`'s
+//      DECLARATION and, newly, a real call inside `releaseRule`. A sweep that
+//      counted the declaration would keep `controller.ts` in the set even if
+//      `releaseRule` stopped calling `stopRule` - the exact regression the set
+//      exists to catch. Reading `CallExpression`s off the AST also makes the
+//      comment-stripping trap moot: a declaration is not a call, and neither is
+//      a sentence about one.
+// ============================================================================
+console.log(
+  "\n[11b. the host delete releases first] releaseRulesForHost awaits every release BEFORE dropRulesForHost; the caller set is pinned as a SET",
+);
+{
+  const controllerSf = ts.createSourceFile(
+    FILES.controller,
+    src.controller,
+    ts.ScriptTarget.ESNext,
+    true,
+    ts.ScriptKind.TS,
+  );
+
+  /** The nearest enclosing `if`, or null. A second copy of section 11's local
+   *  helper of the same name - the twelfth copied helper in this suite, noted
+   *  here so the two cannot silently diverge unremarked. */
+  const enclosingIf = (node: ts.Node): ts.IfStatement | null => {
+    let cur: ts.Node | undefined = node;
+    while (cur && !ts.isIfStatement(cur)) cur = cur.parent;
+    return cur ? (cur as ts.IfStatement) : null;
+  };
+
+  // --------------------------------------------------------------------------
+  // releaseRule: the LIVE guard, and the awaited stop behind it. This is the
+  // pair `ForwardsPage`'s confirm and `RuleEditorDialog`'s save each write
+  // inline, named once so a third caller cannot get it wrong - so it is pinned
+  // at its own declaration and not at a use of it.
+  // --------------------------------------------------------------------------
+  const releaseRule = findFunctionBody(controllerSf, "releaseRule");
+  check("found releaseRule's body", releaseRule !== null);
+  if (releaseRule) {
+    const stops = findCallsTo(releaseRule, "stopRule", controllerSf);
+    check("exactly one stopRule( call inside releaseRule", stops.length === 1, stops.length);
+    const stop = stops[0];
+    if (stop) {
+      check(
+        "releaseRule AWAITS the stop - a release that has not landed is not a release",
+        stop.parent !== undefined && ts.isAwaitExpression(stop.parent),
+        stop.parent === undefined ? undefined : ts.SyntaxKind[stop.parent.kind],
+      );
+      const guard = enclosingIf(stop);
+      check("the stop sits inside an if statement at all", guard !== null);
+      check(
+        "and that if's condition is EXACTLY pageMustStopFirst(rule.id) - the LIVE read, so a rule a terminal owns and a rule this side never started both cost nothing",
+        guard !== null &&
+          norm(guard.expression.getText(controllerSf)) === norm("pageMustStopFirst(rule.id)"),
+        guard === null ? undefined : guard.expression.getText(controllerSf),
+      );
+      check(
+        "and nothing above it decides whether it runs, so a runtime-false wrapper cannot make the release dead code",
+        guard !== null && isUnguardedToItsFunctionBody(guard),
+        guard === null ? undefined : ts.SyntaxKind[guard.parent.kind],
+      );
+    }
+  }
+
+  // --------------------------------------------------------------------------
+  // releaseRulesForHost: order, both awaits, and the structural position that
+  // refuses the whole deferral family.
+  // --------------------------------------------------------------------------
+  const releaseForHost = findFunctionBody(controllerSf, "releaseRulesForHost");
+  check("found releaseRulesForHost's body", releaseForHost !== null);
+  if (releaseForHost) {
+    const releases = findCallsTo(releaseForHost, "releaseRule", controllerSf);
+    const drops = findCallsTo(releaseForHost, "dropRulesForHost", controllerSf);
+    check(
+      "exactly one releaseRule( call inside releaseRulesForHost",
+      releases.length === 1,
+      releases.length,
+    );
+    check(
+      "exactly one dropRulesForHost( call inside releaseRulesForHost",
+      drops.length === 1,
+      drops.length,
+    );
+    const release = releases[0];
+    const drop = drops[0];
+    if (release && drop) {
+      check(
+        "the release is ORDERED BEFORE the drop - both being present is satisfied by the drop first, which is the same leak with an extra IPC",
+        release.getStart(controllerSf) < drop.getStart(controllerSf),
+        { release: release.getStart(controllerSf), drop: drop.getStart(controllerSf) },
+      );
+      check(
+        "and the release is AWAITED, not fired off - a stop that has not landed is not a stop",
+        release.parent !== undefined && ts.isAwaitExpression(release.parent),
+        release.parent === undefined ? undefined : ts.SyntaxKind[release.parent.kind],
+      );
+      check(
+        "and the awaited release is a DIRECT statement of releaseRulesForHost's own body (or of a loop in it), never nested in a function expression - which is what refuses forEach/setTimeout/queueMicrotask/.then and every deferral written after this",
+        isDirectlyInFunctionBody(release, releaseForHost),
+      );
+      check(
+        "the drop is AWAITED too, so a store failure reaches deleteHost instead of being lost inside its write queue",
+        drop.parent !== undefined && ts.isAwaitExpression(drop.parent),
+        drop.parent === undefined ? undefined : ts.SyntaxKind[drop.parent.kind],
+      );
+      check(
+        "and the drop is a DIRECT statement of that body as well - a drop deferred into a callback runs after deleteHost's write queue has already moved on",
+        isDirectlyInFunctionBody(drop, releaseForHost),
+      );
+    }
+  }
+
+  // --------------------------------------------------------------------------
+  // stopRule's own terminal-owned guard. TWO HALVES, PINNED SEPARATELY:
+  // PRESENCE and POSITION.
+  //
+  // It is DEFENCE IN DEPTH and unreachable today - `pageMustStopFirst`'s own
+  // first line reads the same map, and `RuleCard`'s Stop button sits behind
+  // that row's early return on `hostOwned`. So deleting it changes no
+  // behaviour any fixture can construct, and no fixture is manufactured for it
+  // here: what is asserted is that the statement is THERE and is FIRST. First
+  // matters on its own - behind the prompt-abandon block it would abandon a
+  // host-key question and then decline to act, leaving a Start it just killed
+  // with nothing that reports the failure.
+  // --------------------------------------------------------------------------
+  const stopBody = findFunctionBody(controllerSf, "stopRule");
+  check("found stopRule's body", stopBody !== null);
+  if (stopBody && ts.isBlock(stopBody)) {
+    const stmts = stopBody.statements;
+    const guardIndex = stmts.findIndex(
+      (s) =>
+        ts.isIfStatement(s) &&
+        norm(s.expression.getText(controllerSf)) ===
+          norm("useHostOwnedForwards.getState().byRule[rule.id] !== undefined") &&
+        norm(s.thenStatement.getText(controllerSf)) === norm("return;"),
+    );
+    const abandonIndex = stmts.findIndex((s) =>
+      s.getText(controllerSf).includes("startAttempts.delete"),
+    );
+    check(
+      "PRESENCE: stopRule declines a TERMINAL-owned rule outright - this side holds no claim it could spend, so a close from here either misses or spends a reference the terminal still needs",
+      guardIndex >= 0,
+      guardIndex,
+    );
+    check(
+      "POSITION: and it is the FIRST statement of stopRule, ahead of the prompt-abandon block - behind it, the guard would abandon a host-key question and then decline to act on the Start it just killed",
+      guardIndex === 0 && abandonIndex > 0,
+      { guardIndex, abandonIndex },
+    );
+  }
+
+  // --------------------------------------------------------------------------
+  // PART 1 of the caller set: the forwards store's members, as an exact set.
+  //
+  // Read off the object literal `createForwardStore` RETURNS - not off the file
+  // text, which a mention satisfies, and not off the
+  // `export const { … } = forwardsStore` destructuring, which re-exports
+  // whatever the object has and so can never disagree with it. The
+  // `ForwardsStore` TYPE is pinned beside it as a second anchor, so a route
+  // added to one side only is as loud as one added to both.
+  // --------------------------------------------------------------------------
+  const FORWARDS_STORE_MEMBERS = [
+    // The three WRITE ROUTES. Every other member is a read or plumbing, and
+    // these three are the whole of how a rule record is created, rewritten or
+    // removed - which is what makes "release before every one of them" a claim
+    // with a finite surface rather than a hope.
+    "deleteRule",
+    "dropRulesForHost",
+    "upsertRule",
+    // The reads and the plumbing.
+    "ensureLoaded",
+    "findRule",
+    "listRules",
+    "newRuleId",
+    "onForwardsChanged",
+    "takeRecoveryNotice",
+  ].sort();
+  {
+    const storeSf = ts.createSourceFile(
+      FILES.forwardsStore,
+      src.forwardsStore,
+      ts.ScriptTarget.ESNext,
+      true,
+      ts.ScriptKind.TS,
+    );
+    const factory = findFunctionBody(storeSf, "createForwardStore");
+    check("found createForwardStore's body", factory !== null);
+    let returned: string[] | null = null;
+    if (factory) {
+      const visit = (n: ts.Node): void => {
+        if (
+          returned === null &&
+          ts.isReturnStatement(n) &&
+          n.expression !== undefined &&
+          ts.isObjectLiteralExpression(n.expression) &&
+          isDirectlyInFunctionBody(n, factory)
+        ) {
+          returned = n.expression.properties
+            .map((p) => (p.name === undefined ? "<computed>" : p.name.getText(storeSf)))
+            .sort();
+        }
+        ts.forEachChild(n, visit);
+      };
+      visit(factory);
+    }
+    check(
+      "the object createForwardStore returns has EXACTLY these members, three of them write routes (upsertRule, deleteRule, dropRulesForHost) - a fourth route reddens here",
+      JSON.stringify(returned) === JSON.stringify(FORWARDS_STORE_MEMBERS),
+      returned,
+    );
+    // {@link findTypeAliasMembers} reads PROPERTY signatures only, and every
+    // member of `ForwardsStore` is a METHOD signature (`listRules(): …`), so
+    // that helper answers `[]` here rather than answering wrong. This local
+    // reader takes both kinds; it is not a fix to the shared one, whose two
+    // existing callers pin object-shaped types and would gain nothing.
+    const memberNames = (root: ts.Node, name: string): string[] | null => {
+      let out: string[] | null = null;
+      const visit = (n: ts.Node): void => {
+        if (ts.isTypeAliasDeclaration(n) && n.name.text === name && ts.isTypeLiteralNode(n.type)) {
+          out = n.type.members
+            .filter((m) => ts.isPropertySignature(m) || ts.isMethodSignature(m))
+            .map((m) => (m.name === undefined ? "<computed>" : m.name.getText(storeSf)));
+        }
+        ts.forEachChild(n, visit);
+      };
+      visit(root);
+      return out;
+    };
+    const declared = memberNames(storeSf, "ForwardsStore");
+    check(
+      "and the ForwardsStore TYPE declares the same set - a route added to the type but not the object, or the reverse, is as loud as one added to both",
+      declared !== null &&
+        JSON.stringify([...declared].sort()) === JSON.stringify(FORWARDS_STORE_MEMBERS),
+      declared,
+    );
+  }
+
+  // --------------------------------------------------------------------------
+  // PART 2 of the caller set: HostsPage.tsx's IMPORT SET.
+  //
+  // The Hosts page is the only `src/` reference to `dropRulesForHost` outside
+  // `modules/forwards`, and it must now reach it through the release. Asserted
+  // off the import declarations and never as a substring: that file's own
+  // comment explains why the release and not the bare drop, so a substring ban
+  // on `dropRulesForHost` would fail on correct code. A comment is not an
+  // `ImportSpecifier`.
+  //
+  // TWO SCRIPTS PIN THIS ONE CALL SITE, DELIBERATELY, AND THIS ONE IS THE
+  // STRICTER OF THE TWO - measured, not assumed. `forward-rules-verify.ts`
+  // pins the second argument's own expression text; this section pins the
+  // whole argument list AND the import set, so it also reddens on the page
+  // importing `dropRulesForHost` again while still handing the release over by
+  // name, which leaves that script GREEN. The other one is kept for
+  // INDEPENDENCE rather than coverage: separate script, separate parser, so a
+  // regression in one script's machinery - or one of them going dark on a
+  // module-load error rather than red - does not leave this call site unpinned.
+  // --------------------------------------------------------------------------
+  {
+    const pageSf = ts.createSourceFile(
+      FILES.hostsPage,
+      src.hostsPage,
+      ts.ScriptTarget.ESNext,
+      true,
+      ts.ScriptKind.TSX,
+    );
+    const imported = new Map<string, string>();
+    const visitImports = (n: ts.Node): void => {
+      if (
+        ts.isImportDeclaration(n) &&
+        n.importClause?.namedBindings !== undefined &&
+        ts.isNamedImports(n.importClause.namedBindings) &&
+        ts.isStringLiteral(n.moduleSpecifier)
+      ) {
+        const from = n.moduleSpecifier.text;
+        for (const el of n.importClause.namedBindings.elements) imported.set(el.name.text, from);
+      }
+      ts.forEachChild(n, visitImports);
+    };
+    visitImports(pageSf);
+    check(
+      "HostsPage.tsx imports releaseRulesForHost from the controller - the release, not the bare store drop",
+      imported.get("releaseRulesForHost") === "@/modules/forwards/controller",
+      imported.get("releaseRulesForHost"),
+    );
+    check(
+      "and HostsPage.tsx imports dropRulesForHost from nowhere at all - the page's only route to the drop is through the release",
+      !imported.has("dropRulesForHost"),
+      imported.get("dropRulesForHost"),
+    );
+    // AND IT IS HANDED OVER BY NAME. `deleteHost`'s cleanup parameter is
+    // required precisely so no caller can skip it, and an inline
+    // `() => { void releaseRulesForHost(id); }` satisfies both import checks
+    // above while dropping the await that makes the cleanup fail CLOSED - the
+    // property `hosts/store.ts`'s `ForwardRuleCleanup` doc names.
+    const deleteHostCalls = findCallsTo(pageSf, "deleteHost", pageSf);
+    check(
+      "HostsPage.tsx calls deleteHost( exactly once - the confirm dialog's action",
+      deleteHostCalls.length === 1,
+      deleteHostCalls.length,
+    );
+    const deleteHostCall = deleteHostCalls[0];
+    check(
+      "and hands it releaseRulesForHost BY NAME - an inline arrow satisfies the import set while dropping the await that makes the cleanup fail closed",
+      deleteHostCall !== undefined &&
+        norm(deleteHostCall.arguments.map((a) => a.getText(pageSf)).join(",")) ===
+          norm("host.id,releaseRulesForHost"),
+      deleteHostCall?.arguments.map((a) => a.getText(pageSf)),
+    );
+  }
+
+  // --------------------------------------------------------------------------
+  // PART 3 of the caller set: the files that CALL stopRule, as an exact set.
+  //
+  // Declarations do not count - see this section's banner for why that is
+  // load-bearing now that `controller.ts` is in the set for a call rather than
+  // for holding the declaration.
+  // --------------------------------------------------------------------------
+  {
+    const callsStopRule = walkSrcFiles(join(repoRoot, "src"))
+      .filter((f) => {
+        const fileSf = ts.createSourceFile(
+          f,
+          readFileSync(f, "utf8"),
+          ts.ScriptTarget.ESNext,
+          true,
+          f.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
+        );
+        return findCallsTo(fileSf, "stopRule", fileSf).length > 0;
+      })
+      .map((f) => f.slice(repoRoot.length))
+      .sort();
+    check(
+      "stopRule( is CALLED from exactly these four files and no others (a declaration is not a call): the controller's own release, the page's confirm, the editor's save, the row's button",
+      JSON.stringify(callsStopRule) ===
+        JSON.stringify([
+          "/src/modules/forwards/ForwardsPage.tsx",
+          "/src/modules/forwards/controller.ts",
+          "/src/modules/forwards/editor/RuleEditorDialog.tsx",
+          "/src/modules/forwards/page/RuleCard.tsx",
+        ]),
+      callsStopRule,
+    );
+  }
+
+  // --------------------------------------------------------------------------
+  // PART 4 of the caller set: the OTHER write route reached from outside
+  // `modules/forwards`, and the only one that REWRITES rather than removes.
+  //
+  // The import can rewrite a saved rule's host, remote host, remote port or
+  // local port - and `ssh/tunnel.ts` keys its entry by exactly those four - so
+  // an import landing over a live page-owned forward leaves an entry nothing
+  // in the app can name: the close misses, the session stays at `refs: 1`, and
+  // the local port stays bound. Same defect as the editor's save (section 12),
+  // reached without a click on the Forwards page at all.
+  //
+  // IDENTITY, not just presence. The release has to be handed the record as
+  // LOADED and never the incoming row, because the incoming row is precisely
+  // the one whose four key fields may differ - which is why the binding it
+  // comes from is pinned too, and not only the argument name.
+  //
+  // AND THE SET HALF: `upsertRule(` is reached from exactly one file outside
+  // `modules/forwards`. A second one is a second place that can rewrite a live
+  // forward's identity, and it would need this same release.
+  // --------------------------------------------------------------------------
+  {
+    const applySf = ts.createSourceFile(
+      FILES.backupApply,
+      src.backupApply,
+      ts.ScriptTarget.ESNext,
+      true,
+      ts.ScriptKind.TS,
+    );
+    const applyV3 = findFunctionBody(applySf, "applyV3");
+    check("found applyV3's body", applyV3 !== null);
+    if (applyV3) {
+      const releases = findCallsTo(applyV3, "releaseRule", applySf);
+      const upserts = findCallsTo(applyV3, "upsertRule", applySf);
+      check("exactly one releaseRule( call inside applyV3", releases.length === 1, releases.length);
+      check("exactly one upsertRule( call inside applyV3", upserts.length === 1, upserts.length);
+      const release = releases[0];
+      const upsert = upserts[0];
+      if (release && upsert) {
+        check(
+          "the release is ORDERED BEFORE the upsert - after it, the saved record no longer names the entry the forward was opened under",
+          release.getStart(applySf) < upsert.getStart(applySf),
+          { release: release.getStart(applySf), upsert: upsert.getStart(applySf) },
+        );
+        check(
+          "and the release is AWAITED, so the rewrite cannot land while the close is still in flight",
+          release.parent !== undefined && ts.isAwaitExpression(release.parent),
+          release.parent === undefined ? undefined : ts.SyntaxKind[release.parent.kind],
+        );
+        check(
+          "and it is handed `existing` - the record as LOADED, never the incoming row whose four key fields are the ones that may differ",
+          norm(release.arguments.map((a) => a.getText(applySf)).join(",")) === norm("existing"),
+          release.arguments.map((a) => a.getText(applySf)),
+        );
+        const guard = enclosingIf(release);
+        check(
+          "and it runs ONLY for an id already saved - a rule id absent from existingRules is a create, with nothing running under it",
+          guard !== null && norm(guard.expression.getText(applySf)) === norm("existing"),
+          guard === null ? undefined : guard.expression.getText(applySf),
+        );
+      }
+      // PINNED AT THE BINDING, so `existing` cannot be re-rooted onto the
+      // incoming row while every check above stays green - the alias trap
+      // section 11 names, seen on the identity rather than on a flag.
+      const existingInit = findConstInitializerText(applyV3, "existing", applySf);
+      check(
+        "and `existing` is EXACTLY the lookup into existingRules by the incoming id, at its own binding",
+        existingInit !== null &&
+          norm(existingInit) === norm("existingRules.find((r) => r.id === rule.id)"),
+        existingInit,
+      );
+    }
+    const callsUpsertRule = walkSrcFiles(join(repoRoot, "src"))
+      .filter((f) => {
+        const fileSf = ts.createSourceFile(
+          f,
+          readFileSync(f, "utf8"),
+          ts.ScriptTarget.ESNext,
+          true,
+          f.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
+        );
+        return findCallsTo(fileSf, "upsertRule", fileSf).length > 0;
+      })
+      .map((f) => f.slice(repoRoot.length))
+      .filter((p) => !p.startsWith("/src/modules/forwards/"))
+      .sort();
+    check(
+      "upsertRule( is CALLED from exactly one file outside modules/forwards - the import's rule pass, and a second one would need this same release",
+      JSON.stringify(callsUpsertRule) === JSON.stringify(["/src/modules/backup/apply.ts"]),
+      callsUpsertRule,
+    );
+  }
 }
 
 // ============================================================================

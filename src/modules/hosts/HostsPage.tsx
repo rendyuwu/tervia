@@ -40,7 +40,7 @@ import {
 import { InputGroup, InputGroupAddon, InputGroupInput } from "@/components/ui/input-group";
 import { paneCaret } from "@/lib/paneCaret";
 import { toast } from "@/components/ui/toast";
-import { dropRulesForHost } from "@/modules/forwards/store";
+import { releaseRulesForHost } from "@/modules/forwards/controller";
 import { identityRows } from "@/modules/vault/page/derive";
 import { VaultInUseError } from "@/modules/vault/types";
 import { useVault } from "@/modules/vault/useVault";
@@ -261,11 +261,18 @@ export function HostsPage({ onConnect, onScreen }: HostsPageProps): ReactNode {
 
   const confirmDelete = useCallback((host: Host) => {
     setPendingDelete(null);
-    // `dropRulesForHost` is passed by NAME, never as an inline `() => {}`, so
+    // `releaseRulesForHost` is passed by NAME, never as an inline `() => {}`, so
     // "what happens to a host's rules on delete" has one greppable answer -
     // and it is `deleteHost`'s REQUIRED parameter, so no caller can skip the
     // cleanup by omitting it.
-    void deleteHost(host.id, dropRulesForHost).catch((e: unknown) =>
+    //
+    // The CONTROLLER's release, not the store's `dropRulesForHost`. Dropping
+    // the records alone leaves every rule this page had running with its SSH
+    // session at `refs: 1` and its local port bound for the rest of the app's
+    // life, and no row left that could offer a Stop. The release awaits each
+    // stop ahead of the drop; see its own doc for why the order is the
+    // property.
+    void deleteHost(host.id, releaseRulesForHost).catch((e: unknown) =>
       toast(deleteRefusalText(host, e), { variant: "error" }),
     );
   }, []);

@@ -30,7 +30,8 @@
  *
  * 4. `dropRulesForHost` NEVER CONSULTS A HOST LOOKUP. It runs from inside
  *    `hosts/store.ts`'s `deleteHost`, awaited before that queue touches the
- *    keychain or the host list (`hosts/store.ts:954-961`), so the host it is
+ *    keychain or the host list (`deleteHost`'s own `await forwards(id)` runs
+ *    ahead of both `deleteAccounts` and the row drop), so the host it is
  *    reacting to may already be gone. A version that cached the last
  *    `HostLookup` seen by `upsertRule` and consulted it here would work in
  *    every ordinary test and fail exactly there - which is why this section
@@ -40,13 +41,39 @@
  *    accessor and every keychain-free assumption in this module rests on.
  *
  * 6. `HostsPage.tsx`'s `confirmDelete` WIRES THIS MODULE IN: `deleteHost`'s
- *    second argument is the bare `dropRulesForHost` identifier, passed by
+ *    second argument is the bare `releaseRulesForHost` identifier, passed by
  *    name, not a wrapper that could silently un-await it -
- *    `hosts/store.ts`'s `deleteHost` awaits it FIRST and unconditionally
- *    (`hosts/store.ts:961`), and a wrapper that swallows the promise defeats
- *    that ordering without failing `tsc`. Source-text over `HostsPage.tsx`,
- *    because nothing about this store changes here; the property is about
- *    the caller.
+ *    `hosts/store.ts`'s `deleteHost` awaits it FIRST and unconditionally (its
+ *    own `await forwards(id)`, ahead of `deleteAccounts` and the row drop),
+ *    and a wrapper that swallows the promise defeats that ordering without
+ *    failing `tsc`. Source-text over `HostsPage.tsx`, because nothing about
+ *    this store changes here; the property is about the caller.
+ *
+ *    THE PROPERTY IS UNCHANGED AND ONLY THE IDENTIFIER MOVED. The page used
+ *    to hand over this module's own `dropRulesForHost`; it now hands over
+ *    `modules/forwards/controller.ts`'s `releaseRulesForHost`, which awaits a
+ *    release for every rule riding the host and only then calls the drop. It
+ *    reaches this module through that function rather than around it, and the
+ *    reason is that dropping the RECORDS releases nothing: each rule the page
+ *    had running would be left with `ssh/tunnel.ts`'s entry at `refs: 1`, its
+ *    SSH session never closing for the rest of the app's life, and its local
+ *    port still bound.
+ *
+ *    TWO SCRIPTS PIN THIS ONE CALL SITE, DELIBERATELY, AND THE OVERLAP IS NOT
+ *    SYMMETRIC - measured rather than assumed, because "they prove different
+ *    things" is the kind of claim that reads true and is not. This check pins
+ *    the SECOND ARGUMENT'S OWN EXPRESSION TEXT. Section 11b of
+ *    `scripts/forwards-shell-verify.ts` pins the WHOLE argument list AND the
+ *    page's import set, so at this call site it reddens on everything this
+ *    check reddens on and on one thing more: the page importing
+ *    `dropRulesForHost` again while still handing the release over by name,
+ *    which leaves this check GREEN.
+ *
+ *    So this one is kept for INDEPENDENCE, not for coverage. They are separate
+ *    scripts with separate file maps and separate parsers, so a regression in
+ *    one script's own machinery - a `stripComments` bug, a stale path, a
+ *    module-load error taking a script dark rather than red - does not silence
+ *    the other. Delete either and the call site is pinned by one process.
  *
  * The store's only ever port is the recovered-store file; there is no
  * `SecretsIo` for this script to inject, because a forward rule holds no secret
@@ -429,7 +456,7 @@ console.log("\n[ids] newRuleId returns distinct, f-prefixed ids");
 
 // ---------------------------------------------------------------------------
 console.log(
-  "\n[cascade wiring] HostsPage.confirmDelete passes dropRulesForHost, not noForwardRules",
+  "\n[cascade wiring] HostsPage.confirmDelete passes releaseRulesForHost by name - not noForwardRules, and not a wrapper",
 );
 {
   // Self-test for `stripComments`, per the plan's §3 preamble: a comment that
@@ -467,12 +494,25 @@ console.log(
   // POSITIVE, over COMMENT-STRIPPED source and the PARSED call: a positive
   // over raw source is satisfied by a comment that merely claims the wiring
   // is right (§3 preamble), and a substring check on top of that
-  // (`src.includes("dropRulesForHost")`) is satisfied by
-  // `(id) => { dropRulesForHost(id); return; }` - one line, compiles, and
-  // silently un-awaits the cleanup, so `deleteHost`'s fail-closed ordering
-  // (`hosts/store.ts:954-961`) is gone. Reading the second argument's own
-  // expression text off the AST, whitespace-normalised only, is what W2 below
-  // exists to prove catches it.
+  // (`src.includes("releaseRulesForHost")`) is satisfied by
+  // `(id) => { releaseRulesForHost(id); return; }` - one line, compiles, and
+  // silently un-awaits the cleanup, so the fail-closed ordering
+  // `deleteHost`'s own `await forwards(id)` gives it is gone. Reading the
+  // second argument's own expression text off the AST, whitespace-normalised
+  // only, is what refuses that shape: a wrapper is an arrow function and not a
+  // bare identifier, whatever it wraps and whatever it is named.
+  //
+  // THE IDENTIFIER MOVED AND THE PROPERTY DID NOT. The page now reaches this
+  // module's `dropRulesForHost` through `forwards/controller.ts`'s
+  // `releaseRulesForHost`, which awaits a release for every rule riding the
+  // host first - dropping the records alone releases nothing. What is asserted
+  // here is still "by name, never a wrapper", and it is the SECOND ARGUMENT'S
+  // OWN EXPRESSION TEXT that is asserted. `forwards-shell-verify.ts`'s section
+  // 11b pins the same call site more tightly - the whole argument list plus the
+  // page's import set - so it reddens on everything this reddens on and on the
+  // page importing the store's drop again, which this leaves green. Kept for
+  // INDEPENDENCE rather than coverage: two scripts, two parsers, so one going
+  // dark does not leave the call site unpinned. See this file's header item 6.
   const stripped = stripComments(hostsPageRaw);
   const sf = ts.createSourceFile(
     "HostsPage.tsx",
@@ -490,9 +530,9 @@ console.log(
       ? call.arguments[1].getText(sf).replace(/\s+/g, "")
       : "<deleteHost call or its second argument is missing>";
   check(
-    "deleteHost's second argument is the bare identifier dropRulesForHost, whitespace-normalised",
+    "deleteHost's second argument is the bare identifier releaseRulesForHost, whitespace-normalised",
     secondArgText,
-    "dropRulesForHost",
+    "releaseRulesForHost",
   );
 }
 

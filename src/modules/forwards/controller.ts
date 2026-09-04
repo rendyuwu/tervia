@@ -37,6 +37,7 @@ import { closeForwardForConnection, openForwardForConnection } from "@/modules/s
 import { useHostOwnedForwards } from "./hostOwned";
 import { bindFailureText } from "./page/derive";
 import { useForwardRuntime } from "./runtime";
+import { dropRulesForHost, listRules } from "./store";
 import type { ForwardRule } from "./types";
 
 /**
@@ -333,6 +334,25 @@ export async function stopRule(
   rule: ForwardRule,
   runtime: RuntimeDeps = defaultRuntimeDeps,
 ): Promise<void> {
+  // DEFENCE IN DEPTH, AND UNREACHABLE TODAY - said here so the next reader does
+  // not delete it as dead. A forward a TERMINAL opened is never this page's to
+  // stop: this side holds no claim it could spend, so a close issued from here
+  // either misses (there is no entry under this key) or spends a reference the
+  // terminal still needs, which is how another consumer's session gets closed -
+  // see `SshForward.claim`.
+  //
+  // WHAT REACHES IT. Nothing today: every caller either asks
+  // {@link pageMustStopFirst} first, whose own FIRST line reads this same map,
+  // or is `page/RuleCard.tsx`'s Stop button, which sits behind that row's early
+  // return on `hostOwned` - and an early return is a RENDERING, not an
+  // invariant. The sequence that DOES reach it is a second unguarded caller: a
+  // "Stop all" button that sweeps the page's rules, a reconciler, or a
+  // regression in `RuleCard`'s early return. This guard is here so the answer
+  // does not depend on which of those lands first, and on the same reasoning
+  // {@link startRule}'s own terminal-owned refusal gives - the guard has to live
+  // where the close does.
+  if (useHostOwnedForwards.getState().byRule[rule.id] !== undefined) return;
+
   // Answered FIRST, ahead of the close below. A Start parked on an unanswered
   // host-key question holds a socket, a handshake and a blocked runtime thread
   // until the backend's confirm timeout - and now that a release waits for the
@@ -370,4 +390,68 @@ export async function stopRule(
     // precisely so a close that one day DOES report is not swallowed here.
     useForwardRuntime.getState().markStopped(rule.id);
   }
+}
+
+/**
+ * Give up whatever THIS PAGE holds for `rule`, ahead of a write that removes or
+ * rewrites the record the forward was opened under.
+ *
+ * The two lines `ForwardsPage`'s delete confirm and `RuleEditorDialog`'s save
+ * each already write inline, named once here so a third caller cannot get the
+ * pair wrong. {@link pageMustStopFirst} is a LIVE read and not a flag captured
+ * at click time, for every reason its own doc gives.
+ *
+ * NOT A NO-OP THAT PRETENDS OTHERWISE. For a rule this page never started, one
+ * a terminal owns, and one already `stopped` or `failed`, the guard says no and
+ * nothing is spent - which is the whole of why the guard is inside this
+ * function rather than at each caller.
+ */
+export async function releaseRule(rule: ForwardRule): Promise<void> {
+  if (pageMustStopFirst(rule.id)) await stopRule(rule);
+}
+
+/**
+ * Release every rule riding `hostId`, then drop the rules themselves.
+ *
+ * `deleteHost`'s required cleanup parameter (`hosts/store.ts`'s
+ * `ForwardRuleCleanup`), and this rather than `dropRulesForHost` alone because
+ * dropping the RECORDS releases nothing: `runtime.ts` is left naming rules no
+ * row can render, so no Stop is ever offered again; `ssh/tunnel.ts`'s entries
+ * stay at `refs: 1`, so those SSH sessions never close for the rest of the
+ * app's life; and each local port stays bound, with re-creating a rule on the
+ * same pinned port then failing EADDRINUSE and no in-app recovery. That is the
+ * single-rule leak `ForwardsPage`'s delete confirm already fixes, times N.
+ *
+ * ORDER IS THE PROPERTY, NOT PRESENCE. Every release is awaited BEFORE the
+ * drop. Dropping first is the same leak with an extra IPC: the record carries
+ * the host and both endpoints `stopRule` needs to NAME the entry it is
+ * releasing, and once the record is gone nothing can name it.
+ *
+ * IT RUNS INSIDE THE HOSTS STORE'S WRITE QUEUE, which is a real cost stated
+ * rather than designed away. `deleteHost` awaits this from inside its own
+ * `enqueueWrite`, so deleting a host with N page-running rules holds that queue
+ * open for N close round trips. That is the price of a cleanup no caller can
+ * skip, and the alternative - a reconciler that sweeps later - is what leaves a
+ * rule outliving its host in the window between.
+ *
+ * NO DEADLOCK, written down so it is not "fixed" later. `store.ts`'s header
+ * warns that a HOST LOOKUP inside `dropRulesForHost` would re-enter a queue
+ * already mid-entry; nothing here makes one. `listRules` is a read, and
+ * `dropRulesForHost` serialises on the FORWARDS store's write queue, which is
+ * not the hosts queue this call is running inside.
+ *
+ * A REJECTING STOP ABORTS THE HOST DELETE, deliberately. {@link stopRule} has a
+ * `finally` and no `catch`, so a close that reports propagates out of here and
+ * `deleteHost` throws before it touches the keychain or the host list. That
+ * leaves the host and its rules both intact, which is recoverable - the same
+ * argument `deleteHost`'s own comment makes for awaiting this call at all.
+ * Swallowing it would drop the host while a forward it owns is still up, with
+ * nothing left that names the entry. The row does not lie either way:
+ * `stopRule`'s `finally` marks the rule stopped whether the close reported or
+ * not.
+ */
+export async function releaseRulesForHost(hostId: string): Promise<void> {
+  const riding = (await listRules()).filter((r) => r.hostId === hostId);
+  for (const rule of riding) await releaseRule(rule);
+  await dropRulesForHost(hostId);
 }
