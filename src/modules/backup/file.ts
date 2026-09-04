@@ -2,12 +2,12 @@
  * Shape and validation for the `.tervia-backup` connection backup.
  *
  * An import is a TRUST BOUNDARY: the file came off a USB stick or a chat, and
- * whatever survives this module is written straight into the host store and
- * later dialled. So every field is re-checked here rather than trusted - a bad
- * port would be sent to `TcpStream::connect`, a bad `proxyJumpId` would make
- * every connect fail with "a jump host in the chain no longer exists", and an
- * inline binding naming another host would authenticate with THAT host's
- * secrets.
+ * whatever survives this module is written straight into the host, vault and
+ * forward stores and later dialled. So every field is re-checked here rather
+ * than trusted - a bad port would be sent to `TcpStream::connect`, a bad
+ * `proxyJumpId` would make every connect fail with "a jump host in the chain no
+ * longer exists", and an inline binding naming another host would authenticate
+ * with THAT host's secrets.
  *
  * Two of the checks are DESTRUCTIVE when they are missing rather than merely
  * wrong, because `upsertHost` releases every keychain account the new record can
@@ -16,6 +16,29 @@
  * saved host deletes that host's secrets with nothing copied anywhere first, and
  * there is no `secrets_list` to find what is left (§9.7). See
  * {@link resolveIdentityBindings} and {@link refuseProtocolConflicts}.
+ *
+ * THREE MORE RECORD KINDS cross the same boundary, and what a bad row costs
+ * differs for each:
+ *
+ *   An IDENTITY is what one or more hosts log in AS, so a wrong row is wrong
+ *   everywhere it is referenced. Its `hasPassword` is a claim about the
+ *   exporting machine and is forced to `false` here; left true it would render a
+ *   stored-password indicator for a secret this machine does not hold, on a row
+ *   the user then never fills in. Its `keyId` may not dangle: `upsertIdentity`
+ *   THROWS on a key that does not exist, and a throw costs every record behind
+ *   it in the same import. See {@link sanitizeIdentity}.
+ *
+ *   A KEY is the record a private key hangs off. `upsertKey` throws on a blank
+ *   name, for the same reason `sanitizeGroup` refuses one - it is picked by name
+ *   from a dropdown. Its two presence flags are claims about the other machine
+ *   and are forced to `false` for the same reason an identity's is. See
+ *   {@link sanitizeKey}.
+ *
+ *   A RULE is a saved port-forward riding an SSH host. `upsertRule` refuses a
+ *   blank name or remote host, a local port outside `0` or `1-65535`, a remote
+ *   port outside `1-65535`, and a `hostId` naming anything but a saved SSH host
+ *   - every one of them a throw, so every one of them costs the rows behind it.
+ *   See {@link sanitizeRule}.
  *
  * ONE FORMAT IS READ, and where the boundary sits follows from it.
  *
@@ -33,10 +56,12 @@
  * Kept free of the Tauri runtime so `scripts/backup-verify.ts` can exercise the
  * parser under plain node. That constraint matters more now: the value imports
  * below (`RDP_DEFAULT_PRESET`, `hostPins`) come from `@/modules/hosts/types`,
- * alongside type-only imports from `@/modules/vault/types` - both plain
- * TypeScript with no IPC of their own, which is why those imports are safe;
- * anything reaching a store or an `invoke` belongs in `apply.ts` instead.
+ * alongside type-only imports from `@/modules/vault/types` and
+ * `@/modules/forwards/types` - all three plain TypeScript with no IPC of their
+ * own, which is why those imports are safe; anything reaching a store or an
+ * `invoke` belongs in `apply.ts` instead.
  */
+import type { ForwardRule } from "@/modules/forwards/types";
 import {
   RDP_DEFAULT_PRESET,
   hostPins,
@@ -52,7 +77,10 @@ import type {
   RdpCredentialBinding,
   SshCredentialBinding,
   VaultAuthMode,
+  VaultIdentity,
   VaultIdentityBinding,
+  VaultKey,
+  VaultKeyType,
 } from "@/modules/vault/types";
 
 export const BACKUP_KIND = "tervia-connections";
@@ -166,6 +194,29 @@ const str = (v: unknown): string => (typeof v === "string" ? v : "");
 /** A port is only usable if it is a whole number in range; 0 is not valid to dial. */
 function port(v: unknown): number | null {
   return typeof v === "number" && Number.isInteger(v) && v >= 1 && v <= 65535 ? v : null;
+}
+
+/**
+ * A forward rule's LOCAL port, where `0` additionally means "let the OS pick"
+ * and is the value the rule is saved with until it binds.
+ *
+ * Separate from {@link port} rather than a widening of it, and that separation
+ * is the point: `port()` is what every host address goes through, and a host on
+ * port 0 is a host nothing can dial. `0` is legal here and nowhere else, exactly
+ * as `isValidLocalPort` and `isValidRemotePort` split it in `forwards/store.ts`.
+ */
+function localPort(v: unknown): number | null {
+  return v === 0 ? 0 : port(v);
+}
+
+/** A key type is recorded only when it is one this build can name. Anything
+ *  else - including a type a later build writes - is OMITTED rather than
+ *  coerced: `undefined` and `"unknown"` are different facts, and `KeyCard.tsx`
+ *  renders "Unknown type" for the first and the recorded "UNKNOWN" for the
+ *  second. Coercing would turn "nobody looked" into "we looked and could not
+ *  tell". */
+function keyType(v: unknown): VaultKeyType | undefined {
+  return v === "rsa" || v === "ed25519" || v === "ecdsa" || v === "unknown" ? v : undefined;
 }
 
 /** A desktop dimension, or null when it is not a size a canvas could hold. */
@@ -391,6 +442,133 @@ export function sanitizeGroup(raw: unknown): HostGroup | null {
     id,
     name,
     ...(typeof order === "number" && Number.isFinite(order) ? { order } : {}),
+  };
+}
+
+/**
+ * Validate one vault identity. Null when the row could not be a working one.
+ *
+ * `name` is required for the reason {@link sanitizeGroup}'s is - it is what
+ * every host picking a credential shows and searches - even though the store
+ * itself accepts a blank one (`vault/store.ts` requires only that key auth names
+ * a key, and `validateIdentityDraft` is the guard the dialogs apply). A row that
+ * arrives nameless would render an empty card title here and fall back to an
+ * opaque id in its own delete refusal.
+ *
+ * `username` may be BLANK, and that asymmetry is deliberate: it is a field the
+ * user can see and fix on the Vault page, and refusing the row over it throws
+ * away the name, the domain, the auth mode and the description with it.
+ *
+ * `keyId` is PRESERVED rather than applied, the same split {@link sshBinding}
+ * makes with its identity arm: this function records what the file ASKED for,
+ * and a later cross-collection pass is what decides whether the key it names
+ * will exist to be honoured.
+ */
+export function sanitizeIdentity(raw: unknown): VaultIdentity | null {
+  if (!isRecord(raw)) return null;
+  const id = str(raw.id).trim();
+  const name = str(raw.name).trim();
+  if (!id || !name) return null;
+
+  const domain = str(raw.domain).trim();
+  const keyId = str(raw.keyId).trim();
+  const description = str(raw.description).trim();
+
+  return {
+    id,
+    name,
+    username: str(raw.username).trim(),
+    // RDP only, and absent for a local account or a UPN username - so a blank
+    // one is omitted rather than stored as "".
+    ...(domain ? { domain } : {}),
+    authMode: authMode(raw.authMode),
+    // Never trusted from the file, for the reason `sshBinding` gives: a presence
+    // flag is a claim about the EXPORTING machine's stored secrets, and the file
+    // is describing another machine.
+    hasPassword: false,
+    ...(keyId ? { keyId } : {}),
+    ...(description ? { description } : {}),
+  };
+}
+
+/**
+ * Validate one vault key. Null when the row could not be a working one.
+ *
+ * `name` is required because `upsertKey` throws on a blank one, and a throw
+ * inside the import loop costs every record behind it - so the refusal is made
+ * here, where it is one skipped row and a count.
+ *
+ * `fingerprint` and `publicKey` are carried as trimmed strings and NOT parsed.
+ * Both are display-only on this side, so an unrecognised `SHA256:` shape says
+ * nothing about whether the private half is usable - and a stricter parse here
+ * would drop a good key over a cosmetic field the user cannot even edit.
+ */
+export function sanitizeKey(raw: unknown): VaultKey | null {
+  if (!isRecord(raw)) return null;
+  const id = str(raw.id).trim();
+  const name = str(raw.name).trim();
+  if (!id || !name) return null;
+
+  const type = keyType(raw.keyType);
+  const fingerprint = str(raw.fingerprint).trim();
+  const publicKey = str(raw.publicKey).trim();
+  const description = str(raw.description).trim();
+
+  return {
+    id,
+    name,
+    ...(type ? { keyType: type } : {}),
+    ...(fingerprint ? { fingerprint } : {}),
+    ...(publicKey ? { publicKey } : {}),
+    // Both forced, like an identity's `hasPassword`: the material they claim
+    // lives in the exporting machine's keychain, and whether any of it arrives
+    // here is decided by what the sealed payload actually carried.
+    hasPrivateKey: false,
+    hasPassphrase: false,
+    ...(description ? { description } : {}),
+  };
+}
+
+/**
+ * Validate one forward rule. Null when the row could not be a working one.
+ *
+ * Every refusal below mirrors one `upsertRule` already makes, so a row that
+ * would throw at the write is skipped and counted here instead. The two that do
+ * not mirror anything - a blank `id`, a blank `hostId` - are refused for the
+ * same reason every other record's are: a rule with no id has no slot, and a
+ * rule naming no host is refused by the host lookup a moment later anyway.
+ *
+ * THE TWO PORTS ARE DIFFERENT and the store says so: `localPort` may be `0`,
+ * which means "let the OS pick", and `remotePort` may not, because it is dialled
+ * on the far side. See {@link localPort} for why that is a second predicate
+ * rather than a looser {@link port}.
+ *
+ * `startWithHost` is `true` only when the file literally says `true`. A missing
+ * or non-boolean value falls to `false`, which is the safe direction: a rule
+ * that does not start itself is visible and one click from running, where one
+ * that starts unasked opens a listening socket the user did not ask for.
+ */
+export function sanitizeRule(raw: unknown): ForwardRule | null {
+  if (!isRecord(raw)) return null;
+  const id = str(raw.id).trim();
+  const name = str(raw.name).trim();
+  const hostId = str(raw.hostId).trim();
+  const remoteHost = str(raw.remoteHost).trim();
+  const local = localPort(raw.localPort);
+  const remote = port(raw.remotePort);
+  if (!id || !name || !hostId || !remoteHost || local === null || remote === null) return null;
+
+  const description = str(raw.description).trim();
+
+  return {
+    id,
+    name,
+    hostId,
+    localPort: local,
+    remoteHost,
+    remotePort: remote,
+    startWithHost: raw.startWithHost === true,
+    ...(description ? { description } : {}),
   };
 }
 
@@ -820,58 +998,96 @@ export function parseBackupFile(raw: unknown): ParsedBackup {
 }
 
 /**
- * Validate the decrypted payload: the hosts and their groups, bad entries
- * skipped and counted. This is the second half of the trust boundary -
- * `parseBackupFile` can only reach the envelope, and everything of substance is
- * sealed until the host process has decrypted it.
+ * One payload collection, validated row by row: bad entries and duplicate ids
+ * skipped and counted, the survivors in file order.
  *
- * A missing collection is not an error: a payload sealed by a build without one
- * of them is a legitimate file, so the absent list imports as empty rather than
- * failing.
+ * A NON-ARRAY THROWS and names the collection, because it is not one bad row -
+ * it is a payload that is not the shape this build seals, and importing four
+ * collections out of five while silently dropping the fifth would report a
+ * success the user cannot check. A MISSING collection is the opposite case and
+ * is not an error at all: a payload sealed by a build that had no vault is a
+ * legitimate file, so the absent list imports as empty.
+ *
+ * IDS ARE ONE NAMESPACE PER STORE, not one app-wide, which is why the `seen` set
+ * is per collection rather than shared. A host `h-1` and a key `k-1` are records
+ * in different files on different services and cannot collide; two KEYS sharing
+ * an id are the same record slot and the same `tervia-vault :: <id>::privateKey`
+ * account, so the second would silently overwrite the first - the whole reason
+ * the dedupe exists. Sharing one set across the five would instead make an id
+ * reused between two stores drop a row that was never in conflict.
+ *
+ * `label` is the collection's name as the user reads it in the refusal, so it is
+ * a noun phrase ("host groups") and not the payload key.
+ */
+function collectRows<T extends { id: string }>(
+  raw: unknown,
+  label: string,
+  sanitize: (entry: unknown) => T | null,
+): { rows: T[]; skipped: number } {
+  if (raw !== undefined && !Array.isArray(raw)) {
+    throw new Error(`The encrypted payload's ${label} are not a list.`);
+  }
+  const rows: T[] = [];
+  const seen = new Set<string>();
+  let skipped = 0;
+  for (const entry of Array.isArray(raw) ? raw : []) {
+    const row = sanitize(entry);
+    if (!row || seen.has(row.id)) {
+      skipped++;
+      continue;
+    }
+    seen.add(row.id);
+    rows.push(row);
+  }
+  return { rows, skipped };
+}
+
+/**
+ * Validate the decrypted payload: hosts, their groups, and the vault and forward
+ * records that travel alongside them - bad entries skipped and counted. This is
+ * the second half of the trust boundary - `parseBackupFile` can only reach the
+ * envelope, and everything of substance is sealed until the host process has
+ * decrypted it.
+ *
+ * Five collections, ONE `skipped` count. It is a "rows the file lost" number for
+ * the import summary, not a diagnosis: a per-collection breakdown would suggest
+ * the user could act on it differently per kind, and there is nothing different
+ * to do. See {@link collectRows} for the per-collection rules the count comes
+ * from.
+ *
+ * The five collections do not depend on each other here: every sanitizer is pure
+ * and reads only its own row, so nothing below is a pass over another list. The
+ * one thing the call order decides is WHICH refusal a payload with two non-array
+ * collections gets, and hosts going first keeps that the same sentence it has
+ * always been. Cross-collection work - a `keyId` naming a key, a rule naming a
+ * host - is deliberately not done here; it needs what is already saved on this
+ * machine, which this function has no access to.
  */
 export function sanitizePayload(raw: unknown): {
   hosts: Host[];
   groups: HostGroup[];
+  identities: VaultIdentity[];
+  keys: VaultKey[];
+  rules: ForwardRule[];
   skipped: number;
 } {
   if (!isRecord(raw)) throw new Error("The encrypted payload did not contain any connections.");
 
-  if (raw.hosts !== undefined && !Array.isArray(raw.hosts)) {
-    throw new Error("The encrypted payload's hosts are not a list.");
-  }
-  if (raw.groups !== undefined && !Array.isArray(raw.groups)) {
-    throw new Error("The encrypted payload's host groups are not a list.");
-  }
+  // A host id is one namespace across BOTH protocols, which is narrower than it
+  // was: the two old stores had a keychain service each and could keep a `c-1`
+  // and an `r-1` apart, and one store on one service cannot.
+  const hosts = collectRows(raw.hosts, "hosts", sanitizeHost);
+  const groups = collectRows(raw.groups, "host groups", sanitizeGroup);
+  const identities = collectRows(raw.identities, "identities", sanitizeIdentity);
+  const keys = collectRows(raw.keys, "keys", sanitizeKey);
+  const rules = collectRows(raw.rules, "forward rules", sanitizeRule);
 
-  let skipped = 0;
-
-  // Ids are ONE namespace now, across both protocols: one store, one keychain
-  // service, so two rows sharing an id are the same accounts and the same record
-  // slot. The two old stores could keep a `c-1` and an `r-1` apart; this dedupe
-  // is what stops the second row silently overwriting the first.
-  const hosts: Host[] = [];
-  const seenHosts = new Set<string>();
-  for (const entry of Array.isArray(raw.hosts) ? raw.hosts : []) {
-    const host = sanitizeHost(entry);
-    if (!host || seenHosts.has(host.id)) {
-      skipped++;
-      continue;
-    }
-    seenHosts.add(host.id);
-    hosts.push(host);
-  }
-
-  const groups: HostGroup[] = [];
-  const seenGroups = new Set<string>();
-  for (const entry of Array.isArray(raw.groups) ? raw.groups : []) {
-    const group = sanitizeGroup(entry);
-    if (!group || seenGroups.has(group.id)) {
-      skipped++;
-      continue;
-    }
-    seenGroups.add(group.id);
-    groups.push(group);
-  }
-
-  return { hosts, groups, skipped };
+  return {
+    hosts: hosts.rows,
+    groups: groups.rows,
+    identities: identities.rows,
+    keys: keys.rows,
+    rules: rules.rows,
+    skipped: hosts.skipped + groups.skipped + identities.skipped + keys.skipped + rules.skipped,
+  };
 }
