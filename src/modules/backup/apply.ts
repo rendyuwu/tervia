@@ -180,31 +180,49 @@ export function landedKey(group: BackupSecretGroup, id: string, field: string): 
 }
 
 /**
- * Serialize every saved host and group plus the hosts' keychain secrets into
- * file text. Returns the counts alongside it so the caller can say what it wrote
- * without parsing the JSON back out.
+ * Serialize every saved record - hosts, groups, identities, keys and forward
+ * rules - plus their keychain secrets into file text. Returns the counts
+ * alongside it so the caller can say what it wrote without parsing the JSON
+ * back out.
  *
- * References are built for EVERY field a host could own, including ones with
- * nothing stored - the host process skips a reference that resolves to nothing,
- * which keeps the decision about what exists in the one place that can actually
- * answer it.
+ * References are built for EVERY field a host, identity or key could own,
+ * including ones with nothing stored - the host process skips a reference
+ * that resolves to nothing, which keeps the decision about what exists in the
+ * one place that can actually answer it.
  */
-export async function buildBackup(
-  passphrase: string,
-): Promise<{ text: string; sshCount: number; rdpCount: number }> {
+export async function buildBackup(passphrase: string): Promise<{
+  text: string;
+  counts: { hosts: number; groups: number; identities: number; keys: number; rules: number };
+}> {
   if (!passphrase) throw new Error("A passphrase is required.");
-  const [hosts, groups] = await Promise.all([listHosts(), listGroups()]);
-  if (hosts.length === 0) {
-    throw new Error("There are no saved connections to export.");
+  const [hosts, groups, identities, keys, rules] = await Promise.all([
+    listHosts(),
+    listGroups(),
+    listIdentities(),
+    listKeys(),
+    listRules(),
+  ]);
+  if (
+    hosts.length === 0 &&
+    groups.length === 0 &&
+    identities.length === 0 &&
+    keys.length === 0 &&
+    rules.length === 0
+  ) {
+    throw new Error("There is nothing saved to export.");
   }
 
-  const refs: SecretRef[] = hosts.flatMap(hostRefs);
+  const refs: SecretRef[] = [
+    ...hosts.flatMap(hostRefs),
+    ...identities.flatMap(identityRefs),
+    ...keys.flatMap(keyRefs),
+  ];
 
   const payload = await invoke<SealedBlob>("backup_seal_payload", {
     // The inventory only. Rust folds the credentials in under the group names in
-    // SECRET_GROUPS and refuses to overwrite a key that is already here, so
-    // neither `hosts` nor `groups` can be replaced by a credential map.
-    payload: JSON.stringify({ hosts, groups }),
+    // SECRET_GROUPS and refuses to overwrite a key that is already here, so none
+    // of these five lists can be replaced by a credential map.
+    payload: JSON.stringify({ hosts, groups, identities, keys, rules }),
     refs,
     passphrase,
   });
@@ -217,8 +235,13 @@ export async function buildBackup(
   };
   return {
     text: JSON.stringify(file, null, 2),
-    sshCount: hosts.filter((h) => h.protocol === "ssh").length,
-    rdpCount: hosts.filter((h) => h.protocol === "rdp").length,
+    counts: {
+      hosts: hosts.length,
+      groups: groups.length,
+      identities: identities.length,
+      keys: keys.length,
+      rules: rules.length,
+    },
   };
 }
 
