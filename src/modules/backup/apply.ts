@@ -1,35 +1,12 @@
 /**
- * Export / import saved hosts as a single passphrase-encrypted `.tervia-backup`
- * file, so moving to another machine is one import instead of retyping every
- * host and credential.
+ * Export / import saved hosts and groups as a single passphrase-encrypted
+ * `.tervia-backup` file, so moving to another machine is one import instead of
+ * retyping every host and credential.
  *
- * The credentials live in the OS keychain and CANNOT travel with the store files
- * on their own - a keychain does not move between machines - which is exactly
- * why this exists and why the file is always encrypted: it carries SSH
- * passwords, SSH private keys and RDP passwords, so a plaintext export would be
- * a credential leak the moment it touched Downloads or a synced folder. Sealing
- * happens in the host process (`modules/backup.rs`); `crypto.subtle` is not
- * available to the webview because the app origin is plain http.
- *
- * THE CREDENTIALS DO NOT PASS THROUGH HERE. An export sends keychain
- * REFERENCES and Rust reads the values; an import gets back only the host
- * metadata and tells Rust which ids may be written. That is deliberate, and it
- * is why there is no RDP secret read-back helper anywhere in the tree:
- * `rdp_open` takes a reference precisely so an RDP password never enters the
- * webview, and a backup that read one would have thrown that away.
- *
- * The v1 path below is the exception, and it cannot be otherwise: a v1 file's
- * sealed block IS the credential map, so importing one means holding it here
- * long enough to write it. v1 is SSH-only and read-only.
- *
- * What does NOT travel yet: a vault-bound host's credential. The host record
- * itself is exported, but its identity and key live on the `tervia-vault`
- * service and are not in this payload - a format carrying them is 6g. So the
- * BINDING does not travel either: an incoming `{kind:"identity"}` is a claim
- * about the exporting machine's vault, and applying it here would delete the
- * secrets of whatever is saved under that id. `resolveIdentityBindings` is where
- * that is refused. Nothing here makes a secret safer either way; what a vault
- * binding buys is fewer copies of one secret.
+ * This module now lives under `backup/` rather than `ssh/` because 6g grows
+ * what it carries from two collections (hosts, groups) to five - adding
+ * identities, keys and forward rules - without moving the file a second time;
+ * that v3 payload is step 2's work, and this step is the move alone.
  */
 import { invoke } from "@tauri-apps/api/core";
 
@@ -75,7 +52,7 @@ import {
   type BackupSecrets,
   type SealedBlob,
   type SecretRef,
-} from "./backupFile";
+} from "./file";
 
 function reason(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
@@ -88,7 +65,7 @@ function reason(e: unknown): string {
  * is nothing on the host service to read. Its identity's secrets are a separate
  * service and a later format.
  *
- * Exported for `scripts/ssh-backup-verify.ts`, which pins the producing half of
+ * Exported for `scripts/backup-verify.ts`, which pins the producing half of
  * the {@link SECRET_ALREADY_STORED} contract: what travels on an export is
  * decided here, and a field this stops naming simply stops travelling.
  */
@@ -258,7 +235,7 @@ export async function applyBackup(text: string, passphrase: string): Promise<Imp
  * unwritable until that type gains a key for it, which is where the omission
  * surfaces.
  *
- * Exported for `scripts/ssh-backup-verify.ts` alongside {@link hostRefs}: between
+ * Exported for `scripts/backup-verify.ts` alongside {@link hostRefs}: between
  * them they are the whole producing half of the {@link SECRET_ALREADY_STORED}
  * contract, and the consumer half is pinned in `hosts-store-verify.ts`.
  */

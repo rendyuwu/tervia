@@ -17,8 +17,8 @@
 import { Button } from "@/components/ui/button";
 import { toast } from "@/components/ui/toast";
 import type { FsReadResult } from "@/lib/ipc";
-import type { BackupMode } from "@/modules/ssh/SshBackupDialog";
-import { BACKUP_EXTENSION, BACKUP_EXTENSION_V1, parseBackupFile } from "@/modules/ssh/backupFile";
+import type { BackupMode } from "@/modules/backup/BackupDialog";
+import { BACKUP_EXTENSION, BACKUP_EXTENSION_V1, parseBackupFile } from "@/modules/backup/file";
 import { invoke } from "@tauri-apps/api/core";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { Download, Upload } from "lucide-react";
@@ -28,8 +28,8 @@ import { useHosts } from "../useHosts";
 
 // Same treatment SshMenu gave it: the backup dialog pulls in the crypto/IO
 // path, which nobody pays for until they actually move machines.
-const SshBackupDialog = lazy(() =>
-  import("@/modules/ssh/SshBackupDialog").then((m) => ({ default: m.SshBackupDialog })),
+const BackupDialog = lazy(() =>
+  import("@/modules/backup/BackupDialog").then((m) => ({ default: m.BackupDialog })),
 );
 
 export function HostsBackupActions(): ReactNode {
@@ -158,7 +158,7 @@ export function HostsBackupActions(): ReactNode {
           keep either resident for a close animation. */}
       {backup ? (
         <Suspense fallback={null}>
-          <SshBackupDialog
+          <BackupDialog
             open={backupOpen}
             onOpenChange={(o) => {
               setBackupOpen(o);

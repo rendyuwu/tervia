@@ -32,11 +32,12 @@
  *
  * Only reading v1 is supported; every export is v2.
  *
- * Kept free of the Tauri runtime so `scripts/ssh-backup-verify.ts` can exercise
- * the parser under plain node. `@/modules/hosts/types` and
- * `@/modules/vault/types` are both plain TypeScript with no IPC of their own,
- * which is why the value imports below are safe; anything reaching a store or
- * an `invoke` belongs in `backup.ts` instead.
+ * Kept free of the Tauri runtime so `scripts/backup-verify.ts` can exercise the
+ * parser under plain node. That constraint matters more now: the value imports
+ * below (`RDP_DEFAULT_PRESET`, `hostPins`) come from `@/modules/hosts/types`,
+ * alongside type-only imports from `@/modules/vault/types` - both plain
+ * TypeScript with no IPC of their own, which is why those imports are safe;
+ * anything reaching a store or an `invoke` belongs in `apply.ts` instead.
  */
 import {
   RDP_DEFAULT_PRESET,

@@ -109,10 +109,10 @@ import {
   type SshHost,
 } from "../src/modules/hosts/types";
 // The import's own passes, so the pin block below can exercise the COMPOSITION
-// this store sits at the end of. Both are Tauri-free by design - `backupFile.ts`
-// is kept that way so `ssh-backup-verify.ts` can run under plain node - and
-// nothing here reaches `backup.ts`, which does `invoke`.
-import { carryPins, sanitizePayload } from "../src/modules/ssh/backupFile";
+// this store sits at the end of. Both are Tauri-free by design - `file.ts`
+// is kept that way so `backup-verify.ts` can run under plain node - and
+// nothing here reaches `apply.ts`, which does `invoke`.
+import { carryPins, sanitizePayload } from "../src/modules/backup/file";
 import type { SecretsIo } from "../src/modules/vault/adapters";
 import type { ResolveDeps } from "../src/modules/vault/resolve";
 import { VaultInUseError, type VaultIdentity, type VaultKey } from "../src/modules/vault/types";

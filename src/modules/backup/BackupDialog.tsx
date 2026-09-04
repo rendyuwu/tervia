@@ -11,8 +11,8 @@ import {
 import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
 import { toast } from "@/components/ui/toast";
-import { applyBackup, buildBackup, type ImportResult } from "./backup";
-import { BACKUP_EXTENSION } from "./backupFile";
+import { applyBackup, buildBackup, type ImportResult } from "./apply";
+import { BACKUP_EXTENSION } from "./file";
 import { invoke } from "@tauri-apps/api/core";
 import { save as saveFileDialog } from "@tauri-apps/plugin-dialog";
 import { useEffect, useState } from "react";
@@ -30,7 +30,7 @@ type Props = {
   mode: BackupMode;
 };
 
-export function SshBackupDialog({ open, onOpenChange, mode }: Props) {
+export function BackupDialog({ open, onOpenChange, mode }: Props) {
   const isExport = mode.kind === "export";
   const [passphrase, setPassphrase] = useState("");
   const [confirm, setConfirm] = useState("");

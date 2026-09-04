@@ -1,6 +1,6 @@
 /**
  * Self-check for the connection backup parser, both format generations.
- * Run: `npx tsx scripts/ssh-backup-verify.ts`.
+ * Run: `npx tsx scripts/backup-verify.ts`.
  *
  * Importing a backup is a TRUST BOUNDARY: the file arrives from a USB stick or
  * a chat, and everything that survives it is written into the host store and
@@ -48,7 +48,7 @@
 import { jumpChain, MAX_JUMP_HOPS } from "../src/modules/hosts/jumps";
 import { SECRET_ALREADY_STORED } from "../src/modules/hosts/store";
 import { hostFingerprint, type Host, type RdpHost, type SshHost } from "../src/modules/hosts/types";
-import { arrivedWithoutSecret, hostRefs, storedFields } from "../src/modules/ssh/backup";
+import { arrivedWithoutSecret, hostRefs, storedFields } from "../src/modules/backup/apply";
 import {
   BACKUP_KIND,
   BACKUP_KIND_V1,
@@ -65,7 +65,7 @@ import {
   sanitizeLegacyHost,
   sanitizePayload,
   sanitizeSecrets,
-} from "../src/modules/ssh/backupFile";
+} from "../src/modules/backup/file";
 import { sshCredentialValues } from "../src/modules/vault/resolve";
 
 let failed = 0;

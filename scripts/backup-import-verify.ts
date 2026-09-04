@@ -1,8 +1,8 @@
 /**
  * Self-check for VLT-60: the Import dialog's failure surface, and the order
  * validation runs in relative to the passphrase prompt.
- * Run: `pnpm verify ssh-backup-import` (or `npx tsx
- * scripts/ssh-backup-import-verify.ts` to iterate).
+ * Run: `pnpm verify backup-import` (or `npx tsx
+ * scripts/backup-import-verify.ts` to iterate).
  *
  * SOURCE-TEXT for both halves, and for the same reason `hosts-error-toast-
  * verify.ts` is: there is no DOM/layout engine in this repo's check suite, and
@@ -10,15 +10,15 @@
  * WHICH code path a failure or a passphrase prompt runs through, which is a
  * property of the source rather than of any one render. The one piece that IS
  * ordinary behaviour (does `parseBackupFile` actually accept what it should,
- * and reject what it should not) is already exercised in `ssh-backup-verify
- * .ts`'s `[envelope]`/`[v1 envelope]`/`[v2 envelope]` sections; this file
+ * and reject what it should not) is already exercised in `backup-verify.ts`'s
+ * `[envelope]`/`[v1 envelope]`/`[v2 envelope]` sections; this file
  * reuses that function directly for two checks specific to VLT-60's claims
  * (a v1 envelope is not rejected, a v2 envelope with garbage ciphertext is
  * not rejected pre-passphrase) rather than re-deriving that coverage.
  *
  * Two files, two concerns:
  *
- *   `SshBackupDialog.tsx` - Import's run() failure must toast(), not setError()
+ *   `BackupDialog.tsx` - Import's run() failure must toast(), not setError()
  *   into the dialog's own inline line (VLT-36 left this one surface out:
  *   "three surfaces become one" is still deferred, so Export's inline line is
  *   checked to be UNCHANGED, not merged away).
@@ -40,7 +40,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
-import { BACKUP_KIND, BACKUP_KIND_V1, parseBackupFile } from "../src/modules/ssh/backupFile";
+import { BACKUP_KIND, BACKUP_KIND_V1, parseBackupFile } from "../src/modules/backup/file";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const read = (p: string) => readFileSync(join(root, p), "utf8");
@@ -136,10 +136,10 @@ check(
   !stripComments(STRIPPER_PROBE).includes("{/*"),
 );
 
-const dialogSrc = stripComments(read("src/modules/ssh/SshBackupDialog.tsx"));
+const dialogSrc = stripComments(read("src/modules/backup/BackupDialog.tsx"));
 const actionsSrc = stripComments(read("src/modules/hosts/page/HostsBackupActions.tsx"));
 
-// --- Part 1: SshBackupDialog.tsx --------------------------------------------
+// --- Part 1: BackupDialog.tsx --------------------------------------------
 
 console.log("[dialog] imports the shared toast");
 check(
@@ -179,8 +179,8 @@ check(
 
 console.log("\n[actions] imports parseBackupFile to pre-check the envelope");
 check(
-  "imports parseBackupFile from @/modules/ssh/backupFile",
-  /import\s*\{[^}]*\bparseBackupFile\b[^}]*\}\s*from\s*"@\/modules\/ssh\/backupFile";/.test(
+  "imports parseBackupFile from @/modules/backup/file",
+  /import\s*\{[^}]*\bparseBackupFile\b[^}]*\}\s*from\s*"@\/modules\/backup\/file";/.test(
     actionsSrc,
   ),
 );
