@@ -238,20 +238,18 @@ export function RuleCard({ row, onEdit, onDelete }: RuleCardProps): ReactNode {
         // scrollbar jumps while the user scrolls. The pair is load-bearing;
         // neither half works alone. This is the fourth root that carries it.
         //
-        // THE 100px NOW UNDERSTATES THIS CARD, and it stays anyway.
-        // `vault-shell-verify.ts` section 16 asserts all four roots carry an
-        // IDENTICAL pair, so this number cannot move here alone; HostCard's
-        // 100px is HostCard's own measurement (24 of `p-3` + 20 name row + 16
-        // detail row + 24 action row + 16 of gaps) and a forwards card in a
-        // quarter-width cell is ~128px with nothing running, ~144px once the
-        // route takes its second line, and ~205px while a running rule shows
-        // its three-line stop note and the status row wraps its buttons under
-        // the status. An estimate that is too SMALL only makes the scrollbar
-        // grow as cards paint in - it never jumps backwards, which is the
-        // failure the pair exists to prevent - so the honest fix is to
-        // re-measure all four roots and move them together, which is a change
-        // to four files and not this one.
-        "[contain-intrinsic-size:auto_100px] [content-visibility:auto]",
+        // A quarter-width forwards card measures ~128px with nothing running,
+        // ~144px once the route takes its second line, and ~205px while a
+        // running rule shows its three-line stop note and the status row
+        // wraps its buttons under the status. 144 is the reserve: it covers
+        // the two common states and deliberately not the running one, because
+        // an estimate that is too SMALL only makes the scrollbar grow as
+        // cards paint in - it never jumps backwards, which is the failure the
+        // pair exists to prevent - so over-reserving for the rare running
+        // case is the wrong direction for every idle card on the page. The
+        // other three roots keep their own measured value; nothing requires
+        // them to agree with this one or with each other.
+        "[contain-intrinsic-size:auto_144px] [content-visibility:auto]",
       )}
     >
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1">

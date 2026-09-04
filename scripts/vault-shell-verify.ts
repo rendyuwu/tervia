@@ -1100,50 +1100,50 @@ console.log("    missingPrivateKey -> the row Badge's variant AND its label");
 // ============================================================================
 // 16. The duplicated layout strings still agree with each other.
 // ============================================================================
-// Protects: four files carry the identical containment pair and four call
-// sites carry the identical responsive grid, and nothing asserted that they
-// match. The remedy a review proposed was one shared shell; the reason it is
-// not here is that a vault-only shell would cut three copies to two -
-// `hosts/page/HostCard.tsx` is the third and lives in another module - so it
-// would shrink the property rather than close it, while rewriting hand-tested
-// code and moving the root element sections 10 and 15 anchor on. A structural
-// equality between the copies costs one section and makes a later divergence
-// deliberate, which is exactly what the search box already gets
-// (`hosts-header-narrow-verify.ts:244-247`). If a shared shell ever lands,
-// this section is what has to be deleted on purpose.
+// Protects: four files carry the containment pair and four call sites carry
+// the identical responsive grid, and nothing asserted either property. The
+// remedy a review proposed for the grid tuple was one shared shell; the
+// reason it is not here is that a vault-only shell would cut three copies to
+// two - `hosts/page/HostCard.tsx` is the third and lives in another module -
+// so it would shrink the property rather than close it, while rewriting
+// hand-tested code and moving the root element sections 10 and 15 anchor on.
+// A structural equality between the copies costs one section and makes a
+// later divergence deliberate, which is exactly what the search box already
+// gets (`hosts-header-narrow-verify.ts:244-247`). If a shared shell ever
+// lands, this section is what has to be deleted on purpose. The shared-shell
+// question is untouched by this file; its trigger is still a future card
+// root, not this one.
 //
 // `usageDetail` is deliberately NOT checked here: it is nine lines of copy
 // differing only in its noun, a drift in it is visible on screen rather than
 // silent, and a check per duplicated helper is the "one check per copy" this
 // section exists to avoid.
 //
-// GROWN A FOURTH ROOT (step 10, 6f wave 2): `RuleCard.tsx` carries the
-// identical containment pair too (§4(a) Q3) - "this is the fourth root that
-// carries it", per that file's own comment on the pair. If a future owner
-// picks the shared shell instead of a fourth hand-written copy, THIS is the
-// line where this section is deleted on purpose, per that same decision.
+// FOUR CONTAINMENT ROOTS, NOT ONE SHARED VALUE: `IdentityCard`, `KeyCard`,
+// `HostCard` and `RuleCard` are genuinely different heights, so the pair's
+// PRESENCE (both halves, on every root) is the property this section checks,
+// and the reserved SIZE is per-card - raising a shared value to cover the
+// tallest card over-reserves on every shorter one, and an over-estimate is
+// the direction that jumps the scrollbar backwards, the exact failure the
+// pair exists to prevent (an under-estimate only grows the scrollbar as
+// cards paint in). Each root's expected value is measured against that
+// root's own layout, not against its siblings.
 //
-// AND A FOURTH GRID CALL SITE (VLT-101(b)): `ForwardsPage.tsx` swapped its
-// `flex flex-col gap-2` list for the same literal, so the containment tuple
-// and the grid tuple now cover the same four modules. The two halves of this
-// section stayed the same size for three waves and grew together in this one,
-// which is the argument FOR the shared shell getting stronger rather than the
-// argument against it changing - a fifth surface should take that trade,
-// not a fifth hand-written copy.
-//
-// THE 100px IN THAT PAIR IS NOW WRONG FOR `RuleCard`, and this section is why
-// it was not fixed here: a quarter-width forwards card measures ~128px empty
-// and ~205px with a running rule's stop note (`RuleCard.tsx`'s own comment on
-// the pair does the arithmetic), but the check below demands all four roots be
-// IDENTICAL, so moving one is a red check and moving all four is a re-measure
-// of `HostCard`, `IdentityCard` and `KeyCard` as well. Deliberately deferred:
-// an under-estimate grows the scrollbar as cards paint in and never jumps it
-// backwards, which is the failure the pair exists for.
+// AND A FOURTH GRID CALL SITE: `ForwardsPage.tsx` swapped its
+// `flex flex-col gap-2` list for the same literal, so the grid tuple now
+// covers the same four modules the containment check does.
 console.log("\n[16. VLT-75 parity] the containment pair and the responsive grid still agree");
 {
   // --- the containment pair: IdentityCard, KeyCard, HostCard, RuleCard ---
   const CONTAINMENT_TOKEN = /^\[(contain-intrinsic-size|content-visibility):/;
-  const containmentTexts: string[] = [];
+  // Per-root expected value, not a shared constant: the four cards are
+  // genuinely different heights, so no single number is right for all four.
+  const EXPECTED_INTRINSIC = {
+    identityCard: "auto_100px",
+    keyCard: "auto_100px",
+    hostCard: "auto_100px",
+    ruleCard: "auto_144px",
+  } as const;
   for (const [key, functionName] of [
     ["identityCard", "IdentityCard"],
     ["keyCard", "KeyCard"],
@@ -1178,13 +1178,22 @@ console.log("\n[16. VLT-75 parity] the containment pair and the responsive grid 
       tokens.length === 2,
       tokens.join(" "),
     );
-    containmentTexts.push(tokens.join(" "));
+    check(
+      `${FILES[key]}'s containment tokens are contain-intrinsic-size and content-visibility`,
+      tokens.some((t) => t.startsWith("[contain-intrinsic-size:")) &&
+        tokens.some((t) => t.startsWith("[content-visibility:")),
+      tokens.join(" "),
+    );
+    const intrinsicToken = tokens.find((t) => t.startsWith("[contain-intrinsic-size:"));
+    const intrinsicValue = intrinsicToken
+      ? intrinsicToken.slice("[contain-intrinsic-size:".length, -1)
+      : "";
+    check(
+      `${FILES[key]}'s contain-intrinsic-size value matches its own root's expected reserve`,
+      intrinsicValue === EXPECTED_INTRINSIC[key],
+      intrinsicValue,
+    );
   }
-  check(
-    "the containment pair is identical across IdentityCard, KeyCard, HostCard and RuleCard",
-    containmentTexts.every((t) => t === containmentTexts[0]),
-    containmentTexts.join(" | "),
-  );
 
   // --- the responsive grid: two call sites on VaultPage, one on HostsPage,
   //     one on ForwardsPage ---
