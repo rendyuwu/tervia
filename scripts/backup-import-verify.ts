@@ -232,6 +232,31 @@ for (const field of ["hosts", "groups", "identities", "keys", "rules"]) {
   );
 }
 
+console.log(
+  "\n[dialog] summarize() reports groups too - counts, and the two silent-conflict cases",
+);
+// Pin the guard EXPRESSIONS for the same reason describeExport's are pinned
+// above: the field name appearing somewhere in the function is also true of
+// a version that always reports it.
+const summarizeBody =
+  dialogSrc.match(/function summarize\(r: ImportResult\): string \{([\s\S]*?)\n\}/)?.[1] ?? "";
+check("summarize() was found", summarizeBody.length > 0);
+check(
+  "summarize() only reports host groups when added+replaced is non-zero (groupCount > 0)",
+  summarizeBody.includes("groupCount > 0"),
+);
+// `merged` and `keptNames` are not failures - they belong nowhere in
+// `problems[]` - but they are the two cases where a file's hosts land in a
+// group other than the one the file named, so they must not be silent either.
+check(
+  "summarize() surfaces a group name that lost to an existing id match (r.groups.merged > 0)",
+  summarizeBody.includes("r.groups.merged > 0"),
+);
+check(
+  "summarize() surfaces a group whose local name won over the file's (r.groups.keptNames > 0)",
+  summarizeBody.includes("r.groups.keptNames > 0"),
+);
+
 // --- Part 2: HostsBackupActions.tsx -----------------------------------------
 
 console.log("\n[actions] imports parseBackupFile to pre-check the envelope");

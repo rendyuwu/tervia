@@ -215,11 +215,13 @@ function summarize(r: ImportResult): string {
   const added = r.ssh.added + r.rdp.added;
   const replaced = r.ssh.replaced + r.rdp.replaced;
   const withoutSecrets = r.ssh.withoutSecrets + r.rdp.withoutSecrets;
-  const parts = [`${added} added`, `${replaced} updated`];
-  if (r.skipped > 0) parts.push(`${r.skipped} skipped as unreadable`);
-  if (withoutSecrets > 0) parts.push(`${withoutSecrets} without stored credentials`);
   // The per-protocol split only earns its space when both are present; a
   // v1 file or an SSH-only export would otherwise report "0 RDP".
+  //
+  // It rides on the HOST count rather than the end of the sentence, because
+  // the clauses after it are about other collections: trailing it would put
+  // "(3 SSH hosts, 2 RDP hosts)" after a sentence about group names, where it
+  // reads as qualifying that instead.
   const split =
     r.rdp.added + r.rdp.replaced > 0 && r.ssh.added + r.ssh.replaced > 0
       ? ` (${plural(r.ssh.added + r.ssh.replaced, "SSH host")}, ${plural(
@@ -227,14 +229,33 @@ function summarize(r: ImportResult): string {
           "RDP host",
         )})`
       : "";
+  const parts = [`${added} added`, `${replaced} updated${split}`];
+  if (r.skipped > 0) parts.push(`${r.skipped} skipped as unreadable`);
+  if (withoutSecrets > 0) parts.push(`${withoutSecrets} without stored credentials`);
   // Same rule as the split above: a collection earns its own clause only
   // when it actually landed something, or a host-only import would read "0
   // identities, 0 keys, 0 rules" and look broken.
+  const groupCount = r.groups.added + r.groups.replaced;
   const identityCount = r.identities.added + r.identities.replaced;
   const keyCount = r.keys.added + r.keys.replaced;
   const ruleCount = r.rules.added + r.rules.replaced;
+  if (groupCount > 0) parts.push(plural(groupCount, "host group"));
   if (identityCount > 0) parts.push(plural(identityCount, "identity", "identities"));
   if (keyCount > 0) parts.push(plural(keyCount, "vault key"));
   if (ruleCount > 0) parts.push(plural(ruleCount, "forward rule"));
-  return `Imported: ${parts.join(", ")}${split}.`;
+  // Not failures - `problems[]` is for what could not be done - but not
+  // silent either: each is a case where the file's hosts landed in a group
+  // other than the one the file named, and the file's own record of that is
+  // gone the moment this import finishes.
+  if (r.groups.merged > 0) {
+    const noun = r.groups.merged === 1 ? "group's" : "groups'";
+    parts.push(`${r.groups.merged} ${noun} hosts merged into an existing group of the same name`);
+  }
+  if (r.groups.keptNames > 0) {
+    const noun = r.groups.keptNames === 1 ? "group's" : "groups'";
+    parts.push(
+      `${r.groups.keptNames} ${noun} hosts kept this machine's group name instead of the file's`,
+    );
+  }
+  return `Imported: ${parts.join(", ")}.`;
 }
