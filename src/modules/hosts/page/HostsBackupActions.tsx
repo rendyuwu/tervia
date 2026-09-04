@@ -9,11 +9,10 @@
  * not only picked-then-read-then-opened.
  *
  * The format is **v3**, and v1 and v2 files are refused by name rather than by
- * a parse error - which is why the picker still offers the v1 extension. What
- * a v3 payload carries is growing to identities, keys and forward rules
- * alongside the hosts; until it does, a reader who finds only hosts and groups
- * sealed here on a page that shows vault-bound hosts should not have to guess
- * whether that is a bug. It is not, yet.
+ * a parse error - which is why the picker still offers the v1 extension. A v3
+ * payload now carries identities, keys and forward rules alongside the hosts
+ * and groups, so this page - which shows only vault-bound hosts - sealing all
+ * five collections into one backup is expected, not a mismatch to puzzle over.
  */
 import { Button } from "@/components/ui/button";
 import { toast } from "@/components/ui/toast";
@@ -25,8 +24,6 @@ import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { Download, Upload } from "lucide-react";
 import { lazy, Suspense, useState, type ReactNode } from "react";
 
-import { useHosts } from "../useHosts";
-
 // Same treatment SshMenu gave it: the backup dialog pulls in the crypto/IO
 // path, which nobody pays for until they actually move machines.
 const BackupDialog = lazy(() =>
@@ -34,10 +31,6 @@ const BackupDialog = lazy(() =>
 );
 
 export function HostsBackupActions(): ReactNode {
-  // Only for the Export button's enabled state: one backup covers both
-  // protocols, so an empty SSH-only view of the store would be the wrong
-  // thing to check - only every host being gone makes the export empty.
-  const hosts = useHosts();
   const [backup, setBackup] = useState<BackupMode | null>(null);
   const [backupOpen, setBackupOpen] = useState(false);
 
@@ -130,7 +123,6 @@ export function HostsBackupActions(): ReactNode {
         variant="outline"
         size="sm"
         onClick={openExport}
-        disabled={hosts.size === 0}
         aria-label="Export…"
         className="gap-1.5"
       >

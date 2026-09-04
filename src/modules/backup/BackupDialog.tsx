@@ -58,10 +58,11 @@ export function BackupDialog({ open, onOpenChange, mode }: Props) {
     setBusy(true);
     try {
       if (isExport) {
-        const { text, sshCount, rdpCount } = await buildBackup(passphrase);
-        // Built BEFORE the save dialog on purpose: "no saved connections" or a
-        // keychain refusal should surface without first making the user pick a
-        // filename for a file that was never going to be written.
+        const { text, counts } = await buildBackup(passphrase);
+        // Built BEFORE the save dialog on purpose: "There is nothing saved to
+        // export" or a keychain refusal should surface without first making
+        // the user pick a filename for a file that was never going to be
+        // written.
         const target = await saveFileDialog({
           defaultPath: `tervia-connections.${BACKUP_EXTENSION}`,
           filters: [{ name: "Tervia backup", extensions: [BACKUP_EXTENSION] }],
@@ -71,9 +72,7 @@ export function BackupDialog({ open, onOpenChange, mode }: Props) {
           return;
         }
         await invoke<void>("fs_write_file", { path: target, content: text });
-        setDone(
-          `Exported ${plural(sshCount, "SSH host")} and ${plural(rdpCount, "RDP host")} to ${target}`,
-        );
+        setDone(`Exported ${describeExport(counts)} to ${target}`);
       } else {
         const result = await applyBackup(mode.text, passphrase);
         setDone(summarize(result));
@@ -104,11 +103,11 @@ export function BackupDialog({ open, onOpenChange, mode }: Props) {
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
-          <DialogTitle>{isExport ? "Export connections" : "Import connections"}</DialogTitle>
+          <DialogTitle>{isExport ? "Export backup" : "Import backup"}</DialogTitle>
           <DialogDescription>
             {isExport
-              ? "Writes every saved SSH and RDP host, and its stored credentials, to one encrypted file. Keep the passphrase: without it the file cannot be read, and there is no recovery."
-              : "Merges the hosts in the file into your saved connections, matching on connection id. Nothing is deleted."}
+              ? "Writes every saved host, host group, vault identity, vault key and forward rule, and their stored credentials, to one encrypted file. Keep the passphrase: without it the file cannot be read, and there is no recovery."
+              : "Merges the hosts, host groups, vault identities, vault keys and forward rules in the file into what is already saved, matching on id. Nothing is deleted."}
           </DialogDescription>
         </DialogHeader>
 
@@ -185,8 +184,31 @@ export function BackupDialog({ open, onOpenChange, mode }: Props) {
   );
 }
 
-function plural(n: number, noun: string): string {
-  return `${n} ${noun}${n === 1 ? "" : "s"}`;
+function plural(n: number, noun: string, pluralNoun?: string): string {
+  return `${n} ${n === 1 ? noun : (pluralNoun ?? `${noun}s`)}`;
+}
+
+/**
+ * The export result line's five-collection summary. Same rule as
+ * summarize()'s per-protocol split below: a collection earns its own clause
+ * only when it is non-zero, or a vault-only export would read "0 hosts, 0
+ * host groups" and a host-only one, symmetrically, "0 identities, 0 keys, 0
+ * rules" - both look broken.
+ */
+function describeExport(counts: {
+  hosts: number;
+  groups: number;
+  identities: number;
+  keys: number;
+  rules: number;
+}): string {
+  const parts: string[] = [];
+  if (counts.hosts > 0) parts.push(plural(counts.hosts, "host"));
+  if (counts.groups > 0) parts.push(plural(counts.groups, "host group"));
+  if (counts.identities > 0) parts.push(plural(counts.identities, "identity", "identities"));
+  if (counts.keys > 0) parts.push(plural(counts.keys, "vault key"));
+  if (counts.rules > 0) parts.push(plural(counts.rules, "forward rule"));
+  return parts.join(", ");
 }
 
 function summarize(r: ImportResult): string {
@@ -205,5 +227,14 @@ function summarize(r: ImportResult): string {
           "RDP host",
         )})`
       : "";
+  // Same rule as the split above: a collection earns its own clause only
+  // when it actually landed something, or a host-only import would read "0
+  // identities, 0 keys, 0 rules" and look broken.
+  const identityCount = r.identities.added + r.identities.replaced;
+  const keyCount = r.keys.added + r.keys.replaced;
+  const ruleCount = r.rules.added + r.rules.replaced;
+  if (identityCount > 0) parts.push(plural(identityCount, "identity", "identities"));
+  if (keyCount > 0) parts.push(plural(keyCount, "vault key"));
+  if (ruleCount > 0) parts.push(plural(ruleCount, "forward rule"));
   return `Imported: ${parts.join(", ")}${split}.`;
 }

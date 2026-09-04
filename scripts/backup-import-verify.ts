@@ -179,6 +179,59 @@ check(
   /\{error \? <span className="text-destructive/.test(dialogSrc),
 );
 
+console.log("\n[dialog] the export/import descriptions name the five backup collections");
+// Bounded to the <DialogDescription> tag first: DialogTitle right above it is
+// ALSO an `isExport ? "..." : "..."` ternary (just of two short strings), so
+// an unbounded match here would silently latch onto the title instead - which
+// is exactly what happened the first time this check was written.
+const descriptionBlock =
+  dialogSrc.match(/<DialogDescription>([\s\S]*?)<\/DialogDescription>/)?.[1] ?? "";
+check("the DialogDescription block was found", descriptionBlock.length > 0);
+// The descriptions are a plain ternary of two single-line string literals -
+// captured together so "export names X" and "import keeps Y verbatim" both
+// read off the same match instead of two independent regexes that could each
+// silently latch onto the wrong string if the ternary's shape ever changes.
+const descMatch = descriptionBlock.match(/isExport\s*\?\s*"([^"]*)"\s*:\s*"([^"]*)"/);
+check("the DialogDescription ternary was found", descMatch !== null);
+const exportDesc = descMatch?.[1] ?? "";
+const importDesc = descMatch?.[2] ?? "";
+for (const noun of ["host", "host group", "vault identity", "vault key", "forward rule"]) {
+  check(`export description names "${noun}"`, exportDesc.includes(noun));
+}
+// Exact-string pin, not a paraphrase check: this sentence is the module's
+// contract (step 6 spent real design on keeping it true), so a rewording
+// that keeps the same MEANING but not the same words must still fail here.
+check(
+  'import description keeps "Nothing is deleted" verbatim',
+  importDesc.includes("Nothing is deleted"),
+);
+// "identity" is plural here ("identities"), unlike the export description's
+// "every saved ... identity" - a regular plural still contains its singular
+// stem ("hosts" contains "host"), but "identities" does not contain
+// "identity" (the "y" breaks at the same letter the "-ies" replaces), so this
+// list spells that one out rather than reusing exportNouns above.
+for (const noun of ["host", "host group", "vault identities", "vault key", "forward rule"]) {
+  check(`import description names "${noun}"`, importDesc.includes(noun));
+}
+
+console.log(
+  "\n[dialog] the export result line hides a zero-valued collection, not just identities/keys/rules",
+);
+// Pin the guard EXPRESSIONS, not just the field names: `counts.identities`
+// appearing somewhere in the function is also true of a version that always
+// pushes it. `describeExport`'s parameter is a multi-line object type, so the
+// non-greedy `[^)]*` (which, being a negated class, matches newlines too)
+// walks past it to the first real `)` before the body starts.
+const describeExportBody =
+  dialogSrc.match(/function describeExport\([^)]*\)[^{]*\{([\s\S]*?)\n\}/)?.[1] ?? "";
+check("describeExport() was found", describeExportBody.length > 0);
+for (const field of ["hosts", "groups", "identities", "keys", "rules"]) {
+  check(
+    `describeExport() only includes "${field}" when it is non-zero (counts.${field} > 0)`,
+    describeExportBody.includes(`counts.${field} > 0`),
+  );
+}
+
 // --- Part 2: HostsBackupActions.tsx -----------------------------------------
 
 console.log("\n[actions] imports parseBackupFile to pre-check the envelope");
@@ -188,6 +241,23 @@ check(
     actionsSrc,
   ),
 );
+
+console.log(
+  "\n[actions] the picker filter still offers all three extensions - dropping v1 was withdrawn",
+);
+// Bounded to the `extensions: [...]` array rather than pinned as one line of
+// exact text: a Prettier reformat is free to break that array across lines,
+// and a check anchored to the single-line form would then read a live filter
+// as broken. `[\s\S]*?` inside the brackets tolerates that; the word-boundary
+// on BACKUP_EXTENSION keeps it from also matching inside BACKUP_EXTENSION_V1.
+const filterExtensions = actionsSrc.match(/extensions:\s*\[([\s\S]*?)\]/)?.[1] ?? "";
+check("the picker filter array was found", filterExtensions.length > 0);
+check("the picker filter contains BACKUP_EXTENSION", /\bBACKUP_EXTENSION\b/.test(filterExtensions));
+check(
+  "the picker filter contains BACKUP_EXTENSION_V1 - a filtered-out v1 file would have nothing to click",
+  /\bBACKUP_EXTENSION_V1\b/.test(filterExtensions),
+);
+check('the picker filter contains "json"', /"json"/.test(filterExtensions));
 
 console.log("\n[actions] openImport() checks the shape BEFORE opening the passphrase dialog");
 // Textual order is the contract here: reading is not enough (VLT-60's bug was
