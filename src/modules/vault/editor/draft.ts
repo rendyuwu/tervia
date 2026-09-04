@@ -374,8 +374,11 @@ export function passphraseHelp(replacingBody: boolean): string {
  * and `keyMissingSecret` (`../refs.ts:67-69`) reads only `hasPrivateKey`, so
  * nothing on the Vault page says a word about it.
  *
- * The host editor's inline key field has the same hole and is NOT changed here:
- * its save does not inspect at all. VLT-81.
+ * The host editor's inline key field had the same hole and now imports this
+ * rather than carrying a second copy of it, so the two editors refuse the same
+ * key for the same reason. A third caller should import it too: a private
+ * reimplementation passes every gate in this repo, which is why the host
+ * dialog's import is pinned as a set rather than compared by value.
  */
 export function encryptedKeyRefusal(encrypted: boolean, passphrase: string): string | null {
   if (!encrypted || passphrase.trim() !== "") return null;
