@@ -40,6 +40,29 @@
  *   - every one of them a throw, so every one of them costs the rows behind it.
  *   See {@link sanitizeRule}.
  *
+ * THE PASSES OVER THOSE RECORDS HAVE AN ORDER, and it is stated here because no
+ * signature carries it and nothing in the type system enforces it. Each function
+ * repeats its own constraint; this is the list.
+ *
+ *   {@link refuseProtocolConflicts} before {@link resolveIdentityBindings}, so a
+ *   saved record the second one finds is known to speak the row's protocol.
+ *
+ *   {@link normaliseIdentityKeys} before {@link resolveIdentityBindings}, which
+ *   is handed the ids the first RETURNED and not the ids it was given: an
+ *   identity skipped for a key that did not travel does not exist after the
+ *   import, and a host must not be bound to it.
+ *
+ *   {@link clearDanglingRuleHosts} may run on either side of
+ *   {@link resolveIdentityBindings}. They are independent - the credential pass
+ *   changes a row's credential and never its id or its protocol, and those are
+ *   the only fields the rule pass reads.
+ *
+ *   All three credential and reference passes before {@link carryPins}, which
+ *   may not put a pin on a row one of them is about to refuse.
+ *
+ *   {@link orderHostWrites} after both jump-clearing passes, because it assumes
+ *   every surviving reference resolves.
+ *
  * ONE FORMAT IS READ, and where the boundary sits follows from it.
  *
  * **v3** (`.tervia-backup`, kind `tervia-connections`) seals everything - the
@@ -168,8 +191,15 @@ export type SealedBlob = {
   ciphertext: string;
 };
 
-/** The file an export writes. Everything of substance is inside `payload`. */
-export type BackupFileV2 = {
+/**
+ * The file an export writes. Everything of substance is inside `payload`.
+ *
+ * NOT version-suffixed, and that is the whole reason it was renamed: `version`
+ * below is `typeof BACKUP_VERSION`, so the type already carries its own number
+ * and a second copy in the name can only ever go stale - it had already gone
+ * stale once, still saying V2 for a type stamping a 3.
+ */
+export type BackupFile = {
   kind: typeof BACKUP_KIND;
   version: typeof BACKUP_VERSION;
   exportedAt: number;
@@ -461,7 +491,7 @@ export function sanitizeGroup(raw: unknown): HostGroup | null {
  *
  * `keyId` is PRESERVED rather than applied, the same split {@link sshBinding}
  * makes with its identity arm: this function records what the file ASKED for,
- * and a later cross-collection pass is what decides whether the key it names
+ * and {@link normaliseIdentityKeys} is what decides whether the key it names
  * will exist to be honoured.
  */
 export function sanitizeIdentity(raw: unknown): VaultIdentity | null {
@@ -759,6 +789,82 @@ export function refuseProtocolConflicts(
   return { hosts, conflicts: incoming.length - hosts.length };
 }
 
+/**
+ * Reconcile every identity's `keyId` against the keys that will exist, so no
+ * identity reaches `upsertIdentity` carrying a reference it would refuse.
+ *
+ * A `keyId` MAY NEVER DANGLE, and `upsertIdentity` enforces that from both
+ * sides: it refuses key auth that names no key, and it refuses any `keyId`
+ * naming a key it cannot find. Both are throws, so one unreconciled identity
+ * costs every record queued behind it. "Will exist" is therefore the union of
+ * two sets - the keys arriving in this file, and the keys already saved on this
+ * machine. A key the user already has is as good as one that travelled.
+ *
+ * The two failures are NOT given the same treatment, because they do not cost
+ * the same thing:
+ *
+ *   KEY AUTH whose key will not exist -> the identity is SKIPPED, counted in
+ *   `withoutKeys`. It is NEVER downgraded to password auth. A downgrade looks
+ *   like the kinder repair and is the worse one: every host bound to this
+ *   identity would quietly start offering a password where it used to offer a
+ *   key, there is no error and nothing on the host row that says so, and the
+ *   password it would offer is one the identity has no reason to hold. Skipping
+ *   costs the user an identity they can see is absent and re-enter.
+ *
+ *   ANY OTHER MODE with a `keyId` that will not exist -> the `keyId` is DROPPED,
+ *   counted in `keysDropped`. The identity authenticates exactly as it did
+ *   before, so there is nothing to gain by refusing the whole record.
+ *
+ * A `keyId` ON A NON-KEY IDENTITY IS ORDINARY, not a malformed row to be tidied.
+ * `convertHostToVault` writes precisely that shape on purpose: it mints a
+ * `VaultKey` out of a host's stored private key, and if the new identity did not
+ * name that key then nothing would - `deleteKey`'s in-use guard would have no
+ * holder to refuse over, and one click on the Vault page would destroy what may
+ * be the user's only copy of it. So a resolvable `keyId` is left alone whatever
+ * the mode says, and only an unresolvable one is dropped.
+ *
+ * Run BEFORE {@link resolveIdentityBindings}, which must be handed the ids this
+ * pass RETURNED rather than the ids it was given.
+ */
+export function normaliseIdentityKeys(
+  identities: VaultIdentity[],
+  keys: VaultKey[],
+  existingKeys: VaultKey[],
+): { identities: VaultIdentity[]; withoutKeys: number; keysDropped: number } {
+  const willExist = new Set(existingKeys.map((k) => k.id));
+  for (const key of keys) willExist.add(key.id);
+
+  const out: VaultIdentity[] = [];
+  let withoutKeys = 0;
+  let keysDropped = 0;
+
+  for (const identity of identities) {
+    if (identity.keyId && willExist.has(identity.keyId)) {
+      out.push(identity);
+      continue;
+    }
+    // Reached by a DANGLING `keyId` and by no `keyId` at all, and key auth may
+    // not survive either: an absent one names nothing, which is the second
+    // shape `upsertIdentity` throws on rather than a milder version of the first.
+    if (identity.authMode === "key") {
+      withoutKeys++;
+      continue;
+    }
+    if (identity.keyId) {
+      keysDropped++;
+      // Set to `undefined` rather than rebuilt without the key, the same way
+      // `clearDanglingJumps` clears a `proxyJumpId`: one spelling of "this
+      // reference is gone" across the module, and the store persists as JSON, so
+      // the field does not survive the write either way.
+      out.push({ ...identity, keyId: undefined });
+      continue;
+    }
+    out.push(identity);
+  }
+
+  return { identities: out, withoutKeys, keysDropped };
+}
+
 /** Whether the binding already saved here IS the one the file asked for, so
  *  keeping it costs the user nothing and there is nothing to report. */
 function isSameIdentity(
@@ -769,34 +875,87 @@ function isSameIdentity(
 }
 
 /**
- * Never apply a vault binding, because this format carries no vault.
+ * Decide what each incoming host's credential binding is allowed to BECOME,
+ * given what is already saved under that id and which identities will exist once
+ * this import is done.
  *
- * A v2 payload holds hosts and groups and nothing else - no identities, no keys -
- * so an incoming `{kind:"identity"}` is a claim about the EXPORTING machine's
- * vault, in the same class as a `hasPassword` flag from the file. Unlike a flag it
- * is destructive: a vault-bound record owns no host accounts, so landing one over
- * a saved INLINE host makes every field that host owned stale and `upsertHost`
- * deletes all of them - password, private key and key passphrase. Nothing was
- * copied first, the identity it names does not exist here, and there is no
- * `secrets_list`, so those bytes are unreachable rather than untidy (§9.7).
+ * A v3 payload DOES carry a vault, which is what makes this a decision rather
+ * than a flat refusal. {@link sanitizeHost} preserves the file's
+ * `{kind:"identity"}` arm without acting on it; this is where it is acted on,
+ * and the only question worth asking is whether honouring it can cost the user a
+ * secret.
  *
- * Two outcomes, decided by what is already saved under that id:
+ * IT CAN, and by exactly one mechanism. `upsertHost` asks what fields the NEW
+ * record can name and releases every account the STORED record owned that is not
+ * among them. A vault-bound record names none, so landing one over a saved inline
+ * host releases everything that host owned - all three accounts for SSH
+ * (password, private key, key passphrase), the password for RDP. Nothing copied
+ * them anywhere first, and there is no `secrets_list` command, so "released"
+ * means unreachable rather than untidy (§9.7).
  *
- *   THE HOST IS ALREADY SAVED -> its own credential is KEPT, byte for byte. The
- *   file updates the metadata and says nothing about the credential, which is what
- *   `undefined` means everywhere else in this store. A machine re-importing its
- *   own backup keeps its vault binding this way, and the destructive path stops
- *   being unlikely and becomes unreachable: the binding KIND never changes across
- *   the write, so `releaseStaleAccounts` has nothing stale to release.
+ * THREE OUTCOMES. `identityIds` is what separates the second from the third.
  *
- *   THE HOST IS NEW -> the binding is downgraded to the same blank inline one an
- *   unreadable binding falls back to. That is the state every host is in before
- *   someone types a password: in the list, editable, one dialog away from working.
- *   Refusing the row instead would throw away a good name, address, jump chain and
- *   pinned host key over a credential the file never carried.
+ *   1. A HOST IS SAVED UNDER THAT ID AND IS ALREADY BOUND TO THE SAME IDENTITY
+ *      -> kept byte for byte, counted nowhere. The file updates the metadata and
+ *      says nothing about the credential. A machine re-importing its own backup
+ *      lands here for every vault-bound row, and for it the mechanism above is
+ *      not merely unlikely but unreachable: the binding KIND does not change
+ *      across the write, so there is nothing stale to release.
+ *
+ *   2. NO HOST IS SAVED UNDER THAT ID AND THE IDENTITY WILL EXIST -> the binding
+ *      is APPLIED, counted in `applied`. This is the arm that makes a
+ *      machine-to-machine restore work: the host arrives, the identity it names
+ *      arrives beside it, and there is no stored record whose accounts could be
+ *      released, because there is no stored record. BOTH halves are required. A
+ *      host that is new is the only row for which applying is provably free.
+ *
+ *   3. EVERYTHING ELSE -> the saved credential is kept, or a blank inline
+ *      binding for a host that is new but whose identity did not travel; counted
+ *      in `dropped`.
+ *
+ * OUTCOME 3 IS THE LOAD-BEARING ONE AND IT IS DELIBERATELY CONSERVATIVE. It
+ * reads as an omission, so the whole argument is written out here rather than
+ * left to be re-derived.
+ *
+ * The row it exists for is a SAVED INLINE HOST whose file row asks for an
+ * identity that DID travel. Applying looks obviously correct - the file asked,
+ * the identity is here - and it is precisely the mechanism above: that host's
+ * accounts are released, nothing copied them, and nothing can enumerate what is
+ * left to put them back. THE IDENTITY HAVING TRAVELLED DOES NOT MAKE IT SAFE,
+ * and that is the step this is easy to get wrong on: the user's local inline
+ * password for this host is not necessarily the identity's password. They are two
+ * different credentials that one row happens to name, and this module has read
+ * neither of them. Honouring the file trades a secret this machine actually holds
+ * for one the file merely asserts.
+ *
+ * The contract of this module is that NOTHING IS DELETED - a host that exists
+ * here and not in the file is left alone, a pin this machine verified is kept, a
+ * group's local label wins over the file's. Outcome 3 is where that contract is
+ * kept for the one field whose loss cannot be undone from inside the app. The
+ * cost of being wrong is asymmetric and that asymmetry is the entire argument:
+ * too conservative costs the user one edit in a dialog they can find, and too
+ * eager costs them a private key nothing can put back.
+ *
+ * The remaining rows outcome 3 catches are conservative for a SECOND and weaker
+ * reason, worth separating so the first is not read as covering them: a saved
+ * host already bound to a DIFFERENT identity loses no account by being repointed,
+ * since vault-to-vault releases nothing. It is still not repointed, because the
+ * saved binding is this machine's own current answer to how a host it already has
+ * authenticates, and a file has no better claim on that than it has on the host's
+ * group label - which the group pass declines for the same reason. It is counted
+ * in `dropped` and one edit changes it.
  *
  * `dropped` counts only the rows where the file's binding was NOT honoured, so a
- * round trip of one machine's own backup reports zero.
+ * round trip of one machine's own backup reports zero on both counters.
+ *
+ * `identityIds` is REQUIRED and not optional, for the reason `IdentityHostRefs`
+ * and `assertBindingOwner`'s `ownerId` are: a caller allowed to omit it would
+ * skip the guard silently, and outcome 2 would then either never fire at all or
+ * fire for an identity that is not going to be there.
+ *
+ * Run AFTER {@link normaliseIdentityKeys}, and pass the ids that pass RETURNED:
+ * an identity it skipped for a missing key does not exist after this import, so
+ * outcome 2 must not bind a host to it.
  *
  * Run AFTER {@link refuseProtocolConflicts}: a saved record found here is then
  * known to speak this row's protocol, so its binding fits this row's arm.
@@ -804,8 +963,10 @@ function isSameIdentity(
 export function resolveIdentityBindings(
   incoming: Host[],
   existing: Host[],
-): { hosts: Host[]; dropped: number } {
+  identityIds: ReadonlySet<string>,
+): { hosts: Host[]; applied: number; dropped: number } {
   const byId = new Map(existing.map((h) => [h.id, h]));
+  let applied = 0;
   let dropped = 0;
   const hosts = incoming.map((h): Host => {
     // Read off `h` once: narrowing `h.protocol` below re-widens `h.credential`,
@@ -813,6 +974,13 @@ export function resolveIdentityBindings(
     const wanted = h.credential;
     if (wanted.kind !== "identity") return h;
     const saved = byId.get(h.id);
+    // Outcome 2, and it needs BOTH halves. The row already carries the binding
+    // `sanitizeHost` preserved, so applying it is returning the row untouched -
+    // which also keeps it out of the protocol guard below and its narrowing.
+    if (!saved && identityIds.has(wanted.identityId)) {
+      applied++;
+      return h;
+    }
     if (h.protocol === "ssh") {
       // `undefined` rather than a raw object: `sshBinding` owns the blank
       // fallback, so there is one spelling of "an inline binding with nothing in
@@ -825,7 +993,39 @@ export function resolveIdentityBindings(
     if (!isSameIdentity(keep, wanted)) dropped++;
     return { ...h, credential: keep };
   });
-  return { hosts, dropped };
+  return { hosts, applied, dropped };
+}
+
+/**
+ * Drop every forward rule whose host will not be there to carry it.
+ *
+ * Two refusals, and both are `upsertRule`'s: a `hostId` naming no host at all,
+ * and a `hostId` naming an RDP host - a rule rides an SSH session, and an RDP
+ * row has no session to ride. Both are throws at the write, and a throw costs
+ * the rules queued behind it, so refusing here turns what would be a `problems`
+ * line and a lost tail into one count.
+ *
+ * "Will be there" is the union {@link hostIndex} already builds - the file's
+ * hosts over the saved ones - reused rather than rebuilt, so this pass and the
+ * jump passes cannot come to different conclusions about what the import
+ * produces. Hand it the hosts that SURVIVED the credential passes: a row those
+ * refused is not going to be written, and a rule riding it would dangle.
+ *
+ * Independent of {@link resolveIdentityBindings} and may run on either side of
+ * it: that pass changes a row's credential and never its id or its protocol,
+ * which are the only two fields this one reads.
+ */
+export function clearDanglingRuleHosts(
+  rules: ForwardRule[],
+  hosts: Host[],
+  existing: Host[],
+): { rules: ForwardRule[]; dropped: number } {
+  const byId = hostIndex(hosts, existing);
+  // One expression covers both refusals: a missing host and an RDP host are each
+  // "not an SSH host that will exist", which is the only thing `upsertRule` will
+  // accept.
+  const kept = rules.filter((r) => byId.get(r.hostId)?.protocol === "ssh");
+  return { rules: kept, dropped: rules.length - kept.length };
 }
 
 /**
