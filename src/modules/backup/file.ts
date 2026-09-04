@@ -17,20 +17,18 @@
  * there is no `secrets_list` to find what is left (§9.7). See
  * {@link resolveIdentityBindings} and {@link refuseProtocolConflicts}.
  *
- * TWO FORMATS, and the difference is where the boundary sits:
+ * ONE FORMAT IS READ, and where the boundary sits follows from it.
  *
- * - **v1** (`.tervia-ssh`, kind `tervia-ssh-connections`) is SSH only, and its
- *   `connections` array is PLAINTEXT beside a sealed credential block. So the
- *   whole file is validated at parse time, before anything is decrypted.
- * - **v2** (`.tervia-backup`, kind `tervia-connections`) seals everything -
- *   the inventory and every credential - in one blob, because a v1 export
- *   leaks the machine inventory in plaintext while protecting only the
- *   passwords. That moves the boundary: `parseBackupFile` can only check the
- *   ENVELOPE, and {@link sanitizePayload} does the per-host work after the host
- *   process has decrypted. Credentials never come back to JS at all in v2 -
- *   `backup_apply_secrets` writes them to the keychain from Rust.
+ * **v3** (`.tervia-backup`, kind `tervia-connections`) seals everything - the
+ * inventory and every credential - in one blob, so `parseBackupFile` can check
+ * only the ENVELOPE and {@link sanitizePayload} does the per-record work after
+ * the host process has decrypted. Credentials never come back to JS at all:
+ * `backup_apply_secrets` writes them to the keychain from Rust.
  *
- * Only reading v1 is supported; every export is v2.
+ * v1 (`.tervia-ssh`, kind `tervia-ssh-connections`) and v2 are REFUSED, each by
+ * a message that names the format it is refusing. There is no converter, so
+ * that message is the only thing left to tell the user what they are holding -
+ * and "not a Tervia backup" would be a lie about a file this app wrote.
  *
  * Kept free of the Tauri runtime so `scripts/backup-verify.ts` can exercise the
  * parser under plain node. That constraint matters more now: the value imports
@@ -60,43 +58,61 @@ import type {
 export const BACKUP_KIND = "tervia-connections";
 
 /**
- * The format version - deliberately UNCHANGED while the payload shape beneath it
- * changed completely.
+ * The format version. v3 is the only one this build reads, and the only one it
+ * writes; {@link parseBackupFile} refuses v1 and v2 by name.
  *
- * The shape changed under the same number ON PURPOSE. No installed build of this
- * app exists, `release.yml` has never run on this repository and there is no
- * tag, so the only v2 files in existence are hand-made test ones and a payload
- * shape moving under a fixed number costs nothing today. Bumping to v3 here
- * would drag in the rest of 6g with it - the five-collection payload that also
- * carries identities, keys and forward rules, the dropped v1/v2 read path, and
- * with it the deletion of the last route where plaintext credentials reach JS.
- * 6g bumps this.
+ * The number is what the two refusals turn on, so it is the whole compatibility
+ * story in one place: a file numbered below this one cannot be read at all,
+ * because nothing converts a payload shape into this one.
  */
-export const BACKUP_VERSION = 2;
+export const BACKUP_VERSION = 3;
 export const BACKUP_EXTENSION = "tervia-backup";
 
-/** v1: SSH only, plaintext inventory, sealed credentials. Read, never written. */
+/**
+ * The v1 envelope's kind and extension. Neither is read for its contents any
+ * more; both survive so the v1 refusal can NAME the shape it is refusing -
+ * {@link parseBackupFile} matches the kind to reach that message instead of the
+ * generic "not a Tervia backup", and the open dialog keeps offering the
+ * extension so a `.tervia-ssh` file can be picked and told what it is rather
+ * than being filtered out of the picker with no explanation.
+ */
 export const BACKUP_KIND_V1 = "tervia-ssh-connections";
 export const BACKUP_EXTENSION_V1 = "tervia-ssh";
 
 /**
- * The one top-level payload key that holds credentials rather than inventory.
+ * The three top-level payload keys that hold credentials rather than inventory -
+ * one per record kind that owns a secret. A host owns its inline credential, an
+ * identity owns its password, a key owns its body and its passphrase.
  *
- * ONE group now, where there were two. The two old stores had a keychain service
- * each (`tervia-ssh`, `tervia-rdp`) and an id space each, so a credential needed
- * the protocol to address it; one host store on one service (`tervia-hosts`)
- * with one id space does not.
+ * NONE of the three may collide with a payload key that carries inventory:
+ * `hosts`, `groups`, `identities`, `keys`, `rules`. `merge_secrets` in
+ * `modules/backup.rs` refuses to write into a group the payload already carries,
+ * and it checks EVERY reference's group before inserting any, so a colliding
+ * name fails the whole seal rather than replacing an inventory list with a
+ * credential map partway through.
  *
- * It must not collide with a payload key that carries inventory - `merge_secrets`
- * in `modules/backup.rs` refuses to write into a group the payload already
- * carries, precisely so a typo cannot replace the host list with a credential
- * map. `hostSecrets` is neither `hosts` nor `groups`.
+ * Split by kind rather than pooled under one name, because a secret is addressed
+ * `group`/`id`/`field` and the three kinds draw their ids from three separate
+ * collections. Pooled, an id out of an untrusted file would say nothing about
+ * which record it belongs to, and a key's body could be read back for an
+ * identity that happened to share its id.
+ *
+ * One group for hosts and not two, which is the opposite move for the opposite
+ * reason: the two old stores had a keychain service each (`tervia-ssh`,
+ * `tervia-rdp`) and an id space each, so a credential needed the protocol to
+ * address it; one host store on one service (`tervia-hosts`) with one id space
+ * does not.
  */
 export const HOST_SECRET_GROUP = "hostSecrets";
+export const IDENTITY_SECRET_GROUP = "identitySecrets";
+export const KEY_SECRET_GROUP = "keySecrets";
 
 /** Named here and passed to `backup_open_payload` so the host process knows what
- *  to withhold from the metadata it hands back. */
-export const SECRET_GROUPS = [HOST_SECRET_GROUP] as const;
+ *  to withhold from the metadata it hands back. A credential group missing from
+ *  this list is not withheld - it stays in the payload and is handed to the
+ *  webview in the clear, which is the one thing this whole path exists to
+ *  prevent. */
+export const SECRET_GROUPS = [HOST_SECRET_GROUP, IDENTITY_SECRET_GROUP, KEY_SECRET_GROUP] as const;
 export type BackupSecretGroup = (typeof SECRET_GROUPS)[number];
 
 /**
@@ -124,13 +140,7 @@ export type SealedBlob = {
   ciphertext: string;
 };
 
-/** Plaintext inside a v1 `secrets` blob, keyed by connection id. */
-export type BackupSecrets = Record<
-  string,
-  { password?: string; privateKey?: string; keyPassphrase?: string }
->;
-
-/** The v2 file. Everything of substance is inside `payload`. */
+/** The file an export writes. Everything of substance is inside `payload`. */
 export type BackupFileV2 = {
   kind: typeof BACKUP_KIND;
   version: typeof BACKUP_VERSION;
@@ -139,13 +149,14 @@ export type BackupFileV2 = {
 };
 
 /**
- * What `parseBackupFile` could establish without a passphrase. The version is
- * the discriminant because the two generations need different import paths, not
- * because the caller should care about the format.
+ * What `parseBackupFile` could establish without a passphrase: that the envelope
+ * is a readable one, and the sealed blob to hand the host process.
+ *
+ * Still a discriminated union with one arm, and the `version` field is why. It
+ * is what makes a second readable format an added arm that every consumer has to
+ * narrow for, rather than a silently widened object.
  */
-export type ParsedBackup =
-  | { version: 1; hosts: SshHost[]; secrets: SealedBlob; skipped: number }
-  | { version: 2; payload: SealedBlob };
+export type ParsedBackup = { version: 3; payload: SealedBlob };
 
 const isRecord = (v: unknown): v is Record<string, unknown> =>
   typeof v === "object" && v !== null && !Array.isArray(v);
@@ -380,43 +391,6 @@ export function sanitizeGroup(raw: unknown): HostGroup | null {
     id,
     name,
     ...(typeof order === "number" && Number.isFinite(order) ? { order } : {}),
-  };
-}
-
-/**
- * Validate one record from a **v1** file, whose rows are the old SSH-only shape:
- * `user` and `authMode` at the top level, no `protocol`, no `credential`.
- *
- * The result is an ordinary {@link SshHost} with an inline binding, so a v1
- * import walks exactly the same write path as a v2 one. One v1 field cannot
- * survive: `forwards`, because a forward rule is its own record now (decision 7)
- * and the store has nowhere to put one. 6g drops this read path entirely.
- */
-export function sanitizeLegacyHost(raw: unknown): SshHost | null {
-  if (!isRecord(raw)) return null;
-  const base = baseOf(raw);
-  if (!base) return null;
-  const proxyJumpId = str(raw.proxyJumpId).trim();
-  const lastFingerprint = str(raw.lastFingerprint).trim();
-  // A v1 file predates keying entirely, so this is the pure flat-pin case
-  // {@link pinsOf} exists for: the pin is keyed onto the address the FILE names,
-  // never onto whatever address is saved here under the same id.
-  const pins = pinsOf(raw.pins, base.host, lastFingerprint);
-  return {
-    ...base,
-    protocol: "ssh",
-    credential: {
-      kind: "inline",
-      hostId: base.id,
-      user: str(raw.user).trim(),
-      authMode: authMode(raw.authMode),
-      hasPassword: false,
-      hasPrivateKey: false,
-      hasKeyPassphrase: false,
-    },
-    ...(lastFingerprint ? { lastFingerprint } : {}),
-    ...(pins ? { pins } : {}),
-    ...(proxyJumpId ? { proxyJumpId } : {}),
   };
 }
 
@@ -793,12 +767,16 @@ const NOT_A_BACKUP = "Not a Tervia connection backup file.";
 
 /**
  * Parse and validate a backup file's envelope. Throws with a user-facing
- * message when the file is not a Tervia backup at all.
+ * message when the file is not a Tervia backup at all, and with a message naming
+ * the format when it is one this build cannot read.
  *
- * For v1 this also validates every connection, because they are in the clear;
- * bad entries are skipped and counted rather than failing the whole import. For
- * v2 there is nothing else here to check until the payload is decrypted - see
- * {@link sanitizePayload}.
+ * There is nothing else here to check until the payload is decrypted - see
+ * {@link sanitizePayload}, which is the rest of this trust boundary.
+ *
+ * The older kind is still MATCHED, and only so the refusal can be specific. A
+ * `.tervia-ssh` file that fell through to "not a Tervia connection backup file"
+ * would be told a falsehood about a file this app wrote, and the user would have
+ * no way to learn that the format, rather than the file, is what ended it.
  */
 export function parseBackupFile(raw: unknown): ParsedBackup {
   if (!isRecord(raw)) throw new Error(NOT_A_BACKUP);
@@ -812,46 +790,40 @@ export function parseBackupFile(raw: unknown): ParsedBackup {
       `This backup was written by a newer Tervia (format v${version}); this build reads up to v${BACKUP_VERSION}.`,
     );
   }
-  // The kind and the version have to agree. A file claiming v2 under the old
-  // kind (or the reverse) is hand-edited or half-converted, and guessing which
-  // half to believe would mean reading a plaintext inventory as a sealed one.
+  // The kind and the version have to agree, and this is checked BEFORE the two
+  // refusals so that a half-edited file is told it is half-edited rather than
+  // being named as a format it never was. A file claiming v2 under the old kind
+  // (or the reverse) is hand-made either way.
   const expectedKind = version === 1 ? BACKUP_KIND_V1 : BACKUP_KIND;
   if (raw.kind !== expectedKind) {
     throw new Error(`Backup file says format v${version} but is not a ${expectedKind} file.`);
   }
 
-  if (version >= 2) {
-    const payload = sanitizeSealed(raw.payload);
-    if (!payload) throw new Error("Backup file is missing its encrypted payload.");
-    return { version: 2, payload };
+  // Refused, not converted, and each by its own sentence. There is no code that
+  // could turn either shape into this one: a v1 file's sealed block IS a
+  // credential map, and reading it would mean holding plaintext credentials in
+  // the webview - the exact thing every other path here was built to stop.
+  if (version === 1) {
+    throw new Error(
+      "This is a Tervia v1 backup (.tervia-ssh). This build reads format v3 only, and there is no converter — the hosts in it have to be entered again.",
+    );
+  }
+  if (version === 2) {
+    throw new Error(
+      "This backup is format v2 and this build reads format v3 only. There is no converter, and nothing in it can be imported.",
+    );
   }
 
-  if (!Array.isArray(raw.connections)) throw new Error("Backup file has no connections list.");
-  const secrets = sanitizeSealed(raw.secrets);
-  if (!secrets) throw new Error("Backup file is missing its encrypted credentials block.");
-
-  const hosts: SshHost[] = [];
-  const seen = new Set<string>();
-  let skipped = 0;
-  for (const entry of raw.connections) {
-    const host = sanitizeLegacyHost(entry);
-    // A duplicate id would import twice and the second would silently win.
-    if (!host || seen.has(host.id)) {
-      skipped++;
-      continue;
-    }
-    seen.add(host.id);
-    hosts.push(host);
-  }
-
-  return { version: 1, hosts, secrets, skipped };
+  const payload = sanitizeSealed(raw.payload);
+  if (!payload) throw new Error("Backup file is missing its encrypted payload.");
+  return { version: 3, payload };
 }
 
 /**
- * Validate the decrypted v2 payload: the hosts and their groups, bad entries
- * skipped and counted. This is the v2 half of the trust boundary, and it runs on
- * the same data `parseBackupFile` checks for a v1 file - just after decryption
- * instead of before it.
+ * Validate the decrypted payload: the hosts and their groups, bad entries
+ * skipped and counted. This is the second half of the trust boundary -
+ * `parseBackupFile` can only reach the envelope, and everything of substance is
+ * sealed until the host process has decrypted it.
  *
  * A missing collection is not an error: a payload sealed by a build without one
  * of them is a legitimate file, so the absent list imports as empty rather than
@@ -902,25 +874,4 @@ export function sanitizePayload(raw: unknown): {
   }
 
   return { hosts, groups, skipped };
-}
-
-/**
- * Validate a decrypted **v1** secrets payload before any of it reaches the
- * keychain. v2 has no equivalent on this side: its credentials go from the
- * sealed blob to the keychain without JS ever holding them.
- */
-export function sanitizeSecrets(raw: unknown): BackupSecrets {
-  if (!isRecord(raw)) return {};
-  const out: BackupSecrets = {};
-  for (const [id, v] of Object.entries(raw)) {
-    if (!isRecord(v)) continue;
-    const entry: BackupSecrets[string] = {};
-    if (typeof v.password === "string" && v.password) entry.password = v.password;
-    if (typeof v.privateKey === "string" && v.privateKey) entry.privateKey = v.privateKey;
-    if (typeof v.keyPassphrase === "string" && v.keyPassphrase) {
-      entry.keyPassphrase = v.keyPassphrase;
-    }
-    if (Object.keys(entry).length > 0) out[id] = entry;
-  }
-  return out;
 }

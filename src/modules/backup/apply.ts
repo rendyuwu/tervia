@@ -1,12 +1,36 @@
 /**
- * Export / import saved hosts and groups as a single passphrase-encrypted
+ * Export / import the saved connections as a single passphrase-encrypted
  * `.tervia-backup` file, so moving to another machine is one import instead of
  * retyping every host and credential.
  *
- * This module now lives under `backup/` rather than `ssh/` because 6g grows
- * what it carries from two collections (hosts, groups) to five - adding
- * identities, keys and forward rules - without moving the file a second time;
- * that v3 payload is step 2's work, and this step is the move alone.
+ * The credentials live in the keychain and CANNOT travel with the store files on
+ * their own - a keychain does not move between machines - which is exactly why
+ * this exists and why the file is always encrypted: it carries SSH passwords,
+ * SSH private keys, RDP passwords, identity passwords, vault private key bodies
+ * and key passphrases, so a plaintext export would be a credential leak the
+ * moment it touched Downloads or a synced folder. Sealing happens in the host
+ * process (`modules/backup.rs`); `crypto.subtle` is not available to the webview
+ * because the app origin is plain http.
+ *
+ * THE CREDENTIALS DO NOT PASS THROUGH HERE, AND THERE IS NO LONGER AN EXCEPTION.
+ * An export sends keychain REFERENCES and Rust reads the values; an import gets
+ * back only the metadata and tells Rust which ids may be written. The v1 read
+ * path was the exception and it could not have been otherwise - a v1 file's
+ * sealed block IS the credential map, so importing one meant holding it here
+ * long enough to write it - and it is gone, along with the `backup_open` call
+ * that fetched it. Nothing in this app hands a plaintext credential map to JS
+ * any more. That is also why there is no RDP secret read-back helper anywhere in
+ * the tree: `rdp_open` takes a reference precisely so an RDP password never
+ * enters the webview, and a backup that read one would have thrown that away.
+ *
+ * A BINDING WHOSE TARGET DID NOT TRAVEL IS NEVER APPLIED - it is refused or
+ * downgraded, and {@link resolveIdentityBindings} is where that is decided. An
+ * incoming `{kind:"identity"}` is a claim about a vault, and applying one over a
+ * host saved here would delete the secrets that host owns with nothing copied
+ * anywhere first. So a host already saved here KEEPS its own credential, and a
+ * host that is new arrives as a blank inline row that one dialog fixes. Nothing
+ * here strengthens the protection on any secret; what a vault binding buys is
+ * fewer copies of one.
  */
 import { invoke } from "@tauri-apps/api/core";
 
@@ -18,12 +42,7 @@ import {
   SECRET_ALREADY_STORED,
   type HostSecretInput,
 } from "@/modules/hosts/store";
-import {
-  HOST_RDP_SECRET_FIELDS,
-  HOST_SSH_SECRET_FIELDS,
-  type Host,
-  type SshHost,
-} from "@/modules/hosts/types";
+import { HOST_RDP_SECRET_FIELDS, HOST_SSH_SECRET_FIELDS, type Host } from "@/modules/hosts/types";
 import {
   HOST_KEYRING_SERVICE,
   HOST_RDP_PASSWORD_FIELD,
@@ -47,9 +66,7 @@ import {
   refuseProtocolConflicts,
   resolveIdentityBindings,
   sanitizePayload,
-  sanitizeSecrets,
   type BackupFileV2,
-  type BackupSecrets,
   type SealedBlob,
   type SecretRef,
 } from "./file";
@@ -62,8 +79,9 @@ function reason(e: unknown): string {
  * Keychain references for one host's every credential field.
  *
  * A vault-bound host contributes NONE: it owns no accounts of its own, so there
- * is nothing on the host service to read. Its identity's secrets are a separate
- * service and a later format.
+ * is nothing on the host service to read. Its identity's secrets live on another
+ * service and belong to `IDENTITY_SECRET_GROUP`, which this function does not
+ * build references for - it answers for one host and one group only.
  *
  * Exported for `scripts/backup-verify.ts`, which pins the producing half of
  * the {@link SECRET_ALREADY_STORED} contract: what travels on an export is
@@ -103,7 +121,7 @@ export async function buildBackup(
   const refs: SecretRef[] = hosts.flatMap(hostRefs);
 
   const payload = await invoke<SealedBlob>("backup_seal_payload", {
-    // The inventory only. Rust folds the credentials in under the group name in
+    // The inventory only. Rust folds the credentials in under the group names in
     // SECRET_GROUPS and refuses to overwrite a key that is already here, so
     // neither `hosts` nor `groups` can be replaced by a credential map.
     payload: JSON.stringify({ hosts, groups }),
@@ -207,10 +225,10 @@ export async function applyBackup(text: string, passphrase: string): Promise<Imp
   } catch {
     throw new Error("That file is not valid JSON.");
   }
-  const parsed = parseBackupFile(raw);
-  return parsed.version === 1
-    ? applyV1(parsed.hosts, parsed.secrets, parsed.skipped, passphrase)
-    : applyV2(parsed.payload, passphrase);
+  // No branch on the parsed version: there is one readable format, and
+  // `parseBackupFile` has already refused every other envelope by name. A second
+  // arm on `ParsedBackup` is what would put a branch back here.
+  return applyV2(parseBackupFile(raw).payload, passphrase);
 }
 
 /**
@@ -281,10 +299,8 @@ export function arrivedWithoutSecret(host: Host, stored: HostSecretInput): boole
   return stored.password === undefined;
 }
 
-/**
- * Write one host and tally it. Shared by both format generations so the counting
- * rule cannot drift between them.
- */
+/** Write one host and tally it, so "added versus replaced" is decided in one
+ *  place rather than at each call site. */
 async function writeImported(
   host: Host,
   secrets: HostSecretInput,
@@ -485,81 +501,4 @@ async function applyV2(payload: SealedBlob, passphrase: string): Promise<ImportR
       // Already gone, or the store is wedged; nothing useful to do here.
     }
   }
-}
-
-/**
- * v1: SSH only, and the one path where a plaintext credential still passes
- * through the webview - the sealed block in a v1 file is the credential map
- * itself, so there is nothing else to hand to the keychain.
- *
- * A v1 file predates groups and forward rules, so it carries neither: its rows
- * arrive as ordinary SSH hosts with an inline credential, and their `forwards`
- * are dropped at the parser (decision 7).
- */
-async function applyV1(
-  hosts: SshHost[],
-  sealed: SealedBlob,
-  skipped: number,
-  passphrase: string,
-): Promise<ImportResult> {
-  // Decrypt BEFORE touching the store: a wrong passphrase must leave the
-  // existing hosts exactly as they were, not half-merged.
-  const plain = await invoke<string>("backup_open", { blob: sealed, passphrase });
-  let secrets: BackupSecrets;
-  try {
-    secrets = sanitizeSecrets(JSON.parse(plain));
-  } catch {
-    throw new Error("The encrypted block did not contain readable credentials.");
-  }
-
-  const existingHosts = await listHosts();
-  const existingIds = new Set(existingHosts.map((h) => h.id));
-  const problems: string[] = [];
-  // The same passes and the same ordering as v2, for the same reason: the store's
-  // guards do not care which format the row came out of. `resolveIdentityBindings`
-  // is the one that is not needed - a v1 row has no `credential` to read, so
-  // `sanitizeLegacyHost` can only produce an inline one. `carryPins` matters MORE
-  // here, not less: a v1 file predates keying, so every pin it carries is a flat
-  // one that has to be attributed to the address the file names.
-  const kinds = refuseProtocolConflicts(hosts, existingHosts);
-  const pinned = carryPins(kinds.hosts, existingHosts);
-  const incoming = orderHostWrites(clearDanglingJumps(pinned, existingHosts), existingHosts);
-
-  const ssh: ImportCounts = { ...NO_COUNTS };
-  for (const host of incoming) {
-    // Real VALUES here, not `SECRET_ALREADY_STORED`: on this path the credential
-    // is in hand, so the store writes it and derives the flag from that write.
-    // `sanitizeSecrets` has already dropped anything empty, so a field left out
-    // is one that did not travel - which the store reads as "leave whatever is
-    // already in the keychain", the non-destructive choice when re-importing over
-    // a host whose credential is set up here.
-    const s = secrets[host.id];
-    const stored: HostSecretInput = {
-      ...(s?.password ? { password: s.password } : {}),
-      ...(s?.privateKey ? { privateKey: s.privateKey } : {}),
-      ...(s?.keyPassphrase ? { keyPassphrase: s.keyPassphrase } : {}),
-    };
-    // One write per row here, not two: the credential is in hand, so `upsertHost`
-    // writes the secrets and the record together and rolls the secrets back itself
-    // when the row is new. What this adds is the containment - a refused row must
-    // not abandon the rows behind it.
-    try {
-      await writeImported(host, stored, existingIds, ssh);
-      if (arrivedWithoutSecret(host, stored)) ssh.withoutSecrets++;
-    } catch (e) {
-      ssh.failed++;
-      problems.push(`"${host.name}" could not be saved: ${reason(e)}`);
-    }
-  }
-
-  return {
-    ssh,
-    rdp: { ...NO_COUNTS },
-    groups: { ...NO_GROUP_COUNTS },
-    skipped,
-    protocolConflicts: kinds.conflicts,
-    // A v1 file cannot carry a binding of any kind, let alone a vault one.
-    vaultBindingsDropped: 0,
-    problems,
-  };
 }
