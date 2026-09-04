@@ -2353,6 +2353,83 @@ function ifsIn(root: ts.Node | null): ts.IfStatement[] {
   return out;
 }
 
+/**
+ * How many declarations `functionNamed` would have matched, over the same
+ * whole-SourceFile search. `functionNamed` itself keeps only the LAST one, so a
+ * decoy - a same-named `const` arrow tucked inside another declaration - is
+ * indistinguishable from the real one once resolved; this is what tells two
+ * matches from one. The mismatch, not the resolved node, is the fact worth
+ * asking about.
+ */
+function countFunctionNamed(name: string): number {
+  let n = 0;
+  const visit = (node: ts.Node): void => {
+    if (ts.isFunctionDeclaration(node) && node.name?.text === name) n++;
+    else if (
+      ts.isVariableDeclaration(node) &&
+      ts.isIdentifier(node.name) &&
+      node.name.text === name &&
+      node.initializer &&
+      (ts.isArrowFunction(node.initializer) || ts.isFunctionExpression(node.initializer))
+    ) {
+      n++;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(applySf);
+  return n;
+}
+
+/** The same, for `localInit`: how many `const <name> = ...` sit inside `root`,
+ *  rather than which one `localInit` resolved to (its last). */
+function countLocalInit(root: ts.Node | null, name: string): number {
+  if (!root) return 0;
+  let n = 0;
+  const visit = (node: ts.Node): void => {
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.name.text === name) {
+      n++;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(root);
+  return n;
+}
+
+/** The nearest function-like ancestor of `n` - a declaration, an arrow, a
+ *  function expression or a method - or `null` if `n` is not inside one. */
+function nearestFunctionOf(n: ts.Node): ts.Node | null {
+  let cursor: ts.Node | undefined = n.parent;
+  while (cursor) {
+    if (
+      ts.isFunctionDeclaration(cursor) ||
+      ts.isFunctionExpression(cursor) ||
+      ts.isArrowFunction(cursor) ||
+      ts.isMethodDeclaration(cursor)
+    ) {
+      return cursor;
+    }
+    cursor = cursor.parent;
+  }
+  return null;
+}
+
+/**
+ * Whether `init` - an initialiser found by {@link localInit} - runs as a
+ * direct statement of `fn` itself, rather than one sitting inside a NESTED
+ * function literal `fn` merely contains. `applyV3`'s body wraps almost
+ * everything in a `try`, so "direct child of the outermost block" is the
+ * wrong test - control flow (`try`, `if`, a loop) does not defer anything, it
+ * still runs when `fn` runs. A function literal does: `setTimeout`, `.then`
+ * or a scheduler not yet written all have to nest a statement in one to defer
+ * it. The nearest function-like ancestor of the statement being `fn` itself
+ * is what rules out every one of those, present and future, without naming
+ * any of them.
+ */
+function isDirectDeclarationOf(init: ts.Expression | null, fn: ts.Node | null): boolean {
+  if (!init || !fn) return false;
+  return nearestFunctionOf(init) === fn;
+}
+
 /** The named function a node sits inside, for a pin that is about WHICH consumer
  *  asks the question rather than about the question being asked somewhere. */
 function enclosingName(n: ts.Node): string {
@@ -2368,6 +2445,23 @@ const applyV3Fn = functionNamed("applyV3");
 const buildFn = functionNamed("buildBackup");
 const keyRecordFn = functionNamed("keyRecord");
 const landedKeyFn = functionNamed("landedKey");
+
+// `functionNamed` takes the LAST match with no early return, so a same-named
+// decoy `const` arrow tucked anywhere in the file - including nested inside
+// the real function - silently becomes the one every pin below is rooted at.
+// Checked once, for all four names this script resolves this way, rather than
+// once per pin: every pin downstream of `applyV3Fn`, `buildFn`, `keyRecordFn`
+// or `landedKeyFn` is a claim about the WRONG function if this is not 1.
+check(
+  "applyV3, buildBackup, keyRecord and landedKey each have exactly one declaration in the file",
+  [
+    countFunctionNamed("applyV3"),
+    countFunctionNamed("buildBackup"),
+    countFunctionNamed("keyRecord"),
+    countFunctionNamed("landedKey"),
+  ],
+  [1, 1, 1, 1],
+);
 
 console.log("\n[apply source] identityIds' provenance, which is one expression from destructive");
 // THE MUTATION THIS EXISTS FOR compiles clean and puts the destructive path back:
@@ -2386,6 +2480,33 @@ check(
   "applyV3 and the identityIds it hands the credential pass are both found",
   [applyV3Fn !== null, identityIdsInit !== null],
   [true, true],
+);
+// COUNTED, not just found: `localInit` takes the LAST `const identityIds`
+// inside `applyV3Fn`, so a decoy declaration in a sibling block - reachable or
+// not - would let the real, mutated one sit unread while this pin compares the
+// decoy's correct expression instead. Rooting caught a name collision outside
+// `applyV3`; nothing above catches one inside it.
+check(
+  "and there is exactly one identityIds declared inside applyV3",
+  countLocalInit(applyV3Fn, "identityIds"),
+  1,
+);
+// STRUCTURAL - but a same-named decoy, `const applyV3 = async () => {...}`
+// nested inside the real one, does not redden through here: it also matches
+// `functionNamed`'s own matcher, so the file-wide uniqueness check higher up
+// fires first and misresolves `applyV3Fn` before this runs, and this check
+// and the identityIds count just above then both read the decoy's own body,
+// where its nested `identityIds` is trivially direct. No decoy inside
+// `applyV3` defeats only this check and not that count: `countLocalInit`
+// walks the same nested bodies `localInit` does, so anything that avoids the
+// name collision moves the identityIds count to two at the same moment it
+// moves the resolved declaration. This is kept as defence in depth for if
+// the file-wide uniqueness check is ever narrowed or removed, not because it
+// is what currently catches the same-named decoy.
+check(
+  "and identityIds is declared directly in applyV3's body, not inside a nested function literal",
+  isDirectDeclarationOf(identityIdsInit, applyV3Fn),
+  true,
 );
 // THE SET IS A UNION AND EACH HALF IS PINNED ON ITS OWN, because a pin that
 // asserts only the first passes over an implementation that drops the second, and
@@ -2485,6 +2606,10 @@ check(
   ifsIn(keyRecordFn).map((s) => exprOf(s.expression))[0] ?? "(missing)",
   squash("!stored || landedBody"),
 );
+// COUNTED: the check above reads `[0]`, the FIRST `if` inside `keyRecordFn`, so
+// a decoy `if` added earlier in the same body - ahead of the real, mutated one -
+// would be what that index reads instead.
+check("and keyRecord has exactly one if statement", ifsIn(keyRecordFn).length, 1);
 
 console.log("\n[export source] what buildBackup names, which no fixture here can reach");
 // `buildBackup` calls `invoke`, so this half has no behavioural gate and cannot
@@ -2510,6 +2635,14 @@ check(
     squash("keys.flatMap(keyRefs)"),
   ],
 );
+// COUNTED: `localInit` takes the LAST `const refs` inside `buildFn`, so a
+// decoy declaration elsewhere in the same body would be what the pin above
+// reads instead of the real one.
+check(
+  "and there is exactly one refs declared inside buildBackup",
+  countLocalInit(buildFn, "refs"),
+  1,
+);
 // (b) ALL FIVE COLLECTIONS SEALED. A collection dropped here exports as absent,
 // and `sanitizePayload` imports an absent collection as EMPTY rather than
 // failing - by design, so a payload sealed by a build with no vault stays
@@ -2523,6 +2656,18 @@ check(
     .map((o) => o.properties.map((p) => p.name?.getText(applySf) ?? "(computed)"))[0] ?? ["(none)"],
   ["hosts", "groups", "identities", "keys", "rules"],
 );
+// COUNTED: the check above reads `[0]`, the FIRST call to `JSON.stringify`
+// inside `buildFn` whose own first argument is an object literal - `buildFn`
+// also stringifies `file` for the returned `text`, which the same filter
+// already excludes - so a decoy `JSON.stringify({...})` earlier in the body
+// would be what that index reads instead of the real seal.
+check(
+  "and buildBackup calls JSON.stringify with an object literal exactly once",
+  calls(buildFn, "JSON.stringify")
+    .map((c) => c.arguments[0])
+    .filter(ts.isObjectLiteralExpression).length,
+  1,
+);
 // (c) THE EMPTINESS REFUSAL NEEDS ALL FIVE. Reverting it to `hosts.length === 0`
 // makes a vault-only profile - identities and keys and no host yet - unable to
 // export at all, which is the defect this condition exists to fix.
@@ -2535,6 +2680,18 @@ check(
   "and refuses to export only when every one of the five is empty",
   emptinessGuard ? andOperands(emptinessGuard.expression) : ["(no conjunction at all)"],
   ["hosts", "groups", "identities", "keys", "rules"].map((c) => squash(`${c}.length === 0`)),
+);
+// COUNTED: `.find` above picks the FIRST `if` inside `buildFn` whose condition
+// is an `&&` chain, so a decoy conjunction earlier in the same body would be
+// what that pin reads instead of the real emptiness guard.
+check(
+  "and buildBackup has exactly one && conjunction among its if statements",
+  ifsIn(buildFn).filter(
+    (s) =>
+      ts.isBinaryExpression(s.expression) &&
+      s.expression.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken,
+  ).length,
+  1,
 );
 
 console.log(failed === 0 ? "\nAll backup checks passed." : `\n${failed} check(s) FAILED.`);
