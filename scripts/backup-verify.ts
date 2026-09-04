@@ -1,6 +1,9 @@
 /**
  * Self-check for the connection backup parser.
- * Run: `pnpm verify backup` (or `npx tsx scripts/backup-verify.ts` to iterate).
+ * Run: `pnpm verify backup-verify` (or `npx tsx scripts/backup-verify.ts` to
+ * iterate). The full name, not `backup`: `backup-import-verify.ts` matches the
+ * short one too, and a run that measured both would report the other script's
+ * state as this one's.
  *
  * Importing a backup is a TRUST BOUNDARY: the file arrives from a USB stick or
  * a chat, and everything that survives it is written into the host store and
@@ -48,6 +51,28 @@
  * `hosts-store-verify.ts`. Nothing here calls `invoke`, so importing that module
  * is safe under plain node.
  *
+ * `identityRefs` and `keyRefs` come from the same module for the same reason:
+ * they are the other two thirds of what an export NAMES, and a field one of them
+ * stops naming simply stops travelling. They are imported rather than described,
+ * so a rename fails loudly here instead of leaving a name-based pin running over
+ * nothing. `landedKey` is imported for a sharper reason - it is the key an import
+ * remembers a landed credential under, and building a fixture by CALLING it means
+ * a group dropped out of that key collapses two fixtures onto one entry, so the
+ * arithmetic reddens on its own rather than this file and the implementation
+ * making the same mistake in two places.
+ *
+ * THREE THINGS HERE CANNOT BE REACHED BEHAVIOURALLY AT ALL, and they are
+ * source-pinned rather than skipped. `buildBackup` calls `invoke`, so no fixture
+ * in a plain-node run can enter it; `applyV3`'s `landed` set, its `identityIds`
+ * set and `keyRecord` are all internal to a function that starts with one. What
+ * those pins compare is read off the AST - the argument's own expression, rooted
+ * at the function that owns it - and not a substring: `refs` is assembled from
+ * three spreads, and a substring pin on `identityRefs` is satisfied by the import
+ * clause at the top of that file. Every pin reads INDIVIDUAL sub-expressions and
+ * never a whole comma list, which is also what makes them survive a legal
+ * reformat: a narrower print width moves line breaks and trailing commas, and
+ * moves nothing a pin compares.
+ *
  * The crypto itself, and the payload assembly that keeps credentials out of the
  * webview, are checked on the Rust side (`modules/backup.rs` tests: round trip,
  * wrong passphrase, tampered ciphertext, nonce reuse, group merge/split, the
@@ -55,29 +80,59 @@
  * `backup_open` call in `src/`, no `backup_open` handler registered - is pinned
  * in `backup-import-verify.ts`, which already reads source text by path.
  */
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+import ts from "typescript";
+
+import type { ForwardRule } from "../src/modules/forwards/types";
 import { jumpChain, MAX_JUMP_HOPS } from "../src/modules/hosts/jumps";
 import { SECRET_ALREADY_STORED } from "../src/modules/hosts/store";
 import { hostFingerprint, type Host, type RdpHost, type SshHost } from "../src/modules/hosts/types";
-import { arrivedWithoutSecret, hostRefs, storedFields } from "../src/modules/backup/apply";
+import {
+  arrivedWithoutSecret,
+  hostRefs,
+  identityRefs,
+  keyRefs,
+  landedKey,
+  storedFields,
+} from "../src/modules/backup/apply";
 import {
   BACKUP_EXTENSION_V1,
   BACKUP_KIND,
   BACKUP_KIND_V1,
   BACKUP_VERSION,
+  HOST_SECRET_GROUP,
+  IDENTITY_SECRET_GROUP,
+  KEY_SECRET_GROUP,
   SECRET_GROUPS,
   carryPins,
   clearDanglingJumps,
+  clearDanglingRuleHosts,
   clearDanglingTunnels,
   mergeGroups,
+  normaliseIdentityKeys,
   orderHostWrites,
   parseBackupFile,
   refuseProtocolConflicts,
   resolveIdentityBindings,
   sanitizeGroup,
   sanitizeHost,
+  sanitizeIdentity,
+  sanitizeKey,
   sanitizePayload,
+  sanitizeRule,
 } from "../src/modules/backup/file";
 import { sshCredentialValues } from "../src/modules/vault/resolve";
+import {
+  IDENTITY_PASSWORD_FIELD,
+  KEY_PRIVATE_KEY_FIELD,
+  VAULT_IDENTITY_SECRET_FIELDS,
+  VAULT_KEY_SECRET_FIELDS,
+  type VaultIdentity,
+  type VaultKey,
+} from "../src/modules/vault/types";
 
 let failed = 0;
 
@@ -244,6 +299,43 @@ const LEGACY_ROW = {
   authMode: "password",
 };
 
+/**
+ * A vault identity as it appears inside a sealed payload: the well-formed case,
+ * with every field a check might want to break passed explicitly.
+ *
+ * `hasPassword` is deliberately NOT here. It is a claim about the exporting
+ * machine's keychain and the parser forces it false, so a fixture that carried it
+ * by default would make every check below read as though the file had said
+ * nothing - and the check that matters is the one where the file says `true`.
+ */
+const identity = (over: Record<string, unknown> = {}) => ({
+  id: "i-1",
+  name: "deploy",
+  username: "deploy",
+  authMode: "password",
+  ...over,
+});
+/** A vault key row. Its two presence flags are absent for the same reason. */
+const key = (over: Record<string, unknown> = {}) => ({
+  id: "k-1",
+  name: "laptop",
+  keyType: "ed25519",
+  fingerprint: "SHA256:FPR",
+  publicKey: "ssh-ed25519 AAAAC3Nz",
+  ...over,
+});
+/** A forward rule row. `localPort` is deliberately not 0 by default, so the
+ *  check that 0 is LEGAL there says so on purpose rather than by inheritance. */
+const rule = (over: Record<string, unknown> = {}) => ({
+  id: "f-1",
+  name: "postgres",
+  hostId: "h-1",
+  localPort: 15432,
+  remoteHost: "127.0.0.1",
+  remotePort: 5432,
+  ...over,
+});
+
 /** A validated host, for the passes that work on records rather than on raw file
  *  data. Throws rather than returning null so a bad fixture fails loudly instead
  *  of quietly skipping the check it was written for. */
@@ -266,6 +358,37 @@ function rdpHost(raw: unknown): RdpHost {
   if (h.protocol !== "rdp") throw new Error(`fixture is not an RDP host: ${JSON.stringify(raw)}`);
   return h;
 }
+/** The vault equivalents, for the passes that take records rather than raw rows.
+ *  Same loud failure, for the same reason: a fixture that came back null would
+ *  otherwise skip the check it was written for and report nothing. */
+function identityOf(raw: unknown): VaultIdentity {
+  const i = sanitizeIdentity(raw);
+  if (!i) throw new Error(`fixture is not a valid identity: ${JSON.stringify(raw)}`);
+  return i;
+}
+function keyOf(raw: unknown): VaultKey {
+  const k = sanitizeKey(raw);
+  if (!k) throw new Error(`fixture is not a valid key: ${JSON.stringify(raw)}`);
+  return k;
+}
+function ruleOf(raw: unknown): ForwardRule {
+  const r = sanitizeRule(raw);
+  if (!r) throw new Error(`fixture is not a valid rule: ${JSON.stringify(raw)}`);
+  return r;
+}
+
+/**
+ * Whether the object carries the property AT ALL, which is a different question
+ * from whether reading it gives `undefined`.
+ *
+ * The distinction is the check, in two places. `sanitizeKey` OMITS an unknown
+ * `keyType` rather than coercing it, and `undefined` and `"unknown"` are
+ * different facts - `KeyCard.tsx` renders "Unknown type" for the first and the
+ * recorded "UNKNOWN" for the second. `JSON.stringify` cannot tell an absent
+ * property from a present `undefined` one, so a check written through it passes
+ * over a parser that stored one.
+ */
+const has = (o: object, prop: string): boolean => Object.prototype.hasOwnProperty.call(o, prop);
 
 /** Reference readers, so a check reads through the protocol guard instead of
  *  casting past it: a row that came back on the wrong arm then reads as null
@@ -771,13 +894,38 @@ check(
   2,
 );
 
-console.log("\n[vault bindings] a backup carries no vault, so one must never be APPLIED");
+console.log(
+  "\n[vault bindings] a v3 payload carries a vault, so this is a DECISION, not a refusal",
+);
+// THREE OUTCOMES, and the third one covers two rows that are conservative for
+// different reasons - so four cases are checked below, each on its own fixture.
+// `identityIds` is what separates outcome 2 from outcome 3, and it is REQUIRED
+// rather than optional for exactly that reason: a caller allowed to omit it would
+// skip the guard silently, and outcome 2 would either never fire or fire for an
+// identity that is not going to be there.
+//
+// The set is what `applyV3` builds - the ids `normaliseIdentityKeys` RETURNED,
+// unioned with the ids already saved here - and it is spelled per check rather
+// than shared, because which ids are in it is the whole question.
+const travelled = (...ids: string[]): ReadonlySet<string> => new Set(ids);
+/** No identity travelled and none is saved here: the pre-v3 world, where every
+ *  binding was refused because there was nothing for it to name. */
+const NO_IDENTITIES: ReadonlySet<string> = new Set();
+
 // The failure this closes. `h-7` is a saved inline host holding the only copy of a
 // passphrased key. A file says `h-7` is `{kind:"identity"}`; a vault-bound record
 // owns no accounts, so `upsertHost` makes all three of that host's fields stale
-// and deletes them - nothing copied them, `i-1` does not exist here, and there is
-// no `secrets_list`. The import reported `withoutSecrets: 1`, which reads as "the
-// credential did not travel" rather than "the credential is gone".
+// and deletes them - nothing copied them, and there is no `secrets_list`. The
+// import reported `withoutSecrets: 1`, which reads as "the credential did not
+// travel" rather than "the credential is gone".
+//
+// THE IDENTITY HAVING TRAVELLED DOES NOT MAKE IT SAFE TO APPLY, which is the step
+// this is easy to get wrong on, so `i-1` is IN the set below: the user's local
+// inline password for this host is not necessarily the identity's password, and
+// this module has read neither. That is why the case is checked with the identity
+// present rather than absent - with it absent the row takes outcome 3 for the
+// weaker reason and the check would pass over an implementation that applies the
+// binding whenever the identity is there.
 const savedKeyHost: SshHost = {
   ...sshHost(ssh({ id: "h-7" })),
   credential: {
@@ -793,6 +941,7 @@ const savedKeyHost: SshHost = {
 const overSaved = resolveIdentityBindings(
   [host(ssh({ id: "h-7", credential: { kind: "identity", identityId: "i-1" } }))],
   [savedKeyHost],
+  travelled("i-1"),
 );
 check(
   "landing on a saved inline host keeps that host's own credential, flags and all",
@@ -800,6 +949,11 @@ check(
   savedKeyHost.credential,
 );
 check("and says so, rather than reporting a missing secret", overSaved.dropped, 1);
+// Not applied, and counted in NEITHER direction: `applied` is what the summary
+// reports as a binding honoured, and a row that kept its own credential must not
+// appear there. Checked beside `dropped` because the two counters are one
+// decision - an implementation that incremented both would report a row twice.
+check("and it is not counted as applied either", overSaved.applied, 0);
 // The binding kind is what makes the delete happen, so the check that matters is
 // that it did not change: same kind on both sides means nothing is stale.
 check(
@@ -807,9 +961,63 @@ check(
   overSaved.hosts[0].credential.kind,
   "inline",
 );
+// OUTCOME 3, SECOND AND WEAKER REASON, and it is a separate case rather than a
+// variation on the one above. A saved host already bound to a DIFFERENT identity
+// loses no account by being repointed - vault-to-vault releases none either side -
+// so keeping it is not about preventing a loss at all. It is kept because the
+// saved binding is this machine's own current answer to how a host it already has
+// authenticates, and a file has no better claim on that than on a group's local
+// label, which `mergeGroups` declines for the same reason and counts as
+// `keptNames`. BOTH identities travel here, so the only thing left standing in the
+// way is the decision itself.
+const repoint = resolveIdentityBindings(
+  [host(ssh({ id: "h-7", credential: { kind: "identity", identityId: "i-2" } }))],
+  [{ ...sshHost(ssh({ id: "h-7" })), credential: { kind: "identity", identityId: "i-1" } }],
+  travelled("i-1", "i-2"),
+);
+check(
+  "a saved host bound to another identity is not repointed, even when both travelled",
+  [repoint.hosts[0].credential, repoint.applied, repoint.dropped],
+  [{ kind: "identity", identityId: "i-1" }, 0, 1],
+);
+// OUTCOME 2, and it needs BOTH halves. The host is new, so there is no stored
+// record whose accounts could be released, and the identity it names will exist -
+// which together are what make applying provably free rather than merely likely.
+const applied = resolveIdentityBindings(
+  [host(ssh({ id: "h-new", credential: { kind: "identity", identityId: "i-1" } }))],
+  [],
+  travelled("i-1"),
+);
+check(
+  "a NEW host naming an identity that will exist keeps the binding, and is counted",
+  [applied.hosts[0].credential, applied.applied, applied.dropped],
+  [{ kind: "identity", identityId: "i-1" }, 1, 0],
+);
+// THE OTHER HALF OF THE UNION, behaviourally. `applyV3` builds the set from the
+// identities the FILE brought plus the ones already saved here, and this is the
+// only observable difference the saved half makes: before it, a host naming an
+// identity this machine already holds took outcome 3 and arrived blank. The set
+// here carries an id that is in NO incoming identity, which is exactly the shape
+// the saved half contributes.
+//
+// This proves what a right set DOES; that the set is BUILT right is a different
+// question and cannot be reached from here - see `[apply source]`.
+const savedIdentityOnly = resolveIdentityBindings(
+  [host(ssh({ id: "h-new", credential: { kind: "identity", identityId: "i-local" } }))],
+  [],
+  travelled("i-local"),
+);
+check(
+  "an identity already saved HERE counts as existing, so the binding is applied",
+  [savedIdentityOnly.hosts[0].credential, savedIdentityOnly.applied],
+  [{ kind: "identity", identityId: "i-local" }, 1],
+);
+// And the half that is NOT enough on its own: the host is new, the identity did
+// not travel and is not saved here, so there is nothing for the binding to name.
 const fresh = resolveIdentityBindings(
   [host(ssh({ id: "h-new", credential: { kind: "identity", identityId: "i-1" } }))],
   [],
+  NO_IDENTITIES,
 );
 check(
   "a host that is NOT saved here arrives as a blank inline row instead of vanishing",
@@ -829,23 +1037,31 @@ check(
   [fresh.hosts[0].name, fresh.hosts[0].port],
   ["prod", 22],
 );
-check("and it is counted", fresh.dropped, 1);
-// A machine re-importing its own backup: the saved binding IS what the file asked
-// for, so nothing was refused and there is nothing to report.
+check(
+  "and it is counted, on the dropped side and not the applied one",
+  [fresh.dropped, fresh.applied],
+  [1, 0],
+);
+// OUTCOME 1. A machine re-importing its own backup: the saved binding IS what the
+// file asked for, so nothing was refused and there is nothing to report. The
+// mechanism outcome 3 exists for is not merely unlikely here but unreachable -
+// the binding KIND does not change across the write, so nothing goes stale.
 const roundTrip = resolveIdentityBindings(
   [host(ssh({ id: "h-7", credential: { kind: "identity", identityId: "i-1" } }))],
   [{ ...sshHost(ssh({ id: "h-7" })), credential: { kind: "identity", identityId: "i-1" } }],
+  travelled("i-1"),
 );
 check(
-  "a binding this machine already has is kept, and not counted",
-  [roundTrip.hosts[0].credential, roundTrip.dropped],
-  [{ kind: "identity", identityId: "i-1" }, 0],
+  "a binding this machine already has is kept byte for byte, and counted in neither",
+  [roundTrip.hosts[0].credential, roundTrip.dropped, roundTrip.applied],
+  [{ kind: "identity", identityId: "i-1" }, 0, 0],
 );
 check(
   "a DIFFERENT identity does not repoint the saved host at one it may not have",
   resolveIdentityBindings(
     [host(ssh({ id: "h-7", credential: { kind: "identity", identityId: "i-2" } }))],
     [{ ...sshHost(ssh({ id: "h-7" })), credential: { kind: "identity", identityId: "i-1" } }],
+    travelled("i-1"),
   ).hosts[0].credential,
   { kind: "identity", identityId: "i-1" },
 );
@@ -858,20 +1074,22 @@ check(
   resolveIdentityBindings(
     [host(rdp({ id: "h-9", credential: { kind: "identity", identityId: "i-1" } }))],
     [savedRdp],
+    travelled("i-1"),
   ).hosts[0].credential,
   savedRdp.credential,
 );
 check(
-  "and a new RDP row arrives blank rather than bound",
+  "and a new RDP row whose identity did not travel arrives blank rather than bound",
   rdpInline(
     resolveIdentityBindings(
       [host(rdp({ id: "h-fresh", credential: { kind: "identity", identityId: "i-1" } }))],
       [],
+      NO_IDENTITIES,
     ).hosts[0],
   ),
   { kind: "inline", hostId: "h-fresh", username: "", hasPassword: false },
 );
-const inlineOnly = resolveIdentityBindings([host(ssh()), host(rdp())], []);
+const inlineOnly = resolveIdentityBindings([host(ssh()), host(rdp())], [], NO_IDENTITIES);
 check(
   "an inline row is passed through untouched and counted as nothing",
   [inlineOnly.hosts.map((h) => h.credential.kind), inlineOnly.dropped],
@@ -1041,6 +1259,7 @@ const afterBindings = carryPins(
       ),
     ],
     [savedKeyHost],
+    travelled("i-1"),
   ).hosts,
   [savedKeyHost],
 );
@@ -1089,6 +1308,97 @@ check(
 const vaultBound = host(ssh({ id: "h-v", credential: { kind: "identity", identityId: "i-1" } }));
 check("a vault-bound host contributes none", hostRefs(vaultBound).length, 0);
 
+// THE OTHER TWO THIRDS OF WHAT AN EXPORT NAMES. `hostRefs` answers for one host
+// and one group only - a vault-bound host's identity has its secrets on another
+// service - so an identity's password and a key's body and passphrase are named by
+// their own builders or they do not travel at all.
+const refIdentity = identityOf(identity());
+const refKey = keyOf(key());
+check("an identity contributes one ref, and it is its password", identityRefs(refIdentity), [
+  {
+    group: "identitySecrets",
+    id: "i-1",
+    field: "password",
+    service: "tervia-vault",
+    account: "i-1::password",
+  },
+]);
+check("a key contributes its private body and its passphrase", keyRefs(refKey), [
+  {
+    group: "keySecrets",
+    id: "k-1",
+    field: "privateKey",
+    service: "tervia-vault",
+    account: "k-1::privateKey",
+  },
+  {
+    group: "keySecrets",
+    id: "k-1",
+    field: "passphrase",
+    service: "tervia-vault",
+    account: "k-1::passphrase",
+  },
+]);
+// THREE PAYLOAD GROUPS, TWO KEYCHAIN SERVICES. Identities and keys SHARE
+// `tervia-vault`; the groups are three because the three record kinds draw their
+// ids from three separate collections, and a group is not a service. Reading both
+// off the same fixtures keeps that distinction stated rather than assumed.
+check(
+  "the three kinds sit on two services, the vault's shared by identities and keys",
+  [
+    hostRefs(host(ssh()))[0].service,
+    identityRefs(refIdentity)[0].service,
+    keyRefs(refKey)[0].service,
+  ],
+  ["tervia-hosts", "tervia-vault", "tervia-vault"],
+);
+check(
+  "and on three distinct groups, which is what keeps one id space out of another's",
+  [hostRefs(host(ssh()))[0].group, identityRefs(refIdentity)[0].group, keyRefs(refKey)[0].group],
+  [HOST_SECRET_GROUP, IDENTITY_SECRET_GROUP, KEY_SECRET_GROUP],
+);
+// COUNTED AGAINST THE CONSTANTS, never against the literals 1 and 2. A field added
+// to either list has to be named by its builder or it simply stops travelling -
+// which is the same contract `hostRefs`' own doc states - and this is the only
+// thing that would say so.
+check(
+  "each builder names every field in its own list, in the list's order",
+  [identityRefs(refIdentity).map((r) => r.field), keyRefs(refKey).map((r) => r.field)],
+  [[...VAULT_IDENTITY_SECRET_FIELDS], [...VAULT_KEY_SECRET_FIELDS]],
+);
+check(
+  "so the ref count is the field list's length, and a fourth field cannot be added silently",
+  [identityRefs(refIdentity).length, keyRefs(refKey).length],
+  [VAULT_IDENTITY_SECRET_FIELDS.length, VAULT_KEY_SECRET_FIELDS.length],
+);
+// A field is asked for whether or not anything is stored at it: the host process
+// skips a reference that resolves to nothing, which keeps the decision about what
+// exists in the one place that can answer it. So a record whose flags are all
+// false still contributes its full set, exactly as an agent-auth host does.
+check(
+  "a record with no stored material still contributes every ref, because Rust answers that",
+  [
+    identityRefs(identityOf(identity({ hasPassword: false }))).length,
+    keyRefs(keyOf(key({ hasPrivateKey: false, hasPassphrase: false }))).length,
+  ],
+  [1, 2],
+);
+
+/**
+ * The keys an import remembers a landed credential under, built by CALLING
+ * `landedKey` rather than by respelling `<group>::<id>::<field>` here.
+ *
+ * That is what the export is for. The group is part of the key because v3 draws
+ * three groups from three separate id spaces, so an id alone no longer says which
+ * record it came off - and a fixture that spelled the format itself could make the
+ * same mistake the implementation made and then agree with it in two places.
+ * Called, a group dropped out of the key collapses the host fixture and the
+ * identity one onto a single entry, and the collision checks below redden on their
+ * own arithmetic.
+ */
+const hostLanded = (id: string, ...fields: string[]): string[] =>
+  fields.map((field) => landedKey(HOST_SECRET_GROUP, id, field));
+
 /** Which fields were claimed as ALREADY STORED, by name. Read out by name because
  *  the names ARE the contract - `storedFields` promises a claim per field - which
  *  keeps the assertion off how a symbol happens to render. */
@@ -1099,7 +1409,7 @@ const claimed = (h: Host, landed: string[]): string[] =>
 
 check(
   "every field that landed is claimed",
-  claimed(host(ssh()), ["h-1::password", "h-1::privateKey", "h-1::keyPassphrase"]),
+  claimed(host(ssh()), hostLanded("h-1", "password", "privateKey", "keyPassphrase")),
   ["password", "privateKey", "keyPassphrase"],
 );
 // PER FIELD, which is the whole point: the store takes an untouched field's flag
@@ -1107,27 +1417,63 @@ check(
 // live secret - which `RdpPane` pre-flights and refuses to connect on.
 check(
   "and only those, so a partial arrival is reported partially",
-  claimed(host(ssh()), ["h-1::privateKey"]),
+  claimed(host(ssh()), hostLanded("h-1", "privateKey")),
   ["privateKey"],
 );
 check("nothing landed, nothing claimed", claimed(host(ssh()), []), []);
-check("the RDP row claims its one field", claimed(host(rdp()), ["h-9::password"]), ["password"]);
+check("the RDP row claims its one field", claimed(host(rdp()), hostLanded("h-9", "password")), [
+  "password",
+]);
 // `HOST_SSH_PRIVATE_KEY_FIELD` and the RDP password field share an id space now,
 // so the guard is the protocol arm rather than the account name.
 check(
   "an RDP row claims nothing from an SSH field, even at its own id",
-  claimed(host(rdp()), ["h-9::privateKey", "h-9::keyPassphrase"]),
+  claimed(host(rdp()), hostLanded("h-9", "privateKey", "keyPassphrase")),
   [],
 );
 check(
   "a vault-bound host claims nothing, which is what stops upsertHost refusing the row",
-  claimed(vaultBound, ["h-v::password"]),
+  claimed(vaultBound, hostLanded("h-v", "password")),
   [],
 );
 check(
   "and what is claimed is the symbol, never a string a file could carry",
-  Object.values(storedFields(host(ssh()), new Set(["h-1::password"]))).map((v) => typeof v),
+  Object.values(storedFields(host(ssh()), new Set(hostLanded("h-1", "password")))).map(
+    (v) => typeof v,
+  ),
   ["symbol"],
+);
+
+// THE GROUP IN THE KEY, asked of the one consumer a plain-node run can reach.
+// Three groups over three id spaces means an id no longer identifies the record
+// it came off: an identity and a host sharing an id, each with a `password`
+// field, collide on a bare `<id>::<field>` key - and `storedFields` would then
+// report SECRET_ALREADY_STORED for a host whose secret never landed, so the host
+// is written with `hasPassword: true` over nothing. That is a presence flag taken
+// from the file by the back door, which is the one thing this module exists to
+// stop.
+//
+// A REAL EXPORT CANNOT PRODUCE THE COLLISION - the three stores mint ids
+// independently - but a hand-made payload can, and an import is a trust boundary.
+// Both fixtures are built through `landedKey`, so dropping the group from it makes
+// these two sets equal to the host's own and the two checks fail together.
+check(
+  "an identity's landed password does not answer for a host that shares its id",
+  claimed(host(ssh()), [landedKey(IDENTITY_SECRET_GROUP, "h-1", IDENTITY_PASSWORD_FIELD)]),
+  [],
+);
+check(
+  "and a key's landed private body does not answer for a host that shares ITS id",
+  claimed(host(ssh()), [landedKey(KEY_SECRET_GROUP, "h-1", KEY_PRIVATE_KEY_FIELD)]),
+  [],
+);
+// The positive control for the pair above: the same id and the same field under
+// the HOST group is claimed. Without it, both checks are satisfied by a
+// `storedFields` that claims nothing at all.
+check(
+  "while the host's own group at the same id and field is claimed",
+  claimed(host(ssh()), hostLanded("h-1", "password")),
+  ["password"],
 );
 
 console.log("\n[without secrets] counted per FIELD, against the mode that needs it");
@@ -1140,25 +1486,25 @@ const agentAuth = ssh({
   credential: { kind: "inline", hostId: "h-1", user: "r", authMode: "agent" },
 });
 check("password auth with no password is counted", missing(ssh(), []), true);
-check("password auth with one is not", missing(ssh(), ["h-1::password"]), false);
+check("password auth with one is not", missing(ssh(), hostLanded("h-1", "password")), false);
 // The case a per-host answer got wrong: something landed, so it reported fine,
 // and the host cannot connect because the thing that landed was the passphrase.
 check(
   "key auth whose passphrase arrived and whose KEY did not is counted",
-  missing(keyAuth, ["h-1::keyPassphrase"]),
+  missing(keyAuth, hostLanded("h-1", "keyPassphrase")),
   true,
 );
-check("key auth with the key is not", missing(keyAuth, ["h-1::privateKey"]), false);
+check("key auth with the key is not", missing(keyAuth, hostLanded("h-1", "privateKey")), false);
 check(
   "and a key with no passphrase is ordinary, not missing one",
-  missing(keyAuth, ["h-1::privateKey"]),
+  missing(keyAuth, hostLanded("h-1", "privateKey")),
   false,
 );
 // Agent auth stores nothing by design, so reporting it as missing a credential
 // would read as a broken import.
 check("agent auth is never counted", missing(agentAuth, []), false);
 check("an RDP host with no password is counted", missing(rdp(), []), true);
-check("and with one is not", missing(rdp(), ["h-9::password"]), false);
+check("and with one is not", missing(rdp(), hostLanded("h-9", "password")), false);
 check(
   "a host that kept a vault binding is not counted: its credential is already here",
   arrivedWithoutSecret(vaultBound, {}),
@@ -1256,6 +1602,361 @@ check(
   undefined,
 );
 
+console.log("\n[identities] a bad row is wrong everywhere it is referenced, not just once");
+check("a good identity survives", sanitizeIdentity(identity()), {
+  id: "i-1",
+  name: "deploy",
+  username: "deploy",
+  authMode: "password",
+  hasPassword: false,
+});
+check("no id is dropped", sanitizeIdentity(identity({ id: "  " })), null);
+// `name` is required even though the STORE accepts a blank one - `vault/store.ts`
+// asks only that key auth names a key. It is what every host picking a credential
+// shows and searches, so a nameless row would render an empty card title here and
+// fall back to an opaque id in its own delete refusal.
+check(
+  "a blank name is dropped here, stricter than the store on purpose",
+  sanitizeIdentity(identity({ name: "   " })),
+  null,
+);
+check("a non-object is dropped", sanitizeIdentity("i-1"), null);
+// `username` may be BLANK, and the asymmetry with `name` is deliberate: it is a
+// field the user can see and fix on the Vault page, and refusing the row over it
+// throws away the name, the domain, the auth mode and the description with it.
+check(
+  "a blank username is kept, because refusing the row would cost every other field",
+  sanitizeIdentity(identity({ username: "   ", description: "note" })),
+  {
+    id: "i-1",
+    name: "deploy",
+    username: "",
+    authMode: "password",
+    hasPassword: false,
+    description: "note",
+  },
+);
+check(
+  "an unknown authMode - including one a later build writes - falls to password",
+  [
+    sanitizeIdentity(identity({ authMode: "sso" }))?.authMode,
+    sanitizeIdentity(identity({ authMode: undefined }))?.authMode,
+    sanitizeIdentity(identity({ authMode: "agent" }))?.authMode,
+  ],
+  ["password", "password", "agent"],
+);
+// PRESERVED, not applied: this function records what the file ASKED for, and
+// `normaliseIdentityKeys` is what decides whether the key it names will exist.
+check(
+  "keyId rides along verbatim, for the later pass to judge",
+  sanitizeIdentity(identity({ authMode: "key", keyId: " k-9 " }))?.keyId,
+  "k-9",
+);
+// THE ONE THAT MATTERS. Left true it would render a stored-password indicator for
+// a secret this machine does not hold, on a row the user then never fills in -
+// and whether a password arrives is decided by what the sealed payload carried,
+// which this function cannot see.
+check(
+  "hasPassword is forced false even when the file says true",
+  sanitizeIdentity(identity({ hasPassword: true }))?.hasPassword,
+  false,
+);
+const sparse = identityOf(identity({ domain: "   ", description: "  " }));
+check(
+  "a blank domain and a blank description are OMITTED rather than stored as empty strings",
+  [has(sparse, "domain"), has(sparse, "description")],
+  [false, false],
+);
+check(
+  "and a real domain rides along, trimmed",
+  sanitizeIdentity(identity({ domain: " CORP " }))?.domain,
+  "CORP",
+);
+
+console.log("\n[keys] the record a private key hangs off, and two flags that are not ours");
+check("a good key survives", sanitizeKey(key()), {
+  id: "k-1",
+  name: "laptop",
+  keyType: "ed25519",
+  fingerprint: "SHA256:FPR",
+  publicKey: "ssh-ed25519 AAAAC3Nz",
+  hasPrivateKey: false,
+  hasPassphrase: false,
+});
+check("no id is dropped", sanitizeKey(key({ id: "" })), null);
+// `upsertKey` THROWS on a blank name, and a throw inside the import loop costs
+// every record behind it - so the refusal is made here, where it is one skipped
+// row and a count.
+check(
+  "a blank name is dropped, because the store would throw on it",
+  sanitizeKey(key({ name: " " })),
+  null,
+);
+check("a non-object is dropped", sanitizeKey(7), null);
+check(
+  "all four types this build can name are recorded",
+  ["rsa", "ed25519", "ecdsa", "unknown"].map((keyType) => sanitizeKey(key({ keyType }))?.keyType),
+  ["rsa", "ed25519", "ecdsa", "unknown"],
+);
+// OMITTED, never coerced, and the assertion is that the PROPERTY IS ABSENT rather
+// than that it reads `undefined`: `JSON.stringify` cannot tell those apart, and
+// they are different facts. `KeyCard.tsx` renders "Unknown type" for the absent
+// one and the recorded "UNKNOWN" for `"unknown"`, so coercing would turn "nobody
+// looked" into "we looked and could not tell".
+check(
+  "an illegal keyType is omitted, not coerced - and the property is gone, not undefined",
+  has(keyOf(key({ keyType: "dsa" })), "keyType"),
+  false,
+);
+check(
+  "which is a different fact from the recorded unknown sitting beside it",
+  sanitizeKey(key({ keyType: "unknown" }))?.keyType,
+  "unknown",
+);
+const bareKey = keyOf(key({ fingerprint: "  ", publicKey: "", description: " " }));
+check(
+  "a blank fingerprint, publicKey and description are omitted rather than empty-stringed",
+  [has(bareKey, "fingerprint"), has(bareKey, "publicKey"), has(bareKey, "description")],
+  [false, false, false],
+);
+// Carried as trimmed strings and NOT parsed: both are display-only on this side,
+// so an unrecognised `SHA256:` shape says nothing about whether the private half
+// is usable - and a stricter parse would drop a good key over a cosmetic field.
+check(
+  "and an unparseable fingerprint is still carried, because it is display only",
+  sanitizeKey(key({ fingerprint: " not-a-sha " }))?.fingerprint,
+  "not-a-sha",
+);
+check(
+  "both presence flags are forced false even when the file says true",
+  [
+    sanitizeKey(key({ hasPrivateKey: true, hasPassphrase: true }))?.hasPrivateKey,
+    sanitizeKey(key({ hasPrivateKey: true, hasPassphrase: true }))?.hasPassphrase,
+  ],
+  [false, false],
+);
+
+console.log("\n[identity keys] a keyId may never dangle: upsertIdentity throws on one either way");
+// SKIPPED, never downgraded, and the downgrade is the tempting wrong answer: every
+// host bound to this identity would quietly start offering a password where it used
+// to offer a key, with no error and nothing on the host row that says so - and the
+// password it would offer is one the identity has no reason to hold. Skipping costs
+// the user an identity they can see is absent and re-enter.
+const keyAuthDangling = normaliseIdentityKeys(
+  [identityOf(identity({ authMode: "key", keyId: "k-gone" }))],
+  [],
+  [],
+);
+check(
+  "key auth naming a key that will not exist is SKIPPED, and counted in withoutKeys",
+  [keyAuthDangling.identities, keyAuthDangling.withoutKeys, keyAuthDangling.keysDropped],
+  [[], 1, 0],
+);
+// The second shape `upsertIdentity` throws on, and not a milder version of the
+// first: key auth with no `keyId` at all names nothing.
+// The count and the SKIP are asserted together, and not the count alone: a
+// downgrade increments `withoutKeys` too, so a check on the counter by itself
+// passes over exactly the repair this arm refuses to make.
+check(
+  "key auth with no keyId at all is skipped too, not saved as key auth naming nothing",
+  ((r) => [r.identities, r.withoutKeys])(
+    normaliseIdentityKeys([identityOf(identity({ authMode: "key" }))], [], []),
+  ),
+  [[], 1],
+);
+// The other failure, and it does NOT cost the same thing: the identity
+// authenticates exactly as it did before, so there is nothing to gain by refusing
+// the whole record.
+const droppedKeyId = normaliseIdentityKeys(
+  [identityOf(identity({ keyId: "k-gone", description: "note" }))],
+  [],
+  [],
+);
+check(
+  "any other mode KEEPS the identity and loses only the keyId",
+  [
+    droppedKeyId.identities.length,
+    droppedKeyId.identities[0]?.name,
+    droppedKeyId.identities[0]?.authMode,
+    droppedKeyId.identities[0]?.description,
+    droppedKeyId.keysDropped,
+    droppedKeyId.withoutKeys,
+  ],
+  [1, "deploy", "password", "note", 1, 0],
+);
+// `undefined` rather than rebuilt without the field, the same spelling
+// `clearDanglingJumps` uses for a `proxyJumpId`: one way of saying "this reference
+// is gone" across the module, and the store persists as JSON so the field does not
+// survive the write either way. Asserted as undefined and not as absent, because
+// this is the one place the two are deliberately the same.
+check(
+  "cleared to undefined, one spelling of a gone reference",
+  droppedKeyId.identities[0]?.keyId,
+  undefined,
+);
+// "WILL EXIST" IS A UNION, and both halves are checked, because a key the user
+// already has is as good as one that travelled.
+check(
+  "a key travelling in the SAME payload counts as existing",
+  normaliseIdentityKeys(
+    [identityOf(identity({ authMode: "key", keyId: "k-1" }))],
+    [keyOf(key({ id: "k-1" }))],
+    [],
+  ).identities[0]?.keyId,
+  "k-1",
+);
+check(
+  "and so does a key already saved on THIS machine",
+  normaliseIdentityKeys(
+    [identityOf(identity({ authMode: "key", keyId: "k-local" }))],
+    [],
+    [keyOf(key({ id: "k-local" }))],
+  ).identities[0]?.keyId,
+  "k-local",
+);
+// A `keyId` on a NON-KEY identity is ordinary rather than a malformed row to be
+// tidied: `convertHostToVault` writes precisely that shape on purpose, minting a
+// `VaultKey` out of a host's stored private key - and if the new identity did not
+// name that key then nothing would, `deleteKey`'s in-use guard would have no
+// holder to refuse over, and one click could destroy the user's only copy of it.
+check(
+  "a resolvable keyId on a password identity is left alone, whatever the mode says",
+  normaliseIdentityKeys([identityOf(identity({ keyId: "k-1" }))], [keyOf(key({ id: "k-1" }))], []),
+  {
+    identities: [
+      {
+        id: "i-1",
+        name: "deploy",
+        username: "deploy",
+        authMode: "password",
+        hasPassword: false,
+        keyId: "k-1",
+      },
+    ],
+    withoutKeys: 0,
+    keysDropped: 0,
+  },
+);
+
+console.log("\n[rules] every refusal here mirrors one upsertRule makes, so a row costs one count");
+check("a good rule survives", sanitizeRule(rule()), {
+  id: "f-1",
+  name: "postgres",
+  hostId: "h-1",
+  localPort: 15432,
+  remoteHost: "127.0.0.1",
+  remotePort: 5432,
+  startWithHost: false,
+});
+// THE TWO PORTS ARE DIFFERENT, and they are asserted ADJACENTLY because they are
+// the pair a single shared predicate gets wrong: `localPort` may be 0, which means
+// "let the OS pick" and is the value a rule is saved with until it binds, and
+// `remotePort` may not, because it is dialled on the far side.
+check(
+  "localPort 0 is LEGAL, and means let the OS pick",
+  sanitizeRule(rule({ localPort: 0 }))?.localPort,
+  0,
+);
+check("remotePort 0 is NOT, because it is dialled", sanitizeRule(rule({ remotePort: 0 })), null);
+check(
+  "each port is bound at 1 and at 65535",
+  [
+    sanitizeRule(rule({ localPort: 1, remotePort: 1 }))?.localPort,
+    sanitizeRule(rule({ localPort: 65535, remotePort: 65535 }))?.remotePort,
+    sanitizeRule(rule({ localPort: 65536 })),
+    sanitizeRule(rule({ remotePort: 65536 })),
+    sanitizeRule(rule({ localPort: -1 })),
+  ],
+  [1, 65535, null, null, null],
+);
+check(
+  "a float is refused on either port, not rounded to something dialable",
+  [sanitizeRule(rule({ localPort: 8080.5 })), sanitizeRule(rule({ remotePort: 80.5 }))],
+  [null, null],
+);
+check(
+  "and so is a string, on either",
+  [sanitizeRule(rule({ localPort: "8080" })), sanitizeRule(rule({ remotePort: "80" }))],
+  [null, null],
+);
+check(
+  "a blank name, hostId, remoteHost or id is refused, each on its own",
+  [
+    sanitizeRule(rule({ name: "  " })),
+    sanitizeRule(rule({ hostId: "" })),
+    sanitizeRule(rule({ remoteHost: "   " })),
+    sanitizeRule(rule({ id: " " })),
+    sanitizeRule("f-1"),
+  ],
+  [null, null, null, null, null],
+);
+// `false` is the safe direction: a rule that does not start itself is visible and
+// one click from running, where one that starts unasked opens a listening socket
+// the user did not ask for.
+check(
+  "startWithHost is true only for a literal true",
+  [
+    sanitizeRule(rule({ startWithHost: true }))?.startWithHost,
+    sanitizeRule(rule({ startWithHost: "true" }))?.startWithHost,
+    sanitizeRule(rule({ startWithHost: 1 }))?.startWithHost,
+    sanitizeRule(rule({ startWithHost: undefined }))?.startWithHost,
+  ],
+  [true, false, false, false],
+);
+check(
+  "and a blank description is omitted",
+  has(sanitizeRule(rule({ description: " " })) ?? {}, "description"),
+  false,
+);
+
+console.log("\n[rule hosts] a rule rides an SSH session, so it needs one that will be there");
+// Two refusals, and both are `upsertRule`'s: a `hostId` naming no host at all, and
+// a `hostId` naming an RDP host, which has no session for a forward to ride. Both
+// are throws at the write, and a throw costs the rules queued behind it.
+const ruledMissing = clearDanglingRuleHosts([ruleOf(rule({ hostId: "gone" }))], [], []);
+check(
+  "a rule whose host is nowhere is dropped, and counted",
+  [ruledMissing.rules, ruledMissing.dropped],
+  [[], 1],
+);
+const ruledRdp = clearDanglingRuleHosts(
+  [ruleOf(rule({ hostId: "h-9" }))],
+  [host(rdp({ id: "h-9" }))],
+  [],
+);
+check(
+  "a rule riding an RDP host is dropped too, which is the refusal one merged store made possible",
+  [ruledRdp.rules, ruledRdp.dropped],
+  [[], 1],
+);
+// "Will be there" is the union the jump passes already build - the file's hosts
+// over the saved ones - so this pass and those cannot come to different
+// conclusions about what the import produces.
+check(
+  "a host travelling in the SAME payload keeps the rule",
+  clearDanglingRuleHosts([ruleOf(rule({ hostId: "h-1" }))], [host(ssh({ id: "h-1" }))], []),
+  {
+    rules: [
+      {
+        id: "f-1",
+        name: "postgres",
+        hostId: "h-1",
+        localPort: 15432,
+        remoteHost: "127.0.0.1",
+        remotePort: 5432,
+        startWithHost: false,
+      },
+    ],
+    dropped: 0,
+  },
+);
+check(
+  "and a host already saved HERE keeps it as well",
+  clearDanglingRuleHosts([ruleOf(rule({ hostId: "h-local" }))], [], [host(ssh({ id: "h-local" }))])
+    .dropped,
+  0,
+);
+
 console.log("\n[payload] the same validation, after decryption instead of before");
 const payload = sanitizePayload({
   hosts: [ssh(), ssh({ id: "h-2", port: 0 }), ssh({ id: "h-3" }), ssh()],
@@ -1277,9 +1978,18 @@ check(
 // Two bad hosts (port 0, duplicate id) and one bad group (duplicate id): the
 // count is across every collection in the payload.
 check("skipped counts them all", payload.skipped, 3);
-check("an empty payload is not an error", sanitizePayload({}), {
+// EVERY collection, and an exact shape rather than a spot check. A payload sealed
+// by a build that had no vault is a legitimate file, so an absent list imports as
+// empty rather than failing - which means a collection accidentally dropped from
+// the return shape reads as an empty import and not as an error. The five names
+// are also what the export seals, so this and `[export source]` are the two ends
+// of one round trip.
+check("an empty payload is not an error, and every collection comes back", sanitizePayload({}), {
   hosts: [],
   groups: [],
+  identities: [],
+  keys: [],
+  rules: [],
   skipped: 0,
 });
 check("a payload with only RDP hosts is fine", sanitizePayload({ hosts: [rdp()] }).hosts.length, 1);
@@ -1297,17 +2007,130 @@ check(
 );
 throws("a payload that is not an object", () => sanitizePayload([1, 2]), "did not contain");
 throws("a payload that is null", () => sanitizePayload(null), "did not contain");
-throws("a host inventory that is not a list", () => sanitizePayload({ hosts: {} }), "not a list");
-throws("a group list that is not a list", () => sanitizePayload({ groups: "g-1" }), "not a list");
 // Credentials never come back to JS: the payload the host process returns has
 // the secret groups removed, and nothing here reads one even if a hand-made file
-// puts it back.
+// puts it back. Read as an exact key list, so a sixth collection cannot be added
+// to the return shape without this saying so.
 check(
   "the secret group in the payload is ignored, not imported",
   Object.keys(
     sanitizePayload({ hosts: [ssh()], hostSecrets: { "h-1": { password: "pw" } } }),
   ).sort(),
-  ["groups", "hosts", "skipped"],
+  ["groups", "hosts", "identities", "keys", "rules", "skipped"],
+);
+
+console.log("\n[payload collections] five of them, each answering for itself");
+// A MISSING collection is not an error, one at a time: a build with no vault
+// sealed no `identities`, `keys` or `rules`, and its file is still readable. Each
+// is asked on its own, so a return shape that dropped one of the five to `[]`
+// unconditionally would still have to face the dedupe and count checks below.
+check(
+  "each collection is independently absent-is-empty",
+  [
+    sanitizePayload({ groups: [], identities: [], keys: [], rules: [] }).hosts,
+    sanitizePayload({ hosts: [], identities: [], keys: [], rules: [] }).groups,
+    sanitizePayload({ hosts: [], groups: [], keys: [], rules: [] }).identities,
+    sanitizePayload({ hosts: [], groups: [], identities: [], rules: [] }).keys,
+    sanitizePayload({ hosts: [], groups: [], identities: [], keys: [] }).rules,
+  ],
+  [[], [], [], [], []],
+);
+// A NON-ARRAY throws instead, and by a sentence that NAMES the collection - one
+// bad row is a count, but a payload that is not the shape this build seals is not
+// something to import four fifths of. Pinned WHOLE rather than on "not a list",
+// which every one of the five shares: a substring pin here is satisfied by any of
+// them, so a label copied from the wrong collection would read as green.
+throwsExactly(
+  "a host inventory that is not a list names the hosts",
+  () => sanitizePayload({ hosts: {} }),
+  "The encrypted payload's hosts are not a list.",
+);
+throwsExactly(
+  "a group list that is not a list names the host groups, as the user reads them",
+  () => sanitizePayload({ groups: "g-1" }),
+  "The encrypted payload's host groups are not a list.",
+);
+throwsExactly(
+  "an identity list that is not a list names the identities",
+  () => sanitizePayload({ identities: 1 }),
+  "The encrypted payload's identities are not a list.",
+);
+throwsExactly(
+  "a key list that is not a list names the keys",
+  () => sanitizePayload({ keys: {} }),
+  "The encrypted payload's keys are not a list.",
+);
+throwsExactly(
+  "a rule list that is not a list names the forward rules",
+  () => sanitizePayload({ rules: "f-1" }),
+  "The encrypted payload's forward rules are not a list.",
+);
+// Hosts go first, so a payload with two bad collections keeps the sentence it has
+// always had rather than reporting whichever one a reordering put in front.
+throwsExactly(
+  "hosts are checked first, so two bad collections still report the hosts",
+  () => sanitizePayload({ hosts: {}, rules: {} }),
+  "The encrypted payload's hosts are not a list.",
+);
+// PER COLLECTION, not app-wide. Two keys sharing an id are the same record slot
+// and the same `tervia-vault :: <id>::privateKey` account, so the second would
+// silently overwrite the first. An id reused BETWEEN two stores is not a conflict
+// at all, and one shared `seen` set would drop a row over it.
+const dupes = sanitizePayload({
+  hosts: [ssh({ id: "x-1" }), ssh({ id: "x-1", name: "second" })],
+  groups: [
+    { id: "x-1", name: "prod" },
+    { id: "x-1", name: "second" },
+  ],
+  identities: [identity({ id: "x-1" }), identity({ id: "x-1", name: "second" })],
+  keys: [key({ id: "x-1" }), key({ id: "x-1", name: "second" })],
+  rules: [rule({ id: "x-1" }), rule({ id: "x-1", name: "second" })],
+});
+check(
+  "every collection dedupes by id, and the FIRST row wins in each",
+  [
+    dupes.hosts.map((h) => h.name),
+    dupes.groups.map((g) => g.name),
+    dupes.identities.map((i) => i.name),
+    dupes.keys.map((k) => k.name),
+    dupes.rules.map((r) => r.name),
+  ],
+  [["prod"], ["prod"], ["deploy"], ["laptop"], ["postgres"]],
+);
+check(
+  "and one id reused across all five collections is no conflict at all",
+  [
+    dupes.hosts.length,
+    dupes.groups.length,
+    dupes.identities.length,
+    dupes.keys.length,
+    dupes.rules.length,
+  ],
+  [1, 1, 1, 1, 1],
+);
+// ONE `skipped` across the five. It is a "rows the file lost" number for the
+// summary rather than a diagnosis - there is nothing different for the user to do
+// per kind - so a per-collection breakdown would suggest an action that does not
+// exist.
+check("and one shared count carries all five collections' losses", dupes.skipped, 5);
+const oneBadEach = sanitizePayload({
+  hosts: [ssh({ port: 0 })],
+  groups: [{ id: "g-1", name: "  " }],
+  identities: [identity({ name: "" })],
+  keys: [key({ name: "   " })],
+  rules: [rule({ remotePort: 0 })],
+});
+check(
+  "one unusable row in each collection is five skipped and nothing imported",
+  [
+    oneBadEach.skipped,
+    oneBadEach.hosts.length +
+      oneBadEach.groups.length +
+      oneBadEach.identities.length +
+      oneBadEach.keys.length +
+      oneBadEach.rules.length,
+  ],
+  [5, 0],
 );
 
 console.log("\n[round trip] the shape an export actually writes");
@@ -1329,12 +2152,15 @@ check(
   real.hosts[3].credential.kind,
   "identity",
 );
-// The whole pipeline in the order `applyV2` runs it, on a fresh machine: nothing
-// is saved here, so the vault-bound row lands inline and blank rather than binding
-// to an identity this machine does not have.
+// The whole pipeline in the order `applyV3` runs it, on a fresh machine. THIS
+// PAYLOAD CARRIES NO IDENTITIES, which is what the empty set says: nothing
+// travelled and nothing is saved, so the vault-bound row lands inline and blank
+// rather than binding to an identity that will not be there. The same file WITH
+// its identity would take outcome 2 instead, which `[vault bindings]` checks on
+// its own fixture.
 const pipeline = ((): Host[] => {
   const kinds = refuseProtocolConflicts(real.hosts, []);
-  const bound = resolveIdentityBindings(kinds.hosts, []);
+  const bound = resolveIdentityBindings(kinds.hosts, [], NO_IDENTITIES);
   return orderHostWrites(clearDanglingTunnels(clearDanglingJumps(bound.hosts, []), []), []);
 })();
 check(
@@ -1385,6 +2211,330 @@ check(
   "a missing secret becomes undefined, not an empty string",
   JSON.stringify(sshCredentialValues("password", { password: "" })),
   "{}",
+);
+
+// ============================================================================
+// SOURCE PINS. Three things in `apply.ts` that no fixture in a plain-node run can
+// reach, and each of them is one expression away from a silent credential loss.
+// ============================================================================
+//
+// `buildBackup` calls `invoke`, so the whole export half is unreachable from
+// here; `applyV3`'s `identityIds` set, its `landed` set and `keyRecord` are all
+// internal to a function that starts with one. Nor does the COMPILER see any of
+// them: each defect below is an edit between two expressions of the same type -
+// two `VaultIdentity[]`s, two `string`s, two `boolean`s - so `tsc` cannot tell
+// the wrong one from the right one, and without these pins nothing in the tree
+// looks at all.
+//
+// READ OFF THE AST, AND ROOTED AT THE FUNCTION THAT OWNS THE EXPRESSION. A
+// substring search is the wrong instrument twice over: `refs` is assembled from
+// three spreads, so a search for `identityRefs` is satisfied by the import clause
+// at the top of that file, and an unrooted search for a name that appears twice
+// compares whichever declaration comes last. Both sides of every comparison go
+// through `squash`, so the expected value can be written the way the source writes
+// it while a narrower print width - moving line breaks and trailing commas around -
+// moves nothing that is compared. That pairing is what keeps these pins from being
+// a landmine on the next `pnpm format`.
+const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+const APPLY_PATH = "src/modules/backup/apply.ts";
+const applySf = ts.createSourceFile(
+  APPLY_PATH,
+  readFileSync(join(repoRoot, APPLY_PATH), "utf8"),
+  ts.ScriptTarget.ESNext,
+  /* setParentNodes */ true,
+);
+
+/** Every layout difference removed: whitespace gone, and a trailing comma before
+ *  a closer gone. Applied to BOTH sides of every pin below. */
+const squash = (s: string): string => s.replace(/\s+/g, "").replace(/,(?=[)\]}])/g, "");
+const exprOf = (n: ts.Node): string => squash(n.getText(applySf));
+
+/** The function that owns a pin, by name: a declaration, or the arrow a `const`
+ *  holds. Rooting every lookup at one of these is what makes the pins below
+ *  answer about the right expression - `refs` is declared in two functions here,
+ *  and an unrooted search would compare the second one. */
+function functionNamed(name: string): ts.Node | null {
+  let out: ts.Node | null = null;
+  const visit = (n: ts.Node): void => {
+    if (ts.isFunctionDeclaration(n) && n.name?.text === name) out = n;
+    else if (
+      ts.isVariableDeclaration(n) &&
+      ts.isIdentifier(n.name) &&
+      n.name.text === name &&
+      n.initializer &&
+      (ts.isArrowFunction(n.initializer) || ts.isFunctionExpression(n.initializer))
+    ) {
+      out = n.initializer;
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(applySf);
+  return out;
+}
+
+/** The initialiser of `const <name> = ...` inside `root`. */
+function localInit(root: ts.Node | null, name: string): ts.Expression | null {
+  if (!root) return null;
+  let out: ts.Expression | null = null;
+  const visit = (n: ts.Node): void => {
+    if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.name.text === name) {
+      out = n.initializer ?? null;
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(root);
+  return out;
+}
+
+/** Every call to `<callee>` inside `root`, in source order. The callee is matched
+ *  through `squash` so a property access (`JSON.stringify`) and a bare name
+ *  (`landedKey`) are found by the same helper. */
+function calls(root: ts.Node | null, callee: string): ts.CallExpression[] {
+  const out: ts.CallExpression[] = [];
+  if (!root) return out;
+  const target = squash(callee);
+  const visit = (n: ts.Node): void => {
+    if (ts.isCallExpression(n) && exprOf(n.expression) === target) out.push(n);
+    ts.forEachChild(n, visit);
+  };
+  visit(root);
+  return out;
+}
+
+/** The SPREAD elements of an array literal, or of the array a `new Set([...])`
+ *  is built from - each one's own expression, never the list's text. Read
+ *  individually on purpose: the list's text carries the trailing comma a reformat
+ *  adds and removes, and each element is the fact being pinned anyway. */
+function spreadsOf(expr: ts.Expression | null): string[] {
+  if (!expr) return [];
+  let arr: ts.ArrayLiteralExpression | null = null;
+  if (ts.isArrayLiteralExpression(expr)) arr = expr;
+  else if (ts.isNewExpression(expr) || ts.isCallExpression(expr)) {
+    const first = expr.arguments?.[0];
+    if (first && ts.isArrayLiteralExpression(first)) arr = first;
+  }
+  if (!arr) return [];
+  return arr.elements.filter(ts.isSpreadElement).map((e) => exprOf(e.expression));
+}
+
+/** The operands of an `&&` chain, flattened. */
+function andOperands(e: ts.Expression): string[] {
+  if (ts.isBinaryExpression(e) && e.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken) {
+    return [...andOperands(e.left), ...andOperands(e.right)];
+  }
+  return [exprOf(e)];
+}
+
+/** The first `return`'s own expression inside `root`. */
+function returnExprOf(root: ts.Node | null): string | null {
+  if (!root) return null;
+  let out: string | null = null;
+  const visit = (n: ts.Node): void => {
+    if (out !== null) return;
+    if (ts.isReturnStatement(n) && n.expression) {
+      out = exprOf(n.expression);
+      return;
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(root);
+  return out;
+}
+
+/** Every `if` inside `root`, in source order. */
+function ifsIn(root: ts.Node | null): ts.IfStatement[] {
+  const out: ts.IfStatement[] = [];
+  if (!root) return out;
+  const visit = (n: ts.Node): void => {
+    if (ts.isIfStatement(n)) out.push(n);
+    ts.forEachChild(n, visit);
+  };
+  visit(root);
+  return out;
+}
+
+/** The named function a node sits inside, for a pin that is about WHICH consumer
+ *  asks the question rather than about the question being asked somewhere. */
+function enclosingName(n: ts.Node): string {
+  let cursor: ts.Node | undefined = n.parent;
+  while (cursor) {
+    if (ts.isFunctionDeclaration(cursor) && cursor.name) return cursor.name.text;
+    cursor = cursor.parent;
+  }
+  return "(top level)";
+}
+
+const applyV3Fn = functionNamed("applyV3");
+const buildFn = functionNamed("buildBackup");
+const keyRecordFn = functionNamed("keyRecord");
+const landedKeyFn = functionNamed("landedKey");
+
+console.log("\n[apply source] identityIds' provenance, which is one expression from destructive");
+// THE MUTATION THIS EXISTS FOR compiles clean and puts the destructive path back:
+// build the set from `sanitizePayload`'s raw `identities` instead of from what
+// `normaliseIdentityKeys` RETURNED, and an identity that pass SKIPPED counts as
+// existing - so a host naming it takes outcome 2, the binding is APPLIED, and the
+// host is pointed at an identity that was never written. Both expressions are
+// `VaultIdentity[]`, so the compiler cannot tell them apart, and every gate in
+// this repository was green over exactly that edit.
+const identityIdsInit = localInit(applyV3Fn, "identityIds");
+const identityHalves = spreadsOf(identityIdsInit);
+// The pin's own precondition, checked out loud: a rename that took either name
+// away would otherwise leave every comparison below running over `(missing)` and
+// reporting it as a failure of the wrong thing.
+check(
+  "applyV3 and the identityIds it hands the credential pass are both found",
+  [applyV3Fn !== null, identityIdsInit !== null],
+  [true, true],
+);
+// THE SET IS A UNION AND EACH HALF IS PINNED ON ITS OWN, because a pin that
+// asserts only the first passes over an implementation that drops the second, and
+// the other way round. Two checks, so one mutation reddens one of them and the
+// pair says which fact broke rather than that "the expression changed".
+check(
+  "the FILE's half comes from normaliseIdentityKeys' return, and parsed.identities is not read",
+  [
+    identityHalves[0] ?? "(missing)",
+    identityIdsInit ? exprOf(identityIdsInit).includes(squash("parsed.identities")) : true,
+  ],
+  [squash("normalised.identities.map((i) => i.id)"), false],
+);
+check(
+  "and the SAVED half is there, so an identity this machine already holds counts as existing",
+  [identityHalves.length, identityHalves[1] ?? "(missing)"],
+  [2, squash("existingIdentities.map((i) => i.id)")],
+);
+
+console.log(
+  "\n[apply source] the landed key carries its GROUP, and each consumer asks with its own",
+);
+// The group was not in this key before v3, where every reference came from one
+// group over one id space. Dropping it back out compiles, and `storedFields` then
+// reports a stored credential for a host whose secret never landed - a presence
+// flag taken from the file by the back door. `[secret refs]` above catches that
+// behaviourally through the one consumer a plain-node run can call; these two pin
+// the key itself and the two consumers it cannot reach.
+check(
+  "landedKey returns the payload group, then the id, then the field",
+  returnExprOf(landedKeyFn) ?? "(missing)",
+  squash("`${group}::${id}::${field}`"),
+);
+// The behavioural half of the same fact, and the reason the function is exported:
+// two groups over one id and one field have to be two different keys. A group
+// dropped from the key collapses them onto one, and this says so without reading
+// any source at all.
+check(
+  "so the same id and field under two groups are two different keys",
+  landedKey(HOST_SECRET_GROUP, "x-1", "password") ===
+    landedKey(IDENTITY_SECRET_GROUP, "x-1", "password"),
+  false,
+);
+check(
+  "and the construction site keys by the REF's own group, not by a bare id",
+  calls(applyV3Fn, "landedKey")
+    .filter((c) => exprOf(c.arguments[0]) === "r.group")
+    .map((c) => c.arguments.map((a) => exprOf(a)))[0] ?? ["(missing)"],
+  ["r.group", "r.id", "r.field"],
+);
+// EACH CONSUMER WITH ITS OWN CONSTANT. Keying by group and then querying two of
+// the three with the wrong one is silently equivalent to not having keyed at all,
+// and a pin on the key alone would not see it. Sorted rather than in source order:
+// which consumer asks with which group is the contract, and where the passes sit
+// relative to each other is `applyV3`'s own documented write order, pinned there.
+check(
+  "every landedKey consumer asks under its own group",
+  calls(applySf, "landedKey")
+    .map((c) => `${enclosingName(c)}: ${exprOf(c.arguments[0])}`)
+    .sort(),
+  [
+    "applyV3: IDENTITY_SECRET_GROUP",
+    "applyV3: KEY_SECRET_GROUP",
+    "applyV3: KEY_SECRET_GROUP",
+    "applyV3: r.group",
+    "storedFields: HOST_SECRET_GROUP",
+  ],
+);
+
+console.log(
+  "\n[apply source] keyRecord is called TWICE, and the first call is the conservative one",
+);
+// "Did the private body land" is UNANSWERABLE at the record write: it is only
+// known after `backup_apply_secrets`, which the RECORDS-BEFORE-SECRETS order puts
+// after the key write. So the first call passes a literal `false` - nothing has
+// landed yet, so the conservative arm is the TRUE one rather than merely the safe
+// one - and the flag pass calls it again with the real answer. The file's
+// fingerprint therefore never sits over this machine's private key at any moment,
+// and it lands in the same import once the body does.
+//
+// The two-call SHAPE is the check: a single call would be a silent regression to a
+// record that momentarily names a key nobody holds.
+check(
+  "two calls, and the record write hands over a literal false",
+  calls(applyV3Fn, "keyRecord").map((c) => exprOf(c.arguments[2])),
+  ["false", "landedBody"],
+);
+// The two arms of `keyRecord` are a pair, and a check on one is satisfied by an
+// implementation that gets the other wrong - so both are in one condition. A key
+// that is NEW keeps the file's triple whatever landed, because there is nothing
+// stored to keep, and its `hasPrivateKey` stays false, so the fingerprint reads as
+// metadata for a key still to be added rather than a claim about one the store
+// holds. A key already here whose body DID land keeps the file's triple too, over
+// the private key it actually describes.
+check(
+  "nothing stored, or the body landed: either way the file's triple wins",
+  ifsIn(keyRecordFn).map((s) => exprOf(s.expression))[0] ?? "(missing)",
+  squash("!stored || landedBody"),
+);
+
+console.log("\n[export source] what buildBackup names, which no fixture here can reach");
+// `buildBackup` calls `invoke`, so this half has no behavioural gate and cannot
+// have one: a real export is ciphertext, and the hand test can only do
+// well-formed round trips. All three of these are one deletion from a silent loss
+// with every other gate in the repository green.
+check(
+  "buildBackup is found, so the three pins below are asking about something",
+  buildFn !== null,
+  true,
+);
+// (a) ALL THREE BUILDERS. Delete the identities spread and every identity password
+// stops travelling; delete the keys spread and every stored private key body
+// does. That is exactly the contract `hostRefs`' own doc states - a field this
+// stops naming simply stops travelling - and nothing else enforces it for two of
+// the three record kinds.
+check(
+  "the export names every record kind that owns a secret",
+  spreadsOf(localInit(buildFn, "refs")),
+  [
+    squash("hosts.flatMap(hostRefs)"),
+    squash("identities.flatMap(identityRefs)"),
+    squash("keys.flatMap(keyRefs)"),
+  ],
+);
+// (b) ALL FIVE COLLECTIONS SEALED. A collection dropped here exports as absent,
+// and `sanitizePayload` imports an absent collection as EMPTY rather than
+// failing - by design, so a payload sealed by a build with no vault stays
+// readable - so the round trip would lose it in silence at both ends. The
+// importing end of this pin is `[payload collections]` above.
+check(
+  "and seals all five inventory collections",
+  calls(buildFn, "JSON.stringify")
+    .map((c) => c.arguments[0])
+    .filter(ts.isObjectLiteralExpression)
+    .map((o) => o.properties.map((p) => p.name?.getText(applySf) ?? "(computed)"))[0] ?? ["(none)"],
+  ["hosts", "groups", "identities", "keys", "rules"],
+);
+// (c) THE EMPTINESS REFUSAL NEEDS ALL FIVE. Reverting it to `hosts.length === 0`
+// makes a vault-only profile - identities and keys and no host yet - unable to
+// export at all, which is the defect this condition exists to fix.
+const emptinessGuard = ifsIn(buildFn).find(
+  (s) =>
+    ts.isBinaryExpression(s.expression) &&
+    s.expression.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken,
+);
+check(
+  "and refuses to export only when every one of the five is empty",
+  emptinessGuard ? andOperands(emptinessGuard.expression) : ["(no conjunction at all)"],
+  ["hosts", "groups", "identities", "keys", "rules"].map((c) => squash(`${c}.length === 0`)),
 );
 
 console.log(failed === 0 ? "\nAll backup checks passed." : `\n${failed} check(s) FAILED.`);
