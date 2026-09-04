@@ -676,6 +676,15 @@ never blocks persistence. Not supported in builtin mode:
   `disable_browser_accelerator_keys` so WebView2 does not eat Ctrl+W / Ctrl+R.
   macOS rebuilds the app menu without "Close Window" so Cmd+W closes a tab.
 - **Docs and prose**: avoid em-dashes; use commas, colons, or parentheses.
+- **Comments cite only what a clone can reach.** A comment may reference a file
+  `git ls-files` returns, a symbol, or a path inside the repo. It may not
+  reference a planning or handoff document, an issue-tracker row id, a section
+  number of a document that is not checked in, a `/tmp` path, a date, or a
+  commit hash: to anyone cloning the repository those name something that does
+  not exist, which is worse than no citation because it looks checkable. State
+  the fact in the comment; provenance belongs in the commit message, which is
+  in git and reachable with `git log -S` or `--grep`. The tell when writing
+  one is a backtick around a filename `git ls-files` would not return.
 
 ## Development workflow
 

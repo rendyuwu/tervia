@@ -84,6 +84,10 @@ If an issue already exists for what you want to do, comment "I'll take this" bef
 - TypeScript: no `any` unless you really mean it.
 - Rust: `cargo fmt` + `clippy` clean.
 - Few comments. Code should explain itself; comments are for the _why_, not the _what_.
+- Comments cite only what a clone can reach: a checked-in file, a symbol, a path in the repo. Not a
+  planning doc, not an issue id, not a section number of something that isn't in git, not a `/tmp`
+  path, not a date or a commit hash. Those look checkable and aren't. Put the fact in the comment and
+  the provenance in the commit message.
 - No emoji in code or commit messages.
 
 ### Formatting standard
