@@ -656,16 +656,32 @@ mod tests {
     }
 
     #[test]
-    fn a_v2_export_leaks_no_metadata() {
-        // Exit-gate item 5: nothing greppable in the file. The envelope JS
-        // writes around this blob carries only kind/version/exportedAt.
+    fn a_sealed_export_leaks_no_metadata() {
+        // A sealed blob leaks no metadata - not the hostname, the username, the
+        // port, or a keychain credential. This is all Rust ever sees of an
+        // export; the envelope wrapped around it is TypeScript's concern. The
+        // username sits inside the host's `credential` object rather than on
+        // the row itself, which is where the SSH inline-credentials type puts
+        // it. 54321 stands in for the port rather than the real default 22: a
+        // two-digit run turns up in base64 output by chance often enough to
+        // make that assertion flaky instead of strict.
         let plain = merge_secrets(
-            r#"{"connections":[{"id":"c-1","host":"vps.example.com","user":"root","port":22}],"rdpConnections":[]}"#,
-            &[(secret_ref("secrets", "c-1", "password"), "hunter2".into())],
+            r#"{"hosts":[{"id":"h-1","name":"vps","protocol":"ssh","host":"vps.example.com","port":54321,"credential":{"kind":"inline","hostId":"h-1","user":"root","authMode":"password","hasPassword":true,"hasPrivateKey":false,"hasKeyPassphrase":false}}],"groups":[],"identities":[],"keys":[],"rules":[]}"#,
+            &[(secret_ref("hostSecrets", "h-1", "password"), "hunter2".into())],
         )
         .unwrap();
+        // Negative assertions below are free to pass if a needle is simply
+        // absent from the fixture, so a dropped field would read as coverage
+        // instead of a hole. This confirms every needle is actually present
+        // before the sealing loop gets to claim it hid them.
+        for needle in ["vps.example.com", "root", "hunter2", "54321"] {
+            assert!(
+                plain.contains(needle),
+                "{needle} is missing from the fixture"
+            );
+        }
         let blob = seal(&plain, "pw");
-        for needle in ["vps.example.com", "root", "hunter2"] {
+        for needle in ["vps.example.com", "root", "hunter2", "54321"] {
             assert!(
                 !blob.ciphertext.contains(needle),
                 "{needle} is readable in the sealed blob"
