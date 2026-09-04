@@ -22,6 +22,16 @@
  *   - `pickKeyFile` calls the inspector before it commits the picked text to the
  *     draft, so a failed inspection leaves nothing on screen to look at (check 10).
  *
+ * Section [7] is the same wiring on a SECOND surface. `checkKey` above is a
+ * button, so a user who never pressed it used to store whatever was in the
+ * textarea; `HostEditorDialog`'s save now inspects the body it is about to
+ * write, which means every message `mod.rs` phrases can now reach the user
+ * through a path this file did not watch. The rule is the one sections [2] and
+ * [5] already hold for the panel - the backend's sentence is RENDERED, never
+ * rewritten - so [7] pins the strip (`describeKeyError`, union narrowing and
+ * all) and asserts that neither host-editor file carries a restatement of any
+ * sentence `mod.rs` owns.
+ *
  * Every region below is asserted to have been FOUND before anything is checked
  * over it: `between()` returns `""` for a missing anchor, and an empty string
  * satisfies a negative check (`!"".includes(...)`) for free. An unwatched anchor
@@ -70,6 +80,22 @@ function between(src: string, from: string, to: string): string {
 
 function count(src: string, re: RegExp): number {
   return [...src.matchAll(re)].length;
+}
+
+/**
+ * Source with ALL whitespace removed and any comma sitting immediately before
+ * a closing bracket dropped, so section [7]'s exact-text needles survive a
+ * legal reformat.
+ *
+ * Both halves are needed and the second is the one that is easy to miss:
+ * Prettier does not only break a long call across lines, it ADDS A TRAILING
+ * COMMA when it does, so whitespace-stripping alone still leaves `String(e),)`
+ * where the needle says `String(e))`. Measured - the narrowing pin below went
+ * red at `--print-width 60` over code that had not changed, which is a
+ * landmine rather than a check.
+ */
+function tight(src: string): string {
+  return src.replace(/\s+/g, "").replace(/,(?=[)\]}])/g, "");
 }
 
 /**
@@ -624,22 +650,139 @@ console.log("\n[5] SshCredentialSection.tsx - the wiring, over the raw source");
   );
 }
 
+/**
+ * The dead ends `mod.rs` phrases, as the fragments this suite holds it to.
+ *
+ * A module constant now rather than a literal inside section [6], because
+ * section [7] needs the SAME list for the opposite assertion: [6] says these
+ * still exist on the Rust side, [7] says neither host-editor file restates one.
+ * Two lists would let those two drift, and the drift is silent in the direction
+ * that matters - a fragment reworded out of [6] alone leaves [7] asserting the
+ * absence of a string nothing produces any more.
+ *
+ * The SEC1 entry is a clause rather than the bare format name for [7]'s sake:
+ * "SEC1" names a file format, which prose either side is free to mention, while
+ * the sentence telling the user what to do about one belongs to `mod.rs`. The
+ * inner quotes are dropped from the fragment because the Rust literal escapes
+ * them and this is matched against the SOURCE.
+ */
+const BACKEND_SENTENCES = [
+  "that is a public key",
+  "DSA keys are not supported",
+  "file, which Tervia cannot read. Rewrite it in",
+  "wrong passphrase for this private key",
+  "unrecognised key format",
+];
+
 // ---------------------------------------------------------------------------
 console.log("\n[6] the Rust side's own messages have not silently changed under this UI's feet");
 {
   const modRs = read("src-tauri/src/modules/ssh/mod.rs");
-  for (const substring of [
-    "that is a public key",
-    "DSA keys are not supported",
-    "SEC1",
-    "wrong passphrase for this private key",
-    "unrecognised key format",
-  ]) {
+  for (const substring of [...BACKEND_SENTENCES, "SEC1"]) {
     check(`mod.rs still carries the message naming "${substring}"`, modRs.includes(substring));
   }
 
   const libRs = read("src-tauri/src/lib.rs");
   check("ssh_key_inspect is still registered as a command", /ssh::ssh_key_inspect/.test(libRs));
+}
+
+// ---------------------------------------------------------------------------
+console.log(
+  "\n[7] the host editor's SAVE is the second surface these diagnostics reach, and it restates none of them",
+);
+{
+  // Until now the panel above was the only place an inspection went: `checkKey`
+  // is a button, so a user who never pressed it stored whatever was in the
+  // textarea. The host editor's save now inspects the body it is about to
+  // store, which puts every message `mod.rs` phrases on a second surface - and
+  // the rule sections [2] and [5] hold for the first one has to hold here too:
+  // the backend's sentence is RENDERED, never rewritten. Each dead end has its
+  // own wording naming what to do next, so a paraphrase is a second copy of
+  // that wording, drifting from the moment it is typed.
+  const dialogRaw = read("src/modules/hosts/HostEditorDialog.tsx");
+  const dialogSrc = stripComments(dialogRaw);
+  const sectionRaw = read("src/modules/hosts/editor/SshCredentialSection.tsx");
+
+  check(
+    "the dialog inspects through the same bridge function the panel uses, not a second command",
+    /import \{[^}]*\binspectSshKey\b[^}]*\}\s*from\s*"@\/modules\/ssh\/bridge";/.test(dialogRaw),
+  );
+  check(
+    "and it imports describeKeyError from this module rather than trimming the prefix itself",
+    /import \{[^}]*\bdescribeKeyError\b[^}]*\}\s*from\s*"@\/modules\/vault\/keyInspect";/.test(
+      dialogRaw,
+    ),
+  );
+
+  // Over the COMMENT-STRIPPED source for the positives: the comment written
+  // beside this arm explains what `describeKeyError` does, so a positive over
+  // the raw file would be satisfied by the explanation of a call that had been
+  // deleted.
+  const saveRegion = between(dialogSrc, "const save = async () => {", "const protocolLabel =");
+  check("the dialog's save was located", saveRegion.length > 1000, saveRegion.length);
+  const genericArm = between(
+    saveRegion,
+    "if (!(e instanceof HostBindingChangedError)) {",
+    "} else if (e.actual",
+  );
+  check("its generic error arm was located", genericArm.length > 40, genericArm.length);
+  // Through `tight` on both sides, needle included: a NEGATIVE that goes
+  // vacuous on a reformat is a false pass, which is the worse direction of the
+  // two, and the positive beside it would be a landmine.
+  const arm = tight(genericArm);
+  check(
+    "a rejected inspection is rendered through describeKeyError - the same `ssh: ` strip the panel gets, in a field already labelled as an SSH private key",
+    arm.includes(tight("const described = describeKeyError(e);")),
+    genericArm.trim(),
+  );
+  // The narrowing, pinned with it: `describeKeyError` returns the whole
+  // `KeyInspectState` union, so `.message` does not exist on the declared type
+  // and the `kind` test is what makes this compile. It is not a branch this
+  // code can reach - the function only ever returns the error arm.
+  check(
+    "and the union it returns is narrowed rather than cast, which is what makes the message reachable at all",
+    arm.includes(tight('setError(described.kind === "error" ? described.message : String(e));')),
+    genericArm.trim(),
+  );
+  check(
+    "and the raw e.message this replaced is gone from that arm, prefix and all",
+    !arm.includes(tight("setError(e instanceof Error ? e.message : String(e))")),
+    genericArm.trim(),
+  );
+
+  // Negatives over the RAW files, deliberately: copy pasted into a comment is
+  // still copy that drifted from `mod.rs`, and a negative is the direction that
+  // catches it. Section [6] above is what holds the originals in place, so the
+  // pair stays honest - reword one there and [6] reddens.
+  // Section [6]'s own list, with the SEC1 entry lengthened from the bare format
+  // name into the clause that tells the user what to do: "SEC1" is a fact about
+  // a file, which prose on this side is allowed to mention, while the wording
+  // is `mod.rs`'s alone. That longer clause is pinned in section [6] too, or
+  // this negative would go vacuous the moment the Rust side reworded.
+  for (const sentence of BACKEND_SENTENCES) {
+    check(
+      `the host editor restates none of "${sentence}"`,
+      !dialogRaw.includes(sentence) && !sectionRaw.includes(sentence),
+      { dialog: dialogRaw.includes(sentence), section: sectionRaw.includes(sentence) },
+    );
+  }
+
+  // The encrypted-key refusal is the one message that is NOT the backend's: it
+  // is `vault/editor/draft.ts`'s, and the host editor imports the function that
+  // returns it. A private reimplementation would bring these words along with
+  // it, which is what this catches from the copy side; the import declaration
+  // itself is pinned in `host-editor-verify.ts` section [10], and the sentence's
+  // exact value in `vault-draft-verify.ts` section [9] - so a reword there
+  // reddens that check rather than leaving this one quietly vacuous.
+  const REFUSAL_FRAGMENT = "Enter it below and save again";
+  check(
+    "and it restates the encrypted-key refusal no more than it restates the backend's - the host side imports that policy, it does not own a copy",
+    !dialogRaw.includes(REFUSAL_FRAGMENT) && !sectionRaw.includes(REFUSAL_FRAGMENT),
+    {
+      dialog: dialogRaw.includes(REFUSAL_FRAGMENT),
+      section: sectionRaw.includes(REFUSAL_FRAGMENT),
+    },
+  );
 }
 
 console.log(`\n${checked - failed}/${checked} key-inspect checks passed`);
@@ -716,4 +859,26 @@ if (failed > 0) console.error(`${failed} check(s) FAILED.`);
 //   D4: `verified` written into KeyInspectPanel's           "no copy this file
 //     rendered JSX (not a comment)                          renders...safe...
 //                                                       verified...protected"
+//
+// Section [7]'s own, run against HostEditorDialog.tsx:
+//
+//   E3: the `encryptedKeyRefusal` import replaced with     "and it restates the
+//     a private copy of the function, body and              encrypted-key refusal no
+//     sentence included                                     more than it restates
+//                                                       the backend's..." - the
+//                                                       copy brings the sentence
+//                                                       with it. `tsc` stayed at 0.
+//   E5: `pnpm exec prettier --print-width 60 --write`      NOTHING in section [7],
+//     over HostEditorDialog.tsx - the paired reformat        which is the point of
+//     that an exact-text pin owes                            the pair. It DID redden
+//                                                       the narrowing pin before
+//                                                       `tight()` existed: Prettier
+//                                                       broke the call across lines
+//                                                       AND added a trailing comma,
+//                                                       which whitespace-stripping
+//                                                       alone does not remove.
+//                                                       Section [5]'s own anchors
+//                                                       do not survive that
+//                                                       reformat - pre-existing,
+//                                                       untouched here.
 process.exit(failed === 0 ? 0 : 1);

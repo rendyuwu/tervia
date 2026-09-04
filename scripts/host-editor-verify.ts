@@ -101,6 +101,31 @@
  *    `session.rs` pre-flights it. The real outcome is the better one, which is why
  *    the prose has to name it rather than an invented one.
  *
+ * 8. THE SAVE LOOKS AT THE KEY BODY BEFORE IT STORES ONE, AND SAYS SO IN THAT FIELD.
+ *    It used to store whatever was in the textarea. An encrypted `openssh-key-v1`
+ *    key pasted with a blank passphrase PARSES - the container answers with a type,
+ *    a fingerprint and a public half without it - so the record came out with
+ *    `hasPrivateKey: true`, complete-looking and unusable at every connect, and the
+ *    card's own pip reads that flag alone. The vault key editor already refused
+ *    exactly this, so the refusal is IMPORTED rather than restated: a second copy of
+ *    that policy is how the two surfaces come to disagree at the next key-format
+ *    finding, and only an import-set pin can tell a shared function from a duplicate
+ *    with the same body - agreement-by-value cannot.
+ *
+ *    The refusal renders as the last child of the key field rather than in the
+ *    bottom `error` line, because its sentence tells the user to enter the
+ *    passphrase BELOW and the passphrase input is the next field down. The vault
+ *    editor's version once rendered under the description field while saying those
+ *    words, and that was a hand-tested defect. The bottom line still carries store
+ *    refusals and keychain errors, which are about the form rather than one input.
+ *
+ *    The rule this replaces went the other way: "Private key body is required for
+ *    key auth" refused the one key-auth state that is HONEST on the card
+ *    (`hasPrivateKey: false` renders "Missing secret") and caught none of the states
+ *    that are not. It is gone, exactly as VLT-44 removed the password one. The RDP
+ *    password rule is deliberately NOT gone with it - `RdpPane` declines to connect
+ *    at all without a password, so such a row's only reachable outcome is a failure.
+ *
  * Section [0] tests the helpers the source-text sections depend on, against samples whose
  * answers are known. That is not ceremony: `rdp-lifetime-verify.ts` shipped a
  * gating check that looked back a fixed 90 characters, found the PREVIOUS
@@ -357,6 +382,23 @@ function norm(s: string): string {
   return s.replace(/\s+/g, "");
 }
 
+/**
+ * A call's ARGUMENTS as their own normalised source text.
+ *
+ * Argument by argument rather than "the whole call's text, whitespace aside",
+ * and that is not a style preference: Prettier ADDS A TRAILING COMMA when it
+ * breaks a call across lines, and `norm()` does not remove one, so a
+ * whole-call pin is width-sensitive - it reddens on a legal reformat while
+ * claiming to be about the arguments. Measured: at `--print-width 60` both
+ * calls in section [10] wrapped and both whole-call pins went red over
+ * unchanged code. An argument's own text carries no separator, so this form is
+ * the reformat pair the pin needs. `vault-editor-verify.ts` pins the same call
+ * this way.
+ */
+function argTexts(call: ts.CallExpression, sf: ts.SourceFile): string[] {
+  return call.arguments.map((a) => norm(a.getText(sf)));
+}
+
 /** The `let`/`const` variable declaration named `name` anywhere under `root`.
  *
  *  IT RETURNS THE LAST ONE, because `result` is overwritten on every match, and
@@ -428,6 +470,36 @@ function findIdentifierUses(root: ts.Node, name: string): ts.Identifier[] {
   return out;
 }
 
+/** Every `import ... from "x"` declaration at the top level of `sf`.
+ *
+ *  Parsed rather than regexed. `vault-draft-verify.ts`'s proven form scans
+ *  `/from\s*["']([^"']+)["']/g` over the source, which also matches an
+ *  `export ... from` re-export and any string literal that happens to contain
+ *  ` from "` - neither is an import, and a check that counts them is asserting
+ *  something other than what it says. */
+function importDeclarations(sf: ts.SourceFile): ts.ImportDeclaration[] {
+  const out: ts.ImportDeclaration[] = [];
+  sf.forEachChild((n) => {
+    if (ts.isImportDeclaration(n)) out.push(n);
+  });
+  return out;
+}
+
+/** A declaration's module specifier text, or "" for the non-literal form no
+ *  static import actually uses. */
+function moduleSpecifierOf(decl: ts.ImportDeclaration): string {
+  return ts.isStringLiteral(decl.moduleSpecifier) ? decl.moduleSpecifier.text : "";
+}
+
+/** The NAMES a declaration takes from its module - `import { a, b as c }`
+ *  yields `["a", "b"]`, the names as the exporting module spells them, so a
+ *  local rename cannot make the pin below pass over a different export. */
+function namedImportsOf(decl: ts.ImportDeclaration): string[] {
+  const bindings = decl.importClause?.namedBindings;
+  if (!bindings || !ts.isNamedImports(bindings)) return [];
+  return bindings.elements.map((e) => (e.propertyName ?? e.name).text);
+}
+
 /** Every JSX element or self-closing element in `root` whose tag is
  *  `tagName`, as its opening element - copied from `vault-shell-verify.ts` /
  *  `vault-editor-verify.ts`. */
@@ -472,6 +544,46 @@ function findAncestorJsxElementByTag(node: ts.Node, tag: string, sf: ts.SourceFi
   while (n) {
     if (ts.isJsxElement(n) && n.openingElement.tagName.getText(sf) === tag) return true;
     n = n.parent;
+  }
+  return false;
+}
+
+/** An element's own JSX children with whitespace-only text dropped, so "the
+ *  LAST child" means the last thing rendered rather than the newline and
+ *  indentation Prettier put after it. A `{/* ... *\/}` comment IS kept: it is a
+ *  real child node, and one left behind as the last child by a render that
+ *  moved away is exactly the state the caller must not read as a pass. */
+function renderedChildren(el: ts.JsxElement, sf: ts.SourceFile): ts.JsxChild[] {
+  return el.children.filter((c) => !(ts.isJsxText(c) && c.getText(sf).trim() === ""));
+}
+
+/** Every reference to `ident` under `root` that sits inside JSX at all - i.e.
+ *  has a `{...}` expression somewhere above it. Counting JSX EXPRESSIONS
+ *  instead does not work: a `{...}` node's own text contains every nested one,
+ *  so the enclosing `{ready ? <>…</> : null}` matches whatever any descendant
+ *  names. An identifier has exactly one position, which is the question. */
+function jsxUsesOf(root: ts.Node, ident: string): ts.Identifier[] {
+  return findIdentifierUses(root, ident).filter((id) => {
+    for (let n: ts.Node | undefined = id.parent; n; n = n.parent) {
+      if (ts.isJsxExpression(n)) return true;
+    }
+    return false;
+  });
+}
+
+/** Whether `node` sits inside a `foo={...}` attribute value - which PASSES a
+ *  string to a child rather than rendering one, the opposite claim. */
+function insideJsxAttribute(node: ts.Node): boolean {
+  for (let n: ts.Node | undefined = node.parent; n; n = n.parent) {
+    if (ts.isJsxAttribute(n)) return true;
+  }
+  return false;
+}
+
+/** Whether `ancestor` is on `node`'s parent chain. */
+function isDescendantOf(node: ts.Node, ancestor: ts.Node): boolean {
+  for (let n: ts.Node | undefined = node.parent; n; n = n.parent) {
+    if (n === ancestor) return true;
   }
   return false;
 }
@@ -607,6 +719,17 @@ const editorSf = ts.createSourceFile(
 const hostsPageSf = ts.createSourceFile(
   "HostsPage.tsx",
   hostsPageRaw,
+  ts.ScriptTarget.ESNext,
+  true,
+  ts.ScriptKind.TSX,
+);
+// Section [10] asks WHERE a string renders, which is a JSX nesting question:
+// "is this expression the last child of the Field labelled X" cannot be asked
+// of the text, and asserting the string merely appears in the file is exactly
+// what a render move walks past.
+const sshSectionSf = ts.createSourceFile(
+  "SshCredentialSection.tsx",
+  sshSectionRaw,
   ts.ScriptTarget.ESNext,
   true,
   ts.ScriptKind.TSX,
@@ -2098,6 +2221,364 @@ console.log(
       !editorRaw.includes(frag),
     );
   }
+}
+
+// ---------------------------------------------------------------------------
+console.log(
+  "\n[10] the save inspects a key body before it stores one, and the refusal names the field it is about",
+);
+{
+  // The gap this closes: the save stored whatever was in the key textarea. An
+  // encrypted `openssh-key-v1` key pasted with a blank passphrase parses, so
+  // the record came out with a key type, a fingerprint and `hasPrivateKey:
+  // true` - complete-looking, and unusable at every connect, with nothing on
+  // the card to say so because the pip reads that flag alone. The vault key
+  // editor already refused exactly this; this editor refused nothing.
+  //
+  // ONE policy, imported. A private local copy of the refusal passes every
+  // other check here, and every gate in this repo - agreement-by-value cannot
+  // tell a shared function from a duplicate of it, so the import declaration
+  // itself is pinned below.
+  const saveBody = findConstArrowBody(editorSf, "save");
+  check("save's body was found (compiler API)", saveBody !== null);
+
+  if (saveBody) {
+    const inspectCalls = findCalls(saveBody, editorSf, ["inspectSshKey"]);
+    check(
+      "save inspects the key body exactly once - none is the hole, twice is two answers about one key",
+      inspectCalls.length === 1,
+      inspectCalls.length,
+    );
+
+    if (inspectCalls.length === 1) {
+      const call = inspectCalls[0];
+      // The shape that defeats a name-scoped positive: alias the result above
+      // `save` and demote the call to a `??` arm that never runs. The text
+      // `inspectSshKey(` is still inside the body, so "the name appears here"
+      // stays green over a call that cannot execute. What forbids it is the
+      // call's own PARENTAGE - awaited, and the WHOLE of a `const`
+      // initializer. A `??`/`||` arm's parent is a BinaryExpression and a
+      // ternary arm's is a ConditionalExpression, so neither can wear this
+      // shape.
+      const awaited: ts.Node | undefined = call.parent;
+      const decl: ts.Node | undefined = awaited?.parent;
+      const declIsInfo =
+        awaited !== undefined &&
+        ts.isAwaitExpression(awaited) &&
+        decl !== undefined &&
+        ts.isVariableDeclaration(decl) &&
+        ts.isIdentifier(decl.name) &&
+        decl.name.text === "info";
+      check(
+        "and it is awaited straight into a const, never an arm of a ?? / || / ternary a cached result could skip",
+        declIsInfo,
+        {
+          parent: awaited ? ts.SyntaxKind[awaited.kind] : null,
+          grandparent: decl ? ts.SyntaxKind[decl.kind] : null,
+        },
+      );
+      // What it is asked ABOUT. Argument by argument - see `argTexts` for why a
+      // whole-call pin is a landmine here - because arguments drifting off the
+      // draft is how the inspection comes to answer about a key that is not the
+      // one the save is about to store.
+      check(
+        "and it is asked about the draft's own body and passphrase",
+        JSON.stringify(argTexts(call, editorSf)) ===
+          JSON.stringify([norm("sshCred.privateKey"), norm("sshCred.keyPassphrase || undefined")]),
+        argTexts(call, editorSf),
+      );
+
+      // The other half of "statically reachable": exactly ONE enclosing `if`,
+      // pinned. A `if (!cachedInfo.current)` wrapper - the reason the call
+      // above could be demoted at all - is a second one and reddens here even
+      // if the call itself keeps its shape.
+      const conds = ifConditionsEnclosing(call, editorSf);
+      check(
+        "the only thing gating the inspection is its own guard, and that guard is exactly the four states it is for",
+        conds.length === 1 &&
+          norm(conds[0]) ===
+            norm(
+              'protocol === "ssh" && !boundIdentity && sshCred.authMode === "key" && sshCred.privateKey.trim() !== ""',
+            ),
+        conds,
+      );
+    }
+
+    // The inspection's OWN answer feeds the refusal. `info.encrypted` rather
+    // than anything read off the draft is the whole point: an
+    // `openssh-key-v1` container answers with a real type, a fingerprint and a
+    // public half WITHOUT its passphrase, so nothing the draft knows says the
+    // passphrase is missing.
+    const refusalDecls = findVariableDeclarations(saveBody, "refusal");
+    check("refusal is declared exactly once inside save", refusalDecls.length === 1, {
+      count: refusalDecls.length,
+    });
+    const refusalCalls = findCalls(saveBody, editorSf, ["encryptedKeyRefusal"]);
+    check(
+      "save calls the vault's refusal exactly once",
+      refusalCalls.length === 1,
+      refusalCalls.length,
+    );
+    if (refusalCalls.length === 1) {
+      check(
+        "and hands it the INSPECTION's own answer beside the draft passphrase - never something the draft alone knows, which says nothing about whether the container is sealed",
+        JSON.stringify(argTexts(refusalCalls[0], editorSf)) ===
+          JSON.stringify([norm("info.encrypted"), norm("sshCred.keyPassphrase")]),
+        argTexts(refusalCalls[0], editorSf),
+      );
+      const bound: ts.Node = refusalCalls[0].parent;
+      check(
+        "and binds the answer to a name the save then branches on, rather than computing it and dropping it",
+        ts.isVariableDeclaration(bound) &&
+          ts.isIdentifier(bound.name) &&
+          bound.name.text === "refusal",
+        ts.SyntaxKind[bound.kind],
+      );
+    }
+
+    const refusalIf = findIfByCondition(saveBody, editorSf, "refusal");
+    check("the refusal's own if was found (compiler API)", refusalIf !== null);
+    if (refusalIf) {
+      check(
+        "it tests the refusal itself",
+        refusalIf.expression.getText(editorSf) === "refusal",
+        refusalIf.expression.getText(editorSf),
+      );
+      const branch = refusalIf.thenStatement;
+      const stmts = ts.isBlock(branch) ? [...branch.statements] : [branch];
+      const first: ts.Statement | undefined = stmts[0];
+      const second: ts.Statement | undefined = stmts[1];
+      const firstCall =
+        first !== undefined &&
+        ts.isExpressionStatement(first) &&
+        ts.isCallExpression(first.expression)
+          ? first.expression
+          : null;
+      check(
+        "and its branch is exactly setKeyRefusal(refusal) then a bare return - so no write, and no partial one, can hide inside it",
+        stmts.length === 2 &&
+          firstCall !== null &&
+          firstCall.expression.getText(editorSf) === "setKeyRefusal" &&
+          JSON.stringify(argTexts(firstCall, editorSf)) === JSON.stringify(["refusal"]) &&
+          second !== undefined &&
+          ts.isReturnStatement(second) &&
+          second.expression === undefined,
+        stmts.map((s) => norm(s.getText(editorSf))),
+      );
+
+      const upserts = findCalls(saveBody, editorSf, ["upsertHost"]);
+      check("save writes through upsertHost exactly once", upserts.length === 1, upserts.length);
+      check(
+        "and that write is downstream of the refusal, so a refused save has not reached it",
+        upserts.length === 1 && upserts[0].getStart(editorSf) > refusalIf.end,
+        upserts.length === 1
+          ? { writeAt: upserts[0].getStart(editorSf), refusalEndsAt: refusalIf.end }
+          : null,
+      );
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // The import-set pin. This is the ONLY thing that can tell the shared policy
+  // from a duplicate of it: replace the import with a private
+  // `encryptedKeyRefusal` of the same body and every value-level check above
+  // stays green, measured. MEMBERSHIP rather than an exact set -
+  // `vault-draft-verify.ts` asserts an exact two-element set because the file
+  // it reads imports two things; this one imports a dozen, and an exact set
+  // there is a red check on the next unrelated import, which the person who
+  // hits it weakens rather than investigates.
+  // -------------------------------------------------------------------------
+  const editorImports = importDeclarations(editorSf);
+  // Zero import declarations satisfies the membership check's negative form
+  // and would satisfy nothing else. Asserted as its own check so a parse that
+  // silently found nothing cannot read as a pass.
+  check(
+    "the dialog's import declarations were found at all",
+    editorImports.length > 10,
+    editorImports.length,
+  );
+  const DRAFT_MODULE = "@/modules/vault/editor/draft";
+  const specifiers = editorImports.map(moduleSpecifierOf);
+  check(
+    `the dialog imports ${DRAFT_MODULE}, so the refusal is the vault's and not a second copy of it`,
+    specifiers.includes(DRAFT_MODULE),
+    specifiers,
+  );
+  const draftImport = editorImports.find((d) => moduleSpecifierOf(d) === DRAFT_MODULE);
+  check(
+    "and encryptedKeyRefusal is one of the names it takes from there - importing the module for something else is not the claim",
+    draftImport !== undefined && namedImportsOf(draftImport).includes("encryptedKeyRefusal"),
+    draftImport ? namedImportsOf(draftImport) : null,
+  );
+  // The one shape the two checks above cannot see: the import kept, and a
+  // same-named local declared beside it. `tsc` refuses that today, so this
+  // guards against a rename making it legal rather than against a live hole.
+  check(
+    "and the dialog declares no encryptedKeyRefusal of its own",
+    findVariableDeclarations(editorSf, "encryptedKeyRefusal").length === 0 &&
+      !/function encryptedKeyRefusal\b/.test(editorRaw),
+    /.{0,40}function encryptedKeyRefusal.{0,40}/.exec(editorRaw)?.[0],
+  );
+
+  // -------------------------------------------------------------------------
+  // WHERE it renders, over the parsed JSX on both sides of the prop. The
+  // refusal's own sentence tells the user to enter the passphrase BELOW, so it
+  // has to be the last child of the key field with the passphrase input
+  // directly under it. The vault key editor's version once rendered under the
+  // description field while saying those words, and that was a hand-tested
+  // defect - asserting the string appears somewhere in the file is exactly
+  // what a render move walks past.
+  // -------------------------------------------------------------------------
+  const keyFields = findOpeningElementsByTag(sshSectionSf, "Field", sshSectionSf).filter(
+    (el) => jsxAttrExprText(el, "label", sshSectionSf) === "Private key (PEM / OpenSSH)",
+  );
+  check("the key body's own Field was found, exactly once", keyFields.length === 1, {
+    count: keyFields.length,
+  });
+  const sectionJsxUses = jsxUsesOf(sshSectionSf, "keyRefusal");
+  check(
+    "the section renders the refusal at all - zero uses would pass every placement check below for free",
+    sectionJsxUses.length > 0,
+    sectionJsxUses.length,
+  );
+  if (keyFields.length === 1) {
+    const el: ts.Node = keyFields[0].parent;
+    const children = ts.isJsxElement(el) ? renderedChildren(el, sshSectionSf) : [];
+    check(
+      "and it is a container with children rather than a self-closing tag",
+      children.length > 0,
+      { count: children.length },
+    );
+    const last: ts.JsxChild | undefined = children[children.length - 1];
+    check(
+      "the refusal is the LAST child of that Field, so the passphrase input its sentence points at is the next thing on screen",
+      last !== undefined &&
+        ts.isJsxExpression(last) &&
+        last.expression !== undefined &&
+        /\bkeyRefusal\b/.test(last.expression.getText(sshSectionSf)),
+      last?.getText(sshSectionSf).slice(0, 140),
+    );
+    // EVERY use, not just the last child: a second render further up this
+    // component - beside the agent panel, under the user field - would be a
+    // second place the same sentence can point at the wrong input.
+    check(
+      "and every use of it in this component is inside that same Field",
+      sectionJsxUses.length > 0 && sectionJsxUses.every((u) => isDescendantOf(u, el)),
+      sectionJsxUses
+        .filter((u) => !isDescendantOf(u, el))
+        .map((u) => u.parent.getText(sshSectionSf).slice(0, 80)),
+    );
+  }
+
+  const sshSections = findOpeningElementsByTag(editorSf, "SshCredentialSection", editorSf);
+  check(
+    "the dialog renders exactly one SshCredentialSection",
+    sshSections.length === 1,
+    sshSections.length,
+  );
+  if (sshSections.length === 1) {
+    check(
+      "and hands the refusal down as keyRefusal={keyRefusal}",
+      jsxAttrExprText(sshSections[0], "keyRefusal", editorSf) === "keyRefusal",
+      jsxAttrExprText(sshSections[0], "keyRefusal", editorSf),
+    );
+  }
+  // The move this forbids, in the other direction: rendering the refusal in
+  // the dialog puts it beside the bottom `error` line, where "enter it below"
+  // points at the Test button. Stated positively - EVERY JSX use here is an
+  // attribute value - because the negative "it is not rendered" is satisfied by
+  // the string not being here at all, which is the same mutation one step
+  // further on.
+  const dialogJsxUses = jsxUsesOf(editorSf, "keyRefusal");
+  check(
+    "the dialog uses the refusal in JSX at all - it has to hand it down from somewhere",
+    dialogJsxUses.length > 0,
+    dialogJsxUses.length,
+  );
+  check(
+    "and every one of those uses is an attribute value: the dialog PASSES the refusal, it never renders one beside the bottom error line, which carries store refusals and keychain errors instead",
+    dialogJsxUses.length > 0 && dialogJsxUses.every(insideJsxAttribute),
+    dialogJsxUses
+      .filter((u) => !insideJsxAttribute(u))
+      .map((u) => u.parent.getText(editorSf).slice(0, 80)),
+  );
+
+  // -------------------------------------------------------------------------
+  // VLT-50's key-body half: the blank-body rule is gone, and the RDP password
+  // rule is deliberately not gone with it.
+  // -------------------------------------------------------------------------
+  check(
+    "validateSshCredential no longer refuses a key-auth host with a blank body - the pip on the card is what says so now",
+    !/Private key body is required/.test(sshSectionRaw),
+    /.{0,60}Private key body is required.{0,40}/.exec(sshSectionRaw)?.[0],
+  );
+  const validateRegion = between(
+    sshSectionSrc,
+    "export function validateSshCredential(",
+    "function passwordHelp(",
+  );
+  check("validateSshCredential's region was found", validateRegion.length > 100, {
+    length: validateRegion.length,
+  });
+  check(
+    "and it still refuses a blank user, which has no flag, no pip, and no path that fills it in later",
+    /if \(!draft\.user\.trim\(\)\) return "User is required";/.test(validateRegion),
+    validateRegion.trim().slice(0, 200),
+  );
+  check(
+    "and refuses nothing else - one message, so a second secret rule cannot creep back beside the relaxed ones",
+    count(validateRegion, /return "/g) === 1,
+    [...validateRegion.matchAll(/return "[^"]*"/g)].map((m) => m[0]),
+  );
+  check(
+    "the RDP password rule is untouched - `RdpPane` will not dial without one, so that row's only outcome is a failure",
+    /if \(!draft\.password && !hasStoredPassword\) return "Password is required";/.test(
+      rdpSectionRaw,
+    ),
+    /.{0,80}Password is required.{0,20}/.exec(rdpSectionRaw)?.[0],
+  );
+
+  // --- what was watched fail, and what `tsc` did while it did ---------------
+  //
+  // E1  the whole guarded block deleted from `save`
+  //       -> "save inspects the key body exactly once" (0), "refusal is declared
+  //          exactly once inside save" (0), "the refusal's own if was found".
+  //          `tsc` reddened TS6133 on the now-unused import - INCIDENTAL, and
+  //          not on `inspectSshKey`, which `applyCredentialChange` still uses.
+  // E1b the block AND the import deleted, which is what a real regression looks
+  //     like
+  //       -> the three above PLUS the two import-set checks. `tsc` at 0. This
+  //          is the pair that prices the pin: the compiler covers none of it.
+  // E2  `const info = lastInspection.current ?? (await inspectSshKey(...))`,
+  //     with a ref seeded above `save` so the right arm never runs
+  //       -> "and it is awaited straight into a const, never an arm of a ?? /
+  //          || / ternary" alone. `tsc` at 0. The name-scoped positive
+  //          ("inspectSshKey( appears in save") stays satisfied throughout,
+  //          which is the whole reason parentage is asserted instead.
+  // E3  the import replaced with a private copy of `encryptedKeyRefusal`
+  //       -> both import-set checks and the no-local-copy belt, plus
+  //          `key-inspect-verify` section [7]'s restatement check, which sees
+  //          the sentence the copy brought with it. `tsc` at 0.
+  // E4  the render moved out of the key `Field` and rendered beside the bottom
+  //     `error` line instead, prop and all
+  //       -> five: the section's three placement checks, the
+  //          `keyRefusal={keyRefusal}` prop pin, and the dialog's
+  //          every-JSX-use-is-an-attribute check. `tsc` at 0.
+  // E5  the refusal branch's `return;` deleted, leaving a warning that still
+  //     writes
+  //       -> "and its branch is exactly setKeyRefusal(refusal) then a bare
+  //          return". `tsc` at 0.
+  // E6  `Private key body is required for key auth` put back
+  //       -> the relaxation check and the one-message count. `tsc` at 0.
+  // E7  `prettier --print-width 60 --write` over both source files - the
+  //     reformat pair the exact-text pins above owe (§4.51)
+  //       -> nothing in this section, which is the point. It DID redden the two
+  //          whole-call pins this section had first: Prettier breaks a wrapped
+  //          call AND adds a trailing comma, which `norm()` does not strip, so
+  //          both became argument-wise (see `argTexts`). Sections [1], [2],
+  //          [4], [6] and [8] do not survive that reformat - their anchors and
+  //          regexes are line-shaped, they are pre-existing, and nothing here
+  //          touched them.
 }
 
 console.log(failed === 0 ? "\nAll host-editor checks passed." : `\n${failed} check(s) FAILED.`);

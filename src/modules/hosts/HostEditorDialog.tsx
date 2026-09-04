@@ -22,7 +22,12 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { inspectSshKey } from "@/modules/ssh/bridge";
 import { useHostKeyPrompt } from "@/modules/ssh/hostKeyPrompt";
-import { vaultKeyFactsFrom, type VaultKeyFacts } from "@/modules/vault/keyInspect";
+import { encryptedKeyRefusal } from "@/modules/vault/editor/draft";
+import {
+  describeKeyError,
+  vaultKeyFactsFrom,
+  type VaultKeyFacts,
+} from "@/modules/vault/keyInspect";
 import type { IdentityRow } from "@/modules/vault/page/derive";
 import type { ReactNode } from "react";
 import { useEffect, useRef, useState } from "react";
@@ -217,6 +222,20 @@ export function HostEditorDialog({
   const [ready, setReady] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /**
+   * The ONE refusal `save` produces about the private key body, kept apart from
+   * `error` above so it can render inside the key field rather than in the
+   * generic line at the bottom of the form.
+   *
+   * The split is the sentence's own doing: it tells the user to enter the
+   * passphrase BELOW, and the passphrase input sits directly under the key
+   * field - the vault key editor once rendered the same sentence under its
+   * description field and that was a hand-tested defect. Everything else the
+   * same `try` can fail with - a store refusal, a keychain error, a key the
+   * backend cannot read at all - is about the form or about the whole record,
+   * so it still lands at the bottom.
+   */
+  const [keyRefusal, setKeyRefusal] = useState<string | null>(null);
   const [test, setTest] = useState<TestState>({ kind: "idle" });
   /**
    * The server keys this host trusts, as of right now, keyed by the ADDRESS each
@@ -298,6 +317,9 @@ export function HostEditorDialog({
     if (!target || !token) return;
 
     setError(null);
+    // A refusal names the key body of the row this editor was pointed away
+    // from, and nothing about the next one.
+    setKeyRefusal(null);
     setSaving(false);
     setTest({ kind: "idle" });
     // Per row, or the last row's typing would suppress this one's seed - and the
@@ -616,6 +638,12 @@ export function HostEditorDialog({
       privateKey: sshTouched.current.privateKey || patch.privateKey !== undefined,
       keyPassphrase: sshTouched.current.keyPassphrase || patch.keyPassphrase !== undefined,
     };
+    // A refusal from the LAST save describes the (body, passphrase) pair as it
+    // stood then, and either edit makes it stale - exactly the staleness the
+    // section's own `invalidateInspection` retires its inspection panel for, at
+    // the same two inputs. Kept here rather than handed down as a callback
+    // because the state is the dialog's and every edit already arrives here.
+    if (patch.privateKey !== undefined || patch.keyPassphrase !== undefined) setKeyRefusal(null);
   };
 
   const changeProtocol = (next: "ssh" | "rdp") => {
@@ -809,6 +837,7 @@ export function HostEditorDialog({
 
   const save = async () => {
     setError(null);
+    setKeyRefusal(null);
     const invalid = validate();
     if (invalid) {
       setError(invalid);
@@ -817,6 +846,46 @@ export function HostEditorDialog({
     const port = Number.parseInt(shared.port, 10);
     setSaving(true);
     try {
+      // Inspected HERE, before anything is built, rather than read off the
+      // section's own panel: this reads both fields at the moment the record is
+      // written, so there is no generation to compare and no way for a panel
+      // describing an older (body, passphrase) pair to decide a save. The same
+      // call, the same refusal and the same order as the vault key editor's own
+      // save, with `encryptedKeyRefusal` IMPORTED rather than restated - a
+      // second copy of that policy is how two surfaces come to disagree at the
+      // next key-format finding, and this editor had no policy at all until
+      // now.
+      //
+      // All four conjuncts are load-bearing, none is a belt: a vault-bound row
+      // stores no key of its own (`secrets` is `{}` below) and can still hold a
+      // body typed before the picker was pointed at an identity; a blank body
+      // is the state `validateSshCredential` now deliberately lets through; and
+      // the refusal renders inside the key field, which is mounted only under
+      // key auth - raising it under password auth would be a Save that appears
+      // to do nothing at all.
+      //
+      // Reached by: pick Private key, paste an encrypted key, leave the
+      // passphrase blank, press Save. What the backend cannot read at all - a
+      // public key, a DSA key, a SEC1 key, a wrong passphrase - is a rejection
+      // rather than a refusal, and lands in the `catch` below with the
+      // backend's own sentence.
+      if (
+        protocol === "ssh" &&
+        !boundIdentity &&
+        sshCred.authMode === "key" &&
+        sshCred.privateKey.trim() !== ""
+      ) {
+        const info = await inspectSshKey(sshCred.privateKey, sshCred.keyPassphrase || undefined);
+        const refusal = encryptedKeyRefusal(info.encrypted, sshCred.keyPassphrase);
+        if (refusal) {
+          // Not `setError`, and a RETURN rather than a warning: the sentence
+          // names the field below this one, and a key stored without its
+          // passphrase can never be used while nothing on the saved record
+          // tells it apart from a key that has none.
+          setKeyRefusal(refusal);
+          return;
+        }
+      }
       const id = existing?.id ?? newHostId();
       const host = shared.host.trim();
       // No `keepPin` any more, and its absence is the fix rather than a
@@ -933,7 +1002,20 @@ export function HostEditorDialog({
       onClose();
     } catch (e) {
       if (!(e instanceof HostBindingChangedError)) {
-        setError(e instanceof Error ? e.message : String(e));
+        // Through `describeKeyError`, which strips a leading `ssh: ` and leaves
+        // everything else alone - right for both sources this branch now has.
+        // A rejected inspection carries that prefix and is rendered inside a
+        // field already labelled as an SSH private key, where it is noise; a
+        // store refusal ("hosts: ...") or a keychain error does not carry it
+        // and is untouched. The message itself is never rewritten: every dead
+        // end the backend classifies has its own sentence naming what to do
+        // next, and paraphrasing one here would put a second copy of that
+        // wording in the tree. Its return type is the whole `KeyInspectState`
+        // union rather than the error arm alone, so the `kind` test below is a
+        // narrowing the function itself never fails - not a branch this code
+        // can reach.
+        const described = describeKeyError(e);
+        setError(described.kind === "error" ? described.message : String(e));
       } else if (e.actual === CREDENTIAL_STAMP_ABSENT) {
         // No recovery offered, deliberately. `existing` is left exactly as it was
         // - nothing here calls `setExisting` - so `id` and the stamp this form
@@ -1273,6 +1355,7 @@ export function HostEditorDialog({
                     value={sshCred}
                     onChange={patchSshCred}
                     hasStoredPassword={hasStoredSshPassword}
+                    keyRefusal={keyRefusal}
                   />
                 ) : (
                   <RdpCredentialSection

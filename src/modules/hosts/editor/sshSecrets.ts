@@ -71,6 +71,15 @@ export function clearsSecret(value: string): boolean {
  * the account is deleted. What is refused is a clear of something that was never
  * on screen.
  *
+ * THE KEY BODY NOW LEANS ON THAT RULE THE SAME WAY THE PASSWORD DOES, and it did
+ * not before. `validateSshCredential` used to refuse a key-auth save with a blank
+ * body, so the blank-and-touched case never reached this function under key auth
+ * at all; that rule is gone, for the reason stated there, and this is what stands
+ * behind it. Nothing here changed to accommodate that: the rule is per field and
+ * was always applied to all three. A body emptied before the seed landed is still
+ * omitted, so the stored key survives; a seeded body the user selected and deleted
+ * still goes down as `""`, so the key is removed and the card says so.
+ *
  * A field the current auth mode does not use is left ALONE rather than cleared,
  * which is the one place this differs from the dialog it came from. Nothing goes
  * unreachable by it: an inline SSH record NAMES all three accounts whatever its

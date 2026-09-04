@@ -55,6 +55,18 @@ export type SshCredentialSectionProps = {
    * section's - see {@link passwordHelp}.
    */
   hasStoredPassword: boolean;
+  /**
+   * The dialog's save-time refusal for the key body, or null.
+   *
+   * A prop rather than state of this component's own because the inspection it
+   * comes from happens in `save()`, which reads every field at the moment the
+   * record is built - and it is DISTINCT from the dialog's bottom `error` line,
+   * which carries store refusals and keychain errors. This one names the key
+   * field and tells the user to enter the passphrase below it, so it renders as
+   * the last child of that field with the passphrase input directly under it.
+   * The same split, for the same reason, as the vault key editor's.
+   */
+  keyRefusal: string | null;
 };
 
 /**
@@ -74,12 +86,15 @@ export function validateSshCredential(
   // names nothing the card could show, so a blank user is a MALFORMED record
   // rather than an incomplete one.
   if (!draft.user.trim()) return "User is required";
-  // A BLANK PASSWORD IS DELIBERATELY ALLOWED, and the missing rule here is the
-  // fix rather than an omission. `hasPassword: false` on an inline password-auth
-  // row is a state the store persists and the Hosts page renders - the card shows
-  // "Missing secret" and reads the stored flag, not the keychain - so refusing it
-  // made the one state that indicator exists for unreachable from the UI, while
-  // leaving no way to save a host now and store its password later.
+  // A BLANK SECRET IS DELIBERATELY ALLOWED - the password AND, since the key
+  // body joined it, the private key - and the missing rules here are the fix
+  // rather than an omission. `hasPassword: false` and `hasPrivateKey: false` on
+  // an inline row are states the store persists and the Hosts page renders: the
+  // card shows "Missing secret" and reads the stored flag, not the keychain, and
+  // `../page/derive.ts` asks about exactly the one field the auth mode uses. So
+  // refusing either made the one state that indicator exists for unreachable
+  // from the UI, while leaving no way to save a host now and store its secret
+  // later.
   //
   // What a connect then does, stated correctly because the earlier version of this
   // comment claimed the wrong thing: it never reaches the server. `resolve.ts` maps
@@ -89,12 +104,21 @@ export function validateSshCredential(
   // since nothing is sent and nothing looks like a rejected login, but it is a
   // different message and the reasoning here should name the one that happens.
   //
-  // Key auth is NOT relaxed with it. `hasPrivateKey: false` renders the same pip,
-  // so this is a scope boundary and not a correctness one: it is a second
-  // behaviour change, it needs its own hand test of what the connect reports for
-  // an empty key body, and the reported defect (test C8) is about password auth.
-  if (draft.authMode === "key" && !draft.privateKey.trim())
-    return "Private key body is required for key auth";
+  // What replaced the key-body rule is a REAL check rather than nothing, and the
+  // trade is the point: the rule caught the one key-auth state that is honest on
+  // the card, and caught none of the states that are not. The dialog's save now
+  // inspects a non-blank body and refuses an encrypted key saved without its
+  // passphrase, and lets the backend refuse a public key, a DSA key, a SEC1 key
+  // and a wrong passphrase - each of which used to store a complete-looking
+  // record whose every connect fails, with nothing on the card to say so. That
+  // inspection cannot live here: it is an IPC round trip and this function is
+  // synchronous.
+  //
+  // The RDP password is NOT relaxed with either of them, and the asymmetry is
+  // deliberate rather than an oversight: `RdpPane` declines to connect at all
+  // without a password, so an RDP row saved without one has no reachable outcome
+  // but a failure. See `validateRdpCredential`.
+  //
   // Agent mode has nothing to require here on purpose: the agent may be started
   // (or the key added) after this host is saved, so a down agent must not block
   // saving. The panel reports its state, and a connect attempt fails with the
@@ -131,6 +155,7 @@ export function SshCredentialSection({
   value,
   onChange,
   hasStoredPassword,
+  keyRefusal,
 }: SshCredentialSectionProps) {
   const [agent, setAgent] = useState<AgentState>({ kind: "checking" });
   const [imported, setImported] = useState<ImportState>({ kind: "idle" });
@@ -389,6 +414,13 @@ export function SshCredentialSection({
               </div>
               <KeyInspectPanel state={inspected} />
             </div>
+            {/* The save-time refusal, and the LAST child of this field on
+                purpose: its sentence says to enter the passphrase below, and
+                the passphrase input is the next field down. It is not the
+                dialog's bottom `error` line and must not move there - that
+                line carries store refusals and keychain errors, which are
+                about the form rather than about this one input. */}
+            {keyRefusal ? <p className="text-destructive text-[10.5px]">{keyRefusal}</p> : null}
           </Field>
           <Field label="Key passphrase (optional)">
             <Input
