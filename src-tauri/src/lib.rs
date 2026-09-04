@@ -742,7 +742,6 @@ pub fn run() {
             secrets::secrets_delete,
             secrets::secrets_get_all,
             secrets::secrets_copy,
-            backup::backup_open,
             backup::backup_seal_payload,
             backup::backup_open_payload,
             backup::backup_apply_secrets,
