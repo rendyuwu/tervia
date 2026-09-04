@@ -322,9 +322,12 @@ export function HostsPage({ onConnect, onScreen }: HostsPageProps): ReactNode {
     // width from dragging a divider never crosses a fixed px line - the only
     // way to make it happen is to shrink the number the percentage is taken
     // OF, i.e. the window itself, down toward its own floor,
-    // `src-tauri/tauri.conf.json`'s `minWidth: 420` - the same order of
+    // `src-tauri/tauri.conf.json`'s `minWidth: 640` - the same order of
     // magnitude as this breakpoint, which is the actual reason narrow layout
-    // is reachable only at the window's own edge. The tester (report N-4)
+    // is reachable only at the window's own edge. TWO DIFFERENT 420s, and
+    // conflating them is what put the wrong number here: `@max-[420px]` is a
+    // CONTAINER breakpoint and is unchanged, while the WINDOW floor is the
+    // config's and is 640. The tester (report N-4)
     // confirmed this by hand at both divider stops across four window
     // widths, landing on an effective floor in the 500s of px - an EMERGENT
     // number (25% of whatever window width they were at), not a constant

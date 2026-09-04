@@ -222,9 +222,11 @@ export function VaultPage(): ReactNode {
     // edge is a PERCENTAGE (`WorkspaceArea.tsx:97` 25%, `AppSidebar.tsx:215`
     // 8%, `AppRightSlot.tsx:178` 18%), and a percentage floor shrinks with the
     // window - so the narrow rules below are reachable only by shrinking the
-    // window itself toward `tauri.conf.json`'s `minWidth: 420`, and
+    // window itself toward `tauri.conf.json`'s `minWidth: 640`, and
     // `scripts/hosts-header-narrow-verify.ts` forces the width directly
-    // instead of relying on a hand test that cannot get there.
+    // instead of relying on a hand test that cannot get there. That floor is
+    // NOT the same number as any `@max-[420px]` container breakpoint, which is
+    // what a reader is likely to assume and what once put 420 here.
     <div ref={pageRef} className="bg-background @container flex h-full w-full min-w-0 flex-col">
       <div className="flex flex-col gap-2 border-b p-3">
         {/* The same wrapping header row the Hosts page uses, with one child

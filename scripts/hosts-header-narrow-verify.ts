@@ -31,8 +31,11 @@
  * was in use), not a constant. The header's `@container` rules, and VLT-41's
  * fix to the search box specifically, are therefore not reachable by
  * hand-resizing anything in a running build - only by shrinking the WINDOW
- * itself down toward its own floor (`tauri.conf.json`'s `minWidth: 420`,
- * the same order of magnitude as this breakpoint). This file, forcing the
+ * itself down toward its own floor (`tauri.conf.json`'s `minWidth: 640`,
+ * the same order of magnitude as this breakpoint). TWO DIFFERENT NUMBERS
+ * THAT BOTH READ 420 ONCE: the 420 this file checks is the header's own
+ * CONTAINER breakpoint and is correct everywhere it appears below; the
+ * window floor is the config's, and it is 640. This file, forcing the
  * width directly instead of asking a real pane to reach it, is the only
  * verification either one gets.
  */
