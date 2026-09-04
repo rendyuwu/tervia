@@ -8,11 +8,12 @@
  * VLT-60: the envelope is validated between the read and the dialog opening,
  * not only picked-then-read-then-opened.
  *
- * The payload this writes and reads is still backup **v2** - SSH and RDP hosts
- * and their credentials, sealed as one blob. 6g takes it to v3, where
- * identities, keys and forward rules travel alongside the hosts. A reader who
- * finds a v2 writer on a page that shows vault-bound hosts should not have to
- * guess whether that is a bug: it is not, yet.
+ * The format is **v3**, and v1 and v2 files are refused by name rather than by
+ * a parse error - which is why the picker still offers the v1 extension. What
+ * a v3 payload carries is growing to identities, keys and forward rules
+ * alongside the hosts; until it does, a reader who finds only hosts and groups
+ * sealed here on a page that shows vault-bound hosts should not have to guess
+ * whether that is a bug. It is not, yet.
  */
 import { Button } from "@/components/ui/button";
 import { toast } from "@/components/ui/toast";
@@ -55,7 +56,10 @@ export function HostsBackupActions(): ReactNode {
         filters: [
           {
             name: "Tervia backup",
-            // The v1 extension stays offered: those files still import.
+            // The v1 extension stays offered even though v1 no longer imports:
+            // a filtered-out file gives the user nothing to click and no reason
+            // why, where picking one reaches the refusal that names the format
+            // and says there is no converter.
             extensions: [BACKUP_EXTENSION, BACKUP_EXTENSION_V1, "json"],
           },
         ],
