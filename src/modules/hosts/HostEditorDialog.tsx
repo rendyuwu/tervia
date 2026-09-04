@@ -9,6 +9,7 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
   DialogClose,
@@ -29,10 +30,17 @@ import {
   type VaultKeyFacts,
 } from "@/modules/vault/keyInspect";
 import type { IdentityRow } from "@/modules/vault/page/derive";
+import { listKeys } from "@/modules/vault/store";
+import type { VaultKey } from "@/modules/vault/types";
 import type { ReactNode } from "react";
 import { useEffect, useRef, useState } from "react";
 
-import { bindHostToIdentity, convertHostToVault, detachHostFromVault } from "./credentialMove";
+import {
+  bindHostToIdentity,
+  convertHostToVault,
+  detachHostFromVault,
+  reusableVaultKey,
+} from "./credentialMove";
 import { Combobox, type ComboboxOption } from "./editor/Combobox";
 import {
   CREDENTIAL_CHOICE_INLINE,
@@ -143,6 +151,18 @@ const EMPTY_SSH_CRED: SshCredentialDraft = {
 };
 
 const EMPTY_RDP_CRED: RdpCredentialDraft = { username: "", domain: "", password: "" };
+
+/**
+ * The convert confirmation's reuse question, and its three states.
+ *
+ * `VaultKey | null` would be two of them. "We have not looked yet" has to render
+ * differently from "we looked and the vault holds nothing like it": the offer is
+ * a choice with a consequence in both directions, and blank space where a
+ * question is about to appear reads as there being nothing to ask.
+ */
+type ReuseOffer = { kind: "checking" } | { kind: "none" } | { kind: "candidate"; key: VaultKey };
+
+const NO_REUSE_OFFER: ReuseOffer = { kind: "none" };
 
 function defaultPortFor(protocol: "ssh" | "rdp"): number {
   return protocol === "ssh" ? SSH_DEFAULT_PORT : RDP_DEFAULT_PORT;
@@ -279,6 +299,32 @@ export function HostEditorDialog({
    *  because `${user}@${host}` is a poor name for a credential about to be
    *  shared across every host that binds to it. */
   const [convertName, setConvertName] = useState("");
+  /**
+   * The vault key that already holds the private key a convert is about to move
+   * in, as of the moment the confirmation opened.
+   *
+   * The lookup runs on the way INTO the confirmation, not inside
+   * `applyCredentialChange`, because the answer is a question for the user and
+   * the confirmation is the only place there is to ask it.
+   */
+  const [reuseOffer, setReuseOffer] = useState<ReuseOffer>(NO_REUSE_OFFER);
+  /**
+   * Whether the user took that offer.
+   *
+   * `false` on every open, and that default is the whole of the fallback: the
+   * lookup is asynchronous and the Confirm button is deliberately not gated on
+   * it, so a confirmation answered before the answer arrives mints a new key -
+   * which is what every convert did before this existed.
+   */
+  const [reuseExistingKey, setReuseExistingKey] = useState(false);
+  /**
+   * Which lookup's answer is still wanted. The confirmation can be opened,
+   * cancelled and reopened faster than `ssh_key_inspect` and the vault read
+   * behind it return, and an answer from the previous open describes a key body
+   * that may no longer be the one being converted - the same race the vault key
+   * editor's inspection counter exists for.
+   */
+  const reuseGeneration = useRef(0);
   const [changing, setChanging] = useState(false);
 
   const token = tokenFor(target);
@@ -330,9 +376,13 @@ export function HostEditorDialog({
     setReady(false);
     setMode(target.mode);
     // A confirmation left open from the row this editor was just pointed away
-    // from must not survive onto the new one.
+    // from must not survive onto the new one - and neither may a reuse lookup
+    // still in flight for it, which is what moving the generation on discards.
     setPendingChange(null);
     setConvertName("");
+    reuseGeneration.current += 1;
+    setReuseOffer(NO_REUSE_OFFER);
+    setReuseExistingKey(false);
 
     const stale = () => applied.current !== token;
 
@@ -1091,6 +1141,55 @@ export function HostEditorDialog({
     `${(sshCred.user || rdpCred.username).trim()}@${shared.host.trim()}`;
 
   /**
+   * Ask, on the way into the convert confirmation, whether the vault already
+   * holds the private key this convert would move in.
+   *
+   * WHY IT IS HERE AND NOT IN `applyCredentialChange`. Reuse hands the new
+   * identity a `VaultKey` the user did not pick, whose name, description and
+   * passphrase belong to an earlier import, and getting that wrong is silent -
+   * the connect works, using someone else's record. So it is the user's
+   * decision, and the confirmation is the only place to put it. That means the
+   * lookup has to have happened before Confirm is pressed.
+   *
+   * IT DOES NOT GATE CONFIRM. An answer that has not arrived leaves the offer at
+   * "checking" and `reuseExistingKey` at false, so the convert mints a new key -
+   * today's behaviour, unchanged. Blocking the button on an inspection that may
+   * fail would trade a correct-but-duplicated key for a stuck confirmation.
+   *
+   * THE BODY IS INSPECTED A SECOND TIME here; `applyCredentialChange` keeps its
+   * own inspection for the facts it stores on a key it mints. Deliberately not
+   * shared: this one runs before the user has answered and may be superseded or
+   * discarded, while the facts written onto a new record have to come from the
+   * body as it stands when the write happens.
+   *
+   * A BODY THE BACKEND CANNOT READ IS NOT AN ERROR. `vaultKeyFactsFrom` reports
+   * no fingerprint for a container it could not open - a PuTTY or PKCS#8 key
+   * whose passphrase has not been entered - and no fingerprint means no
+   * candidate, never a failure. Same degradation as the `facts = {}` arm below,
+   * for the same reason: a cosmetic lookup must not fail the convert.
+   */
+  const offerKeyReuse = async () => {
+    const generation = ++reuseGeneration.current;
+    setReuseExistingKey(false);
+    if (protocol !== "ssh" || !sshCred.privateKey.trim()) {
+      setReuseOffer(NO_REUSE_OFFER);
+      return;
+    }
+    setReuseOffer({ kind: "checking" });
+    let candidate: VaultKey | null = null;
+    try {
+      const facts = vaultKeyFactsFrom(
+        await inspectSshKey(sshCred.privateKey, sshCred.keyPassphrase || undefined),
+      );
+      candidate = reusableVaultKey(await listKeys(), facts);
+    } catch {
+      candidate = null;
+    }
+    if (reuseGeneration.current !== generation) return;
+    setReuseOffer(candidate ? { kind: "candidate", key: candidate } : NO_REUSE_OFFER);
+  };
+
+  /**
    * The credential picker's confirmed action: convert this host's own
    * credentials into a new identity, bind to an existing one, or detach back
    * to inline. One function, so there is exactly one call site for each of
@@ -1115,12 +1214,19 @@ export function HostEditorDialog({
     setChanging(true);
     try {
       if (change.kind === "convert") {
+        // The key the user chose to reuse, or null for "mint a new record".
+        // Read from the offer rather than from the checkbox alone, so a ticked
+        // box over an offer that has since been replaced cannot name a record
+        // the user never saw.
+        const reused = reuseExistingKey && reuseOffer.kind === "candidate" ? reuseOffer.key : null;
         // The draft's key body, when there is one - never the stored record,
         // which cannot be reached from here without a second keychain read.
         // The host editor already seeds SSH secrets from the keychain
         // (`getHostSshSecrets` above), so a saved host's body is in `sshCred`.
+        // Skipped entirely when a key is being reused: nothing is written to
+        // that record, so there are no facts to put on it.
         let facts: VaultKeyFacts = {};
-        if (protocol === "ssh" && sshCred.privateKey.trim()) {
+        if (!reused && protocol === "ssh" && sshCred.privateKey.trim()) {
           try {
             facts = vaultKeyFactsFrom(
               await inspectSshKey(sshCred.privateKey, sshCred.keyPassphrase || undefined),
@@ -1145,7 +1251,12 @@ export function HostEditorDialog({
             domain: protocol === "rdp" ? rdpCred.domain.trim() : "",
             description: "",
           },
-          key: protocol === "ssh" ? { name: `${shared.name.trim()} key`, facts } : null,
+          key:
+            protocol !== "ssh"
+              ? null
+              : reused
+                ? { reuseKeyId: reused.id }
+                : { name: `${shared.name.trim()} key`, facts },
         });
         setExisting(result.host);
         setChoice(currentCredentialChoice(result.host));
@@ -1337,8 +1448,10 @@ export function HostEditorDialog({
                         className="h-7 shrink-0 px-2 text-[11px]"
                         disabled={changing}
                         onClick={() => {
-                          if (credentialChange.kind === "convert")
+                          if (credentialChange.kind === "convert") {
                             setConvertName(defaultConvertName());
+                            void offerKeyReuse();
+                          }
                           setPendingChange(credentialChange);
                         }}
                       >
@@ -1485,18 +1598,46 @@ export function HostEditorDialog({
               {credentialChangeNote(shownChange, shownIdentityName, shownOwnedSecrets)}
             </AlertDialogDescription>
           </AlertDialogHeader>
+          {/* `shownChange`, never `pendingChange`: Radix keeps this content
+            mounted through its exit animation, and a body reading the cleared
+            value renders blank while the dialog fades. */}
           {shownChange.kind === "convert" ? (
-            <div className="flex flex-col gap-1">
-              <label htmlFor="convert-identity-name" className="text-[11px] font-medium">
-                Identity name
-              </label>
-              <Input
-                id="convert-identity-name"
-                value={convertName}
-                onChange={(e) => setConvertName(e.target.value)}
-                spellCheck={false}
-                className="h-8 text-[12px]"
-              />
+            <div className="flex flex-col gap-3">
+              <div className="flex flex-col gap-1">
+                <label htmlFor="convert-identity-name" className="text-[11px] font-medium">
+                  Identity name
+                </label>
+                <Input
+                  id="convert-identity-name"
+                  value={convertName}
+                  onChange={(e) => setConvertName(e.target.value)}
+                  spellCheck={false}
+                  className="h-8 text-[12px]"
+                />
+              </div>
+              {reuseOffer.kind === "checking" ? (
+                <span className="text-muted-foreground text-[10.5px]">
+                  Checking whether the vault already holds this key…
+                </span>
+              ) : reuseOffer.kind === "candidate" ? (
+                <div className="flex flex-col gap-1">
+                  <label className="flex items-start gap-2 text-[11px]">
+                    <Checkbox
+                      checked={reuseExistingKey}
+                      onCheckedChange={(checked) => setReuseExistingKey(checked === true)}
+                      className="mt-0.5"
+                    />
+                    <span>
+                      {`The vault already holds this private key as "${reuseOffer.key.name}" — use that record instead of adding a second one.`}
+                    </span>
+                  </label>
+                  <span className="text-muted-foreground text-[10.5px]">
+                    {reuseExistingKey
+                      ? `The new identity points at "${reuseOffer.key.name}" exactly as it stands: its name, its description and its passphrase are left alone, and nothing from this host is written onto it. The fingerprints match, so the key body is the same one — but a re-encrypted copy of one key can carry a different passphrase, and writing this host's over it would stop every other identity using that record from opening it. This host's own key and key passphrase are released once the move succeeds, and the vault still holds the key itself.`
+                      : `Left unticked, a second record is created holding another copy of the same private key, with the name and passphrase this host has now.`}
+                  </span>
+                </div>
+              ) : null}
             </div>
           ) : null}
           <AlertDialogFooter>

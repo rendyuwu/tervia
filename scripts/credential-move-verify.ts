@@ -83,6 +83,8 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import ts from "typescript";
+
 import { createWriteQueue } from "../src/lib/recoveredStore";
 import type { HostsStoreIo } from "../src/modules/hosts/adapters";
 import {
@@ -91,6 +93,7 @@ import {
   convertMoves,
   detachHostFromVault,
   detachMoves,
+  reusableVaultKey,
   type CredentialMoveDeps,
 } from "../src/modules/hosts/credentialMove";
 import { createHostsStore } from "../src/modules/hosts/store";
@@ -113,10 +116,14 @@ import {
   identityIdFromChoice,
 } from "../src/modules/hosts/editor/credentialChoice";
 import type { SecretsIo, VaultStoreIo } from "../src/modules/vault/adapters";
-import { createVaultStore } from "../src/modules/vault/store";
+import { createVaultStore, type VaultStore } from "../src/modules/vault/store";
 import {
   HOST_KEYRING_SERVICE,
   VAULT_KEYRING_SERVICE,
+  VAULT_STAMP_ABSENT,
+  VaultRecordChangedError,
+  vaultIdentityStamp,
+  vaultKeyStamp,
   type VaultIdentity,
   type VaultKey,
 } from "../src/modules/vault/types";
@@ -1198,6 +1205,662 @@ console.log("\n[10] convert writes only FRESH vault ids, never reusing a seeded 
 }
 
 // ===========================================================================
+// [10b] and [10c] exist because GROUP 10 IS NOT COVER FOR EITHER OF THEM, and
+// reading it as cover is the trap the fingerprint-dedupe row names by itself.
+// Group 10 forbids reusing a CALLER-SUPPLIED or the HOST's OWN id. It says
+// nothing about a record convert was ASKED to reuse, its seeded fixtures are
+// named differently, and a dedupe therefore passes it untouched - so without
+// these two groups the reuse path would ship with a green gate and no evidence
+// at all about the property that changed.
+//
+// The fixtures below share one shape, and every field of it is load-bearing:
+//
+//   * The shared key and the host hold THE SAME private key body and DIFFERENT
+//     passphrases. That is the real case - a re-encrypted copy of one key file
+//     is still that key, and the fingerprint (the public half) cannot tell the
+//     two passphrases apart. A reuse path that copied would overwrite the vault
+//     record's passphrase with this host's, and every other identity using that
+//     record would stop being able to open it.
+//   * NO OTHER IDENTITY names the shared key. That is what gives [10b]'s
+//     direction-2 check teeth: `deleteKey` refuses only while a holder exists,
+//     so a key with no holder is deletable, and a compensating delete pointed at
+//     it would go through. The last check of that block proves the delete really
+//     would have succeeded, so a green result there is a fact about the code and
+//     not about an inert guard.
+// ===========================================================================
+console.log(
+  "\n[10b] convert can REUSE a vault key the caller found, and the reuse path writes NOTHING to it",
+);
+{
+  /** Every vault write and delete, by name and id, in call order, over
+   *  deterministic minted ids.
+   *
+   *  Every claim this group exists for is of the form "this call was not made",
+   *  and an absence check over `kept` or over the record list afterwards cannot
+   *  tell "never called" from "called, then undone" - group 9 is what the second
+   *  one looks like and it leaves the store looking identical. So the calls
+   *  themselves are the assertion, by value and in order. */
+  const convertSpy = (h: ReturnType<typeof harness>) => {
+    const log: string[] = [];
+    const vault: CredentialMoveDeps["vault"] = {
+      ...h.vault,
+      newIdentityId: () => "i-new",
+      newKeyId: () => "k-new",
+      upsertKey: (...a: Parameters<VaultStore["upsertKey"]>) => {
+        log.push(`upsertKey ${a[0].id}`);
+        return h.vault.upsertKey(...a);
+      },
+      upsertIdentity: (...a: Parameters<VaultStore["upsertIdentity"]>) => {
+        log.push(`upsertIdentity ${a[0].id}`);
+        return h.vault.upsertIdentity(...a);
+      },
+      deleteKey: (...a: Parameters<VaultStore["deleteKey"]>) => {
+        log.push(`deleteKey ${a[0]}`);
+        return h.vault.deleteKey(...a);
+      },
+      deleteIdentity: (...a: Parameters<VaultStore["deleteIdentity"]>) => {
+        log.push(`deleteIdentity ${a[0]}`);
+        return h.vault.deleteIdentity(...a);
+      },
+    };
+    return { log, deps: { ...h.deps, vault } };
+  };
+
+  const sharedKey = vaultKey({
+    id: "k-shared",
+    name: "laptop key",
+    fingerprint: "SHA256:AAAA",
+    hasPrivateKey: true,
+    hasPassphrase: true,
+  });
+  const keyedHost = (over: Partial<SshHost> = {}): SshHost =>
+    sshHost({
+      id: "h-1",
+      credential: {
+        kind: "inline",
+        hostId: "h-1",
+        user: "root",
+        authMode: "key",
+        hasPassword: true,
+        hasPrivateKey: true,
+        hasKeyPassphrase: true,
+      },
+      ...over,
+    });
+  const hostKept = {
+    [`${HOST_KEYRING_SERVICE}::h-1::password`]: "hunter2",
+    [`${HOST_KEYRING_SERVICE}::h-1::privateKey`]: "PEM-BODY",
+    // DIFFERENT from the vault record's, and the same key body: this is the
+    // value a reuse path that copied would write over `k-shared::passphrase`.
+    [`${HOST_KEYRING_SERVICE}::h-1::keyPassphrase`]: "this-host-passphrase",
+  };
+  const sharedKept = {
+    [`${VAULT_KEYRING_SERVICE}::k-shared::privateKey`]: "PEM-BODY",
+    [`${VAULT_KEYRING_SERVICE}::k-shared::passphrase`]: "the-shared-passphrase",
+  };
+  const sharedAccounts = (h: ReturnType<typeof harness>): (string | undefined)[] => [
+    h.kept.get(`${VAULT_KEYRING_SERVICE}::k-shared::privateKey`),
+    h.kept.get(`${VAULT_KEYRING_SERVICE}::k-shared::passphrase`),
+  ];
+
+  // -- 10b.1: the reuse path itself ----------------------------------------
+  {
+    const host = keyedHost();
+    const h = harness({
+      hosts: [host],
+      keys: [sharedKey],
+      kept: { ...hostKept, ...sharedKept },
+    });
+    const spy = convertSpy(h);
+    const result = await convertHostToVault(
+      {
+        host,
+        identity: { name: "shared", username: "root", domain: "", description: "" },
+        key: { reuseKeyId: "k-shared" },
+      },
+      spy.deps,
+    );
+
+    // (1) No `upsertKey` call is made AT ALL - not "an upsertKey that happens to
+    // write the same bytes".
+    check("the vault write log, by value and in order - there is no upsertKey in it", spy.log, [
+      "upsertIdentity i-new",
+    ]);
+    // (2) The identity names exactly that key id, on the returned record and on
+    // the stored one: `identityRecordFrom` is between the two and normalises.
+    check(
+      "the returned identity names exactly the key that was reused",
+      result.identity.keyId,
+      "k-shared",
+    );
+    check(
+      "and so does the STORED identity, which is what a connect reads",
+      h.identities().map((i) => i.keyId),
+      ["k-shared"],
+    );
+    // (3) THE DANGEROUS DIRECTION. By value and in order, never by count: a
+    // count of one is satisfied by a single copy onto the WRONG account.
+    check("the copies, by value and in order - the password alone", h.copies(), [
+      `${HOST_KEYRING_SERVICE}::h-1::password -> ${VAULT_KEYRING_SERVICE}::i-new::password`,
+    ]);
+    check(
+      "no copy names the shared key's accounts at all",
+      h.copies().filter((c) => c.includes("k-shared")),
+      [],
+    );
+    // The same claim one level down, where it actually costs something: what is
+    // AT those accounts. A move log can be right while a `secrets.set` somewhere
+    // else wrote the value anyway.
+    check(
+      "the shared key's two accounts still hold what they held, values included - the differing passphrase in particular",
+      sharedAccounts(h),
+      ["PEM-BODY", "the-shared-passphrase"],
+    );
+    check("the shared key's RECORD is byte-identical afterwards", h.keys(), [sharedKey]);
+
+    // The return value (amendment G2): the EXISTING record, not `null`. `null`
+    // is the honest answer for "this identity names no key", and on this path
+    // the identity names one.
+    check("the caller is handed the existing key record, not null", result.key, sharedKey);
+    check(
+      "so result.key.id and result.identity.keyId agree on every path where a key is named",
+      result.key !== null && result.key.id === result.identity.keyId,
+      true,
+    );
+
+    // And the trade the confirmation has to state out loud: the host's own
+    // copies are released as stale by `upsertHost`, its passphrase included -
+    // that value is not copied anywhere, and it is GONE.
+    check(
+      "the host's own three accounts are all released, its own key passphrase included",
+      [
+        h.kept.has(`${HOST_KEYRING_SERVICE}::h-1::password`),
+        h.kept.has(`${HOST_KEYRING_SERVICE}::h-1::privateKey`),
+        h.kept.has(`${HOST_KEYRING_SERVICE}::h-1::keyPassphrase`),
+      ],
+      [false, false, false],
+    );
+    check("the host record is bound to the new identity", result.host.credential, {
+      kind: "identity",
+      identityId: "i-new",
+    });
+  }
+
+  // -- 10b.2: DIRECTION 2 - a refused host write must not delete the key ----
+  {
+    // `proxyJumpId` naming a host that is gone: `upsertHost` refuses, with no
+    // second writer anywhere, which is group 9b's own fixture. On the reuse path
+    // the compensating delete then runs with a key id that came from OUTSIDE
+    // this call - the one case `undoConvertRecords`' provenance argument
+    // explicitly does not cover.
+    const host = keyedHost({ proxyJumpId: "h-gone" });
+    const h = harness({
+      hosts: [host],
+      keys: [sharedKey],
+      kept: { ...hostKept, ...sharedKept },
+    });
+    const spy = convertSpy(h);
+    await rejects(
+      "the convert is refused, because the host names a jump host that is gone",
+      () =>
+        convertHostToVault(
+          {
+            host,
+            identity: { name: "shared", username: "root", domain: "", description: "" },
+            key: { reuseKeyId: "k-shared" },
+          },
+          spy.deps,
+        ),
+      ["names a jump host", "does not exist"],
+    );
+    check(
+      "the vault write AND delete log, by value and in order - the identity is taken back and deleteKey is NOT called",
+      spy.log,
+      ["upsertIdentity i-new", "deleteIdentity i-new"],
+    );
+    check("no identity survives", h.identities(), []);
+    check("the shared key survives, byte-identical", h.keys(), [sharedKey]);
+    check("with both of its secrets, values included", sharedAccounts(h), [
+      "PEM-BODY",
+      "the-shared-passphrase",
+    ]);
+    check(
+      "and the only vault accounts left are the shared key's own",
+      [...h.kept.keys()].filter((k) => k.startsWith(`${VAULT_KEYRING_SERVICE}::`)).sort(),
+      [
+        `${VAULT_KEYRING_SERVICE}::k-shared::passphrase`,
+        `${VAULT_KEYRING_SERVICE}::k-shared::privateKey`,
+      ],
+    );
+    check(
+      "the host's own accounts are untouched, values included",
+      [
+        h.kept.get(`${HOST_KEYRING_SERVICE}::h-1::password`),
+        h.kept.get(`${HOST_KEYRING_SERVICE}::h-1::privateKey`),
+        h.kept.get(`${HOST_KEYRING_SERVICE}::h-1::keyPassphrase`),
+      ],
+      ["hunter2", "PEM-BODY", "this-host-passphrase"],
+    );
+
+    // WHY THE CHECK ABOVE IS NOT INERT, done rather than argued. If the shared
+    // key were undeletable here - because some identity still named it - then
+    // "deleteKey was not called" would be a statement about the fixture rather
+    // than about the code, and passing the reused id through would have been
+    // harmless. It is not: nothing names this key, so the delete goes through,
+    // and it takes both secrets with it. Run LAST in this block, because it
+    // empties the store.
+    await h.vault.deleteKey("k-shared");
+    check(
+      "proof the guard is not inert: deleting the shared key from here is NOT refused, so handing its id to the cleanup really would have destroyed it",
+      h.keys(),
+      [],
+    );
+    check("and its two secrets go with it", sharedAccounts(h), [undefined, undefined]);
+  }
+
+  // -- 10b.3: the mint path is byte-identical to what it was ---------------
+  {
+    const host = keyedHost();
+    const h = harness({
+      hosts: [host],
+      keys: [sharedKey],
+      kept: { ...hostKept, ...sharedKept },
+    });
+    const spy = convertSpy(h);
+    const result = await convertHostToVault(
+      {
+        host,
+        identity: { name: "shared", username: "root", domain: "", description: "" },
+        key: { name: "prod key", facts: { fingerprint: "SHA256:AAAA" } },
+      },
+      spy.deps,
+    );
+    check("the vault write log, by value and in order - a key IS written", spy.log, [
+      "upsertKey k-new",
+      "upsertIdentity i-new",
+    ]);
+    check("all three copies, by value and in order", h.copies(), [
+      `${HOST_KEYRING_SERVICE}::h-1::password -> ${VAULT_KEYRING_SERVICE}::i-new::password`,
+      `${HOST_KEYRING_SERVICE}::h-1::privateKey -> ${VAULT_KEYRING_SERVICE}::k-new::privateKey`,
+      `${HOST_KEYRING_SERVICE}::h-1::keyPassphrase -> ${VAULT_KEYRING_SERVICE}::k-new::passphrase`,
+    ]);
+    check(
+      "the new key holds this host's own passphrase, and the shared record's is not involved",
+      [
+        h.kept.get(`${VAULT_KEYRING_SERVICE}::k-new::privateKey`),
+        h.kept.get(`${VAULT_KEYRING_SERVICE}::k-new::passphrase`),
+      ],
+      ["PEM-BODY", "this-host-passphrase"],
+    );
+    check(
+      "the same-fingerprint record already in the vault is byte-identical afterwards",
+      h.keys().find((k) => k.id === "k-shared"),
+      sharedKey,
+    );
+    check("and its accounts too, values included", sharedAccounts(h), [
+      "PEM-BODY",
+      "the-shared-passphrase",
+    ]);
+    check("the identity names the key that was minted", result.identity.keyId, "k-new");
+    check("and the caller is handed that record", result.key?.id, "k-new");
+    check("which is the record the store now holds", result.key?.name, "prod key");
+  }
+
+  // -- 10b.4: the candidate filter, by value -------------------------------
+  {
+    // `reusableVaultKey` is the ONLY thing in the app that produces a
+    // `reuseKeyId`, so the `hasPrivateKey` condition is enforced here rather
+    // than at the write. Pure, so it is checked by value.
+    const withBody = vaultKey({
+      id: "k-1",
+      name: "laptop key",
+      fingerprint: "SHA256:AAAA",
+      hasPrivateKey: true,
+    });
+    const dupe = vaultKey({
+      id: "k-1b",
+      name: "laptop key (imported twice)",
+      fingerprint: "SHA256:AAAA",
+      hasPrivateKey: true,
+    });
+    const noBody = vaultKey({
+      id: "k-2",
+      name: "metadata only",
+      fingerprint: "SHA256:AAAA",
+      hasPrivateKey: false,
+    });
+    const otherFp = vaultKey({
+      id: "k-3",
+      name: "other",
+      fingerprint: "SHA256:BBBB",
+      hasPrivateKey: true,
+    });
+    const blankFp = vaultKey({ id: "k-4", name: "sealed", fingerprint: "", hasPrivateKey: true });
+    const noFp = vaultKey({ id: "k-5", name: "no fingerprint", hasPrivateKey: true });
+
+    check(
+      "a fingerprint match that holds the body IS the candidate",
+      reusableVaultKey([otherFp, withBody], { fingerprint: "SHA256:AAAA" })?.id,
+      "k-1",
+    );
+    check(
+      "a fingerprint match with hasPrivateKey:false is NOT a candidate - a record naming a key nobody holds must not be reused",
+      reusableVaultKey([noBody], { fingerprint: "SHA256:AAAA" }),
+      null,
+    );
+    check(
+      "and it does not merely lose a race: with the bodyless record FIRST in the list, the one holding the body is still what comes back",
+      reusableVaultKey([noBody, withBody], { fingerprint: "SHA256:AAAA" })?.id,
+      "k-1",
+    );
+    check(
+      "a non-matching fingerprint is not a candidate",
+      reusableVaultKey([otherFp], { fingerprint: "SHA256:AAAA" }),
+      null,
+    );
+    check("no fingerprint in hand, no candidate", reusableVaultKey([withBody], {}), null);
+    check(
+      "a blank fingerprint in hand is not a wildcard",
+      reusableVaultKey([withBody, blankFp], { fingerprint: "" }),
+      null,
+    );
+    check(
+      "a blank fingerprint ON THE RECORD matches nothing either",
+      reusableVaultKey([blankFp], { fingerprint: "SHA256:AAAA" }),
+      null,
+    );
+    check(
+      "nor does a record with no fingerprint at all",
+      reusableVaultKey([noFp], { fingerprint: "SHA256:AAAA" }),
+      null,
+    );
+    check(
+      "and two blanks do not match each other",
+      reusableVaultKey([blankFp], { fingerprint: "" }),
+      null,
+    );
+    check(
+      "the FIRST match wins when one fingerprint is on two records - the caller names which one it is offering",
+      reusableVaultKey([withBody, dupe], { fingerprint: "SHA256:AAAA" })?.id,
+      "k-1",
+    );
+    check(
+      "an empty vault has no candidate",
+      reusableVaultKey([], { fingerprint: "SHA256:AAAA" }),
+      null,
+    );
+  }
+
+  // -- 10b.5: a reuse id whose record is gone is refused BEFORE a byte moves -
+  {
+    // Reachable: the caller lists the vault's keys to build the offer, and
+    // another window can delete the one it offered between that list and the
+    // confirmation. Without this pre-check `upsertIdentity` refuses the dangling
+    // `keyId` at step 7, AFTER step 5 has copied this host's password onto a
+    // vault account no record will ever name - P0-1's shape, one door over.
+    const host = keyedHost();
+    const h = harness({ hosts: [host], kept: hostKept });
+    await rejects(
+      "a reuseKeyId naming a key that no longer exists is refused, naming the host and the id",
+      () =>
+        convertHostToVault(
+          {
+            host,
+            identity: { name: "shared", username: "root", domain: "", description: "" },
+            key: { reuseKeyId: "k-gone" },
+          },
+          h.deps,
+        ),
+      ["prod", "cannot reuse vault key", "k-gone", "no longer exists"],
+    );
+    check("no copy was issued at all - the refusal is a pre-check", h.copies(), []);
+    check(
+      "so no vault account was written",
+      [...h.kept.keys()].filter((k) => k.startsWith(`${VAULT_KEYRING_SERVICE}::`)),
+      [],
+    );
+    check("no vault identity exists", h.identities(), []);
+    check("no vault key exists", h.keys(), []);
+    check(
+      "the host's own accounts are untouched, values included",
+      [
+        h.kept.get(`${HOST_KEYRING_SERVICE}::h-1::password`),
+        h.kept.get(`${HOST_KEYRING_SERVICE}::h-1::privateKey`),
+        h.kept.get(`${HOST_KEYRING_SERVICE}::h-1::keyPassphrase`),
+      ],
+      ["hunter2", "PEM-BODY", "this-host-passphrase"],
+    );
+    check("the stored host record is unchanged", h.hostRows(), [host]);
+  }
+}
+
+// ===========================================================================
+console.log(
+  "\n[10c] convert's two vault writes claim the record is ABSENT, and the store enforces that claim",
+);
+{
+  // Group 10 pins that convert MINTS fresh ids. That is a property of this
+  // code, which any later edit is free to lose. `VAULT_STAMP_ABSENT` turns it
+  // into a REFUSAL the store makes: `upsertKey`/`upsertIdentity` compare the
+  // stamp inside their own write queue and throw `VaultRecordChangedError`
+  // rather than overwriting a record another writer already put at that id.
+  //
+  // Reached today by nothing, and that is the point - both ids come out of the
+  // store's own minters two statements before the write, so the guard is inert
+  // in shipped code and only an INJECTED minter can drive it. That is
+  // "correct-but-inert", not "unreachable": the day a caller hands convert an id
+  // (a v3 import replaying a backup, say) it is the difference between a refusal
+  // and a silent overwrite.
+
+  const seededKey = vaultKey({
+    id: "k-seed",
+    name: "someone else's key",
+    fingerprint: "SHA256:CCCC",
+    hasPrivateKey: true,
+    hasPassphrase: true,
+  });
+  const keyedHost = sshHost({
+    id: "h-1",
+    credential: {
+      kind: "inline",
+      hostId: "h-1",
+      user: "root",
+      authMode: "key",
+      hasPassword: false,
+      hasPrivateKey: true,
+      hasKeyPassphrase: true,
+    },
+  });
+
+  // -- 10c.1: the key write -------------------------------------------------
+  {
+    const h = harness({
+      hosts: [keyedHost],
+      keys: [seededKey],
+      kept: {
+        [`${HOST_KEYRING_SERVICE}::h-1::privateKey`]: "PEM-BODY",
+        [`${HOST_KEYRING_SERVICE}::h-1::keyPassphrase`]: "this-host-passphrase",
+        [`${VAULT_KEYRING_SERVICE}::k-seed::privateKey`]: "OTHER-PEM",
+        [`${VAULT_KEYRING_SERVICE}::k-seed::passphrase`]: "other-passphrase",
+      },
+    });
+    const deps: CredentialMoveDeps = {
+      ...h.deps,
+      vault: { ...h.vault, newKeyId: () => "k-seed", newIdentityId: () => "i-new" },
+    };
+    let caught: unknown;
+    try {
+      await convertHostToVault(
+        {
+          host: keyedHost,
+          identity: { name: "x", username: "root", domain: "", description: "" },
+          key: { name: "new key", facts: {} },
+        },
+        deps,
+      );
+    } catch (e) {
+      caught = e;
+    }
+    assert(
+      caught instanceof VaultRecordChangedError,
+      "the key write is REFUSED by type, not merely by a differing record afterwards",
+    );
+    const err = caught as VaultRecordChangedError;
+    check("recordId, by value", err?.recordId, "k-seed");
+    check(
+      "expected, by value - convert's own claim that nothing is stored there",
+      err?.expected,
+      VAULT_STAMP_ABSENT,
+    );
+    check("actual, by value - what is really there", err?.actual, vaultKeyStamp(seededKey));
+    check("the seeded key's record is byte-identical - the refusal precedes the write", h.keys(), [
+      seededKey,
+    ]);
+    // Stated rather than left to be found: the stamp is over the RECORD, and
+    // step 5's copies have already run by the time it fires, so this fixture
+    // also shows what the guard does NOT cover. It costs nothing in shipped
+    // code, where no id can collide; it is here so the next reader does not read
+    // the guard as wider than it is.
+    check(
+      "and its ACCOUNTS were already overwritten by step 5's copy, which the stamp is not over",
+      [
+        h.kept.get(`${VAULT_KEYRING_SERVICE}::k-seed::privateKey`),
+        h.kept.get(`${VAULT_KEYRING_SERVICE}::k-seed::passphrase`),
+      ],
+      ["PEM-BODY", "this-host-passphrase"],
+    );
+  }
+
+  // -- 10c.2: the identity write -------------------------------------------
+  {
+    const seededIdentity = identity({ id: "i-seed", name: "someone else's identity" });
+    const host = sshHost({ id: "h-1" });
+    const h = harness({
+      hosts: [host],
+      identities: [seededIdentity],
+      kept: { [`${HOST_KEYRING_SERVICE}::h-1::password`]: "hunter2" },
+    });
+    const deps: CredentialMoveDeps = {
+      ...h.deps,
+      vault: { ...h.vault, newIdentityId: () => "i-seed" },
+    };
+    let caught: unknown;
+    try {
+      await convertHostToVault(
+        {
+          host,
+          identity: { name: "x", username: "root", domain: "", description: "" },
+          key: null,
+        },
+        deps,
+      );
+    } catch (e) {
+      caught = e;
+    }
+    assert(
+      caught instanceof VaultRecordChangedError,
+      "the identity write is REFUSED by type as well",
+    );
+    const err = caught as VaultRecordChangedError;
+    check("recordId, by value", err?.recordId, "i-seed");
+    check("expected, by value", err?.expected, VAULT_STAMP_ABSENT);
+    check("actual, by value", err?.actual, vaultIdentityStamp(seededIdentity));
+    check("the seeded identity is byte-identical afterwards", h.identities(), [seededIdentity]);
+    check("and the host was never bound", h.hostRows(), [host]);
+  }
+
+  // -- 10c.3: the argument's own expression text ---------------------------
+  {
+    // ARGUMENT-WISE, never the whole call's text. Prettier adds a trailing comma
+    // when it wraps a call across lines, and that comma sits INSIDE the
+    // CallExpression's span but OUTSIDE every argument's own span - so a
+    // whole-call pin reddens on a legal reflow while an argument-wise one does
+    // not.
+    //
+    // Argument-wise is NOT SUFFICIENT ON ITS OWN, and the `--print-width 60`
+    // control is what showed it: argument 0 here is ITSELF a four-argument call,
+    // so at a narrow width Prettier wraps that inner call and puts a trailing
+    // comma inside the argument's own span, where whitespace-stripping alone
+    // does not reach. Measured: this section went to 1 FAIL over unchanged code.
+    // So `norm` drops a comma that sits immediately before a closing paren as
+    // well. That is formatting and only formatting - a trailing comma before `)`
+    // never changes what a call means - and nothing else in the text is
+    // normalised, because everything else IS the claim.
+    //
+    // The arity is checked and the loop `continue`s on a mismatch, so a fourth
+    // argument added later reports ONE failure rather than silently skipping
+    // every argument pin below it and passing for free.
+    const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+    const movePath = join(repoRoot, "src/modules/hosts/credentialMove.ts");
+    const moveSf = ts.createSourceFile(
+      "credentialMove.ts",
+      readFileSync(movePath, "utf8"),
+      ts.ScriptTarget.ESNext,
+      true,
+      ts.ScriptKind.TS,
+    );
+    const findCalls = (root: ts.Node, callee: string): ts.CallExpression[] => {
+      const out: ts.CallExpression[] = [];
+      const visit = (n: ts.Node): void => {
+        if (ts.isCallExpression(n) && n.expression.getText(moveSf) === callee) out.push(n);
+        ts.forEachChild(n, visit);
+      };
+      visit(root);
+      return out;
+    };
+    const norm = (s: string): string => s.replace(/\s+/g, "").replace(/,(?=\))/g, "");
+    const pinArgs = (callee: string, expected: readonly [string, string, string]): void => {
+      const calls = findCalls(moveSf, callee);
+      check(`found exactly one ${callee}( call to pin`, calls.length, 1);
+      for (const c of calls) {
+        check(`${callee}( is called with exactly 3 arguments`, c.arguments.length, 3);
+        if (c.arguments.length !== 3) continue;
+        for (const [i, want] of expected.entries()) {
+          check(
+            `${callee}('s argument ${i} is exactly \`${want}\`, whitespace aside`,
+            norm(c.arguments[i].getText(moveSf)),
+            norm(want),
+          );
+        }
+      }
+    };
+    pinArgs("deps.vault.upsertKey", [
+      "keyRecordFrom(mintedKeyId, keyDraft, null, newKey.facts)",
+      "keySecrets",
+      "VAULT_STAMP_ABSENT",
+    ]);
+    pinArgs("deps.vault.upsertIdentity", [
+      'identityRecordFrom(identityId, identityDraft, "keep")',
+      "identitySecrets",
+      "VAULT_STAMP_ABSENT",
+    ]);
+
+    // The two ids are what the stamp claim rests on, so the split itself is
+    // pinned: `convertMoves` and the compensating delete take the id this call
+    // MINTED, and only the identity draft takes the one it NAMES. Swapping
+    // either is compile-clean and is the whole hazard of this feature.
+    const movesCalls = findCalls(moveSf, "convertMoves");
+    check("found exactly one convertMoves( call inside the module", movesCalls.length, 1);
+    if (movesCalls.length === 1) {
+      check(
+        "convertMoves takes the MINTED key id, so a reused key's accounts are never a copy destination",
+        movesCalls[0].arguments.map((a) => norm(a.getText(moveSf))),
+        ["args.host", "identityId", "mintedKeyId"],
+      );
+    }
+    const undoCalls = findCalls(moveSf, "undoConvertRecords");
+    check("found exactly one undoConvertRecords( call", undoCalls.length, 1);
+    if (undoCalls.length === 1) {
+      check(
+        "the compensating delete takes the MINTED key id, so a refused host write cannot destroy a key the user already had",
+        undoCalls[0].arguments.map((a) => norm(a.getText(moveSf))),
+        ["deps", "identityId", "mintedKeyId"],
+      );
+    }
+  }
+}
+
+// ===========================================================================
 console.log("\n[11] detach: SSH key auth copies the identity's and key's values onto the host");
 {
   const idn = identity({
@@ -2020,3 +2683,92 @@ console.log("\ncredential-move-verify: OK\n");
 // when the record is GONE, which the guard's doc says must not stop the cleanup
 // - is still uncovered, because every fixture here has a stored record. It is a
 // register row, not this round's.
+//
+// --- mutation table (the fingerprint-dedupe round, sections 10b and 10c) ----
+//
+//   Mutation                                          Check(s) it killed
+//   -------------------------------------------------  ---------------------------
+//   K1: the reuse path calls upsertKey anyway -        NOT the log check, but
+//     mintedKeyId falls back to the reused id and       10c's stamp guard: the
+//     the key upsert loses its `newKey` condition       script ABORTS on an
+//                                                       uncaught
+//                                                       VaultRecordChangedError
+//                                                       over the reused record.
+//                                                       A red gate, from the
+//                                                       guard rather than from
+//                                                       the property, so it was
+//                                                       re-run as K1b.
+//   K1b: the same, with the stamp relaxed on that      12 FAILs, `tsc` at 0.
+//     arm (`newKey ? VAULT_STAMP_ABSENT : undefined`)   10b.1's write log first,
+//     - the shape an author adding reuse would write    then the copies, the
+//                                                       shared key's accounts,
+//                                                       its record (the mutation
+//                                                       WIPES its fingerprint),
+//                                                       the return value, and
+//                                                       10b.2's delete log -
+//                                                       where the shared key and
+//                                                       both of its secrets are
+//                                                       gone.
+//   K2: convertMoves handed namedKeyId instead of      5 FAILs, `tsc` at 0. The
+//     mintedKeyId - direction 1, the copy onto a        copies by value, the
+//     shared key's own accounts                         shared key's two
+//                                                       accounts (the passphrase
+//                                                       is this host's, not the
+//                                                       record's), and 10c.3's
+//                                                       convertMoves argument
+//                                                       pin.
+//   K3: reusableVaultKey's `hasPrivateKey` condition   2 FAILs, `tsc` at 0. Both
+//     dropped from the candidate filter                 of 10b.4's bodyless-record
+//                                                       rows, including the one
+//                                                       that puts the bodyless
+//                                                       record FIRST.
+//   K4: VAULT_STAMP_ABSENT replaced with undefined     13 FAILs, and `tsc`
+//     at both upserts                                   flags the now-unused
+//                                                       import. 10c.1 and 10c.2
+//                                                       show what the guard
+//                                                       stops: the seeded key
+//                                                       comes back renamed "new
+//                                                       key" with its
+//                                                       fingerprint gone, the
+//                                                       seeded identity is
+//                                                       overwritten, and the host
+//                                                       is bound to it.
+//   K5: undoConvertRecords handed namedKeyId -         5 FAILs, `tsc` at 0.
+//     direction 2, the compensating delete pointed      10b.2's delete log, the
+//     at a key that existed before this call            shared key's survival,
+//                                                       both of its secrets, and
+//                                                       10c.3's undoConvertRecords
+//                                                       argument pin.
+//   K6: a Prettier reflow at --print-width 60 over     NOTHING - after the fix
+//     the whole module (§4.51's pair for 10c.3's        below. Before it, ONE
+//     exact-text pins)                                  FAIL over unchanged code:
+//                                                       argument 0 is itself a
+//                                                       four-argument call, and a
+//                                                       narrow width wraps it and
+//                                                       puts a trailing comma
+//                                                       INSIDE that argument's
+//                                                       own span, where
+//                                                       argument-wise pinning
+//                                                       does not reach. `norm`
+//                                                       now drops a comma before
+//                                                       a closing paren too.
+//
+// And two over `HostEditorDialog.tsx`, which this file does not check and
+// `host-editor-verify.ts` does not either - recorded because a green mutation is
+// a statement about the CHECKS, and both of these are cause 1, "the check is
+// weak", not "unreachable" and not "inert":
+//
+//   K7: the dialog reuses whenever a candidate exists,  NOTHING. `pnpm verify`
+//     ignoring the checkbox the user did or did not     credential-move-verify
+//     tick                                              and host-editor-verify
+//                                                       both stay green, `tsc` at
+//                                                       0. This is the row's own
+//                                                       premise - the decision is
+//                                                       the USER'S - and nothing
+//                                                       holds it.
+//   K8: the reuse lookup's generation guard deleted,    NOTHING from either
+//     so an answer for the previous row can land on     script; `tsc` alone,
+//     this one                                          for the now-unused
+//                                                       binding. A guard deleted
+//                                                       WITH its binding would be
+//                                                       invisible.

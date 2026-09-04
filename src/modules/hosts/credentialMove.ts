@@ -15,6 +15,7 @@ import {
 import {
   HOST_KEYRING_SERVICE,
   VAULT_KEYRING_SERVICE,
+  VAULT_STAMP_ABSENT,
   vaultAccount,
   type VaultAuthMode,
   type VaultIdentity,
@@ -62,6 +63,12 @@ function vaultEntry(id: string, field: string): SecretEntry {
 /**
  * Every account an inline host owns, mapped onto the vault accounts a new
  * identity (and, when `keyId` is given, a new key) will own.
+ *
+ * `keyId` is the id of a key THIS OPERATION IS CREATING, never one it found:
+ * these two moves overwrite whatever is at the destination, so a shared key's
+ * accounts passed in here would take this host's private key and passphrase over
+ * the ones every other identity using that key already depends on. Convert
+ * passes `null` on its reuse path for exactly that reason.
  *
  * For an RDP host the list is the password row alone, using the same
  * `HOST_SSH_FIELDS.password` / `VAULT_SSH_FIELDS.password` names an SSH
@@ -220,6 +227,44 @@ function inlineAuthMode(host: Host): VaultAuthMode {
 }
 
 /**
+ * The vault key that already holds the private key this host is about to move
+ * in, if the vault holds one. `null` means "mint a new record", which is what
+ * every convert did before this existed.
+ *
+ * PURE, and handed the list rather than reading it. The decision is the USER'S,
+ * not this module's: reusing a record gives the new identity a key whose name,
+ * description and passphrase belong to an earlier import, and getting that
+ * wrong is silent - the connect works, using someone else's record. So the
+ * caller looks up, offers, and passes the answer back through
+ * {@link convertHostToVault}'s `key` argument.
+ *
+ * TWO conditions, and the second is not decoration. The fingerprint is what the
+ * stored private key IS, so a match means the same public half means the same
+ * private key. `hasPrivateKey` is what says the record's body is actually
+ * there: a `VaultKey` can carry a fingerprint with no material behind it (a key
+ * imported metadata-first, or one whose secret write failed), and binding a new
+ * identity to that record produces an identity that cannot authenticate - while
+ * the convert has already released the host's own copy, which was the only one
+ * left.
+ *
+ * A BLANK OR ABSENT FINGERPRINT MATCHES NOTHING, on either side. `""` is what a
+ * container this app could not open reports (`keyInspect.ts`'s sealed-container
+ * rule maps it to `undefined`, but a record stored before that rule can hold the
+ * empty string), and `"" === ""` would otherwise make every unreadable key a
+ * candidate for every other one.
+ *
+ * THE FIRST MATCH WINS when several records share one fingerprint. That state is
+ * reachable - importing one key file twice is all it takes - and there is no
+ * honest way to pick between them here, so the caller names the record it is
+ * offering and the choice is visible rather than silent.
+ */
+export function reusableVaultKey(keys: readonly VaultKey[], facts: VaultKeyFacts): VaultKey | null {
+  const fingerprint = facts.fingerprint?.trim();
+  if (!fingerprint) return null;
+  return keys.find((k) => k.hasPrivateKey && k.fingerprint?.trim() === fingerprint) ?? null;
+}
+
+/**
  * Remove the vault records a convert just minted, because the host write that
  * was going to reference them refused.
  *
@@ -231,6 +276,15 @@ function inlineAuthMode(host: Host): VaultAuthMode {
  * argument about where the ids came FROM, not about the delete, and it does not
  * carry over to an id that arrived from anywhere else: a compensating delete
  * over a pre-existing record would destroy something the user made.
+ *
+ * WHICH IS WHY THE PARAMETER IS `mintedKeyId` AND NOT "the key the identity
+ * names". On the reuse path those are two different values: the identity names a
+ * key that already existed, and nothing was minted, so `null` is what belongs
+ * here. Handing the reused id over instead would satisfy every type in this file
+ * and delete a key the user already had, along with both of its secrets -
+ * `deleteKey` refuses only while an identity still names the key, and this
+ * function deletes the identity FIRST, deliberately (see the next paragraph), so
+ * the refusal that would have stopped it is the one it has just removed.
  *
  * IDENTITY FIRST. `deleteKey` refuses while any identity still names the key
  * (`vault/store.ts:337-347`), and the identity minted above names it, so the
@@ -259,16 +313,16 @@ function inlineAuthMode(host: Host): VaultAuthMode {
 async function undoConvertRecords(
   deps: CredentialMoveDeps,
   identityId: string,
-  keyId: string | null,
+  mintedKeyId: string | null,
 ): Promise<void> {
   try {
     await deps.vault.deleteIdentity(identityId, deps.hosts.identityHostRefs);
   } catch {
     // See above: this must not become the error the caller sees.
   }
-  if (keyId === null) return;
+  if (mintedKeyId === null) return;
   try {
-    await deps.vault.deleteKey(keyId);
+    await deps.vault.deleteKey(mintedKeyId);
   } catch {
     // Attempted even when the identity delete threw, because the two records
     // fail independently and stopping here would leave a key holding a copy of
@@ -286,15 +340,17 @@ async function undoConvertRecords(
  * 1. Refuse unless the host is inline.
  * 2. Refuse when the host stores key material but no key was given.
  * 3. Refuse when the record authenticates BY key and stores none.
+ * 3b. Refuse when the key to reuse is gone.
  * 4. Mint the new ids.
  * 5. Copy every account, sequentially.
- * 6. Write the key, when there is one, through `keyRecordFrom` - not a
+ * 6. Write the key WHEN ONE IS BEING MINTED, through `keyRecordFrom` - not a
  *    hand-assembled `VaultKey` (wave-3 boundary 7: one builder).
  * 7. Write the identity through `identityRecordFrom`, the single normaliser
  *    of `keyId` (wave-3 boundary 6, VLT-73).
  * 8. Bind the host. `releaseStaleAccounts` then clears its accounts, because
  *    a non-inline record owns none.
- * 9. Return all three records.
+ * 9. Return all three records. On the reuse path the key is the EXISTING record,
+ *    read at step 3b and written to by nothing here.
  *
  * Steps 5 to 8 do not move: copy-then-write is §4.5's ordering, where an orphan
  * account after a good write is the lesser evil and a crash between the copy
@@ -314,6 +370,13 @@ async function undoConvertRecords(
  * pass one was able to disagree with `inlineNeedsKey`, and both P0s this round
  * fixed were that disagreement. Removing the parameter is what makes the class
  * unreachable rather than merely guarded: no caller can get it wrong.
+ *
+ * THE KEY, ON THE OTHER HAND, IS A DECISION AND SO IT IS A PARAMETER. `{name,
+ * facts}` mints a new record; `{reuseKeyId}` points the new identity at one the
+ * vault already holds ({@link reusableVaultKey} is what finds a candidate). No
+ * lookup and no question happen here: reuse hands the new identity a record
+ * whose name, description and passphrase belong to an earlier import, so the
+ * user is the one who picks, and the caller passes the answer.
  */
 export async function convertHostToVault(
   args: {
@@ -328,9 +391,18 @@ export async function convertHostToVault(
       domain: string;
       description: string;
     };
-    /** The new key's name and facts. Required when the host stores key
-     *  material, ignored when it does not. */
-    key: { name: string; facts: VaultKeyFacts } | null;
+    /**
+     * What the identity's key should be. Required when the host stores key
+     * material, ignored when it does not - a host with nothing to move gets an
+     * identity that names no key, whichever arm is passed.
+     *
+     * `{name, facts}` mints a new `VaultKey` from this host's own material.
+     * `{reuseKeyId}` names one the vault already holds, found by
+     * {@link reusableVaultKey} and CHOSEN BY THE USER; see the split at
+     * `mintedKeyId` / `namedKeyId` below for what that changes, which is more
+     * than which id ends up on the identity.
+     */
+    key: { name: string; facts: VaultKeyFacts } | { reuseKeyId: string } | null;
   },
   deps: CredentialMoveDeps = defaultCredentialMoveDeps,
 ): Promise<{ host: Host; identity: VaultIdentity; key: VaultKey | null }> {
@@ -359,15 +431,65 @@ export async function convertHostToVault(
     );
   }
 
-  const keyId = needsKey ? deps.vault.newKeyId() : null;
+  // Which arm the caller picked, resolved once. `newKey` is null on the reuse
+  // path and on the no-key path, which is what makes step 6 below a single
+  // condition instead of a second reading of `args.key`.
+  const reuseKeyId = args.key && "reuseKeyId" in args.key ? args.key.reuseKeyId : null;
+  const newKey = args.key && !("reuseKeyId" in args.key) ? args.key : null;
+
+  // PRE-CHECK 4, beside the other three and before a byte moves, for the reason
+  // the key-auth-with-no-body one gives: `upsertIdentity` refuses a `keyId` that
+  // names nothing ("names a key that does not exist"), and it refuses it at step
+  // 7, after step 5 has already copied this host's password onto a vault account
+  // that no record will ever name. The window is small and real - the caller
+  // listed the vault's keys to offer this one, and another window can delete it
+  // between that list and this call.
+  //
+  // The lookup is also what answers "what does the caller get back": on reuse
+  // `key` is this record, unchanged, rather than `null`. Nothing is written to
+  // it, but the identity NAMES it, and a caller told `null` would read that as
+  // "this identity has no key".
+  let reusedKey: VaultKey | null = null;
+  if (needsKey && reuseKeyId !== null) {
+    reusedKey = (await deps.vault.findKey(reuseKeyId)) ?? null;
+    if (!reusedKey) {
+      throw new Error(
+        `hosts: "${args.host.name}" cannot reuse vault key ${reuseKeyId}, which no longer exists`,
+      );
+    }
+  }
+
+  // ONE `keyId` WAS TWO VALUES ALL ALONG, and reuse is what separates them.
+  //
+  // `mintedKeyId` is the id THIS CALL created. It owns the vault accounts step 5
+  // copies onto, it is what step 6 writes, and it is the only id the compensating
+  // delete may ever touch. `null` on the reuse path, because nothing was minted.
+  //
+  // `namedKeyId` is what the new identity points at. On reuse that is a record
+  // that already existed and is not this call's to write or to remove.
+  //
+  // Collapsing the two is the whole hazard of this feature, in both directions:
+  //
+  //   - `convertMoves(host, identityId, namedKeyId)` would copy THIS HOST's
+  //     private key and passphrase over the shared key's own accounts. Same
+  //     fingerprint means the same private key, but the PASSPHRASE can differ - a
+  //     re-encrypted copy of one key is still that key - and writing this host's
+  //     over it breaks every other identity using that record.
+  //   - `undoConvertRecords(deps, identityId, namedKeyId)` would DELETE that
+  //     record, with both of its secrets, whenever `upsertHost` refuses. See
+  //     that function's own note for why its argument is the minted id by name.
+  //
+  // So both take `mintedKeyId` and only the identity draft takes `namedKeyId`.
+  const mintedKeyId = needsKey && newKey ? deps.vault.newKeyId() : null;
+  const namedKeyId = mintedKeyId ?? (needsKey ? reuseKeyId : null);
   const identityId = deps.vault.newIdentityId();
 
-  const copied = await copyMoves(deps.secrets, convertMoves(args.host, identityId, keyId));
+  const copied = await copyMoves(deps.secrets, convertMoves(args.host, identityId, mintedKeyId));
 
-  let key: VaultKey | null = null;
-  if (keyId !== null && args.key) {
+  let key: VaultKey | null = reusedKey;
+  if (mintedKeyId !== null && newKey) {
     const keyDraft: KeyDraft = {
-      name: args.key.name,
+      name: newKey.name,
       privateKey: "",
       passphrase: "",
       description: "",
@@ -375,9 +497,14 @@ export async function convertHostToVault(
     const keySecrets: { privateKey?: VaultSecretValue; passphrase?: VaultSecretValue } = {};
     if (copied[HOST_SSH_FIELDS.privateKey]) keySecrets.privateKey = SECRET_ALREADY_STORED;
     if (copied[HOST_SSH_FIELDS.keyPassphrase]) keySecrets.passphrase = SECRET_ALREADY_STORED;
+    // `VAULT_STAMP_ABSENT` - the id was minted two statements ago, so "the store
+    // holds nothing under it" is the truth rather than a waiver, and passing it
+    // turns "convert only ever creates" from a property of this code into a
+    // refusal the store enforces.
     const upserted = await deps.vault.upsertKey(
-      keyRecordFrom(keyId, keyDraft, null, args.key.facts),
+      keyRecordFrom(mintedKeyId, keyDraft, null, newKey.facts),
       keySecrets,
+      VAULT_STAMP_ABSENT,
     );
     key = upserted.record;
   }
@@ -388,7 +515,7 @@ export async function convertHostToVault(
     domain: args.identity.domain,
     authMode,
     password: "",
-    keyId: keyId ?? "",
+    keyId: namedKeyId ?? "",
     description: args.identity.description,
   };
   const identitySecrets: { password?: VaultSecretValue } = {};
@@ -410,9 +537,13 @@ export async function convertHostToVault(
   // `VaultIdentity` assembled here: that function is VLT-73's single normaliser
   // (wave-3 boundary 6), and a second assembly in this file is the drift it
   // exists to prevent.
+  // `VAULT_STAMP_ABSENT` for the reason the key upsert above passes it: the id
+  // came out of `newIdentityId()` in this call, so absent is what the store
+  // genuinely holds under it.
   const identityUpsert = await deps.vault.upsertIdentity(
     identityRecordFrom(identityId, identityDraft, "keep"),
     identitySecrets,
+    VAULT_STAMP_ABSENT,
   );
 
   let nextHost: Host;
@@ -423,7 +554,7 @@ export async function convertHostToVault(
       credentialStamp(args.host),
     );
   } catch (e) {
-    await undoConvertRecords(deps, identityId, keyId);
+    await undoConvertRecords(deps, identityId, mintedKeyId);
     // The ORIGINAL error, unchanged and by identity: `HostEditorDialog`'s
     // recovery arm tests `instanceof HostBindingChangedError` and reads
     // `hostId` / `expected` / `actual` off it (VLT-29), so wrapping this or
