@@ -247,6 +247,12 @@ function inlineAuthMode(host: Host): VaultAuthMode {
  * the convert has already released the host's own copy, which was the only one
  * left.
  *
+ * BOTH CONDITIONS ARE RE-ASSERTED AT THE WRITE, on the record that actually
+ * resolves there - see {@link convertHostToVault}'s pre-check 4. This function
+ * being the only producer of a `reuseKeyId` today is a fact about today, and the
+ * release the reuse path performs is destructive, so the write does not take the
+ * offer's word for it.
+ *
  * A BLANK OR ABSENT FINGERPRINT MATCHES NOTHING, on either side. `""` is what a
  * container this app could not open reports (`keyInspect.ts`'s sealed-container
  * rule maps it to `undefined`, but a record stored before that rule can hold the
@@ -340,7 +346,8 @@ async function undoConvertRecords(
  * 1. Refuse unless the host is inline.
  * 2. Refuse when the host stores key material but no key was given.
  * 3. Refuse when the record authenticates BY key and stores none.
- * 3b. Refuse when the key to reuse is gone.
+ * 3b. Refuse when the key to reuse is gone, stores no private key, or records no
+ *     fingerprint.
  * 4. Mint the new ids.
  * 5. Copy every account, sequentially.
  * 6. Write the key WHEN ONE IS BEING MINTED, through `keyRecordFrom` - not a
@@ -449,12 +456,40 @@ export async function convertHostToVault(
   // `key` is this record, unchanged, rather than `null`. Nothing is written to
   // it, but the identity NAMES it, and a caller told `null` would read that as
   // "this identity has no key".
+  //
+  // AND IT RE-ASSERTS WHAT THE OFFER ALREADY CLAIMED, because this is the arm
+  // that releases the host's own key without copying anything. Step 8 clears the
+  // host's accounts as stale, so on this path the record in front of us is the
+  // only place that private key survives - and "no copy is needed" has to be a
+  // property of THIS record, not of whatever an earlier lookup examined.
+  // {@link reusableVaultKey} returns only a record that has a body and a
+  // non-blank fingerprint, so a record failing either is one no offer could have
+  // named: the id came from somewhere else, or the record changed between the
+  // offer and this call. Being the only producer of a `reuseKeyId` today is a
+  // fact about today; a second producer of a mis-described record is refused here
+  // whether or not anyone has written one yet.
+  //
+  // REFUSED, never quietly downgraded to minting a new key. A silent fallback
+  // would leave the two paths indistinguishable afterwards - the identity would
+  // name a fresh record and nothing would say the reuse the user asked for did
+  // not happen - and callers already handle a refusal from the three pre-checks
+  // above.
   let reusedKey: VaultKey | null = null;
   if (needsKey && reuseKeyId !== null) {
     reusedKey = (await deps.vault.findKey(reuseKeyId)) ?? null;
     if (!reusedKey) {
       throw new Error(
         `hosts: "${args.host.name}" cannot reuse vault key ${reuseKeyId}, which no longer exists`,
+      );
+    }
+    if (!reusedKey.hasPrivateKey) {
+      throw new Error(
+        `hosts: "${args.host.name}" cannot reuse vault key "${reusedKey.name}", which stores no private key, so this host's own copy would be released against a record that holds none`,
+      );
+    }
+    if (!reusedKey.fingerprint?.trim()) {
+      throw new Error(
+        `hosts: "${args.host.name}" cannot reuse vault key "${reusedKey.name}", which records no fingerprint, so nothing says it holds this host's private key`,
       );
     }
   }

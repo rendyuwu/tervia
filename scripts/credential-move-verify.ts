@@ -76,6 +76,17 @@
  *     source, comments included, because a negative belongs everywhere or it
  *     proves nothing.
  *
+ * 11. A `VaultKey` NEVER DESCRIBES ONE KEY WHILE HOLDING ANOTHER. Property 10 is
+ *     what makes this one impossible to check from the inside: convert stamps
+ *     the `facts` it is handed over the body it copies and cannot compare them,
+ *     so the record is only as honest as the condition its caller inspects
+ *     under. That condition is pinned in group [10d], which is the one thing
+ *     this file reads out of `HostEditorDialog.tsx`, and group [10e] measures
+ *     what a mis-described record costs and which half of the guard holds which
+ *     part of it. The cost is not cosmetic: the reuse path copies nothing and
+ *     property 4's release then takes the host's own accounts, so an offer made
+ *     on a false fingerprint destroys the last copy of a key.
+ *
  * The store, secrets and event bus are all injectable ports, so all of this
  * runs under plain node with no Tauri runtime and no mocking library.
  */
@@ -1861,6 +1872,390 @@ console.log(
 }
 
 // ===========================================================================
+/**
+ * The one property of `HostEditorDialog.tsx` this file checks, and it is here
+ * rather than beside the dialog's own checks because it is about THIS module's
+ * contract.
+ *
+ * `convertHostToVault` copies the private key from the host's STORED account and
+ * stamps whatever `facts` it is handed onto the record it mints. It cannot
+ * compare the two: nothing here reads a secret (section [17]), so a fingerprint
+ * describing a different key than the body arrives looking exactly like a
+ * correct one. The only thing standing between the vault and a record that
+ * DESCRIBES one key while HOLDING another is the condition its caller inspects
+ * under, so that condition is pinned here, next to the contract it protects.
+ *
+ * Group [10e] below measures what such a record costs, and which half of the
+ * remedy holds which part of it.
+ */
+console.log("\n[10d] the dialog inspects key facts ONLY from a body that is still the stored one");
+{
+  const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+  const dialogSf = ts.createSourceFile(
+    "HostEditorDialog.tsx",
+    readFileSync(join(repoRoot, "src/modules/hosts/HostEditorDialog.tsx"), "utf8"),
+    ts.ScriptTarget.ESNext,
+    true,
+    ts.ScriptKind.TSX,
+  );
+  const norm = (s: string): string => s.replace(/\s+/g, "").replace(/,(?=\))/g, "");
+
+  /** The body of `const <name> = (...) => ...`, or null. */
+  const arrowBody = (name: string): ts.Node | null => {
+    let found: ts.Node | null = null;
+    const visit = (n: ts.Node): void => {
+      if (
+        ts.isVariableDeclaration(n) &&
+        ts.isIdentifier(n.name) &&
+        n.name.text === name &&
+        n.initializer !== undefined &&
+        (ts.isArrowFunction(n.initializer) || ts.isFunctionExpression(n.initializer))
+      ) {
+        found = n.initializer.body;
+      }
+      ts.forEachChild(n, visit);
+    };
+    visit(dialogSf);
+    return found;
+  };
+  const callsTo = (root: ts.Node, callee: string): ts.CallExpression[] => {
+    const out: ts.CallExpression[] = [];
+    const visit = (n: ts.Node): void => {
+      if (ts.isCallExpression(n) && n.expression.getText(dialogSf) === callee) out.push(n);
+      ts.forEachChild(n, visit);
+    };
+    visit(root);
+    return out;
+  };
+  /** `a && b && c` flattened. Anything else is ONE conjunct, so a condition
+   *  that buries a ref inside an `||` or a `?:` does not answer these pins. */
+  const conjuncts = (e: ts.Expression): string[] =>
+    ts.isBinaryExpression(e) && e.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken
+      ? [...conjuncts(e.left), ...conjuncts(e.right)]
+      : [norm(e.getText(dialogSf))];
+
+  // Asserted, never assumed: a rename would otherwise leave every check below
+  // running over `null`, reporting nothing, and passing for free.
+  const applyBody = arrowBody("applyCredentialChange");
+  check("applyCredentialChange's body was found in the dialog", applyBody !== null, true);
+
+  if (applyBody) {
+    // COUNTED as well as rooted. Rooting excludes the second inspection
+    // `offerKeyReuse` makes - a different question, over a body that may be
+    // superseded - and only the count excludes a second, ungated one added
+    // inside this function beside the gated one.
+    const inspects = callsTo(applyBody, "inspectSshKey");
+    check("exactly one inspectSshKey call inside applyCredentialChange", inspects.length, 1);
+
+    if (inspects.length === 1) {
+      const call = inspects[0];
+      // STRUCTURAL POSITION, which is the half a presence check cannot buy: the
+      // inspection has to sit INSIDE the gate's then-branch. Hoisting it one
+      // statement out leaves every conjunct below still present, still exact,
+      // and the guard doing nothing.
+      const enclosing: ts.IfStatement[] = [];
+      const visit = (n: ts.Node): void => {
+        if (
+          ts.isIfStatement(n) &&
+          n.thenStatement.getStart(dialogSf) <= call.getStart(dialogSf) &&
+          call.getEnd() <= n.thenStatement.getEnd()
+        ) {
+          enclosing.push(n);
+        }
+        ts.forEachChild(n, visit);
+      };
+      visit(applyBody);
+      check(
+        "and it is lexically inside the then-branch of at least one if - a hoisted inspection leaves the conjuncts below exact and inert",
+        enclosing.length >= 1,
+        true,
+      );
+
+      if (enclosing.length >= 1) {
+        // The INNERMOST such `if` is the gate: the widest one is
+        // `change.kind === "convert"`, which is a different claim.
+        const gate = enclosing.reduce((a, b) =>
+          b.thenStatement.getStart(dialogSf) >= a.thenStatement.getStart(dialogSf) ? b : a,
+        );
+        const parts = conjuncts(gate.expression);
+
+        // TWO refs, TWO checks, because they are two facts and the file says so:
+        // `sshSeeded` is what the keychain read put on SCREEN, `sshTouched` is
+        // whether the user has changed it since. Dropping either one alone leaves
+        // a body that is not the stored one being inspected, so each is pinned
+        // against the mutation only it catches.
+        check(
+          "`sshSeeded.current.privateKey` is a top-level conjunct of that gate - facts are read only from a field the keychain read actually filled",
+          parts.includes(norm("sshSeeded.current.privateKey")),
+          true,
+        );
+        check(
+          "`!sshTouched.current.privateKey` is a top-level conjunct of that gate - and only while the user has not typed over it since",
+          parts.includes(norm("!sshTouched.current.privateKey")),
+          true,
+        );
+        // The whole condition by value, so drift in the OTHER conjuncts is
+        // visible too rather than hidden behind the two above. Reported as the
+        // list, so a failure names what the gate actually says.
+        check("the gate's conjuncts, by value and in order", parts, [
+          norm("!reused"),
+          norm('protocol === "ssh"'),
+          norm("sshSeeded.current.privateKey"),
+          norm("!sshTouched.current.privateKey"),
+          norm("sshCred.privateKey.trim()"),
+        ]);
+      }
+    }
+  }
+}
+
+// ===========================================================================
+/**
+ * What a mis-described `VaultKey` costs, and which half of the remedy holds
+ * which part of it. Every row here is over a record whose `fingerprint` does not
+ * describe the body it holds.
+ *
+ * 1. THE HAZARD IS REAL, not inert. This module stamps the `facts` it is handed
+ *    over the body it copies and has no way to disagree, so a caller inspecting
+ *    an edited textarea mints exactly that record. Measured rather than argued,
+ *    because "the dialog's gate matters" is a claim about consequences.
+ * 2. THE CHAIN IS REAL. `reusableVaultKey` then OFFERS that record to the next
+ *    host whose own body genuinely is the key it names - and the reuse path
+ *    copies nothing while step 8 releases that host's accounts, so accepting the
+ *    offer destroys the last copy of a key the record does not hold.
+ * 3. THE BELT. Pre-check 4 re-asserts, on the record that actually resolves, the
+ *    two conditions `reusableVaultKey` enforces when it makes the offer: a body
+ *    is present, and a fingerprint is recorded. A record failing either is one no
+ *    offer could have named.
+ *
+ * WHAT THE BELT DOES NOT CATCH, stated rather than left to be found: a record
+ * that HAS a body and HAS a fingerprint, where that fingerprint describes
+ * different material. Nothing in this module can see it - it reads no secret, so
+ * it cannot compare a recorded fingerprint against a stored body, and the id it
+ * is handed resolves to a record that satisfies every condition an honest offer
+ * would. That case is closed at the producer, by group [10d]'s gate, and the belt
+ * covers the rest: a bodyless record, a fingerprint-less record, and any
+ * `reuseKeyId` that did not come from an offer at all.
+ */
+console.log("\n[10e] a mis-described key: the hazard, the chain, and what the write refuses");
+{
+  const keyedHost = sshHost({
+    id: "h-1",
+    credential: {
+      kind: "inline",
+      hostId: "h-1",
+      user: "root",
+      authMode: "key",
+      hasPassword: true,
+      hasPrivateKey: true,
+      hasKeyPassphrase: true,
+    },
+  });
+  const hostKept = {
+    [`${HOST_KEYRING_SERVICE}::h-1::password`]: "hunter2",
+    [`${HOST_KEYRING_SERVICE}::h-1::privateKey`]: "PEM-OLD",
+    [`${HOST_KEYRING_SERVICE}::h-1::keyPassphrase`]: "this-host-passphrase",
+  };
+  /** Every vault write, by name and id, in call order - group [10b]'s own
+   *  discipline: "no identity was written" cannot be told from "written, then
+   *  undone" by looking at the store afterwards. */
+  const writeSpy = (h: ReturnType<typeof harness>) => {
+    const log: string[] = [];
+    const vault: CredentialMoveDeps["vault"] = {
+      ...h.vault,
+      newIdentityId: () => "i-new",
+      newKeyId: () => "k-new",
+      upsertKey: (...a: Parameters<VaultStore["upsertKey"]>) => {
+        log.push(`upsertKey ${a[0].id}`);
+        return h.vault.upsertKey(...a);
+      },
+      upsertIdentity: (...a: Parameters<VaultStore["upsertIdentity"]>) => {
+        log.push(`upsertIdentity ${a[0].id}`);
+        return h.vault.upsertIdentity(...a);
+      },
+    };
+    return { log, deps: { ...h.deps, vault } };
+  };
+
+  // -- 10e.1: the hazard, measured - a stamped fingerprint the body does not have
+  {
+    const h = harness({ hosts: [keyedHost], kept: { ...hostKept } });
+    const spy = writeSpy(h);
+    // `SHA256:NEW` is the fingerprint of a key the user PASTED and never saved.
+    // `PEM-OLD` is what the host's account actually holds, and what travels.
+    const result = await convertHostToVault(
+      {
+        host: keyedHost,
+        identity: { name: "shared", username: "root", domain: "", description: "" },
+        key: {
+          name: "prod key",
+          facts: {
+            fingerprint: "SHA256:NEW",
+            publicKey: "ssh-ed25519 AAAANEW",
+            keyType: "ed25519",
+          },
+        },
+      },
+      spy.deps,
+    );
+    check(
+      "the record carries the facts it was HANDED, all three - this module stamps them and cannot disagree",
+      [result.key?.fingerprint, result.key?.publicKey, result.key?.keyType],
+      ["SHA256:NEW", "ssh-ed25519 AAAANEW", "ed25519"],
+    );
+    check(
+      "while the account under it holds the STORED body, which is a different key entirely",
+      h.kept.get(`${VAULT_KEYRING_SERVICE}::k-new::privateKey`),
+      "PEM-OLD",
+    );
+    check(
+      "and hasPrivateKey is true, so the record looks complete from every angle a reader has",
+      result.key?.hasPrivateKey,
+      true,
+    );
+    check("the key was written, so this is a stored record and not a return value", spy.log, [
+      "upsertKey k-new",
+      "upsertIdentity i-new",
+    ]);
+
+    // (2) THE CHAIN. A second host whose body really IS `SHA256:NEW` inspects it,
+    // and this record is what the offer names. By value, over the stored record.
+    const offered = reusableVaultKey(h.keys(), { fingerprint: "SHA256:NEW" });
+    check(
+      "and reusableVaultKey OFFERS it to the next host that really does hold SHA256:NEW - the chain is not hypothetical",
+      offered?.id,
+      "k-new",
+    );
+  }
+
+  // -- 10e.2: the belt, first condition - a record with no body -------------
+  {
+    // Fingerprint present and matching, `hasPrivateKey` false: the state
+    // `reusableVaultKey`'s second condition exists for, arriving at the write
+    // anyway. A metadata-first import, or a record whose secret write failed.
+    const bodyless = vaultKey({
+      id: "k-nobody",
+      name: "metadata only",
+      fingerprint: "SHA256:AAAA",
+      hasPrivateKey: false,
+    });
+    const h = harness({ hosts: [keyedHost], keys: [bodyless], kept: { ...hostKept } });
+    const spy = writeSpy(h);
+    await rejects(
+      "the convert is REFUSED rather than releasing the host's key against a record that holds none",
+      () =>
+        convertHostToVault(
+          {
+            host: keyedHost,
+            identity: { name: "shared", username: "root", domain: "", description: "" },
+            key: { reuseKeyId: "k-nobody" },
+          },
+          spy.deps,
+        ),
+      ["cannot reuse vault key", "stores no private key"],
+    );
+    // BEFORE A BYTE MOVES, which is the whole reason this sits with the other
+    // pre-checks: a refusal after step 5 leaves this host's password on a vault
+    // account no record will ever name.
+    check("no vault record was written", spy.log, []);
+    check("nothing was copied at all", h.copies(), []);
+    check(
+      "the host keeps all three of its own accounts, values included - this is the loss the refusal prevents",
+      [
+        h.kept.get(`${HOST_KEYRING_SERVICE}::h-1::password`),
+        h.kept.get(`${HOST_KEYRING_SERVICE}::h-1::privateKey`),
+        h.kept.get(`${HOST_KEYRING_SERVICE}::h-1::keyPassphrase`),
+      ],
+      ["hunter2", "PEM-OLD", "this-host-passphrase"],
+    );
+    check("and its record is still inline, bound to nothing", h.hostRows(), [keyedHost]);
+    check("the bodyless record is byte-identical afterwards", h.keys(), [bodyless]);
+  }
+
+  // -- 10e.3: the belt, second condition - a record with no fingerprint ----
+  {
+    // `hasPrivateKey` true and the fingerprint ABSENT, then BLANK. Both are
+    // records `reusableVaultKey` refuses to offer ("a blank or absent fingerprint
+    // matches nothing, on either side"), so both are ids that came from somewhere
+    // other than an offer - and nothing about either one says it holds THIS
+    // host's key.
+    for (const [label, fingerprint] of [
+      ["absent", undefined],
+      ["blank", ""],
+      ["whitespace", "   "],
+    ] as const) {
+      const unnamed = vaultKey({
+        id: "k-nofp",
+        name: "sealed import",
+        fingerprint,
+        hasPrivateKey: true,
+      });
+      const h = harness({ hosts: [keyedHost], keys: [unnamed], kept: { ...hostKept } });
+      const spy = writeSpy(h);
+      await rejects(
+        `a fingerprint that is ${label} is REFUSED - nothing says that record holds this host's private key`,
+        () =>
+          convertHostToVault(
+            {
+              host: keyedHost,
+              identity: { name: "shared", username: "root", domain: "", description: "" },
+              key: { reuseKeyId: "k-nofp" },
+            },
+            spy.deps,
+          ),
+        ["cannot reuse vault key", "records no fingerprint"],
+      );
+      check(`(${label}) no vault record was written`, spy.log, []);
+      check(`(${label}) nothing was copied at all`, h.copies(), []);
+      check(
+        `(${label}) the host keeps its private key and passphrase, values included`,
+        [
+          h.kept.get(`${HOST_KEYRING_SERVICE}::h-1::privateKey`),
+          h.kept.get(`${HOST_KEYRING_SERVICE}::h-1::keyPassphrase`),
+        ],
+        ["PEM-OLD", "this-host-passphrase"],
+      );
+      // Proof the refusal is not inert: `reusableVaultKey` would never have
+      // offered this record either, so the two agree - which is the property,
+      // not a coincidence of the fixture.
+      check(
+        `(${label}) and reusableVaultKey would not have offered it either, whatever fingerprint is asked for`,
+        reusableVaultKey([unnamed], { fingerprint: fingerprint ?? "" }),
+        null,
+      );
+    }
+  }
+
+  // -- 10e.4: the arm that must still work ---------------------------------
+  {
+    // The belt refuses two shapes and NOTHING else. A record with a body and a
+    // fingerprint reuses exactly as it did - stated as its own row, because a
+    // guard that refused the good path too would be caught by group [10b] only
+    // as a red gate, not as a statement about this change.
+    const good = vaultKey({
+      id: "k-good",
+      name: "laptop key",
+      fingerprint: "SHA256:AAAA",
+      hasPrivateKey: true,
+      hasPassphrase: true,
+    });
+    const h = harness({ hosts: [keyedHost], keys: [good], kept: { ...hostKept } });
+    const spy = writeSpy(h);
+    const result = await convertHostToVault(
+      {
+        host: keyedHost,
+        identity: { name: "shared", username: "root", domain: "", description: "" },
+        key: { reuseKeyId: "k-good" },
+      },
+      spy.deps,
+    );
+    check("a record with a body and a fingerprint still reuses", result.identity.keyId, "k-good");
+    check("with no key write of any kind", spy.log, ["upsertIdentity i-new"]);
+    check("and the caller is handed that record, byte-identical", result.key, good);
+  }
+}
+
+// ===========================================================================
 console.log("\n[11] detach: SSH key auth copies the identity's and key's values onto the host");
 {
   const idn = identity({
@@ -2753,10 +3148,11 @@ console.log("\ncredential-move-verify: OK\n");
 //                                                       now drops a comma before
 //                                                       a closing paren too.
 //
-// And two over `HostEditorDialog.tsx`, which this file does not check and
-// `host-editor-verify.ts` does not either - recorded because a green mutation is
-// a statement about the CHECKS, and both of these are cause 1, "the check is
-// weak", not "unreachable" and not "inert":
+// And two over `HostEditorDialog.tsx`. Group [10d] is now the one thing this
+// file checks there, and it does not cover either of these; `host-editor-verify.ts`
+// does not either - recorded because a green mutation is a statement about the
+// CHECKS, and both of these are cause 1, "the check is weak", not "unreachable"
+// and not "inert":
 //
 //   K7: the dialog reuses whenever a candidate exists,  NOTHING. `pnpm verify`
 //     ignoring the checkbox the user did or did not     credential-move-verify
@@ -2772,3 +3168,85 @@ console.log("\ncredential-move-verify: OK\n");
 //                                                       binding. A guard deleted
 //                                                       WITH its binding would be
 //                                                       invisible.
+//
+// --- mutation table (the mis-described-key round, groups 10d and 10e) -------
+//
+// Two producers of a `VaultKey` that DESCRIBES one key and HOLDS another: the
+// dialog inspecting an edited textarea while the stored account travels, and a
+// `reuseKeyId` naming a record no offer could have made. Both were green here
+// before these groups existed - this file was at 243 ok / 0 FAIL.
+//
+//   Mutation                                          Check(s) it killed
+//   -------------------------------------------------  ---------------------------
+//   M1: the dialog's gate reverted to                  THREE, all in 10d: both
+//     `!reused && protocol === "ssh" &&                 conjunct rows and the
+//     sshCred.privateKey.trim()` - facts inspected      by-value list, which
+//     from the draft however it got there               reports the gate it
+//                                                       actually found. `tsc` at 0.
+//   M1a: `sshSeeded.current.privateKey` dropped        the sshSeeded row and the
+//     alone                                             list. `tsc` at 0.
+//   M1b: `!sshTouched.current.privateKey` dropped      the sshTouched row and the
+//     alone                                             list. `tsc` at 0. Run
+//                                                       separately from M1a
+//                                                       because they are two
+//                                                       facts, not one wearing
+//                                                       two names.
+//   M1c: the gate KEPT verbatim, governing an          the same three rows, with
+//     unrelated statement, and the inspection           the list reporting
+//     hoisted out from under it                         `change.kind==="convert"`
+//                                                       - the innermost `if` that
+//                                                       still contains the call.
+//                                                       This is the mutation the
+//                                                       structural half catches
+//                                                       and a presence check over
+//                                                       the file cannot: every
+//                                                       conjunct is still there,
+//                                                       spelled exactly, and inert.
+//                                                       `tsc` at 0.
+//   M2a: pre-check 4's `hasPrivateKey` test dropped,   FIVE, all in 10e.2 and
+//     the fingerprint test left in place                none in 10e.3: the refusal
+//                                                       "did not reject", the
+//                                                       identity write, the
+//                                                       password copy, and the
+//                                                       host's three accounts -
+//                                                       all three `undefined`
+//                                                       afterwards, which is the
+//                                                       loss itself. `tsc` at 0.
+//   M2b: the fingerprint test dropped, `hasPrivateKey` TWELVE, all in 10e.3 and
+//     left in place                                     none in 10e.2 - four rows
+//                                                       per fingerprint shape
+//                                                       (absent, blank,
+//                                                       whitespace). `tsc` at 0.
+//   M3: `prettier --print-width 60` and then `20`      NOTHING in 10d or 10e, at
+//     over the whole dialog - the reformat pair         either width, with the file
+//     10d's exact pins owe                             measurably changed both
+//                                                       times (629 and 3469 diff
+//                                                       lines). Width 20 is the
+//                                                       one that measures
+//                                                       something: it breaks the
+//                                                       PINNED spans themselves
+//                                                       (`sshSeeded` / `.current` /
+//                                                       `.privateKey` onto three
+//                                                       lines), where 60 only
+//                                                       wraps the call under them.
+//                                                       It DID redden 25 checks in
+//                                                       `host-editor-verify.ts` at
+//                                                       60, and 79 there plus 5 in
+//                                                       `key-inspect-verify.ts` and
+//                                                       20 in
+//                                                       `rdp-lifetime-verify.ts` at
+//                                                       20 - measured against the
+//                                                       UNMODIFIED dialog first and
+//                                                       identical on both sides, so
+//                                                       every one of them is
+//                                                       pre-existing and none is
+//                                                       this round's.
+//   M4: `applyCredentialChange` renamed, so 10d's      ONE, loudly: "applyCredential
+//     anchor resolves to nothing                        Change's body was found in
+//                                                       the dialog". The five rows
+//                                                       under it then do not run,
+//                                                       which is why the anchor is
+//                                                       asserted rather than
+//                                                       assumed - a rooted region
+//                                                       that resolves to nothing
+//                                                       otherwise passes for free.

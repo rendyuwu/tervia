@@ -1219,14 +1219,43 @@ export function HostEditorDialog({
         // box over an offer that has since been replaced cannot name a record
         // the user never saw.
         const reused = reuseExistingKey && reuseOffer.kind === "candidate" ? reuseOffer.key : null;
-        // The draft's key body, when there is one - never the stored record,
-        // which cannot be reached from here without a second keychain read.
-        // The host editor already seeds SSH secrets from the keychain
-        // (`getHostSshSecrets` above), so a saved host's body is in `sshCred`.
+        // The metadata a newly minted `VaultKey` records, and it is inspected
+        // ONLY from a body that is still the STORED one.
+        //
+        // WHAT TRAVELS IS THE STORED ACCOUNT. `convertHostToVault` copies from
+        // the host's own keychain accounts, so a fingerprint, public half and
+        // type read out of a body the user has edited would describe one key
+        // while the record holds another. That record then hands the user a
+        // copyable public key that will never open the server, anchors its own
+        // change stamp on a false fingerprint, and offers itself for reuse to the
+        // next host that really does hold the key it names - and reuse RELEASES
+        // that host's own copy. All three fields are optional and the vault's key
+        // card renders an unknown-type state for an absent one, so leaving them
+        // off is honest where stamping them is not.
+        //
+        // BOTH REFS, and neither one says it alone. `sshSeeded` says the keychain
+        // read put a value the user could SEE into the field; `sshTouched` says
+        // whether they have changed it since. Seeded alone still accepts a body
+        // typed over the seed; untouched alone accepts a field that is empty or
+        // stale only because the read has not landed.
+        //
+        // The PASSPHRASE is deliberately not gated, and it is a different
+        // question: a fingerprint is a hash of the public half, which
+        // `ssh_key_inspect` reads out of the key body alone - an OpenSSH
+        // container keeps it in cleartext even while sealed. A wrong passphrase
+        // does not yield different facts, it yields a rejection, which the
+        // `catch` below already degrades to no facts at all.
+        //
         // Skipped entirely when a key is being reused: nothing is written to
         // that record, so there are no facts to put on it.
         let facts: VaultKeyFacts = {};
-        if (!reused && protocol === "ssh" && sshCred.privateKey.trim()) {
+        if (
+          !reused &&
+          protocol === "ssh" &&
+          sshSeeded.current.privateKey &&
+          !sshTouched.current.privateKey &&
+          sshCred.privateKey.trim()
+        ) {
           try {
             facts = vaultKeyFactsFrom(
               await inspectSshKey(sshCred.privateKey, sshCred.keyPassphrase || undefined),
@@ -1242,7 +1271,11 @@ export function HostEditorDialog({
         // radio, which could disagree with what the record actually holds - and
         // that disagreement was both of this round's P0s, one stranding a
         // plaintext password per press and one orphaning the host's only private
-        // key. The four fields left are the ones the user may have edited.
+        // key. The four identity fields left are the ones the user may have
+        // edited, and none of them carries an invariant against the accounts
+        // being moved. `facts` is on the record's side of that same rule, which
+        // is what the gate above enforces - it describes the material that
+        // travels, so it may only be read from a body that IS that material.
         const result = await convertHostToVault({
           host: existing,
           identity: {
