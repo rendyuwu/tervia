@@ -1,17 +1,19 @@
-//! Passphrase-encrypted blobs for the connection backup (SSH menu -> Export
-//! connections).
+//! Passphrase-encrypted blobs for the connection backup, reached from the
+//! Hosts page's Export button.
 //!
-//! An exported backup carries the credentials that live in the OS keychain -
-//! SSH passwords and private keys, RDP passwords - so it can never be written
-//! as plaintext: the file ends up on a USB stick, in Downloads, or in a synced
-//! folder. This module is the whole crypto surface; everything above it in JS
-//! handles only the already-sealed blob.
+//! An exported backup carries every credential that lives in the OS keychain -
+//! SSH passwords, private keys and key passphrases; RDP passwords; vault
+//! identity passwords; and vault key bodies and their passphrases - so it can
+//! never be written as plaintext: the file ends up on a USB stick, in
+//! Downloads, or in a synced folder. This module is the whole crypto surface;
+//! everything above it in JS handles only the already-sealed blob.
 //!
 //! One format lives here (`tervia-connections`), and it seals the WHOLE
-//! payload - both connection inventories and every credential - so the
-//! plaintext never leaves this process. On export, JS passes keychain
-//! REFERENCES and [`backup_seal_payload`] reads the values itself. On import,
-//! [`backup_open_payload`] returns only the connection metadata and parks the
+//! payload - five collections (hosts, groups, identities, keys, forward
+//! rules) and every credential - so the plaintext never leaves this process.
+//! On export, JS passes keychain REFERENCES and [`backup_seal_payload`] reads
+//! the values itself. On import, [`backup_open_payload`] returns only the
+//! metadata - the five collections with no credential in them - and parks the
 //! credentials here behind a handle; JS validates the metadata, says which
 //! ids survived, and [`backup_apply_secrets`] writes those straight to the
 //! keychain. That is the same property `rdp_open`'s keychain reference exists
@@ -198,9 +200,9 @@ pub struct SecretRef {
 /// Refuses to write into a group the payload already carries. That guard is not
 /// theoretical bookkeeping: the caller sends five inventory collections - hosts,
 /// groups, identities, keys, rules - and a secret group is meant to never match
-/// one of those names. A bug that let `group` collide with `hosts` would replace
-/// the whole host inventory with a credential map, and the export would still
-/// report success.
+/// one of those names. This is the guard against exactly that: without it, a
+/// `group` that collided with `hosts` would replace the whole host inventory
+/// with a credential map, and the export would still report success.
 fn merge_secrets(payload: &str, values: &[(SecretRef, String)]) -> Result<String, String> {
     let mut root: Map<String, Value> = serde_json::from_str(payload)
         .map_err(|_| "backup: the payload is not a JSON object".to_string())?;
@@ -232,9 +234,10 @@ fn merge_secrets(payload: &str, values: &[(SecretRef, String)]) -> Result<String
 /// Seal a payload, reading every credential out of the keychain here rather
 /// than taking it from the caller.
 ///
-/// `payload` is the connection inventory as JSON; `refs` say which keychain
-/// entries to fold into it. A reference that resolves to nothing is skipped, not
-/// an error - a connection whose password was never saved is ordinary.
+/// `payload` is the five collections - hosts, groups, identities, keys, forward
+/// rules - as JSON; `refs` say which keychain entries to fold into it. A
+/// reference that resolves to nothing is skipped, not an error - a connection
+/// whose password was never saved is ordinary.
 #[tauri::command]
 pub async fn backup_seal_payload(
     app: AppHandle,
@@ -326,8 +329,8 @@ fn split_groups(plain: &str, groups: &[String]) -> Result<(String, Map<String, V
 pub struct OpenedPayload {
     /// Pass to [`backup_apply_secrets`], then to [`backup_release`].
     handle: u32,
-    /// The payload with every requested group removed: connection metadata
-    /// only, safe to hand to the webview's validator.
+    /// The payload with every requested group removed: the five collections'
+    /// metadata only, safe to hand to the webview's validator.
     payload: String,
 }
 
