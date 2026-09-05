@@ -314,9 +314,9 @@ export function reusableVaultKey(keys: readonly VaultKey[], facts: VaultKeyFacts
  * `() => []` shortcut. It finds no holders on the path this runs on - nothing
  * binds the new identity - and it is the store's own guard over the one case
  * the provenance argument does not cover: `upsertHost` throwing at its
- * `persist` (`./store.ts:802-806`), where the record is already in the plugin's
- * cache with a debounced retry behind it, so a host DOES name this identity and
- * the delete is refused rather than stranding that host.
+ * `persist` (`./store.ts`), where the record is already in the store's own
+ * pending map and is what this session goes on reading, so a host DOES name
+ * this identity and the delete is refused rather than stranding that host.
  *
  * EVERY FAILURE IN HERE IS SWALLOWED - the same swallow, for the same reason,
  * as `vault/store.ts`'s key-secret rollback. The caller is already rethrowing
@@ -755,9 +755,10 @@ function buildInlineRecord(host: Host, inline: SshInlineArgs | RdpInlineArgs): H
  *
  * THE RE-READ, which is a guard and not a formality. Two paths end with the
  * stored record already INLINE and naming these very accounts: `upsertHost`
- * throwing at its `persist` (`./store.ts:802-806`), where the record is in the
- * plugin's cache with a debounced retry behind it, and a concurrent writer that
- * detached this host first - which is exactly what a stamp refusal reports.
+ * throwing at its `persist` (`./store.ts`), where the record is in the store's
+ * own pending map and is what this session goes on reading, and a concurrent
+ * writer that detached this host first - which is exactly what a stamp refusal
+ * reports.
  * Deleting there would not strand bytes, it would destroy the host's only copy
  * of a credential the vault may no longer hold. So the stored record is read
  * back and the cleanup runs only while it is still bound. A record that is GONE

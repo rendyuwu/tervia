@@ -14,16 +14,35 @@ import { storeFilePaths, type StoreFileIo, type StoreFileRead } from "./storeRec
 // `persist`, which the plugin could tear in half.
 //
 // What is deliberately absent: autosave, debounce, and retry. `set` touches
-// nothing but the cache, and `save()` is the only thing that reaches disk, so
-// there is exactly one moment a file changes and a caller can name it. A store
-// layer that used to rely on a debounced retry behind a failed write no longer
-// has one, and the comments at those call sites say so rather than implying a
-// net that is gone.
+// nothing but memory, and `save()` is the only thing that reaches disk, so there
+// is exactly one moment a file changes and a caller can name it. A store layer
+// that used to rely on a debounced retry behind a failed write no longer has
+// one, and the comments at those call sites say so rather than implying a net
+// that is gone.
 //
-// The cache is per webview. Nothing here notices another window's write on its
-// own - `createRecoveredStore` drives {@link FileKeyValueStore.invalidate} from
-// the change event, which is also why that method is on the type rather than
-// hidden behind the `KeyValueStore` shape.
+// TWO MAPS, NOT ONE, and that split is what makes the atomicity claim true. The
+// cache is what the file said and is DROPPABLE: it is per webview, so another
+// window's commit makes it wrong, and `createRecoveredStore` drives
+// {@link FileKeyValueStore.invalidate} from the change event to say so. Pending
+// holds what this session has `set` and NOT yet saved, and it survives an
+// invalidation, because a change event is news about the file and says nothing
+// about a commit this window is halfway through assembling. One map cost both
+// halves of the guarantee: an event between the two `set`s of `deleteGroup`
+// dropped the first one on the floor and wrote half the pair, and an event
+// during `save()`'s own path resolution left `JSON.stringify` reading an emptied
+// cache - so the commit wrote `{}`, and the snapshot after it copied `{}` over
+// the last good `.bak`.
+
+/**
+ * How many times a read or a write rebuilds itself after the file changed under
+ * it before it gives up and accepts a stale baseline.
+ *
+ * Small on purpose. The retry exists for the ordinary case - one other window
+ * committing while this one is mid-operation, which clears on the next turn -
+ * and not for a peer emitting faster than this process can do IO. Under that,
+ * making progress with a slightly stale baseline beats not making progress.
+ */
+const CONTENDED_ATTEMPTS = 3;
 
 /** A whole-file store, plus the one thing its cache owner needs to say. */
 export type FileKeyValueStore = KeyValueStore & {
@@ -67,7 +86,18 @@ function parseMap(read: StoreFileRead): Record<string, unknown> {
  * was checked and snapshotted.
  */
 export function createFileKeyValueStore(fileName: string, files: StoreFileIo): FileKeyValueStore {
+  /** What the file said when it was last read. Dropped by `invalidate`. */
   let cache: Record<string, unknown> = {};
+  /**
+   * What this session has `set` since its last successful `save()`.
+   *
+   * Kept apart from the cache and NOT dropped by `invalidate`, so a commit being
+   * assembled cannot be half-thrown-away by another window's news. It is also
+   * what makes the "a failed `persist` is not rolled back because the record is
+   * still in this session's view" reasoning in `modules/hosts/store.ts` and
+   * `modules/vault/store.ts` actually true.
+   */
+  let pending: Record<string, unknown> = {};
   let loaded = false;
   /** Bumped by `invalidate`, so a read already in flight when the file changed
    *  underneath it does not install what it found. */
@@ -77,15 +107,19 @@ export function createFileKeyValueStore(fileName: string, files: StoreFileIo): F
    *  costs one file read rather than two. */
   let inFlight: Promise<void> | null = null;
   /**
-   * Set when the last read REFUSED the file rather than not finding one.
+   * Set when the last read did not get to SEE the file, rather than finding
+   * there was not one.
    *
-   * `fs_read_file` will not return a file over 10 MB, and the recovery pass
-   * deliberately leaves such a file alone because it is real data rather than
-   * corruption. Without this the same read would give an empty cache and the
-   * next `save()` would write `{}` over it - the whole-file write turning a file
-   * this layer merely cannot READ into a file it destroys. `missing` and
-   * `binary` are NOT this case: recovery has already restored or reported them,
-   * and coming up empty over either is the intended answer.
+   * Two reads land here. `fs_read_file` will not return a file over 10 MB, and
+   * it rejects for a file that is there and would not open. Both leave the
+   * contents unknown, and the recovery pass deliberately leaves both alone
+   * because unknown contents may be perfectly good ones. Without this the same
+   * read would give an empty cache and the next `save()` would write `{}` over
+   * it - the whole-file write turning a file this layer merely cannot READ into
+   * a file it destroys.
+   *
+   * `missing` and `binary` are NOT this case: recovery has already restored or
+   * reported them, and coming up empty over either is the intended answer.
    */
   let refused: string | null = null;
 
@@ -94,18 +128,29 @@ export function createFileKeyValueStore(fileName: string, files: StoreFileIo): F
   }
 
   async function fill(): Promise<void> {
-    // Loops instead of installing what it read: an `invalidate()` landing while
+    // Retries instead of installing what it read: an `invalidate()` landing while
     // the read is in flight means these bytes are the PRE-change contents, and
-    // caching them would leave this webview permanently behind the file. Each
-    // turn of the loop awaits real IO, so it can only spin as fast as another
-    // window commits.
-    for (;;) {
+    // caching them would leave this webview behind the file.
+    //
+    // BOUNDED, and the bound is the point. An unbounded loop here cannot be
+    // starved by anything realistic - each turn awaits real IO - but "realistic"
+    // is the wrong guarantee for a loop that would freeze `enqueueWrite` and
+    // every mutation behind it rather than fail. Giving up installs the bytes
+    // and leaves `loaded` FALSE, so a storm of change events degrades this to an
+    // uncached store, which is slower and still correct, instead of a stuck one.
+    for (let attempt = 1; ; attempt++) {
       const gen = generation;
       const read = await files.read(await primaryPath());
-      if (gen !== generation) continue;
+      const stale = gen !== generation;
+      if (stale && attempt < CONTENDED_ATTEMPTS) continue;
       cache = parseMap(read);
-      refused = read.kind === "toolarge" ? "it is too large to read" : null;
-      loaded = true;
+      refused =
+        read.kind === "toolarge"
+          ? "it is too large to read"
+          : read.kind === "unreadable"
+            ? `it could not be read: ${read.reason}`
+            : null;
+      loaded = !stale;
       return;
     }
   }
@@ -119,23 +164,64 @@ export function createFileKeyValueStore(fileName: string, files: StoreFileIo): F
 
   return {
     async get<T>(key: string): Promise<T | undefined> {
+      // An unsaved `set` is what this session should read back, so pending wins.
+      // Checked before the load as well as after: before, so a key this session
+      // just wrote costs no file read at all; after, because `load()` yields and
+      // another caller can `set` across it.
+      if (key in pending) return pending[key] as T | undefined;
       await load();
-      return cache[key] as T | undefined;
+      return (key in pending ? pending[key] : cache[key]) as T | undefined;
     },
-    /** Cache only. Nothing reaches disk until `save()`. */
+    /**
+     * Remember the value. Nothing reaches disk, and nothing is read either.
+     *
+     * Deliberately does NOT load first. It used to, so that `save()` would not
+     * write a file holding this key alone - but with the pending map that is no
+     * longer what stops it (`save` loads), and loading here was the whole of the
+     * torn-pair bug: an `invalidate()` between two `set`s made the second one's
+     * `load()` re-read the file and drop the first one's value.
+     */
+    // eslint-disable-next-line @typescript-eslint/require-await -- the port is async.
     async set(key: string, value: unknown): Promise<void> {
-      // Load first even though this writes nothing: a `set` on an unloaded cache
-      // would make `save()` write a file holding this key alone, dropping every
-      // other one the file already had.
-      await load();
-      cache[key] = value;
+      pending[key] = value;
     },
     /** One `fs_write_file` of the whole map - the atomic replacement. */
     async save(): Promise<void> {
-      await load();
-      // A whole-file write can only be as good as the read it is built on.
-      if (refused) throw new Error(`refusing to write ${fileName} over itself: ${refused}`);
-      await files.write(await primaryPath(), JSON.stringify(cache));
+      for (let attempt = 1; ; attempt++) {
+        await load();
+        // A whole-file write can only be as good as the read it is built on.
+        if (refused) throw new Error(`refusing to write ${fileName} over itself: ${refused}`);
+
+        // Build the payload BEFORE the last await, and re-check afterwards.
+        // Both halves matter, and the first one is not a style preference:
+        // argument evaluation is left to right, so `write(await path(), stringify(cache))`
+        // stringifies AFTER the path resolves - and `dir()` is a real IPC round
+        // trip, wide enough for a change event to empty the cache inside it. The
+        // commit then wrote `{}`, and `snapshotAfterSave` called that `"ok"` and
+        // copied it over the last good `.bak`.
+        const gen = generation;
+        const payload = JSON.stringify({ ...cache, ...pending });
+        const path = await primaryPath();
+        if (gen !== generation && attempt < CONTENDED_ATTEMPTS) {
+          // The file changed under us. Re-read and rebuild rather than write a
+          // payload whose baseline is stale: this session's own pending keys
+          // still win, and the other window's other keys survive.
+          //
+          // Bounded for the reason `fill` is. Giving up writes a payload that is
+          // this session's pending keys over a baseline one generation old - a
+          // LOST UPDATE of some other key, which is what this store has always
+          // been able to do and what the plugin did too. Never a `{}`: the
+          // payload is built from a cache a completed read installed.
+          continue;
+        }
+        await files.write(path, payload);
+        // Saved, so pending is now what the file says. An `invalidate()` that
+        // landed during the write leaves `loaded` false, and the next read picks
+        // up these bytes from disk.
+        Object.assign(cache, pending);
+        pending = {};
+        return;
+      }
     },
     invalidate(): void {
       generation++;

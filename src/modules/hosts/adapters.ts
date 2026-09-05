@@ -27,8 +27,8 @@ const HOSTS_CHANGED_EVENT = "tervia://hosts-changed";
 export type HostsStoreIo = RecoveredStoreIo;
 
 /**
- * Raw file reads, for the one thing in this module that cannot go through the
- * plugin store: the legacy purge reads the two OLD store files directly, so it
+ * Raw file reads, for the one thing in this module that cannot go through a
+ * store at all: the legacy purge reads the two OLD store files directly, so it
  * keeps working after the modules that own them are deleted (`legacyPurge.ts`).
  *
  * Optional with the real default, the way `recoverStoreFile` and `resolveJumpHops`

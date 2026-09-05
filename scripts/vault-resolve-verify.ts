@@ -1418,6 +1418,25 @@ function faultyListenBus() {
 const reads = (log: string[]): number => log.filter((e) => e === "read:primary").length;
 const writes = (log: string[]): number => log.filter((e) => e === "write:primary").length;
 
+/**
+ * The same filesystem, with a hook that fires inside every `dir()`.
+ *
+ * `dir()` is `appDataDir()`, a real IPC round trip that nothing caches, and it
+ * is awaited inside both `fill()` and `save()`. That await is the window a
+ * change event lands in, so it is where a fixture has to put one - a race that
+ * only exists between two awaits cannot be provoked from outside them.
+ */
+function racingIo(io: StoreFileIo, onDir: () => void): StoreFileIo {
+  return {
+    ...io,
+    dir: async () => {
+      const dir = await io.dir();
+      onDir();
+      return dir;
+    },
+  };
+}
+
 {
   // The cache is what makes a whole-file read affordable: a screen that lists
   // two keys, or lists the same one twice, costs ONE read of the file.
@@ -1514,6 +1533,103 @@ const writes = (log: string[]): number => log.filter((e) => e === "write:primary
   });
   assert(message.includes("too large"), `saving over it is refused: ${message || "it saved"}`);
   check("and the file is untouched", fs.written, []);
+}
+{
+  // THE destruction case, and the one that makes the two maps two maps. A change
+  // event landing inside `save()`'s own path resolution used to empty the cache
+  // before `JSON.stringify` ran - argument evaluation is left to right, so the
+  // payload was built AFTER the path resolved - and the commit wrote `{}`. Then
+  // `snapshotAfterSave` read `{}`, `inspect` called it "ok", and the last good
+  // `.bak` was overwritten with it. Both copies of a store file in one commit.
+  //
+  // The fixture fires on EVERY `dir()` while saving, not once, so it also pins
+  // that the rebuild loop terminates rather than spinning against a peer that
+  // never stops emitting.
+  const log: string[] = [];
+  const fs = memFs({ [PRIMARY]: text(GOOD) }, {}, log);
+  let saving = false;
+  let store!: ReturnType<typeof createFileKeyValueStore>;
+  store = createFileKeyValueStore(
+    STORE_FILE,
+    racingIo(fs.io, () => {
+      if (saving) store.invalidate();
+    }),
+  );
+
+  await store.get("identities");
+  await store.set("keys", [{ id: "k-1" }]);
+  saving = true;
+  await store.save();
+  saving = false;
+
+  check(
+    "an event inside save() does not blank the file",
+    fs.files[PRIMARY],
+    text('{"identities":[{"id":"i-1"}],"keys":[{"id":"k-1"}]}'),
+  );
+  check("and the write still happened exactly once", writes(log), 1);
+}
+{
+  // The other half of the same bug. `set` used to `await load()`, so an event
+  // between the two `set`s of one commit made the second one re-read the file
+  // and drop the first one's value - `deleteGroup` writing the `groupId` clear
+  // without the group removal, which is the exact torn pair this store exists
+  // to make impossible.
+  const fs = memFs({ [PRIMARY]: text(GOOD) });
+  const store = createFileKeyValueStore(STORE_FILE, fs.io);
+
+  await store.get("identities");
+  await store.set("identities", []);
+  store.invalidate();
+  await store.set("keys", [{ id: "k-9" }]);
+  await store.save();
+
+  check(
+    "both halves of a pair survive an event between them",
+    fs.files[PRIMARY],
+    text('{"identities":[],"keys":[{"id":"k-9"}]}'),
+  );
+}
+{
+  // What the `persist` comments in `hosts/store.ts` and `vault/store.ts` claim:
+  // an unsaved record is what this session goes on reading. An invalidation is
+  // news about the FILE and must not throw away a commit being assembled.
+  const fs = memFs({ [PRIMARY]: text(GOOD) });
+  const store = createFileKeyValueStore(STORE_FILE, fs.io);
+  await store.set("identities", [{ id: "i-unsaved" }]);
+  store.invalidate();
+  check("an unsaved set survives an invalidation", await store.get("identities"), [
+    { id: "i-unsaved" },
+  ]);
+}
+{
+  // A rebuild is a MERGE, not a retry of the same bytes: the other window's key
+  // survives and this session's own pending key still wins. Writing the stale
+  // baseline instead would silently undo whatever the other window just did.
+  const fs = memFs({ [PRIMARY]: text(GOOD) });
+  let saving = false;
+  let store!: ReturnType<typeof createFileKeyValueStore>;
+  store = createFileKeyValueStore(
+    STORE_FILE,
+    racingIo(fs.io, () => {
+      if (!saving) return;
+      saving = false;
+      // The other window commits a key this session never touched.
+      fs.files[PRIMARY] = text('{"identities":[{"id":"i-1"}],"keys":[],"theirs":[1]}');
+      store.invalidate();
+    }),
+  );
+
+  await store.get("identities");
+  await store.set("keys", [{ id: "mine" }]);
+  saving = true;
+  await store.save();
+
+  check(
+    "a rebuilt save keeps the other window's key and this one's own",
+    fs.files[PRIMARY],
+    text('{"identities":[{"id":"i-1"}],"keys":[{"id":"mine"}],"theirs":[1]}'),
+  );
 }
 {
   // Another window's commit. The change event is the only thing that can tell

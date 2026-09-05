@@ -34,9 +34,16 @@ const APP_DATA_DIR = "/verify-app-data";
 const PRIMARY = `${APP_DATA_DIR}/tervia-workspaces.json`;
 const SNAPSHOT = `${PRIMARY}.bak`;
 
-type Read = { kind: "text"; content: string } | { kind: "binary" } | { kind: "toolarge" };
+type Read =
+  | { kind: "text"; content: string }
+  | { kind: "binary" }
+  | { kind: "toolarge" }
+  /** There IS a file and the command would not open it. Distinct from absent,
+   *  and the distinction is the point of the `[unreadable]` group below. */
+  | { kind: "unreadable" };
 
-/** The two files, as this run wants them found. Absent = the command errors. */
+/** The two files, as this run wants them found. Absent = the command errors
+ *  with ENOENT, which is a genuine first run and NOT a failed read. */
 let files: Record<string, Read> = {};
 /** Every `fs_write_file`, in order. */
 let writes: { path: string; content: string }[] = [];
@@ -54,9 +61,14 @@ async function handleInvoke(cmd: string, args: Record<string, unknown>): Promise
     case "fs_read_file": {
       const path = args.path as string;
       const held = files[path];
-      // Absent is an ERROR from the real command; `tauriStoreFileIo.read`'s catch
-      // is what turns it into `{kind:"missing"}`.
-      if (!held) throw new Error(`no such file: ${path}`);
+      // Both of these are REJECTIONS from the real command, and the wording is
+      // what tells them apart: `tauriStoreFileIo.read` sorts on the `(os error N)`
+      // suffix Rust appends, so ENOENT becomes `missing` and everything else
+      // becomes `unreadable`.
+      if (!held) throw new Error(`No such file or directory (os error 2): ${path}`);
+      if (held.kind === "unreadable") {
+        throw new Error(`Permission denied (os error 13): ${path}`);
+      }
       if (held.kind === "text") return { kind: "text", content: held.content, size: 1 };
       return held.kind === "toolarge"
         ? { kind: "toolarge", size: 1, limit: 1 }
@@ -227,6 +239,34 @@ console.log("\n[torn] a primary its snapshot cannot replace is NOT written over"
   const mod = await world({ dirFails: true });
   await mod.useWorkspacesStore.getState().hydrate();
   check("an unreachable data directory writes nothing", primaryWrites().length, 0);
+  check("and still hydrates", mod.useWorkspacesStore.getState().hydrated, true);
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n[unreadable] a file that is THERE and will not open is not a first run");
+{
+  // The distinction the whole guard rests on. `fs_read_file` rejects for BOTH
+  // "no such file" and "there is a file and it would not open" - a lock during
+  // an auto-update handoff, a Windows sharing violation, EACCES, a descriptor
+  // limit. Folding the second into the first is what makes the default look
+  // safe to write, and the file it would be written over is the one that was
+  // never read.
+  const mod = await world({ files: { [PRIMARY]: { kind: "unreadable" } } });
+  await mod.useWorkspacesStore.getState().hydrate();
+  const s = mod.useWorkspacesStore.getState();
+  check("a default is seeded so the app can boot", s.workspaces.length, 1);
+  check("hydrated is true", s.hydrated, true);
+  check("and NOTHING is written over the file that would not open", primaryWrites().length, 0);
+}
+{
+  // And the same read on the snapshot must not license a restore over a primary
+  // that is merely torn: the snapshot's bytes are unknown, so they are not a
+  // better copy of anything.
+  const mod = await world({
+    files: { [PRIMARY]: text(""), [SNAPSHOT]: { kind: "unreadable" } },
+  });
+  await mod.useWorkspacesStore.getState().hydrate();
+  check("an unreadable snapshot restores nothing", primaryWrites().length, 0);
   check("and still hydrates", mod.useWorkspacesStore.getState().hydrated, true);
 }
 

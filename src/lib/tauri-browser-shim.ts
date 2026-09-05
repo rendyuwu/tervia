@@ -64,9 +64,9 @@ if (typeof window !== "undefined" && !window.__TAURI_INTERNALS__) {
   };
 
   // The app data directory `appDataDir()` resolves to. A constant rather than
-  // anything derived: nothing in a browser has one, and the only thing that
-  // reads it is store path resolution, which needs a stable prefix and no more.
-  // Without this, `plugin:path|resolve_directory` fell through to `null` and
+  // anything derived: nothing in a browser has one, and the thing that reads it
+  // is store path resolution, which needs a stable prefix and no more. Without
+  // this, `plugin:path|resolve_directory` fell through to `null` and
   // `storeFilePaths` threw on `null.replace` - which recovery reported as an
   // "unreachable" store, one error toast per recovered store, at every launch.
   const PREVIEW_APP_DATA_DIR = "/tervia-preview";
@@ -78,10 +78,20 @@ if (typeof window !== "undefined" && !window.__TAURI_INTERNALS__) {
   // names for one entry in one direction and none in the other.
   const FS_PREFIX = "tervia:shim:fs:";
 
-  const handlePath = (op: string): unknown => {
-    // Only the one op the store path needs. `join`, `basename` and the rest
-    // still fall through to null, exactly as before.
-    if (op === "resolve_directory") return PREVIEW_APP_DATA_DIR;
+  /** `BaseDirectory.AppData`, which is what `appDataDir()` asks for. */
+  const BASE_DIRECTORY_APP_DATA = 14;
+
+  const handlePath = (op: string, args: InvokeArgs): unknown => {
+    // Narrowed to the ONE directory the store path needs. `resolve_directory`
+    // serves every `BaseDirectory`, so answering it unconditionally would hand
+    // `homeDir()` - which `terminal/lib/agentTodos.ts` and
+    // `app/hooks/useWorkspaceRoot.ts` both call - a confident wrong answer in
+    // place of the null they already handle. A plausible bad path is worse in a
+    // preview than an obvious missing one.
+    const a = (args ?? {}) as Record<string, unknown>;
+    if (op === "resolve_directory" && a.directory === BASE_DIRECTORY_APP_DATA) {
+      return PREVIEW_APP_DATA_DIR;
+    }
     return null;
   };
 
@@ -90,13 +100,19 @@ if (typeof window !== "undefined" && !window.__TAURI_INTERNALS__) {
     const path = String(a.path ?? "");
     if (cmd === "fs_read_file") {
       const content = localStorage.getItem(FS_PREFIX + path);
-      // MUST reject rather than return null. The Rust command errors when
-      // `metadata` fails, and `tauriStoreFileIo.read`'s catch is what turns that
-      // into `{kind: "missing"}`. A null return would deserialise as an
+      // MUST reject rather than return null, and must reject with ENOENT's
+      // wording. The Rust command errors when `metadata` fails, and
+      // `tauriStoreFileIo.read`'s catch is what sorts that into `missing` or
+      // `unreadable` - and it sorts on the `(os error N)` suffix Rust appends,
+      // so a message without one is read as "the file is there and would not
+      // open", which makes every preview launch look like a locked profile.
+      // A null return would be worse still: it would deserialise as an
       // `FsReadResult` with no `kind`, fall through that switch to
       // `{kind: "binary"}`, and recovery reads binary as a nul-filled file - so
       // a store file that is merely NEW would have a snapshot restored over it.
-      if (content === null) throw new Error(`fs_read_file: ${path}: no such file or directory`);
+      if (content === null) {
+        throw new Error(`No such file or directory (os error 2): ${path}`);
+      }
       return { kind: "text", content, size: content.length };
     }
     // fs_write_file
@@ -269,7 +285,7 @@ if (typeof window !== "undefined" && !window.__TAURI_INTERNALS__) {
       return handleOs(cmd.slice("plugin:os|".length));
     }
     if (cmd.startsWith("plugin:path|")) {
-      return handlePath(cmd.slice("plugin:path|".length));
+      return handlePath(cmd.slice("plugin:path|".length), args);
     }
     if (cmd === "fs_read_file" || cmd === "fs_write_file") {
       return handleFsCommand(cmd, args);

@@ -52,13 +52,14 @@ export const SNAPSHOT_SUFFIX = ".bak";
  * How a store file looks on disk.
  *
  * `"ok"` is the only trustworthy answer. `"missing"`, `"empty"`, `"nul"` and
- * `"unparseable"` all mean the snapshot should be preferred. The last two mean
- * nothing can be decided: `"toolarge"` is a file `fs_read_file` refuses to read
- * but the plugin has no trouble with, and `"unreachable"` is the data directory
- * itself failing.
+ * `"unparseable"` all mean the snapshot should be preferred. The last THREE mean
+ * nothing can be decided, so nothing may be written over the primary either:
+ * `"toolarge"` is a file `fs_read_file` will not return for its size,
+ * `"unreadable"` is one it would not open at all, and `"unreachable"` is the
+ * data directory itself failing.
  */
 export type StoreFileState =
-  "ok" | "missing" | "empty" | "nul" | "unparseable" | "toolarge" | "unreachable";
+  "ok" | "missing" | "empty" | "nul" | "unparseable" | "toolarge" | "unreadable" | "unreachable";
 
 /**
  * One file as the host process can see it.
@@ -72,11 +73,22 @@ export type StoreFileState =
  * `toolarge` is deliberately NOT folded in with it. A 10 MB store file is real
  * data the plugin reads fine; calling it corruption would restore a snapshot
  * over it.
+ *
+ * `unreadable` is the same distinction one step further out, and it exists
+ * because folding it into `missing` is a data-loss bug rather than a rounding
+ * error: a file that is THERE and would not open (a lock during an update
+ * handoff, a sharing violation, EACCES, a descriptor limit) must not be treated
+ * as a first run. Everything downstream writes over a first run - the recovery
+ * pass would restore a snapshot, the store layer would come up empty and save
+ * that emptiness, and `modules/workspaces/store.ts` would persist a seeded
+ * default. `missing` therefore means "the OS said there is no such file", never
+ * "the read did not work out".
  */
 export type StoreFileRead =
   | { kind: "text"; content: string }
   | { kind: "binary" }
   | { kind: "toolarge" }
+  | { kind: "unreadable"; reason: string }
   | { kind: "missing" };
 
 /**
@@ -154,6 +166,7 @@ function inspect(read: StoreFileRead): StoreFileState {
   if (read.kind === "missing") return "missing";
   if (read.kind === "binary") return "nul";
   if (read.kind === "toolarge") return "toolarge";
+  if (read.kind === "unreadable") return "unreadable";
   // `trim` does not strip U+0000, so an all-nul buffer falls through to the
   // check below rather than reading as merely empty.
   if (read.content.trim() === "") return "empty";
@@ -197,8 +210,20 @@ export async function recoverStoreFile(
 
 async function recover(fileName: string, io: StoreFileIo): Promise<StoreRecovery> {
   const { primary, snapshot } = storeFilePaths(await io.dir(), fileName);
-  const found = inspect(await io.read(primary));
+  const primaryRead = await io.read(primary);
+  const found = inspect(primaryRead);
   if (found === "ok") return { found, recovered: false };
+  if (primaryRead.kind === "unreadable") {
+    // The file is THERE and would not open. Its bytes are unknown, so they may
+    // be perfectly good - which makes restoring a snapshot over them the same
+    // destruction as restoring over a too-large file, for the same reason: a
+    // read this app could not make is not evidence about the contents.
+    return {
+      found,
+      recovered: false,
+      note: `${fileName} could not be read, so it was left as it is: ${primaryRead.reason}`,
+    };
+  }
   if (found === "toolarge") {
     // Not corruption: the plugin has no size limit and reads this fine. Say so
     // and stop - restoring a snapshot over it would destroy real data.
@@ -286,10 +311,28 @@ export const tauriStoreFileIo: StoreFileIo = {
         default:
           return { kind: "binary" };
       }
-    } catch {
-      // Absent, or unreadable for a reason we cannot act on. Either way there is
-      // nothing here to trust.
-      return { kind: "missing" };
+    } catch (e) {
+      // `fs_read_file` rejects for BOTH "there is no such file" and "there is a
+      // file and it would not open", so the two have to be told apart here or
+      // not at all - and telling them apart is the whole of what stops a file
+      // that merely would not open being written over as though it were a first
+      // run.
+      //
+      // Rust's `io::Error` Display always appends `(os error N)` for an OS
+      // error, on every platform, whatever the localised text before it says.
+      // 2 is ENOENT and Windows' ERROR_FILE_NOT_FOUND; 3 is Windows'
+      // ERROR_PATH_NOT_FOUND. Anything else - EACCES, a sharing violation, a
+      // descriptor limit, the command's own join error - is a file we did not
+      // get to see.
+      //
+      // The unrecognised case falls to `unreadable`, which is the safe
+      // direction: the cost of calling a first run unreadable is that a default
+      // is not written until the first real change, and the cost of the reverse
+      // is the file.
+      const message = reason(e);
+      return /\(os error (2|3)\)/.test(message)
+        ? { kind: "missing" }
+        : { kind: "unreadable", reason: message };
     }
   },
   write: (path, content) => invoke<void>("fs_write_file", { path, content }),

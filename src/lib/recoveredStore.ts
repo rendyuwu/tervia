@@ -69,9 +69,9 @@ export type StoreBroadcast = {
 
 /** What distinguishes one store in this family from another. */
 export type RecoveredStoreSpec = {
-  /** Store file name, resolved against the directory the plugin uses. */
+  /** Store file name, resolved against `appDataDir()`. */
   path: string;
-  /** A key read once to force the plugin's load while the file is known good.
+  /** A key read once to force the first load while the file is known good.
    *  Any key would do; naming a real one keeps the intent readable. */
   loadKey: string;
   /** Emitted after every commit so another window reloads instead of showing a
@@ -214,7 +214,8 @@ export function createRecoveredStore(
     // for as long as nothing else changed.
     //
     // The listener is never removed. There is one of these per store file per
-    // process, and it lives as long as the store does.
+    // WEBVIEW - the settings window builds its own, so two exist for the store
+    // files it touches - and each lives as long as the store it belongs to.
     try {
       await broadcast.listen(spec.changedEvent, () => store.invalidate?.());
     } catch (e) {

@@ -356,23 +356,38 @@ the plugin.
 **Trigger.** The settings store gaining a field that cannot be re-entered from
 the UI, or `LazyStore.onChange` no longer being needed there.
 
-### A store file over 10 MB can be read by nothing and is therefore never written
+### A store file this app cannot read is inert until it can
 
-**Accepted state.** `fs_read_file` refuses a file above its size limit and
-reports `toolarge` instead of the bytes. The recovery pass treats that as real
-data rather than corruption and leaves the file alone, which is right. The store
-layer above it then has no contents to work from, so it refuses to `save()` at
-all rather than write a whole file built on a read it never got - a whole-file
-write over an empty cache would destroy exactly the file that is too big to have
-been read. The consequence is that such a store is inert: it loads as empty and
-every mutation fails with a refusal naming the size. No store in this app
-approaches that limit today, and nothing shrinks one automatically.
+**Accepted state.** A whole-file write can only be as good as the read it is
+built on, so a store whose file could not be read refuses to save rather than
+write a file assembled from an empty cache - which would destroy exactly the
+file it never got to see. Two reads land there. `fs_read_file` refuses a file
+above its size limit and reports `toolarge`; and it rejects for a file that is
+present and will not open (a lock during an update handoff, a Windows sharing
+violation, EACCES, a descriptor limit). The recovery pass leaves both alone for
+the same reason - unknown contents may be perfectly good ones - so neither has a
+snapshot restored over it either.
+
+The consequence is that such a store is inert while the condition lasts: it loads
+as empty and every mutation fails with a refusal naming the reason. That is the
+accepted cost. No store in this app approaches the size limit today, and an
+unopenable file is expected to clear on its own or to need a human.
+
+One classification is done by wording, not by a type: `fs_read_file` rejects for
+both "no such file" and "would not open", so the distinction is drawn from the
+`(os error N)` suffix Rust appends to an OS error - 2 and 3 mean absent,
+everything else means unreadable. An error that carries no such suffix is read as
+unreadable, which is the safe direction: a first run misread that way costs a
+default that is not written until the first real change, where the reverse costs
+the file.
 
 **Carried by.** `createFileKeyValueStore` in `src/lib/fileKeyValueStore.ts`,
-whose `refused` flag holds the verdict, and the `[whole-file]` group in
-`scripts/vault-resolve-verify.ts`, which pins the refusal.
+whose `refused` flag holds the verdict; `tauriStoreFileIo.read` in
+`src/lib/storeRecovery.ts`, which does the classification; and the
+`[whole-file]` group in `scripts/vault-resolve-verify.ts` and the `[unreadable]`
+group in `scripts/workspace-store-verify.ts`, which pin both halves.
 
 **Trigger.** A store file that legitimately grows past the limit - the workspace
 file is the only plausible candidate, since it holds a tab tree per workspace -
-or `fs_read_file` gaining a way to read a large file in portions that this layer
-could use.
+or `fs_read_file` gaining a distinct not-found result, which would retire the
+string match.
