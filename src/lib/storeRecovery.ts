@@ -302,11 +302,16 @@ async function recover(fileName: string, io: StoreFileIo): Promise<StoreRecovery
  * the same rule `recover` applies to a primary it could not read, applied to the
  * other file.
  *
- * The second guard costs one extra read per pass, not per commit -
- * `snapshotAfterSave` coalesces a burst into one pass - and it is what stops a
- * `.bak` at mode 000 being replaced by the first ordinary edit after launch.
- * Nothing else can see that: `recover` runs once at startup, so a snapshot that
- * becomes unreadable mid-session is invisible to everything but this.
+ * The second guard costs one extra read PER COMMIT. `snapshotAfterSave` looks
+ * like it would fold a burst into one pass, and it does not: it coalesces only
+ * callers that overlap, and every store layer commits inside `enqueueWrite`, so
+ * they never do. Measured rather than reasoned about, because the first version
+ * of this comment claimed the cheaper number.
+ *
+ * Worth it anyway, and the trade is not close: one read against replacing the
+ * only surviving copy of a store file. It is also the ONLY thing that can notice
+ * a snapshot going unreadable mid-session - `recover` runs once, at startup, and
+ * does not even look at the snapshot when the primary is good.
  *
  * A caller may still fire this after any save without checking anything first.
  *

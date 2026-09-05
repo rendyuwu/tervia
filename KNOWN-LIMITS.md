@@ -378,13 +378,26 @@ round: a snapshot this app could not read is never REPLACED, so a store whose
 `.bak` is unreadable takes no new snapshot until that clears, and a crash in the
 meantime falls back to whatever that older `.bak` holds. Replacing it instead
 would destroy the only surviving copy whenever the primary is absent or torn -
-which is exactly the state a snapshot exists for. A failed pass says so in the
-recovery notice, so the user is told the safety net has stopped being refreshed
-rather than left to assume it has not.
+which is exactly the state a snapshot exists for. Nothing latches: the decision
+is taken per pass from a fresh read, so the first commit after the condition
+clears snapshots normally.
 
-Only the user is told. A store layer sees a rejected `save()` and logs it; there
-is no per-store toast for the writes that follow, so a profile in this state
-shows one notice at launch and then nothing while each edit quietly fails.
+**The user may not hear about it, and that is the part accepted rather than
+fixed.** A refused pass does put a note in the recovery slot, but two things
+stand between that and a toast. A good primary beside an unreadable `.bak` gets
+no launch notice at all - `recover` returns as soon as the primary reads `"ok"`
+and never looks at the snapshot. And the note lands too late for its own
+commit's drain: `commit` runs the broadcast and the snapshot pass concurrently,
+the broadcast is one IPC against the snapshot's three, so the drain the event
+fires finds the slot still empty and the note is picked up by the NEXT commit's
+drain. A session that makes one edit and quits is therefore never told the
+safety net stopped being refreshed. Draining after the snapshot pass instead
+would fix it and would put every cross-window update behind a file copy, which
+is the worse trade.
+
+The same shape covers the writes that follow. A store layer sees a rejected
+`save()` and logs it; there is no per-store toast, so a profile in this state is
+quiet while each edit fails.
 
 One classification is done by wording, not by a type: `fs_read_file` rejects for
 both "no such file" and "would not open", so the distinction is drawn from the

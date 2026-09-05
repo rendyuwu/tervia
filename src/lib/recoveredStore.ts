@@ -268,12 +268,22 @@ export function createRecoveredStore(
   }
 
   /**
-   * Snapshot the file the save just produced, coalescing concurrent callers.
+   * Snapshot the file the save just produced, coalescing CONCURRENT callers.
    *
-   * One pass at a time plus one trailing pass for whatever landed during it. A
-   * page of inline edits fires one commit per field the user leaves, so a burst
-   * costs two file copies instead of one each - and the LAST commit is still
-   * covered, which a plain "skip while busy" would not guarantee.
+   * One pass at a time plus one trailing pass for whatever landed during it,
+   * which is what keeps the LAST commit covered where a plain "skip while busy"
+   * would not.
+   *
+   * MEASURE BEFORE CITING THIS AS A SAVING. It coalesces only callers that
+   * overlap, and no live one does: `commit` awaits this, and every store layer
+   * commits inside `enqueueWrite`, so `snapshotting` is always null by the time
+   * the next pass starts. A queued burst of four commits costs four snapshot
+   * passes, not one. The machinery is reachable through the public port - two
+   * `commit()` calls not awaited, which the `[settle]` group does exercise - so
+   * it is a real guard rather than dead code, but a comment that prices a burst
+   * as one pass is describing a path nothing in `src/` takes. `modules/workspaces`
+   * gets the burst saving people expect here, and gets it from its own `persist`
+   * coalescer instead.
    *
    * A failure goes into the notice slot, deduplicated. The startup pass is NOT
    * enough to make that redundant: on a fresh profile it has no primary to copy,

@@ -1230,9 +1230,9 @@ function bus() {
   // The SECOND `read:snapshot` is the snapshot pass reading the file it is about
   // to replace. It refuses to overwrite a `.bak` it could not read, because bytes
   // nobody managed to look at may be the only good copy left - the same rule
-  // `recover` applies to a primary. That read is the whole of its cost, it
-  // happens once per coalesced burst rather than once per commit, and it is the
-  // only thing that can notice a snapshot going unreadable mid-session.
+  // `recover` applies to a primary. That read is the whole of its cost and it is
+  // paid once per COMMIT: `snapshotAfterSave` coalesces overlapping callers only,
+  // and no store layer produces any, since they all commit inside `enqueueWrite`.
   check("recover, then force the load, then snapshot", log, [
     "read:primary",
     "read:snapshot",
@@ -1542,6 +1542,12 @@ function racingIo(io: StoreFileIo, onDir: () => void): StoreFileIo {
   return {
     ...io,
     dir: async () => {
+      // Yields to a MACROTASK, which the plain `memFs` does not. `appDataDir()`
+      // is an IPC round trip, so a real `dir()` always does - and a fixture that
+      // resolves through microtasks alone lets a spinning retry loop starve the
+      // timer queue, which is how the termination deadline below came to sit
+      // there never firing while the run hung anyway.
+      await new Promise((resolve) => setTimeout(resolve, 0));
       const dir = await io.dir();
       onDir();
       return dir;
@@ -1671,8 +1677,17 @@ function racingIo(io: StoreFileIo, onDir: () => void): StoreFileIo {
   await store.get("identities");
   await store.set("keys", [{ id: "k-1" }]);
   saving = true;
-  await store.save();
+  // Raced against a deadline, because the defect this half pins is a HANG: an
+  // unbounded rebuild loop spins forever against a peer that emits on every
+  // IPC. `verify-all.mjs` has no timeout, so without this the mutation shows up
+  // in CI as a stalled job - which reads as infrastructure flake rather than as
+  // the red check it is.
+  const finished = await Promise.race([
+    store.save().then(() => true),
+    new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 5_000)),
+  ]);
   saving = false;
+  assert(finished, "save() terminates against a peer emitting on every IPC");
 
   check(
     "an event inside save() does not blank the file",
