@@ -1,5 +1,5 @@
 /**
- * Self-check for everything the Hosts page derives (research §5.2, §5.5).
+ * Self-check for everything the Hosts page derives.
  * Run: `pnpm verify` (or `npx tsx scripts/hosts-page-verify.ts` to iterate).
  *
  * `page/derive.ts` is pure - no React, no store, no Tauri - which is the only
@@ -8,7 +8,7 @@
  * expensive answers to get wrong are:
  *
  *   A missing-secret pip that reads "fine". Every branch below comes off the
- *   record's `has*` flags, never a keychain read (§5.2), so a branch that
+ *   record's `has*` flags, never a keychain read, so a branch that
  *   forgets to ask is silently reassuring about a row that cannot connect - and
  *   the failure only surfaces at the handshake, talking about credentials the
  *   user believes they entered. The two states that must NOT read as fine are an
@@ -86,16 +86,16 @@ function ok(label: string, cond: boolean): void {
 // --- fixtures -----------------------------------------------------------
 //
 // Every builder returns a FRESH record, so no check can be reading a fixture an
-// earlier one mutated - one of the two ways a vacuous check got through earlier
-// in this phase (handoff §5.12).
+// earlier one mutated - one of the two ways a vacuous check has got through
+// before.
 //
 // There is exactly one exception, and the earlier version of this comment claimed
 // there was none: `NO_VAULT` below is a module-level value held live across the
 // whole file. It is safe for two reasons, not one - it is an EMPTY vault, so
 // there is nothing in it to disagree about, and it is never used as a BASELINE
-// that a later result is compared against, which is the failure mode §5.12
-// actually names. Anything needing a populated vault calls `vault(...)` for its
-// own copy. The end-of-run guard below is what keeps the first reason true.
+// that a later result is compared against, which is the failure mode a shared
+// fixture actually creates. Anything needing a populated vault calls `vault(...)`
+// for its own copy. The end-of-run guard below is what keeps the first reason true.
 
 const FULL_SSH_INLINE: SshInlineCredentials = {
   kind: "inline",
@@ -762,7 +762,7 @@ console.log("\n[filterAndRank] all three filters run, and ranking orders what su
 
 // --- the one shared fixture is still what its name says -----------------
 //
-// Guards the exact failure §5.12 names, for the exact value that could suffer it.
+// Guards that exact failure, for the exact value that could suffer it.
 // If anything above had written into `NO_VAULT`, every "no vault" answer after
 // that point would have been computed against a vault that is not empty, while
 // its label still said it was. Its maps are typed `ReadonlyMap`, so this can only
@@ -776,7 +776,7 @@ ok(
 
 // --- gate: break the implementation and watch each check actually fail --
 //
-// Handoff §5.12: a check that has not been watched fail is not a check. The
+// A check that has not been watched fail is not a check. The
 // record for the checks added or repaired in THIS pass is below. The original
 // pass's table is NOT here and is not anywhere in the repo - the comment that
 // used to sit here deferred to "the report sent alongside this file", which is

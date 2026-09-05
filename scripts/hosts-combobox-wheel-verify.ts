@@ -1,5 +1,5 @@
 /**
- * Self-check for VLT-47: the jump-host / RDP-tunnel / desktop-size picker's
+ * Self-check: the jump-host / RDP-tunnel / desktop-size picker's
  * wheel fix uses `stopPropagation()`, not an unconditional `scrollTop +=`
  * write.
  * Run: `pnpm verify hosts-combobox-wheel` (or `npx tsx
@@ -18,13 +18,13 @@
  * `scrollTop += deltaY` is correct only INSIDE a modal `Dialog`, where the
  * lock's own `preventDefault()` suppresses the browser's native scroll and
  * the imperative write is the only one that lands. `Combobox` is shared by
- * three pickers today and is the documented reuse target for 6e's vault
- * entry picker - the moment ANY caller mounts this component with no modal
- * Dialog above it, an unconditional `scrollTop +=` write runs ALONGSIDE the
- * browser's now-unsuppressed native scroll, and the list scrolls twice per
- * wheel notch. `stopPropagation()` has no such failure mode: with no
- * `RemoveScroll` mounted there is no document listener to stop propagation
- * to, so it is a no-op and native scroll runs once, exactly as expected.
+ * every picker in the host editor, the SSH and RDP option panels, the forward
+ * rule editor and the vault's identity editor - the moment ANY caller mounts
+ * this component with no modal Dialog above it, an unconditional `scrollTop +=`
+ * write runs ALONGSIDE the browser's now-unsuppressed native scroll, and the
+ * list scrolls twice per wheel notch. `stopPropagation()` has no such failure
+ * mode: with no `RemoveScroll` mounted there is no document listener to stop
+ * propagation to, so it is a no-op and native scroll runs once, as expected.
  * This file is what stops that regression from being silently reintroduced.
  */
 import { readFileSync } from "node:fs";

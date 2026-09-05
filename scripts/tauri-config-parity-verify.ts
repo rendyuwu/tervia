@@ -10,7 +10,7 @@
  * `windows[0]` therefore vanishes on that platform - not with an error, but
  * by quietly falling back to whatever default Tauri picks for an unset field.
  *
- * That is exactly how the window floor (VLT-61 / handoff §4.22) went missing:
+ * That is exactly how the window floor went missing:
  * `minWidth`/`minHeight` lived only in the base file, so only macOS (which
  * has no override file) ever got a floor. `title` and `visible` were hit the
  * same way before they were restated on both platforms.
@@ -26,12 +26,12 @@
  *   tunes - `title`, `decorations`, `transparent`, `shadow` - where carrying a
  *   different value is the merge model working as intended, not a bug.
  *
- *   VALUE EQUALITY, for GEOMETRY_KEYS. §4.22's actual damage was a *value*
+ *   VALUE EQUALITY, for GEOMETRY_KEYS. The floor's actual damage was a *value*
  *   silently not applying, and presence cannot see that shape at all: revert
  *   `minWidth` to its old number in both override files and every key is still
  *   present, while both shipping platforms get the old floor. Geometry has no
  *   platform-specific right answer here - the floor is a property of what the
- *   UI needs in order to render (VLT-61: an 80x24 terminal), not of the window
+ *   UI needs in order to render (an 80x24 terminal), not of the window
  *   manager - so the three files must agree digit for digit.
  *
  * The geometry keys are additionally asserted to EXIST in the base. Without
@@ -39,7 +39,7 @@
  * trimming the base silently shrinks the check along with it: deleting
  * `minWidth` from the base takes the floor away from macOS while every
  * remaining assertion still passes, and an emptied `windows[0]` would run zero
- * assertions and print a pass. That is handoff §4.18's empty-fold shape, and
+ * assertions and print a pass. That is the empty-fold shape, and
  * declaring the set up front is what closes it.
  *
  * `bundle.targets` is the other base array that both platform files redeclare.
@@ -80,7 +80,7 @@ const WINDOWS_PATH = "src-tauri/tauri.windows.conf.json";
 /**
  * Keys whose VALUE must match across all three files, and which the base must
  * declare. Window size and the size floor: no platform has a reason to differ,
- * and a divergence here is the §4.22 defect, not customization.
+ * and a divergence here is the floor silently not applying, not customization.
  */
 const GEOMETRY_KEYS = ["width", "height", "minWidth", "minHeight"] as const;
 

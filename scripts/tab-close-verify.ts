@@ -2,7 +2,7 @@
  * Self-check for the close rule: WHICH leaves and tabs may be closed.
  * Run: `npx tsx scripts/tab-close-verify.ts`.
  *
- * The bug this pins down (VLT-43) is not "Hosts is unclosable" - it is that the
+ * The bug this pins down is not "Hosts is unclosable" - it is that the
  * three close paths disagreed about it. The tab-strip X was gated on the entry
  * COUNT (`totalEntries > 1`), so with a terminal open beside it the X appeared on
  * Hosts and closed it. The pane-header X routed a single-pane tab through
@@ -16,8 +16,8 @@
  * completely, so "an ordinary leaf beside another entry IS closable" is what
  * makes the other two mean anything.
  *
- * The claim was re-checked against RDP panes and needed a fifth section
- * (VLT-62). `closable.ts` was fine - it asks only whether the leaf is a page and
+ * The claim was re-checked against RDP panes and needed a fifth section.
+ * `closable.ts` was fine - it asks only whether the leaf is a page and
  * whether it is the last entry, so it has always answered for an `rdp` leaf
  * exactly as for a `terminal` one, and both X buttons closed an RDP tab
  * happily. What disagreed was `Ctrl+Shift+X`, which carried its OWN kind test
@@ -28,7 +28,7 @@
  *
  * Sections [vi] and [vii] are the SECOND question a close has to answer - not
  * "may this happen" but "may it happen silently" - which was still in the state
- * the first one was in before VLT-43: one copy per path, and the copies
+ * the first one was in before it was fixed: one copy per path, and the copies
  * disagreed. `requestCloseLeaf` confirmed only on a busy terminal, so a dirty
  * editor was discarded without a word by three of the five affordances that
  * funnel through it, while `handleClose` prompted for the same file. Every
@@ -53,7 +53,7 @@ import type { PaneNode } from "../src/modules/terminal/lib/panes";
 /**
  * A line with its trailing `//` comment removed, string literals respected.
  *
- * VLT-33, and this is the fourth copy of this pair in the suite - duplicated
+ * This is the fourth copy of this pair in the suite - duplicated
  * on purpose, because these scripts share no module and `scripts/lib` is not a
  * thing we want. The canonical copy is in `scripts/host-editor-verify.ts`; keep
  * them the same shape.
@@ -84,15 +84,15 @@ function stripLineComment(line: string): string {
   return line;
 }
 
-// VLT-83: no JSX-comment branch here, deliberately. Every file this stripper
+// No JSX-comment branch here, deliberately. Every file this stripper
 // runs over is a `.ts` module - `shortcutHandlers.ts`, `shortcuts.ts`,
 // `useTabActions.ts` - and a `{/* ... */}` is only meaningful inside JSX
 // children, so a `.ts` source can never contain one that would hide code from
-// a positive check the way it did in `host-editor-verify.ts` (fixed at
-// `host-editor-verify.ts:191` - copy the branch from there, and not the lazy
+// a positive check the way it did in `host-editor-verify.ts` (fixed in that
+// file's own `stripComments` - copy the branch from there, and not the lazy
 // form `\{\s*\/\*[\s\S]*?\*\/\s*\}`, which is not a substitute: it can still
-// cross an intervening `*/` while hunting for one followed by `}`) and
-// `vault-editor-verify.ts:101`. If this file is ever pointed at a `.tsx`
+// cross an intervening `*/` while hunting for one followed by `}`) and in
+// `vault-editor-verify.ts`'s. If this file is ever pointed at a `.tsx`
 // file, that branch has to be added first.
 /** The same source with whole-line and trailing comments removed. */
 function stripComments(src: string): string {
@@ -155,7 +155,7 @@ const THREE_TABS: Tab[] = [
 // one fixture that can tell `tabCloseRefusal`'s "last entry" gate apart from
 // `leafCloseRefusal`'s. See [ii-tab] below.
 const ONE_TAB_TWO_PANES: Tab[] = [tab(1, split(5, [termLeaf(2), termLeaf(6)]), 2)];
-// The VLT-62 shape: Hosts plus an RDP tab, which is what the hand test had open
+// The RDP shape: Hosts plus an RDP tab, which is what the hand test had open
 // when Ctrl+Shift+X did nothing and both X buttons worked.
 const HOSTS_AND_RDP: Tab[] = [tab(1, hostsLeaf(2), 2), tab(3, rdpLeaf(4), 4)];
 const RDP_ONLY: Tab[] = [tab(3, rdpLeaf(4), 4)];
@@ -252,7 +252,7 @@ check(
 // `tabs.length === 1` but `countTabEntries` of 2, so only the real gate
 // refuses it. Get this backwards and `closeTab` would filter the workspace's
 // only tab out from under itself, leaving `tabs = []` for whatever reads
-// `.id` off the (now empty) array next - see `useTabs.ts:396` and VLT-43.
+// `.id` off the (now empty) array next - see `useTabs.ts`'s `closeTab`.
 console.log("\n[ii-tab] the only tab is refused even though it holds two panes, not one");
 check(
   "closing the workspace's one tab is refused as last-entry, not allowed for holding 2 panes",
@@ -323,7 +323,7 @@ console.log("\n[strip] every entry the strip renders resolves through the same p
 }
 
 // ---- (iv) an RDP leaf is a session leaf like any other -------------------
-// VLT-62. Checked as its own section rather than assumed from "terminal works",
+// Checked as its own section rather than assumed from "terminal works",
 // because the whole item was somebody assuming exactly that: `closable.ts`
 // never names a leaf kind except `page`, so RDP was always fine here - and the
 // chord that quoted it as the single arbiter was refusing what it allows.
@@ -365,11 +365,11 @@ check("and the terminal beside it closes too", canCloseLeaf(RDP_SPLIT_WITH_TERMI
 // Source-text, because `shortcutHandlers.ts` imports through the `@/` alias and
 // this suite has no bundler to resolve it. The behavioural checks above cannot
 // see a caller that stops asking - which is exactly the defect: every fixture in
-// [iv] passed for the whole life of VLT-62.
+// [iv] passed for the whole life of that defect.
 console.log("\n[v] Ctrl+Shift+X and Ctrl+W ask the arbiter rather than a leaf kind");
 {
   const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-  // Comments stripped first (VLT-33): every assertion below is POSITIVE - "this
+  // Comments stripped first: every assertion below is POSITIVE - "this
   // expression is present" - and a positive check is exactly the kind a comment
   // satisfies. Deleting the guard and leaving `// if (coveredByRailView())
   // return;` behind must fail, and stripping is what makes it fail.
@@ -435,14 +435,14 @@ console.log("\n[v] Ctrl+Shift+X and Ctrl+W ask the arbiter rather than a leaf ki
 // ---- (vi) a legal close still has to ask before discarding work -----------
 // The sections above are all about which closes are LEGAL. This one is about
 // which of the legal ones may happen SILENTLY, and it exists because that
-// second question was in the same state the first one was in before VLT-43:
+// second question was in the same state the first one was in before that fix:
 // one copy per path, and the copies disagreed. `handleClose` prompted on a
 // dirty editor; `requestCloseLeaf` prompted only on a busy terminal. So for a
 // single-pane tab holding an unsaved editor the pane-header X and `Ctrl+W`
 // asked, and `Ctrl+Shift+X`, the tab-strip leaf X and the split pane-header X
 // discarded the buffer without a word.
 //
-// Removing the chord's leaf-kind test (VLT-62) is only what made it reachable
+// Removing the chord's leaf-kind test is only what made it reachable
 // FROM THE CHORD - the other two paths had been losing buffers all along, which
 // is why the fix is at the funnel and why this section is behavioural over
 // `closable.ts` rather than a source-text check on the chord.
@@ -476,7 +476,7 @@ check(
   leafCloseConfirmReason(HOSTS_AND_TERMINAL, 4, noProcess),
 );
 check(
-  // VLT-62's pane must keep closing on one keystroke. Only terminal panes
+  // An RDP pane must keep closing on one keystroke. Only terminal panes
   // register a handle, so a predicate that answered `true` for everything was
   // never asked about an RDP leaf by accident - state it as a rule instead.
   "an RDP leaf is never confirmed, even when the process probe says yes",

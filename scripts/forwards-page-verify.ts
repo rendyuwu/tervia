@@ -1,6 +1,6 @@
 /**
- * Self-check for the pure Port Forwarding page derivation layer (6f wave 2,
- * step 5). Run: `pnpm verify` (or `npx tsx scripts/forwards-page-verify.ts`
+ * Self-check for the pure Port Forwarding page derivation layer.
+ * Run: `pnpm verify` (or `npx tsx scripts/forwards-page-verify.ts`
  * to iterate).
  *
  * `modules/forwards/page/derive.ts` is pure - no React, no store, no Tauri -
@@ -295,7 +295,7 @@ console.log("\n[2] rankRules: tiers, drops, empty and whitespace queries");
   );
 }
 
-// --- 3. Ports are matched as strings, substring tier ONLY (§4.37, D7) -------
+// --- 3. Ports are matched as strings, substring tier ONLY (D7) --------------
 
 console.log(
   "\n[3] rankRules: localPort and remotePort are substring-tier matches only, never a prefix tier",
@@ -478,7 +478,7 @@ console.log("\n[6] localPortLabel: auto, pinned, bound, and the pinned-vs-bound-
     "localhost:8080",
   );
   // D4: must show the BOUND port, never the requested one, when they differ -
-  // the exact defect §4.10's second half produced.
+  // the exact defect that naming the requested port instead produces.
   check(
     "pinned and bound differ: shows the bound port, never the requested one",
     localPortLabel(rule("r-4", { localPort: 8080 }), 9090),
@@ -489,7 +489,7 @@ console.log("\n[6] localPortLabel: auto, pinned, bound, and the pinned-vs-bound-
 // --- 7. bindFailureText: the four-way table, and the fallback that matters --
 
 console.log(
-  "\n[7] bindFailureText: the four cases from research §12.8, fallback passes the raw message through",
+  "\n[7] bindFailureText: the four failure cases, fallback passes the raw message through",
 );
 {
   check(
@@ -532,7 +532,7 @@ console.log(
     bindFailureText("ssh: bind 127.0.0.1:5432 failed: bind: address in use", 5432),
     "Port 5432 is already in use on this machine.",
   );
-  // The REAL messages, which is the half the plan's table did not carry. What
+  // The REAL messages, which the needle spellings above do not carry. What
   // the backend sends is `std::io::Error`'s Display, not an errno name:
   // `src-tauri/src/modules/ssh/session.rs:443` is
   // `format!("ssh: bind 127.0.0.1:{local_port} failed: {e}")`. So every needle
@@ -805,7 +805,7 @@ console.log(
 {
   const deriveSrc = readFileSync(join(root, "src/modules/forwards/page/derive.ts"), "utf8");
 
-  // VLT-80(a)'s remedy: an IMPORT-SPECIFIER parse, not a quoted-needle scan.
+  // An IMPORT-SPECIFIER parse, not a quoted-needle scan.
   // Agreement-by-value (two functions that happen to return the same answer
   // for every fixture) cannot tell a shared import from a local
   // reimplementation that copied the same regex - only pinning the exact set

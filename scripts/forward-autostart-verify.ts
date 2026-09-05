@@ -1,5 +1,5 @@
 /**
- * Self-check for wave 3 step 11: `startWithHost` - the terminal-owned forwards
+ * Self-check for `startWithHost` - the terminal-owned forwards
  * map (`src/modules/forwards/hostOwned.ts`), the autostart entry point
  * (`src/modules/forwards/autostart.ts`), its call site and its two release
  * sites in `src/modules/terminal/lib/ssh-session.ts`, and the read-only
@@ -26,7 +26,7 @@
  *    forward nobody asked for - one binds a local port the user never
  *    consented to, the other binds it on the wrong machine entirely.
  *
- * 3. MUTUAL EXCLUSION (VLT-94). A rule the PAGE is running is skipped, not
+ * 3. MUTUAL EXCLUSION. A rule the PAGE is running is skipped, not
  *    started a second time: two listeners for one rule means the page's Stop
  *    frees one of them and the row then lies about the other. The skip is a
  *    `continue` and never a `return`, so the rules after it still come up.
@@ -42,8 +42,8 @@
  *
  * 5. THE BANNER NAMES THE PORT THAT IS LISTENING. `openForward` resolves with
  *    the port actually bound - an auto rule asked for 0, and a pinned rule can
- *    be handed a different one. Naming the requested port is §4.10's second
- *    defect exactly, and on an auto rule it prints "localhost:0".
+ *    be handed a different one. Naming the requested port instead is the
+ *    defect, and on an auto rule it prints "localhost:0".
  *
  * 6. A TERMINAL OWNS WHAT IT OPENED, AND THE ENDING IS THE SESSION'S.
  *    `releaseSession(a)` drops exactly session a's entries; session b's
@@ -62,8 +62,8 @@
  *    in a runtime-false guard the feature is inert for every rule and every
  *    gate in this repo passes) and the adapter-close release has to be
  *    UNDEFERRED (queued into a microtask it survives the session it is ending).
- *    Two structural assertions each, and the second of each pair is the one a
- *    reviewer generation found the first one blind to: an EXPRESSION guard
+ *    Two structural assertions each, and the second of each pair covers what
+ *    the first was blind to: an EXPRESSION guard
  *    (`sessionEnded && void startHostForwards(...)`) is a direct top-level
  *    statement, and `await` defers without a callback. Every one of them closes
  *    an open set of spellings that no deny-list could.
@@ -72,10 +72,10 @@
  *    is actually listening, and a disabled Start/Stop whose tooltip says where
  *    to stop it. Nothing else in the suite reads `RuleCard.tsx` for any of it.
  *
- * 10. §1.6 IN THE SECOND STORE TOO. Every `useHostOwnedForwards(` selector
+ * 10. PRIMITIVE SELECTORS IN THE SECOND STORE TOO. Every `useHostOwnedForwards(` selector
  *    returns a primitive: one that builds a fresh object is never `Object.is`
  *    its own last return, and under zustand v5 that is "Maximum update depth
- *    exceeded" (research §12.7). The allow-list has to recurse on every
+ *    exceeded". The allow-list has to recurse on every
  *    operator whose VALUE is an operand rather than the operator's own result -
  *    `??`/`||`/`&&`, and also the comma and the assignments, which is where it
  *    had a measured hole. Its access-chain arm is rooted on the selector's own
@@ -83,8 +83,8 @@
  *    `(state) => state.byRule[id]?.boundPort`, and a check that reddens on a
  *    rename is a check the next reader weakens. `forwards-shell-verify.ts`
  *    carries a COPY of the same helper for `useForwardRuntime`, whose selectors
- *    were still behind the deny-list this one replaced (no `scripts/lib` exists
- *    yet - VLT-33).
+ *    were still behind the deny-list this one replaced (no `scripts/lib`
+ *    exists).
  *
  * 11. TWO PANES ON ONE HOST ARE TWO OWNERS, AND THE SECOND IS REFUSED -
  *    SEQUENTIALLY AND CONCURRENTLY. The terminal dials its own session per
@@ -123,10 +123,10 @@
  *    raw-string arm (section 4) and `Error` arm (section 7) were covered; its
  *    `JSON.stringify` and `String(e)` fallbacks were not. Banner text only, so
  *    low stakes - but arms nothing exercises is the shape that has produced
- *    real defects against a green suite twice in this wave.
+ *    real defects against a green suite twice here.
  *
- * 16. AUTOSTART NEVER WRITES THE PAGE'S STORE. The load-bearing half of VLT-94,
- *    and the one thing the `AutostartDeps` seam cannot see: `claimHostOwned` is
+ * 16. AUTOSTART NEVER WRITES THE PAGE'S STORE. The load-bearing half of mutual
+ *    exclusion, and the one thing the `AutostartDeps` seam cannot see: `claimHostOwned` is
  *    injected, a direct `useForwardRuntime.getState().markRunning(...)` is not.
  */
 
@@ -365,7 +365,7 @@ console.log("[1. startWithHost] a rule that does not start with its host is neve
   check("and it produced no banner of its own", w.banners, [
     forwardingBanner(18080, "10.0.0.9:5432", "db tunnel"),
   ]);
-  // THE LOAD-BEARING HALF OF VLT-94, and nothing else in this suite asserts it.
+  // THE LOAD-BEARING HALF OF MUTUAL EXCLUSION, and nothing else asserts it.
   // `autostart.ts` holds a live `useForwardRuntime` reference for its own
   // default `runtimeStatus`, so `useForwardRuntime.getState().markRunning(...)`
   // inside `startHostForwards` would satisfy every dep-injected check in this
@@ -496,8 +496,8 @@ console.log("\n[4. a bad rule is not a bad connect] the next rule opens, and the
 
   // A deferred the fixture controls, NOT an already-rejected promise: a
   // counter read after awaiting something already settled passes whether or
-  // not anybody waited for it, which is the exact fixture defect wave 2's own
-  // step-9 block shipped.
+  // not anybody waited for it, which is a fixture defect this suite has
+  // shipped before.
   let rejectBad: (e: unknown) => void = () => {};
   const parked = new Promise<number>((_, rej) => {
     rejectBad = rej;
@@ -717,7 +717,7 @@ console.log("\n[wiring] defaultAutostartDeps is complete");
     true,
   );
   // REFERENCE IDENTITY, which is the commit's headline claim and the one thing
-  // `typeof === "function"` cannot see. VLT-11 and research §5.4 rest on
+  // `typeof === "function"` cannot see. The whole claim rests on
   // autostart calling `openSshForward` - a forward on a LIVE SESSION ID - and
   // never `openForwardForConnection`, which takes a HOST id and DIALS a
   // connection if there is none. Wired to that one, a `startWithHost` rule
@@ -888,7 +888,7 @@ function findFunctionBody(sf: ts.SourceFile, name: string): ts.Node | null {
 /** Walking up from `node`, is every ancestor up to `fnBody` free of a NESTED
  *  function? Tells a direct statement of a function's own body from a call
  *  buried in a decoy arrow declared in the same scope - the count alone cannot
- *  bite that deletion (VLT-76's lesson). */
+ *  bite that deletion. */
 function isDirectlyInFunctionBody(node: ts.Node, fnBody: ts.Node): boolean {
   let cur: ts.Node | undefined = node.parent;
   while (cur && cur !== fnBody) {
@@ -1038,7 +1038,7 @@ function selectorParamName(arrow: ts.ArrowFunction, sf: ts.SourceFile): string {
  * to forbid - PASSING, alongside `Object.keys(s.byRule)`, `Object.entries(...)`,
  * `new Set(...)`, `structuredClone(s.byRule)` and bare `s.byRule`, every one of
  * them the same "Maximum update depth exceeded" failure under zustand v5
- * (research §12.7). Measured, not argued.
+ * Measured, not argued.
  *
  * Returns the REASON as well as the verdict, so a failure names the shape it
  * refused instead of only echoing the text.
@@ -1867,8 +1867,8 @@ console.log("\n[9. RuleCard.tsx] the read-only row a terminal-owned forward gets
   // different sentence for a terminal-owned rule - the one that says deleting
   // the record does NOT stop that forward. Folding them into
   // `pageStops || hostOwned` is the mutation this pins: the dialog would then
-  // promise a stop it cannot perform, which is the false promise in a
-  // destructive confirm this round exists to remove.
+  // promise a stop it cannot perform, which is a false promise in a
+  // destructive confirm.
   //
   // THIS IS THE `hostOwned`-IS-NOT-FOLDED-IN CLAIM AND NOTHING WIDER, which is
   // all a substring can carry: it says the two names appear in that order in
@@ -1882,7 +1882,7 @@ console.log("\n[9. RuleCard.tsx] the read-only row a terminal-owned forward gets
 }
 
 // ===========================================================================
-console.log("\n[10. §1.6 in the second store] every useHostOwnedForwards( selector is primitive");
+console.log("\n[10. the second store] every useHostOwnedForwards( selector is primitive");
 // ===========================================================================
 {
   const hostOwnedSrc = read("src/modules/forwards/hostOwned.ts");
@@ -2061,7 +2061,7 @@ console.log(
   // listeners, zero closes and one named - the pre-fix defect verbatim, against
   // a suite that was green.
   //
-  // §4.60's second half: the suspension point is one the FIXTURE controls. Each
+  // The suspension point is one the FIXTURE controls. Each
   // run's bind is a deferred this block resolves by hand, never an
   // already-settled promise, so every counter below is read after an ordering
   // this file chose.
@@ -2269,7 +2269,7 @@ console.log("\n[13. NEVER REJECTS, structurally] every throw site outside the pe
     mutate?: (deps: AutostartDeps) => void;
   };
   const sites: Site[] = [
-    // The four the reviewer named.
+    // The four throwing sites in `AutostartDeps`.
     {
       name: "the unreadable-store banner throws",
       over: {},
@@ -2296,7 +2296,7 @@ console.log("\n[13. NEVER REJECTS, structurally] every throw site outside the pe
       over: { rules: [t], open: () => Promise.reject("ssh: bind 127.0.0.1:18080 failed") },
       banner: throwingBanner,
     },
-    // And the sites this round's own fixes added.
+    // And the remaining throwing sites.
     {
       name: "deps.hostOwnedBy throws",
       over: {
@@ -2389,7 +2389,7 @@ console.log(
 {
   resetHostOwned();
   const r = rule({ id: "f-yield", name: "yielded", localPort: 0 });
-  // THE STALE READ, which the seam could not express before this round: the
+  // THE STALE READ, which the seam could not express before: the
   // status is answered "stopped" on the FIRST read (before the bind) and
   // "running" on the second (after it). That is the user clicking Start while
   // this bind was in flight, and `controller.ts`'s `markStarting` is
@@ -2473,8 +2473,9 @@ console.log(
 console.log("\n[15. describeError] the two FALLBACK arms, not only the two already covered");
 // ===========================================================================
 // Banner text only, so the stakes are low - but two of four arms untested is
-// the §4.59 shape, and it costs two fixtures. The RAW-STRING arm is covered by
-// section 4 and correctly so: a Tauri `invoke` rejects with a raw string, and
+// the shape that ships defects past a green suite, and it costs two fixtures.
+// The RAW-STRING arm is covered by section 4 and correctly so: a Tauri
+// `invoke` rejects with a raw string, and
 // that is how the backend's own `ssh: bind ... failed` text reaches the banner
 // at all. The `Error` arm is covered by section 7. These are the other two.
 {
@@ -2508,7 +2509,7 @@ console.log("\n[15. describeError] the two FALLBACK arms, not only the two alrea
 }
 
 // ===========================================================================
-console.log("\n[16. VLT-94's load-bearing half] autostart never writes the PAGE's store");
+console.log("\n[16. mutual exclusion's load-bearing half] autostart never writes the PAGE's store");
 // ===========================================================================
 {
   // Read after every section above has run, with NO reset in between - the
@@ -2652,7 +2653,7 @@ console.log("\nforward-autostart-verify: OK\n");
 //                                                          every index comparison
 //                                                          passed.
 //   Y8    `prettier --write --print-width 60` over all   GREEN, the paired control
-//           seven src files this round pins (770             - BUT ONLY AFTER
+//           seven src files this file pins (770              - BUT ONLY AFTER
 //           changed lines; at this repo's printWidth of      `findCallsTo` was
 //           100 the reflow would have been a no-op, so       fixed to normalise the
 //           the narrower width is what makes the            CALLEE text. On the
@@ -2669,7 +2670,7 @@ console.log("\nforward-autostart-verify: OK\n");
 //                                                          An exact-text pin needs
 //                                                          its reformat control, and
 //                                                          this is the second time
-//                                                          in this wave that the
+//                                                          in this file that the
 //                                                          control is what found the
 //                                                          defect.
 // ----------------------------------------------------------------------------

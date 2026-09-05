@@ -30,11 +30,11 @@
  * 6. A page leaf must round-trip its `page` value and rename, inside a split
  *    exactly like any other kind, and an unrecognised `page` value (a newer
  *    build's page, or hand-edited state) must restore as Hosts rather than crash
- *    or drop the leaf. Hosts is the only page that may BE a leaf since DCR-1; a
+ *    or drop the leaf. Hosts is the only page that may BE a leaf; a
  *    saved `vault`/`forwards` leaf is dropped on restore, which is
  *    `scripts/rail-views-verify.ts`.
  * 7. Switching to (or creating) a workspace with no saved tabs must land on
- *    the Hosts page, matching the startup fallback (decision 9) instead of
+ *    the Hosts page, matching the startup fallback instead of
  *    reverting to a local shell; a workspace that does have saved tabs must
  *    still restore them untouched. And the fallback tab must itself survive a
  *    restart, since it is snapshotted like any other tab.
@@ -75,7 +75,7 @@ let nextId = 1;
 const id = () => nextId++;
 
 /**
- * `savedToTab` returns null for a tab that does not survive restore - DCR-1's
+ * `savedToTab` returns null for a tab that does not survive restore - the
  * dropped Vault/Port-Forwarding leaves. Every case below restores a tab that is
  * supposed to come back, so a null here is the check failing, not a branch to
  * handle. The rail-view cases assert on `savedToTab` / `restoreSavedTabs`
@@ -128,7 +128,7 @@ function rdp(leafId: number, rdpConnectionId: string): PaneNode {
   return { kind: "leaf", id: leafId, leafKind: "rdp", rdpConnectionId, sizeMode: "preset" };
 }
 /** A page leaf: nothing but which page it is. `TabPageKind`, so a Vault or
- *  Port-Forwarding leaf cannot be built here either - since DCR-1 that is a
+ *  Port-Forwarding leaf cannot be built here either - that is a
  *  type error, not a fixture. See `scripts/rail-views-verify.ts`. */
 function page(leafId: number, p: TabPageKind): PaneNode {
   return { kind: "leaf", id: leafId, leafKind: "page", page: p };
@@ -563,7 +563,7 @@ console.log("\n[page] a page leaf round-trips its page value, name and tree shap
 
 // 6. A page leaf's whole restorable identity is which page it is.
 //
-// `hosts` throughout, not `vault`: since DCR-1 the only page that may be a tab
+// `hosts` throughout, not `vault`: the only page that may be a tab
 // leaf is Hosts, and a saved `vault`/`forwards` leaf is DROPPED on restore rather
 // than round-tripped. That migration is `scripts/rail-views-verify.ts`; what is
 // checked here is that the surviving kind is unaffected by it.
@@ -685,7 +685,7 @@ console.log(
   "\n[switch] switching to (or creating) an empty workspace opens Hosts, not a shell; a saved one restores untouched",
 );
 
-// `tabsForWorkspaceEntry` is decision 9's runtime counterpart to
+// `tabsForWorkspaceEntry` is the runtime counterpart to
 // `useWorkspacePersistence`'s startup fallback, and the single resolver both
 // `switchToWorkspace` and `closeWorkspace` go through. It lives in serialize.ts
 // (not beside those callers in `useWorkspaceSwitching`, whose module pulls in
@@ -719,7 +719,7 @@ console.log(
 // The fallback tab has to survive a restart like any other tab: it is
 // snapshotted on the first save, so a page leaf that failed to round-trip would
 // turn a fresh profile's only tab into an empty terminal on the next launch -
-// silently reintroducing exactly the shell that decision 9 replaced.
+// silently reintroducing exactly the shell the Hosts fallback replaced.
 {
   let n = 1;
   const allocId = () => n++;

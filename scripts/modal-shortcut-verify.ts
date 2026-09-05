@@ -1,5 +1,5 @@
 /**
- * Self-check for VLT-30: global shortcuts must not fire through an open
+ * Self-check: global shortcuts must not fire through an open
  * Dialog/AlertDialog (repro: Ctrl+W closed the tab out from under the open
  * host editor and silently discarded the in-progress edit).
  *
@@ -40,7 +40,7 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 /**
  * A line with its trailing `//` comment removed, string literals respected.
  *
- * VLT-33; canonical copy in `scripts/host-editor-verify.ts`, duplicated here on
+ * The canonical copy is in `scripts/host-editor-verify.ts`, duplicated here on
  * purpose (no shared module between these scripts, and no `scripts/lib`). A
  * character scan rather than a regex: a `//` inside a string is not a comment,
  * and a regex alternation over string literals desyncs on the first unbalanced
@@ -70,16 +70,16 @@ function stripComments(src: string): string {
   // legal INSIDE JSX children, and the line-based filter below only ever
   // recognised `//`, `/*` and `*` starting a trimmed line, none of which match
   // a line starting `{`. `read()` above strips `dialog.tsx` and
-  // `CommandPalette.tsx` (both `.tsx`), so this file is exposed exactly as
-  // VLT-83 describes: a deleted call left behind as `{/* ... */}` would pass
-  // every positive check that reads through `read()`.
+  // `CommandPalette.tsx` (both `.tsx`), so this file is exposed to it: a
+  // deleted call left behind as `{/* ... */}` would pass every positive check
+  // that reads through `read()`.
   //
-  // VLT-83: the inner group must NOT be allowed to cross a `*/` while hunting
+  // The inner group must NOT be allowed to cross a `*/` while hunting
   // for one followed by `}` - a lazy `[\s\S]*?` is still permitted to do that,
   // and a type literal opening `{ /** ... */ x: T }` then swallows everything
   // up to some later, unrelated `*/}`. The negative lookahead below forbids
   // that: the first `*/` is final, either a real `{/* ... */}` or the match
-  // fails right there. Copied from `host-editor-verify.ts:191`'s fixed form;
+  // fails right there. Copied from `host-editor-verify.ts`'s `stripComments`;
   // see that file's comment for the measured damage the lazy form did.
   const withoutJsxComments = src.replace(/\{\s*\/\*(?:(?!\*\/)[\s\S])*\*\/\s*\}/g, "");
   return withoutJsxComments
@@ -94,7 +94,7 @@ function stripComments(src: string): string {
 
 /**
  * Every source-text check in this file is POSITIVE - "this expression is
- * present" - which is exactly the shape a comment satisfies (VLT-33). This file
+ * present" - which is exactly the shape a comment satisfies. This file
  * read raw text until now, so `return openModal(modalName);` deleted and left
  * behind as `// return openModal(modalName);` would have passed every wiring
  * check below.
@@ -116,7 +116,7 @@ function check(name: string, ok: boolean, detail?: unknown): void {
   failed++;
 }
 
-// VLT-83 self-test: both directions of stripComments' JSX-comment branch, run
+// Self-test: both directions of stripComments' JSX-comment branch, run
 // once so a regression here cannot hide behind every other check in this
 // file. Placed after check()/failed are initialised rather than immediately
 // under the stripComments declaration - failed is a `let`, and calling
@@ -213,7 +213,7 @@ check("starts closed", isModalOpen() === false);
   check("released -> closed", isModalOpen() === false);
 }
 
-console.log("[behavioural] nesting: a COUNT, not a boolean (§ VLT-30 req 4)");
+console.log("[behavioural] nesting: a COUNT, not a boolean");
 {
   const releaseOuter = openModal();
   const releaseInner = openModal();
@@ -238,7 +238,7 @@ console.log("[behavioural] idempotent release: leak-safety building block");
   check("clean after", isModalOpen() === false);
 }
 
-console.log("[behavioural] which modal is on TOP (VLT-59: the palette exemption)");
+console.log("[behavioural] which modal is on TOP (the palette exemption)");
 {
   __resetModalRegistryForTest();
   check(
@@ -259,7 +259,7 @@ console.log("[behavioural] which modal is on TOP (VLT-59: the palette exemption)
   );
   check("and something IS open, so the gate applies", isModalOpen());
 
-  // THE NEGATIVE HALF (§4.30): the case the exemption exists for must still
+  // THE NEGATIVE HALF: the case the exemption exists for must still
   // work, or this is just the suppression with extra steps.
   releaseEditor();
   const releasePalette = openModal(COMMAND_PALETTE_MODAL);
@@ -318,7 +318,7 @@ check(
   // The gate now asks the modal STACK, not the chord's identity: `isModalOpen()`
   // decides whether it applies at all, and the exempt chord gets through only
   // while the modal it names is the topmost one. A gate that still reads
-  // `MODAL_GATE_EXEMPT.has(...)` is VLT-59(b) back again, so the shape is
+  // `MODAL_GATE_EXEMPT.has(...)` is the chord-identity gate back again, so the shape is
   // pinned rather than merely "isModalOpen appears somewhere".
   const gateMatch =
     /if\s*\(\s*isModalOpen\(\)\s*&&\s*\(\s*mayActOn === undefined\s*\|\|\s*!isTopModal\(mayActOn\)\s*\)\s*\)\s*return\s*;/.exec(
@@ -411,7 +411,7 @@ console.log("[source-text] the palette registers under the name the gate asks fo
 }
 
 console.log("[source-text] the two primitives register on open, release on close/unmount");
-// `Dialog` alone can be handed a name to register under (VLT-59), so it calls
+// `Dialog` alone can be handed a name to register under, so it calls
 // `openModal(modalName)` and carries that in its dep array. Spelled out per
 // primitive rather than as one loose pattern: a check that accepted "any
 // argument, any deps" would stop noticing the mechanism it is here to pin.
@@ -495,7 +495,7 @@ check(
 // `<Dialog><DialogTrigger>...</DialogTrigger><DialogContent>...</DialogContent></Dialog>`
 // - open only via the Trigger's own internal state, no `open` prop at all -
 // imports the primitive, renders it, and would pass every check above while
-// being exactly the shape VLT-30's registration effect does not cover (see
+// being exactly the shape the registration effect does not cover (see
 // the "future fully-uncontrolled dialog" line in both primitives' own
 // comments). So: every root tag must show SOME form of control - a literal
 // `open=` attribute, the direct form every consumer but one uses, or a

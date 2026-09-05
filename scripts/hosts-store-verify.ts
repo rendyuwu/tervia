@@ -54,7 +54,7 @@
  *    ACCOUNT. There is no `secrets_list` command, so an account nothing
  *    references is unreachable, not merely untidy. A delete clears the host's
  *    accounts; an upsert clears the ones the new record can no longer name, but
- *    only AFTER the new record is on disk (§5.3), because a protocol change has no
+ *    only AFTER the new record is on disk, because a protocol change has no
  *    copy step and this layer cannot put a secret back; a partial write on a
  *    brand-new host rolls back. The two OLD connection stores' accounts are swept
  *    once by `legacyPurge.ts`, which is the only thing that can ever name them
@@ -123,8 +123,8 @@ let failed = 0;
  * A canonical rendering of a value, used to compare AND to report - so what a
  * failure prints is what was actually compared.
  *
- * Deliberately not `JSON.stringify`, which §5.18 lists as one of the shapes that
- * passed against implementations it existed to reject. Two reasons, and the pin
+ * Deliberately not `JSON.stringify`, which is one of the comparison shapes that
+ * has passed against implementations it existed to reject. Two reasons, and the pin
  * assertions below are exposed to both.
  *
  * It DROPS `undefined` properties, so `{ pins: undefined }` and `{}` serialize
@@ -199,8 +199,8 @@ type SecretCall = {
   op: "getAll" | "set" | "delete" | "copy";
   service: string;
   accounts: string[];
-  /** `copy` only, and separate because a copy can CROSS services: 6e moves a host
-   *  password onto `tervia-vault`. */
+  /** `copy` only, and separate because a copy can CROSS services: moving a host
+   *  password onto `tervia-vault` does. */
   toService?: string;
 };
 
@@ -601,9 +601,10 @@ console.log("\n[duplicate] a copy owns its own secrets and inherits no pin");
 // ---------------------------------------------------------------------------
 console.log("\n[duplicate] an RDP password DOES travel, still without a read-back");
 {
-  // Accepted gap 3 of the 6c handoff, closed. There was no `secrets_copy`, so
-  // carrying an RDP password would have meant reading it into the webview - the
-  // Phase 5 invariant - and the copy was saved with `hasPassword: false` instead.
+  // There was no `secrets_copy` when this was written, so carrying an RDP
+  // password would have meant reading it into the webview - which an RDP
+  // password must never enter - and the copy was saved with
+  // `hasPassword: false` instead.
   // `RdpPane` pre-flights that flag and refuses to connect, so a duplicated RDP
   // host was unconnectable until the password was re-entered by hand.
   const h = harness();
@@ -703,13 +704,12 @@ console.log("\n[duplicate] a vault-bound copy shares the identity instead of the
 // ---------------------------------------------------------------------------
 console.log("\n[duplicate] a copy's flags describe what the COPY got, not what the source claimed");
 {
-  // The source's record claims a password its account no longer holds - which is
-  // VLT-22's exact shape, a `.bak` restore rolling metadata back over a rotation
-  // while `secrets.rs` stayed current. The source's flags arrive on the copy for
+  // The source's record claims a password its account no longer holds - a `.bak`
+  // restore rolling metadata back over a rotation while `secrets.rs` stayed
+  // current. The source's flags arrive on the copy for
   // free through the `rebound` spread, and propagating that claim writes a flag
   // that is wrong FOREVER: this layer never reads a secret back, so nothing can
-  // correct it, and `RdpPane`'s pre-flight and every export key on it. §5.4 is the
-  // same failure with a different cause.
+  // correct it, and `RdpPane`'s pre-flight and every export key on it.
   const flags = (host: Host | undefined): unknown =>
     host && host.protocol === "ssh" && host.credential.kind === "inline"
       ? [
@@ -771,8 +771,8 @@ console.log("\n[duplicate] a copy that cannot carry a secret writes no record at
 {
   // Secrets FIRST, record SECOND, and the order is not interchangeable. Copying
   // is additive - it touches only accounts under an id no record names yet - so a
-  // failure here leaves bytes at an unreferenced account, which is VLT-23's
-  // orphan class and nothing that is WRONG, just unreachable. The other order
+  // failure here leaves bytes at an unreferenced account, which is an orphan
+  // and nothing that is WRONG, just unreachable. The other order
   // leaves a saved record claiming secrets that are not there, permanently.
   const h = harness({
     hosts: [
@@ -1240,7 +1240,7 @@ console.log("\n[accounts] no secret outlives the record naming it");
 // ---------------------------------------------------------------------------
 console.log("\n[accounts] the release happens AFTER the record is written, never before");
 {
-  // The order is the whole point (§5.3). A protocol change has no copy step, so
+  // The order is the whole point. A protocol change has no copy step, so
   // releasing first and then failing to persist destroys the user's only copy of a
   // key while the stored record still claims it - and this layer never reads a
   // secret, so it cannot put one back.
@@ -1274,7 +1274,7 @@ console.log("\n[accounts] the release happens AFTER the record is written, never
   );
   check("no delete was even attempted", torn.deletes().length, 0);
 
-  // The residual worst case, which §5.3 ranks as the lesser evil: a good write
+  // The residual worst case, and the lesser evil of the two: a good write
   // followed by a release that fails. It must say the record WAS saved, or the
   // user re-enters an edit that already landed.
   const orphan = harness({
@@ -1534,8 +1534,8 @@ console.log("\n[delete] refused while an RDP host tunnels through it, not cascad
 // ---------------------------------------------------------------------------
 console.log("\n[delete] refused while another host JUMPS through it, not cascaded");
 {
-  // Settled in 6d, reversing what `deleteConnection` did before the two stores
-  // merged. A cleared `proxyJumpId` is a SILENT DIRECT DIAL: the row goes on
+  // Reversing what `deleteConnection` did before the two stores merged.
+  // A cleared `proxyJumpId` is a SILENT DIRECT DIAL: the row goes on
   // connecting and changes ROUTE, and the pin is what makes it silent rather than
   // merely quiet - `lastFingerprint` is keyed per HOST ID, so the same machine
   // reached directly presents the same host key, matches the pin the row already
@@ -1812,7 +1812,7 @@ console.log("\n[pins] one pin per (host, address), in whichever field the protoc
 // record still named - so testing a new address required Forget first, and Cancel
 // then reverted the address while nothing reverted the pin. The host was left with
 // no pinned key at all, silently on TOFU, accepting whatever the next connect was
-// presented. It failed OPEN, which is why §5.16's inverse (a foreign fingerprint
+// presented. It failed OPEN, which is why the inverse (a foreign fingerprint
 // persisted by a cancelled dialog, failing closed as a MISMATCH) got fixed first.
 //
 // The store's half of that fix is keying, and its contract is exactly two things:
@@ -1964,7 +1964,7 @@ console.log("\n[pins] an unkeyed pin is attributed rather than dropped or moved"
   // can tell that from a caller for which it is true. So the key already keyed there
   // wins and the arriving pin is DROPPED: overwriting would put a different
   // machine's key at an address the user may return to, and that connect aborts as a
-  // MISMATCH, which reads as an attack (§5.16) out of a save about something else.
+  // MISMATCH, which reads as an attack out of a save about something else.
   // Dropping leaves that address exactly as fail-open as it was before the pin
   // existed. Both leave the new address unpinned; only overwriting invents a false
   // alarm.

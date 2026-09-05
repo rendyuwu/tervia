@@ -1,6 +1,6 @@
 /**
  * Self-check for the host search ranking shared by the Hosts page search box
- * and the header quick-connect (research §5.5, §5.8, §12.11).
+ * and the header quick-connect.
  * Run: `pnpm verify` (or `npx tsx scripts/hosts-search-verify.ts` to iterate).
  *
  * The whole point of ONE ranking function with two mount points is that the
@@ -617,7 +617,7 @@ console.log("\n[two surfaces] one row builder, so the page and the header cannot
 // The structural half. A behavioural check cannot see which builder a React
 // component calls - this script has no DOM and `HeaderQuickConnect.tsx` cannot be
 // imported under plain node - so it is asserted against the source text, the same
-// workaround handoff §5.12 records for `workspace-serialize-verify.ts`.
+// workaround `workspace-serialize-verify.ts` uses.
 console.log("\n[two surfaces] neither mount point assembles its own rows");
 {
   const header = read("src/modules/header/HeaderQuickConnect.tsx");
@@ -661,11 +661,11 @@ console.log("\n[header] a click on the input cannot close the input's own list")
 
 // --- gate: break the implementation and watch each check actually fail --
 //
-// Handoff §5.12: a check that has not been watched fail is not a check. This is
+// A check that has not been watched fail is not a check. This is
 // the record for the checks added or repaired in THIS pass, and only those. It is
 // NOT a record for every check in the file - the original pass's mutation table
 // was never committed anywhere, and the comment that used to sit here promised a
-// table it did not contain, which is §5.12's own anti-pattern wearing §5.12's
+// table it did not contain, which is an unwatched check wearing a watched one's
 // clothes. Each row was run by editing the named file, running this script, and
 // restoring from a byte-exact copy verified with `diff`.
 //
@@ -718,8 +718,8 @@ console.log("\n[header] a click on the input cannot close the input's own list")
 //                                                  copy"
 //
 // Not run: "the Hosts page builds its rows with searchRows" would mean editing
-// `HostsPage.tsx`, which this pass does not own. The regex is the same one the
-// header check uses, against the same string, so it fails the same way.
+// `HostsPage.tsx`. The regex is the same one the header check uses, against
+// the same string, so it fails the same way.
 
 console.log(failed === 0 ? "\nAll hosts-search checks passed." : `\n${failed} check(s) FAILED.`);
 process.exit(failed === 0 ? 0 : 1);

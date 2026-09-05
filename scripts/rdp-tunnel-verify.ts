@@ -81,7 +81,7 @@
  *    with no generation, so a close fired and forgotten can land on a listener
  *    that a re-open has since bound on that same port: a Stop returning before
  *    the backend heard it, then a Start on the same pinned port, reads from the
- *    page as "Start silently does nothing every other time" (VLT-96). Only a
+ *    page as "Start silently does nothing every other time". Only a
  *    stop while the dial is STILL IN FLIGHT can tell the two forms apart, which
  *    is what the last `[stop]` fixture sets up.
  */
@@ -627,7 +627,7 @@ console.log("\n[stop] releasing the last reference frees the port");
   // generation, so a close still in flight names whatever is listening on that
   // port - a re-open's brand-new listener included. A Stop that resolved before
   // the backend heard it, followed by a Start on the same pinned port, is
-  // therefore "Start silently does nothing every other time" (VLT-96).
+  // therefore "Start silently does nothing every other time".
   //
   // Every fixture above closes a forward whose open has already RESOLVED, and
   // for those the fire-and-forget form is INDISTINGUISHABLE from this one: its

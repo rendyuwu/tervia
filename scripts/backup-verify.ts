@@ -42,7 +42,7 @@
  * again: `upsertHost` releases every account the new record can no longer NAME,
  * so a row that arrives vault-bound (owning none) or on the other protocol
  * (owning fewer) deletes the saved host's secrets, with nothing copied first and
- * no `secrets_list` to find what is left (§9.7).
+ * no `secrets_list` to find what is left.
  *
  * `hostRefs` and `storedFields` are reached from `backup/apply.ts` rather than
  * from `backup/file.ts`, and they are the producing half of the
@@ -683,7 +683,7 @@ check(
 );
 
 console.log("\n[dropped fields] a field the store has no home for must not ride in");
-// A forward rule is its own record now (decision 7), so `Host` has no
+// A forward rule is its own record now, so `Host` has no
 // `forwards` and the store would carry a key nothing ever reads or edits.
 check(
   "`forwards` does not survive a payload row",
@@ -1247,10 +1247,11 @@ check(
   Object.prototype.hasOwnProperty.call(carryPins([host(ssh({ id: "h-2" }))], [])[0], "pins"),
   false,
 );
-// §5.6 is not weakened by this pass running after it: it touches `pins` and nothing
-// else, so the credential the vault pass CHOSE is the one that gets written, and the
-// row still names the address the file gave it. A version that spread the saved
-// record instead of the incoming one would silently undo both.
+// `resolveIdentityBindings` is not weakened by `carryPins` running after it: this
+// pass touches `pins` and nothing else, so the credential the vault pass CHOSE is
+// the one that gets written, and the row still names the address the file gave it.
+// A version that spread the saved record instead of the incoming one would
+// silently undo both.
 const afterBindings = carryPins(
   resolveIdentityBindings(
     [

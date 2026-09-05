@@ -1,12 +1,12 @@
 /**
- * Self-check for the vault editors' pure layer (6e wave 3, step 1).
+ * Self-check for the vault editors' pure layer.
  * Run: `pnpm verify vault-draft` (or `npx tsx scripts/vault-draft-verify.ts` to iterate).
  *
  * `src/modules/vault/editor/draft.ts` is pure - no React, no store, no Tauri,
  * no keychain read - which is the only reason this file can exist, the same
- * argument `vault-page-verify.ts`'s own header makes for `page/derive.ts`. This
- * script is that module's only caller: steps 2 and 3 wire the two editor
- * dialogs to it.
+ * argument `vault-page-verify.ts`'s own header makes for `page/derive.ts`. It
+ * is imported by both vault editor dialogs, `HostEditorDialog.tsx`,
+ * `credentialMove.ts` and `editor/credentialChoice.ts`.
  *
  * Modelled on `vault-page-verify.ts`: same `canonical()` (JSON is key-order
  * sensitive and drops `undefined` keys, and both matter here - `keyId: undefined`
@@ -14,7 +14,7 @@
  * `check`/`ok` pair, fixtures, numbered sections, and a mutation table at the
  * tail recording every mutation actually run against this file. Copied rather
  * than imported: there is no `scripts/lib`, and every script in this suite
- * duplicates these (VLT-33).
+ * duplicates these.
  */
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -127,7 +127,7 @@ console.log(
   );
 }
 
-// --- 2. identityRecordFrom - the VLT-73 rule, literal per row ---------------
+// --- 2. identityRecordFrom - the keyId rule, literal per row ----------------
 console.log("\n[2] identityRecordFrom - keyId is written ONLY when authMode is 'key'");
 {
   check(
@@ -145,7 +145,7 @@ console.log("\n[2] identityRecordFrom - keyId is written ONLY when authMode is '
     },
   );
   check(
-    "password auth drops a key still sitting in the draft (VLT-73)",
+    "password auth drops a key still sitting in the draft",
     identityRecordFrom("i-1", identityDraft({ authMode: "password", keyId: "k-1" })),
     {
       id: "i-1",
@@ -204,19 +204,20 @@ console.log("\n[2] identityRecordFrom - keyId is written ONLY when authMode is '
   );
 }
 
-// --- 2b. identityRecordFrom's ONE opt-out, "keep" (wave 4, P0-2) ------------
+// --- 2b. identityRecordFrom's ONE opt-out, "keep" ---------------------------
 console.log('\n[2b] identityRecordFrom("keep") - the documented opt-out, and its default');
 {
   // `"keep"` exists for exactly one caller: `convertHostToVault`
   // (`../../hosts/credentialMove.ts`), which mints a `VaultKey` out of a stored
   // host's PEM and then has to leave something naming it - `deleteKey`'s in-use
   // guard finds holders by `identity.keyId`, so a key nothing names is one Vault
-  // page click from destroyed. Owner's decision, 2026-09-01: that is worse than
-  // the off-spec record VLT-73 describes, so `"keep"` builds the off-spec one.
+  // page click from destroyed. That is worse than the off-spec record - a
+  // password-auth identity that still names a key - so `"keep"` builds the
+  // off-spec one.
   //
   // The opt-out lives HERE rather than as a hand-assembled `VaultIdentity` at
-  // that call site, because this function is VLT-73's single normaliser
-  // (wave-3 boundary 6) and a second assembly is the drift it prevents.
+  // that call site, because this function is the single normaliser for that
+  // rule and a second assembly is the drift it prevents.
   // `credential-move-verify.ts` sections 4 and 4b are where the caller's own use
   // of it is pinned; these rows are the rule itself.
   check(
@@ -259,7 +260,7 @@ console.log('\n[2b] identityRecordFrom("keep") - the documented opt-out, and its
     identityRecordFrom("i-1", identityDraft({ authMode: "key", keyId: "" }), "auth-mode").keyId,
     "",
   );
-  // THE DEFAULT IS THE SAFE ONE. A caller that says nothing gets VLT-73's rule;
+  // THE DEFAULT IS THE SAFE ONE. A caller that says nothing gets the drop rule;
   // the opt-out has to be asked for by name. Checked as an equality between the
   // two-argument and the explicit three-argument call, so this cannot pass by
   // the default silently becoming "keep" - the row above would fail, and so
@@ -331,7 +332,7 @@ console.log("\n[4] validateIdentityDraft");
     null,
   );
   check(
-    "password auth with a blank password passes - VLT-44, and the row that makes 'missingSecret' reachable",
+    "password auth with a blank password passes - the row that makes 'missingSecret' reachable",
     validateIdentityDraft(identityDraft({ authMode: "password", password: "" })),
     null,
   );
@@ -465,11 +466,11 @@ console.log(
 {
   const draftSrc = read("src/modules/vault/editor/draft.ts");
 
-  // VLT-80/7d(a): an IMPORT-SPECIFIER parse, not a quoted-needle scan. The
-  // needle list this replaced forbade the exact quoted text `"../store"`,
-  // `"../adapters"`, `"../resolve"` and three `@/modules/vault/*` spellings -
-  // and `import { findKey } from "../../vault/store";` (P10, reviewer A's own
-  // executed evasion) matches none of them: it resolves under this tsconfig
+  // An IMPORT-SPECIFIER parse, not a quoted-needle scan. The needle list this
+  // replaced forbade the exact quoted text `"../store"`, `"../adapters"`,
+  // `"../resolve"` and three `@/modules/vault/*` spellings - and
+  // `import { findKey } from "../../vault/store";`, an executed evasion,
+  // matches none of them: it resolves under this tsconfig
   // and the old check went green over it. Enumerating forbidden spellings
   // cannot close a class with infinitely many members (`../../vault/store`,
   // `../../../vault/store` from a nested file, `@/modules/vault/store`, ...);
@@ -535,7 +536,7 @@ console.log(
   ok("passphraseHelp's two branches are distinct", passphraseHelp(true) !== passphraseHelp(false));
 }
 
-// --- 9. encryptedKeyRefusal (VLT-77/7b) --------------------------------------
+// --- 9. encryptedKeyRefusal --------------------------------------------------
 console.log(
   "\n[9] encryptedKeyRefusal - refuses only an ENCRYPTED body saved with a BLANK (trimmed) passphrase",
 );
@@ -571,11 +572,9 @@ process.exit(failed === 0 ? 0 : 1);
 
 // --- mutation table ----------------------------------------------------
 //
-// Handoff discipline (this wave's plan, step 1): a check that has not been
-// watched fail is not a check. Every mutation below was actually run against
-// the file named, its exit code recorded, and the source restored by hash -
-// see /tmp/wave3-step1-pure/MUTATIONS.md for the full before/after/restore
-// transcript.
+// A check that has not been watched fail is not a check. Every mutation below
+// was actually run against the file named, its exit code recorded, and the
+// source restored by hash.
 //
 //   Mutation                                          Check(s) it killed
 //   -------------------------------------------------  ---------------------------
@@ -603,9 +602,8 @@ process.exit(failed === 0 ? 0 : 1);
 //   V9: draft.ts - privateKeyHelp changed to return      section 8's distinctness
 //     "Paste a key." unconditionally                       check
 //
-// Wave 4's P0 round added section 2b. Its mutations were run from
-// credential-move-verify's side, where the caller lives - see that file's own
-// table and /tmp/wave4-fix-p0-authmode/MUTATIONS.md. The one that lands here:
+// Section 2b's mutations were run from credential-move-verify's side, where
+// the caller lives - see that file's own table. The one that lands here:
 //
 //   H2: credentialMove.ts - the third argument dropped   credential-move-verify
 //     from identityRecordFrom(identityId, draft, "keep")   sections 4 and 4b.

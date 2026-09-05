@@ -459,7 +459,7 @@ console.log(
   "\n[cascade wiring] HostsPage.confirmDelete passes releaseRulesForHost by name - not noForwardRules, and not a wrapper",
 );
 {
-  // Self-test for `stripComments`, per the plan's §3 preamble: a comment that
+  // Self-test for `stripComments`: a comment that
   // is NOT a JSX comment expression (a plain block comment mid-line, inside a
   // type literal) must survive, and code that follows it must too; a JSX
   // comment expression must not.
@@ -482,7 +482,7 @@ console.log(
   // NEGATIVE, over RAW source: a negative over raw source is what catches a
   // comment that still CLAIMS the old wiring even after the call site itself
   // was fixed - stripping comments first would blind this half to exactly
-  // that (§3 preamble). `noForwardRules` stays exported from `hosts/store.ts`
+  // that. `noForwardRules` stays exported from `hosts/store.ts`
   // and stays in `hosts-store-verify.ts`'s fixtures; this checks only that
   // `HostsPage.tsx` no longer names it, anywhere.
   check(
@@ -493,7 +493,7 @@ console.log(
 
   // POSITIVE, over COMMENT-STRIPPED source and the PARSED call: a positive
   // over raw source is satisfied by a comment that merely claims the wiring
-  // is right (§3 preamble), and a substring check on top of that
+  // is right, and a substring check on top of that
   // (`src.includes("releaseRulesForHost")`) is satisfied by
   // `(id) => { releaseRulesForHost(id); return; }` - one line, compiles, and
   // silently un-awaits the cleanup, so the fail-closed ordering

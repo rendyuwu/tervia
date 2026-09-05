@@ -1,5 +1,5 @@
 /**
- * Self-check for 6e wave 4 step 5: moving a host's credentials into the vault
+ * Self-check for moving a host's credentials into the vault
  * and back (`src/modules/hosts/credentialMove.ts`), and the credential
  * picker's pure vocabulary (`src/modules/hosts/editor/credentialChoice.ts`).
  * Run: `pnpm verify credential-move` (or `npx tsx
@@ -23,19 +23,20 @@
  *    still store a stray private key; `inlineNeedsKey` reads the credential's
  *    own flags and `inlineAuthMode` reads the mode off the same arm, so the two
  *    cannot disagree. They used to: the mode arrived from the caller's draft,
- *    and that single disagreement was both of wave 4's P0s - a stranded
+ *    and that single disagreement produced two defects - a stranded
  *    plaintext password one way (group 8's third arm), a `VaultKey` that nothing
  *    names and `deleteKey` will happily destroy the other (group 4). The
  *    identity therefore NAMES whatever key the copy minted, whatever the mode
- *    says: the record VLT-73 calls off-spec, accepted 2026-09-01 because the
- *    alternative is losing the user's only copy of a private key.
+ *    says: an off-spec record (a password-auth identity that still names a
+ *    key), accepted because the alternative is losing the user's only copy of a
+ *    private key.
  *
  * 3. A COPY THAT FOUND NOTHING SETS NO FLAG. `secrets.copy` reports `false` for
  *    an empty source, and that must reach the new record as an ABSENT secret
  *    field, not a written empty string - the same rule `hosts-store-verify.ts`
  *    pins for `duplicateHost`.
  *
- * 4. ORDERING (research §5.3): every copy happens before the host record is
+ * 4. ORDERING: every copy happens before the host record is
  *    rewritten, and the host's own accounts are released only AFTER that
  *    rewrite. A crash between the two must cost at most an orphan account,
  *    never a key that existed nowhere else. The corollary, and the reason
@@ -67,8 +68,8 @@
  *    `credentialChoice.ts` exists to make the user confirm it first.
  *
  * 9. `credentialChoice.ts` IS PURE VOCABULARY, checked by value: what a picker
- *    selection MEANS against a stored record (or none, in create mode -
- *    amendment A1), and the exact confirmation text for each outcome.
+ *    selection MEANS against a stored record (or none, in create mode), and
+ *    the exact confirmation text for each outcome.
  *
  * 10. THE TWO NEW FILES READ NO SECRET AND CLAIM NO SAFETY. Neither calls
  *     `getAll(`, `secrets_get` or the resolver that would read one back, and
@@ -585,8 +586,8 @@ console.log(
   // A host on PASSWORD auth that also stores a private key - `inlineNeedsKey`
   // reads `hasPrivateKey`/`hasKeyPassphrase` off the credential, and
   // `inlineAuthMode` reads the mode off the same arm, so the two cannot
-  // disagree. This is accepted gap 12's record: key material that outlived the
-  // mode that used it.
+  // disagree. This is the accepted case: key material that outlived the mode
+  // that used it.
   const host = sshHost({
     id: "h-1",
     credential: {
@@ -628,10 +629,10 @@ console.log(
   );
 
   // ---------------------------------------------------------------------------
-  // P0-2's regression check, and this row carries the OPPOSITE claim it used to.
+  // A regression check, and this row carries the OPPOSITE claim it used to.
   //
   // It read: "the new identity's keyId does not leak it in, since its mode is
-  // password", citing VLT-73 - `identityRecordFrom` drops `keyId` for a non-key
+  // password" - `identityRecordFrom` drops `keyId` for a non-key
   // mode so a password row cannot render a grey key chip that reads as "this
   // identity signs with that key".
   //
@@ -644,11 +645,11 @@ console.log(
   // nothing to refuse over and one click on the Vault page destroys it, from a
   // convert that reported SUCCESS.
   //
-  // Owner's decision, 2026-09-01: the identity names the key whenever one was
-  // minted, regardless of mode. That deliberately builds the record VLT-73 calls
-  // off-spec (accepted gap 12's case: a host that once used key auth, now
-  // authenticates by password, still carries its PEM), and reopens VLT-73's
-  // rendering question earlier than 6g. It is strictly better than the delete.
+  // The identity names the key whenever one was minted, regardless of mode.
+  // That deliberately builds the off-spec record (a host that once used key
+  // auth, now authenticates by password, still carries its PEM), and reopens
+  // the question of how such a row renders. It is strictly better than the
+  // delete.
   // `identityRecordFrom`'s `"keep"` rule is where that opt-out lives - on the
   // single normaliser, not assembled by hand at the call site.
   // ---------------------------------------------------------------------------
@@ -677,8 +678,8 @@ console.log(
   "\n[4b] the caller cannot influence the identity's auth mode - it is derived from the STORED record",
 );
 {
-  // Owner's decision, 2026-09-01: `convertHostToVault`'s `args.identity` carries
-  // no `authMode` at all. It used to, and it was the ROOT CAUSE of both P0s -
+  // `convertHostToVault`'s `args.identity` carries no `authMode` at all. It
+  // used to, and it was the ROOT CAUSE of both defects -
   // the mode came from the caller's draft while `inlineNeedsKey` decided whether
   // a key was needed from the stored record, so the two could disagree in either
   // direction (group 4 is what a disagreement one way did to a key; group 8's
@@ -725,8 +726,8 @@ console.log(
     [fromPassword.identity.authMode, fromKey.identity.authMode, fromAgent.identity.authMode],
     ["password", "key", "agent"],
   );
-  // And decision 2 applies across all three, not only to the password row group
-  // 4 pins: whichever mode the record was on, the minted key ends up named.
+  // And the naming rule applies across all three, not only to the password row
+  // group 4 pins: whichever mode the record was on, the minted key ends up named.
   check(
     "and every one of them names the key that was minted from its PEM",
     [
@@ -781,8 +782,7 @@ console.log("\n[5] convert: RDP moves the password alone and carries the domain"
 console.log("\n[6] a copy that found nothing sets no flag");
 {
   // Seeded claiming `hasPassword: true`, with an EMPTY keychain: the copy finds
-  // nothing, so the new identity must not claim a password either (§1.5, §5
-  // decision 10).
+  // nothing, so the new identity must not claim a password either.
   const host = sshHost({ id: "h-1" });
   const h = harness({ hosts: [host] });
   const result = await convertHostToVault(
@@ -991,8 +991,8 @@ console.log("\n[9] a refused convert leaves no vault record, no copy of the secr
   // `convertHostToVault` mints the new identity (and key), copies the host's
   // accounts onto them and writes both records BEFORE it calls
   // `hosts.upsertHost` - which is the first call in it that can refuse for any
-  // reason beyond its own two pre-checks. That ordering is §4.5's and does not
-  // move; what closes the hole is the compensating delete on the failure path.
+  // reason beyond its own two pre-checks. That ordering does not move; what
+  // closes the hole is the compensating delete on the failure path.
   // Without it every one of those refusals stranded an identity, a key, and a
   // SECOND copy of the host's secret at vault accounts nothing referenced.
   //
@@ -1369,7 +1369,7 @@ console.log(
     );
     check("the shared key's RECORD is byte-identical afterwards", h.keys(), [sharedKey]);
 
-    // The return value (amendment G2): the EXISTING record, not `null`. `null`
+    // The return value: the EXISTING record, not `null`. `null`
     // is the honest answer for "this identity names no key", and on this path
     // the identity names one.
     check("the caller is handed the existing key record, not null", result.key, sharedKey);
@@ -2381,13 +2381,13 @@ console.log("\n[13] detach with the identity gone, or with a key the identity na
   );
   check("nothing was copied", h.copies(), []);
 
-  // Step 3's extension, beyond the plan's own group 13: an identity that DOES
-  // exist but names a key that does not. The password still copies and the
-  // host still detaches; only the key material is reported missing. Read off
-  // the committed `detachHostFromVault`, not from the addendum's paraphrase.
+  // An extension beyond group 13: an identity that DOES exist but names a key
+  // that does not. The password still copies and the host still detaches; only
+  // the key material is reported missing. Read off the committed
+  // `detachHostFromVault`.
   //
   // Near-unreachable today - `upsertIdentity` refuses a dangling `keyId` and
-  // `deleteKey` refuses to orphan one - and reachable only once 6g's import can
+  // `deleteKey` refuses to orphan one - and reachable only once an import can
   // seed a hand-edited file past both guards.
   const idn = identity({
     id: "i-dangling",
@@ -2560,7 +2560,7 @@ console.log("\n[13b] a refused detach takes its copies back off the host's own a
   // NOT reachable from the shipped dialog today: `HostEditorDialog` picks the
   // inline shape off the same `protocol` the host carries, and the protocol
   // toggle is create-mode only while this path is edit-only. It is pinned anyway
-  // because the ordering is the whole guarantee, and 6f/6g's callers arm it.
+  // because the ordering is the whole guarantee, and a later caller arms it.
   //
   // The two assertions are the same pair the rest of this group uses, read the
   // other way round: nothing landed, so there was nothing to take back. Group
@@ -2616,8 +2616,8 @@ console.log("\n[13b] a refused detach takes its copies back off the host's own a
 
   // The stamp refusal, kept for the ERROR rather than for the cleanup: this is
   // the one that arrives as a `HostBindingChangedError`, and it is checked by
-  // instance and by value (§4.39) because `HostEditorDialog`'s recovery arm
-  // reads those three fields off it (VLT-29). A cleanup failure replacing the
+  // instance and by value because `HostEditorDialog`'s recovery arm
+  // reads those three fields off it. A cleanup failure replacing the
   // original error would be invisible to a message-text match.
   const boundElsewhere = sshHost({
     id: "h-4",
@@ -2822,7 +2822,7 @@ console.log("\n[15] bind refuses an identity that does not exist");
 // ===========================================================================
 console.log("\n[16] credentialChoice.ts, by value");
 {
-  // host === null (create mode, amendment A1): every choice answers `none`.
+  // host === null (create mode): every choice answers `none`.
   check("host===null, inline choice -> none", credentialChangeFor(null, CREDENTIAL_CHOICE_INLINE), {
     kind: "none",
   });
@@ -2981,7 +2981,7 @@ console.log("\n[17] the two new files read no secret and claim no safety");
   assert(!moveSrc.includes("secrets_get"), "and never invokes secrets_get directly");
   assert(!moveSrc.includes("resolveSshAuth"), "and never calls the resolver that WOULD read one");
 
-  // Over the RAW source, comments and dead branches included (§4.33) - a
+  // Over the RAW source, comments and dead branches included - a
   // negative that only checked live code would pass the exact defect it exists
   // to catch: a comment claiming a keychain buys more than it does.
   const safetyClaim = /\bsafer\b|\bsecurely\b|\bmore secure\b|\bsafe\b|\bverified\b|\bprotected\b/i;
@@ -2999,12 +2999,12 @@ console.log("\n[17] the two new files read no secret and claim no safety");
 if (failed > 0) throw new Error(`credential-move-verify: ${failed} FAILED`);
 console.log("\ncredential-move-verify: OK\n");
 
-// --- mutation table (wave 4's P0 round) ------------------------------------
+// --- mutation table --------------------------------------------------------
 //
 // The discipline `vault-draft-verify.ts` records at its own tail: a check that
 // has not been watched fail is not a check. Every mutation below was applied to
-// the file named, run, its FAIL lines recorded, and the source restored by hash
-// - see /tmp/wave4-fix-p0-authmode/MUTATIONS.md for the transcript.
+// the file named, run, its FAIL lines recorded, and the source restored by
+// hash.
 //
 //   Mutation                                          Check(s) it killed
 //   -------------------------------------------------  ---------------------------
@@ -3050,12 +3050,12 @@ console.log("\ncredential-move-verify: OK\n");
 //                                                        buildInlineRecord
 //                                                        succeeds, so none of
 //                                                        them can see its throw.
-//   H5: a Prettier-legal reflow of every region this   NOTHING (§4.51), with
-//     round changed, in all five files                   `pnpm format:check`
+//   H5: a Prettier-legal reflow of every region the    NOTHING, with
+//     fix changed, in all five files                     `pnpm format:check`
 //                                                        still at 0 over the
 //                                                        reflowed form.
 //
-// And reviewer B's two, against 13b's new persist-half-landed fixture - the one
+// And two more, against 13b's new persist-half-landed fixture - the one
 // that reaches `undoDetachCopies`' DECLINING branch. Before it existed, both of
 // these left this file at 138 ok / 0 FAIL and `pnpm verify` at 53/53:
 //
@@ -3076,8 +3076,7 @@ console.log("\ncredential-move-verify: OK\n");
 //
 // Residual, stated rather than left to be found: J2's OTHER half - declining
 // when the record is GONE, which the guard's doc says must not stop the cleanup
-// - is still uncovered, because every fixture here has a stored record. It is a
-// register row, not this round's.
+// - is still uncovered, because every fixture here has a stored record.
 //
 // --- mutation table (the fingerprint-dedupe round, sections 10b and 10c) ----
 //
@@ -3135,8 +3134,8 @@ console.log("\ncredential-move-verify: OK\n");
 //                                                       10c.3's undoConvertRecords
 //                                                       argument pin.
 //   K6: a Prettier reflow at --print-width 60 over     NOTHING - after the fix
-//     the whole module (§4.51's pair for 10c.3's        below. Before it, ONE
-//     exact-text pins)                                  FAIL over unchanged code:
+//     the whole module (the paired control             below. Before it, ONE
+//     10c.3's exact-text pins owe)                      FAIL over unchanged code:
 //                                                       argument 0 is itself a
 //                                                       four-argument call, and a
 //                                                       narrow width wraps it and
@@ -3240,7 +3239,7 @@ console.log("\ncredential-move-verify: OK\n");
 //                                                       identical on both sides, so
 //                                                       every one of them is
 //                                                       pre-existing and none is
-//                                                       this round's.
+//                                                       new.
 //   M4: `applyCredentialChange` renamed, so 10d's      ONE, loudly: "applyCredential
 //     anchor resolves to nothing                        Change's body was found in
 //                                                       the dialog". The five rows

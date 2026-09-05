@@ -1,5 +1,5 @@
 /**
- * Self-check for VLT-36: the Hosts page's three row-action error surfaces
+ * Self-check: the Hosts page's three row-action error surfaces
  * route through the shared toast (`components/ui/toast.tsx`) instead of a
  * page-owned, persistent inline line.
  * Run: `pnpm verify hosts-error-toast` (or `npx tsx
@@ -122,7 +122,7 @@ check(
 // two had no dismiss control at all. If any of the three still has this
 // span, the fix did not reach it, regardless of whether it ALSO now calls
 // toast() (a caller could add toast() alongside the old line by mistake,
-// leaving the exact bug VLT-36 reported - a message that never goes away on
+// leaving the exact bug the toast replaced - a message that never goes away on
 // its own - twice, on whichever surface still has the leftover span).
 
 console.log("\n[no leftover inline error line] none of the three still render one of their own");

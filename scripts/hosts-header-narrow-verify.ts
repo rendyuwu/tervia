@@ -1,7 +1,7 @@
 /**
  * Self-check for the page header row pattern - the Hosts page, and the Vault
- * page that reuses it verbatim by decision (DCR-2) - at a FORCED container
- * width (VLT-48, and VLT-41's fix specifically).
+ * page that reuses it verbatim by decision - at a FORCED container width, and
+ * the search box's wrap rule specifically.
  * Run: `pnpm verify hosts-header-narrow` (or `npx tsx
  * scripts/hosts-header-narrow-verify.ts` to iterate).
  *
@@ -19,7 +19,7 @@
  * source files by anchored regex, so a class renamed or removed there fails
  * this file loudly instead of the check silently drifting from what ships.
  *
- * Why this file exists at all (report N-4 / VLT-48): every size floor
+ * Why this file exists at all: every size floor
  * between this pane and the window edge - the sidebar, this workspace
  * column, the right slot, a pane split - is a PERCENTAGE, not a px minimum
  * (see the `@container` comment on `HostsPage`'s root div for the full list
@@ -28,8 +28,8 @@
  * 420px this header's narrow layout keys off, AT ANY WINDOW WIDTH WIDE
  * ENOUGH TO BE USABLE - confirmed by hand at both divider stops across four
  * window widths, landing on an emergent floor (25% of whatever window width
- * was in use), not a constant. The header's `@container` rules, and VLT-41's
- * fix to the search box specifically, are therefore not reachable by
+ * was in use), not a constant. The header's `@container` rules, and the wrap
+ * rule on the search box specifically, are therefore not reachable by
  * hand-resizing anything in a running build - only by shrinking the WINDOW
  * itself down toward its own floor (`tauri.conf.json`'s `minWidth: 640`,
  * the same order of magnitude as this breakpoint). TWO DIFFERENT NUMBERS
@@ -119,7 +119,7 @@ const protocolGroupClass = findClass(
 const searchInputGroupClass = findClass(
   hostsPageSrc,
   /<InputGroup className="([^"]*)">\s*\n\s*<InputGroupAddon>\s*\n\s*<Search \/>/,
-  "search InputGroup (VLT-41)",
+  "search InputGroup",
 );
 const vaultSearchInputGroupClass = findClass(
   vaultPageSrc,
@@ -195,9 +195,9 @@ check("min-w-0 present at 300px", activeAt(protocolGroupClass, 300).has("min-w-0
 check("flex-wrap present at 300px", activeAt(protocolGroupClass, 300).has("flex-wrap"));
 check("flex-wrap present at 1400px", activeAt(protocolGroupClass, 1400).has("flex-wrap"));
 
-// --- VLT-41: the search box now has BOTH a wrap rule and a min-width floor ---
+// --- the search box has BOTH a wrap rule and a min-width floor ---------------
 
-console.log("\n[VLT-41] search box: a wrap rule AND a min-width floor at <=420px");
+console.log("\n[search box] a wrap rule AND a min-width floor at <=420px");
 {
   const at400 = activeAt(searchInputGroupClass, 400);
   check("basis-full (wrap rule) active at 400px", at400.has("basis-full"));
@@ -210,8 +210,8 @@ console.log("\n[VLT-41] search box: a wrap rule AND a min-width floor at <=420px
   const at421 = activeAt(searchInputGroupClass, 421);
   check("basis-full NOT active at 421px (wrap rule is <=420 only)", !at421.has("basis-full"));
   // The 420-480px band is a pre-existing, documented gap (see the comment on
-  // this InputGroup in HostsPage.tsx) - not what VLT-41 reported, and not
-  // widened or narrowed by this fix. Pinned here so a future change to either
+  // this InputGroup in HostsPage.tsx) - not what the wrap rule was added for,
+  // and not widened or narrowed by it. Pinned here so a future change to either
   // boundary has to touch this check on purpose.
   check("min-w-40 NOT active at 421px (the pre-existing 420-480px gap)", !at421.has("min-w-40"));
 
@@ -224,15 +224,14 @@ console.log("\n[VLT-41] search box: a wrap rule AND a min-width floor at <=420px
   check("basis-full NOT active at 1200px", !at1200.has("basis-full"));
 }
 
-// --- DCR-3: the desktop arrow convention, and the only check on it ----------
+// --- the desktop arrow convention, and the only check on it -----------------
 
-console.log("\n[DCR-3] Export points OUT of the box, Import points IN");
+console.log("\n[icons] Export points OUT of the box, Import points IN");
 {
-  // Settled by the owner on 2026-08-28 and pulled forward from wave 4. Two
-  // live conventions exist - the web-form one ("download the result" / "upload
-  // your file") is what shipped, and the desktop one is the reverse - so this
-  // was never a defect and is not self-evident from reading the file. Which
-  // means: without a check, the next person to touch these two buttons flips
+  // Two live conventions exist - the web-form one ("download the result" /
+  // "upload your file") is what shipped, and the desktop one is the reverse -
+  // so this was never a defect and is not self-evident from reading the file.
+  // Which means: without a check, the next person to touch these two buttons flips
   // them back on instinct and nothing notices. Lucide's `Upload` is an arrow
   // leaving a tray (data going OUT = Export); `Download` is an arrow entering
   // one (data coming IN = Import).
@@ -256,19 +255,20 @@ console.log("\n[DCR-3] Export points OUT of the box, Import points IN");
   check("...and not <Upload>", !/<Upload\b/.test(importButton));
 }
 
-// --- the Vault page reuses that header verbatim (DCR-2) ---------------------
+// --- the Vault page reuses that header verbatim -----------------------------
 
 console.log("\n[vault header] the same wrap rule and floor, on the second page that has one");
 {
   // ONE check for the whole pattern, because "reused as-is" is the decision:
   // three adjacent unlabelled search fields was accepted on the condition that
   // the Vault page copies this header rather than re-deriving it. If a later
-  // wave needs them to differ, it has to change this line on purpose.
+  // change needs them to differ, it has to change this line on purpose.
   //
-  // The search box's `@max-[420px]:basis-full` rule was anticipatory in wave
-  // 2 - a single child has nothing to wrap against - and becomes load-bearing
-  // here, with two collapsible buttons (New identity, New key) now sharing
-  // its row. That is hand-off boundary 6, discharged.
+  // The search box's `@max-[420px]:basis-full` rule is load-bearing on this
+  // page rather than merely inherited: below 420px the two buttons sharing its
+  // row (New identity, New key) shed their labels but stay on the first row,
+  // and the wrap rule is what claims a full row for the search box instead of
+  // leaving it squeezed between them.
   check(
     "the Vault page's search box carries the identical className string",
     vaultSearchInputGroupClass === searchInputGroupClass,
@@ -307,7 +307,7 @@ console.log("\n[vault header] the same wrap rule and floor, on the second page t
   }
 }
 
-// --- the Port Forwarding page reuses the same header too (DCR-2) -----------
+// --- the Port Forwarding page reuses the same header too -------------------
 
 console.log("\n[forwards header] the same wrap rule and floor, on the third page that has one");
 {
@@ -315,8 +315,8 @@ console.log("\n[forwards header] the same wrap rule and floor, on the third page
   // stays its OWN check (so a failure names which page drifted) and this adds
   // the forwards page as its own leg, so a break in either pairing is
   // reported against the right page rather than a single combined "one of
-  // three disagrees" line. DCR-2 (settled): three adjacent unlabelled search
-  // fields was accepted on the condition that every later page copies this
+  // three disagrees" line. Three adjacent unlabelled search fields was
+  // accepted on the condition that every later page copies this
   // header rather than re-deriving it - a later page has to diverge on
   // purpose (K1/K2 name exactly that: a change to only the forwards copy
   // breaks this equality; a change to all three together does not, because
@@ -355,10 +355,10 @@ console.log("\n[forwards header] the same wrap rule and floor, on the third page
 //                                                       at 400px"
 // Both of the above at once (full revert to the         Both checks above, plus
 //   pre-fix `min-w-0 flex-1 @[480px]:min-w-40`)         the two 420px-boundary ones
-// Swap Export/Import icons back to the web-form         All four DCR-3 checks
+// Swap Export/Import icons back to the web-form         All four arrow checks
 //   convention (Download on Export, Upload on Import)
 // Reorder the `import { Download, Upload }` line while   No change - the four
-//   leaving the icons swapped                            DCR-3 checks are anchored
+//   leaving the icons swapped                            arrow checks are anchored
 //                                                         to the button body, not
 //                                                         the import list
 // Delete `@max-[420px]:basis-full` from VaultPage.tsx's  The equality check AND
@@ -380,10 +380,9 @@ console.log("\n[forwards header] the same wrap rule and floor, on the third page
 //                                                        restatement of the
 //                                                        literal
 //
-// See the report for this pass for the actual mutate -> red -> restore ->
-// `diff` transcript; it is not duplicated here because a stale transcript
-// nobody re-runs is worse than no transcript, and this file's own gate
-// (the checks above) is what stays true.
+// The mutate -> red -> restore -> `diff` transcript itself is not kept here,
+// because a stale transcript nobody re-runs is worse than no transcript, and
+// this file's own gate (the checks above) is what stays true.
 
 console.log(
   failed === 0 ? "\nAll hosts-header-narrow checks passed." : `\n${failed} check(s) FAILED.`,

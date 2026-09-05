@@ -1,25 +1,25 @@
 /**
- * Self-check for VLT-60: the Import dialog's failure surface, and the order
+ * Self-check for the Import dialog's failure surface, and the order
  * validation runs in relative to the passphrase prompt.
  * Run: `pnpm verify backup-import` (or `npx tsx
  * scripts/backup-import-verify.ts` to iterate).
  *
  * SOURCE-TEXT for most of it, and for the same reason `hosts-error-toast-
  * verify.ts` is: there is no DOM/layout engine in this repo's check suite, and
- * neither half of VLT-60 is about what one render call produces - it is about
+ * neither half of this is about what one render call produces - it is about
  * WHICH code path a failure or a passphrase prompt runs through, which is a
  * property of the source rather than of any one render. Whether the envelope
  * rules themselves are right (which sentence each refused format gets, what a
  * good file parses to) is `backup-verify.ts`'s `[refusals]` and `[v3 envelope]`
  * sections; this file reuses `parseBackupFile` only to establish WHAT the
- * pre-check decides at the point it runs, which is VLT-60's own claim.
+ * pre-check decides at the point it runs.
  *
  * Three concerns:
  *
  *   `BackupDialog.tsx` - Import's run() failure must toast(), not setError()
- *   into the dialog's own inline line (VLT-36 left this one surface out:
- *   "three surfaces become one" is still deferred, so Export's inline line is
- *   checked to be UNCHANGED, not merged away).
+ *   into the dialog's own inline line (this one surface was left out of the
+ *   toast consolidation: "three surfaces become one" is still deferred, so
+ *   Export's inline line is checked to be UNCHANGED, not merged away).
  *
  *   `HostsBackupActions.tsx` - openImport() must establish the envelope shape
  *   (kind/version/payload presence) BEFORE opening the dialog that asks for a
@@ -35,7 +35,7 @@
  *   not found", and nothing in this repo otherwise reads the handler list.
  *
  * COMMENTS ARE REMOVED FIRST, quote-aware, before any source-text scan below
- * runs - handoff §4.17. A commented-out call (`// was: parseBackupFile(raw);`)
+ * runs. A commented-out call (`// was: parseBackupFile(raw);`)
  * still contains the literal an un-stripped scan looks for, and this file's
  * own prose above names both guarded calls in the same identifiers the code
  * uses, so raw source is not safe to scan directly either way.
@@ -68,9 +68,9 @@ function check(label: string, cond: boolean): void {
  * keeping text, never towards deleting code.
  *
  * Copied verbatim from `host-editor-verify.ts` (also duplicated in
- * `rdp-lifetime-verify.ts`) rather than reimplemented. VLT-33 - extract this
- * and `stripComments` into `scripts/lib` - is still open and out of scope
- * here; this is now the THIRD copy of the same two functions, not the second.
+ * `rdp-lifetime-verify.ts`) rather than reimplemented. Extracting this and
+ * `stripComments` into a shared `scripts/lib` is out of scope here; this is
+ * now the THIRD copy of the same two functions, not the second.
  */
 function stripLineComment(line: string): string {
   let quote = "";
@@ -106,16 +106,16 @@ function stripComments(src: string): string {
   // legal INSIDE JSX children, and the line-based filter below only ever
   // recognised `//`, `/*` and `*` starting a trimmed line, none of which match
   // a line starting `{`. Both `dialogSrc` and `actionsSrc` below strip a
-  // `.tsx` file, so this file is exposed exactly as VLT-83 describes: a
-  // deleted guarded call left behind as `{/* ... */}` would pass every
-  // positive check run over the stripped source.
+  // `.tsx` file, so this file is exposed to it: a deleted guarded call left
+  // behind as `{/* ... */}` would pass every positive check run over the
+  // stripped source.
   //
-  // VLT-83: the inner group must NOT be allowed to cross a `*/` while hunting
+  // The inner group must NOT be allowed to cross a `*/` while hunting
   // for one followed by `}` - a lazy `[\s\S]*?` is still permitted to do that,
   // and a type literal opening `{ /** ... */ x: T }` then swallows everything
   // up to some later, unrelated `*/}`. The negative lookahead below forbids
   // that: the first `*/` is final, either a real `{/* ... */}` or the match
-  // fails right there. Copied from `host-editor-verify.ts:191`'s fixed form;
+  // fails right there. Copied from `host-editor-verify.ts`'s `stripComments`;
   // see that file's comment for the measured damage the lazy form did.
   const withoutJsxComments = src.replace(/\{\s*\/\*(?:(?!\*\/)[\s\S])*\*\/\s*\}/g, "");
   return withoutJsxComments
@@ -128,7 +128,7 @@ function stripComments(src: string): string {
     .join("\n");
 }
 
-// VLT-83 self-test: both directions of the JSX-comment branch above.
+// Self-test: both directions of the JSX-comment branch above.
 const STRIPPER_PROBE =
   "type P = { /** c */ x: X };\nconst KEEP = 1;\nconst j = <div>{/* c */}</div>;";
 check(
@@ -161,7 +161,7 @@ const [exportArm = "", importArm = ""] = catchBody.split(/\}\s*else\s*\{/);
 
 check("export's arm still calls setError(message)", /setError\(message\)/.test(exportArm));
 check(
-  "export's arm does NOT toast - VLT-36's consolidation is deferred, not done here",
+  "export's arm does NOT toast - the toast consolidation is deferred, not done here",
   !/toast\(/.test(exportArm),
 );
 check(
@@ -285,7 +285,7 @@ check(
 check('the picker filter contains "json"', /"json"/.test(filterExtensions));
 
 console.log("\n[actions] openImport() checks the shape BEFORE opening the passphrase dialog");
-// Textual order is the contract here: reading is not enough (VLT-60's bug was
+// Textual order is the contract here: reading is not enough (the bug was
 // exactly that the read happened first and the check ran only after Import
 // was clicked, inside applyBackup). Each anchor must appear, and exactly once,
 // so a future refactor that duplicates or removes a step fails loudly instead

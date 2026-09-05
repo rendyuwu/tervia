@@ -1,19 +1,19 @@
 /**
- * Self-check for VLT-57: a connect that failed for a LOCAL reason must not
+ * Self-check: a connect that failed for a LOCAL reason must not
  * enter the reconnect ladder.
  * Run: `npx tsx scripts/ssh-retry-verify.ts`.
  *
- * The bug: a host saved with no password (a legal state since VLT-44 relaxed
- * the save validation) was clicked to connect, and the pane spent 1s + 3s + 7s
+ * The bug: a host saved with no password (a legal state since the save
+ * validation was relaxed) was clicked to connect, and the pane spent 1s + 3s + 7s
  * failing three more times with the identical message before it would let the
  * user do anything. Nothing about the saved host changes while the pane waits,
  * so every one of those attempts was known-doomed at the moment it was
  * scheduled.
  *
- * This is a DIFFERENT question from VLT-42's (scripts/ssh-exit-verify.ts), and
- * the distinction is the whole point: VLT-42 is about a shell channel that
- * existed and then ended, so it flows through `decideSshEnding`. VLT-57's
- * failure happens before any channel exists - `openSsh` rejects, `finishSsh` is
+ * This is a DIFFERENT question from `scripts/ssh-exit-verify.ts`'s, and the
+ * distinction is the whole point: that file is about a shell channel that
+ * existed and then ended, so it flows through `decideSshEnding`. The failure
+ * here happens before any channel exists - `openSsh` rejects, `finishSsh` is
  * never called, and `decideSshEnding` never runs. The retry for it is scheduled
  * from the two catch blocks around `openPtyForSession` instead, which is where
  * the fourth category has to be honoured.
@@ -63,14 +63,14 @@ const readRaw = (rel: string) => readFileSync(join(repoRoot, rel), "utf8");
  * swallow the rest of the line - which for `has_credential('a ...)` would hide
  * real code from a check rather than reveal it.
  */
-// VLT-83: no JSX-comment branch here, deliberately. `readTs` strips only
+// No JSX-comment branch here, deliberately. `readTs` strips only
 // `ssh-session.ts` (a `.ts` file), and `readRust` strips Rust source - neither
 // language gives `{/* ... */}` any meaning, so this stripper cannot be fooled
-// the way `host-editor-verify.ts`'s was (fixed at `host-editor-verify.ts:191`
-// - copy the branch from there, and not the lazy form
+// the way `host-editor-verify.ts`'s was (fixed in that file's own
+// `stripComments` - copy the branch from there, and not the lazy form
 // `\{\s*\/\*[\s\S]*?\*\/\s*\}`, which is not a substitute: it can still cross
-// an intervening `*/` while hunting for one followed by `}`) and
-// `vault-editor-verify.ts:101`. If this file is ever pointed at a `.tsx`
+// an intervening `*/` while hunting for one followed by `}`) and in
+// `vault-editor-verify.ts`'s. If this file is ever pointed at a `.tsx`
 // file, that branch has to be added first - to the `quotes` two-argument form
 // below, not a copy-pasted single-argument one.
 function stripComments(src: string, quotes: string): string {
@@ -123,7 +123,7 @@ for (const [label, attempt] of [
   assert(canAuthenticate(attempt), `${label} -> dial`);
 }
 
-console.log("\n[canAuthenticate] nothing configured is the VLT-57 state");
+console.log("\n[canAuthenticate] nothing configured is the state that must not dial");
 assert(!canAuthenticate({}), "no agent, no password, no key -> refuse before dialling");
 assert(
   !canAuthenticate({ useAgent: false }),
@@ -285,13 +285,13 @@ console.log("\n[parity] the backend guard and its frontend mirror agree");
 // ssh-exit-decision.ts), and neither exposes its catch block as a pure function,
 // so this half is read rather than run.
 //
-// Read by SCOPE, never by distance - handoff §4.17. This section used to compare
+// Read by SCOPE, never by distance. This section used to compare
 // character indices ("the gate's text comes before the ladder's in this block"),
 // and two mutants walked through it green:
 //
 //   * the park arm loses its `return`, so a local failure parks AND THEN walks
-//     1s + 3s + 7s. Every index assertion still held. That is VLT-57 restored in
-//     full, passing the check written to catch it.
+//     1s + 3s + 7s. Every index assertion still held. That is the bug restored
+//     in full, passing the check written to catch it.
 //   * `const decision = …; void decision; scheduleSshReconnect(…)`. The verdict
 //     is computed and dropped on the floor; `gate < ladder` cannot notice, and
 //     its own label claimed the ladder was gated.
@@ -314,9 +314,9 @@ function matchingBrace(src: string, openIdx: number): number {
   return -1;
 }
 
-/** Every offset of `needle`, in source order. §4.17's "search by all matches,
- *  not the first": one `indexOf` examines whichever occurrence happens to come
- *  first, which is ordering luck rather than a check. */
+/** Every offset of `needle`, in source order - search by all matches, not the
+ *  first: one `indexOf` examines whichever occurrence happens to come first,
+ *  which is ordering luck rather than a check. */
 function allIndexes(src: string, needle: string): number[] {
   const out: number[] = [];
   for (let at = src.indexOf(needle); at !== -1; at = src.indexOf(needle, at + 1)) out.push(at);
@@ -324,8 +324,8 @@ function allIndexes(src: string, needle: string): number[] {
 }
 
 // ----------------------------------------------------------------------------
-// The scope walker, ported from scripts/rdp-lifetime-verify.ts. VLT-33 tracks
-// the duplication: these scripts exit on load, there is no scripts/lib to share
+// The scope walker, ported from scripts/rdp-lifetime-verify.ts. The
+// duplication is deliberate: these scripts exit on load, there is no scripts/lib to share
 // from, and a third divergent copy of "which block is this in" is worse than a
 // second identical one. The doc comments there carry the full reasoning.
 
@@ -409,7 +409,7 @@ function guardAt(src: string, start: number): string {
 /**
  * The statement list around the SOLE occurrence of `anchor`.
  *
- * `hits` is reported rather than swallowed because §4.17's cheap trap is an
+ * `hits` is reported rather than swallowed because the cheap trap is an
  * anchor that matches twice and an `indexOf` that takes whichever came first:
  * this section's previous anchor, `if (s.sshConnectionId) {`, occurs TWICE in
  * session-lifecycle.ts, and only source order put the spawn catch ahead of the

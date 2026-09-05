@@ -9,8 +9,8 @@
  *     The half that was never asked: the gate used to test which leaf was
  *     ACTIVE IN THE TAB while its own comment claimed to be about focus, so
  *     Ctrl+W was suppressed with the caret in the tab strip (closing no tab
- *     anywhere, VLT-59) and Ctrl+T / Ctrl+] / Ctrl+[ were eaten by a terminal a
- *     rail view had made invisible (VLT-58). Both halves must hold for the gate
+ *     anywhere) and Ctrl+T / Ctrl+] / Ctrl+[ were eaten by a terminal a rail
+ *     view had made invisible. Both halves must hold for the gate
  *     to fire, so both halves get a positive AND a negative case here.
  *
  * Run: `npx tsx scripts/keybindings-terminal-verify.ts`.
@@ -101,7 +101,7 @@ expect("plain D (no modifier)", { code: "KeyD" }, false);
  * A line with its trailing `//` comment removed, string literals respected, and
  * the same source with whole-line comments dropped.
  *
- * VLT-33; the canonical copy is in `scripts/host-editor-verify.ts` and this is
+ * The canonical copy is in `scripts/host-editor-verify.ts` and this is
  * a deliberate duplicate (these scripts share no module). A character scan
  * rather than a regex, because a `//` inside a string is not a comment and a
  * regex alternation desyncs on the first unbalanced quote, after which it eats
@@ -131,16 +131,16 @@ function stripComments(src: string): string {
   // legal INSIDE JSX children, and the line-based filter below only ever
   // recognised `//`, `/*` and `*` starting a trimmed line, none of which match
   // a line starting `{`. This file strips both pane files and `App.tsx`
-  // (`stripComments(read(...))` further down), all `.tsx`, so it is exposed
-  // exactly as VLT-83 describes: a deleted call left behind as `{/* ... */}`
-  // would pass every positive check run over the stripped source.
+  // (`stripComments(read(...))` further down), all `.tsx`, so it is exposed to
+  // it: a deleted call left behind as `{/* ... */}` would pass every positive
+  // check run over the stripped source.
   //
-  // VLT-83: the inner group must NOT be allowed to cross a `*/` while hunting
+  // The inner group must NOT be allowed to cross a `*/` while hunting
   // for one followed by `}` - a lazy `[\s\S]*?` is still permitted to do that,
   // and a type literal opening `{ /** ... */ x: T }` then swallows everything
   // up to some later, unrelated `*/}`. The negative lookahead below forbids
   // that: the first `*/` is final, either a real `{/* ... */}` or the match
-  // fails right there. Copied from `host-editor-verify.ts:191`'s fixed form;
+  // fails right there. Copied from `host-editor-verify.ts`'s `stripComments`;
   // see that file's comment for the measured damage the lazy form did.
   const withoutJsxComments = src.replace(/\{\s*\/\*(?:(?!\*\/)[\s\S])*\*\/\s*\}/g, "");
   return withoutJsxComments
@@ -153,7 +153,7 @@ function stripComments(src: string): string {
     .join("\n");
 }
 
-// VLT-83 self-test: both directions of the JSX-comment branch above. `failed`
+// Self-test: both directions of the JSX-comment branch above. `failed`
 // was initialised above (line 48), so check() is safe to call here.
 const STRIPPER_PROBE =
   "type P = { /** c */ x: X };\nconst KEEP = 1;\nconst j = <div>{/* c */}</div>;";
@@ -200,14 +200,14 @@ check(
   ownsRawKeyboard(focusedInside("data-terminal-leaf-id")),
 );
 check(
-  // VLT-62's sibling: an RDP pane owns Ctrl and Alt exactly as a terminal does,
+  // An RDP pane owns Ctrl and Alt exactly as a terminal does,
   // so the selector has to name it too or every bare-Ctrl chord fires an app
   // action instead of reaching the remote desktop.
   "focus inside an RDP pane owns it too",
   ownsRawKeyboard(focusedInside("data-rdp-leaf-id")),
 );
 check(
-  // THE NEGATIVE HALF (§4.30). This is the case that failed for Ctrl+W
+  // THE NEGATIVE HALF. This is the case that failed for Ctrl+W
   // everywhere: the caret is in the tab strip, the sidebar or a rail view, no
   // surface is holding the keys, and the chord must mean the app action.
   "focus anywhere else does NOT - this is what makes Ctrl+W reachable at all",
@@ -267,7 +267,7 @@ console.log("\n[gate wiring] App asks focus and the rail view, not the active le
   );
   check(
     // The straight revert, and the thing whose comment lied: leaf kind is not
-    // focus, so a gate that reads it is the VLT-59 bug back again.
+    // focus, so a gate that reads it suppresses Ctrl+W from the tab strip again.
     "it does NOT decide from the active leaf kind",
     !/activeLeafKindCurrent/.test(gate),
     gate,

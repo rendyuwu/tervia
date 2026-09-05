@@ -52,7 +52,7 @@
  *    `runTest` dialled the DRAFT address, so re-pointing the form, testing,
  *    accepting and cancelling left a record saved at 10.0.0.1 carrying 10.0.0.2's
  *    key - the next real connect aborts as a MISMATCH, which reads as an attack
- *    (§5.16). Gating the write on the saved address stopped it landing on the wrong
+ *    attempt. Gating the write on the saved address stopped it landing on the wrong
  *    address but not on the right one: press Forget (a DRAFT edit), Test the same
  *    address, and the probe TOFUs instead of raising the mismatch the pin existed
  *    for; accept, and the addresses match, so the gate passes and the stored pin is
@@ -77,7 +77,7 @@
  *    record owns no accounts, so the draft loads blank - and rebuilding an inline
  *    credential from that blank draft sent the store its CLEAR instruction, losing
  *    the binding AND the secret while the identity's own secrets sat untouched
- *    (handoff §5.3). Both protocols, since one save path now serves them.
+ *    Both protocols, since one save path now serves them.
  *
  * 5. THE HELP TEXT NAMES NO STORE THE PLATFORM DOES NOT HAVE. The copy said "your
  *    OS keychain (Windows Credential Manager / macOS Keychain)". On Linux
@@ -122,7 +122,7 @@
  *    The rule this replaces went the other way: "Private key body is required for
  *    key auth" refused the one key-auth state that is HONEST on the card
  *    (`hasPrivateKey: false` renders "Missing secret") and caught none of the states
- *    that are not. It is gone, exactly as VLT-44 removed the password one. The RDP
+ *    that are not. It is gone, exactly as the password rule was. The RDP
  *    password rule is deliberately NOT gone with it - `RdpPane` declines to connect
  *    at all without a password, so such a row's only reachable outcome is a failure.
  *
@@ -218,8 +218,8 @@ function stripComments(src: string): string {
   // legal INSIDE JSX children (a bare `//` there renders as literal text),
   // and the line-based filter below only ever recognised `//`, `/*` and `*`
   // starting a trimmed line, none of which match a line starting `{`.
-  // Fixed here per `vault-editor-verify.ts`'s own fix (VLT-83, found live by
-  // step 7 of this wave against a DIFFERENT file): without this, a mutation
+  // Fixed here per `vault-editor-verify.ts`'s own fix (found live against a
+  // DIFFERENT file): without this, a mutation
   // that moves code into exactly this shape slips past every comment-stripped
   // positive in this file, of which section [7] already has one -
   // `/\{passwordHelp\(hasStoredPassword\)\}/.test(sshSectionSrc)` would still
@@ -261,8 +261,8 @@ function stripComments(src: string): string {
  *
  * ALL matches rather than the first, because the first-match form this replaces was
  * a false pass waiting to happen: add a second write of the same kind and it reads
- * the one that is still correct while reporting nothing about the new one. Handoff
- * §5.17, which `expectedFingerprint` already follows in section [6] by asserting a
+ * the one that is still correct while reporting nothing about the new one. The
+ * all-matches rule, which `expectedFingerprint` already follows in section [6] by asserting a
  * count of two. A caller asserts the count as well, because an empty list satisfies
  * `every` - a write that DISAPPEARS must not pass either.
  */
@@ -319,12 +319,12 @@ function count(src: string, re: RegExp): number {
 }
 
 // ---------------------------------------------------------------------------
-// Compiler-API helpers for section [9] (6b, and 6a's re-aim of section [8]).
+// Compiler-API helpers for section [9], and for section [8]'s re-aim.
 // Copied from `vault-editor-verify.ts` / `vault-shell-verify.ts` where a
 // helper of the same job already exists there, so this file's shape matches
 // the rest of the suite rather than inventing a sixth way to do the same walk
-// (§4.43's list of `check()` shapes is exactly this kind of drift, one level
-// up). New helpers are ones neither file needed: `conditionalArmOf`,
+// - a suite that spells one `check()` shape six ways is exactly this kind of
+// drift, one level up. New helpers are ones neither file needed: `conditionalArmOf`,
 // `findIfByCondition`, `ifConditionsEnclosing`, `findObjectLiteralProperties`,
 // `parseFragment`.
 // ---------------------------------------------------------------------------
@@ -376,7 +376,7 @@ function findCalls(root: ts.Node, sf: ts.SourceFile, calleeNames: string[]): ts.
 
 /** Whitespace-stripped, for comparing two expressions' source text - Prettier
  *  decides whether a call or a ternary spans one line or several, and that
- *  choice is not the claim (§4.51). The ONLY normalisation applied before an
+ *  choice is not the claim. The ONLY normalisation applied before an
  *  exact-text pin compares two sides. */
 function norm(s: string): string {
   return s.replace(/\s+/g, "");
@@ -423,8 +423,8 @@ function findVariableDeclaration(root: ts.Node, name: string): ts.VariableDeclar
  * assert how many there are instead of silently taking the last.
  *
  * The singular above answers "show me one", which is a different question from
- * "is there exactly one, and is it the one I mean". Reviewer B's executed
- * evasion is the difference: with §4.3's real break applied to `boundIdentity`
+ * "is there exactly one, and is it the one I mean". An executed
+ * evasion is the difference: with a real break applied to `boundIdentity`
  * inside the component AND an `export function resolveBoundIdentity(...)`
  * appended below it whose body declares `boundIdentity` with the pinned
  * expression verbatim, the singular helper returned the DECOY, the exact-text
@@ -594,7 +594,7 @@ function isDescendantOf(node: ts.Node, ancestor: ts.Node): boolean {
  * `whenFalse`; `null` once the walk runs out of parents.
  *
  * This resolves nesting through the AST rather than by scanning for the
- * nearest `?`/`:` in the text (§4.17's shape): `mode === "create" ?
+ * nearest `?`/`:` in the text: `mode === "create" ?
  * identityIdFromChoice(choice) : …` and `mode === "edit" ? [ { value:
  * CREDENTIAL_CHOICE_NEW_IDENTITY, … } ] : []` both bury the identifier this
  * file checks for several nodes below the ternary whose gate actually
@@ -642,7 +642,7 @@ function findIfByCondition(
 
 /** Every enclosing `if` statement's own condition text, walking upward from
  *  `node`, innermost first - resolved through the AST rather than by how far
- *  away the text sits (§4.17), which is what section [8]'s 6a re-aim needs:
+ *  away the text sits, which is what section [8]'s re-aim needs:
  *  `setSshCred(`/`setRdpCred(` sit two `if`s below the one that actually
  *  names the refreshed record's credential kind, with an `if (isSshHost(fresh))`
  *  in between that a fixed-hop walk would stop at instead. */
@@ -703,11 +703,11 @@ const sshSectionSrc = stripComments(sshSectionRaw);
 const copyRaw = read("src/modules/hosts/editor/secretStoreCopy.ts");
 const hostsPageRaw = read("src/modules/hosts/HostsPage.tsx");
 
-// Parsed once, for section [9]'s compiler-API checks (VLT-76's shape - the
-// precedent is `vault-editor-verify.ts:482-540` and `pane-caret-verify.ts`,
+// Parsed once, for section [9]'s compiler-API checks. The precedent is
+// `vault-editor-verify.ts` and `pane-caret-verify.ts`,
 // both already on `typescript` for exactly this reason: "is this call
 // lexically inside X" is a nesting question a distance heuristic answers
-// wrong, per §4.17). `ScriptKind.TSX` on both, since either file's JSX would
+// wrong. `ScriptKind.TSX` on both, since either file's JSX would
 // otherwise parse its own generics as JSX and vice versa.
 const editorSf = ts.createSourceFile(
   "HostEditorDialog.tsx",
@@ -812,7 +812,7 @@ console.log("[0] the helpers the checks below depend on");
     stripComments('const s = "a // b";').includes("a // b"),
   );
   check("and keeps the code around it", stripComments("// x\nwriteIt();").includes("writeIt();"));
-  // VLT-83: the only comment syntax legal inside JSX children, and the one the
+  // The only comment syntax legal inside JSX children, and the one the
   // line-based filter above cannot see because it never starts a line with `{`.
   check(
     "and strips a JSX comment expression too, not just a // or /* one",
@@ -824,7 +824,7 @@ console.log("[0] the helpers the checks below depend on");
     stripComments("<div>{/* writeIt() */}</div>").includes("<div>") &&
       stripComments("<div>{/* writeIt() */}</div>").includes("</div>"),
   );
-  // VLT-83(d): the OVER-strip direction, which is the one that actually
+  // The OVER-strip direction, which is the one that actually
   // shipped broken and which no stripper self-test in this suite covers - every
   // other one asserts only that a comment was removed. The original lazy form
   // `\{\s*\/\*[\s\S]*?\*\/\s*\}` swallowed 50752 characters of
@@ -960,7 +960,7 @@ console.log("\n[1] the keychain seed cannot overwrite a field the user typed");
     );
   }
   // Outside the updater, which must stay pure: React may call an updater twice,
-  // and §5.14's whole lesson is about what a value read in the wrong place says.
+  // the whole lesson is about what a value read in the wrong place says.
   check(
     "and it is written outside the draft updater",
     seed.indexOf("sshSeeded.current = {") > seed.indexOf("}));"),
@@ -973,7 +973,7 @@ console.log("\n[2] a secret is sent only when touched, and cleared only when it 
 {
   // The real function, called directly - `sshSecretsForSave` lives in a plain
   // module for exactly this reason. A source-text check here would be a regex over
-  // a rule about VALUES, which is §5.18's first failure shape: it cannot tell `""`
+  // a rule about VALUES, whose first failure shape is this: it cannot tell `""`
   // being FORWARDED from `""` being omitted, and those are the two outcomes the
   // whole thing turns on.
   const draft = (value: string): SshCredentialDraft => ({
@@ -1110,7 +1110,7 @@ console.log("\n[2] a secret is sent only when touched, and cleared only when it 
 
   const save = between(editorSrc, "const save = async () => {", "const protocolLabel =");
   check("save was found", save.length > 1000, save.length);
-  // BOTH live records. Reading either from state instead is §5.14's defect wearing
+  // BOTH live records. Reading either from state instead is that defect wearing
   // the fix's shape, and a stale seeded record is the same fault one field over -
   // it would license a clear the user could not see, which is the whole finding.
   check(
@@ -1136,7 +1136,7 @@ console.log("\n[3] nothing inside the dialog persists a pin, in either direction
   check("its trust callback was found", onTrusted.length > 50, onTrusted.length);
 
   // The store write is GONE, not gated, and the check is the absence rather than
-  // the guard. Gating it on the saved address (§5.16) closed the case where a
+  // the guard. Gating it on the saved address closed the case where a
   // cancelled dialog left a FOREIGN machine's fingerprint on a record - the next
   // real connect aborts as a MISMATCH, which reads as an attack. It did not close
   // the case where the write lands on the address the record does name: Forget (a
@@ -1144,7 +1144,7 @@ console.log("\n[3] nothing inside the dialog persists a pin, in either direction
   // mismatch the pin existed for, accepting overwrites the STORED pin because the
   // addresses agree, and Cancel leaves that in place with nothing warned. The write
   // the gate permitted was the destructive one. With no write here, both cases are
-  // closed by construction and §5.16's question - does this survive Cancel, and
+  // closed by construction and the question - does this survive Cancel, and
   // should it - has nothing left in this dialog to ask it of.
   //
   // Read out of the import statement rather than listed here, so importing a NEW
@@ -1184,7 +1184,7 @@ console.log("\n[3] nothing inside the dialog persists a pin, in either direction
   //
   // ALL of them, with the count asserted: a second trust write added beside a
   // correctly gated first one is invisible to a first-match search, and an empty
-  // list satisfies `every` (handoff §5.17).
+  // list satisfies `every`.
   const formPins = guardsFor(onTrusted, "setPins(");
   check("the callback holds exactly one write to the form's pins", formPins.length === 1, formPins);
   check(
@@ -1228,7 +1228,7 @@ console.log("\n[3] nothing inside the dialog persists a pin, in either direction
 // ---------------------------------------------------------------------------
 console.log("\n[6] Forget edits the draft, and Test dials with the pin for that address");
 {
-  // Gap 20. `Forget` used to call `clearFingerprint` straight through, so Cancel
+  // `Forget` used to call `clearFingerprint` straight through, so Cancel
   // reverted the address and left the host with NO pin - silently back on TOFU.
   const forget = between(editorSrc, "const forgetPin = () => {", "const runTest = async () => {");
   check("forgetPin was found", forget.length > 50, forget.length);
@@ -1263,15 +1263,15 @@ console.log("\n[6] Forget edits the draft, and Test dials with the pin for that 
     !editorSrc.includes("clearFingerprint"),
   );
 
-  // Gap 15. Test must verify against the machine it is ACTUALLY DIALLING, or a
+  // Test must verify against the machine it is ACTUALLY DIALLING, or a
   // re-pointed host cannot be tested without destroying its pin first - which is
-  // what made gap 20 reachable.
+  // what made the Forget-then-Cancel loss above reachable.
   const runTest = between(editorSrc, "const runTest = async () => {", "const save = async () => {");
   const expected = [
     ...runTest.matchAll(/expected(?:Cert)?Fingerprint: (\w+)\[(\w+)\] \|\| undefined/g),
   ];
   // BOTH protocol arms. One `indexOf` here would have examined the SSH branch only
-  // while this file's header claimed it covered both - handoff §5.17.
+  // while this file's header claimed it covered both.
   check(
     "both probes take their expected pin from a keyed map",
     expected.length === 2,
@@ -1349,12 +1349,12 @@ console.log("\n[5] the credential copy names no store the platform does not have
     linux,
   );
 
-  // 6c: extended to the two files this wave adds, `credentialMove.ts` and
-  // `editor/credentialChoice.ts` - VLT-83's sibling risk, not comments this
+  // Extended to `credentialMove.ts` and `editor/credentialChoice.ts` - a
+  // sibling risk, not comments this
   // time: these two are now where a sentence about a stored private key is
   // most likely to be written (the convert/bind/detach confirmations), and
   // the vault files already hold the wording rule below
-  // (`vault-shell-verify.ts:620-623`).
+  // (`vault-shell-verify.ts`'s section 12).
   const credentialMoveRaw = read("src/modules/hosts/credentialMove.ts");
   const credentialChoiceRaw = read("src/modules/hosts/editor/credentialChoice.ts");
   const KEYCHAIN_SWEEP_FILES = [
@@ -1376,9 +1376,9 @@ console.log("\n[5] the credential copy names no store the platform does not have
   // ban ("Nothing here protects a secret better than it was protected
   // before", per `vault/page/IdentityCard.tsx:14-16`) rather than the sweep
   // being narrowed to fit the one file most likely to grow a safety claim.
-  // `Encrypted` is deliberately not forbidden - wave 3's key panel says it
+  // `Encrypted` is deliberately not forbidden - the key panel says it
   // about a locked key, truthfully, and that is a different claim
-  // (`vault-shell-verify.ts:610-611`).
+  // (`vault-shell-verify.ts`'s section 12 carries the same note).
   for (const [path, src] of KEYCHAIN_SWEEP_FILES) {
     check(
       `${path} makes no safety comparison`,
@@ -1448,7 +1448,7 @@ console.log("\n[7] the password field says what BLANK does, which is two differe
     /without one/.test(fresh),
     fresh.trim(),
   );
-  // §5.20: a string the component cannot reach is the same as no string at all.
+  // A string the component cannot reach is the same as no string at all.
   check(
     "the field renders the branch rather than a literal of its own",
     /\{passwordHelp\(hasStoredPassword\)\}/.test(sshSectionSrc),
@@ -1589,10 +1589,10 @@ console.log("\n[8] the save hands the store the binding it loaded, and recovers 
 
   check("recovery refreshes the record", recoveryArm.includes("setExisting("));
 
-  // 6a (re-aim, §1.10): VLT-29's fix added a SECOND write to this arm -
+  // The recovery fix added a SECOND write to this arm -
   // `setSshCred`/`setRdpCred`, gated on the refreshed record having just
   // become inline where the loaded one was not - and the flat forbidden list
-  // this section used to run named both calls unconditionally, so step 4's
+  // this section used to run named both calls unconditionally, so that
   // correct, gated write reddened it. The list below drops those two names
   // and the three checks after it replace the flat ban with what the gate
   // actually has to be: present, lexically inside a branch that names the
@@ -1617,7 +1617,7 @@ console.log("\n[8] the save hands the store the binding it loaded, and recovers 
 
   // Parsed as its own fragment (compiler API - `parseFragment`), over the RAW
   // arm: a call parked behind a `//` comment or a dead branch must still fail
-  // the negative above (§4.33), but the structural checks below need real
+  // the negative above, but the structural checks below need real
   // nodes to walk, which only the raw, uncommented text reliably parses as
   // (stripComments's line filter can turn a multi-line call into invalid
   // syntax if a comment sits mid-expression).
@@ -1632,7 +1632,7 @@ console.log("\n[8] the save hands the store the binding it loaded, and recovers 
   if (armSetExisting.length === 1) {
     const arg = armSetExisting[0].arguments[0];
     check(
-      "and it is given exactly `fresh` - not a value rebuilt here that could carry a stale field back (§4.47)",
+      "and it is given exactly `fresh` - not a value rebuilt here that could carry a stale field back",
       arg !== undefined && norm(arg.getText(recoveryFrag)) === norm("fresh"),
       arg?.getText(recoveryFrag),
     );
@@ -1643,14 +1643,14 @@ console.log("\n[8] the save hands the store the binding it loaded, and recovers 
   // merely absent-and-therefore-vacuously-fine.
   const armSeedCalls = findCalls(recoveryFrag, recoveryFrag, ["setSshCred", "setRdpCred"]);
   check(
-    "the arm's conditional reseed (§1.10) is present - both the SSH and the RDP call - so the branch below is not asserting over an absent one",
+    "the arm's conditional reseed is present - both the SSH and the RDP call - so the branch below is not asserting over an absent one",
     armSeedCalls.length === 2,
     armSeedCalls.length,
   );
   for (const call of armSeedCalls) {
     const conds = ifConditionsEnclosing(call, recoveryFrag);
     check(
-      `${call.expression.getText(recoveryFrag)}( sits inside a branch naming the refreshed record's credential kind, resolved lexically rather than by distance (§4.17)`,
+      `${call.expression.getText(recoveryFrag)}( sits inside a branch naming the refreshed record's credential kind, resolved lexically rather than by distance`,
       conds.some((c) => /credential\.kind/.test(c)),
       conds,
     );
@@ -1686,9 +1686,9 @@ console.log(
 );
 {
   // -------------------------------------------------------------------------
-  // 6b.1: the options come from the `identityRows` PROP, never a vault
+  // The options come from the `identityRows` PROP, never a vault
   // subscription of this dialog's own - and the page's own prop wiring is
-  // pinned too (VLT-76's pin-3 shape), so an unfiltered list feeding the
+  // pinned at its DEFINITION too, so an unfiltered list feeding the
   // picker cannot quietly become the page's filtered `visible` rows.
   // -------------------------------------------------------------------------
   check(
@@ -1745,7 +1745,7 @@ console.log(
         /\bidentityRows\(/.test(factoryText),
         factoryText,
       );
-      // VLT-76's pin-3 shape: the check that stops the picker following the
+      // Pinned at its definition: the check that stops the picker following the
       // page's own search box - a memo built off `visible` (the filtered,
       // ranked rows) or re-derived from `query` would still satisfy every
       // check above while quietly narrowing what the picker can offer.
@@ -1758,8 +1758,8 @@ console.log(
   }
 
   // -------------------------------------------------------------------------
-  // 6b.2: the three movers are called only from applyCredentialChange's body -
-  // compiler-API containment, not distance, per §4.17.
+  // The three movers are called only from applyCredentialChange's body -
+  // compiler-API containment, not distance.
   // -------------------------------------------------------------------------
   const applyBody = findConstArrowBody(editorSf, "applyCredentialChange");
   check("applyCredentialChange's body was found (compiler API)", applyBody !== null);
@@ -1774,19 +1774,19 @@ console.log(
   if (applyBody) {
     const insideBody = findCalls(applyBody, editorSf, MOVER_NAMES);
     check(
-      "and EVERY call to any of them is lexically inside applyCredentialChange's body - a call just past its closing brace does not count as inside (§4.17)",
+      "and EVERY call to any of them is lexically inside applyCredentialChange's body - a call just past its closing brace does not count as inside",
       allMoverCalls.length === insideBody.length,
       { total: allMoverCalls.length, inside: insideBody.length },
     );
   }
 
   // -------------------------------------------------------------------------
-  // 6b.3 / addendum note 1: `setExisting` takes what the write returned, in
+  // `setExisting` takes what the write returned, in
   // each of the three arms - pinned exactly, whitespace aside, because
   // `{ ...result.host, name: shared.name }` type-checks and would carry a
   // stale field back into the stamp, and a substring cannot tell it from the
-  // right thing (§4.47). `norm()` strips ALL whitespace before comparing, so
-  // this pin is its own §4.51 reformat pair - wrapping either side across
+  // right thing. `norm()` strips ALL whitespace before comparing, so
+  // this pin is its own reformat control - wrapping either side across
   // lines changes nothing it compares.
   // -------------------------------------------------------------------------
   const CHANGE_ARMS = [
@@ -1817,7 +1817,7 @@ console.log(
   }
 
   // -------------------------------------------------------------------------
-  // 6b.4: the action is behind a confirmation.
+  // The action is behind a confirmation.
   // -------------------------------------------------------------------------
   const applyCalls = findCalls(editorSf, editorSf, ["applyCredentialChange"]);
   check("applyCredentialChange is called exactly once", applyCalls.length === 1, applyCalls.length);
@@ -1839,7 +1839,7 @@ console.log(
   }
 
   // -------------------------------------------------------------------------
-  // 6b.5: the detach arm seeds no secret.
+  // The detach arm seeds no secret.
   // -------------------------------------------------------------------------
   const detachIf = applyBody
     ? findIfByCondition(applyBody, editorSf, 'change.kind === "detach"')
@@ -1875,7 +1875,7 @@ console.log(
   }
 
   // -------------------------------------------------------------------------
-  // Addendum check 2 (A1, 2026-09-01): the draft arm is create-gated.
+  // The draft arm is create-gated.
   //
   // Section [4]'s six checks count three patterns keyed on the identifier
   // `boundIdentity` inside `save`'s own text - they stay green under this
@@ -1888,7 +1888,7 @@ console.log(
   // Rooted at the COMPONENT'S OWN BODY, not the SourceFile, and counted.
   // `findVariableDeclaration` returns the LAST match in traversal order, so the
   // SourceFile-rooted version of this pin compared a decoy against itself while
-  // the real `boundIdentity` was broken - reviewer B ran exactly that and got
+  // the real `boundIdentity` was broken - that evasion was run and got
   // 211/211 here and 53/53 from `pnpm verify`. See
   // {@link findVariableDeclarations} for the full transcript of the evasion.
   // The count is the other half: rooting alone still admits a second
@@ -1908,8 +1908,8 @@ console.log(
   if (boundIdentityDecl?.initializer) {
     const init = boundIdentityDecl.initializer;
     // Pin 1: the WHOLE definition, whitespace aside. Whitespace is Prettier's;
-    // everything else here IS the claim (§4.51) - N17 reflows this same
-    // expression and must stay green under it.
+    // everything else here IS the claim - a legal reflow of this same
+    // expression must leave it green.
     const pinnedText =
       'mode === "create"\n' +
       "    ? identityIdFromChoice(choice)\n" +
@@ -1931,7 +1931,7 @@ console.log(
     if (idChoiceCalls.length === 1) {
       const arm = conditionalArmOf(idChoiceCalls[0]);
       check(
-        'the identityIdFromChoice(choice) arm is reached only under a condition naming mode === "create" - never by adjacency (§4.17)',
+        'the identityIdFromChoice(choice) arm is reached only under a condition naming mode === "create" - never by adjacency',
         arm !== null &&
           arm.arm === "then" &&
           /mode === "create"/.test(arm.cond.condition.getText(editorSf)),
@@ -1948,7 +1948,7 @@ console.log(
   }
 
   // -------------------------------------------------------------------------
-  // VLT-86 pin 1: the create arm RESETS `choice` to the inline sentinel, and
+  // Pin 1: the create arm RESETS `choice` to the inline sentinel, and
   // does so on the path that `return`s before the edit arm's own reset.
   //
   // The three checks above pin where `boundIdentity` READS `choice`. Nothing
@@ -1992,7 +1992,7 @@ console.log(
     // smallest nodes that carry the claim cannot falsely redden on a reflow
     // that pinning the whole right-hand side would. Whitespace is normalised
     // and only whitespace - Prettier owns the line breaks, everything else
-    // here IS the claim (§4.51).
+    // here IS the claim.
     check(
       "and the reset it makes is setChoice(CREDENTIAL_CHOICE_INLINE) - the sentinel, not some other draft value",
       norm(reset.expression.getText(editorSf)) === "setChoice" &&
@@ -2000,7 +2000,7 @@ console.log(
       { callee: reset.expression.getText(editorSf), arg: reset.arguments[0].getText(editorSf) },
     );
     check(
-      'and it is reached only under a condition naming target.mode === "create" - never by adjacency (§4.17)',
+      'and it is reached only under a condition naming target.mode === "create" - never by adjacency',
       ifConditionsEnclosing(reset, editorSf).some((c) => /target\.mode === "create"/.test(c)),
       ifConditionsEnclosing(reset, editorSf),
     );
@@ -2039,7 +2039,7 @@ console.log(
   }
 
   // -------------------------------------------------------------------------
-  // VLT-86 pin 2: what makes the stale-`choice` window UNREACHABLE THROUGH
+  // Pin 2: what makes the stale-`choice` window UNREACHABLE THROUGH
   // SAVE. A pin on the mitigation, deliberately not a rewrite of the effect -
   // the shipped behaviour is correct today and this region has been
   // hand-tested three times.
@@ -2048,7 +2048,7 @@ console.log(
   // effect body while both `setChoice` resets sit behind the `Promise.all`
   // two awaits down, so for the whole duration of a load `mode` is already
   // the new target's mode while `choice` is still the previous sitting's
-  // value - and `boundIdentity` reads exactly that pair. That is A1's own
+  // value - and `boundIdentity` reads exactly that pair. That is the
   // `!existing`-versus-`mode === "create"` argument one step to the side.
   //
   // Three links close it and all three are pinned, because any one of them
@@ -2061,8 +2061,8 @@ console.log(
   //   2. `busy` still carries the `!ready` term.
   //   3. the ONE Save entry point is `disabled={busy}`.
   //
-  // WHAT THIS DOES NOT COVER, which belongs in the register rather than in a
-  // silence. (a) `boundIdentity` has a consumer that is NOT behind the gate:
+  // WHAT THIS DOES NOT COVER, said here rather than left as a silence.
+  // (a) `boundIdentity` has a consumer that is NOT behind the gate:
   // the `DialogDescription` renders outside the `{ready ? … }` branch, so
   // during the window it can say "This host authenticates with a shared vault
   // identity" about a row that does not. Cosmetic, costs no credential, left
@@ -2138,14 +2138,12 @@ console.log(
   }
 
   // -------------------------------------------------------------------------
-  // Addendum check 3 (A1): the convert option is edit-mode only. Supersedes
-  // 6b.6 as literally written ("the picker is edit-mode only") - amendment A1
-  // supersedes plan §0's "no picker in create mode", and the committed
+  // The convert option is edit-mode only. NOT the whole picker: the committed
   // `HostEditorDialog.tsx` renders the whole `Field label="Credential"` in
   // BOTH modes (its own comment says so); only this ONE option inside it is
-  // edit-mode gated. Checking the superseded 6b.6 literally would redden
-  // against the correct, committed code, so this is the check that replaces
-  // it rather than one added beside it.
+  // edit-mode gated. A check for "the picker is edit-mode only" would redden
+  // against the correct, committed code, so this is the narrower claim that
+  // is actually true.
   // -------------------------------------------------------------------------
   // `hostEditorFnBody` is the one computed above, for the `boundIdentity` pin -
   // the same component body, found once.
@@ -2159,7 +2157,7 @@ console.log(
     if (newIdentityRefs.length === 1) {
       const arm = conditionalArmOf(newIdentityRefs[0]);
       check(
-        'it is offered only under a condition naming mode === "edit" - the other picker option is not (amendment A1)',
+        'it is offered only under a condition naming mode === "edit" - the other picker option is not',
         arm !== null &&
           arm.arm === "then" &&
           /mode === "edit"/.test(arm.cond.condition.getText(editorSf)),
@@ -2169,13 +2167,13 @@ console.log(
   }
 
   // -------------------------------------------------------------------------
-  // 6b.7: save() is unchanged, deliberately - section [4]'s six checks are
+  // save() is unchanged, deliberately - section [4]'s six checks are
   // the check on that, and this comment exists so the next reader does not
   // read [4] as covering the picker's provenance too: it counts an
   // identifier, `boundIdentity`, and the three checks above this comment are
   // where that identifier's OWN provenance is actually pinned.
   //
-  // 6b.8: the confirmation copy comes from the pure module.
+  // The confirmation copy comes from the pure module.
   // -------------------------------------------------------------------------
   // Over `editorSrc`, the COMMENT-STRIPPED source, and the direction is why:
   // a POSITIVE count over the raw file is satisfied by a comment that merely
@@ -2186,7 +2184,7 @@ console.log(
   // `credential-move-verify` section [16]'s exact-text pins went dead in the
   // same move: the three strings are still pinned there, the dialog simply
   // stops rendering them. `stripComments` above carries the corrected
-  // negative-lookahead JSX branch (VLT-83), so the JSX comment form is removed
+  // negative-lookahead JSX branch, so the JSX comment form is removed
   // here rather than counted.
   check(
     "the confirmation calls the pure module's title and note builders, not literals of its own",
@@ -2504,7 +2502,7 @@ console.log(
   );
 
   // -------------------------------------------------------------------------
-  // VLT-50's key-body half: the blank-body rule is gone, and the RDP password
+  // The key-body half: the blank-body rule is gone, and the RDP password
   // rule is deliberately not gone with it.
   // -------------------------------------------------------------------------
   check(
@@ -2571,7 +2569,7 @@ console.log(
   // E6  `Private key body is required for key auth` put back
   //       -> the relaxation check and the one-message count. `tsc` at 0.
   // E7  `prettier --print-width 60 --write` over both source files - the
-  //     reformat pair the exact-text pins above owe (§4.51)
+  //     control the exact-text pins above owe
   //       -> nothing in this section, which is the point. It DID redden the two
   //          whole-call pins this section had first: Prettier breaks a wrapped
   //          call AND adds a trailing comma, which `norm()` does not strip, so

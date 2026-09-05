@@ -1,5 +1,5 @@
 /**
- * Self-check for DCR-1: Vault and Port Forwarding are rail VIEWS, not tabs.
+ * Self-check: Vault and Port Forwarding are rail VIEWS, not tabs.
  * Run: `pnpm verify rail-views` (or `npx tsx scripts/rail-views-verify.ts`).
  *
  * Four things worth pinning down, and the last two are the ones that bit:
@@ -24,7 +24,7 @@
  *     the RAW saved index instead of calling it - so the checks below go through
  *     `restoreWorkspaceEntry` and `savedToTab`, which is where the answer is
  *     actually decided. The fixtures pick indices where a clamp gives a
- *     DIFFERENT tab, not merely an equal one (§5.18: the old leaf fixture had 2
+ *     DIFFERENT tab, not merely an equal one (the old leaf fixture had 2
  *     leaves and a saved index of 1, so clamping rescued the wrong answer).
  *  4. THE WAY BACK OUT. A rail view covers the tab area, so every route INTO
  *     that area has to leave it. That is one state write (`tabs/lib/tabView.ts`)
@@ -61,7 +61,7 @@ import {
 // as a constraint: it said the hook "pulls in `@xterm/xterm`, which Node cannot
 // resolve outside a bundler". It does not - `grep -rn "@xterm" src/modules/tabs/`
 // is empty, and `tsx` resolves `useTabs.ts` and `tabHelpers.ts` as value imports
-// fine (measured, 2026-09-03, while pricing section 8d's lift). That hazard is
+// fine (measured). That hazard is
 // real but belongs to another module; `serialize.ts`'s own note is about
 // something else. The probe below is checked by `pnpm typecheck:scripts`.
 import type { Tab, useTabs } from "../src/modules/tabs/lib/useTabs";
@@ -141,7 +141,7 @@ const read = (p: string) => readFileSync(join(root, p), "utf8");
 
 /**
  * Comments stripped so a doc comment naming a call is not read AS one. (The
- * third copy of this pair in the suite - VLT-33. Canonical copy lives in
+ * third copy of this pair in the suite. Canonical copy lives in
  * `scripts/host-editor-verify.ts`; keep them the same shape. Duplicated
  * rather than shared, because these scripts have no common module.)
  *
@@ -169,7 +169,7 @@ const stripLineComment = (line: string): string => {
   }
   return line;
 };
-// VLT-83: no JSX-comment branch in THIS one, and that is deliberate rather
+// No JSX-comment branch in THIS one, and that is deliberate rather
 // than an oversight. It does run over `.tsx` files (section 8 reads
 // `src/app/App.tsx`), so a `{/* ... */}` left behind by a deletion survives
 // it - but every check section 8 makes over a `.tsx` file is a NEGATIVE
@@ -203,7 +203,7 @@ const stripComments = (src: string): string =>
 // of section 9(ii)'s checks then PASS off a trigger that no longer renders
 // ("found the TabsTrigger opening tag to scan", plus the five that scan inside
 // what it returned). With this stripper the tag is gone and all six fail
-// instead. That is the VLT-83 failure, in the direction that matters.
+// instead. That is the stripper failure, in the direction that matters.
 //
 // It has to be the opening tag ALONE. Commenting out the whole
 // `<TabsTrigger>...</TabsTrigger>` does not work: the element carries
@@ -331,7 +331,7 @@ check("nor is a terminal leaf", !isUnrestorablePageLeaf(savedTerm()));
 check("nor is a split", !isUnrestorablePageLeaf(savedSplit([savedTerm(), savedTerm()])));
 
 // ---- 3. migration on restore --------------------------------------------
-console.log("\n[migrate] a pre-DCR-1 snapshot restores without a Vault tab in the strip");
+console.log("\n[migrate] a snapshot holding a Vault tab restores without one in the strip");
 {
   // The realistic shape: Hosts, a terminal, and the Vault tab the user left open.
   const saved: SavedTab[] = [
@@ -482,7 +482,7 @@ console.log("\n[focus] the active tab index is re-based onto the tabs that survi
   // called it, clamping the raw saved index against the restored array instead.
   // Index 2 with one dropped tab before it: re-basing gives termA, clamping
   // gives termB, so the two answers DIFFER (a fixture where they agree proves
-  // nothing - §5.18).
+  // nothing).
   const entry = {
     tabs: [
       savedTab(savedPage("hosts")), // 0
@@ -641,7 +641,7 @@ console.log("\n[exit] activating a tab leaves the rail view, and a removal does 
   // then covered by these rows the moment it is declared.
   const RAIL: (RailViewKind | null)[] = [null, ...RAIL_VIEW_KINDS];
   check(
-    // §4.18: driving the table off `RAIL_VIEW_KINDS` is what keeps it current,
+    // Driving the table off `RAIL_VIEW_KINDS` is what keeps it current,
     // and is also the way it could quietly become vacuous - an empty list would
     // leave only the `null` row, so every "over a view" assertion below would
     // run exclusively against "no view" and pass while testing nothing. The
@@ -729,7 +729,7 @@ console.log("\n[exit] activating a tab leaves the rail view, and a removal does 
 // ---- 8. every activeId write goes through the funnel --------------------
 // SOURCE-TEXT, because the rule is about which writes EXIST, not about what one
 // of them returns - and the state lives in a React hook this suite cannot run
-// (no renderer here; §5.26's lesson is to enumerate by the mutation, so this
+// (no renderer here; the lesson is to enumerate by the mutation, so this
 // enumerates them). The pure transition above is the behaviour; this is the
 // proof that nothing writes `activeId` around it.
 console.log("\n[funnel] no route into the tab area writes activeId on its own");
@@ -776,7 +776,7 @@ console.log("\n[funnel] no route into the tab area writes activeId on its own");
    * complete, because a new mutation that writes `activeId` and is not named
    * here fails.
    *
-   * The last three arrived with §4.29: this list originally stopped at "moves
+   * The last three arrived later: this list originally stopped at "moves
    * focus", which is why a rotate or a reorder driven from the header - a
    * surface a rail view does not cover - reshaped panes nobody could see. See
    * the [sweep] section below, which enumerates from the pane-tree write rather
@@ -859,7 +859,7 @@ console.log("\n[funnel] no route into the tab area writes activeId on its own");
   }
 
   // ---- 8b. every PANE-TREE write, not just every activeId write ----------
-  // §4.29: the fix for this rule inherited the blind spot of the enumeration
+  // The fix for this rule inherited the blind spot of the enumeration
   // that scoped it. The list above is "routes that ACTIVATE A TAB", so it could
   // never have covered a chord that rearranges the tab already active - Ctrl+D
   // splitting a pane behind the Vault, the header's Rotate/reorder doing the
@@ -872,7 +872,8 @@ console.log("\n[funnel] no route into the tab area writes activeId on its own");
   // that lands in none - which is what makes a NEW pane-tree mutation a red
   // check rather than the next round's defect report.
   //
-  // THE CLOSURE WAS ITSELF A HARDCODED LIST, once (§4.29 one level up). "Which
+  // THE CLOSURE WAS ITSELF A HARDCODED LIST, once - the same blind spot one
+  // level up. "Which
   // calls count as a pane-tree write" was seven names transcribed into a regex,
   // out of the twenty-one `useTabs` imports from `panes.ts` - so `buildPaneTree`
   // and `cloneLeafState` were imported, in use, and invisible to it, and a new
@@ -1003,8 +1004,8 @@ console.log("\n[funnel] no route into the tab area writes activeId on its own");
      * performs, so a write that cleared the view would hand every stray echo the
      * power to close the Vault. The exemption rests on those two, NOT on the
      * divider being unreachable under a view - `movePaneLeafToEdge` above gave
-     * up exactly that argument, because §4.26b says an unreachability claim is
-     * only ever as good as the enumeration of affordances behind it.
+     * up exactly that argument, because an unreachability claim is only ever
+     * as good as the enumeration of affordances behind it.
      */
     const NOT_A_ROUTE_IN = ["setSplitSizes"];
 
@@ -1053,8 +1054,8 @@ console.log("\n[funnel] no route into the tab area writes activeId on its own");
         );
       }
       // THE CLOSURE. Every pane-tree writer must be spoken for; a new one that
-      // is not fails here by name. This is the check the round before this one
-      // did not have, and its absence is the whole of §4.29.
+      // is not fails here by name. This is the check that was missing when a
+      // pane-tree writer went unenumerated.
       const treeWriters = [...bodies.entries()]
         .filter(([, b]) => TREE_WRITE.test(b))
         .map(([n]) => n);
@@ -1195,7 +1196,7 @@ console.log("\n[funnel] no route into the tab area writes activeId on its own");
     // And the constructive chords must NOT carry it: they leave the view
     // through `useTabs` and show the user their own result, so a guard here
     // would turn Ctrl+T back into the "does nothing at all" this item opened
-    // with. The negative half of the refusal (§4.30).
+    // with. The negative half of the refusal.
     for (const id of ["tab.new", "pane.splitRight", "pane.splitDown", "pane.focusNext"]) {
       const body = handlerBody(id);
       check(`found the ${id} handler`, body !== null);
@@ -1234,8 +1235,8 @@ console.log("\n[funnel] no route into the tab area writes activeId on its own");
     !/openPageTabInTabs/.test(appSrc) && !/showTabs\(\);/.test(appSrc),
   );
 
-  // The three cold-restore call sites. Also source-text, and for the same reason
-  // §5.26 gives: the index defect was never in the helper - the helper was right
+  // The three cold-restore call sites. Also source-text, and for the same
+  // reason: the index defect was never in the helper - the helper was right
   // and two of its three callers did the arithmetic themselves. A behavioural
   // check on `restoreWorkspaceEntry` cannot see a caller that stops asking it.
   const switching = stripComments(read("src/app/hooks/useWorkspaceSwitching.ts"));
@@ -1258,7 +1259,7 @@ console.log("\n[funnel] no route into the tab area writes activeId on its own");
 
   // ---- 8d. focusPane hands back the SAME array when nothing moved --------
   // The one thing in this file that is about identity rather than about which
-  // writes exist, and it is here because §5 decision 3's neighbour cost is real:
+  // writes exist, and it is here because the cost of a fresh `tabs` identity is real:
   // `curr.map(...)` allocates a new array whether or not any element changed, so
   // an updater that always maps always gives `tabs` a new identity.
   //
@@ -1273,7 +1274,7 @@ console.log("\n[funnel] no route into the tab area writes activeId on its own");
   // and the second arrival never moves anything. Before the guard, one click on
   // a terminal chip wrote the workspace twice.
   //
-  // Pinned as the EXPRESSION, not the name (§5 decision 17): the updater must
+  // Pinned as the EXPRESSION, not the name: the updater must
   // hand `curr` back on its no-change path. Both spellings are accepted (a
   // ternary tail or an early `return curr;`) because either is the same promise;
   // what neither of them is, is the always-allocate `curr.map(...)` this came
@@ -1286,8 +1287,8 @@ console.log("\n[funnel] no route into the tab area writes activeId on its own");
   // callback's body, so moving that expression anywhere at all turns
   // "focusPane writes a pane tree - the reason it is on this list" red and drops
   // the lifted function into the unaccounted-for bucket. The sweep and the lift
-  // want the code in two different places; the sweep is load-bearing for §4.29
-  // and wins.
+  // want the code in two different places; the sweep is load-bearing for the
+  // completeness claim and wins.
   {
     const focusPaneBody = tabsBodies.get("focusPane") ?? "";
     check(
@@ -1324,7 +1325,7 @@ console.log("\n[funnel] no route into the tab area writes activeId on its own");
 // HOSTS chip first worked, and only then did the terminal's chip respond.
 //
 // Two halves, because one alone would have passed before the fix. The click
-// route is EXECUTED (§5 decision 17: pin the expression, not the name) and then
+// route is EXECUTED (pin the expression, not the name) and then
 // fed through the real `focusTabView`; and the wiring - which is the part that
 // was missing, and which no behavioural check on a leaf module can see - is
 // pinned in the source of the three components that carry it: `renderEntryBody`
@@ -1416,7 +1417,7 @@ console.log("\n[chip] a chip selects its own entry, even when it is already the 
   check("and entrySelectTarget agrees", entrySelectTarget(boardEntry).leafId === null);
 
   // ---- 9(ii) source text: the wiring is what was missing -----------------
-  // VLT-83: these are POSITIVE checks over `.tsx` files, so they run on
+  // These are POSITIVE checks over `.tsx` files, so they run on
   // `stripTsxComments` - the line-based stripper would let a deletion pass by
   // leaving the code behind as a JSX comment expression.
   const bodySrc = stripTsxComments(read("src/modules/tabs/components/renderEntryBody.tsx"));
@@ -1542,7 +1543,7 @@ console.log("\n[chip] a chip selects its own entry, even when it is already the 
   // at all, so before this block any one of them could be deleted with all 58
   // scripts still green.
   //
-  // What they protect is §5 decision 3 - closing a tab must not throw the user
+  // What they protect is this: closing a tab must not throw the user
   // out of the rail view they are reading. `tabView.ts`'s `rehomeTabView`
   // deliberately leaves `railView` alone for a removal, and that is no help if
   // something ACTIVATES the tab on the way to closing it. Three separate native
@@ -1670,9 +1671,9 @@ console.log("\nALL PASS");
 //
 // A check that has not been watched fail is not a check. Every mutation below
 // was run against this suite, its exit code recorded, and the source restored
-// by hash (`git hash-object -w` before, `git cat-file blob` after). The VLT-101
-// fix round is what added them: section 9's source-text half had grown three
-// pins that nothing in the suite had ever seen redden.
+// by hash (`git hash-object -w` before, `git cat-file blob` after). They were
+// added because section 9's source-text half had grown three pins that nothing
+// in the suite had ever seen redden.
 //
 //   Mutation                                        Check(s) it killed
 //   ---------------------------------------------   ---------------------------
@@ -1688,7 +1689,7 @@ console.log("\nALL PASS");
 //
 //       N1-N3 are the point of that block. Before it, `grep -rn
 //       TrailingIconButton scripts/` returned nothing: all three stops could be
-//       deleted with every script in the suite still green, and §5 decision 3
+//       deleted with every script in the suite still green, and the rule
 //       (a close must not throw the user out of a rail view) held only by
 //       accident. N2 was the live one - `mousedown` was NOT being stopped, and
 //       a background chip's X really did activate its tab first.
@@ -1729,5 +1730,5 @@ console.log("\nALL PASS");
 //
 //       Section 8d was added for this one. The identity guard is a behaviour
 //       change with a real cost behind it (two `wsSaveTabs` per chip click), and
-//       until N6 it was the only thing in this round that could be undone with
+//       until N6 it was the only thing here that could be undone with
 //       all 58 scripts still green.

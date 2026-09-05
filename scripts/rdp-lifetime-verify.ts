@@ -39,7 +39,7 @@
  *    borrowed its `heldKeys.current.add`, so deleting the unicode record passed.
  *
  * 3. A TEST PROBE CANNOT WRITE TO A ROW IT NO LONGER BELONGS TO. The merged host
- *    editor (`HostEditorDialog`, 6d - this used to be `RdpConnectionDialog`) is
+ *    editor (`HostEditorDialog`, which used to be `RdpConnectionDialog`) is
  *    mounted persistently once latched and the trust prompt is global, so
  *    closing the dialog neither cancels a probe nor hides its question: row A ->
  *    Test -> cancel -> open row B -> answer, and an ungated write into the draft
@@ -62,8 +62,9 @@
  *    in this dialog persists a pin now; Save does. So the only trust write left
  *    is the form's own, and the row guard below is what keeps a probe that
  *    outlived its row from putting A's certificate into B's form.
- *    `host-editor-verify.ts` §3 owns the absence rule in full; what is here is
- *    that the row guard covers EVERY such write, counted, rather than the first.
+ *    `host-editor-verify.ts`'s section [3] owns the absence rule in full; what
+ *    is here is that the row guard covers EVERY such write, counted, rather
+ *    than the first.
  *
  * 4. THE `pagehide` BACKSTOP ANSWERS BOTH PROTOCOLS. `HostKeyPromptDialog` is
  *    shared, so its backstop fires for an SSH host key as well as an RDP
@@ -162,17 +163,17 @@ function stripComments(src: string): string {
   // legal INSIDE JSX children, and the line-based filter below only ever
   // recognised `//`, `/*` and `*` starting a trimmed line, none of which match
   // a line starting `{`. `paneSrc`/`editorSrc`/`promptDialogSrc` below all
-  // strip `.tsx` files, so this file is exposed exactly as VLT-83 describes -
-  // and demonstrated live: deleting `HostEditorDialog.tsx:297`'s
-  // `applied.current = token;` and leaving it in exactly this shape passed
-  // section [3]'s row guard entirely, 81 ok / 0 FAIL, with the guard removed.
+  // strip `.tsx` files, so this file is exposed to it - and demonstrated live:
+  // deleting `HostEditorDialog.tsx`'s `applied.current = token;` write and
+  // leaving it in exactly this shape passed section [3]'s row guard entirely,
+  // 81 ok / 0 FAIL, with the guard removed.
   //
-  // VLT-83: the inner group must NOT be allowed to cross a `*/` while hunting
+  // The inner group must NOT be allowed to cross a `*/` while hunting
   // for one followed by `}` - a lazy `[\s\S]*?` is still permitted to do that,
   // and a type literal opening `{ /** ... */ x: T }` then swallows everything
   // up to some later, unrelated `*/}`. The negative lookahead below forbids
   // that: the first `*/` is final, either a real `{/* ... */}` or the match
-  // fails right there. Copied from `host-editor-verify.ts:191`'s fixed form;
+  // fails right there. Copied from `host-editor-verify.ts`'s `stripComments`;
   // see that file's comment for the measured damage the lazy form did.
   const withoutJsxComments = src.replace(/\{\s*\/\*(?:(?!\*\/)[\s\S])*\*\/\s*\}/g, "");
   return withoutJsxComments
@@ -291,7 +292,7 @@ function enclosingGuard(region: string, needle: string): string {
 /**
  * The same answer for EVERY occurrence of `needle`, in source order.
  *
- * Handoff §5.17's all-matches rule, which this file already follows for
+ * The all-matches rule, which this file already follows for
  * `kind: "ok"` by reaching each protocol arm separately. The form it exists for is
  * the other one: a second write of the same kind added beside a correctly guarded
  * first one, which `enclosingGuard` reports nothing about. A caller asserts the
@@ -475,7 +476,7 @@ console.log("[0] the helpers the checks below depend on");
   );
   check("and keeps the code around it", stripComments("// x\nwriteIt();").includes("writeIt();"));
 
-  // VLT-83: the JSX-comment branch, both directions.
+  // The JSX-comment branch, both directions.
   const STRIPPER_PROBE =
     "type P = { /** c */ x: X };\nconst KEEP = 1;\nconst j = <div>{/* c */}</div>;";
   check(
@@ -659,7 +660,7 @@ console.log("\n[3] a Test probe cannot write to a row it no longer belongs to");
 
   // The other half of the split is GONE rather than guarded, so the check is the
   // absence. Gating the store write on the saved address closed the cancelled-dialog
-  // case where a FOREIGN fingerprint landed on a record (§5.16) and left the one
+  // case where a FOREIGN fingerprint landed on a record and left the one
   // where it lands on the address the record does name: Forget removes the pin from
   // the draft, so Test TOFUs instead of raising the mismatch, accepting overwrites
   // the stored pin because the addresses agree, and Cancel keeps it. Save is the

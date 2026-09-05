@@ -1,5 +1,5 @@
 /**
- * Self-check for VLT-45: a `.bak` recovery is SAID OUT LOUD.
+ * Self-check: a `.bak` recovery is SAID OUT LOUD.
  * Run: `npx tsx scripts/recovery-notice-verify.ts`.
  *
  * `createRecoveredStore` has produced a recovery notice since it was written,

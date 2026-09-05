@@ -36,7 +36,7 @@
  *    the good snapshot is sitting next to the broken primary.
  *
  * 5. RDP RESOLVES TO A REFERENCE, never a value, for both binding kinds. The
- *    Phase 5 invariant is that an RDP password never enters the webview; here it
+ *    invariant is that an RDP password never enters the webview; here it
  *    holds by construction, so what is checked is that the reference names the
  *    right SERVICE - vault-owned and host-owned secrets live in different ones,
  *    and a wrong service reads as "no password stored" at connect time.
@@ -369,10 +369,10 @@ console.log("\n[flags] presence flags track writes, and never read a secret back
 // ---------------------------------------------------------------------------
 console.log("\n[secrets] SECRET_ALREADY_STORED writes no keychain call and reports present");
 {
-  // Step 1's fourth secret state (6e wave 4): the caller has already put the
-  // value at this account - a cross-service copy in `credentialMove.ts` - so
-  // `upsertIdentity` / `upsertKey` must not touch the keychain for that field at
-  // all (no read, no set, no delete) and must still report the flag `true`.
+  // The caller has already put the value at this account - a cross-service copy
+  // in `credentialMove.ts` - so `upsertIdentity` / `upsertKey` must not touch the
+  // keychain for that field at all (no read, no set, no delete) and must still
+  // report the flag `true`.
   const h = harness();
   const before = h.calls.length;
   const ident = await h.vault.upsertIdentity(identity({ id: "i-already" }), {

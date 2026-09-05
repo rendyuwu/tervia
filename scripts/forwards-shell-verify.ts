@@ -1,5 +1,5 @@
 /**
- * Self-check for wave 2 step 10: the Port Forwarding page UI - the rail-view
+ * Self-check for the Port Forwarding page UI - the rail-view
  * branch swap in `RailViewArea.tsx`, `runtime.ts`'s selector shapes,
  * `RuleEditorDialog.tsx`/`draft.ts`'s save path, `ForwardsPage.tsx`'s
  * assembly, `RuleCard.tsx`'s row, and `controller.ts`'s Start/Stop. Run:
@@ -68,9 +68,9 @@ const src = Object.fromEntries(Object.entries(FILES).map(([k, p]) => [k, read(p)
 >;
 
 // ============================================================================
-// stripComments - the tenth copy of this helper in this suite (VLT-33's
-// extraction is the real remedy; this step does not attempt it, per the
-// plan's §5 boundary 9). Copied from `host-editor-verify.ts:191-225`, JSX
+// stripComments - the tenth copy of this helper in this suite; extracting it
+// into a shared module is the real remedy and has not been done. Copied from
+// `host-editor-verify.ts`'s own `stripComments`, JSX
 // branch in the NEGATIVE-LOOKAHEAD form - the lazy form reads as equivalent
 // and is not: it crosses an intervening `*/` and once swallowed 50752
 // characters in a different script, silencing a negative that then ran blind
@@ -121,7 +121,7 @@ function stripComments(src: string): string {
 
 // ============================================================================
 // Shared compiler-API helpers - copied/adapted from `vault-shell-verify.ts`,
-// "your closest model" per the brief.
+// the closest model in the suite.
 // ============================================================================
 
 function findFunctionBody(root: ts.Node, name: string): ts.Node | null {
@@ -247,7 +247,7 @@ function findPropertyValue(
  *  `fnBody` free of crossing into a NESTED function? Used to tell a direct
  *  statement of a function's own body from a call buried inside a decoy arrow
  *  declared in the same scope - the count alone cannot bite that deletion
- *  (VLT-76's own lesson, `vault-shell-verify.ts`'s M5/section 6). */
+ *  (see `vault-shell-verify.ts`'s section 6). */
 function isDirectlyInFunctionBody(node: ts.Node, fnBody: ts.Node): boolean {
   let cur: ts.Node | undefined = node.parent;
   while (cur && cur !== fnBody) {
@@ -267,7 +267,7 @@ function isDirectlyInFunctionBody(node: ts.Node, fnBody: ts.Node): boolean {
 /** The source text of `const <name> = <expr>`'s initializer, or `null`. Pins a
  *  derived flag at ITS OWN DEFINITION - a check on the identifier handed to a
  *  callback is defeated by an alias (`const pageStops = running;`), which is
- *  the rebind trap §4's trap list names. */
+ *  the rebind trap. */
 function findConstInitializerText(root: ts.Node, name: string, sf: ts.SourceFile): string | null {
   let result: string | null = null;
   const visit = (n: ts.Node): void => {
@@ -387,16 +387,16 @@ function walkSrcFiles(dir: string): string[] {
 // reformat of `ruleRecordFrom(id, draft)` under this repo's Prettier config
 // (trailing commas) adds a comma after the last argument, which plain
 // whitespace-collapsing does not remove - a false FAIL on a reformat that
-// changed nothing the claim cares about, the exact trap the brief's mutation
-// discipline section names.
+// changed nothing the claim cares about, which is exactly what a paired
+// reformat control exists to catch.
 const norm = (s: string): string => s.replace(/\s+/g, "").replace(/,+([)\]}])/g, "$1");
 
 // ============================================================================
 // The selector allow-list - A COPY of `scripts/forward-autostart-verify.ts`'s
 // `selectorParamName` + `primitiveSelectorBody`, the eleventh copied helper in
-// this suite. There is no `scripts/lib` to share it through and creating one is
-// VLT-33's extraction, not this round's; the copy is noted here so the two
-// cannot silently diverge unremarked.
+// this suite. There is no `scripts/lib` to share it through and creating one
+// has not been done; the copy is noted here so the two cannot silently
+// diverge unremarked.
 //
 // WHAT IT REPLACED, AND WHY THE POLARITY HAD TO FLIP. This section used to run
 // a four-name DENY-LIST (`isForbiddenSelectorBody`: object literal, array
@@ -560,8 +560,8 @@ function primitiveSelectorBody(
 // one script ahead of the other. Compared as CODE: both files are
 // comment-stripped first (the two copies' comments differ deliberately, each
 // naming its own store) and whitespace-normalised after, so a legal reformat of
-// either is invisible here. VLT-33's extraction into a shared module is the real
-// remedy and is not this round's; until then this is what makes "cannot silently
+// either is invisible here. Extraction into a shared module is the real remedy
+// and has not been done; until then this is what makes "cannot silently
 // diverge" true.
 {
   const twin = "scripts/forward-autostart-verify.ts";
@@ -647,11 +647,11 @@ function primitiveSelectorBody(
 // ============================================================================
 // 1. The rail branch: forwards renders <ForwardsPage />, not a placeholder -
 //    and the OTHER way round from vault-shell's own section 1, because THIS
-//    is the branch that changed this wave. Vault is now the negative control:
+//    is the branch this file is about. Vault is the negative control:
 //    without it, an edit that replaced BOTH branches reads as correct.
 // ============================================================================
 //
-// RE-ANCHORED (VLT-101 fix round) FROM A CHARACTER BUDGET ONTO THE `return`
+// RE-ANCHORED FROM A CHARACTER BUDGET ONTO THE `return`
 // ITSELF, in step with `vault-shell-verify.ts`'s section 1 and for the reason
 // its own note spells out: all three checks here used to be a regex of the
 // shape `/case "forwards":[\s\S]{0,200}<ForwardsPage\s*\/>/` over the RAW
@@ -679,7 +679,7 @@ console.log("[1. rail branch] only the forwards case was replaced");
    *  unwrapped the same way `findReturnedJsxRoot` above does it, so a `return (
    *  <VaultPage /> )` reads identically to the one-liner this file has today.
    *
-   *  A COPY (VLT-33); the canonical one lives in `scripts/vault-shell-verify.ts`
+   *  A COPY; the canonical one lives in `scripts/vault-shell-verify.ts`
    *  section 1, which asks the same question about the same file from the other
    *  side. Kept byte-identical to it, so a diff between the two is the whole
    *  review. Duplicated rather than shared, because these scripts have no common
@@ -727,7 +727,7 @@ console.log("[1. rail branch] only the forwards case was replaced");
 
 // ============================================================================
 // 2. The selector rule: every useForwardRuntime( call in runtime.ts returns a
-//    primitive (§1.6), useShallow is imported nowhere in runtime.ts NOR
+//    primitive, useShallow is imported nowhere in runtime.ts NOR
 //    anywhere under src/, and useForwardRuntime( is called ONLY from
 //    runtime.ts - added after step 6 landed, because step 6 exports four
 //    selector hooks and no action wrappers, so a component's own object
@@ -781,8 +781,8 @@ console.log(
   // Comment-stripped, not raw: `runtime.ts`'s own header explains IN PROSE why
   // useShallow is avoided, and that sentence legitimately contains the word.
   // A raw substring check would fail on the very comment documenting the
-  // rule - the same one exception §3/correction 1 already carves out for
-  // section 8's `pane` check, applied here for the same reason.
+  // rule - the same exception section 8's `pane` check already carves out,
+  // applied here for the same reason.
   const allSrcFiles = walkSrcFiles(join(repoRoot, "src"));
   const shallowOffenders = allSrcFiles.filter((f) =>
     stripComments(readFileSync(f, "utf8")).includes("useShallow"),
@@ -813,8 +813,8 @@ console.log(
 //    ruleRecordFrom(id, draft) (whitespace-normalised), rooted at save's own
 //    body and counted (exactly one call), AND a direct statement of that
 //    body - not merely somewhere inside it. Rooting+counting alone is
-//    defeated by a DELETION whose decoy keeps the count at 1 (VLT-76's
-//    lesson, `vault-shell-verify.ts`'s M5) - the direct-statement check is
+//    defeated by a DELETION whose decoy keeps the count at 1 (see
+//    `vault-shell-verify.ts`'s section 6) - the direct-statement check is
 //    what a nested-arrow decoy cannot survive.
 // ============================================================================
 console.log(
@@ -842,7 +842,7 @@ console.log(
   // upsertRule at all) left the `upsertRule(` count at 1 and passed
   // undetected until this check was added. `ruleRecordFrom` is THE place a
   // `ForwardRule` is built from this editor (`draft.ts`'s own header) - a
-  // second call anywhere in `save` is itself the drift VLT-76 named, whether
+  // second call anywhere in `save` is itself that drift, whether
   // or not its result ever reaches `upsertRule`.
   const ruleRecordFromCalls = saveBody ? findCallsTo(saveBody, "ruleRecordFrom", sf) : [];
   check(
@@ -871,7 +871,7 @@ console.log(
 }
 
 // ============================================================================
-// 4. Message placement (VLT-90/VLT-93's remedy). privilegedPortWarning's
+// 4. Message placement. privilegedPortWarning's
 //    reader is a descendant of the Local port Field; the host-refusal reader
 //    (hostError, NOT the generic error) is a descendant of the SSH host
 //    Field; error is a descendant of NEITHER - the third is what makes the
@@ -1162,15 +1162,13 @@ for (const key of SAFETY_CLAIM_FILES) {
 }
 
 // ============================================================================
-// 10. stopNote is used, not restated. NOTE (deviation from the plan's prose):
-//     the plan says "RuleCard.tsx and ForwardsPage.tsx ... both reach that
-//     copy through stopNote(" - but ForwardsPage.tsx does not reference
-//     stopNote at all (only RuleCard.tsx does; ForwardsPage.tsx uses
-//     deleteNote for its own dialog). The NEGATIVE (no inlined literal) holds
-//     for both files - neither may restate the copy - but the POSITIVE
-//     ("reaches it through stopNote(") only applies where the file actually
-//     uses it. Adapted to the code; see the step's report for the deviation
-//     verbatim.
+// 10. stopNote is used, not restated. ASYMMETRIC ON PURPOSE: only
+//     `RuleCard.tsx` references `stopNote` at all - `ForwardsPage.tsx` uses
+//     `deleteNote` for its own dialog and never reaches for `stopNote`. So the
+//     NEGATIVE (no inlined literal) holds for both files - neither may restate
+//     the copy - while the POSITIVE ("reaches it through stopNote(") is
+//     asserted only where the file actually uses it. A positive over both
+//     would be a check that cannot pass.
 // ============================================================================
 console.log(
   "\n[10. stopNote via function, not restated] the two-sentence copy is never inlined; RuleCard reaches it through stopNote(",
@@ -1227,7 +1225,8 @@ console.log(
   );
 
   /** The factory handed to `useCallback` in `const <name> = useCallback(fn,
-   *  deps)`, or null. Copied from `vault-shell-verify.ts:402`. */
+   *  deps)`, or null. Copied from `vault-shell-verify.ts`'s own
+   *  `useCallbackFactory`. */
   function useCallbackFactory(root: ts.Node, name: string): ts.Node | null {
     let result: ts.Node | null = null;
     const visit = (n: ts.Node): void => {
@@ -1334,7 +1333,7 @@ console.log(
     // AND THE CAPTURED FLAGS ARE NOT CONSULTED HERE AT ALL. `target.pageStops`
     // and `target.hostOwned` are the dialog's copy of what the user was TOLD
     // (`deleteNote`, in the JSX below), and reading either one to decide
-    // whether to stop is the P0 this round fixed - the row is `starting` for the
+    // whether to stop is the defect this pins - the row is `starting` for the
     // whole dial and the Delete button is not disabled during it, so the
     // ordinary ordering has the dial resolving before the confirm click.
     //
@@ -1393,7 +1392,7 @@ console.log(
   // rule from outside that row: the unconstructibility argument is about
   // `controller.ts:169-175` running the terminal-owned refusal and
   // `markStarting` with no `await` between them, so it is a new `startRule`
-  // caller that opens that gap. The editor's caller added this round only ever
+  // caller that opens that gap. The editor's own caller only ever
   // STOPS, which takes a rule out of `running` and cannot manufacture the
   // `hostOwned && <page status>` pair. `startRule(` is swept for separately
   // below, and it is still the row's button alone.
@@ -2112,7 +2111,7 @@ async function handleBridgeInvoke(cmd: string, args: Record<string, unknown>): P
       // Nothing in the C-series should ever reach the real bridge -
       // startRule/stopRule are always driven with a FAKE
       // openForward/closeForward/toast. Reaching here means a fixture forgot
-      // to inject the seam, which is exactly the fidelity bug wave 1's
+      // to inject the seam, which is exactly the fidelity bug an earlier
       // ssh_forward_open mock hid (a mock that cannot tell its input from its
       // output turns a check into a tautology) - thrown loudly instead.
       throw new Error(
@@ -2210,7 +2209,7 @@ function resetCallLogs(): void {
  *   chain, which ends in `.catch(() => {})` (`tunnel.ts:561`) and cannot
  *   reject either. C8m's prediction ("nothing should change today") depends
  *   on this being true - a fake that COULD reject would test a contract the
- *   real function does not have, the exact mock-fidelity trap wave 1 hit.
+ *   real function does not have, the exact mock-fidelity trap named above.
  */
 const FAKE_RUNTIME = {
   openForward: (
@@ -2583,10 +2582,10 @@ console.log(
 // was the entire defence, and a disabled button is a rendering rather than an
 // invariant. `hostOwned` can also become true while this page's own Start is in
 // flight (the terminal reads the page's status before its bind and claims after
-// it), so the guard has to live where the dial does. First claim wins (VLT-94),
-// and the terminal's is the one already taken.
+// it), so the guard has to live where the dial does. First claim wins, and the
+// terminal's is the one already taken.
 //
-// This lives here and NOT in `rdp-tunnel-verify.ts`, which the brief named:
+// This lives here and NOT in `rdp-tunnel-verify.ts`:
 // that script has no reference to `startRule`, `stopRule` or `controller` at
 // all. This file is the one that owns the `RuntimeDeps` seam.
 {
@@ -2857,8 +2856,8 @@ console.log(
 // again, and the local port stayed bound with no in-app recovery.
 //
 // `capturedRunning` BELOW IS THE NARROW FLAG, computed here as
-// `status === "running"` because that is what `RuleCard` handed over before
-// this round widened it to `pageStops` (`running || starting`) - so it is now a
+// `status === "running"` because that is what `RuleCard` handed over before it
+// was widened to `pageStops` (`running || starting`) - so it is now a
 // historical control rather than a reading of today's row, and it is kept
 // because the claim it measures is not about that flag's width. THE CLAIM IS
 // THAT A CAPTURED FLAG IS A CLAIM ABOUT A MOMENT THAT HAS PASSED, which no
@@ -2879,7 +2878,7 @@ console.log(
   await settle();
 
   // THE DELETE CLICK. The NARROW captured flag, computed the way `RuleCard`
-  // computed it before this round - see the note above on why it is kept.
+  // computed it before the widening - see the note above on why it is kept.
   const capturedRunning = useForwardRuntime.getState().byRule["c12"]?.status === "running";
   const capturedHostOwned = useHostOwnedForwards.getState().byRule["c12"] !== undefined;
   check(
@@ -3431,7 +3430,7 @@ console.log(failed === 0 ? "\nAll forwards-shell checks passed." : `\n${failed} 
 //     same text                                           count and the text
 //                                                          pin both stayed
 //                                                          green, the asymmetry
-//                                                          the brief predicted
+//                                                          that was expected
 //   E3: a second ruleRecordFrom(...) call added in a    [3]'s NEW
 //     sibling branch (never passed to upsertRule)          ruleRecordFrom(
 //                                                          count check - FIRST
@@ -3515,7 +3514,7 @@ console.log(failed === 0 ? "\nAll forwards-shell checks passed." : `\n${failed} 
 //   C5m: isCurrentAttempt reimplemented as               C7 ONLY (all three of
 //     `?.status === "starting"` instead of Set identity   its checks) - C5 and
 //                                                          C6 stayed green,
-//                                                          exactly as the brief
+//                                                          exactly as was
 //                                                          predicted: both
 //                                                          interleavings have
 //                                                          the row already
@@ -3528,7 +3527,7 @@ console.log(failed === 0 ? "\nAll forwards-shell checks passed." : `\n${failed} 
 //                                                          related checks only
 //   C7m: startRule's superseded-resolve guard's early    C7 (as predicted) AND
 //     `return` removed - markRunning always runs           C5, C6 (broader than
-//                                                          the brief's narrow
+//                                                          the narrow
 //                                                          claim - the guard is
 //                                                          load-bearing for
 //                                                          every superseded-
@@ -3578,7 +3577,7 @@ console.log(failed === 0 ? "\nAll forwards-shell checks passed." : `\n${failed} 
 //                                                          accidental tripwire.
 //   Z2    controller.ts: pageMustStopFirst rewritten to  RED, fs 192/202 - C11's two
 //           `status === "running" && hostOwned` (the       `running` rows, C11's
-//           runtime-false shape this round's own pin       keyed-by-rule check, and
+//           runtime-false shape this file's own pin        keyed-by-rule check, and
 //           was written for)                                every C12 and C13 check
 //                                                          downstream of the guard.
 //                                                          `tsc` and `prettier`
@@ -3591,7 +3590,7 @@ console.log(failed === 0 ? "\nAll forwards-shell checks passed." : `\n${failed} 
 //           new Set(Object.getOwnPropertyNames(…))         that selector, each with
 //                                                          the refused shape NAMED.
 //                                                          All four were GREEN under
-//                                                          the deny-list this round
+//                                                          the deny-list section 2
 //                                                          replaced, each printing a
 //                                                          fresh PASSING "primitive
 //                                                          shape" assertion.

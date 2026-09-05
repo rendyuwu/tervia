@@ -1,10 +1,10 @@
 /**
- * Self-check for wave 3 step 5: the two vault editors -
+ * Self-check for the two vault editors -
  * `src/modules/vault/editor/KeyEditorDialog.tsx` and
  * `.../IdentityEditorDialog.tsx`. Run: `pnpm verify vault-editor`.
  *
- * Written by a DIFFERENT agent from the one that wrote either dialog (steps 2
- * and 3): the author of a piece of code defends it, so every section here
+ * Written by a DIFFERENT author from the one that wrote either dialog:
+ * the author of a piece of code defends it, so every section here
  * exists to try to redden theirs, not to restate what the dialogs already say
  * about themselves in their own comments.
  *
@@ -12,13 +12,13 @@
  * (`vault-shell-verify.ts`'s precedent) wherever a question is about NESTING -
  * "is this call lexically inside `save`" is a shape a distance heuristic
  * cannot tell from "these two strings happen to sit near each other" (see
- * `vault-shell-verify.ts`'s own header on its section 6/M3).
+ * `vault-shell-verify.ts`'s own header on its section 6).
  *
  * Every anchored region is asserted to have been FOUND before anything is
  * checked over it: `between()` returns `""` for a missing anchor, and an
  * empty string satisfies a negative check for free.
  *
- * Sections 14-16 (VLT-78) reach past the two dialogs, because the contract they
+ * Sections 14-16 reach past the two dialogs, because the contract they
  * cover does: the stamp the editors pass is only worth passing if the store
  * still compares it, and a source-text check on the CONSUMER stays green while
  * three separate mutations to the PRODUCER disable it (a plain `Error` of the
@@ -82,7 +82,7 @@ const src = Object.fromEntries(Object.entries(FILES).map(([k, p]) => [k, read(p)
 >;
 
 // ---------------------------------------------------------------------------
-// Copied helpers - VLT-33, there is no `scripts/lib`.
+// Copied helpers - there is no `scripts/lib`.
 // ---------------------------------------------------------------------------
 
 /** The source between two anchors, or "" if either is missing - copied from
@@ -130,28 +130,28 @@ function stripComments(str: string): string {
   // legal INSIDE JSX children (a bare `//` there renders as literal text),
   // and the line-based filter below only ever recognised `//`, `/*` and `*`
   // starting a trimmed line, none of which match a line starting `{`.
-  // Discovered live, not hypothesised: P11 (VLT-80/7d(b)'s own paired
-  // mutation) moved `chosenKey?.missingPrivateKey` into exactly this shape -
+  // Discovered live, not hypothesised: a paired mutation moved
+  // `chosenKey?.missingPrivateKey` into exactly this shape -
   // `{/* chosenKey?.missingPrivateKey */}` - and the original version of this
   // helper passed it straight through, leaving section 7's positive green
   // over dead, commented-out code.
   //
-  // VLT-83: the inner group may not CROSS a `*/`. The first form here was
+  // The inner group may not CROSS a `*/`. The first form here was
   // `\{\s*\/\*[\s\S]*?\*\/\s*\}` - lazy, but still allowed to skip past an
   // intervening `*/` while hunting for one that a `}` follows. A type literal
   // opening with a doc comment (`{ /** null = closed. */ target: … }`) matches
   // at that `{`, and the group then keeps extending past every later `*/` not
   // followed by `}` until it finds one that is, eating everything in between.
   // In `host-editor-verify.ts` that cost 50752 characters and 70 cascading
-  // failures, and the fix landed there first (`host-editor-verify.ts:216`).
+  // failures, and the fix landed there first (in that file's `stripComments`).
   // Here it was LATENT and reddened nothing, which is the worse half:
   // measured on `KeyEditorDialog.tsx` with such a comment added, the old form
   // swallowed 10954 of 22505 characters and the suite still passed 151/151,
   // because the two `> 3000` floors clear on the remainder and every positive
   // happens to anchor outside the swallowed span. What it does silence is the
   // NEGATIVES: a record assembly with a literal `keyType:` planted inside that
-  // span passes section 5 for free (§4.17 - a check over stripped-away text
-  // goes green). With the lookahead the first `*/` is final: either a `}`
+  // span passes section 5 for free - a check over stripped-away text
+  // goes green. With the lookahead the first `*/` is final: either a `}`
   // follows it and this is a real `{/* … */}`, or the match fails at that `{`
   // rather than searching onward for a luckier one.
   const withoutJsxComments = str.replace(/\{\s*\/\*(?:(?!\*\/)[\s\S])*\*\/\s*\}/g, "");
@@ -214,8 +214,8 @@ function findCalls(root: ts.Node, sf: ts.SourceFile, calleeNames: string[]): ts.
   return out;
 }
 
-/** Whitespace-stripped, for comparing two expressions' source text - VLT-76's
- *  pins 1 and 2 both need this: Prettier decides whether a call spans one
+/** Whitespace-stripped, for comparing two expressions' source text - section
+ *  3's pins 1 and 2 both need this: Prettier decides whether a call spans one
  *  line or four, and that choice is not the claim. Everything else in the
  *  text IS the claim, so this is the ONLY normalisation applied before an
  *  exact-text pin compares two sides. */
@@ -224,7 +224,7 @@ function norm(s: string): string {
 }
 
 /** Every top-level (`=`) assignment expression anywhere under `root` whose
- *  left side is the bare identifier `name` - added for VLT-76's pin 2: "what
+ *  left side is the bare identifier `name` - added for pin 2: "what
  *  is assigned to `facts` inside this function" is a nesting question the
  *  compiler API answers directly, where a regex over the region cannot tell
  *  a real assignment from the same identifier mentioned in a comment or a
@@ -299,7 +299,7 @@ function jsxAttrExprText(
 
 /** The full `<tag label="label">...</tag>` JsxElement (not merely its opening
  *  tag, which `findOpeningElementsByTag` returns) - so a caller can search
- *  CALLS made inside its children, the way section 12 (VLT-79.2) needs to. */
+ *  CALLS made inside its children, the way section 12 needs to. */
 function findJsxElementByTagAndLabel(
   root: ts.Node,
   tag: string,
@@ -323,7 +323,7 @@ function findJsxElementByTagAndLabel(
 
 /** Walking UP from `node`, the source text of the first ternary condition or
  *  `&&`/`||` left-hand side whose own text names `name` - or `null` if the
- *  walk runs out of parents first. VLT-79.1: "is this JSX element wrapped in
+ *  walk runs out of parents first. "Is this JSX element wrapped in
  *  a conditional that mentions authMode" is a nesting question a string scan
  *  cannot answer - the field's own comment names `authMode` right beside it,
  *  to disclaim exactly this, which is why this cannot be a substring check. */
@@ -421,12 +421,11 @@ console.log(
 
   const checkKeyAnchor = "const checkKey = async (pem: string, passphrase: string) => {";
   const checkKeyRegion = between(ks, checkKeyAnchor, "const invalidateInspection = () => {");
-  // VLT-80/7d(c): above the ANCHOR's own length (61) by a wide margin, not an
+  // Above the ANCHOR's own length (61) by a wide margin, not an
   // arbitrary round number below it - `between()` returns a slice that
   // STARTS WITH `from`, so a floor at or below 61 is satisfied by the anchor
-  // text alone with an empty region behind it (P13 empties exactly that).
-  // Measured: the real region is ~600+ characters (the model is
-  // `host-editor-verify.ts:1013-1022`).
+  // text alone with an empty region behind it.
+  // Measured: the real region is ~600+ characters.
   check(
     "checkKey's region was located",
     checkKeyRegion.length > checkKeyAnchor.length + 40,
@@ -450,7 +449,7 @@ console.log(
 
   const invalidateAnchor = "const invalidateInspection = () => {";
   const invalidateRegion = between(ks, invalidateAnchor, "const pickKeyFile = async () => {");
-  // VLT-80/7d(c): above the anchor's own length (36) by a wide margin - see
+  // Above the anchor's own length (36) by a wide margin - see
   // the checkKeyRegion floor just above for why a floor at or below it is
   // vacuous.
   check(
@@ -481,13 +480,13 @@ console.log(
     textareaRegion,
   );
 
-  // The half wave 1's host-editor version shipped WITHOUT: this file's own
+  // The half the host-editor version shipped WITHOUT: this file's own
   // passphrase input closes it. If this fails alone (textarea above staying
   // green), the check is doing its per-input job; if both fail together, the
   // check cannot tell the two apart and is not doing its job at all.
   const passphraseAnchor = '<Field label="Key passphrase (optional)">';
   const passphraseRegion = between(ks, passphraseAnchor, "</Field>");
-  // VLT-80/7d(c): above the anchor's own length (41) by a wide margin - same
+  // Above the anchor's own length (41) by a wide margin - same
   // reasoning as the two floors above.
   check(
     "the key-passphrase field's region was located",
@@ -524,7 +523,7 @@ console.log(
 // still-in-flight question one level deeper, and would silently pass every
 // OTHER check in this section - the negative is what catches it.
 //
-// VLT-93, decided 2026-09-01: this section pins the BRANCH SHAPE around
+// This section pins the BRANCH SHAPE around
 // `encryptedKeyRefusal` - one call, the refusal branch returns - and is
 // deliberately agnostic about where the value it sets ends up rendered. That
 // is why renaming `setError` to `setKeyRefusal` needed no update here:
@@ -536,17 +535,17 @@ console.log(
 // moves or drops the slot passes every gate in this suite.
 //
 // A placement pin was weighed and DECLINED here, not overlooked: the defect
-// it would catch is cosmetic (the hand-test finding D-K2, LOW severity - the
-// message rendering under the wrong field, not a credential loss), and an
+// it would catch is cosmetic (the message rendering under the wrong field,
+// not a credential loss), and an
 // exact pin over parsed JSX is brittle by design - worth spending only where
-// drift costs a secret. What it would have been, so a later round does not
-// re-derive it: assert over the parsed JSX that the `keyRefusal` reader is a
+// drift costs a secret. What it would have been, so it does not have to be
+// re-derived: assert over the parsed JSX that the `keyRefusal` reader is a
 // descendant of the key `Field` and not a sibling of the bottom `error` line.
 console.log("\n[3. save inspects fields] KeyEditorDialog's save reads draft.privateKey itself");
 {
   const saveRegion = between(src.keyDialog, "const save = async () => {", "const busy = saving");
   check("KeyEditorDialog's save region was located", saveRegion.length > 100, saveRegion.length);
-  // Whitespace-normalised (VLT-80's own §4.51 reformat pair found this one
+  // Whitespace-normalised (a paired reformat control found this one
   // vulnerable too): a bare substring check breaks the moment Prettier wraps
   // this call's arguments across lines, which is a real Prettier output shape
   // once the line is long enough - not a hypothetical.
@@ -581,7 +580,7 @@ console.log("\n[3. save inspects fields] KeyEditorDialog's save reads draft.priv
     strippedSave,
   );
 
-  // Pin 2 (VLT-76, re-aimed for VLT-77): the declaration and the SINGLE
+  // Pin 2: the declaration and the SINGLE
   // assignment to `facts`, pinned exactly, over the COMPILER API's own view
   // of `save`'s body - `findConstArrowBody(keySf, "save")` is already used by
   // section 4. A name scoped check (the `!/inspected/i` negative above) does
@@ -591,7 +590,7 @@ console.log("\n[3. save inspects fields] KeyEditorDialog's save reads draft.priv
   // question one level deeper" failure this file's own header on `save`
   // forbids. Only pinning what is actually assigned to `facts` closes that.
   //
-  // VLT-77 (`e4cc903`) inserted an encrypted-with-no-passphrase refusal
+  // An encrypted-with-no-passphrase refusal was inserted
   // between the inspection and the assignment, so the inspection now lives in
   // its own `info` binding that both the refusal and `vaultKeyFactsFrom`
   // read - this pin follows it there instead of naming the old inline call.
@@ -648,7 +647,7 @@ console.log("\n[3. save inspects fields] KeyEditorDialog's save reads draft.priv
         );
         if (rhs.arguments.length === 1) {
           const argText = rhs.arguments[0].getText(keySfForFacts);
-          // Re-aimed for VLT-77 (step 2, `e4cc903`): `save` now inspects the
+          // Re-aimed: `save` now inspects the
           // key ONCE into a local `info` and reuses it for both the refusal
           // below and this call, rather than inspecting twice - so the
           // argument here is the bare identifier `info`, not the inline
@@ -667,7 +666,7 @@ console.log("\n[3. save inspects fields] KeyEditorDialog's save reads draft.priv
       }
     }
 
-    // New for VLT-77/step 2: `save` now inspects the key into `info` before
+    // `save` inspects the key into `info` before
     // deciding whether to refuse it, and `vaultKeyFactsFrom` above is pinned
     // to consume exactly that binding. These two checks are what actually
     // carries the "fresh inspection" claim now that the argument pin above
@@ -686,7 +685,7 @@ console.log("\n[3. save inspects fields] KeyEditorDialog's save reads draft.priv
       // below any trailing comma of their own). A whole-text compare would
       // falsely FAIL against the correct, committed code the moment that
       // reflow happens - caught by this section's own paired reformat
-      // mutation (§4.51), which is what moved this pin here.
+      // control, which is what moved this pin here.
       const awaited = init && ts.isAwaitExpression(init) ? init.expression : init;
       const isInspectCall =
         awaited !== undefined &&
@@ -720,7 +719,7 @@ console.log("\n[3. save inspects fields] KeyEditorDialog's save reads draft.priv
       }
     }
 
-    // New for VLT-77: the encrypted-with-no-passphrase refusal. Pinned by
+    // The encrypted-with-no-passphrase refusal. Pinned by
     // argument VALUE (so `encryptedKeyRefusal(info.encrypted, draft.privateKey)`
     // - the wrong field, and a real defect a save could ship with no type
     // error - is caught) and by NESTING (so a refusal computed but never
@@ -803,7 +802,7 @@ console.log("\n[3. save inspects fields] KeyEditorDialog's save reads draft.priv
 // ============================================================================
 // 4. Store writes live only in `save`. (COMPILER API)
 // ============================================================================
-// Protects: §4.16's question asked of a new dialog - does anything here
+// Protects: the question every dialog owes - does anything here
 // survive Cancel. A distance heuristic reads a write sitting just past
 // save's closing brace as "inside" it; only lexical containment can tell.
 console.log("\n[4. store writes] every upsert call is lexically inside its file's own save");
@@ -869,14 +868,14 @@ console.log("\n[4. store writes] every upsert call is lexically inside its file'
 // ============================================================================
 // 5. The record and the secrets come from the shared pure functions.
 // ============================================================================
-// Protects: §4.46 - agreement BY VALUE cannot forbid a second, silently
+// Protects: agreement BY VALUE cannot forbid a second, silently
 // divergent implementation. Structural: `save` must call the shared builders,
 // and the file must not carry the object-literal keys that are the tell of a
 // record assembled by hand instead.
 //
-// Pin 1 (VLT-76): `includes("keyRecordFrom(")` is satisfied by
+// Pin 1: `includes("keyRecordFrom(")` is satisfied by
 // `{ ...keyRecordFrom(id, draft, existing, facts), ...existing }` - the
-// decisive mutation this round exists to close, which spreads the shared
+// decisive mutation this section exists to close, which spreads the shared
 // builder's own output and then overwrites its `hasPassword`/`hasPrivateKey`
 // fields (or, on the identity twin, its stored password) with the STALE
 // object's. A substring check cannot tell "calls the builder" from "calls the
@@ -888,13 +887,13 @@ console.log(
   "\n[5. shared pure functions] save calls the draft.ts builders, and assembles nothing itself",
 );
 {
-  // VLT-78 added a THIRD argument - the stamp of the record the form loaded -
+  // A THIRD argument was added - the stamp of the record the form loaded -
   // so the arity, the `continue` guarding the argument loop, the tuple type and
   // the expected list all moved from 2 to 3 together. They have to: leaving the
   // arity at 2 makes the `continue` below skip EVERY argument pin for that call,
   // so the section reports one FAIL where it should report three and the two
-  // surviving pins silently do not run at all - a pass for free (the §4.38
-  // shape, one level in).
+  // surviving pins silently do not run at all - a check that cannot fail, one
+  // level in.
   const pinUpsertArgs = (
     fileKey: keyof typeof FILES,
     calleeName: string,
@@ -905,8 +904,7 @@ console.log(
     // Found independently of section 4's own `found at least one` - a check
     // is not allowed to rely on a precondition asserted in an earlier
     // section: a renamed callee would otherwise leave THIS section's loop
-    // below silently iterating zero times, which is a pass for free (the
-    // §4.38 shape).
+    // below silently iterating zero times, which is a check that cannot fail.
     check(
       `${FILES[fileKey]}: found at least one ${calleeName}( call to pin (section 5)`,
       calls.length > 0,
@@ -970,7 +968,7 @@ console.log(
 // ============================================================================
 // 6. Neither editor reads a secret.
 // ============================================================================
-// Protects: §1.1's invariant, said as a check. The vault exposes no
+// Protects: the invariant, said as a check. The vault exposes no
 // single-value secret read by design; the day one is added, these files must
 // not be the first callers.
 console.log(
@@ -994,7 +992,7 @@ console.log(
 // ============================================================================
 // 7. The picker is the shared one.
 // ============================================================================
-// Protects: §4.25 - `Combobox` carries the stopPropagation fix for the modal
+// Protects: `Combobox` carries the stopPropagation fix for the modal
 // scroll lock. A bare `<select>` would compile, render, and lose it silently.
 console.log("\n[7. shared picker] IdentityEditorDialog uses the shared Combobox, not its own list");
 {
@@ -1015,11 +1013,10 @@ console.log("\n[7. shared picker] IdentityEditorDialog uses the shared Combobox,
     !idn.includes("hasPrivateKey"),
   );
 
-  // VLT-80/7d(b): comment-stripped before the positive below - a raw
+  // Comment-stripped before the positive below - a raw
   // `.includes(...)` is satisfied by moving the real read into a comment and
-  // deleting it (P11). Sanity-checked first: an empty string would pass the
-  // next check for free (the model is this same file's section 10, and
-  // `key-inspect-verify.ts:576-580`).
+  // deleting it. Sanity-checked first: an empty string would pass the
+  // next check for free (the model is this same file's section 10).
   const strippedIdnForRow = stripComments(idn);
   check(
     "IdentityEditorDialog.tsx: stripping comments left real code behind (section 7)",
@@ -1036,7 +1033,7 @@ console.log("\n[7. shared picker] IdentityEditorDialog uses the shared Combobox,
 // 8. The help copy is the shared copy.
 // ============================================================================
 // Protects: inlining a help sentence is a second place the wording lives,
-// which is how it goes stale silently (§4.15's shape, one file over). The
+// which is how it goes stale silently. The
 // negative is asserted against the FUNCTIONS' actual return values, imported
 // and sliced at runtime - a hard-coded sentence here would be a THIRD place
 // the copy lives.
@@ -1044,7 +1041,7 @@ console.log(
   "\n[8. shared help copy] both dialogs call the draft.ts help functions, and never inline them",
 );
 {
-  // VLT-80/7d(b): comment-stripped before the three positives below, for the
+  // Comment-stripped before the three positives below, for the
   // same reason section 7 just applied it to `chosenKey?.missingPrivateKey` -
   // moving a call into a comment and deleting the real one would otherwise
   // pass a raw `.includes(...)`. Sanity-checked first, same floor as
@@ -1150,8 +1147,8 @@ console.log(
     !stripComments('const ok = true; // was: reads as "protected"').includes("protected"),
   );
 
-  // VLT-83(d): every self-test above only proves a comment is REMOVED. The
-  // direction that actually shipped broken (VLT-83, this file's own header on
+  // Every self-test above only proves a comment is REMOVED. The
+  // direction that actually shipped broken (see this file's own header on
   // `stripComments`) is the other one - the lazy JSX-comment regex let its
   // match cross an intervening `*/` and kept eating source looking for a
   // luckier one, and both `> 3000` floors below still cleared on the remainder
@@ -1185,8 +1182,8 @@ console.log(
       /.{0,40}(\bsafe\b|\bverified\b|\bprotected\b).{0,40}/i.exec(stripped)?.[0],
     );
     // The sentence must arrive through SECRET_STORE_LOCATIONS - three copies
-    // of a store-name literal is how it came to be wrong on two platforms
-    // (§4.15). `mode-0600` is deliberately NOT a needle here: both headers use
+    // of a store-name literal is how it came to be wrong on two
+    // platforms. `mode-0600` is deliberately NOT a needle here: both headers use
     // it honestly, to DISCLAIM a safety claim, and forbidding it would redden
     // the sentence that disclaims the very overclaim this section exists to
     // catch.
@@ -1198,16 +1195,15 @@ console.log(
 }
 
 // ============================================================================
-// 11. The identity password field renders in every auth mode. (VLT-79.1,
-//     COMPILER API for the nesting question a string scan cannot answer.)
+// 11. The identity password field renders in every auth mode. (COMPILER API
+//     for the nesting question a string scan cannot answer.)
 // ============================================================================
-// Protects: `IdentityEditorDialog.tsx:274-280`'s own five-line comment on why
+// Protects: the comment `IdentityEditorDialog.tsx` carries above its
+// `<Field label="Password">` on why
 // this field must NOT be hidden under key/agent auth - `VaultIdentity.hasPassword`
 // is independent of `authMode` by design and `resolveRdpAuth` never consults
 // the mode - and nothing but that comment currently enforces it.
-console.log(
-  "\n[11. VLT-79.1] the identity Password field is never wrapped in an authMode conditional",
-);
+console.log("\n[11] the identity Password field is never wrapped in an authMode conditional");
 {
   const sf = sourceFile("identityDialog");
   const passwordFields = findOpeningElementsByTag(sf, "Field", sf).filter(
@@ -1230,15 +1226,14 @@ console.log(
 
 // ============================================================================
 // 12. keyId is normalised only at the record, never at either toggle handler.
-//     (VLT-79.2, COMPILER API.)
+//     (COMPILER API.)
 // ============================================================================
-// Protects: `editor/draft.ts:39-44`'s own claim that a second normalisation in
-// a toggle handler "is how the two drift" - `identityRecordFrom` is the ONE
+// Protects: the claim `editor/draft.ts` makes on `IdentityKeyIdRule`, that a
+// second assembly elsewhere "is exactly the drift it exists to prevent" -
+// `identityRecordFrom` is the ONE
 // place `keyId` is dropped for a non-key auth mode, so every `patch({...})`
 // inside the Authentication field must touch `authMode` alone.
-console.log(
-  "\n[12. VLT-79.2] no auth-mode toggle handler patches keyId - only identityRecordFrom does",
-);
+console.log("\n[12] no auth-mode toggle handler patches keyId - only identityRecordFrom does");
 {
   const sf = sourceFile("identityDialog");
   const authField = findJsxElementByTagAndLabel(sf, "Field", "Authentication", sf);
@@ -1276,7 +1271,7 @@ console.log(
 }
 
 // ============================================================================
-// 13. A dead-affordance sweep over both dialogs. (VLT-79.3, COMPILER API.)
+// 13. A dead-affordance sweep over both dialogs. (COMPILER API.)
 // ============================================================================
 // Protects: `vault-shell-verify.ts` section 14 covers VaultPage/IdentityCard/
 // KeyCard only; the two editor dialogs are the app's largest new interactive
@@ -1284,9 +1279,7 @@ console.log(
 // onClick or is a Cancel standing inside <DialogClose> (which wires the close
 // itself); and neither file offers a SECOND, nested "New key"/"New identity"
 // creator - reachable from nowhere and dead by construction if it existed.
-console.log(
-  "\n[13. VLT-79.3] every <Button> in either dialog does something; no nested New key/identity",
-);
+console.log("\n[13] every <Button> in either dialog does something; no nested New key/identity");
 {
   for (const key of ["keyDialog", "identityDialog"] as const) {
     const sf = sourceFile(key);
@@ -1324,14 +1317,14 @@ console.log(
 }
 
 // ============================================================================
-// 14. The stamps are pure, and NARROW. (VLT-78, the functions themselves.)
+// 14. The stamps are pure, and NARROW. (The functions themselves.)
 // ============================================================================
 // Protects: the whole design turns on what is OUTSIDE the stamp. A stamp
 // widened to the record's other fields still passes every "it changed when the
 // secret changed" check while refusing ordinary concurrent RENAMES - which is
 // last-write-wins working correctly, not a conflict - so the invariance checks
 // below are the load-bearing half of this section, not the padding.
-console.log("\n[14. VLT-78 stamps] secret material moves the stamp; a rename does not");
+console.log("\n[14. stamps] secret material moves the stamp; a rename does not");
 {
   const aKey = (over: Partial<VaultKey> = {}): VaultKey => ({
     id: "k-1",
@@ -1453,7 +1446,7 @@ console.log("\n[14. VLT-78 stamps] secret material moves the stamp; a rename doe
 
 // ============================================================================
 // 15. The store actually refuses, and refuses BEFORE it writes a secret.
-//     (VLT-78, behaviour - a real `createVaultStore` on in-memory ports.)
+//     (Behaviour - a real `createVaultStore` on in-memory ports.)
 // ============================================================================
 // Protects: the seam between the two files. Everything above this line is
 // source text over the CONSUMER, and stays green while the producer is
@@ -1462,9 +1455,7 @@ console.log("\n[14. VLT-78 stamps] secret material moves the stamp; a rename doe
 // character in either dialog. So the refusal is caught here and read by
 // INSTANCE and by FIELD VALUE, never by message text, which all three of those
 // mutations leave identical.
-console.log(
-  "\n[15. VLT-78 refusal] the store refuses a moved record, touching no keychain account",
-);
+console.log("\n[15. refusal] the store refuses a moved record, touching no keychain account");
 {
   type SecretCall = { op: "getAll" | "set" | "delete" | "copy"; account: string };
 
@@ -1761,7 +1752,7 @@ console.log(
 }
 
 // ============================================================================
-// 16. WHERE the compare sits in each write body. (VLT-78, COMPILER API.)
+// 16. WHERE the compare sits in each write body. (COMPILER API.)
 // ============================================================================
 // Protects: the half section 15 cannot see for the blank-body case, and the
 // half no rooted-and-counted pin can see at all. A compare MOVED after the
@@ -1769,7 +1760,7 @@ console.log(
 // function - the count reads 1 before and after - and a deletion leaves the
 // count at 1 too if anything replaces it. Only its INDEX among the block's own
 // direct statements distinguishes the three.
-console.log("\n[16. VLT-78 placement] the compare is a direct statement of the queued write body");
+console.log("\n[16. placement] the compare is a direct statement of the queued write body");
 {
   const sf = sourceFile("store");
 

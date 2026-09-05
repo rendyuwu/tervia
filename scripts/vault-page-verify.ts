@@ -1,11 +1,12 @@
 /**
- * Self-check for the pure Vault derivation layer (6e wave 1, step 4).
+ * Self-check for the pure Vault derivation layer.
  * Run: `pnpm verify` (or `npx tsx scripts/vault-page-verify.ts` to iterate).
  *
  * `modules/vault/refs.ts` and `modules/vault/page/derive.ts` are pure - no React,
  * no store, no Tauri, no keychain read - which is the only reason this file can
- * exist. This module has NO production import yet: wave 2 wires the Vault page
- * to it. This script is its only caller in wave 1, and that is deliberate.
+ * exist. `page/derive.ts` is imported by `VaultPage.tsx`, `HostsPage.tsx`,
+ * `HostEditorDialog.tsx`, `IdentityEditorDialog.tsx` and
+ * `editor/credentialChoice.ts`, so a break here is a break in all of them.
  *
  * Modelled on `scripts/hosts-page-verify.ts`: same `canonical()` (JSON is
  * key-order sensitive and drops `undefined` keys, and both matter here), same
@@ -789,7 +790,7 @@ console.log("\n[15] keyDangling and missingPrivateKey: separate facts, literal p
     rows.map((r) => r.keyDangling),
     [false, true, true, false, false],
   );
-  // i-3 is the row wave 1 filed: a dangling keyId with a working password.
+  // i-3 is the awkward row: a dangling keyId with a working password.
   check(
     "a dangling keyId on password auth is NOT a missing secret",
     [rows[2].keyDangling, rows[2].missingSecret],
@@ -976,7 +977,7 @@ console.log(
     authMode: "agent",
     hasPassword: false,
   };
-  // Not one of the plan's minimum cases, but the honest consequence of
+  // Not a minimum case, but the honest consequence of
   // `hasPassword` being independent of `authMode` (`../types.ts:106`): agent
   // auth never NEEDS a password, but nothing stops the flag being true anyway,
   // and `deleteNote` reads the flag, not the mode, for that half of its answer.
@@ -1058,10 +1059,9 @@ process.exit(failed === 0 ? 0 : 1);
 
 // --- mutation table ----------------------------------------------------
 //
-// Handoff discipline (this wave's plan, step 4): a check that has not been
-// watched fail is not a check. Every mutation below was actually run against
-// this file, its exit code recorded, and the source restored by hash - see
-// /tmp/wave1-step4/MUTATIONS.md for the full before/after/restore transcript.
+// A check that has not been watched fail is not a check. Every mutation below
+// was actually run against this file, its exit code recorded, and the source
+// restored by hash.
 //
 //   Mutation                                          Check(s) it killed
 //   -------------------------------------------      ----------------------------
@@ -1077,10 +1077,10 @@ process.exit(failed === 0 ? 0 : 1);
 //   derive.ts: `id` tie-break deleted from both       section 6
 //     comparators (B5)
 //
-// Step 5 (this wave's plan) adds the cross-file half: each mutation below
-// reddens THIS file's section 11-14 check AND a pre-existing suite that now
-// depends on the same single definition, proving the delegation, not just the
-// source text, actually happened. See /tmp/wave1-step5/MUTATIONS.md.
+// The cross-file half: each mutation below reddens THIS file's section 11-14
+// check AND a pre-existing suite that now depends on the same single
+// definition, proving the delegation, not just the source text, actually
+// happened.
 //
 //   refs.ts: hostsUsingIdentity returns `[]` (B6)      section 13, AND
 //                                                       hosts-store-verify's
@@ -1102,8 +1102,7 @@ process.exit(failed === 0 ? 0 : 1);
 //                                                       identities refuses,
 //                                                       naming both"
 //
-// Wave 2 step 1 adds the two new row fields, the shared key-missing leaf and
-// the refusal copy. See /tmp/wave2-derive/MUTATIONS.md for the full transcript.
+// The two new row fields, the shared key-missing leaf and the refusal copy.
 //
 //   derive.ts: identityRows' `keyDangling = key ===         section 15's
 //     undefined` changed to `keyDangling = false` (W1)        keyDangling
@@ -1145,15 +1144,14 @@ process.exit(failed === 0 ? 0 : 1);
 //     `if (e instanceof VaultInUseError) {...}` with the        two checks
 //     non-refusal path returning `""` (W5)
 //
-// Wave 2 fix pass adds section 18 (the structural duplicate-detection check
-// gap 1 of that pass names) and section 19 (`deleteNote`, previously
-// uncovered). See /tmp/wave2-fix-derivecheck/MUTATIONS.md for the full
-// transcript, including W1-W5 re-run to confirm this table is still honest.
+// Section 18 (the structural duplicate-detection check) and section 19
+// (`deleteNote`, previously uncovered). W1-W5 were re-run alongside these to
+// confirm this table is still honest.
 //
 //   Y3 (measured): refs.ts's `key` arm duplicates          section 18's
 //     `!key.hasPrivateKey` AND derive.ts's `keyRows`          "hasPrivateKey
 //     reads `!key.hasPrivateKey` directly, BOTH at once -     exactly once" AND
-//     before this pass, all of vault-page (91), hosts-page     "derive.ts names
+//     before the fix, all of vault-page (91), hosts-page       "derive.ts names
 //     (58) and vault-shell (76) stayed EXIT=0 and              hasPrivateKey
 //     `keyMissingSecret` became a dead export unnoticed         nowhere at all"
 //   Y3a: refs.ts half of Y3 alone                           section 18's

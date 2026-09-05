@@ -1,5 +1,5 @@
 /**
- * Self-check for wave 2 step 3: the Vault page SHELL - the rail-view branch
+ * Self-check for the Vault page SHELL - the rail-view branch
  * swap in `RailViewArea.tsx`, and `VaultPage.tsx` itself, which is assembly
  * only. Run: `pnpm verify vault-shell` (or `npx tsx
  * scripts/vault-shell-verify.ts` to iterate).
@@ -48,11 +48,10 @@ const FILES = {
   draft: "src/modules/vault/editor/draft.ts",
   hostCard: "src/modules/hosts/page/HostCard.tsx",
   hostsPage: "src/modules/hosts/HostsPage.tsx",
-  // Section 16's fourth containment root (step 10, 6f wave 2) - see that
-  // section for why this grows the parity check instead of the file getting
-  // its own copy of it.
+  // Section 16's fourth containment root - see that section for why this grows
+  // the parity check instead of the file getting its own copy of it.
   ruleCard: "src/modules/forwards/page/RuleCard.tsx",
-  // Section 16's FOURTH GRID CALL SITE (VLT-101(b)) - Port Forwarding stopped
+  // Section 16's FOURTH GRID CALL SITE - Port Forwarding stopped
   // being a full-width list and took the same grid literal. Added here and to
   // section 16 alone: the only thing that walks every key of this map is the
   // `read` below, and every section that sweeps a SET names it as its own
@@ -73,7 +72,7 @@ const src = Object.fromEntries(Object.entries(FILES).map(([k, p]) => [k, read(p)
   string
 >;
 
-// The three files this wave's other checks call "the three new files" -
+// The three files the other checks call "the three new files" -
 // VaultPage.tsx plus the two cards next to it. `RailViewArea.tsx` is an
 // EDIT, not a new file, and is deliberately excluded from every whole-suite
 // sweep below (sections 9 and 12) for that reason.
@@ -91,6 +90,23 @@ const SAFETY_CLAIM_FILES = [
   "keyEditorDialog",
   "draft",
 ] as const;
+
+// The `contain-intrinsic-size` reserve each containment root declares, and the
+// single place it is written down: sections 10 and 16 both assert against it,
+// so re-measuring a card is one edit here rather than two that can disagree.
+//
+// Per-root value, not a shared constant: the four cards are genuinely different
+// heights, and raising one value to cover the tallest over-reserves on every
+// shorter one. An over-estimate is the direction that jumps the scrollbar
+// backwards, which is the failure the containment pair exists to prevent; an
+// under-estimate only grows the scrollbar as cards paint in. Each value is
+// measured against that root's own layout, never against its siblings.
+const EXPECTED_INTRINSIC = {
+  identityCard: "auto_100px",
+  keyCard: "auto_100px",
+  hostCard: "auto_100px",
+  ruleCard: "auto_144px",
+} as const;
 
 // ============================================================================
 // Shared compiler-API helpers - sections 9, 10, 13 and 15 all ask some
@@ -219,9 +235,9 @@ function nearestAncestorJsxElement(node: ts.Node): ts.JsxElement | null {
 }
 
 /** The `const <name> = ...` variable declaration anywhere under `root` -
- *  VLT-76's pin 3 needs this, and this file had no variable-declaration
- *  finder before it (VLT-33: there is no `scripts/lib`, so helpers are
- *  copied per script on purpose). Pins a definition, not an identifier: a
+ *  section 14's pin 3 needs this, and this file had no variable-declaration
+ *  finder before it (there is no `scripts/lib`, so helpers are copied per
+ *  script on purpose). Pins a definition, not an identifier: a
  *  check that only reads WHICH NAME is handed to a prop (like section 14's
  *  `rowsProp === "keyRowList"` below) is satisfied by
  *  `const keyRowList = visibleKeys;`, or by the two definitions swapped -
@@ -243,21 +259,20 @@ function findConstDeclaration(root: ts.Node, name: string): ts.VariableDeclarati
 // ============================================================================
 // Protects: `RailViewArea.tsx`'s `vault` case renders `<VaultPage />`, its
 // `PagePlaceholder` call is gone, and - the negative control - the `forwards`
-// case (6f wave 2's own, landed at step 8) still renders `<ForwardsPage />`.
+// case, which has its own branch, still renders `<ForwardsPage />`.
 // The third check is what stops an edit that replaced BOTH branches from
 // reading as correct: M2 below flips `forwards` to `<VaultPage />` too, and
 // only the third check can notice.
 //
-// RE-AIMED (step 10, closing the red window step 8 opened on purpose): this
-// check used to read `<PagePlaceholder page="forwards"`, which was correct
-// while 6f wave 2 had not yet replaced that branch and deliberately wrong
-// (a FAIL on purpose) from the moment `RailViewArea.tsx`'s `forwards` case
-// itself changed - the orchestrator measured the window as exactly this one
+// RE-AIMED: this check used to read `<PagePlaceholder page="forwards"`, which
+// was correct while the forwards branch was still a placeholder and
+// deliberately wrong (a FAIL on purpose) from the moment `RailViewArea.tsx`'s
+// `forwards` case itself changed - the window was exactly this one
 // check, `vault-shell` going 165 ok -> 164 ok + 1 FAIL, and nothing else in
 // this file. Kept as its own check, separate from the vault positives above,
 // so a failure here names WHICH page's branch drifted.
 //
-// RE-ANCHORED (VLT-101 fix round) FROM A CHARACTER BUDGET ONTO THE `return`
+// RE-ANCHORED FROM A CHARACTER BUDGET ONTO THE `return`
 // ITSELF. All three checks used to be a regex of the shape
 // `/case "vault":[\s\S]{0,200}<VaultPage\s*\/>/` over the RAW source, and the
 // `{0,200}` was standing in for "the next thing this case returns". It is the
@@ -291,7 +306,7 @@ console.log("[1. rail branch] only the vault case was replaced");
    *  unwrapped the same way `findReturnedJsxRoot` above does it, so a `return (
    *  <VaultPage /> )` reads identically to the one-liner this file has today.
    *
-   *  THIS IS THE CANONICAL COPY (VLT-33). `forwards-shell-verify.ts`'s section 1
+   *  THIS IS THE CANONICAL COPY. `forwards-shell-verify.ts`'s section 1
    *  asks the same question about the same file from the other side and carries
    *  a byte-identical body; keep them the same shape, so a diff between the two
    *  is the whole review. Duplicated rather than shared, because these scripts
@@ -327,7 +342,7 @@ console.log("[1. rail branch] only the vault case was replaced");
     vaultTag ?? "(none)",
   );
   check(
-    "NEGATIVE CONTROL: the forwards case renders <ForwardsPage /> (its own branch, landed 6f wave 2)",
+    "NEGATIVE CONTROL: the forwards case renders <ForwardsPage /> (its own branch)",
     forwardsTag === "ForwardsPage",
     forwardsTag ?? "(none)",
   );
@@ -419,7 +434,7 @@ console.log("\n[3. memo rule, compiler-verified] every builder call sits inside 
 // Protects: the same "Maximum update depth exceeded" failure mode, from the
 // other direction - a selector (`useStore((s) => ...)`, or `useShallow`, which
 // appears nowhere in `src/` today) calling one of the row builders directly.
-// Kept simple and negative, per the plan.
+// Kept simple and negative.
 console.log("\n[4. no selector] the page reads useVault()/useHosts(), it does not select");
 check("VaultPage.tsx does not import/use useShallow", !src.vaultPage.includes("useShallow"));
 check("VaultPage.tsx has no useStore( call", !/useStore\(/.test(src.vaultPage));
@@ -536,9 +551,9 @@ console.log(
 // 7. The refusal goes to the shared toast; the page has no error surface of
 //    its own.
 // ============================================================================
-// Protects: VLT-36's still-unfinished half - a page-owned `useState<string |
-// null>` (or a hand-rolled `role="alert"` line) that never expires, instead of
-// the shared, self-expiring `toast()`.
+// Protects: the still-unfinished half of the toast consolidation - a
+// page-owned `useState<string | null>` (or a hand-rolled `role="alert"` line)
+// that never expires, instead of the shared, self-expiring `toast()`.
 console.log("\n[7. one error surface] the refusal reaches toast(), and nowhere else");
 {
   const v = src.vaultPage;
@@ -662,8 +677,8 @@ for (const key of ["identityCard", "keyCard"] as const) {
     classText,
   );
   check(
-    `${FILES[key]} applies [contain-intrinsic-size:auto_100px] on its root element`,
-    classText.includes("[contain-intrinsic-size:auto_100px]"),
+    `${FILES[key]} applies [contain-intrinsic-size:${EXPECTED_INTRINSIC[key]}] on its root element`,
+    classText.includes(`[contain-intrinsic-size:${EXPECTED_INTRINSIC[key]}]`),
     classText,
   );
 }
@@ -691,11 +706,11 @@ console.log("\n[11. vaultKey, not key] the reserved prop name is avoided on both
 // ============================================================================
 // 12. Nothing claims a secret is safe.
 // ============================================================================
-// Protects: nothing in this wave protects a secret better than it was
+// Protects: nothing here protects a secret better than it was
 // protected before - what a shared identity buys is fewer COPIES of one
 // secret, never a stronger guarantee, and the copy must not imply otherwise.
-// NOTE: "Encrypted" is deliberately NOT forbidden here - wave 3's key panel
-// says it about a locked key, truthfully, and that is a different claim.
+// NOTE: "Encrypted" is deliberately NOT forbidden here - the key panel says
+// it about a locked key, truthfully, and that is a different claim.
 console.log(
   '\n[12. no false safety claim] "safer"/"securely"/"OS keychain" etc. appear nowhere new',
 );
@@ -823,12 +838,12 @@ console.log("    UNFILTERED row list");
 // 14. Every affordance opens something, and nothing else is offered yet.
 // ============================================================================
 // Protects: a button that opens nothing is the dead-affordance class already
-// filed against this app once (VLT-69, a header drag that silently does
-// nothing under a rail view). Wave 2 held that line by FORBIDDING the strings;
-// wave 3 implements three of the five, so those three move from the forbidden
+// filed against this app once (a header drag that silently did nothing under a
+// rail view). That line was first held by FORBIDDING the strings; three of the
+// five are now implemented, so those three move from the forbidden
 // list to a positive claim - the New buttons set an editor target, the cards'
 // Edit prop does too, and both dialogs are actually rendered. Export and
-// Import stay forbidden: nothing implements them before 6g.
+// Import stay forbidden: nothing implements them.
 console.log("\n[14] every affordance opens something; Export/Import are still not offered");
 for (const label of ["Export", "Import"]) {
   check(`VaultPage.tsx contains no "${label}" string`, !src.vaultPage.includes(label));
@@ -897,7 +912,7 @@ for (const key of ["identityCard", "keyCard"] as const) {
     rowsProp ?? undefined,
   );
 
-  // Pin 3 (VLT-76): `keyRowList` pinned by its own DEFINITION, not merely by
+  // Pin 3: `keyRowList` pinned by its own DEFINITION, not merely by
   // the identifier the check above reads off the prop. `const keyRowList =
   // visibleKeys;` - or the two definitions swapped so `keyRowList` itself
   // becomes the ranked list - leaves the check above green while the key
@@ -1109,7 +1124,8 @@ console.log("    missingPrivateKey -> the row Badge's variant AND its label");
 // hand-tested code and moving the root element sections 10 and 15 anchor on.
 // A structural equality between the copies costs one section and makes a
 // later divergence deliberate, which is exactly what the search box already
-// gets (`hosts-header-narrow-verify.ts:244-247`). If a shared shell ever
+// gets from `hosts-header-narrow-verify.ts`'s vault-header section. If a
+// shared shell ever
 // lands, this section is what has to be deleted on purpose. The shared-shell
 // question is untouched by this file; its trigger is still a future card
 // root, not this one.
@@ -1132,18 +1148,12 @@ console.log("    missingPrivateKey -> the row Badge's variant AND its label");
 // AND A FOURTH GRID CALL SITE: `ForwardsPage.tsx` swapped its
 // `flex flex-col gap-2` list for the same literal, so the grid tuple now
 // covers the same four modules the containment check does.
-console.log("\n[16. VLT-75 parity] the containment pair and the responsive grid still agree");
+console.log("\n[16. layout parity] the containment pair and the responsive grid still agree");
 {
   // --- the containment pair: IdentityCard, KeyCard, HostCard, RuleCard ---
   const CONTAINMENT_TOKEN = /^\[(contain-intrinsic-size|content-visibility):/;
-  // Per-root expected value, not a shared constant: the four cards are
-  // genuinely different heights, so no single number is right for all four.
-  const EXPECTED_INTRINSIC = {
-    identityCard: "auto_100px",
-    keyCard: "auto_100px",
-    hostCard: "auto_100px",
-    ruleCard: "auto_144px",
-  } as const;
+  // `EXPECTED_INTRINSIC` is declared at the top of this file, next to the other
+  // shared file-set constants, because section 10 reads it too.
   for (const [key, functionName] of [
     ["identityCard", "IdentityCard"],
     ["keyCard", "KeyCard"],
@@ -1220,13 +1230,12 @@ console.log("\n[16. VLT-75 parity] the containment pair and the responsive grid 
     hostsGridMatches.length === 1,
     hostsGridMatches.length,
   );
-  // VLT-101(b): Port Forwarding used to render `flex flex-col gap-2`, one
-  // full-width row per rule, and this section could not tell - it named the
-  // files it swept, and that page was not one of them, so the fourth surface
-  // in the set was free to be laid out any way at all. DCR-5's row is exactly
-  // "the cross-module decision that nothing pins decays silently"; this is the
-  // check that stops the decay being invisible rather than the one that stops
-  // it happening.
+  // Port Forwarding used to render `flex flex-col gap-2`, one full-width row
+  // per rule, and this section could not tell - it named the files it swept,
+  // and that page was not one of them, so the fourth surface in the set was
+  // free to be laid out any way at all. A cross-module decision that nothing
+  // pins decays silently; this is the check that stops the decay being
+  // invisible rather than the one that stops it happening.
   check(
     "ForwardsPage.tsx has exactly 1 responsive-grid div",
     forwardsGridMatches.length === 1,
@@ -1252,10 +1261,9 @@ console.log("\n[16. VLT-75 parity] the containment pair and the responsive grid 
       vaultGridMatches[0] === forwardsGridMatches[0],
       [vaultGridMatches[0], forwardsGridMatches[0]].join(" | "),
     );
-    // VLT-80/7d(d): a LITERAL pin, not merely agreement between the four call
+    // A LITERAL pin, not merely agreement between the four call
     // sites. The three checks above pass a coordinated edit that changes all
-    // four grids together - exactly the mutation withheld from this step
-    // (P14, run by the orchestrator once step 4 has retired) - because they
+    // four grids together, because they
     // never compare against a value nobody can move for free. Nothing else in
     // this 53-script suite anchors this string, so without this pin a
     // coordinated four-site change passes every one of them.
@@ -1287,9 +1295,8 @@ console.log(failed === 0 ? "\nAll vault-shell checks passed." : `\n${failed} che
 // Mutation table - every mutation actually run against this file's own
 // checks, by hand, before this file was considered done. Restored by hash
 // each time (`git hash-object` / `git cat-file blob`), never by `git checkout
-// --` or `git show HEAD:` (HEAD is wave 2 step 1/2's baseline and would
-// discard uncommitted work in the same file). Full transcript, exit codes and
-// restore hashes: /tmp/wave2-shell/MUTATIONS.md.
+// --` or `git show HEAD:` (HEAD carries the pre-edit baseline and would
+// discard uncommitted work in the same file).
 //
 //   Mutation                                          Check(s) it killed
 //   -------------------------------------------------  ---------------------------
@@ -1341,9 +1348,8 @@ console.log(failed === 0 ? "\nAll vault-shell checks passed." : `\n${failed} che
 //                                                        function body) is what
 //                                                        was added to catch it.
 //
-// ROUND 2 - four gaps an Oracle review measured against the checks above,
-// each confirmed by running the mutation in a worktree and recording the
-// exit code (transcript: /tmp/wave2-fix-shellcheck/MUTATIONS.md):
+// ROUND 2 - four gaps a review measured against the checks above, each
+// confirmed by running the mutation in a worktree and recording the exit code:
 //
 //   Z2: VaultPage.tsx's root className had          section 9's compiler-
 //     `@container` deleted, leaving the header        verified check, naming
@@ -1384,9 +1390,9 @@ console.log(failed === 0 ? "\nAll vault-shell checks passed." : `\n${failed} che
 //     `"text-muted-foreground"`                         mentions
 //                                                       keyDangling)
 //
-// STEP 10 (6f wave 2) - two extensions, not new mutations of THIS file's own
-// logic: section 1's third check was RE-AIMED (see that section's comment for
-// the red window it closes) and section 16 grew a fourth root:
+// TWO EXTENSIONS, not new mutations of THIS file's own logic: section 1's
+// third check was RE-AIMED (see that section's comment for the red window it
+// closes) and section 16 grew a fourth root:
 //
 //   P1 (forwards-shell-verify.ts's table): both RailViewArea branches to     section 1's re-aimed
 //     <ForwardsPage />                                                       third check
@@ -1395,7 +1401,7 @@ console.log(failed === 0 ? "\nAll vault-shell checks passed." : `\n${failed} che
 //     [content-visibility:auto]) deleted                                      ruleCard, and the
 //                                                                              4-way equality
 //
-// VLT-101(b) - section 16's grid half grew its fourth call site
+// Section 16's grid half grew its fourth call site
 // (`ForwardsPage.tsx`), and the pin check was re-aimed at all four strings
 // because M1 caught it answering for one:
 //

@@ -17,7 +17,7 @@
  *  1. ONE HEADER, NOT ONE PER PAGE. It is written once in the rail-view
  *     container, above `<RailViewArea/>`, so both pages get the same bar from
  *     the same lines. The rejected shape - a bar added inside `VaultPage` and
- *     again inside `ForwardsPage` - is DCR-5's failure mode: two copies of the
+ *     again inside `ForwardsPage` - is the failure mode: two copies of the
  *     same chrome, kept in sync by whoever remembers. So the checks count
  *     occurrences rather than merely finding one.
  *  2. THE NAME IS SAID ONCE, IN ONE PLACE, AND COMES FROM `PAGE_LABELS`. The
@@ -32,7 +32,7 @@
  *     D-NAV1's complaint in another costume. The negatives below are what stop
  *     the next edit reaching for the pane header wholesale.
  *
- * VLT-83: every check here is a POSITIVE over a `.tsx` file, so `stripComments`
+ * Every check here is a POSITIVE over a `.tsx` file, so `stripComments`
  * carries the JSX-comment branch. Without it a `{/* … *\/}` left behind by a
  * deletion satisfies the positives above - the header could be commented out
  * and this script would still report it present.
@@ -57,7 +57,7 @@ function check(name: string, ok: boolean, detail?: unknown): void {
 /**
  * A line with its trailing `//` comment removed, string literals respected.
  *
- * The third copy of this pair in the suite (VLT-33); canonical copy lives in
+ * The third copy of this pair in the suite; the canonical copy lives in
  * `scripts/host-editor-verify.ts`, duplicated rather than shared because these
  * scripts have no common module. Quote-aware and a character scan rather than a
  * regex: a `//` inside a string is not a comment, and an apostrophe in unquoted
@@ -86,7 +86,7 @@ function stripLineComment(line: string): string {
 /**
  * The same source with comments removed - the form every check below reads.
  *
- * The JSX branch is not optional here (VLT-83). `{/* … *\/}` is the only comment
+ * The JSX branch is not optional here. `{/* … *\/}` is the only comment
  * syntax legal inside JSX children, the line filter underneath recognises none
  * of it, and every check in this file is a positive: comment the header out and
  * the positives would still match the header inside the comment. The prose in
@@ -167,7 +167,7 @@ check("exactly one heading in the file", countOf(src, "<h2") === 1, countOf(src,
 const HEADER_BAR = "border-border/60 bg-card flex h-7";
 check(
   // The bar's own vocabulary, taken from `PaneTreeView.tsx:707`. Two of these is
-  // the DCR-5 shape arriving by copy-paste.
+  // a second copy of the same chrome arriving by copy-paste.
   //
   // The pane header's `@container` is deliberately NOT in this literal, because
   // it is deliberately not on the bar: it is there so the pane header's per-file

@@ -3,8 +3,8 @@
  * Run: `pnpm verify key-inspect`.
  *
  * `src-tauri/src/modules/ssh/mod.rs` already classifies a pasted or picked key
- * and phrases every dead end - that half shipped in `07d20d5`, `90e4c87` and
- * `79ce0aa`, with its own cargo tests at `mod.rs:941-1070`. What this file checks
+ * and phrases every dead end - that half has its own cargo tests in
+ * `ssh/mod.rs`'s `tests` module, over `ssh_key_inspect_inner`. What this file checks
  * is the frontend half added alongside it: the pure translation in
  * `src/modules/vault/keyInspect.ts` (behavioural, called directly - it is a plain
  * module with no Tauri surface), and the wiring into
@@ -136,16 +136,16 @@ function stripComments(src: string): string {
   // legal INSIDE JSX children, and the line-based filter below only ever
   // recognised `//`, `/*` and `*` starting a trimmed line, none of which match
   // a line starting `{`. Section [5]'s `sectionRaw` strips
-  // `SshCredentialSection.tsx` (`.tsx`), so this file is exposed exactly as
-  // VLT-83 describes: a deleted call left behind as `{/* ... */}` would pass
-  // every positive check run over the stripped source.
+  // `SshCredentialSection.tsx` (`.tsx`), so this file is exposed to it: a
+  // deleted call left behind as `{/* ... */}` would pass every positive check
+  // run over the stripped source.
   //
-  // VLT-83: the inner group must NOT be allowed to cross a `*/` while hunting
+  // The inner group must NOT be allowed to cross a `*/` while hunting
   // for one followed by `}` - a lazy `[\s\S]*?` is still permitted to do that,
   // and a type literal opening `{ /** ... */ x: T }` then swallows everything
   // up to some later, unrelated `*/}`. The negative lookahead below forbids
   // that: the first `*/` is final, either a real `{/* ... */}` or the match
-  // fails right there. Copied from `host-editor-verify.ts:191`'s fixed form;
+  // fails right there. Copied from `host-editor-verify.ts`'s `stripComments`;
   // see that file's comment for the measured damage the lazy form did.
   const withoutJsxComments = src.replace(/\{\s*\/\*(?:(?!\*\/)[\s\S])*\*\/\s*\}/g, "");
   return withoutJsxComments
@@ -365,7 +365,7 @@ console.log("\n[3b] vaultKeyFactsFrom - what the STORE records, which is not wha
     );
   check("vaultKeyFactsFrom's body is located", factsBody !== null);
   const factsSrc = factsBody?.[1] ?? "";
-  // VLT-80/7d(b): comment-stripped before the positive below - a raw
+  // Comment-stripped before the positive below - a raw
   // `.includes("vaultKeyTypeFrom(")` is satisfied by moving the real call
   // into a comment and deleting it. Sanity-checked first, the same model as
   // this file's own section [5] at :576-580: an empty string would pass the
@@ -412,7 +412,7 @@ console.log("\n[4] stripComments - the helper this section's whole-file check de
     stripComments("// safe\nwriteIt();").includes("writeIt();"),
   );
 
-  // VLT-83: the JSX-comment branch, both directions.
+  // The JSX-comment branch, both directions.
   const STRIPPER_PROBE =
     "type P = { /** c */ x: X };\nconst KEEP = 1;\nconst j = <div>{/* c */}</div>;";
   check(
@@ -802,14 +802,14 @@ if (failed > 0) console.error(`${failed} check(s) FAILED.`);
 //     keyPassphrase: "" })` in pickKeyFile                 text, THEN check whether
 //                                                       it was blank..."
 //   C4: mod.rs's ERR_DSA text changed to "nope"         "mod.rs still carries the
-//     (src-tauri/, restored by hash - see the wave        message naming "DSA keys
-//     orchestrator's mutation log, not this repo)         are not supported""
+//     (src-tauri/, restored by hash)                      message naming "DSA keys
+//                                                         are not supported""
 //   C5: vaultKeyTypeFrom made to `return "unknown"`     eight of the eleven rows in
 //     unconditionally                                    section [3] (every row
 //                                                       whose expectation was not
 //                                                       already "unknown")
 //
-// V3-V4, V8 (wave 3 step 1, over keyInspect.ts's new vaultKeyFactsFrom):
+// V3-V4, V8 (over keyInspect.ts's vaultKeyFactsFrom):
 //
 //   V3: `fingerprint: info.fingerprint || undefined`      section [3b]'s "a blank
 //     changed to `fingerprint: info.fingerprint ?? undefined`  fingerprint becomes
@@ -826,7 +826,7 @@ if (failed > 0) console.error(`${failed} check(s) FAILED.`);
 //                                                       section 1, which is the
 //                                                       cross-file half of this claim
 //
-// D1-D6 (this pass, live UI defects rather than the wiring shape above):
+// D1-D6 (live UI defects rather than the wiring shape above):
 //
 //   D1: both `if (inspectGeneration.current ===          count(...) === 2 check:
 //     generation)` guards in checkKey replaced with        "both the resolved and

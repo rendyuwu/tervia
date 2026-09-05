@@ -1,5 +1,5 @@
 /**
- * Self-check for VLT-42: a clean SSH shell exit must not be reported as a
+ * Self-check: a clean SSH shell exit must not be reported as a
  * dropped connection.
  * Run: `npx tsx scripts/ssh-exit-verify.ts`.
  *
@@ -101,16 +101,16 @@ for (const ending of [
 // `decideSshEnding`'s own tests above never see it, because by the time its
 // input is constructed it has already been mis-mapped.
 //
-// Both files are owned by other agents this round and neither exports a pure
-// function for this - bridge.ts's mapping lives inline in `channel.onmessage`,
-// ssh-session.ts's inline in `onExit`. ssh-session.ts additionally cannot be
+// Neither file exports a pure function for this - bridge.ts's mapping lives
+// inline in `channel.onmessage`, and ssh-session.ts's inline in `onExit`.
+// ssh-session.ts additionally cannot be
 // IMPORTED under plain node at all (it transitively touches `window` - see
 // the file header above), so even with an export a same-process behavioural
 // test could only ever cover bridge.ts's half. The fix that unblocks a real
 // behavioural test for both - extracting each mapping into an exported pure
 // function, `bridge.ts`'s reachable directly and `ssh-session.ts`'s living in
-// the dependency-free `ssh-exit-decision.ts` next to `decideSshEnding` - is
-// written up in this round's report rather than applied here.
+// the dependency-free `ssh-exit-decision.ts` next to `decideSshEnding` - has
+// not been applied.
 //
 // Until that lands, this is what's checkable without editing either file:
 // read the source, and confirm each of the three wire/reason cases maps to
@@ -140,15 +140,16 @@ function stripLineComment(line: string): string {
   }
   return line;
 }
-// VLT-83: no JSX-comment branch here, deliberately. Every input this file
+// No JSX-comment branch here, deliberately. Every input this file
 // strips is a `.ts` file - `bridge.ts` and `ssh-session.ts` - and a `{/* ...
 // */}` is only meaningful inside JSX children, so a `.ts` source can never
 // contain one that would hide code from a positive check the way it did in
-// `host-editor-verify.ts` (fixed at `host-editor-verify.ts:191` - copy the
+// `host-editor-verify.ts` (fixed in that file's own `stripComments` - copy the
 // branch from there, and not the lazy form `\{\s*\/\*[\s\S]*?\*\/\s*\}`,
 // which is not a substitute: it can still cross an intervening `*/` while
-// hunting for one followed by `}`) and `vault-editor-verify.ts:101`. If this
-// file is ever pointed at a `.tsx` file, that branch has to be added first.
+// hunting for one followed by `}`) and in `vault-editor-verify.ts`'s
+// `stripComments`. If this file is ever pointed at a `.tsx` file, that branch
+// has to be added first.
 function stripComments(src: string): string {
   return src
     .split("\n")

@@ -1,14 +1,14 @@
 /**
- * Self-check for VLT-39 (and its RDP-side twin, VLT-64): which pane owns the
- * caret across a tab switch. Run: `npx tsx scripts/pane-caret-verify.ts`.
+ * Self-check for which pane owns the caret across a tab switch, on the terminal
+ * side and the RDP side alike. Run: `npx tsx scripts/pane-caret-verify.ts`.
  *
  * TWO PREDECESSORS WERE GREEN OVER THE VERY THING THEY EXISTED TO PROTECT, for
  * the same underlying reason, so the reason is worth naming rather than the two
  * bugs:
  *
- *   - `terminal-focus-attach-verify.ts` pinned one true but insufficient
- *     property, and deleting `if (focused) s.term.focus();` - the only writer
- *     that returned the caret to a terminal on a tab switch - left it green.
+ *   - A predecessor check pinned one true but insufficient property, and
+ *     deleting `if (focused) s.term.focus();` - the only writer that returned
+ *     the caret to a terminal on a tab switch - left it green.
  *   - This file's first draft asserted `visBody.includes("claimCaret()")`, which
  *     `if (false) claimCaret();` satisfies. Four other straight reversions were
  *     green too, including replacing the whole fix with
@@ -37,10 +37,9 @@
  * changes value on MOUSEDOWN, React 19 flushes the resulting commit (layout AND
  * passive effects) synchronously inside that same mousedown, and the browser
  * then runs the mousedown's default action and focuses the tab chip - over the
- * top of whatever any pane effect had just focused. So both halves of VLT-39
- * were the same defect: the Hosts search box never kept the caret on a
- * click-through (R11.3/R11.5), and a terminal never got it back after a tab
- * round-trip (R11.6).
+ * top of whatever any pane effect had just focused. So both halves were the
+ * same defect: the Hosts search box never kept the caret on a click-through,
+ * and a terminal never got it back after a tab round-trip.
  *
  * The fix is a hand-over deferred by one frame, with three guards, in
  * `src/lib/paneCaret.ts`. Three things are checked here:
@@ -55,7 +54,7 @@
  *      re-created.
  *   3. THE CALL SITES, PARSED. That a pane CLAIMS instead of calling `.focus()`
  *      is a shape, so it is read out of the files that must not regress -
- *      HostsPage, useTerminalSession, and (VLT-64) RdpPane, which had VLT-39's
+ *      HostsPage, useTerminalSession, and RdpPane, which had the same
  *      direct-focus defect verbatim until it was converted to a claim. Parsed
  *      with the TypeScript compiler rather than matched with regexes, because
  *      the question asked of each site - "can this call actually run, and under
@@ -208,7 +207,7 @@ console.log("\n[the user always wins] focus the user placed is never overridden"
   }
 }
 {
-  // THE NEGATIVE HALF (§4.30). Not every portaled thing traps the caret - a
+  // THE NEGATIVE HALF. Not every portaled thing traps the caret - a
   // tooltip must not, or a pane that opens one can never be handed the caret
   // again. This is what keeps `OVERLAY_ROLES` from being widened to `*`.
   const h = harness(() => node("a-tooltip", { role: "tooltip" }));
@@ -319,7 +318,7 @@ function stubFrames(extraGlobals: Record<string, unknown> = {}) {
 console.log("\n[the app's arbiter] `paneCaret` itself, not another one built to taste");
 {
   // Everything above drives `createCaretArbiter`, which is a FACTORY. Swapping
-  // the app's instance for `createCaretArbiter((run) => { run(); })` - VLT-39
+  // the app's instance for `createCaretArbiter((run) => { run(); })` - the fix
   // reverted whole, in one line - leaves every check above green, because none
   // of them ever touches the export the panes actually claim through.
   const rig = stubFrames();
@@ -687,7 +686,7 @@ function renderScopeRefWrite(
  * `stillOnScreen` has to READ A REF THAT IS REWRITTEN EVERY RENDER, not a value
  * closed over when the claim was made. The claim is decided a frame later, so a
  * closure is answering a question about a world that has already moved: that is
- * the stale-claim half of VLT-39, and `() => true`, `() => visible && focused`
+ * the stale-claim half of the defect, and `() => true`, `() => visible && focused`
  * (the params) and `() => onScreen` (the prop) are all the same defect written
  * three ways. Asserted as the property rather than as a spelling, so the fix
  * cannot be renamed out from under the check.
@@ -878,8 +877,9 @@ console.log("\n[useTerminalSession.ts] every terminal focus path is a claim");
   );
   if (visibility) {
     const calls = liveMatches(visibility.body, callTo("claimCaret"));
-    // R11.6 IS this call. `if (false) claimCaret();` used to satisfy the check
-    // that stood here, which is why liveness is the assertion now.
+    // The tab round-trip IS this call. `if (false) claimCaret();` used to
+    // satisfy the check that stood here, which is why liveness is the
+    // assertion now.
     check("the tab-switch path reaches claimCaret()", calls.length === 1, calls.length);
     if (calls.length === 1) {
       const reached = reachIdentifiers(calls[0], visibility.body);
@@ -890,13 +890,13 @@ console.log("\n[useTerminalSession.ts] every terminal focus path is a claim");
       );
     }
     checkNoDirectFocus(
-      "...and it does not call .focus() itself - R11.6 is exactly that call losing to the tab chip",
+      "...and it does not call .focus() itself - that is exactly the call that loses to the tab chip",
       visibility.body,
     );
   }
 }
 
-console.log("\n[RdpPane.tsx] the RDP pane claims the caret, it does not take it (VLT-64)");
+console.log("\n[RdpPane.tsx] the RDP pane claims the caret, it does not take it");
 {
   const sf = parse("src/modules/rdp/RdpPane.tsx");
   const effects = effectsIn(sf);
@@ -958,7 +958,7 @@ console.log("\n[PaneTreeView.tsx] the page is only on screen when its leaf is th
     return found.length > 0 ? found[0] : null;
   };
 
-  // R11.6's other half: without `focused` in this signal, switching to a tab
+  // The tab round-trip's other half: without `focused` in this signal, switching to a tab
   // that splits Hosts beside a terminal would hand the caret to the page.
   const onScreen = jsxAttr("PageLeafBody", "onScreen");
   check("PageLeafBody is given an onScreen expression", !!onScreen, "(missing)");
