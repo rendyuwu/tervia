@@ -234,6 +234,55 @@ function nearestAncestorJsxElement(node: ts.Node): ts.JsxElement | null {
   return null;
 }
 
+/**
+ * Every `{cond && …}` JSX child under `root`, as its condition's source text
+ * and the node it guards.
+ *
+ * Section 17 needs this and nothing here had it. A guarded block is how a card
+ * renders a state that is usually absent, and it is invisible to every other
+ * helper in this file: it carries no `className` of its own to read, no tag
+ * name worth searching for, and `tsc` is perfectly happy when the whole block
+ * is deleted, because the condition it read is a `const` the deletion removes
+ * along with it.
+ */
+function findJsxLogicalBlocks(
+  root: ts.Node,
+  sf: ts.SourceFile,
+): { condition: string; body: ts.Node }[] {
+  const out: { condition: string; body: ts.Node }[] = [];
+  const visit = (n: ts.Node): void => {
+    if (ts.isJsxExpression(n) && n.expression && ts.isBinaryExpression(n.expression)) {
+      const bin = n.expression;
+      if (bin.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken) {
+        out.push({ condition: bin.left.getText(sf), body: bin.right });
+      }
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(root);
+  return out;
+}
+
+/**
+ * The JSX TEXT under `root`, whitespace collapsed - i.e. the words that reach
+ * the screen.
+ *
+ * From `JsxText` nodes rather than `getText()`, for the reason
+ * {@link literalClassNameText} gives: a comment is trivia BETWEEN nodes and
+ * never inside one, so a sentence deleted from the render and left behind in a
+ * `{/* … *\/}` beside it cannot satisfy a check written over this. Collapsed
+ * because a sentence that wraps across source lines is one sentence on screen.
+ */
+function jsxTextUnder(root: ts.Node): string {
+  const parts: string[] = [];
+  const visit = (n: ts.Node): void => {
+    if (ts.isJsxText(n)) parts.push(n.text);
+    ts.forEachChild(n, visit);
+  };
+  visit(root);
+  return parts.join(" ").replace(/\s+/g, " ").trim();
+}
+
 /** The `const <name> = ...` variable declaration anywhere under `root` -
  *  section 14's pin 3 needs this, and this file had no variable-declaration
  *  finder before it (there is no `scripts/lib`, so helpers are copied per
@@ -1289,6 +1338,113 @@ console.log("\n[16. layout parity] the containment pair and the responsive grid 
   }
 }
 
+// ============================================================================
+// 17. The key card says when a stored key needs a passphrase nobody holds.
+// ============================================================================
+// Protects: a state a saved record can be in that NO code path can repair -
+// `VaultKey.encrypted` true with `hasPassphrase` false. There is no way to add
+// a passphrase to a stored key without replacing the body
+// (`vault/editor/draft.ts`'s `keySecretsForSave`), so the row cannot
+// authenticate anything, and `encryptedKeyRefusal` cannot catch it: that
+// refusal needs a FRESH inspection, which an import and a host-to-vault
+// conversion do not perform. The card is the only surface that says so.
+//
+// This section exists because the block was measured to be held by nothing.
+// Deleting it whole left `vault-shell-verify`, `vault-page-verify`,
+// `key-inspect-verify` and `vault-draft-verify` all at exit 0 - `tsc` included,
+// since the `const` it reads goes with it. It is a guarded block, so section
+// 15's Badge and className pins cannot see it and section 10's className pins
+// cannot either.
+//
+// THREE FAILURES, and the third is the one a "the words are in the file" check
+// misses: the block deleted, the condition changed to something that is not the
+// predicate, and the predicate REIMPLEMENTED locally - `const needsPassphrase =
+// vaultKey.encrypted && !vaultKey.hasPassphrase` renders identically today and
+// is a second definition of a question `vault/refs.ts` owns, which is how the
+// card and the next surface to ask it come to disagree.
+//
+// NOT A PIN ON THE SENTENCE. Two fragments are required - that the body is
+// encrypted, and that no passphrase is stored - because those are the two facts
+// the line exists to carry and a version missing either one is a different
+// claim. The wording between them is free. A whole-sentence pin here would be a
+// landmine on ordinary copy editing, which is what section 16's comment says
+// about `usageDetail` for the same reason.
+console.log("\n[17. the needs-a-passphrase line] the key card renders it, on the shared predicate");
+{
+  const sf = ts.createSourceFile(
+    FILES.keyCard,
+    src.keyCard,
+    ts.ScriptTarget.ESNext,
+    true,
+    ts.ScriptKind.TSX,
+  );
+  const body = findFunctionBody(sf, "KeyCard");
+  check("found KeyCard's function body to check", body !== null);
+
+  // The predicate is IMPORTED, not written here. Checked first because every
+  // check below reads an identifier that a local reimplementation also
+  // satisfies.
+  check(
+    "KeyCard.tsx imports keyNeedsPassphrase from the shared refs module",
+    /import \{[^}]*\bkeyNeedsPassphrase\b[^}]*\}\s*from\s*["']\.\.\/refs["'];/.test(src.keyCard),
+  );
+  const decl = body && findConstDeclaration(body, "needsPassphrase");
+  check("found KeyCard's `needsPassphrase` declaration", decl !== null);
+  // Whitespace collapsed, so a line break Prettier chooses is not a red check
+  // over code that did not change - the landmine `key-inspect-verify`'s own
+  // `tight()` exists for.
+  const initText = decl?.initializer ? decl.initializer.getText(sf).replace(/\s+/g, "") : "";
+  check(
+    "and it is exactly the shared predicate applied to this card's own record, not a local re-derivation",
+    initText === "keyNeedsPassphrase(vaultKey)",
+    initText || "(no initializer)",
+  );
+
+  // The guarded block itself. Selected BY CONDITION rather than by counting the
+  // file's guarded blocks: the row Badge carries a
+  // `{missingPrivateKey && <CircleAlert …>}` of its own, so a count would
+  // answer for the wrong one and would move every time either changes.
+  const guarded = body ? findJsxLogicalBlocks(body, sf) : [];
+  check(
+    "KeyCard renders at least one guarded block (extraction sanity)",
+    guarded.length > 0,
+    guarded.map((g) => g.condition).join(" | "),
+  );
+  const onPredicate = guarded.filter((g) => g.condition === "needsPassphrase");
+  check(
+    "exactly one guarded block in KeyCard renders on needsPassphrase",
+    onPredicate.length === 1,
+    guarded.map((g) => g.condition).join(" | "),
+  );
+  if (onPredicate.length === 1) {
+    const rendered = jsxTextUnder(onPredicate[0].body);
+    check(
+      "that block renders real text (extraction sanity) - an empty body would pass the two fragment checks below for free",
+      rendered.length > 40,
+      rendered,
+    );
+    check(
+      "and it says the stored body is passphrase-encrypted",
+      /passphrase-encrypted/i.test(rendered),
+      rendered,
+    );
+    check(
+      "and that no passphrase is stored - the half that makes it a problem rather than a property",
+      /no passphrase (is )?stored/i.test(rendered),
+      rendered,
+    );
+    // A SENTENCE, not a second chip, and this is where that is enforced rather
+    // than left to section 15's `keyBadges.length === 1` to report as an opaque
+    // count. The reason is section 15's own: this card has exactly one `Badge`
+    // and it holds the key TYPE, so a second one would have to displace it.
+    check(
+      "and it is a text line rather than a Badge, which is what keeps section 15's single-Badge count true",
+      findOpeningElementsByTag(onPredicate[0].body, "Badge", sf).length === 0,
+      rendered,
+    );
+  }
+}
+
 console.log(failed === 0 ? "\nAll vault-shell checks passed." : `\n${failed} check(s) FAILED.`);
 
 // ----------------------------------------------------------------------------
@@ -1431,4 +1587,45 @@ console.log(failed === 0 ? "\nAll vault-shell checks passed." : `\n${failed} che
 //     "[content-visibility:auto]"                              "exactly two containment
 //                                                              tokens" check for ruleCard and
 //                                                              the 4-way equality
+//
+// SECTION 17's own, all five run against KeyCard.tsx and restored by hash. The
+// section exists because the block was measured to be held by NOTHING first:
+// deleting it whole left this file, `vault-page-verify`, `key-inspect-verify`
+// and `vault-draft-verify` all at exit 0, `tsc` included. Each mutation below is
+// what that measurement now returns instead.
+//
+//   X1: the whole `{needsPassphrase && (…)}` block          RED, exit 1 - "exactly one
+//     deleted from KeyCard's JSX (the original,               guarded block in KeyCard
+//     unheld mutation)                                        renders on needsPassphrase",
+//                                                            reporting the one condition
+//                                                            left ("missingPrivateKey")
+//   X2: the block's condition swapped to                    RED, exit 1 - same check,
+//     `missingPrivateKey`, so the line renders on             reporting
+//     the wrong state                                        "missingPrivateKey |
+//                                                            missingPrivateKey". The
+//                                                            words are all still in the
+//                                                            file, which is why this
+//                                                            section reads the CONDITION
+//                                                            and not the text alone.
+//   X3: `keyNeedsPassphrase(vaultKey)` replaced with a      RED, exit 1 - "it is exactly
+//     local `vaultKey.encrypted &&                            the shared predicate applied
+//     !vaultKey.hasPassphrase`                                to this card's own record",
+//                                                            reporting the re-derivation
+//                                                            verbatim. Renders identically
+//                                                            today; it is a second
+//                                                            definition of a question
+//                                                            `vault/refs.ts` owns.
+//   X4: the sentence replaced with "This key needs          RED, exit 1 - the extraction-
+//     attention.", block and condition kept                   sanity check AND both
+//                                                            fragment checks (3). This is
+//                                                            what says the two fragments
+//                                                            are not vacuous.
+//   X5: the line turned into a second `<Badge               RED, exit 1 - section 17's
+//     variant="destructive">`                                 "it is a text line rather
+//                                                            than a Badge" AND section
+//                                                            15's "found exactly one
+//                                                            <Badge> in KeyCard.tsx",
+//                                                            reporting 2. Both on purpose:
+//                                                            15's count is the constraint,
+//                                                            17's names the reason.
 process.exit(failed === 0 ? 0 : 1);

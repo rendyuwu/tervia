@@ -31,8 +31,10 @@
  *   A KEY is the record a private key hangs off. `upsertKey` throws on a blank
  *   name, for the same reason `sanitizeGroup` refuses one - it is picked by name
  *   from a dropdown. Its two presence flags are claims about the other machine
- *   and are forced to `false` for the same reason an identity's is. See
- *   {@link sanitizeKey}.
+ *   and are forced to `false` for the same reason an identity's is. Its
+ *   `encrypted` is NOT one of those claims and is carried through - it describes
+ *   the key material, and it is the only thing a saved record has to say that an
+ *   arriving key needs a passphrase nobody here holds. See {@link sanitizeKey}.
  *
  *   A RULE is a saved port-forward riding an SSH host. `upsertRule` refuses a
  *   blank name or remote host, a local port outside `0` or `1-65535`, a remote
@@ -532,6 +534,28 @@ export function sanitizeIdentity(raw: unknown): VaultIdentity | null {
  * Both are display-only on this side, so an unrecognised `SHA256:` shape says
  * nothing about whether the private half is usable - and a stricter parse here
  * would drop a good key over a cosmetic field the user cannot even edit.
+ *
+ * `encrypted` IS CARRIED and is deliberately NOT forced false alongside the two
+ * presence flags, which is the one place this function departs from
+ * {@link sanitizeIdentity}'s treatment of `hasPassword`. The flags describe the
+ * EXPORTING MACHINE'S keychain and only this machine's can answer them;
+ * `encrypted` describes the key MATERIAL, like `fingerprint` and `publicKey`,
+ * and the material is the same material wherever it is read. Forcing it false
+ * would be worse than dropping it: `false` is the claim that something looked
+ * and the body is not encrypted, so an encrypted key whose passphrase did not
+ * travel would arrive asserting an inspection that never happened, and this
+ * function performs none.
+ *
+ * Read as THREE-STATE, the way {@link sanitizeRule} reads `startWithHost`, and
+ * for the same reason - only a value the file literally states is honoured:
+ * `true` when the file says `true`, `false` when it says `false`, ABSENT for a
+ * row that does not mention it or that carries a non-boolean. Absent is what
+ * every pre-field export produces and what `VaultKey.encrypted` defines as "no
+ * inspection has answered this", so an old backup imports honestly rather than
+ * gaining a fact it never carried. This line is also what makes the field
+ * survive an export/import round trip: `buildBackup` seals the records
+ * themselves, so the field travels out unaided, and this is the only gate on
+ * the way back in.
  */
 export function sanitizeKey(raw: unknown): VaultKey | null {
   if (!isRecord(raw)) return null;
@@ -550,6 +574,11 @@ export function sanitizeKey(raw: unknown): VaultKey | null {
     ...(type ? { keyType: type } : {}),
     ...(fingerprint ? { fingerprint } : {}),
     ...(publicKey ? { publicKey } : {}),
+    // Carried, not forced - it describes the key material rather than the
+    // exporting machine's keychain. A `typeof` test rather than the truthiness
+    // spread the fields above use, because `false` here is a real answer and
+    // has to arrive as one; absent is reserved for "the file did not say".
+    ...(typeof raw.encrypted === "boolean" ? { encrypted: raw.encrypted } : {}),
     // Both forced, like an identity's `hasPassword`: the material they claim
     // lives in the exporting machine's keychain, and whether any of it arrives
     // here is decided by what the sealed payload actually carried.

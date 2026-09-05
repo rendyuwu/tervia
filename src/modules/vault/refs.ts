@@ -16,6 +16,12 @@ import type { VaultIdentity, VaultKey, VaultRef } from "./types";
 // list, or a page listing holders a delete does not refuse for, is worse than
 // either alone.
 //
+// `keyNeedsPassphrase` is a FOURTH question and does not yet have two callers -
+// the key card is the only surface that asks it. It lives here anyway because it
+// is the same KIND of question as the pip beside it, read off the same record's
+// flags, and because the next surface that needs it (the editors' recovery copy)
+// must not answer it a second, differently-worded way.
+//
 // The `Host` import is TYPE-ONLY and must stay that way: `modules/hosts` imports
 // the binding union from `modules/vault/types`, so a value import here would close
 // a runtime cycle. A type import is erased and closes nothing.
@@ -66,6 +72,36 @@ export function identitiesUsingKey(
  */
 export function keyMissingSecret(key: VaultKey): boolean {
   return !key.hasPrivateKey;
+}
+
+/**
+ * Does this key record an ENCRYPTED body with no passphrase stored?
+ *
+ * A SIBLING of {@link keyMissingSecret}, deliberately not a widening of it.
+ * That one feeds {@link identityMissingSecret}, and an encrypted key whose
+ * passphrase is missing is not a key with no private half - it has one. Folding
+ * this in there would replace one false statement about the record with a
+ * different one.
+ *
+ * A record in this state fails every connect until the passphrase is stored.
+ * That IS recoverable - `keySecretsForSave` in `editor/draft.ts` forwards a lone
+ * passphrase, so the key editor can add one to a stored key without replacing
+ * the body - and this predicate is what makes it findable: nothing else on a
+ * saved record distinguishes the row that needs that from a key that simply has
+ * no passphrase. `encryptedKeyRefusal` in the same file blocks the two EDITOR
+ * routes into the state and only those, because it needs a fresh inspection to
+ * refuse over; an import (`sanitizeKey` in `modules/backup/file.ts`) and a
+ * conversion (`modules/hosts/credentialMove.ts`) perform none, so for those the
+ * saved record is the only thing left to carry the answer.
+ *
+ * `encrypted === true`, never a truthiness test: {@link VaultKey.encrypted} is
+ * three-state, absent means no inspection ever answered, and the store reads
+ * `tervia-vault.json` without re-validating it, so a hand-edited file can put a
+ * non-boolean there. Absent and a non-boolean both answer `false` here - the
+ * honest answer, since nothing has established the body is encrypted.
+ */
+export function keyNeedsPassphrase(key: VaultKey): boolean {
+  return key.encrypted === true && !key.hasPassphrase;
 }
 
 /**

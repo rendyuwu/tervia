@@ -15,12 +15,19 @@
  * tail recording every mutation actually run against this file. Copied rather
  * than imported: there is no `scripts/lib`, and every script in this suite
  * duplicates these.
+ *
+ * Section 10 reaches OUTSIDE `draft.ts` - to `vault/types.ts`, `vault/refs.ts`
+ * and `backup/file.ts` - and says why in its own comment. All three are pure in
+ * the same sense `draft.ts` is, so nothing about that section needs a runtime
+ * this file does not have.
  */
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { sanitizeKey } from "../src/modules/backup/file";
 import { vaultKeyFactsFrom, type KeyInspectResult } from "../src/modules/vault/keyInspect";
+import { keyMissingSecret, keyNeedsPassphrase } from "../src/modules/vault/refs";
 import {
   EMPTY_IDENTITY_DRAFT,
   EMPTY_KEY_DRAFT,
@@ -37,7 +44,7 @@ import {
   type IdentityDraft,
   type KeyDraft,
 } from "../src/modules/vault/editor/draft";
-import type { VaultKey } from "../src/modules/vault/types";
+import { vaultKeyStamp, type VaultKey } from "../src/modules/vault/types";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const read = (p: string) => readFileSync(join(root, p), "utf8");
@@ -121,9 +128,23 @@ console.log(
 );
 {
   check(
-    "a parsed answer produces exactly the three keys, present, undefined included where absent",
+    "a parsed answer produces exactly the four keys, present, undefined included where absent",
     vaultKeyFactsFrom(keyInspectResult()),
-    { keyType: "ed25519", fingerprint: "SHA256:x", publicKey: "ssh-ed25519 A" },
+    {
+      keyType: "ed25519",
+      fingerprint: "SHA256:x",
+      publicKey: "ssh-ed25519 A",
+      encrypted: false,
+    },
+  );
+  // `encrypted: false` above is PRESENT, and this is the row that says so
+  // rather than leaving it to `canonical`'s treatment of a missing key: absent
+  // means "no inspection has answered this" on `VaultKey.encrypted`, and the
+  // wholesale replace below is what would otherwise leave a stale `true`
+  // standing over a body that is no longer encrypted.
+  ok(
+    "and the fourth key is present even when it is false, not omitted",
+    "encrypted" in vaultKeyFactsFrom(keyInspectResult({ encrypted: false })),
   );
 }
 
@@ -345,7 +366,7 @@ console.log(
 {
   const existing = existingKey();
   check(
-    "facts === null carries all three existing facts forward unchanged",
+    "facts === null carries all four existing facts forward unchanged",
     keyRecordFrom("k-1", keyDraft(), existing, null),
     {
       id: "k-1",
@@ -356,12 +377,29 @@ console.log(
       keyType: "rsa",
       fingerprint: "SHA256:old",
       publicKey: "ssh-rsa AAAAold",
+      encrypted: undefined,
     },
+  );
+  // The carry-forward, on the fact a rename must not drop. A save that only
+  // renames the key passes `facts === null`, and an `encrypted: true` lost
+  // there turns "an inspection found this body encrypted" back into "nobody has
+  // looked" - the record silently forgetting the one thing that says the stored
+  // key needs a passphrase it does not have. Both directions, because carrying
+  // only `true` would be a rule about a value rather than about the field.
+  check(
+    "an existing encrypted: true survives a facts === null save",
+    keyRecordFrom("k-1", keyDraft(), existingKey({ encrypted: true }), null).encrypted,
+    true,
+  );
+  check(
+    "and so does an existing encrypted: false, rather than degrading to absent",
+    keyRecordFrom("k-1", keyDraft(), existingKey({ encrypted: false }), null).encrypted,
+    false,
   );
 
   const freshFacts = vaultKeyFactsFrom(keyInspectResult());
   check(
-    "fresh facts over an existing key REPLACE all three wholesale",
+    "fresh facts over an existing key REPLACE all four wholesale",
     keyRecordFrom("k-1", keyDraft(), existing, freshFacts),
     {
       id: "k-1",
@@ -372,12 +410,25 @@ console.log(
       keyType: "ed25519",
       fingerprint: "SHA256:x",
       publicKey: "ssh-ed25519 A",
+      encrypted: false,
     },
   );
-
-  const sealedFacts = vaultKeyFactsFrom(keyInspectResult({ parsed: false }));
+  // The replace direction that matters: an encrypted body pasted over a key
+  // recorded as unencrypted has to leave the record saying `true`.
   check(
-    "a sealed container's facts ({}) over an existing key with facts leaves all three ABSENT, not carried forward",
+    "a newly pasted ENCRYPTED body replaces a stored encrypted: false with true",
+    keyRecordFrom(
+      "k-1",
+      keyDraft(),
+      existingKey({ encrypted: false }),
+      vaultKeyFactsFrom(keyInspectResult({ encrypted: true })),
+    ).encrypted,
+    true,
+  );
+
+  const sealedFacts = vaultKeyFactsFrom(keyInspectResult({ parsed: false, encrypted: true }));
+  check(
+    "a sealed container's facts over an existing key leave the other three ABSENT and carry the encryption fact",
     keyRecordFrom("k-1", keyDraft(), existing, sealedFacts),
     {
       id: "k-1",
@@ -385,6 +436,7 @@ console.log(
       description: undefined,
       hasPrivateKey: false,
       hasPassphrase: false,
+      encrypted: true,
     },
   );
 
@@ -400,6 +452,23 @@ console.log(
       keyType: "ed25519",
       fingerprint: "SHA256:x",
       publicKey: "ssh-ed25519 A",
+      encrypted: false,
+    },
+  );
+  // A create from a SEALED container: nothing to carry forward, so the record
+  // says only what the container answered. `encrypted: true` with no
+  // fingerprint is the honest shape, and it is the row `keyNeedsPassphrase`
+  // then reads in section 10.
+  check(
+    "a create from a sealed container records the encryption fact and nothing else about the key",
+    keyRecordFrom("k-2", keyDraft(), null, sealedFacts),
+    {
+      id: "k-2",
+      name: "id_ed25519",
+      description: undefined,
+      hasPrivateKey: false,
+      hasPassphrase: false,
+      encrypted: true,
     },
   );
 }
@@ -543,8 +612,8 @@ console.log(
 {
   const REFUSAL =
     "This key file is encrypted and needs its passphrase. Enter it below and save again - a key" +
-    " stored without it cannot be used, and nothing on the saved record can tell that apart from" +
-    " a key that has none.";
+    " stored without it fails every connect, and the passphrase is the only thing that changes" +
+    " that.";
 
   check("not encrypted + a blank passphrase: passes", encryptedKeyRefusal(false, ""), null);
   check(
@@ -564,6 +633,172 @@ console.log(
       " function has to agree or a save could look successful while storing an unusable key",
     encryptedKeyRefusal(true, "   "),
     REFUSAL,
+  );
+
+  // THE MESSAGE MAY NOT DESCRIBE THE SAVED RECORD, and this is the check on
+  // that rather than a note asking the next editor to remember it. TWO editors
+  // render this one string and their records are different shapes: a `VaultKey`
+  // carries `encrypted` and the key card reads it, while a host's
+  // `SshInlineCredentials` has no such field and nothing on the Hosts page says
+  // a word about the state. So a sentence about what "the record" or "the page"
+  // can report is true on one surface and false on the other - which is exactly
+  // how the previous wording ("nothing on the saved record can tell that apart
+  // from a key that has none") became false on the vault side the moment
+  // `VaultKey.encrypted` existed, while staying true on the host side.
+  //
+  // Nouns, not a paraphrase check: a claim needs something to make the claim
+  // ABOUT, and these are the only names this app has for the two things that
+  // differ between the surfaces.
+  for (const noun of ["the saved record", "the record", "the Vault page", "the Hosts page"]) {
+    ok(
+      `the refusal makes no claim about ${JSON.stringify(noun)} - one string, two surfaces, and only one of them has the field`,
+      !REFUSAL.toLowerCase().includes(noun.toLowerCase()),
+    );
+  }
+  // And the claim it DOES make is the one that holds on both: the connect
+  // fails. A counter-example to the negatives above, which a message reduced to
+  // "Enter the passphrase." would otherwise satisfy for free.
+  ok(
+    "and it does say what is true on both surfaces - that the connect fails",
+    /fails every connect/.test(REFUSAL),
+  );
+  // Refusing is not justified by the state being unrecoverable, and the message
+  // must not imply it is: section 6's "blank body + typed passphrase" row is the
+  // recovery, and it has always been there.
+  ok(
+    "and it does not claim the key is permanently unusable - typing a lone passphrase into the editor is a real repair (section 6)",
+    !/\bcannot be used\b|\bpermanently\b|\bunusable\b/i.test(REFUSAL),
+  );
+}
+
+// --- 10. VaultKey.encrypted, the rest of the way to a reader ------------------
+console.log(
+  "\n[10] VaultKey.encrypted - the stamp that notices it, the predicate that reads it, and the import that carries it",
+);
+{
+  // GROUPED HERE rather than split three ways, and said out loud because the
+  // placement is arguable: `vaultKeyStamp` belongs to
+  // `vault-editor-verify.ts`, `keyNeedsPassphrase` to `vault-page-verify.ts`
+  // beside `keyMissingSecret`, and `sanitizeKey` to `backup-verify.ts`. The
+  // three rows below are one property - a field is worthless if any link
+  // between the inspection above and a reader drops it - and sections 1 and 5
+  // already carry the first two links, so the chain is checked end to end in
+  // one place instead of asserted in four files that can each go green while
+  // the chain is broken. Moving each row to its own suite later changes nothing
+  // about the property; leaving the chain unchecked would.
+
+  const aKey = (over: Partial<VaultKey> = {}): VaultKey => ({
+    id: "k-1",
+    name: "id_ed25519",
+    fingerprint: "SHA256:same",
+    hasPrivateKey: true,
+    hasPassphrase: false,
+    ...over,
+  });
+
+  // THE STAMP. A re-encrypted - or decrypted - copy of one key keeps its
+  // fingerprint, because the fingerprint is of the public half and a passphrase
+  // change does not touch it. So `encrypted` is the only thing in the stamp that
+  // can notice that swap, and these two records differ in NOTHING else.
+  ok(
+    "vaultKeyStamp distinguishes two records that differ only in encrypted",
+    vaultKeyStamp(aKey({ encrypted: true })) !== vaultKeyStamp(aKey({ encrypted: false })),
+  );
+  // Three states, not two: absent is "no inspection has answered this", so the
+  // first inspection of an imported key is itself a move in the record.
+  ok(
+    "and it distinguishes ABSENT from both of them - the first inspection of an imported key is a change",
+    vaultKeyStamp(aKey()) !== vaultKeyStamp(aKey({ encrypted: false })) &&
+      vaultKeyStamp(aKey()) !== vaultKeyStamp(aKey({ encrypted: true })),
+  );
+  ok(
+    "the same key twice, as two separate objects, still stamps the same",
+    vaultKeyStamp(aKey({ encrypted: true })) === vaultKeyStamp(aKey({ encrypted: true })),
+  );
+
+  // THE PREDICATE. The absent row is the three-state decision: nothing has
+  // established that this body is encrypted, so claiming it needs a passphrase
+  // would be the record asserting an inspection it never had.
+  ok(
+    "keyNeedsPassphrase: encrypted with no passphrase stored -> true",
+    keyNeedsPassphrase(aKey({ encrypted: true, hasPassphrase: false })) === true,
+  );
+  ok(
+    "keyNeedsPassphrase: encrypted WITH a passphrase stored -> false",
+    keyNeedsPassphrase(aKey({ encrypted: true, hasPassphrase: true })) === false,
+  );
+  ok(
+    "keyNeedsPassphrase: encrypted false with no passphrase -> false, which is a key that simply has none",
+    keyNeedsPassphrase(aKey({ encrypted: false, hasPassphrase: false })) === false,
+  );
+  ok(
+    "keyNeedsPassphrase: encrypted ABSENT with no passphrase -> false, because nobody has looked",
+    keyNeedsPassphrase(aKey({ hasPassphrase: false })) === false,
+  );
+  // The store reads `tervia-vault.json` without re-validating it, so a
+  // hand-edited file can put a non-boolean in a `boolean | undefined` field.
+  // `=== true` answers false; a truthiness test would answer true and put the
+  // warning line on a record nothing established anything about.
+  ok(
+    "keyNeedsPassphrase: a non-boolean from a hand-edited store file -> false, not truthy",
+    keyNeedsPassphrase({ ...aKey(), encrypted: "yes" } as unknown as VaultKey) === false,
+  );
+  // The sibling is NOT widened. It feeds `identityMissingSecret`, and an
+  // encrypted key whose passphrase is missing has a private half - reporting it
+  // as missing one would swap a false statement for a different false statement.
+  ok(
+    "keyMissingSecret still reads only hasPrivateKey - an encrypted key with no passphrase is not a key with no private half",
+    keyMissingSecret(aKey({ encrypted: true, hasPassphrase: false })) === false,
+  );
+
+  // THE IMPORT. `sanitizeKey` performs no inspection, so it may only report
+  // what the file literally says - three states, the same shape `sanitizeRule`
+  // gives `startWithHost`, and the line the field's survival across an
+  // export/import round trip rests on.
+  const fileRow = (over: Record<string, unknown> = {}) => ({
+    id: "k-1",
+    name: "laptop",
+    ...over,
+  });
+  check(
+    "sanitizeKey preserves encrypted: true from the file",
+    sanitizeKey(fileRow({ encrypted: true }))?.encrypted,
+    true,
+  );
+  check(
+    "sanitizeKey preserves encrypted: false from the file - not coerced to absent",
+    sanitizeKey(fileRow({ encrypted: false }))?.encrypted,
+    false,
+  );
+  ok(
+    "a file row that does not mention it leaves the field ABSENT, not false",
+    !("encrypted" in (sanitizeKey(fileRow()) ?? {})),
+  );
+  ok(
+    "and a non-boolean value leaves it absent too, rather than arriving as a truthy claim",
+    !("encrypted" in (sanitizeKey(fileRow({ encrypted: "yes" })) ?? {})) &&
+      !("encrypted" in (sanitizeKey(fileRow({ encrypted: 1 })) ?? {})),
+  );
+  // The two presence flags are still forced, and this row is why the one above
+  // is not simply "the file wins": those two describe the EXPORTING machine's
+  // keychain, `encrypted` describes the key material.
+  check(
+    "the two presence flags are still forced false even when the file claims both",
+    [
+      sanitizeKey(fileRow({ hasPrivateKey: true, hasPassphrase: true, encrypted: true }))
+        ?.hasPrivateKey,
+      sanitizeKey(fileRow({ hasPrivateKey: true, hasPassphrase: true, encrypted: true }))
+        ?.hasPassphrase,
+    ],
+    [false, false],
+  );
+  // The chain, end to end and by value: an encrypted key exported from another
+  // machine, landing here with no passphrase, is a record the page can warn
+  // about. This is the row the whole field exists for.
+  const imported = sanitizeKey(fileRow({ encrypted: true, fingerprint: "SHA256:x" }));
+  ok(
+    "an imported encrypted key with no passphrase reads as needing one",
+    imported !== null && keyNeedsPassphrase(imported),
   );
 }
 
@@ -601,6 +836,68 @@ process.exit(failed === 0 ? 0 : 1);
 //                                                        AND this file's section 1
 //   V9: draft.ts - privateKeyHelp changed to return      section 8's distinctness
 //     "Paste a key." unconditionally                       check
+//
+// `VaultKey.encrypted`, one mutation per link in the chain. Each was run, its
+// failing checks taken from that run's own output, and the source restored by
+// hash.
+//
+//   Mutation                                          Check(s) it killed
+//   -------------------------------------------------  ---------------------------
+//   W1: keyInspect.ts - the sealed branch reverted to    section 5's "a sealed
+//     `return {};`                                        container's facts ..."
+//                                                       and "a create from a
+//                                                       sealed container ..." (2).
+//                                                       ALSO key-inspect-verify
+//                                                       section [3b] (2).
+//   W2: keyInspect.ts - `encrypted: info.encrypted`      section 1's four-key row
+//     deleted from the parsed branch                      and its presence row,
+//                                                       section 5's wholesale-
+//                                                       replace row, the newly
+//                                                       pasted ENCRYPTED body row
+//                                                       and the create row (5).
+//                                                       ALSO key-inspect-verify
+//                                                       section [3b] (2).
+//   W3: draft.ts - `encrypted: existing?.encrypted`      section 5's carry-forward
+//     deleted from keyRecordFrom's facts === null          row and the two
+//     branch                                              directions beside it (3).
+//                                                       That branch is the one a
+//                                                       rename-only save travels.
+//   W4: types.ts - vaultKeyStamp reverted to the two-    section 10's two stamp
+//     flag form, dropping the encryption character        rows (2)
+//   W5: refs.ts - keyNeedsPassphrase's `=== true`        section 10's non-boolean
+//     changed to `!!key.encrypted`                        row (1) - and ONLY that
+//                                                       one, which is what says
+//                                                       that row is not redundant
+//                                                       with the absent row beside
+//                                                       it
+//   W6: refs.ts - the same test changed to               section 10's ABSENT row
+//     `key.encrypted !== false`, i.e. absent read as      and its non-boolean row
+//     encrypted                                           (2)
+//   W7: backup/file.ts - sanitizeKey's typeof test       section 10's "preserves
+//     narrowed to `raw.encrypted === true`                 encrypted: false" row (1)
+//   W8: backup/file.ts - `encrypted` forced to false     section 10's preserves-
+//     alongside the two presence flags                    true row, both absent
+//                                                       rows, and the end-to-end
+//                                                       import row (4)
+//   W9: page/KeyCard.tsx - the whole needs-a-passphrase  NOTHING. This file,
+//     block deleted from the card's JSX                   vault-shell-verify,
+//                                                       vault-page-verify and
+//                                                       key-inspect-verify all
+//                                                       stayed green. The card's
+//                                                       RENDERING of this state is
+//                                                       unchecked, recorded here
+//                                                       rather than left to be
+//                                                       discovered: it is the one
+//                                                       link in the chain no suite
+//                                                       holds. `vault-shell-verify`
+//                                                       is where a check belongs -
+//                                                       it already reads this
+//                                                       card's JSX through the
+//                                                       compiler API, and its
+//                                                       "exactly one <Badge>" check
+//                                                       is also why this state is a
+//                                                       text line rather than a
+//                                                       second chip.
 //
 // Section 2b's mutations were run from credential-move-verify's side, where
 // the caller lives - see that file's own table. The one that lands here:

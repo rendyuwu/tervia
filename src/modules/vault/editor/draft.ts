@@ -254,16 +254,20 @@ export function validateKeyDraft(draft: KeyDraft, mode: "create" | "edit"): stri
  * The record `upsertKey` is handed.
  *
  * `facts` is `null` when the body was left blank - nothing about the stored key
- * is being replaced, so the three things recorded about it are still true and
- * are carried across unchanged.
+ * is being replaced, so the four things recorded about it are still true and
+ * are carried across unchanged. `encrypted` follows the same rule as the other
+ * three, and has to: a rename that dropped it would turn "an inspection found
+ * this body encrypted" back into "nobody has ever looked", which is the record
+ * silently forgetting the one fact that says a stored key needs a passphrase it
+ * does not have.
  *
- * When `facts` is present the three are replaced WHOLESALE, and that includes
- * being replaced with nothing: `vaultKeyFactsFrom` returns `{}` for a sealed
- * container, and the base record below names none of the three, so they end up
- * absent. Merging the old values under the new ones is the failure this shape
- * exists to prevent - a fingerprint that outlives the key body it described
- * names a key the record no longer holds, and the Vault page would show it next
- * to the new key's name without anything looking wrong.
+ * When `facts` is present the four are replaced WHOLESALE, and that includes
+ * being replaced with nothing: `vaultKeyFactsFrom` returns only `encrypted` for
+ * a sealed container, and the base record below names none of the four, so the
+ * other three end up absent. Merging the old values under the new ones is the
+ * failure this shape exists to prevent - a fingerprint that outlives the key
+ * body it described names a key the record no longer holds, and the Vault page
+ * would show it next to the new key's name without anything looking wrong.
  *
  * `hasPrivateKey` and `hasPassphrase` are placeholders: `upsertKey` overwrites
  * both with what it actually stored (`../store.ts:158-180`).
@@ -287,6 +291,7 @@ export function keyRecordFrom(
       keyType: existing?.keyType,
       fingerprint: existing?.fingerprint,
       publicKey: existing?.publicKey,
+      encrypted: existing?.encrypted,
     };
   }
   return { ...base, ...facts };
@@ -367,11 +372,30 @@ export function passphraseHelp(replacingBody: boolean): string {
  * container - `.ppk`, PKCS#8 - answers `parsed: false, encrypted: true`, and is
  * the same trap with fewer facts.
  *
- * Refused rather than warned, because the state has no way out. There is no way
- * to add a passphrase to a stored key without replacing the body
- * ({@link keySecretsForSave}), so a key saved this way is permanently unusable,
- * and `keyMissingSecret` (`../refs.ts:67-69`) reads only `hasPrivateKey`, so
- * nothing on the Vault page says a word about it.
+ * Refused rather than warned, because every connect with that key fails until
+ * the passphrase is supplied, and this is the moment the user has the key in
+ * front of them. NOT because the state is unrecoverable - it is recoverable, and
+ * saying otherwise here would be the same overclaim this function's own message
+ * used to make: {@link keySecretsForSave}'s keep-branch forwards a LONE
+ * passphrase, so typing one into this editor over a blank body adds it to the
+ * stored key without replacing the body. What has no way out is REMOVING a
+ * passphrase, which is the asymmetry {@link keySecretsForSave} documents.
+ *
+ * This refusal is a gate on ONE DOOR - it needs a fresh inspection, so it covers
+ * exactly the paths that perform one. An import and a host-to-vault conversion
+ * do not, and what answers for them is the saved record: `VaultKey.encrypted`
+ * carries the inspection's answer, and `keyNeedsPassphrase` in `../refs.ts` is
+ * what the key card asks. `keyMissingSecret` next to it reads only
+ * `hasPrivateKey` and deliberately still does.
+ *
+ * THE MESSAGE MAY NOT DESCRIBE THE SAVED RECORD, and that constraint is what its
+ * last clause turns on. Two editors render this one string, and their records are
+ * not the same shape: a `VaultKey` carries `encrypted` and the key card reads it,
+ * while a host's `SshInlineCredentials` has no such field and nothing on the
+ * Hosts page says a word about the state. So any sentence about what the record
+ * or the page can report is true on one surface and false on the other. The
+ * message stays with what holds for both - the connect fails, and the passphrase
+ * is what changes that.
  *
  * The host editor's inline key field had the same hole and now imports this
  * rather than carrying a second copy of it, so the two editors refuse the same
@@ -381,5 +405,5 @@ export function passphraseHelp(replacingBody: boolean): string {
  */
 export function encryptedKeyRefusal(encrypted: boolean, passphrase: string): string | null {
   if (!encrypted || passphrase.trim() !== "") return null;
-  return "This key file is encrypted and needs its passphrase. Enter it below and save again - a key stored without it cannot be used, and nothing on the saved record can tell that apart from a key that has none.";
+  return "This key file is encrypted and needs its passphrase. Enter it below and save again - a key stored without it fails every connect, and the passphrase is the only thing that changes that.";
 }

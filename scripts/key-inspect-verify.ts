@@ -310,18 +310,47 @@ console.log("\n[3b] vaultKeyFactsFrom - what the STORE records, which is not wha
       ...info,
     });
 
-  // A sealed container yields NOTHING - not `keyType: "unknown"`, which would
-  // claim the algorithm was read. `KeyCard.tsx:53-57` renders the two
-  // differently, so this is a visible difference and not a nicety.
+  // A sealed container records no ALGORITHM - not `keyType: "unknown"`, which
+  // would claim the algorithm was read. `page/KeyCard.tsx` renders the two
+  // differently (the record's own `keyType.toUpperCase()` against a literal
+  // "Unknown type"), so this is a visible difference and not a nicety.
   check(
     "a sealed container records no keyType at all",
     facts({ parsed: false, encrypted: true, keyType: "ssh-rsa" }).keyType === undefined,
     facts({ parsed: false, encrypted: true, keyType: "ssh-rsa" }),
   );
+  // It records the ONE fact it can answer, and only that one. A container that
+  // cannot be opened without a passphrase IS encrypted, which is what
+  // `needs_passphrase` in `src-tauri/src/modules/ssh/mod.rs` means by
+  // `parsed: false` - and that fact is the difference between a saved key with
+  // no passphrase and a saved key whose passphrase nobody holds. The key SET is
+  // asserted, not just the absence of three: an implementation that carried the
+  // fingerprint through the sealed branch would pass a per-field check that only
+  // asked about `keyType`.
   check(
-    "...and no fingerprint or public half either",
-    Object.keys(facts({ parsed: false })).length === 0,
+    "...and exactly one key, the encryption fact - no fingerprint and no public half",
+    JSON.stringify(Object.keys(facts({ parsed: false })).sort()) === JSON.stringify(["encrypted"]),
     facts({ parsed: false }),
+  );
+  check(
+    "and that fact is TRUE, stated by the sealed state rather than copied off the input beside it",
+    facts({ parsed: false, encrypted: false }).encrypted === true,
+    facts({ parsed: false, encrypted: false }),
+  );
+
+  // The parsed branch carries the inspection's own answer, both ways, and
+  // `false` must be PRESENT: absent means "nobody looked", which is a different
+  // claim and the one `VaultKey.encrypted` exists to keep separate.
+  check(
+    "a parsed ENCRYPTED answer records encrypted: true",
+    facts({ keyType: "ssh-ed25519", encrypted: true }).encrypted === true,
+    facts({ keyType: "ssh-ed25519", encrypted: true }),
+  );
+  const plainFacts = facts({ keyType: "ssh-ed25519", encrypted: false });
+  check(
+    "a parsed UNENCRYPTED answer records encrypted: false, present rather than absent",
+    plainFacts.encrypted === false && "encrypted" in plainFacts,
+    { value: plainFacts.encrypted, present: "encrypted" in plainFacts },
   );
 
   // A PARSED key with no algorithm reported is the opposite case: it WAS read,
@@ -345,7 +374,7 @@ console.log("\n[3b] vaultKeyFactsFrom - what the STORE records, which is not wha
     ed,
   );
 
-  // The `??` trap: `KeyCard.tsx:68` renders
+  // The `??` trap: `page/KeyCard.tsx` renders
   // `vaultKey.fingerprint ?? "No fingerprint recorded"`, and `"" ?? x` is `""`,
   // so a blank stored here is a blank LINE on screen where the sentence
   // belongs. Same for the public half.
@@ -368,8 +397,8 @@ console.log("\n[3b] vaultKeyFactsFrom - what the STORE records, which is not wha
   // Comment-stripped before the positive below - a raw
   // `.includes("vaultKeyTypeFrom(")` is satisfied by moving the real call
   // into a comment and deleting it. Sanity-checked first, the same model as
-  // this file's own section [5] at :576-580: an empty string would pass the
-  // next check for free.
+  // this file's own section [5] check that "stripping comments left real code
+  // behind": an empty string would pass the next check for free.
   const strippedFacts = stripComments(factsSrc);
   check(
     "stripping comments left real code behind (vaultKeyFactsFrom's body)",
@@ -814,9 +843,30 @@ if (failed > 0) console.error(`${failed} check(s) FAILED.`);
 //   V3: `fingerprint: info.fingerprint || undefined`      section [3b]'s "a blank
 //     changed to `fingerprint: info.fingerprint ?? undefined`  fingerprint becomes
 //                                                       undefined, never \"\"" check
-//   V4: `if (!info.parsed) return {};` changed to         section [3b]'s first two
-//     `if (!info.parsed) return { keyType:                 checks (sealed container
-//     vaultKeyTypeFrom(info.keyType) };`                    records no keyType/facts)
+//   V4: the sealed branch changed to return a keyType    all THREE of section
+//     - `return { keyType:                                 [3b]'s sealed-container
+//     vaultKeyTypeFrom(info.keyType) };`                    checks: "records no
+//                                                       keyType at all", "exactly
+//                                                       one key, the encryption
+//                                                       fact", and "that fact is
+//                                                       TRUE"
+//   W1: keyInspect.ts - the sealed branch reverted to     section [3b]'s "exactly
+//     `return {};`, i.e. the shape before it carried        one key, the encryption
+//     the encryption fact                                   fact" and "that fact is
+//                                                       TRUE" (2 failed). ALSO
+//                                                       reddens vault-draft-verify
+//                                                       section 5's two
+//                                                       sealed-container rows,
+//                                                       which is the cross-file
+//                                                       half of the same claim.
+//   W2: keyInspect.ts - `encrypted: info.encrypted`       section [3b]'s "a parsed
+//     deleted from the parsed branch                        ENCRYPTED answer" and
+//                                                       "a parsed UNENCRYPTED
+//                                                       answer ... present rather
+//                                                       than absent" (2 failed).
+//                                                       ALSO reddens five rows in
+//                                                       vault-draft-verify
+//                                                       sections 1 and 5.
 //   V8: vaultKeyTypeFrom's body changed to                section [3]'s eight
 //     `return "unknown";` unconditionally                  non-"unknown" rows AND
 //                                                       section [3b]'s mapping row

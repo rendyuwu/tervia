@@ -129,6 +129,36 @@ export type VaultKey = {
   hasPrivateKey: boolean;
   /** Passphrase at `tervia-vault :: <id>::passphrase`. */
   hasPassphrase: boolean;
+  /**
+   * Whether the stored key BODY is passphrase-encrypted, as an inspection
+   * answered it.
+   *
+   * THREE-STATE, and absent is not `false`. Absent means no inspection has ever
+   * answered this - the truth for every record written before this field
+   * existed, and for every record an import builds, since `sanitizeKey` in
+   * `modules/backup/file.ts` reads a file and inspects nothing. `false` is the
+   * stronger claim that something looked and the body is not encrypted.
+   * Collapsing the two would have a record assert an inspection it never had,
+   * which is the class of false statement this field exists to remove -
+   * `keyInspect.ts` draws the same line between "we looked and the answer is X"
+   * and "we could not look" for `keyType`.
+   *
+   * WHAT IT IS FOR. Without it, `hasPrivateKey: true` with
+   * `hasPassphrase: false` describes two states nothing can tell apart: a key
+   * that legitimately has no passphrase, and an ENCRYPTED key whose passphrase
+   * is not stored. The second fails every connect, and an `openssh-key-v1` body
+   * inspected WITHOUT its passphrase still answers with a real type, fingerprint
+   * and public half - so the broken record looks exactly as complete as the
+   * working one. `keyNeedsPassphrase` in `refs.ts` is the question this field
+   * exists to be asked.
+   *
+   * The state is RECOVERABLE, and this field is what makes the recovery
+   * findable rather than what stands in for it: `keySecretsForSave` in
+   * `editor/draft.ts` forwards a lone passphrase, so typing one into the key
+   * editor over a blank body adds it to the stored key. The problem this field
+   * solves is that nothing could say WHICH rows need that done.
+   */
+  encrypted?: boolean;
   description?: string;
 };
 
@@ -280,10 +310,25 @@ export const VAULT_STAMP_ABSENT = "absent";
  * The fingerprint IS inside it, and is not a rename in disguise: it is what the
  * stored private key is, so a change to it means the material this record names
  * is a different key.
+ *
+ * THE ENCRYPTION STATE IS INSIDE IT TOO, as a third flag character, and the
+ * fingerprint does not already cover it: a RE-ENCRYPTED COPY OF ONE KEY KEEPS
+ * ITS FINGERPRINT. The fingerprint is of the public half, which changing or
+ * removing a passphrase does not touch - the host editor's key-reuse copy says
+ * exactly that in the sentence it shows the user, and `credentialMove.ts` in
+ * `modules/hosts` repeats it. So a stored body swapped for a decrypted copy of
+ * itself is a move in the secret material with an unchanged fingerprint, and
+ * without this character the stamp calls the two records identical.
+ *
+ * Three states rather than a second `0`/`1`, because {@link VaultKey.encrypted}
+ * is three-state: `-` is "no inspection has answered this", which is a
+ * different record from one an inspection found unencrypted, and folding them
+ * together would hide the first inspection of an imported key.
  */
 export function vaultKeyStamp(key: VaultKey | null | undefined): string {
   if (!key) return VAULT_STAMP_ABSENT;
-  return `key:${key.hasPrivateKey ? 1 : 0}${key.hasPassphrase ? 1 : 0}:${key.fingerprint ?? ""}`;
+  const encrypted = key.encrypted === undefined ? "-" : key.encrypted ? "1" : "0";
+  return `key:${key.hasPrivateKey ? 1 : 0}${key.hasPassphrase ? 1 : 0}${encrypted}:${key.fingerprint ?? ""}`;
 }
 
 /**
