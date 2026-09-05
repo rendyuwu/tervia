@@ -75,6 +75,7 @@ import {
   type StoreBroadcast,
 } from "../src/lib/recoveredStore";
 import {
+  classifyReadFailure,
   recoverStoreFile,
   snapshotStoreFile,
   SNAPSHOT_SUFFIX,
@@ -1049,6 +1050,31 @@ function memFs(files: Record<string, StoreFileRead>, fault: FsFault = {}, log: s
   check("a good primary is snapshotted", [s.taken, fs.files[SNAPSHOT]], [true, text(GOOD)]);
 }
 {
+  // The other direction, and it is not symmetry for its own sake. A `.bak` this
+  // process could not READ may hold the only good copy - it is what the next
+  // launch would recover from when the primary is absent or torn - so replacing
+  // it destroys data nobody ever looked at. Without this, an unreadable snapshot
+  // survives launch (`recover` leaves it alone) and then dies to the first
+  // ordinary edit, on every store in the family.
+  const fs = memFs({
+    [PRIMARY]: text(GOOD),
+    [SNAPSHOT]: { kind: "unreadable", reason: "os error 13" },
+  });
+  const s = await snapshotStoreFile(STORE_FILE, fs.io);
+  check("an unreadable snapshot is not replaced", [s.taken, fs.written], [false, []]);
+  check("and is left exactly as it was", fs.files[SNAPSHOT], {
+    kind: "unreadable",
+    reason: "os error 13",
+  });
+  assert(!!s.note?.includes("could not be read"), "with a note saying why");
+}
+{
+  // Same rule for a snapshot too large to read, for the same reason.
+  const fs = memFs({ [PRIMARY]: text(GOOD), [SNAPSHOT]: { kind: "toolarge" } });
+  const s = await snapshotStoreFile(STORE_FILE, fs.io);
+  check("nor is a too-large one", [s.taken, fs.written], [false, []]);
+}
+{
   // The one thing a snapshot must never do: overwrite the last good copy with a
   // torn one, which would turn a recoverable crash into a total loss.
   const fs = memFs({ [PRIMARY]: text(""), [SNAPSHOT]: text(GOOD) });
@@ -1200,12 +1226,20 @@ function bus() {
   // The whole property, as one sequence. Any other order loses data: loading
   // before the restore hands the store layer an empty map it will then save, and
   // snapshotting before the load can copy a torn file over the last good one.
+  //
+  // The SECOND `read:snapshot` is the snapshot pass reading the file it is about
+  // to replace. It refuses to overwrite a `.bak` it could not read, because bytes
+  // nobody managed to look at may be the only good copy left - the same rule
+  // `recover` applies to a primary. That read is the whole of its cost, it
+  // happens once per coalesced burst rather than once per commit, and it is the
+  // only thing that can notice a snapshot going unreadable mid-session.
   check("recover, then force the load, then snapshot", log, [
     "read:primary",
     "read:snapshot",
     "write:primary",
     "get:identities",
     "read:primary",
+    "read:snapshot",
     "write:snapshot",
   ]);
   const settled = log.length;
@@ -1375,6 +1409,45 @@ function bus() {
   await io.commit();
   check("and still writable", kv.data.identities, [{ id: "i-late" }]);
   check("with the broadcast still firing", b.emitted, [SPEC.changedEvent]);
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n[classify] absent is told from unreadable by the shape of the error");
+{
+  // `fs_read_file` rejects for BOTH, and a `Result<_, String>` command hands the
+  // frontend nothing but the message - so the `(os error N)` suffix Rust appends
+  // is the entire contract. `src-tauri/src/modules/fs/file.rs` has a test
+  // pinning the Rust half; this is the reading half.
+  //
+  // The SHIPPED rule, imported rather than restated: `tauriStoreFileIo` itself
+  // cannot run here (it invokes Tauri), and a regex copied into this file would
+  // be free to drift from the one that decides. Every other fixture throws a
+  // message that ENDS with its suffix, which is exactly the input that cannot
+  // tell an anchored pattern from an unanchored one - so without the wrapped
+  // case below the anchor is unpinned.
+  const classify = (message: string): string => classifyReadFailure(message).kind;
+
+  check("ENOENT is absent", classify("No such file or directory (os error 2)"), "missing");
+  check(
+    "and so is Windows' missing parent",
+    classify("The system cannot find the path specified. (os error 3)"),
+    "missing",
+  );
+  check("EACCES is not", classify("Permission denied (os error 13)"), "unreadable");
+  check(
+    // The whole reason the pattern is anchored. A message that merely CONTAINS a
+    // not-found suffix - a wrapped or chained error - is not a report that the
+    // file is absent, and reading it as one puts a store back on the path where
+    // a default is written over a file that is really there.
+    "a suffix in the middle of a longer message is not absent",
+    classify("read failed (os error 2): the file is now locked (os error 13)"),
+    "unreadable",
+  );
+  check(
+    "and neither is a message with no suffix at all",
+    classify("fs_read_file join error: task 7 panicked"),
+    "unreadable",
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -1615,6 +1688,45 @@ function racingIo(io: StoreFileIo, onDir: () => void): StoreFileIo {
     "and the next save is what puts it on disk",
     fs.files[PRIMARY],
     text('{"identities":[{"id":"i-1"}],"keys":[{"id":"early"}],"late":[{"id":"late"}]}'),
+  );
+}
+{
+  // The case the `Object.is` guard in the pending sweep exists for, which the
+  // check above does NOT cover: that one sets a key for the first time mid-write,
+  // so it is absent from the payload and the sweep never looks at it. This one
+  // re-sets a key that IS in the payload. Clearing it unconditionally would drop
+  // the newer value the user just typed and leave the older one on disk, with
+  // the session reading the older one back.
+  const fs = memFs({ [PRIMARY]: text(GOOD) });
+  let inFlight = false;
+  let store!: ReturnType<typeof createFileKeyValueStore>;
+  const late: Promise<void>[] = [];
+  store = createFileKeyValueStore(
+    STORE_FILE,
+    racingIo(fs.io, () => {
+      if (!inFlight) return;
+      inFlight = false;
+      late.push(store.set("keys", [{ id: "newer" }]));
+    }),
+  );
+
+  await store.get("identities");
+  await store.set("keys", [{ id: "older" }]);
+  inFlight = true;
+  await store.save();
+  await Promise.all(late);
+
+  check(
+    "the write carried the value it snapshotted",
+    fs.files[PRIMARY],
+    text('{"identities":[{"id":"i-1"}],"keys":[{"id":"older"}]}'),
+  );
+  check("and the re-set is what the session reads", await store.get("keys"), [{ id: "newer" }]);
+  await store.save();
+  check(
+    "and the next save puts the newer value on disk",
+    fs.files[PRIMARY],
+    text('{"identities":[{"id":"i-1"}],"keys":[{"id":"newer"}]}'),
   );
 }
 {

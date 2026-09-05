@@ -373,6 +373,19 @@ as empty and every mutation fails with a refusal naming the reason. That is the
 accepted cost. No store in this app approaches the size limit today, and an
 unopenable file is expected to clear on its own or to need a human.
 
+The same rule covers the `.bak`, and there the accepted state is the other way
+round: a snapshot this app could not read is never REPLACED, so a store whose
+`.bak` is unreadable takes no new snapshot until that clears, and a crash in the
+meantime falls back to whatever that older `.bak` holds. Replacing it instead
+would destroy the only surviving copy whenever the primary is absent or torn -
+which is exactly the state a snapshot exists for. A failed pass says so in the
+recovery notice, so the user is told the safety net has stopped being refreshed
+rather than left to assume it has not.
+
+Only the user is told. A store layer sees a rejected `save()` and logs it; there
+is no per-store toast for the writes that follow, so a profile in this state
+shows one notice at launch and then nothing while each edit quietly fails.
+
 One classification is done by wording, not by a type: `fs_read_file` rejects for
 both "no such file" and "would not open", so the distinction is drawn from the
 `(os error N)` suffix Rust appends to an OS error - 2 and 3 mean absent,

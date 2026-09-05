@@ -243,6 +243,11 @@ export function createFileKeyValueStore(fileName: string, files: StoreFileIo): F
         // and the next read picks these bytes up from disk.
         Object.assign(cache, writing);
         for (const key of Object.keys(writing)) {
+          // Reference identity, so "still the value that went out" holds only
+          // for values not mutated in place. Nothing reaches it - every store
+          // layer builds a fresh array - and a caller that mutated an array it
+          // had already handed to `set` would lose the mutation at the
+          // `JSON.stringify` above regardless of what happens here.
           if (Object.is(pending[key], writing[key])) delete pending[key];
         }
         return;

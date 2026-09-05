@@ -292,12 +292,23 @@ async function recover(fileName: string, io: StoreFileIo): Promise<StoreRecovery
 }
 
 /**
- * Snapshot a store file that is currently good.
+ * Snapshot a store file that is currently good, over a snapshot worth replacing.
  *
- * The one thing this must never do is copy a torn primary over the last good
- * copy, which would turn a recoverable crash into a total loss - hence the
- * inspect before the write, and hence a caller may fire this after any save
- * without checking anything first.
+ * TWO guards, and they refuse in opposite directions. The primary must be good,
+ * or a torn file would be copied over the last good copy and a recoverable crash
+ * would become a total loss. And the EXISTING snapshot must be one this process
+ * could read: bytes nobody managed to look at may be perfectly good ones, and
+ * they are the only copy left whenever the primary is absent or torn. That is
+ * the same rule `recover` applies to a primary it could not read, applied to the
+ * other file.
+ *
+ * The second guard costs one extra read per pass, not per commit -
+ * `snapshotAfterSave` coalesces a burst into one pass - and it is what stops a
+ * `.bak` at mode 000 being replaced by the first ordinary edit after launch.
+ * Nothing else can see that: `recover` runs once at startup, so a snapshot that
+ * becomes unreadable mid-session is invisible to everything but this.
+ *
+ * A caller may still fire this after any save without checking anything first.
  *
  * Never rejects - see the module header.
  */
@@ -309,6 +320,17 @@ export async function snapshotStoreFile(
     const { primary, snapshot } = storeFilePaths(await io.dir(), fileName);
     const read = await io.read(primary);
     if (read.kind !== "text" || inspect(read) !== "ok") return { taken: false };
+
+    // `missing` is the ordinary case - a first snapshot has nothing to protect -
+    // and every other unreadable answer is a file whose contents are unknown.
+    const existing = await io.read(snapshot);
+    if (existing.kind === "unreadable" || existing.kind === "toolarge") {
+      return {
+        taken: false,
+        note: `${fileName}${SNAPSHOT_SUFFIX} could not be read, so it was left as it is rather than replaced`,
+      };
+    }
+
     await io.write(snapshot, read.content);
     return { taken: true };
   } catch (e) {
@@ -317,6 +339,42 @@ export async function snapshotStoreFile(
       note: `${fileName}${SNAPSHOT_SUFFIX} could not be written: ${reason(e)}`,
     };
   }
+}
+
+/**
+ * Turn a rejected `fs_read_file` into "there is no such file" or "there is a
+ * file and it would not open".
+ *
+ * The command rejects for BOTH, so the two are told apart here or not at all -
+ * and telling them apart is the whole of what stops a file that merely would not
+ * open being written over as though it were a first run.
+ *
+ * The message is the entire contract: `fs_read_file` returns
+ * `Result<_, String>`, so nothing structured survives the boundary. Rust's
+ * `io::Error` Display always appends `(os error N)` for an OS error, on every
+ * platform, whatever the localised text before it says - 2 is ENOENT and
+ * Windows' ERROR_FILE_NOT_FOUND, 3 is Windows' ERROR_PATH_NOT_FOUND, and a
+ * missing parent directory on a first run gives one of those. Anything else -
+ * EACCES, a sharing violation, a descriptor limit, the command's own join error
+ * - is a file this process did not get to see.
+ * `missing_file_error_carries_the_os_error_suffix` in
+ * `src-tauri/src/modules/fs/file.rs` is what holds the other end of it.
+ *
+ * ANCHORED to the end, which `to_string()` always is. Unanchored would match the
+ * suffix appearing anywhere in a wrapped or chained message, and that is the
+ * direction that turns an unreadable file back into a first run.
+ *
+ * Exported so the rule itself is checkable: `tauriStoreFileIo` cannot run under
+ * node, and a verify script re-implementing this regex would be a copy free to
+ * drift from the one that ships.
+ */
+export function classifyReadFailure(message: string): StoreFileRead {
+  // The unrecognised case falls to `unreadable`, which is the safe direction:
+  // the cost of calling a first run unreadable is a default that waits for the
+  // first real change, and the cost of the reverse is the file.
+  return /\(os error (?:2|3)\)$/.test(message.trim())
+    ? { kind: "missing" }
+    : { kind: "unreadable", reason: message };
 }
 
 export const tauriStoreFileIo: StoreFileIo = {
@@ -333,31 +391,7 @@ export const tauriStoreFileIo: StoreFileIo = {
           return { kind: "binary" };
       }
     } catch (e) {
-      // `fs_read_file` rejects for BOTH "there is no such file" and "there is a
-      // file and it would not open", so the two have to be told apart here or
-      // not at all - and telling them apart is the whole of what stops a file
-      // that merely would not open being written over as though it were a first
-      // run.
-      //
-      // Rust's `io::Error` Display always appends `(os error N)` for an OS
-      // error, on every platform, whatever the localised text before it says.
-      // 2 is ENOENT and Windows' ERROR_FILE_NOT_FOUND; 3 is Windows'
-      // ERROR_PATH_NOT_FOUND. Anything else - EACCES, a sharing violation, a
-      // descriptor limit, the command's own join error - is a file we did not
-      // get to see.
-      //
-      // The unrecognised case falls to `unreadable`, which is the safe
-      // direction: the cost of calling a first run unreadable is that a default
-      // is not written until the first real change, and the cost of the reverse
-      // is the file.
-      // Anchored to the END, which `to_string()` always is. Unanchored would
-      // match the suffix appearing anywhere in some future wrapped message, and
-      // that is the direction that turns an unreadable file back into a first
-      // run - the failure this whole distinction exists to prevent.
-      const message = reason(e);
-      return /\(os error (?:2|3)\)$/.test(message.trim())
-        ? { kind: "missing" }
-        : { kind: "unreadable", reason: message };
+      return classifyReadFailure(reason(e));
     }
   },
   write: (path, content) => invoke<void>("fs_write_file", { path, content }),
