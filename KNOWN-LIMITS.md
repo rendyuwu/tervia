@@ -124,6 +124,41 @@ documented the same way near where they live.
 **Trigger.** A change to this repository's `printWidth`, or a Prettier major
 version that changes how it wraps a call or a template literal.
 
+## Backup and import
+
+### The import dialog's busy gate is source-pinned, never exercised
+
+**Accepted state.** Nothing in the check suite mounts a component, so no check
+asserts that pressing Escape - or clicking outside, or the `X`, or Cancel -
+mid-write actually does nothing. Nor does anything assert that the refusal
+reasons are rendered at all: the data reaching `ImportSummary.problems` is
+pinned by value, the JSX that draws it is not, so a future edit could drop the
+list from the markup with every check green. Both are hand-test territory.
+
+**Carried by.** `scripts/backup-verify.ts`'s `[dialog source]` sections, which
+assert that `BackupDialog`'s Root `onOpenChange` reads `busy` and returns
+before forwarding, that the close button is hidden while busy, and that the
+footer Cancel is disabled.
+
+**Trigger.** A component test runner existing in this repository, able to mount
+the dialog and dismiss it while a write is in flight.
+
+### One guard in `summarize` cannot be mutated
+
+**Accepted state.** The guard attaching the per-protocol split to the last host
+clause is defensive only: an empty list of host clauses implies an empty split,
+and the write it would then make goes to a property the spread never reads.
+Widening the guard so it always fires changes no output and reddens nothing -
+measured, not assumed. No fixture can distinguish the two, so this is recorded
+as a limit rather than counted as coverage. The direction that matters, the
+guard never firing so the split is lost, reddens five checks.
+
+**Carried by.** `summarize` in `src/modules/backup/summary.ts`, and the clause
+fixtures in `scripts/backup-verify.ts`.
+
+**Trigger.** The split gaining a second attachment point, or a host clause that
+can be produced without a host count.
+
 ## Shared UI
 
 ### A shared row/box layout is duplicated between the SSH credential section and the host editor, and only one copy is checked

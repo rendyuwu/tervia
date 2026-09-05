@@ -73,6 +73,34 @@
  * reformat: a narrower print width moves line breaks and trailing commas, and
  * moves nothing a pin compares.
  *
+ * WHAT AN IMPORT SAYS ABOUT ITSELF is checked here too, in three instruments
+ * that are not the parser's, and they are here rather than in
+ * `backup-import-verify.ts` because two of them need this file's compiler-API
+ * machinery and the third is about the same `ImportResult` every section above
+ * produces.
+ *
+ *   BY VALUE, through `backup/summary.ts`. `summarize` and `describeExport` were
+ *   module-private in `BackupDialog.tsx`, which imports React, so nothing could
+ *   call either - the only thing holding them was a substring pin over their own
+ *   source text, which reports that a guard expression exists and says nothing
+ *   about the sentence it produces. Moved out, every clause is asserted whole.
+ *
+ *   THE PARTITION OVER `ImportResult`'s LEAF FIELDS, which needs the compiler's
+ *   TYPE view rather than its syntax tree: the type is six aliases deep, and
+ *   fifteen of its thirty-two leaves were counted and never surfaced with nothing
+ *   anywhere saying so. Every leaf now has to be read by `summarize` - derived
+ *   off `summarize`'s own expressions, never off a hand-kept list that would
+ *   satisfy the partition by asserting itself - or named in
+ *   `IMPORT_FIELDS_LEFT_UNSAID` with its reason. The walk is proved on a
+ *   synthetic type first, because a walk that returns nothing makes the partition
+ *   hold for free.
+ *
+ *   THE IMPORT DIALOG'S BUSY GATE, source-pinned for the reason `buildBackup` is:
+ *   nothing in this suite mounts a component. Four routes dismiss that dialog
+ *   mid-write and two of them are Radix `Close`s, which reach the Root's
+ *   `onOpenChange` and neither content handler - so the pins are shaped to redden
+ *   on the half-fix as well as on no fix.
+ *
  * The crypto itself, and the payload assembly that keeps credentials out of the
  * webview, are checked on the Rust side (`modules/backup.rs` tests: round trip,
  * wrong passphrase, tampered ciphertext, nonce reuse, group merge/split, the
@@ -97,7 +125,18 @@ import {
   keyRefs,
   landedKey,
   storedFields,
+  type ImportCounts,
+  type ImportGroupCounts,
+  type ImportIdentityCounts,
+  type ImportKeyCounts,
+  type ImportResult,
+  type ImportRuleCounts,
 } from "../src/modules/backup/apply";
+import {
+  describeExport,
+  summarize,
+  IMPORT_FIELDS_LEFT_UNSAID,
+} from "../src/modules/backup/summary";
 import {
   BACKUP_EXTENSION_V1,
   BACKUP_KIND,
@@ -2382,8 +2421,376 @@ check(
 );
 
 // ============================================================================
+// THE TWO RESULT LINES, BY VALUE. `summarize` and `describeExport` were
+// module-private in `BackupDialog.tsx`, a file that imports React, so nothing in
+// a plain-node run could call either: the only thing holding them was a substring
+// pin over their own source text, which says a guard expression is present and
+// nothing whatever about the sentence it produces. They live in
+// `src/modules/backup/summary.ts` now, for the same reason
+// `hosts/editor/credentialChoice.ts` and `vault/editor/draft.ts` do, and every
+// clause below is asserted through the real function.
+// ============================================================================
+
+/**
+ * An `ImportResult` with every counter at zero, one collection at a time.
+ *
+ * SPELLED OUT HERE rather than read off `apply.ts`'s own `NO_COUNTS` neighbours,
+ * which are module-private anyway: a fixture built from the implementation's
+ * zero constants would agree with a mistake in one of them. A field added to any
+ * of these types later on fails to compile here, which is the cheapest
+ * of the three things that notice it - the other two being the partition check
+ * further down and `tsc` on `summarize` itself.
+ */
+const hostCounts = (over: Partial<ImportCounts> = {}): ImportCounts => ({
+  added: 0,
+  replaced: 0,
+  withoutSecrets: 0,
+  failed: 0,
+  ...over,
+});
+const groupCounts = (over: Partial<ImportGroupCounts> = {}): ImportGroupCounts => ({
+  added: 0,
+  replaced: 0,
+  merged: 0,
+  keptNames: 0,
+  failed: 0,
+  ...over,
+});
+const identityCounts = (over: Partial<ImportIdentityCounts> = {}): ImportIdentityCounts => ({
+  added: 0,
+  replaced: 0,
+  withoutSecrets: 0,
+  withoutKeys: 0,
+  keysDropped: 0,
+  failed: 0,
+  ...over,
+});
+const keyCounts = (over: Partial<ImportKeyCounts> = {}): ImportKeyCounts => ({
+  added: 0,
+  replaced: 0,
+  withoutSecrets: 0,
+  failed: 0,
+  ...over,
+});
+const ruleCounts = (over: Partial<ImportRuleCounts> = {}): ImportRuleCounts => ({
+  added: 0,
+  replaced: 0,
+  dropped: 0,
+  failed: 0,
+  ...over,
+});
+/** A whole result. Every fixture below is one of these with one or two counters
+ *  moved off zero, so each check names exactly the clause it is about. */
+const imported = (over: Partial<ImportResult> = {}): ImportResult => ({
+  ssh: hostCounts(),
+  rdp: hostCounts(),
+  groups: groupCounts(),
+  identities: identityCounts(),
+  keys: keyCounts(),
+  rules: ruleCounts(),
+  skipped: 0,
+  protocolConflicts: 0,
+  vaultBindingsDropped: 0,
+  vaultBindingsApplied: 0,
+  problems: [],
+  ...over,
+});
+/** The sentence only, for the clause checks. `problems` has its own section. */
+const line = (over: Partial<ImportResult> = {}): string => summarize(imported(over)).line;
+
+console.log("\n[export line] a collection earns its clause only when it is non-zero");
+check(
+  "all five, in the order the sentence reads them",
+  describeExport({ hosts: 2, groups: 2, identities: 2, keys: 2, rules: 2 }),
+  "2 hosts, 2 host groups, 2 identities, 2 vault keys, 2 forward rules",
+);
+check(
+  "a vault-only export names no hosts, rather than reading 0 hosts, 0 host groups",
+  describeExport({ hosts: 0, groups: 0, identities: 2, keys: 3, rules: 0 }),
+  "2 identities, 3 vault keys",
+);
+check(
+  "and a host-only one names no vault, singular where the count is one",
+  describeExport({ hosts: 1, groups: 1, identities: 0, keys: 0, rules: 0 }),
+  "1 host, 1 host group",
+);
+// UNREACHABLE THROUGH THE DIALOG, and asserted as such rather than left to be
+// discovered: `buildBackup` throws "There is nothing saved to export" when all
+// five are empty, so no caller can render the empty string this returns. Pinned
+// because the emptiness refusal is one edit from being narrowed back to hosts
+// alone - which `[export source]` catches - and this says what the narrowing
+// would then put on screen.
+check(
+  "nothing at all is the empty string, which no caller can reach",
+  describeExport({
+    hosts: 0,
+    groups: 0,
+    identities: 0,
+    keys: 0,
+    rules: 0,
+  }),
+  "",
+);
+
+console.log("\n[import line] the same rule, including the two clauses that used to ignore it");
+// THE DEFECT THIS SECTION EXISTS FOR: `parts` was seeded with `added` and
+// `replaced` unconditionally, so a vault-only import opened "Imported: 0 added, 0
+// updated, 2 identities" - against the rule the file's own two comments state for
+// every other clause.
+check(
+  "a vault-only import opens with the vault",
+  line({ identities: identityCounts({ added: 2 }), keys: keyCounts({ added: 3 }) }),
+  "Imported: 2 identities, 3 vault keys.",
+);
+check("added alone", line({ ssh: hostCounts({ added: 3 }) }), "Imported: 3 added.");
+check("updated alone", line({ ssh: hostCounts({ replaced: 2 }) }), "Imported: 2 updated.");
+// THE SENTENCE CANNOT BECOME EMPTY, and this is the one case the non-zero rule
+// cannot answer for itself. "nothing" and not an explanation: an empty payload, a
+// file of forward rules that all dangled and a file of identities all skipped for
+// a key that did not travel all land here, and every candidate explanation is
+// false for at least one of them. Pinned as the LITERAL sentence, so a reword has
+// to come through this check rather than through a constant it was written off.
+check("an import that landed nothing still says something", line(), "Imported: nothing.");
+check(
+  "and problems alone do not make it say otherwise - they are a list, not a clause",
+  line({ problems: ["a rule could not be saved: boom"] }),
+  "Imported: nothing.",
+);
+
+console.log("\n[import line] the per-protocol split rides the last HOST clause, not the sentence");
+// It rode `updated` when that clause was unconditional. Now that either host
+// clause can be absent it has to follow whichever one is last, or a
+// replace-nothing import would put "(3 SSH hosts, 1 RDP host)" after a sentence
+// about group names, where it reads as qualifying that instead.
+check(
+  "on updated when both host clauses are present",
+  line({ ssh: hostCounts({ added: 3, replaced: 1 }), rdp: hostCounts({ replaced: 2 }) }),
+  "Imported: 3 added, 3 updated (4 SSH hosts, 2 RDP hosts).",
+);
+check(
+  "on added when nothing was updated",
+  line({ ssh: hostCounts({ added: 3 }), rdp: hostCounts({ added: 1 }) }),
+  "Imported: 4 added (3 SSH hosts, 1 RDP host).",
+);
+check(
+  "on updated when nothing was added",
+  line({ ssh: hostCounts({ replaced: 3 }), rdp: hostCounts({ replaced: 1 }) }),
+  "Imported: 4 updated (3 SSH hosts, 1 RDP host).",
+);
+check(
+  "and not at all when only one protocol is present, which is every v1-era file",
+  line({ ssh: hostCounts({ added: 3, replaced: 1 }) }),
+  "Imported: 3 added, 1 updated.",
+);
+check(
+  "nor when the other protocol only failed, which is not a host that landed",
+  line({ ssh: hostCounts({ added: 3 }), rdp: hostCounts({ failed: 1 }) }),
+  "Imported: 3 added, 1 record the store refused.",
+);
+
+console.log("\n[import line] the clauses that were counted and never said");
+// (a) `failed`, ONE NUMBER ACROSS THE SIX COLLECTIONS, and the words are as much
+// of the check as the number: "3 failed" beside "39 added" reads as if the import
+// failed, where what happened is that the store took everything else.
+check(
+  "one refusal from each of the six collections is one clause and one number",
+  line({
+    ssh: hostCounts({ failed: 1 }),
+    rdp: hostCounts({ failed: 1 }),
+    groups: groupCounts({ failed: 1 }),
+    identities: identityCounts({ failed: 1 }),
+    keys: keyCounts({ failed: 1 }),
+    rules: ruleCounts({ failed: 1 }),
+  }),
+  "Imported: 6 records the store refused.",
+);
+check(
+  "and it says whose refusal it was, beside the count that would otherwise read as a failed import",
+  line({ ssh: hostCounts({ added: 39, failed: 1 }) }),
+  "Imported: 39 added, 1 record the store refused.",
+);
+// (b) `protocolConflicts`. Its own doc says it precisely: the row is refused
+// because replacing a saved host with one that speaks the other protocol would
+// delete secrets nothing copied first.
+check(
+  "a protocol conflict is named as a refusal, with the reason it was refused",
+  line({ protocolConflicts: 1 }),
+  "Imported: 1 row refused because the host saved here under that id speaks the other protocol.",
+);
+check(
+  "and pluralises",
+  line({ ssh: hostCounts({ added: 2 }), protocolConflicts: 2 }),
+  "Imported: 2 added, 2 rows refused because the host saved here under that id speaks the other protocol.",
+);
+// (c) `vaultBindingsDropped`, WHICH MUST NOT READ AS DATA LOSS. The counter now
+// covers three arms that kept what this machine already had - an incoming
+// binding over a saved inline host, over a saved binding to another identity,
+// and an incoming inline row over a saved binding - plus one arm that arrived
+// blank because there was nothing here to keep. The clause has to be true of all
+// four, which is why it names both outcomes rather than the commoner one.
+check(
+  "a dropped vault binding says what happened instead, on both arms",
+  line({ vaultBindingsDropped: 2 }),
+  "Imported: 2 rows did not take the file's vault binding, so each kept the credential saved here or arrived blank.",
+);
+check(
+  "singular too",
+  line({ vaultBindingsDropped: 1 }),
+  "Imported: 1 row did not take the file's vault binding, so each kept the credential saved here or arrived blank.",
+);
+// The binding that WAS applied stays unsaid, and this is the check that says so:
+// nothing was refused and nothing is missing, so a clause for the case that went
+// right is noise. `[summary partition]` below is what stops it being an accident.
+check(
+  "while a binding the file asked for and got adds no clause at all",
+  line({ ssh: hostCounts({ added: 1 }), vaultBindingsApplied: 1 }),
+  "Imported: 1 added.",
+);
+
+console.log("\n[import line] the clauses that were already there, unchanged by the rewrite");
+check("skipped", line({ skipped: 3 }), "Imported: 3 skipped as unreadable.");
+check(
+  "without stored credentials, summed across the two protocols",
+  line({
+    ssh: hostCounts({ added: 1, withoutSecrets: 1 }),
+    rdp: hostCounts({ added: 1, withoutSecrets: 1 }),
+  }),
+  "Imported: 2 added (1 SSH host, 1 RDP host), 2 without stored credentials.",
+);
+check("host groups", line({ groups: groupCounts({ added: 2 }) }), "Imported: 2 host groups.");
+check(
+  "identities, whose plural is not its singular plus an s",
+  [
+    line({ identities: identityCounts({ added: 1 }) }),
+    line({ identities: identityCounts({ replaced: 2 }) }),
+  ],
+  ["Imported: 1 identity.", "Imported: 2 identities."],
+);
+check("vault keys", line({ keys: keyCounts({ added: 1 }) }), "Imported: 1 vault key.");
+check("forward rules", line({ rules: ruleCounts({ replaced: 2 }) }), "Imported: 2 forward rules.");
+check(
+  "a merged group name, singular and plural",
+  [line({ groups: groupCounts({ merged: 1 }) }), line({ groups: groupCounts({ merged: 2 }) })],
+  [
+    "Imported: 1 group's hosts merged into an existing group of the same name.",
+    "Imported: 2 groups' hosts merged into an existing group of the same name.",
+  ],
+);
+check(
+  "a kept local group name, singular and plural",
+  [
+    line({ groups: groupCounts({ keptNames: 1 }) }),
+    line({ groups: groupCounts({ keptNames: 2 }) }),
+  ],
+  [
+    "Imported: 1 group's hosts kept this machine's group name instead of the file's.",
+    "Imported: 2 groups' hosts kept this machine's group name instead of the file's.",
+  ],
+);
+
+console.log("\n[import line] every clause at once, which is also where their ORDER is pinned");
+// Nothing else asserts the order, and a clause moved is a sentence that reads
+// differently - the split's whole argument is about where in the list a clause
+// sits. One fixture with all thirteen non-zero.
+check(
+  "thirteen clauses, in one sentence, in this order",
+  line({
+    ssh: hostCounts({ added: 3, replaced: 1, withoutSecrets: 1, failed: 1 }),
+    rdp: hostCounts({ added: 1, replaced: 2, withoutSecrets: 1, failed: 1 }),
+    groups: groupCounts({ added: 2, merged: 1, keptNames: 2, failed: 1 }),
+    identities: identityCounts({ added: 1, failed: 1 }),
+    keys: keyCounts({ added: 1, failed: 1 }),
+    rules: ruleCounts({ added: 1, failed: 1 }),
+    skipped: 4,
+    protocolConflicts: 2,
+    vaultBindingsDropped: 3,
+  }),
+  "Imported: 4 added, 3 updated (4 SSH hosts, 3 RDP hosts), 4 skipped as unreadable, " +
+    "2 without stored credentials, 2 host groups, 1 identity, 1 vault key, 1 forward rule, " +
+    "6 records the store refused, " +
+    "2 rows refused because the host saved here under that id speaks the other protocol, " +
+    "3 rows did not take the file's vault binding, so each kept the credential saved here or arrived blank, " +
+    "1 group's hosts merged into an existing group of the same name, " +
+    "2 groups' hosts kept this machine's group name instead of the file's.",
+);
+
+console.log("\n[import problems] the only thing in the result that says WHY");
+check(
+  "one line per refusal, verbatim, in the order applyV3 pushed them",
+  summarize(
+    imported({
+      ssh: hostCounts({ added: 39, failed: 1 }),
+      problems: ['"box-12" could not be saved: a jump host closes a cycle'],
+    }),
+  ),
+  {
+    line: "Imported: 39 added, 1 record the store refused.",
+    problems: ['"box-12" could not be saved: a jump host closes a cycle'],
+  },
+);
+check(
+  "a copy, so nothing can mutate the report through the result it came from",
+  ((): string[] => {
+    const r = imported({ problems: ["one"] });
+    const s = summarize(r);
+    r.problems.push("two");
+    return s.problems;
+  })(),
+  ["one"],
+);
+
+// THE ROW THE WHOLE ITEM EXISTS FOR: `backup_apply_secrets` threw.
+//
+// MODELLED, NOT PRODUCED. This is the `ImportResult` `applyV3` builds on that
+// path, written out by hand: nothing here runs `applyV3`, which begins with an
+// `invoke` and cannot be entered from a plain-node run at all. The shape follows
+// its own code - the catch pushes one `problems` line and rethrows nothing, so
+// `written` stays empty, `landed` stays empty, every key takes the `!landedBody`
+// arm and every password identity the `!landedPassword` one, and both flag passes
+// then `continue` without a second write.
+const keychainThrew = imported({
+  identities: identityCounts({ added: 2, withoutSecrets: 2 }),
+  keys: keyCounts({ added: 3, withoutSecrets: 3 }),
+  problems: ["no stored credentials could be written to the keychain: the keyring is locked"],
+});
+const thrown = summarize(keychainThrew);
+// THE LINE IS UNCHANGED BY THE THROW, and that is the finding rather than a
+// failure of this check: both collections did land as records, so both clauses
+// are true. What the line cannot say is that every private body and every
+// identity password is missing, because the two counters that know are in
+// IMPORT_FIELDS_LEFT_UNSAID by decision.
+check(
+  "the line reads as an ordinary vault import, because as a record write it was one",
+  thrown.line,
+  "Imported: 2 identities, 3 vault keys.",
+);
+check(
+  "so the ONE thing saying the private bodies did not land - and the reason - is the problems list",
+  thrown.problems,
+  ["no stored credentials could be written to the keychain: the keyring is locked"],
+);
+// The limit above, asserted rather than described. Moving both counters to zero
+// changes nothing in the sentence, which is what "deliberately unread" means and
+// what makes rendering `problems` the fix rather than a nicety.
+check(
+  "and the two vault withoutSecrets counters move nothing in it, in either direction",
+  thrown.line ===
+    summarize(
+      imported({
+        identities: identityCounts({ added: 2 }),
+        keys: keyCounts({ added: 3 }),
+        problems: keychainThrew.problems,
+      }),
+    ).line,
+  true,
+);
+
+// ============================================================================
 // SOURCE PINS. Four things in `apply.ts` that no fixture in a plain-node run can
 // reach, and each of them is one expression away from a silent credential loss.
+// Two more sections follow them: the leaf-field partition over `ImportResult`,
+// which needs the compiler's TYPE view rather than its syntax tree, and the
+// import dialog's busy gate, which needs a DOM this suite does not have.
 // ============================================================================
 //
 // `buildBackup` calls `invoke`, so the whole export half is unreachable from
@@ -2951,6 +3358,492 @@ check(
   ).length,
   1,
 );
+
+// ============================================================================
+// THE PARTITION OVER ImportResult's LEAF FIELDS. Fifteen of its thirty-two were
+// never surfaced at all, and nothing anywhere said so - a field added in a later
+// phase joined them in silence. Everything above reads the SYNTAX tree; this
+// needs the TYPE view, because `ImportResult` is six type aliases deep and
+// syntax cannot tell a sub-object from a scalar.
+// ============================================================================
+
+const TYPE_OPTIONS: ts.CompilerOptions = {
+  target: ts.ScriptTarget.ES2022,
+  module: ts.ModuleKind.ESNext,
+  moduleResolution: ts.ModuleResolutionKind.Bundler,
+  strict: true,
+  skipLibCheck: true,
+  noEmit: true,
+  baseUrl: repoRoot,
+  paths: { "@/*": ["./src/*"] },
+};
+
+/**
+ * A program over one root file, with an optional in-memory overlay.
+ *
+ * The overlay is what lets the PROBE below run the very same walk over a
+ * synthetic type. A probe that reimplemented the walk would prove the probe
+ * right and say nothing about the instrument actually pointed at
+ * `ImportResult`.
+ */
+function programOver(rootName: string, overlay: Record<string, string> = {}): ts.Program {
+  const host = ts.createCompilerHost(TYPE_OPTIONS, true);
+  const baseGetSourceFile = host.getSourceFile.bind(host);
+  const baseReadFile = host.readFile.bind(host);
+  const baseFileExists = host.fileExists.bind(host);
+  host.getSourceFile = (name, languageVersion, onError, shouldCreate) =>
+    overlay[name] !== undefined
+      ? ts.createSourceFile(name, overlay[name], languageVersion, /* setParentNodes */ true)
+      : baseGetSourceFile(name, languageVersion, onError, shouldCreate);
+  host.readFile = (name) => (overlay[name] !== undefined ? overlay[name] : baseReadFile(name));
+  host.fileExists = (name) => overlay[name] !== undefined || baseFileExists(name);
+  return ts.createProgram({ rootNames: [rootName], options: TYPE_OPTIONS, host });
+}
+
+/** The type a `type X = ...` or `interface X` in `fileName` declares. */
+function declaredType(program: ts.Program, fileName: string, name: string): ts.Type | null {
+  const checker = program.getTypeChecker();
+  const sf = program.getSourceFile(fileName);
+  if (!sf) return null;
+  let found: ts.Type | null = null;
+  const visit = (n: ts.Node): void => {
+    if ((ts.isTypeAliasDeclaration(n) || ts.isInterfaceDeclaration(n)) && n.name.text === name) {
+      const symbol = checker.getSymbolAtLocation(n.name);
+      if (symbol) found = checker.getDeclaredTypeOfSymbol(symbol);
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(sf);
+  return found;
+}
+
+/** What counts as a leaf on sight: a number, a string, a boolean, or a literal
+ *  of one. `ImportResult` is all numbers today; the rest are here so a field of
+ *  an ordinary shape added by a later build is classified rather than reported as
+ *  a mystery. */
+const SCALAR_LEAF =
+  ts.TypeFlags.Number |
+  ts.TypeFlags.String |
+  ts.TypeFlags.Boolean |
+  ts.TypeFlags.BooleanLiteral |
+  ts.TypeFlags.NumberLiteral |
+  ts.TypeFlags.StringLiteral;
+
+/**
+ * Every leaf field of `type`, as a dotted path, plus everything the walk
+ * REFUSED to classify.
+ *
+ * A LEAF IS `groups.failed`, NEVER `groups`. An object with properties is walked
+ * INTO rather than counted, so a sub-object added to `ImportResult` expands into
+ * its own leaves instead of hiding five fields behind one name that the
+ * partition would then satisfy in one line. `[summary partition]`'s probe is
+ * what holds that: its `nested` contributes two leaves and no entry of its own.
+ *
+ * AN ARRAY IS A LEAF, checked BEFORE the object arm, because `string[]` is an
+ * object type with `length`, `push` and forty more properties - walked into, it
+ * would drown the real answer in `Array`'s own surface.
+ *
+ * AND WHAT IT DOES NOT RECOGNISE, IT REPORTS. A union, an optional field, a
+ * function, an object with no properties: each comes back in `unrecognised` and
+ * fails the check below by name. Guessing would be the whole defect again - a
+ * field silently classified is a field silently absent from the partition - and
+ * a union is exactly where guessing is tempting, because whether `"a" | "b"` is
+ * one leaf or two is a decision a person should make in the open.
+ */
+function leavesOf(checker: ts.TypeChecker, type: ts.Type): { leaves: string[]; refused: string[] } {
+  const leaves: string[] = [];
+  const refused: string[] = [];
+  const visit = (t: ts.Type, prefix: string, depth: number): void => {
+    if (depth > 6) {
+      refused.push(`${prefix}: nested deeper than this walk goes`);
+      return;
+    }
+    for (const prop of checker.getPropertiesOfType(t)) {
+      const path = `${prefix}${prop.name}`;
+      const decl = prop.valueDeclaration ?? prop.declarations?.[0];
+      if (!decl) {
+        refused.push(`${path}: no declaration to read a type from`);
+        continue;
+      }
+      const pt = checker.getTypeOfSymbolAtLocation(prop, decl);
+      if (pt.flags & SCALAR_LEAF) {
+        leaves.push(path);
+      } else if (checker.isArrayType(pt) || checker.isTupleType(pt)) {
+        leaves.push(path);
+      } else if (pt.flags & ts.TypeFlags.Object && checker.getPropertiesOfType(pt).length > 0) {
+        visit(pt, `${path}.`, depth + 1);
+      } else {
+        refused.push(`${path}: ${checker.typeToString(pt)}`);
+      }
+    }
+  };
+  visit(type, "", 0);
+  return { leaves: leaves.sort(), refused: refused.sort() };
+}
+
+/**
+ * Which of `summarize`'s parameter's fields it actually reads, off the AST of
+ * `summary.ts` - never off a list somebody maintained by hand.
+ *
+ * A HAND-WRITTEN "these are read" LIST IS THE VACUOUS VERSION OF THIS CHECK: it
+ * satisfies the partition by asserting itself, and a field named in it that
+ * `summarize` stopped reading would keep the whole thing green. Read off the
+ * expressions instead, so the two halves of the partition come from two
+ * different places - the type from the compiler, the read set from the source.
+ *
+ * A path that is a strict PREFIX of another is dropped: `r.ssh.added` contains
+ * `r.ssh` as a sub-expression, and only the longer one names a field.
+ *
+ * A FIELD REACHED THROUGH A LOCAL ALIAS IS NOT SEEN, WHICH IS THE POINT AND NOT
+ * A GAP, and it is worth being exact about what happens rather than only that
+ * something does. `const g = r.groups; g.merged` collects the bare `groups` and
+ * no `groups.merged`, so the field drops out of the read set and lands in the
+ * partition's unread-and-unlisted list BY NAME - measured, at two fields when
+ * two are aliased. The bare `groups` itself is normally swallowed by the prefix
+ * filter, because some other `r.groups.<field>` is still read directly; only
+ * when every one of them is aliased does it survive, and then the "nothing is
+ * claimed for a leaf the type does not have" check is what names it. Either way
+ * `summary.ts`'s header states the rule this depends on, which is why it states
+ * it as load-bearing rather than as a style.
+ */
+function fieldsReadFrom(fn: ts.Node, parameter: string): string[] {
+  const seen: string[] = [];
+  const visit = (n: ts.Node): void => {
+    if (ts.isPropertyAccessExpression(n)) {
+      const parts: string[] = [n.name.text];
+      let cursor: ts.Expression = n.expression;
+      while (ts.isPropertyAccessExpression(cursor)) {
+        parts.unshift(cursor.name.text);
+        cursor = cursor.expression;
+      }
+      if (ts.isIdentifier(cursor) && cursor.text === parameter) seen.push(parts.join("."));
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(fn);
+  const all = [...new Set(seen)];
+  return all.filter((p) => !all.some((q) => q !== p && q.startsWith(`${p}.`))).sort();
+}
+
+console.log("\n[summary partition] the walk itself, proved on a type whose answer is known");
+// THE PROBE RUNS FIRST AND RUNS THE SAME `leavesOf`. Every assertion in the
+// section below is a FILTER over what the walk returned, and every filter over an
+// empty list is empty - so a walk that found nothing, or that quietly skipped the
+// shapes it did not know, would report a perfect partition. The instrument is
+// proved on a type whose answer is written down before it is pointed at one whose
+// answer is the thing being asked. Four facts in one synthetic type: a
+// top-level scalar is a leaf, a sub-object is walked INTO rather than counted
+// once, an array stays whole, and the two shapes the walk will not guess about
+// come back named instead of dropped.
+const PROBE_PATH = join(repoRoot, "src", "modules", "backup", "__leaf_walk_probe__.ts");
+const PROBE_SOURCE = `export type LeafWalkProbe = {
+  top: number;
+  nested: { a: number; b: string };
+  list: string[];
+  odd: (x: number) => void;
+  flag: boolean;
+  choice: "a" | "b";
+};
+`;
+const probeProgram = programOver(PROBE_PATH, { [PROBE_PATH]: PROBE_SOURCE });
+const probeType = declaredType(probeProgram, PROBE_PATH, "LeafWalkProbe");
+check(
+  "the probe type resolved, so the two checks below are about something",
+  probeType !== null,
+  true,
+);
+const probeWalk = probeType
+  ? leavesOf(probeProgram.getTypeChecker(), probeType)
+  : { leaves: ["(no probe type)"], refused: [] };
+check(
+  "a scalar and an array are leaves, and a sub-object contributes its OWN leaves rather than one",
+  probeWalk.leaves,
+  ["flag", "list", "nested.a", "nested.b", "top"],
+);
+check(
+  "and a shape the walk will not classify is reported by name, never skipped",
+  probeWalk.refused.map((r) => r.split(":")[0]),
+  ["choice", "odd"],
+);
+
+console.log("\n[summary partition] every leaf is read by summarize, or is listed as not read");
+const applyProgram = programOver(join(repoRoot, APPLY_PATH));
+const importResultType = declaredType(applyProgram, join(repoRoot, APPLY_PATH), "ImportResult");
+check("ImportResult resolved from apply.ts", importResultType !== null, true);
+const walk = importResultType
+  ? leavesOf(applyProgram.getTypeChecker(), importResultType)
+  : { leaves: [], refused: [] };
+// VACUITY GUARD, FIRST AND BY A MEASURED NUMBER. Every assertion below is a
+// filter over `walk.leaves`, and every filter over an empty list is empty: a walk
+// that found nothing would report a perfect partition. Thirty-two is counted off
+// the type by hand - four each for `ssh` and `rdp`, five for `groups`, six for
+// `identities`, four for `keys`, four for `rules`, and five at the top level.
+check("the walk found all thirty-two of ImportResult's leaves", walk.leaves.length, 32);
+check("and refused none of them", walk.refused, []);
+// BOTH DIRECTIONS OF THE WALK, on the real type this time: a field known to be
+// read, a field known NOT to be, the array leaf, and - the one that pins the
+// `groups.failed`-not-`groups` decision - a sub-object that must not appear as a
+// leaf of its own.
+check(
+  "reaching a top-level scalar, a nested one and the array, and NOT the sub-object holding them",
+  [
+    walk.leaves.includes("skipped"),
+    walk.leaves.includes("identities.keysDropped"),
+    walk.leaves.includes("problems"),
+    walk.leaves.includes("identities"),
+  ],
+  [true, true, true, false],
+);
+
+const summarySource = readFileSync(join(repoRoot, "src/modules/backup/summary.ts"), "utf8");
+const summarySf = ts.createSourceFile(
+  "src/modules/backup/summary.ts",
+  summarySource,
+  ts.ScriptTarget.ESNext,
+  /* setParentNodes */ true,
+);
+const summarizeDecls: ts.FunctionDeclaration[] = [];
+{
+  const visit = (n: ts.Node): void => {
+    if (ts.isFunctionDeclaration(n) && n.name?.text === "summarize") summarizeDecls.push(n);
+    ts.forEachChild(n, visit);
+  };
+  visit(summarySf);
+}
+const summarizeParam =
+  summarizeDecls.length === 1 && ts.isIdentifier(summarizeDecls[0].parameters[0].name)
+    ? summarizeDecls[0].parameters[0].name.text
+    : null;
+// The read set's own precondition, out loud: one `summarize`, and its parameter
+// named, or every path below is collected against the wrong identifier and comes
+// back empty - which the count check immediately after this would blame on the
+// wrong thing.
+check(
+  "summary.ts declares exactly one summarize, and its parameter was found",
+  [summarizeDecls.length, summarizeParam !== null],
+  [1, true],
+);
+const read = summarizeParam ? fieldsReadFrom(summarizeDecls[0], summarizeParam) : [];
+const unsaid = [...IMPORT_FIELDS_LEFT_UNSAID].sort();
+// THE SECOND VACUITY GUARD, on the other half of the partition: a derivation that
+// returned nothing would make every filter below empty just as an empty walk
+// would, and an empty read set makes `IMPORT_FIELDS_LEFT_UNSAID` look like the
+// whole answer. Both halves against measured numbers - twenty-six read, six left
+// unsaid, which is thirty-two.
+check(
+  "twenty-six fields are read off summarize's own expressions, and six are listed as not read",
+  [read.length, unsaid.length, read.length + unsaid.length],
+  [26, 6, 32],
+);
+// BOTH DIRECTIONS, fed one field known to be read and one known not to be. The
+// second is the half that matters: it is what says the derivation distinguishes,
+// rather than returning everything it can see.
+check(
+  "a field the sentence reports comes back read, and one it is silent about does not",
+  [read.includes("ssh.added"), read.includes("identities.keysDropped")],
+  [true, false],
+);
+// THE PARTITION. A field a later build adds to `ImportResult` is in neither
+// set and lands here by name, instead of joining the ones that were counted and
+// never said.
+check(
+  "no leaf is both unread and unlisted",
+  walk.leaves.filter((f) => !read.includes(f) && !unsaid.includes(f)),
+  [],
+);
+// THE OTHER DIRECTION, which the partition alone does not give: a name in either
+// half that is no longer a leaf of the type. A renamed field would otherwise sit
+// in IMPORT_FIELDS_LEFT_UNSAID forever, excusing a field that no longer exists
+// while its replacement went unnoticed - and an aliased read would appear as the
+// bare sub-object, which is not a leaf either.
+check(
+  "and nothing is claimed for a leaf the type does not have",
+  [...read, ...unsaid].filter((f) => !walk.leaves.includes(f)),
+  [],
+);
+// A field cannot be both. Without this the two halves could overlap and their
+// lengths still sum to thirty-two while some leaf sat in neither.
+check(
+  "the two halves are disjoint, so the arithmetic above means what it says",
+  read.filter((f) => unsaid.includes(f)),
+  [],
+);
+
+// ============================================================================
+// THE IMPORT DIALOG'S BUSY GATE. `BackupDialog.tsx` imports React and nothing in
+// this suite mounts a component, so this is a source pin and cannot be anything
+// else - see the report at the end of this section for what that does not buy.
+// ============================================================================
+
+const DIALOG_PATH = "src/modules/backup/BackupDialog.tsx";
+const dialogSf = ts.createSourceFile(
+  DIALOG_PATH,
+  readFileSync(join(repoRoot, DIALOG_PATH), "utf8"),
+  ts.ScriptTarget.ESNext,
+  /* setParentNodes */ true,
+  ts.ScriptKind.TSX,
+);
+const dialogExpr = (n: ts.Node): string => squash(n.getText(dialogSf));
+
+/** Every JSX element named `name` inside `root`, opening or self-closing. */
+function jsxNamed(
+  root: ts.Node,
+  name: string,
+): (ts.JsxOpeningElement | ts.JsxSelfClosingElement)[] {
+  const out: (ts.JsxOpeningElement | ts.JsxSelfClosingElement)[] = [];
+  const visit = (n: ts.Node): void => {
+    if (
+      (ts.isJsxOpeningElement(n) || ts.isJsxSelfClosingElement(n)) &&
+      n.tagName.getText(dialogSf) === name
+    ) {
+      out.push(n);
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(root);
+  return out;
+}
+
+/** The expression an attribute holds - `foo={expr}` gives `expr`. A string
+ *  literal, a bare `foo`, or an absent attribute all give null. */
+function jsxAttrExpr(
+  el: ts.JsxOpeningElement | ts.JsxSelfClosingElement,
+  name: string,
+): ts.Expression | null {
+  for (const attr of el.attributes.properties) {
+    if (!ts.isJsxAttribute(attr) || attr.name.getText(dialogSf) !== name) continue;
+    const init = attr.initializer;
+    return init && ts.isJsxExpression(init) ? (init.expression ?? null) : null;
+  }
+  return null;
+}
+
+/** The squashed text of `el`'s `name={expr}`, or a phrase naming what was missing.
+ *  A phrase rather than an empty string, so a FAIL says whether the attribute is
+ *  gone or the element it hangs on is. */
+function jsxAttrText(
+  el: ts.JsxOpeningElement | ts.JsxSelfClosingElement | undefined,
+  name: string,
+): string {
+  if (!el) return "(no such element)";
+  const expr = jsxAttrExpr(el, name);
+  return expr ? dialogExpr(expr) : `(no ${name} attribute)`;
+}
+
+/** Every identifier appearing anywhere inside `n`. */
+function identifiersIn(n: ts.Node): string[] {
+  const out: string[] = [];
+  const visit = (x: ts.Node): void => {
+    if (ts.isIdentifier(x)) out.push(x.text);
+    ts.forEachChild(x, visit);
+  };
+  visit(n);
+  return out;
+}
+
+console.log("\n[dialog source] a close request is refused at the Root, where all four routes meet");
+// THE FIX IS AT THE ROOT'S `onOpenChange` AND CANNOT BE ANYWHERE ELSE. Four
+// routes dismiss this dialog mid-write - Escape, a pointer down outside, the `X`
+// that `DialogContent` renders under `showCloseButton`, and the footer's Cancel -
+// and the last two are Radix `Close`s, which call the Root's `onOpenChange`
+// DIRECTLY and pass through neither `onEscapeKeyDown` nor `onPointerDownOutside`.
+// So the tempting fix, overriding those two content handlers, leaves half the
+// routes open, and these pins are shaped to redden on it: moving the guard there
+// makes the Root's `onOpenChange` the forwarded prop again, which is not an
+// arrow, has no first statement and contains no call.
+const dialogRoots = jsxNamed(dialogSf, "Dialog");
+check("BackupDialog renders exactly one Dialog root", dialogRoots.length, 1);
+const rootHandler = dialogRoots.length === 1 ? jsxAttrExpr(dialogRoots[0], "onOpenChange") : null;
+const rootArrow = rootHandler && ts.isArrowFunction(rootHandler) ? rootHandler : null;
+check(
+  "whose onOpenChange is a handler of its own rather than the prop forwarded straight through",
+  rootArrow !== null,
+  true,
+);
+const rootStatements =
+  rootArrow && ts.isBlock(rootArrow.body) ? [...rootArrow.body.statements] : [];
+const gate = rootStatements[0] && ts.isIfStatement(rootStatements[0]) ? rootStatements[0] : null;
+// THE GUARD IS THE FIRST STATEMENT AND IT READS `busy`. Two facts, one check,
+// because either one alone is satisfied by the mutation the other catches:
+// dropping the `busy` test leaves a first statement that is still an `if`, and
+// calling `onOpenChange` before the test leaves an `if` that still reads `busy`.
+check(
+  "the handler's FIRST statement is an if, and it reads busy",
+  [gate !== null, gate ? identifiersIn(gate.expression).includes("busy") : false],
+  [true, true],
+);
+// AND IT RETURNS, WITH NOTHING. A `return onOpenChange(next)` is a return too,
+// and it is the whole defect wearing the guard's shape.
+//
+// THE `else` HALF IS THIS PIN DECIDING A SPELLING, and that is worth saying
+// rather than leaving to be discovered. `if (!next && busy) { return; } else {
+// onOpenChange(next); }` behaves identically and reddens here - and on the
+// call-position check below, which sees the call sitting inside the `if` rather
+// than after it. The early return is required because it is the shape both pins
+// read and the shape the rest of this tree uses; an editor who wants the branch
+// has to come through these two checks rather than past them.
+const gateThen = gate
+  ? ts.isBlock(gate.thenStatement)
+    ? (gate.thenStatement.statements[0] ?? null)
+    : gate.thenStatement
+  : null;
+check(
+  "and it returns bare, with no value and no else arm",
+  [
+    gateThen !== null && ts.isReturnStatement(gateThen),
+    gateThen !== null && ts.isReturnStatement(gateThen) ? gateThen.expression === undefined : false,
+    gate ? gate.elseStatement === undefined : false,
+  ],
+  [true, true, true],
+);
+// EVERY CALL AFTER THE GUARD, counted rather than indexed: a call moved ahead of
+// the `if` reopens all four routes while leaving the guard visibly in place, and
+// a second call added later would sit unread behind an index.
+const forwarded = rootArrow
+  ? ((): ts.CallExpression[] => {
+      const out: ts.CallExpression[] = [];
+      const visit = (n: ts.Node): void => {
+        if (ts.isCallExpression(n) && dialogExpr(n.expression) === "onOpenChange") out.push(n);
+        ts.forEachChild(n, visit);
+      };
+      visit(rootArrow);
+      return out;
+    })()
+  : [];
+check(
+  "and every onOpenChange call in the handler sits after that guard, never before it",
+  [forwarded.length, gate ? forwarded.filter((c) => c.getStart(dialogSf) >= gate.end).length : 0],
+  [1, 1],
+);
+
+console.log("\n[dialog source] and the two controls the gate would otherwise leave inert");
+// A control that is visible and silently does nothing is the same dead end the
+// export's inline error line was moved off. `showCloseButton` is already a prop
+// on the shared `DialogContent`, so neither of these widens a primitive that
+// every other dialog in the tree uses to fix the one caller that writes during
+// its own open.
+const contents = jsxNamed(dialogSf, "DialogContent");
+check("exactly one DialogContent to hang it on", contents.length, 1);
+check(
+  "the X is hidden while the write is running, rather than shown and refused",
+  jsxAttrText(contents.length === 1 ? contents[0] : undefined, "showCloseButton"),
+  "!busy",
+);
+const closers = jsxNamed(dialogSf, "DialogClose");
+check("exactly one DialogClose, which is the footer's Cancel", closers.length, 1);
+const cancelButtons = closers.length === 1 ? jsxNamed(closers[0].parent, "Button") : [];
+check(
+  "wrapping exactly one Button, disabled for the same reason the X is hidden",
+  [
+    cancelButtons.length,
+    jsxAttrText(cancelButtons.length === 1 ? cancelButtons[0] : undefined, "disabled"),
+  ],
+  [1, "busy"],
+);
+// WHAT NONE OF THIS BUYS. Nothing in this suite mounts a component, so no check
+// here asserts that pressing Escape mid-write actually does nothing - only that
+// the expression which would refuse it is present, in the one place that reaches
+// all four routes. That the refusal WORKS is a hand test.
 
 console.log(failed === 0 ? "\nAll backup checks passed." : `\n${failed} check(s) FAILED.`);
 process.exit(failed === 0 ? 0 : 1);
