@@ -301,11 +301,16 @@ macOS/Linux rely on `Drop for Session -> killer.kill()`.
   connect order. Cycle detection is seeded by the target's own id, and
   `MAX_JUMP_HOPS` is 16 - `backupFile.ts` duplicates that number and the two have
   to agree, because an over-long chain is refused by the store, not truncated.
-- `duplicateHost` copies SSH credentials but deliberately **not** the pinned
-  fingerprint (a copy exists to be pointed elsewhere, and carrying the key over
-  reads as a MITM on the next connect) and **not** an RDP password (there is no
-  `secrets_copy`, so copying one would mean reading it into the webview). It
-  rewrites the binding's `hostId` and runs read-and-write inside one queue entry.
+- `duplicateHost` copies the source's secrets for **both** protocols and
+  deliberately **not** the pinned server key (a copy exists to be pointed
+  elsewhere, and carrying the key over reads as a MITM on the next connect, so
+  `pins` and the flat fingerprint field both go). The secrets never pass through
+  JS: `copyHostSecrets` calls `secrets_copy`, which reads and writes in-process,
+  which is what lets an RDP password travel at all - the copy's `has*` flags
+  describe what that command actually found, because this layer never reads a
+  secret back to correct them. A vault-bound source owns no accounts, so its
+  binding is **shared** rather than duplicated. It rewrites the binding's
+  `hostId` and runs read-and-write inside one queue entry.
 - `legacyPurge.ts` clears the accounts the two OLD connection stores left on
   `tervia-ssh` and `tervia-rdp`, once, and is the only thing that can: there is no
   `secrets_list`, so an account nothing references is unreachable rather than
@@ -461,7 +466,7 @@ asked **after** the refusal, never before: prompting for a close that is then
 refused is worse than the silent no-op it replaces.
 
 They live beside the refusals because the confirmation was left in exactly the
-state the refusal was in before VLT-43 - one copy per path, disagreeing.
+state the refusal was in - one copy per path, disagreeing.
 `handleClose` asked about unsaved work and a running process; `requestCloseLeaf`
 asked only about the process, in so many words ("Editor leaves always close
 without a prompt"). So a single-pane tab holding a **dirty editor** prompted from
@@ -676,9 +681,17 @@ never blocks persistence. Not supported in builtin mode:
   `disable_browser_accelerator_keys` so WebView2 does not eat Ctrl+W / Ctrl+R.
   macOS rebuilds the app menu without "Close Window" so Cmd+W closes a tab.
 - **Docs and prose**: avoid em-dashes; use commas, colons, or parentheses.
-- **Comments cite only what a clone can reach.** A comment may reference a file
-  `git ls-files` returns, a symbol, or a path inside the repo. It may not
-  reference a planning or handoff document, an issue-tracker row id, a section
+- **Comments cite only what a clone can reach.** The whole test is whether a
+  reader holding nothing but the clone can open the thing you named. A comment
+  may reference a file `git ls-files` returns, a symbol, or a path inside the
+  repo. It may also reference something outside the tree that the clone still
+  gets you to: an **upstream** project's public tracker (`xterm.js #4054`,
+  `IronRDP issue #1251`) or a **pinned** dependency's own source, both of which
+  a reader reaches through the lockfile. Name that project when you cite it - a
+  bare `#1251` fails the test even though `IronRDP issue #1251` passes. It may
+  not reference this project's own planning or handoff documents, a row id from
+  one of them, a bare `issues/nn` path (this repository's tracker is not in the
+  tree, so that reads as a directory and there is no such directory), a section
   number of a document that is not checked in, a `/tmp` path, a date, or a
   commit hash: to anyone cloning the repository those name something that does
   not exist, which is worse than no citation because it looks checkable. State
