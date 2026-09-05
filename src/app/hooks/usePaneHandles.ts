@@ -1,5 +1,6 @@
 import { type EditorPaneHandle } from "@/modules/editor";
 import { activeLeaf, type Tab } from "@/modules/tabs";
+import { isLastEntryInWorkspace } from "@/modules/tabs/lib/entries";
 import {
   hasLeaf,
   leafIds,
@@ -104,26 +105,19 @@ export function usePaneHandles({
     (leafId: number, _code: number) => {
       // Quitting: the shells are being killed on purpose (force quit), so every
       // Exit here is our own doing. Reshaping the layout now would persist a
-      // torn-down workspace over the user's real one - and the last-terminal
-      // branch below would spawn a FRESH shell that then outlives the GUI,
-      // which is the exact opposite of "close all terminals".
+      // torn-down workspace over the user's real one - and the respawn branch
+      // below would spawn a FRESH shell that then outlives the GUI, which is
+      // the exact opposite of "close all terminals".
       if (isQuitting()) return;
       const all = tabsRef.current;
       const tab = all.find((t) => t.kind === "pane" && hasLeaf(t.paneTree, leafId));
       if (!tab || tab.kind !== "pane") return;
-      const terminalLeafCount = (() => {
-        let n = 0;
-        for (const t of all) {
-          if (t.kind !== "pane") continue;
-          for (const l of leaves(t.paneTree)) if (l.leafKind === "terminal") n++;
-        }
-        return n;
-      })();
-      // Respawn if this is the only terminal leaf left, so the UI isn't
-      // empty.
+      // Respawn only to keep the window from going empty - i.e. when this pane
+      // is the last thing on screen. Anything else, including the only terminal
+      // in a workspace whose other tab is a Hosts page, just closes.
       const targetLeaf = leaves(tab.paneTree).find((l) => l.id === leafId);
       const cwd = targetLeaf?.leafKind === "terminal" ? targetLeaf.cwd : undefined;
-      if (terminalLeafCount === 1 && leafIds(tab.paneTree).length === 1) {
+      if (isLastEntryInWorkspace(all, leafId)) {
         void respawnSession(leafId, cwd);
       } else {
         closePaneByLeaf(leafId);

@@ -197,6 +197,20 @@ export function openPtyForSession(s: Session, cwd: string | undefined): Promise<
   const spawnCols = Math.max(MIN_PTY_DIM, s.term.cols);
   const spawnRows = Math.max(MIN_PTY_DIM, s.term.rows);
 
+  // A caveat, recorded because an unreachability claim with nothing beside it
+  // is how a dead guard gets written twice. Two callers below reach this same
+  // SSH branch WITHOUT the connect-failure classifier: `retryPty` writes a plain
+  // PTY error, and `respawnSession` logs and gives up. Neither parks and neither
+  // ladders, so an SSH leaf failing through either gets none of the park-or-
+  // ladder behaviour `ssh-exit-decision.ts` decides.
+  //
+  // Both are unreachable for SSH today, and only by other code's choices:
+  // Enter-to-retry and the stuck-recovery watchdog branch on `sshConnectionId`
+  // and call `retrySsh` instead (useTerminalSession.ts, session-lifecycle.ts),
+  // and `respawnSession` is only ever called for a leaf that is the LAST entry in
+  // its workspace (usePaneHandles.ts) - which the permanent Hosts tab means an
+  // SSH leaf never is. Make the Hosts tab closable, or add a caller that does
+  // not branch, and these two paths become live.
   if (s.sshConnectionId) {
     return openSshForSession(s, s.sshConnectionId, spawnCols, spawnRows, onData, onExit);
   }

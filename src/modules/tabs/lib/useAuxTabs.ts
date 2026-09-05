@@ -1,16 +1,23 @@
 import { useCallback, type Dispatch, type RefObject, type SetStateAction } from "react";
-import { leaves, type PaneLeaf } from "@/modules/terminal/lib/panes";
+import { leaves, PAGE_LABELS, type PaneLeaf } from "@/modules/terminal/lib/panes";
 import { type Tab } from "./tabTypes";
+import { type TabPageKind } from "./pages";
 import { syncPaneMirror } from "./tabHelpers";
 
 /**
  * Shared mutable handles `useTabs` threads into the aux-tab sub-hook. These
- * are the exact `setTabs` / `setActiveId` setters, id counter, and live-tabs
- * ref owned by `useTabs`; the callbacks below close over them verbatim.
+ * are the exact `setTabs` setter, `setActiveId` funnel, id counter, and
+ * live-tabs ref owned by `useTabs`; the callbacks below close over them
+ * verbatim.
+ *
+ * `setActiveId` is `useTabs`' funnel, not React's raw setter - so the tab these
+ * openers activate is a tab the user can actually see, with any rail view
+ * covering it left behind. Hence `(id: number)` rather than
+ * `Dispatch<SetStateAction<number>>`.
  */
 type AuxTabsDeps = {
   setTabs: Dispatch<SetStateAction<Tab[]>>;
-  setActiveId: Dispatch<SetStateAction<number>>;
+  setActiveId: (id: number) => void;
   nextIdRef: RefObject<number>;
   tabsRef: RefObject<Tab[]>;
 };
@@ -90,5 +97,63 @@ export function useAuxTabs({ setTabs, setActiveId, nextIdRef, tabsRef }: AuxTabs
     return tabId;
   }, []);
 
-  return { openBoardTab, newRdpTab };
+  /**
+   * Open (or focus) a page tab. Single-instance PER PAGE KIND: two Hosts
+   * lists would be two copies of one store subscription fighting over the
+   * same selection state, with no upside - unlike `newRdpTab` above, which is
+   * deliberately not single-instance because two RDP panes are two genuine
+   * logins with nothing to fight over.
+   *
+   * `TabPageKind`, not `PageKind`: this is one of the two page-leaf
+   * constructors, and only Hosts is a tab (see `./pages.ts`). Asking
+   * for a Vault tab is a type error rather than a leaf nothing would render a
+   * tab strip entry for.
+   */
+  const openPageTab = useCallback((page: TabPageKind) => {
+    const existing = (() => {
+      for (const t of tabsRef.current) {
+        if (t.kind !== "pane") continue;
+        const leaf = leaves(t.paneTree).find((l) => l.leafKind === "page" && l.page === page);
+        if (leaf) return { tabId: t.id, leafId: leaf.id };
+      }
+      return null;
+    })();
+    if (existing) {
+      // Focus the page LEAF, not just its tab. The rail button carries a pressed
+      // state, so when the page shares a tab with a focused terminal, activating
+      // the tab alone would leave the button reading as engaged with the caret
+      // still in the terminal - a dead click on a permanent affordance.
+      setActiveId(existing.tabId);
+      setTabs((curr) =>
+        curr.map((t) =>
+          t.id === existing.tabId && t.kind === "pane" && t.activeLeafId !== existing.leafId
+            ? syncPaneMirror({ ...t, activeLeafId: existing.leafId })
+            : t,
+        ),
+      );
+      return existing.tabId;
+    }
+    const tabId = nextIdRef.current++;
+    const leafId = nextIdRef.current++;
+    const leaf: PaneLeaf = { kind: "leaf", id: leafId, leafKind: "page", page };
+    // Leftmost, not appended: Hosts is where a workspace starts, so the
+    // strip reads left-to-right as "the machines, then what you opened from
+    // them". The startup fallback already puts it first; this branch is for a
+    // workspace whose saved tabs hold no page leaf at all - one snapshotted by a
+    // build where Hosts was closable, or before it was the default tab.
+    setTabs((curr) => [
+      syncPaneMirror({
+        id: tabId,
+        kind: "pane",
+        title: PAGE_LABELS[page],
+        paneTree: leaf,
+        activeLeafId: leafId,
+      }),
+      ...curr,
+    ]);
+    setActiveId(tabId);
+    return tabId;
+  }, []);
+
+  return { openBoardTab, newRdpTab, openPageTab };
 }

@@ -6,7 +6,7 @@
 // Process model:
 //   `TerviaApp` (GUI)  <—local socket—>  `TerviaApp --pty-daemon`
 //
-// Lifecycle goals (see plan `rosy-dreaming-wombat.md`):
+// Lifecycle goals:
 //   • GUI close       → daemon survives, sessions persist
 //   • GUI reopen      → reconnect + Attach(session_id) to resume
 //   • PC restart      → daemon dies with kernel, sessions lost (intended)

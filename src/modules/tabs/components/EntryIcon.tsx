@@ -36,6 +36,7 @@ export function EntryIcon({ entry }: { entry: Entry }) {
           editorFileName: entry.leafKind === "editor" ? entry.label : undefined,
           editorRemote: !!entry.remoteHost,
           aiCliStatus: entry.aiCliStatus,
+          page: entry.page,
         }}
         size={14}
       />

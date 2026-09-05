@@ -12,7 +12,7 @@ import { TabsTrigger } from "@/components/ui/tabs";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import { MAX_PANES_PER_TAB } from "../lib/useTabs";
-import { type SshConnection } from "@/modules/ssh/connections";
+import { isSshHost, type Host } from "@/modules/hosts/types";
 import { hopDotClass, sshHopDetail, statusLabel } from "@/modules/ssh/status";
 import { aiCliLabel } from "@/modules/terminal/lib/aiCliStatus";
 import { X } from "lucide-react";
@@ -20,6 +20,7 @@ import { useSortable } from "@dnd-kit/sortable";
 import { Fragment } from "react";
 import type { ReactNode } from "react";
 import { type Entry, type PaneEntry, entryLabelClass, tabAccentClass } from "../lib/entries";
+import { type SelectEntry, entrySelectHandlers } from "../lib/selectEntry";
 import { InlineInput } from "@/modules/explorer/InlineInput";
 import { EntryIcon } from "./EntryIcon";
 import { TrailingIconButton } from "./TrailingIconButton";
@@ -40,6 +41,9 @@ export type RenderEntryArgs = {
   activeKey: string | null;
   lastEntryKey: string | null;
   compact?: boolean;
+  /** Whether THIS entry may be closed, decided by the one close predicate
+   *  (`lib/closable.ts`) and resolved by the caller. False renders no X at all
+   *  rather than a dead one - see the invariants in that file. */
   canClose: boolean;
   /** dnd-kit attributes for the trigger as drag handle. */
   dragAttrs?: ReturnType<typeof useSortable>["attributes"];
@@ -49,10 +53,15 @@ export type RenderEntryArgs = {
   dragStyle?: React.CSSProperties;
   /** True when this entry is being dragged. Drives ghost opacity. */
   selfDragging?: boolean;
+  /** Activate this entry. Required, not optional: the trigger's own click route
+   *  (`lib/selectEntry.ts`) is the ONLY thing that reaches a chip whose key is
+   *  already the active one, so an entry rendered without it would be inert
+   *  under a rail view. Every caller has one. */
+  onSelectEntry: SelectEntry;
   onPinLeaf: (tabId: number, leafId: number) => void;
   onCloseEntry: (tabId: number, leafId: number | null) => void;
   onCloseEntriesAfter: (entry: Entry) => void;
-  sshHosts: Map<string, SshConnection>;
+  hosts: Map<string, Host>;
   onMoveLeafToGroup?: (leafId: number, targetTabId: number) => void;
   onMoveLeafToNewTab?: (leafId: number) => "ok" | "invalid";
   onRotateLeafSplit?: (leafId: number) => void;
@@ -82,10 +91,11 @@ export function renderEntryBody(args: RenderEntryArgs): ReactNode {
     dragRef,
     dragStyle,
     selfDragging,
+    onSelectEntry,
     onPinLeaf,
     onCloseEntry,
     onCloseEntriesAfter,
-    sshHosts,
+    hosts,
     onMoveLeafToGroup,
     onMoveLeafToNewTab,
     onRotateLeafSplit,
@@ -94,8 +104,9 @@ export function renderEntryBody(args: RenderEntryArgs): ReactNode {
     onSetRenaming,
     onRename,
   } = args;
-  const sshHost =
-    e.kind === "pane-leaf" && e.sshConnectionId ? sshHosts.get(e.sshConnectionId) : undefined;
+  const sshHostCandidate =
+    e.kind === "pane-leaf" && e.sshConnectionId ? hosts.get(e.sshConnectionId) : undefined;
+  const sshHost = sshHostCandidate && isSshHost(sshHostCandidate) ? sshHostCandidate : undefined;
   const isPaneLeaf = e.kind === "pane-leaf";
   // Declared before the trigger JSX below, which reads `renaming` to swap the
   // label for an edit field. Keeping them with the other right-click flags
@@ -118,6 +129,25 @@ export function renderEntryBody(args: RenderEntryArgs): ReactNode {
       // Drag attrs/listeners supplied by caller. Nullish spreads preserve default click semantics when absent.
       {...(dragAttrs ?? {})}
       {...(dragListeners ?? {})}
+      // The chip's own click route. It sits AFTER the two drag spreads
+      // DEFENSIVELY - not to repair a collision that exists today. In
+      // @dnd-kit/core 6.3.1 neither object carries an `onClick`: `attributes` is
+      // `{role, tabIndex, aria-*}` and `listeners` is `{onPointerDown}`, since
+      // `PointerSensor` is the only sensor `TabBar` registers. So the order
+      // changes nothing right now, and it is pinned anyway because whatever
+      // grows one - a dnd-kit version, or a second sensor whose activator is a
+      // click - would overwrite this handler silently, with every behavioural
+      // check on the leaf module still green.
+      //
+      // Unconditional, on purpose. Radix skips `onValueChange` when the clicked
+      // trigger's value already equals the current one, which under a rail view
+      // is precisely the covered tab the user is asking to see again; see
+      // `lib/selectEntry.ts` for why this is a click handler rather than a
+      // `value` the rail view unsets. The drag hazard is already handled by
+      // dnd-kit (a capture-phase `click` listener on `document` swallows the
+      // click that ends an activated drag), so no `isDragging` guard belongs
+      // here - it would be dead code.
+      {...entrySelectHandlers(e, onSelectEntry)}
       // Inline style set by per-leaf sortables. Undefined for non-leaf paths (wrapper carries the transform).
       // eslint-disable-next-line react/forbid-dom-props
       style={dragStyle}
@@ -165,11 +195,22 @@ export function renderEntryBody(args: RenderEntryArgs): ReactNode {
           // `stopPropagation` on pointerdown so a drag-to-reorder gesture cannot
           // start from inside the field: the drag listeners live on the trigger
           // this input sits in, and text selection would otherwise reorder tabs.
+          // And on click for the same reason, one layer up: the trigger's select
+          // handler is unconditional, so clicking or selecting text INSIDE the
+          // rename field would otherwise activate the tab and throw the user out
+          // of the rail view they opened the rename from. Stopped here rather
+          // than by teaching the trigger's handler about `renaming` - that
+          // handler stays unconditional, which is what makes an already-active
+          // chip clickable at all.
           // InlineInput is the explorer's rename field, reused here because it
           // already survives the hazard this flow creates - the context menu's
           // Radix portal steals focus as it unmounts, and it re-focuses through
           // that instead of committing an empty name.
-          <span className="flex min-w-0 flex-1" onPointerDown={(ev) => ev.stopPropagation()}>
+          <span
+            className="flex min-w-0 flex-1"
+            onPointerDown={(ev) => ev.stopPropagation()}
+            onClick={(ev) => ev.stopPropagation()}
+          >
             <InlineInput
               // The kind tag ("ssh", "SQL", "API") is core's, not the user's;
               // it is re-applied around whatever they type.
@@ -322,7 +363,8 @@ export function renderEntryBody(args: RenderEntryArgs): ReactNode {
         <TooltipContent side="bottom">
           <div className="flex flex-col gap-0.5 text-[11px]">
             <span>
-              SSH · {sshHost!.user}@{sshHost!.host}:{sshHost!.port}
+              SSH · {sshHost!.credential.kind === "inline" ? `${sshHost!.credential.user}@` : ""}
+              {sshHost!.host}:{sshHost!.port}
             </span>
             {sshStatus ? (
               <span className="text-muted-foreground">{statusLabel(sshStatus)}</span>

@@ -17,8 +17,8 @@
         "title": "Tervia",
         "width": 800,
         "height": 600,
-        "minWidth": 420,
-        "minHeight": 280,
+        "minWidth": 640,
+        "minHeight": 480,
         "titleBarStyle": "Overlay",
         "hiddenTitle": true,
         "visible": false

@@ -9,10 +9,8 @@ import { memo, useEffect, useRef, useState, type RefObject } from "react";
 import { SearchInline, type SearchInlineHandle, type SearchTarget } from "./SearchInline";
 import type { Tab } from "@/modules/tabs";
 import { TabBar } from "@/modules/tabs";
-import { SshMenu } from "@/modules/ssh/SshMenu";
-import { RdpMenu } from "@/modules/rdp/RdpMenu";
-import type { SshConnection } from "@/modules/ssh/connections";
-import type { RdpConnection } from "@/modules/rdp/connections";
+import { HeaderQuickConnect } from "./HeaderQuickConnect";
+import type { Host } from "@/modules/hosts/types";
 import type { SshStatus } from "@/modules/ssh/status";
 import type { AiCliStatus } from "@/modules/terminal/lib/aiCliStatus";
 import { FolderOpen, PanelLeft, Settings } from "lucide-react";
@@ -43,15 +41,13 @@ type Props = {
   /** True when the active tab still has room for another split. */
   canSplit: boolean;
   onOpenSettings: () => void;
-  /** Open a saved SSH host as a new terminal tab. */
-  onConnectSsh: (conn: SshConnection) => void;
-  /** Open a saved RDP host as a new pane tab. */
-  onConnectRdp: (conn: RdpConnection) => void;
-  /** The RDP list's open state lives in App: the list IS the connection picker,
-   *  and the command palette's "Connect RDP..." has to be able to raise it
-   *  without a trigger to click. */
-  rdpMenuOpen: boolean;
-  onRdpMenuOpenChange: (open: boolean) => void;
+  /** Connect a host of either protocol through App's connect path, routed by
+   *  `host.protocol`. Backs the quick-connect input - the header's only
+   *  connect surface now that the SSH/RDP dropdowns are gone. */
+  onConnectHost: (host: Host) => void;
+  /** Open the Hosts tab. Backs quick-connect's ad-hoc "no saved match, but it
+   *  parses as a target" path. */
+  onOpenHostsPage: () => void;
   /** Move a leaf into `targetTabId` as a split. Caller toasts on full. */
   onMoveLeafToGroup: (leafId: number, targetTabId: number) => void;
   /** Pop `leafId` out into a new top-level tab. Returns "invalid" if not in a multi-leaf split. */
@@ -81,7 +77,7 @@ function onHeaderMouseDown(e: React.MouseEvent<HTMLElement>) {
   if (e.button !== 0) return;
   const target = e.target as HTMLElement;
   if (!target?.closest) return;
-  // Portaled content (the SshMenu dialogs, dropdown/context menus, tooltips)
+  // Portaled content (quick-connect's popover, dropdown/context menus, tooltips)
   // renders into `document.body`, but React still bubbles its events up the
   // *React* tree - straight into this handler. Without this guard, selecting
   // text in one of those dialogs drags the window instead, and double-clicking
@@ -112,10 +108,8 @@ function HeaderImpl({
   onSplit,
   canSplit,
   onOpenSettings,
-  onConnectSsh,
-  onConnectRdp,
-  rdpMenuOpen,
-  onRdpMenuOpenChange,
+  onConnectHost,
+  onOpenHostsPage,
   onMoveLeafToGroup,
   onMoveLeafToNewTab,
   onRotateLeafSplit,
@@ -203,8 +197,11 @@ function HeaderImpl({
         {/* Divider before the trailing cluster. */}
         <span className="bg-border mx-1 h-5 w-px shrink-0" />
 
-        <SshMenu onConnect={onConnectSsh} />
-        <RdpMenu onConnect={onConnectRdp} open={rdpMenuOpen} onOpenChange={onRdpMenuOpenChange} />
+        <HeaderQuickConnect
+          compact={compact}
+          onConnectHost={onConnectHost}
+          onOpenHostsPage={onOpenHostsPage}
+        />
         {settingsButton}
 
         {USE_CUSTOM_WINDOW_CONTROLS && (

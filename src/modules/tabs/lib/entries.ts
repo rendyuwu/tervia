@@ -1,7 +1,12 @@
 import { cn } from "@/lib/utils";
-import { type PaneLeaf, isRemoteEditorLeaf, leaves } from "@/modules/terminal/lib/panes";
-import { type RdpConnection } from "@/modules/rdp/connections";
-import { type SshConnection } from "@/modules/ssh/connections";
+import {
+  type PageKind,
+  type PaneLeaf,
+  hasLeaf,
+  isRemoteEditorLeaf,
+  leaves,
+} from "@/modules/terminal/lib/panes";
+import { type Host } from "@/modules/hosts/types";
 import { statusLabelClass, type SshStatus } from "@/modules/ssh/status";
 import { type AiCliStatus } from "@/modules/terminal/lib/aiCliStatus";
 import type { Tab } from "./useTabs";
@@ -28,7 +33,7 @@ type EntryBase = {
 export type PaneEntry = EntryBase & {
   kind: "pane-leaf";
   leafId: number;
-  leafKind: "terminal" | "editor" | "rdp" | "board";
+  leafKind: "terminal" | "editor" | "rdp" | "board" | "page";
   /** 1-based FIFO badge number for terminal leaves - the same identifier the
    *  AI sees in `<env>`. */
   ordinal?: number;
@@ -46,6 +51,8 @@ export type PaneEntry = EntryBase & {
   aiCliStatus?: AiCliStatus;
   /** Set on editor leaves backed by SFTP. Flips the file icon to a remote variant. */
   remoteHost?: string;
+  /** Set on page leaves. Picks which glyph `EntryIcon` shows. */
+  page?: PageKind;
   /** True when `label` is a name the user typed rather than a derived one. Only
    *  drives whether the right-click menu offers "Reset name". */
   renamed?: boolean;
@@ -62,9 +69,10 @@ export type Entry = PaneEntry | StandaloneEntry;
 
 /**
  * Background color for the per-tab accent stripe. Emerald for local shell,
- * sky for SSH and RDP, brand blue for editor. Rendered as a `<span>` (not
- * `::after`) because the primitive `TabsTrigger` already uses `::after` with
- * equal specificity. Keep strings as full literals for Tailwind's JIT.
+ * sky for SSH and RDP, brand blue for editor, violet for the app's own surfaces
+ * (board, rail page). Rendered as a `<span>` (not `::after`) because the
+ * primitive `TabsTrigger` already uses `::after` with equal specificity. Keep
+ * strings as full literals for Tailwind's JIT.
  */
 export function tabAccentClass(e: Entry): string {
   if (e.kind === "pane-leaf") {
@@ -77,10 +85,16 @@ export function tabAccentClass(e: Entry): string {
     // theme presets: both are "a session on another machine", which is exactly
     // what the accent is distinguishing from a local shell and a file.
     if (e.leafKind === "rdp") return "bg-[color:var(--tervia-tab-ssh)]";
+    // A board and a rail page are none of the three things this accent tells
+    // apart - not a local shell, not a remote session, not a file - so they
+    // share the violet rather than falling through to the editor colour and
+    // reading as a file. Reused rather than given tokens of their own, which
+    // would mean editing all 20 theme presets.
+    if (e.leafKind === "board" || e.leafKind === "page") {
+      return "bg-[color:var(--tervia-tab-ai-diff)]";
+    }
     return "bg-[color:var(--tervia-tab-editor)]";
   }
-  // Board: reuses the violet accent rather than adding a token of its own to
-  // all 20 theme presets.
   return "bg-[color:var(--tervia-tab-ai-diff)]";
 }
 
@@ -98,16 +112,15 @@ export function entryLabelClass(e: Entry): string {
 
 export function buildEntries(
   tabs: Tab[],
-  sshHosts: Map<string, SshConnection>,
+  hosts: Map<string, Host>,
   sshStatuses?: Map<number, SshStatus>,
   aiCliStatuses?: Map<number, AiCliStatus>,
-  rdpHosts?: Map<string, RdpConnection>,
 ): Entry[] {
   const out: Entry[] = [];
   for (const t of tabs) {
     if (t.kind === "pane") {
       for (const leaf of leaves(t.paneTree)) {
-        const label = leafLabel(leaf, sshHosts, t.cwd, rdpHosts);
+        const label = leafLabel(leaf, hosts, t.cwd);
         const sshConnectionId = leaf.leafKind === "terminal" ? leaf.sshConnectionId : undefined;
         // FIFO ordinal assigned at leaf creation. Preserved through drag,
         // reorder, move-to-group, and workspace restarts. It is the same
@@ -140,8 +153,9 @@ export function buildEntries(
           // AI CLI status on SSH leaves too. Detector runs on the byte stream regardless of PTY locality.
           aiCliStatus: leaf.leafKind === "terminal" ? aiCliStatuses?.get(leaf.id) : undefined,
           remoteHost,
+          page: leaf.leafKind === "page" ? leaf.page : undefined,
           renamed: leaf.customTitle !== undefined,
-          renameSeed: leafRenameSeed(leaf, sshHosts, t.cwd, rdpHosts),
+          renameSeed: leafRenameSeed(leaf, hosts, t.cwd),
         });
       }
     }
@@ -160,4 +174,18 @@ export function countTabEntries(tabs: Tab[]): number {
   let n = 0;
   for (const t of tabs) n += t.kind === "pane" ? leaves(t.paneTree).length : 1;
   return n;
+}
+
+/**
+ * True when `leafId` is the only thing the workspace has on screen, so closing
+ * it would leave an empty window. This - not "is this the last TERMINAL" - is
+ * what a close path has to ask: since the default tab became a Hosts page, a
+ * workspace can hold zero terminals and still be full, and `exit` in the only
+ * terminal beside it must close the pane rather than resurrect it. It is also
+ * exactly the close `closePaneByLeaf` refuses, so asking here keeps the two in
+ * step instead of one path blocking what the other allows.
+ */
+export function isLastEntryInWorkspace(tabs: Tab[], leafId: number): boolean {
+  if (countTabEntries(tabs) !== 1) return false;
+  return tabs.some((t) => t.kind === "pane" && hasLeaf(t.paneTree, leafId));
 }

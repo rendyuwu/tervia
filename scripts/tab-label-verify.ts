@@ -24,8 +24,7 @@ import { leafLabel, leafRenameSeed } from "../src/modules/tabs/lib/tabHelpers";
 import { savedToTab } from "../src/modules/workspaces/serialize";
 import type { SavedPaneNode, SavedTab } from "../src/modules/workspaces/store";
 import type { PaneLeaf, PaneNode } from "../src/modules/terminal/lib/panes";
-import type { SshConnection } from "../src/modules/ssh/connections";
-import type { RdpConnection } from "../src/modules/rdp/connections";
+import type { Host } from "../src/modules/hosts/types";
 import type { Tab } from "../src/modules/tabs";
 
 let failures = 0;
@@ -34,31 +33,40 @@ function check(label: string, cond: boolean) {
   if (!cond) failures++;
 }
 
-const HOST: SshConnection = {
+const HOST: Host = {
   id: "c1",
   name: "prod-db",
   host: "10.0.0.9",
   port: 22,
-  user: "root",
-  authMode: "password",
-  hasPassword: true,
-  hasPrivateKey: false,
-  hasKeyPassphrase: false,
+  protocol: "ssh",
+  credential: {
+    kind: "inline",
+    hostId: "c1",
+    user: "root",
+    authMode: "password",
+    hasPassword: true,
+    hasPrivateKey: false,
+    hasKeyPassphrase: false,
+  },
 };
-const hosts = new Map<string, SshConnection>([[HOST.id, HOST]]);
 
-const RDP_HOST: RdpConnection = {
+const RDP_HOST: Host = {
   id: "r1",
   name: "win-build-01",
   host: "10.0.0.20",
   port: 3389,
-  username: "Administrator",
+  protocol: "rdp",
+  credential: { kind: "inline", hostId: "r1", username: "Administrator", hasPassword: true },
   desktopWidth: 1920,
   desktopHeight: 1080,
   sizeMode: "preset",
-  hasPassword: true,
 };
-const rdpHosts = new Map<string, RdpConnection>([[RDP_HOST.id, RDP_HOST]]);
+
+// One map for both protocols now - see `leafLabel`'s signature.
+const hosts = new Map<string, Host>([
+  [HOST.id, HOST],
+  [RDP_HOST.id, RDP_HOST],
+]);
 
 let nextId = 1;
 const id = () => nextId++;
@@ -85,7 +93,7 @@ console.log("\nleaf labels");
   const ssh = term(undefined, { sshConnectionId: "c1" }) as PaneLeaf;
   check("an SSH leaf reads ssh:<connection name>", leafLabel(ssh, hosts) === "ssh:prod-db");
 
-  const unnamed = new Map<string, SshConnection>([["c1", { ...HOST, name: "  " }]]);
+  const unnamed = new Map<string, Host>([["c1", { ...HOST, name: "  " }]]);
   check("an unnamed connection falls back to the host", leafLabel(ssh, unnamed) === "ssh:10.0.0.9");
   check("a deleted connection reads a bare ssh", leafLabel(ssh, new Map()) === "ssh");
   // `tab.title` is recomputed before the host map has loaded, so no map at all
@@ -103,24 +111,17 @@ console.log("\nleaf labels");
   check("an editor reads its file name", leafLabel(editor) === "main.rs");
 
   // RDP takes the SAME ladder as SSH, and for the same reason: the label names
-  // a machine, so it has to resolve through the connection map, fall back to
-  // the host, and degrade to a bare tag rather than an empty tab. Note the map
-  // is the FOURTH argument - passing it as `sshHosts` compiles (both are
-  // Maps keyed by string) and would silently label every RDP pane "rdp".
+  // a machine, so it has to resolve through the host map, fall back to the
+  // host, and degrade to a bare tag rather than an empty tab. One map now
+  // covers both protocols, so there is no second argument to forget.
   const remote = rdpLeaf();
-  check(
-    "an RDP leaf reads rdp:<connection name>",
-    leafLabel(remote, hosts, undefined, rdpHosts) === "rdp:win-build-01",
-  );
-  const unnamedRdp = new Map<string, RdpConnection>([["r1", { ...RDP_HOST, name: "  " }]]);
+  check("an RDP leaf reads rdp:<connection name>", leafLabel(remote, hosts) === "rdp:win-build-01");
+  const unnamedRdp = new Map<string, Host>([["r1", { ...RDP_HOST, name: "  " }]]);
   check(
     "an unnamed RDP connection falls back to the host",
-    leafLabel(remote, hosts, undefined, unnamedRdp) === "rdp:10.0.0.20",
+    leafLabel(remote, unnamedRdp) === "rdp:10.0.0.20",
   );
-  check(
-    "a deleted RDP connection reads a bare rdp",
-    leafLabel(remote, hosts, undefined, new Map()) === "rdp",
-  );
+  check("a deleted RDP connection reads a bare rdp", leafLabel(remote, new Map()) === "rdp");
   check("no RDP map at all is the same as unresolved", leafLabel(remote) === "rdp");
 }
 
@@ -149,10 +150,7 @@ console.log("\nbut the KIND tag is not the user's to rename away");
   check("even with no host map to resolve", leafLabel(ssh) === "ssh:build");
 
   const remote = rdpLeaf({ customTitle: "build" });
-  check(
-    "a renamed RDP pane keeps its rdp tag",
-    leafLabel(remote, hosts, undefined, rdpHosts) === "rdp:build",
-  );
+  check("a renamed RDP pane keeps its rdp tag", leafLabel(remote, hosts) === "rdp:build");
   check("even with no RDP map to resolve", leafLabel(remote) === "rdp:build");
 }
 
@@ -185,21 +183,14 @@ console.log("\nthe rename field is seeded WITHOUT the tag");
   const remote = rdpLeaf();
   check(
     "an un-renamed RDP pane seeds the host name only",
-    leafRenameSeed(remote, hosts, undefined, rdpHosts) === "win-build-01",
+    leafRenameSeed(remote, hosts) === "win-build-01",
   );
   check(
     "and re-committing it unchanged is idempotent",
-    leafLabel(
-      { ...remote, customTitle: leafRenameSeed(remote, hosts, undefined, rdpHosts) } as PaneLeaf,
-      hosts,
-      undefined,
-      rdpHosts,
-    ) === leafLabel(remote, hosts, undefined, rdpHosts),
+    leafLabel({ ...remote, customTitle: leafRenameSeed(remote, hosts) } as PaneLeaf, hosts) ===
+      leafLabel(remote, hosts),
   );
-  check(
-    "a bare rdp leaf seeds empty, not its own tag",
-    leafRenameSeed(remote, hosts, undefined, new Map()) === "",
-  );
+  check("a bare rdp leaf seeds empty, not its own tag", leafRenameSeed(remote, new Map()) === "");
 }
 
 console.log("\nthe tab strip reads the same function");
@@ -211,22 +202,27 @@ console.log("\nthe tab strip reads the same function");
     { kind: "split", id: id(), dir: "row", children: [leaf, sshLeaf, remote] },
     leaf.id,
   );
-  const entries = buildEntries([tab], hosts, undefined, undefined, rdpHosts);
+  const entries = buildEntries([tab], hosts);
   check(
     "buildEntries labels match leafLabel for the same leaves",
     entries.map((e) => e.label).join("|") ===
-      [
-        leafLabel(leaf, hosts),
-        leafLabel(sshLeaf, hosts),
-        leafLabel(remote, hosts, undefined, rdpHosts),
-      ].join("|"),
+      [leafLabel(leaf, hosts), leafLabel(sshLeaf, hosts), leafLabel(remote, hosts)].join("|"),
   );
-  // The drift this pins: `buildEntries` takes the RDP map as its FIFTH
-  // argument, so a caller that forgets it (the Workspaces panel did, until it
-  // was threaded through) shows "rdp" where the tab strip shows the host name.
+  // The drift this USED to pin: `buildEntries` took the RDP map as a separate
+  // fifth argument, and a caller that forgot it (the Workspaces panel did,
+  // until it was threaded through) showed "rdp" where the tab strip showed the
+  // host name. The merge removes the chance to pass one protocol's map and not
+  // the other's, so the same call - even with the trailing status maps omitted
+  // - now resolves the real name instead of degrading.
   check(
-    "and an entry built WITHOUT the rdp map degrades rather than lying",
-    buildEntries([tab], hosts).find((e) => e.label.startsWith("rdp"))?.label === "rdp",
+    "and an entry built with the trailing status maps omitted still resolves the RDP host",
+    buildEntries([tab], hosts).find((e) => e.label.startsWith("rdp"))?.label === "rdp:win-build-01",
+  );
+  check(
+    "while a host map that has not loaded yet still degrades rather than lying",
+    buildEntries([tab], new Map())
+      .map((e) => e.label)
+      .join("|") === ["build", "ssh", "rdp"].join("|"),
   );
   check(
     "and the renamed one is flagged renamed",
@@ -273,7 +269,14 @@ console.log("\na cold workspace keeps depth-first order");
 
   let neg = -1;
   const entries = buildEntries(
-    saved.map((t) => savedToTab(t, () => neg--)),
+    // `savedToTab` returns null for a tab that is dropped on restore (a saved
+    // Vault/Port-Forwarding page leaf). None of the snapshots here hold one, so
+    // the filter changes nothing - it is what keeps the walk above and the
+    // rehydrated entries counting the same leaves if one ever does.
+    saved.flatMap((t) => {
+      const tab = savedToTab(t, () => neg--);
+      return tab === null ? [] : [tab];
+    }),
     hosts,
   );
   check(

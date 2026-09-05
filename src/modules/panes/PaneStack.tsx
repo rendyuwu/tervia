@@ -1,5 +1,5 @@
 import type { EditorPaneHandle } from "@/modules/editor";
-import type { PaneTab, Tab } from "@/modules/tabs";
+import { canCloseLeaf, type PaneTab, type Tab } from "@/modules/tabs";
 import { leaves, type PaneEdge } from "@/modules/terminal/lib/panes";
 import type { TerminalPaneHandle } from "@/modules/terminal";
 import type {
@@ -7,16 +7,26 @@ import type {
   TerviaSpawnTabInput,
 } from "@/modules/terminal/lib/useTerminalSession";
 import type { SshConnectionBinding, SshStatus } from "@/modules/ssh/status";
-import { useSshHosts } from "@/modules/ssh/connections";
-import { useRdpHosts } from "@/modules/rdp/connections";
+import { useHosts } from "@/modules/hosts/useHosts";
+import type { Host } from "@/modules/hosts/types";
 import type { AiCliStatus } from "@/modules/terminal/lib/aiCliStatus";
 import type { SearchAddon } from "@xterm/addon-search";
-import { useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import { PaneTreeView, type LeafBundle } from "./PaneTreeView";
 
 type Props = {
   tabs: Tab[];
   activeId: number;
+  /**
+   * False while something covers the whole pane area - today, a rail view.
+   * Folded into each tab's `tabVisible` rather than handled by the
+   * caller hiding this subtree, because "visible" is what a leaf acts on: an
+   * xterm told it is visible holds a WebGL context nobody is looking at and
+   * keeps the caret while the user types into the surface on top of it. Panes
+   * stay MOUNTED either way, so a detour into a rail view is a visibility flip
+   * exactly like a tab switch, not a teardown.
+   */
+  visible?: boolean;
   // Terminal leaf callbacks
   registerTerminalHandle: (leafId: number, handle: TerminalPaneHandle | null) => void;
   onSearchReady: (leafId: number, addon: SearchAddon) => void;
@@ -65,11 +75,16 @@ type Props = {
   /** Open an SSH session for a saved connection, from a remote editor pane that
    *  has no live session to bind to. */
   onReconnectSsh?: (connectionId: string, title: string) => void;
+  /** Connect a saved host through App's connect path, routed by
+   *  `host.protocol`. Passed straight through to `PaneTreeView`'s context - a
+   *  page leaf body is the first consumer, not this file. */
+  onConnectHost?: (host: Host) => void;
 };
 
 export function PaneStack({
   tabs,
   activeId,
+  visible = true,
   registerTerminalHandle,
   onSearchReady,
   onCwd,
@@ -96,18 +111,21 @@ export function PaneStack({
   aiCliStatuses,
   sshBindingByConnection,
   onReconnectSsh,
+  onConnectHost,
 }: Props) {
   // Memoize the filter so the prune effect below sees a stable identity.
   const paneTabs = useMemo(() => tabs.filter((t): t is PaneTab => t.kind === "pane"), [tabs]);
 
-  // Resolve a leaf's `sshConnectionId` to a host for the `ssh:<host>` header
-  // label. Read here (not per-leaf), from the same hook the tab strip and the
-  // Workspaces panel use, so all three read identically.
-  const sshHosts = useSshHosts();
-  // Same job for an RDP leaf's `rdp:<host>` label, read from the same place the
-  // tab strip and the Workspaces panel read it so all three agree after a
-  // rename.
-  const rdpHosts = useRdpHosts();
+  // The pane header's X asks the same predicate the tab strip does, so the two
+  // never disagree about whether a pane can be closed. This is the only place
+  // that has the whole tab list, which the answer depends on.
+  const canClosePaneLeaf = useCallback((leafId: number) => canCloseLeaf(tabs, leafId), [tabs]);
+
+  // Resolve a leaf's `sshConnectionId` / `rdpConnectionId` to a host for the
+  // `ssh:<host>` / `rdp:<host>` header label. Read here (not per-leaf), from
+  // the same hook the tab strip and the Workspaces panel use, so all three
+  // read identically.
+  const hosts = useHosts();
 
   // Stable refs for per-leaf callbacks. Re-creating bundles would tear down PTY/editor state.
   // Bundles are only invoked from post-commit PTY/editor/async callbacks, so a render-time ref
@@ -186,7 +204,7 @@ export function PaneStack({
   return (
     <div className="relative h-full w-full">
       {paneTabs.map((t) => {
-        const tabVisible = t.id === activeId;
+        const tabVisible = visible && t.id === activeId;
         return (
           <div
             key={t.id}
@@ -212,6 +230,7 @@ export function PaneStack({
               mdPreviewLeafIds={mdPreviewLeafIds}
               onMovePaneLeaf={onMovePaneLeaf}
               onCloseLeaf={onCloseLeafRequest}
+              canCloseLeaf={canClosePaneLeaf}
               onSetTerminalTheme={onSetTerminalTheme}
               onToggleMdPreview={onToggleMdPreview}
               detectedBrowserUrl={detectedBrowserUrl}
@@ -223,12 +242,12 @@ export function PaneStack({
               // tab, which the per-tab wrapper below cannot address.
               onFocusEntry={onFocusLeaf}
               onSplitSizes={onSplitSizes}
-              sshHosts={sshHosts}
-              rdpHosts={rdpHosts}
+              hosts={hosts}
               sshStatuses={sshStatuses}
               aiCliStatuses={aiCliStatuses}
               sshBindingByConnection={sshBindingByConnection}
               onReconnectSsh={onReconnectSsh}
+              onConnectHost={onConnectHost}
             />
           </div>
         );

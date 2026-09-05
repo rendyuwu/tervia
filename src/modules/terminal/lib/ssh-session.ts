@@ -1,13 +1,11 @@
+import { defaultAutostartDeps, startHostForwards } from "@/modules/forwards/autostart";
+import { useHostOwnedForwards } from "@/modules/forwards/hostOwned";
+import { listHosts, markConnected, pinFingerprint } from "@/modules/hosts/store";
+import { resolveJumpHops } from "@/modules/hosts/jumps";
+import { isSshHost, type SshHost } from "@/modules/hosts/types";
+import { resolveSshAuth } from "@/modules/vault/resolve";
 import {
-  authFields,
-  getConnectionSecrets,
-  listConnections,
-  markConnected,
-  pinFingerprint,
-  resolveJumpHops,
-  type SshConnection,
-} from "@/modules/ssh/connections";
-import {
+  confirmHostKey,
   openSsh,
   openSshForward,
   isHostKeyMismatchError,
@@ -27,9 +25,35 @@ import type { PtySession } from "./pty-bridge";
 import { sessions, type Session } from "./sessionState";
 import { describeError } from "./session-helpers";
 import { flushPendingInput, openPtyForSession, syncPtySize } from "./pty-lifecycle";
+import {
+  canAuthenticate,
+  classifySshConnectFailure,
+  decideSshConnectFailure,
+  decideSshEnding,
+  hostKeyRefused,
+  SshLocalConnectError,
+  type SshEnding,
+} from "./ssh-exit-decision";
 
 const RECONNECT_BACKOFF_MS = [1_000, 3_000, 7_000] as const;
 const MAX_SSH_RECONNECT_ATTEMPTS = RECONNECT_BACKOFF_MS.length;
+
+/**
+ * The backend's own "nothing to authenticate with" wording, mirrored verbatim
+ * (see `NO_CREDENTIALS_ERROR` in src-tauri/src/modules/ssh/session.rs).
+ *
+ * Deliberately identical rather than improved: this pre-flight check exists to
+ * CLASSIFY the failure, not to reword it, and a user who hits the backend guard
+ * through some other caller must read the same sentence. The two constants are
+ * cross-referenced in both directions so a change to either is a change to a
+ * documented pair.
+ */
+const NO_CREDENTIALS_MESSAGE = "ssh: no credentials: set use_agent, password, or private_key";
+
+/** The jump-hop half of the same guard, mirroring `connect`'s per-hop message. */
+function noJumpCredentialsMessage(host: string): string {
+  return `ssh: jump host ${host} has no ssh-agent, password or private key configured`;
+}
 
 // On an SSH drop the remote program (vim/htop/tmux) never got to send its
 // mode-reset teardown, so xterm.js stays in whatever stateful modes it left on -
@@ -91,15 +115,21 @@ export async function openSshForSession(
   // everything watching - the terminal's Enter-to-retry stays disabled, and a
   // remote editor pane bound to this profile waits on a session that will never
   // arrive instead of offering to reconnect.
-  let conn: SshConnection;
-  let secrets: Awaited<ReturnType<typeof getConnectionSecrets>>;
+  let conn: SshHost;
+  let auth: Awaited<ReturnType<typeof resolveSshAuth>>;
   let jumps: SshJumpHop[];
   try {
-    const list = await listConnections();
-    const found = list.find((c) => c.id === sshConnectionId);
+    const list = await listHosts();
+    const found = list.find((h) => h.id === sshConnectionId);
     if (!found) throw new Error(`ssh: connection "${sshConnectionId}" not found`);
+    // A saved id can now name an RDP host - the two used to be different id
+    // spaces. Refused rather than cast: reading `proxyJumpId` off an RdpHost
+    // would be a type error, not a narrowing that happens to be safe.
+    if (!isSshHost(found)) {
+      throw new Error(`ssh: "${found.name}" is an RDP host and cannot open a terminal`);
+    }
     conn = found;
-    secrets = await getConnectionSecrets(sshConnectionId);
+    auth = await resolveSshAuth(conn.credential);
     // Resolve the ProxyJump chain (if this host tunnels through others). Done at
     // open time so each reconnect re-reads the current chain + jump secrets.
     jumps = await resolveJumpHops(conn.proxyJumpId, conn.id, list);
@@ -108,27 +138,87 @@ export async function openSshForSession(
     // could not even be resolved (a jump host was deleted, or it is cyclic), so
     // the hops from last time no longer describe anything.
     s.sshRoute = null;
-    emitSshStatus(s, { kind: "error", message: describeError(e), canRetry: true });
-    throw e;
+    const message = describeError(e);
+    emitSshStatus(s, { kind: "error", message, canRetry: true });
+    // Everything this block can fail on is a fact about THIS machine -
+    // the profile is gone, it names an RDP host, its jump chain is broken or
+    // cyclic, its vault binding no longer resolves, it has no credential. None
+    // of them involve the network and none of them can come out differently on
+    // the next attempt, so they are marked local at the point that is known
+    // rather than guessed at from the wording downstream. Re-wrapped whole (via
+    // `cause`, so the original still reaches the console) instead of tagging
+    // each `throw` above, which is what makes a failure added to this block
+    // later local by default - the safe direction for a block that by
+    // construction never touches the wire.
+    throw e instanceof SshLocalConnectError ? e : new SshLocalConnectError(message, { cause: e });
   }
 
   // Rebuild the route for this attempt, so an edited chain is picked up on
-  // reconnect. Null for a direct connection - see `buildSshRoute`.
-  s.sshRoute = buildSshRoute(jumps, conn);
+  // reconnect. Null for a direct connection - see `buildSshRoute`. `conn` no
+  // longer carries a flat `user` (it moved under `credential`), so the target
+  // endpoint is built from the resolved auth instead.
+  s.sshRoute = buildSshRoute(jumps, { user: auth.user, host: conn.host, port: conn.port });
 
   // `sshReconnectAttempts` is bumped by `scheduleSshReconnect`. 0 means first open.
   const attempt = Math.max(1, s.sshReconnectAttempts);
   emitSshStatus(s, { kind: "connecting", attempt });
   writeSshBanner(
     s,
-    `\x1b[2m[tervia] connecting to ${conn.user}@${conn.host}:${conn.port}…\x1b[0m\r\n`,
+    `\x1b[2m[tervia] connecting to ${auth.user}@${conn.host}:${conn.port}…\x1b[0m\r\n`,
   );
 
-  // Route the first of onExit/onError into the reconnect scheduler; russh can fire both.
+  // Refuse to dial with nothing to authenticate with. A host saved with no
+  // password at all is a legal record - `validateSshCredential` deliberately
+  // allows a blank secret - which makes this failure routine rather than
+  // unreachable, and the backend can only report it as one more connect-failed
+  // string, at which point the ladder cannot tell it apart from a server that is
+  // merely down. Asked here, the answer is attributable: it is a fact about the
+  // saved host, and no amount of retrying changes a saved host.
+  //
+  // Deliberately AFTER the banner above rather than up in the resolve block, so
+  // the failure still reads like every other connect failure - "connecting to
+  // user@host:port", then why it did not. The alternative prints an error naming
+  // no host at all, which in a split workspace does not say which pane failed.
+  if (!canAuthenticate(auth)) throw new SshLocalConnectError(NO_CREDENTIALS_MESSAGE);
+  // Every hop is dialled with its own credential and fails the same way, so the
+  // same question is asked of each. Named rather than counted so the banner says
+  // WHICH hop, matching the backend's per-hop message.
+  const hopWithoutCredential = jumps.find((hop) => !canAuthenticate(hop));
+  if (hopWithoutCredential) {
+    throw new SshLocalConnectError(noJumpCredentialsMessage(hopWithoutCredential.host));
+  }
+
+  // Route the first ending (onExit or onError) through here; russh can fire
+  // both for one drop (an error followed by the channel closing), and only
+  // the first should be acted on. The actual reconnect-or-not decision is
+  // `decideSshEnding` (module scope, above) - kept pure and separate from
+  // these side effects so it stays unit-testable on its own.
   let terminated = false;
-  const handleTerminal = (reason: string) => {
+  // Has this session ENDED? Read by `startHostForwards`'s `stillLive` below,
+  // and the reason it exists at all is that BOTH release sites are one-shot:
+  // `finishSsh` is behind `terminated` and the adapter's `close` fires once, so
+  // an entry claimed after either has run is never released, and the row then
+  // reads "Running (with host)" for the rest of the app's life with a disabled
+  // Stop and a note pointing at a tab that is already gone. Autostart is N
+  // sequential IPC round trips, and `disposeSession` releases synchronously
+  // before its own `ssh_close` invoke lands, so the window is real and it
+  // favours the leak.
+  let sessionEnded = false;
+  const finishSsh = (ending: SshEnding) => {
     if (terminated) return;
     terminated = true;
+    // The forwards this session's autostart opened die WITH the session, so
+    // they are released here - ABOVE the disposed guard below, deliberately. A
+    // disposed pane's forwards are exactly as dead as a live one's, and a
+    // release under that guard would leak every entry for every tab the user
+    // closed. `resolvedSessionId` is null until `openSsh` resolves, and an
+    // attempt that never got that far claimed nothing - but the FLAG is set
+    // unconditionally, because a session that ended without ever resolving an
+    // id is still one an in-flight autostart must not claim against.
+    sessionEnded = true;
+    if (resolvedSessionId !== null) {
+      useHostOwnedForwards.getState().releaseSession(resolvedSessionId);
+    }
     if (s.disposed) return;
     // SSH dropped. Reset the AI CLI detector so its state doesn't ghost into the next reconnect.
     s.aiCliDetector?.reset();
@@ -138,19 +228,55 @@ export async function openSshForSession(
     // Whichever hop had not come up is where the chain broke; freeze that into
     // the route so the indicator names the failing link.
     if (s.sshRoute) s.sshRoute = failPendingSshHops(s.sshRoute);
-    if (s.sshUserClose) {
-      emitSshStatus(s, {
-        kind: "disconnected",
-        reason: "closed by user",
-        canRetry: true,
-      });
-      onExit(0);
-      return;
+
+    const decision = decideSshEnding(ending, s.sshUserClose);
+    switch (decision.action) {
+      case "userClosed":
+        emitSshStatus(s, {
+          kind: "disconnected",
+          reason: "closed by user",
+          canRetry: true,
+        });
+        onExit(0);
+        return;
+      case "closePane":
+        // Deliberate, in-band termination: no banner, no reconnect. Route
+        // through the normal PTY exit path so the leaf closes (or respawns,
+        // if it is the last one left in the workspace) exactly like a local
+        // shell exiting would - reusing that logic instead of duplicating
+        // pane-closing decisions here.
+        s.pty = null;
+        s.ptySpawnedAt = null;
+        onExit(decision.code);
+        return;
+      case "parkKilled":
+        // Also deliberate, not a transport failure, so no auto-reconnect -
+        // but unlike a plain exit this is unusual enough to flag rather
+        // than silently close under: park the pane with a banner naming
+        // the signal and let the user decide (Enter or the Retry button),
+        // the same manual path used once auto-reconnect below gives up.
+        s.pty = null;
+        s.ptySpawnedAt = null;
+        s.sshReconnectAttempts = 0;
+        emitSshStatus(s, {
+          kind: "disconnected",
+          reason: `killed by signal ${decision.signalName}`,
+          canRetry: true,
+        });
+        writeSshBanner(
+          s,
+          `\r\n\x1b[33m[tervia] remote process killed by signal ${decision.signalName}${
+            decision.coreDumped ? " (core dumped)" : ""
+          }. Press Enter or click Retry to reconnect.\x1b[0m\r\n`,
+        );
+        return;
+      case "reconnect":
+        // Drop the live handle so attachSession/retrySsh treat the leaf as "needs spawn".
+        s.pty = null;
+        s.ptySpawnedAt = null;
+        scheduleSshReconnect(s, decision.reason);
+        return;
     }
-    // Drop the live handle so attachSession/retrySsh treat the leaf as "needs spawn".
-    s.pty = null;
-    s.ptySpawnedAt = null;
-    scheduleSshReconnect(s, reason);
   };
 
   // Need both russh session id (from openSsh) and server fingerprint (from onConnected).
@@ -175,14 +301,25 @@ export async function openSshForSession(
   // Track the first-connect host-key prompt so it can be cleaned up if this
   // attempt dies before the user answers it (see the catch below).
   let hostKeyPromptId: string | null = null;
+  // Every ANSWER this attempt's host-key questions were given, in the
+  // order they arrived. Recorded at the moment the answer is MADE - see the
+  // `confirm` wrapper below - rather than inferred at failure time from how many
+  // prompts were raised against how many were trusted.
+  //
+  // The difference is a real failure, not a tidiness one: "raised and not
+  // trusted" is also the state a link dropping while the dialog is still on
+  // screen leaves behind, so counting parks the exact transport blip the ladder
+  // exists for. Only an answer proves someone on this side ended the attempt.
+  const hostKeyAnswers: boolean[] = [];
   let sshSession: SshSession;
   try {
+    const { user, ...credentialValues } = auth;
     sshSession = await openSsh(
       {
         host: conn.host,
         port: conn.port,
-        user: conn.user,
-        ...authFields(conn.authMode, secrets),
+        user,
+        ...credentialValues,
         // Pin against the last recorded fingerprint. First connect is TOFU; later connects fail fast on mismatch.
         expectedFingerprint: conn.lastFingerprint || undefined,
         jumps,
@@ -236,17 +373,48 @@ export async function openSshForSession(
             { host: conn.host, connectionId: sshConnectionId },
             jumps,
           );
-          useHostKeyPrompt.getState().enqueue(prompt, () => {
-            for (const id of owners) void pinFingerprint(id, prompt.fingerprint).catch(() => {});
-          });
+          useHostKeyPrompt.getState().enqueue(
+            {
+              ...prompt,
+              // The queue answers every prompt through the prompt's own
+              // `confirm`, so wrapping it here is the one place that sees EVERY
+              // answer this attempt's questions get - the user's Trust, the
+              // user's Reject, and the rejection `abandon` sends on the user's
+              // behalf when the pane that asked has gone away. Recording the
+              // answer here is what makes the classification a fact rather than
+              // an inference: nothing is written when a prompt is merely raised,
+              // which is why a drop under the dialog stays a transport failure.
+              //
+              // Forwarded unchanged, and its result untouched: the paused
+              // handshake is blocked on this very call, so swallowing it would
+              // hang the connect until the backend's confirm window ran out.
+              confirm: (promptId, accept) => {
+                hostKeyAnswers.push(accept);
+                return confirmHostKey(promptId, accept);
+              },
+            },
+            () => {
+              for (const id of owners) void pinFingerprint(id, prompt.fingerprint).catch(() => {});
+            },
+          );
         },
         onData,
-        onExit: (code) => {
-          handleTerminal(code === 0 ? "remote closed" : `exit ${code}`);
+        onExit: (code, reason) => {
+          switch (reason.kind) {
+            case "exit":
+              finishSsh({ kind: "clean", code });
+              break;
+            case "signal":
+              finishSsh({ kind: "signal", name: reason.name, coreDumped: reason.coreDumped });
+              break;
+            case "disconnected":
+              finishSsh({ kind: "ambiguous", reason: "remote closed" });
+              break;
+          }
         },
         onError: (msg) => {
           writeSshBanner(s, `\r\n\x1b[31m[tervia] ssh error: ${msg}\x1b[0m\r\n`);
-          handleTerminal(msg);
+          finishSsh({ kind: "ambiguous", reason: msg });
         },
       },
     );
@@ -263,30 +431,57 @@ export async function openSshForSession(
       useHostKeyPrompt.getState().dismiss(hostKeyPromptId);
       hostKeyPromptId = null;
     }
+    // A key this attempt asked about and was REFUSED trust for is the
+    // other failure the frontend can attribute on its own. A refusal aborts the
+    // handshake before any credential is sent, and the ladder's answer to that
+    // was to ask the same question again, up to three more times. The user
+    // already answered.
+    //
+    // Refused, not "unanswered". A prompt still sitting in the queue when the
+    // connect died says nothing about who ended it: the link dropping under the
+    // dialog leaves exactly that state, and it is the blip the ladder is FOR.
+    // The backend's own 120s confirm window lapsing lands in the same bucket for
+    // the same reason - it is the backend's decision, made where this side
+    // cannot see it, and telling it apart from a drop needs the connect failure
+    // to carry a phase, which the wire does not do today. Left transport, so
+    // the reconnect re-raises the question for whoever comes back to it, rather
+    // than parking a pane whose link merely blinked.
+    //
+    // Everything else here (a credential the server refused, an unparseable key,
+    // a host that would not resolve) is left transport for the same reason: the
+    // backend reports it as one more string and the frontend has nothing
+    // structural to tell those apart with.
+    if (hostKeyRefused(hostKeyAnswers)) {
+      throw new SshLocalConnectError(describeError(e), { cause: e });
+    }
     throw e;
   }
 
   resolvedSessionId = sshSession.id;
   emitConnectedIfReady();
 
-  // Saved `ssh -L` rules, re-opened on this fresh session (including every
-  // reconnect, since the old session's listeners died with it). Each one is
-  // fire-and-forget: a local port that is already taken is worth a line in the
-  // terminal, not a failed shell.
-  for (const f of conn.forwards ?? []) {
-    void openSshForward(sshSession.id, f.localPort, f.remoteHost, f.remotePort).then(
-      (bound) =>
-        writeSshBanner(
-          s,
-          `\x1b[2m[tervia] forwarding localhost:${bound} -> ${f.remoteHost}:${f.remotePort}\x1b[0m\r\n`,
-        ),
-      (e) =>
-        writeSshBanner(
-          s,
-          `\x1b[33m[tervia] port forward ${f.localPort} -> ${f.remoteHost}:${f.remotePort} failed: ${describeError(e)}\x1b[0m\r\n`,
-        ),
-    );
-  }
+  // Saved `ssh -L` rules used to be re-opened here on every fresh session.
+  // `Host` carries no `forwards` field any more - a forward rule is its own
+  // `ForwardRule` record, so this reads the rules that name THIS host and
+  // starts the ones flagged `startWithHost` on the session just opened.
+  //
+  // Fire-and-forget on purpose, and safe because `startHostForwards` never
+  // rejects: a rule that cannot bind writes a banner and the connect carries
+  // on. Awaiting it would hold the pane's first prompt behind N binds, and
+  // letting it throw would turn a busy local port into a failed SSH connect.
+  // `.catch(() => {})` regardless, matching this file's own idiom at `:336`,
+  // `:346` and `:384`: "never rejects" is now structural in that function, and
+  // this is the belt that does not depend on reading it.
+  //
+  // The deps object exists for ONE key. `stillLive` is the only dep whose
+  // answer lives in this scope - autostart's loop has to be able to ask whether
+  // the session it is binding on is still the one that started, and nothing at
+  // that module's scope can answer. Everything else is spread straight off the
+  // default.
+  void startHostForwards(sshConnectionId, sshSession.id, (text) => writeSshBanner(s, text), {
+    ...defaultAutostartDeps,
+    stillLive: () => !sessionEnded,
+  }).catch(() => {});
 
   // Adapter so SSH looks like a PtySession to the rest of the file. SSH
   // sessions are not persisted via daemon UUIDs (`pty_attach` is local
@@ -298,7 +493,20 @@ export async function openSshForSession(
     alive: true,
     write: (data) => sshSession.write(data),
     resize: (cols, rows) => sshSession.resize(cols, rows),
-    close: () => sshSession.close(),
+    close: () => {
+      // The second release site, for the ending that never reaches `finishSsh`
+      // - a user-initiated `disconnectSsh`, or a pane closing under a session
+      // that reports nothing back. Idempotent, so firing both is harmless.
+      //
+      // BOTH BEFORE `sshSession.close()`, and that order is the claim. Written
+      // as `sshSession.close().finally(() => release)` this file would still
+      // mention both calls while moving the release AFTER the close IPC
+      // resolves - which is exactly the window an in-flight autostart claim
+      // slips through.
+      sessionEnded = true;
+      useHostOwnedForwards.getState().releaseSession(sshSession.id);
+      return sshSession.close();
+    },
   };
 }
 
@@ -356,6 +564,33 @@ export async function forwardDetectedUrl(
     cache.set(remotePort, pending);
   }
   return toLocalUrl(url, await pending);
+}
+
+/**
+ * The ladder's counterpart for a connect failure that retrying cannot change.
+ * One attempt, one banner, then wait for the user.
+ *
+ * Parks in `error` with `canRetry` - the same state a host-key mismatch parks in
+ * (`runSshReconnect` below, and its twin in session-lifecycle's spawn catch),
+ * and for the same reason: nothing about the attempt changes until the user
+ * changes something. NOT the state the ladder gives up in; that one is
+ * `disconnected` with `canRetry`, which reads as "the link went away", and this
+ * failure never had a link. Both satisfy `canRetrySsh`, so Enter and the status
+ * pill's Retry behave identically either way - the difference is what the pill
+ * says. What differs from the ladder is only how long the user waited to get
+ * here: immediately, instead of 11 seconds and three identical failures.
+ *
+ * `sshReconnectAttempts` is reset so a later manual retry starts a fresh
+ * three-attempt window if it fails for a transport reason instead.
+ */
+export function parkSshConnectFailure(s: Session, message: string): void {
+  s.sshReconnectAttempts = 0;
+  writeSshBanner(
+    s,
+    `\r\n\x1b[31m[tervia] ssh connect failed: ${message}\x1b[0m\r\n` +
+      `\x1b[33m[tervia] Press Enter or click Retry to reconnect.\x1b[0m\r\n`,
+  );
+  emitSshStatus(s, { kind: "error", message, canRetry: true });
 }
 
 export function scheduleSshReconnect(s: Session, reason: string): void {
@@ -429,6 +664,14 @@ async function runSshReconnect(s: Session): Promise<void> {
       s.sshReconnectAttempts = 0;
       writeSshBanner(s, `\r\n\x1b[31m[tervia] ${msg}\x1b[0m\r\n`);
       emitSshStatus(s, { kind: "error", message: msg, canRetry: true });
+      return;
+    }
+    // The ladder re-enters here for attempts 2 and 3, so the same gate
+    // has to stand here as on the first attempt - otherwise a host edited into a
+    // credential-less state mid-session would still walk the whole ladder.
+    const decision = decideSshConnectFailure(classifySshConnectFailure(e, msg));
+    if (decision.action === "park") {
+      parkSshConnectFailure(s, decision.message);
       return;
     }
     scheduleSshReconnect(s, msg);

@@ -3,8 +3,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { DragChip } from "@/components/DragChip";
 import { leafIds } from "@/modules/terminal/lib/panes";
 import { MAX_PANES_PER_TAB } from "./lib/useTabs";
-import { useSshHosts } from "@/modules/ssh/connections";
-import { useRdpHosts } from "@/modules/rdp/connections";
+import { useHosts } from "@/modules/hosts/useHosts";
 import { type SshStatus } from "@/modules/ssh/status";
 import { type AiCliStatus } from "@/modules/terminal/lib/aiCliStatus";
 import { useExplorerIconsReady } from "@/modules/explorer/lib/iconResolver";
@@ -24,7 +23,9 @@ import {
 import { horizontalListSortingStrategy, SortableContext } from "@dnd-kit/sortable";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Tab } from "./lib/useTabs";
+import { canCloseLeaf, canCloseTab } from "./lib/closable";
 import { type Entry, type PaneEntry, buildEntries } from "./lib/entries";
+import { entrySelectTarget, type SelectEntry } from "./lib/selectEntry";
 import { EntryIcon } from "./components/EntryIcon";
 import { NewTabMenu } from "./components/NewTabMenu";
 import { SortableTabGroup } from "./components/SortableTabGroup";
@@ -33,8 +34,12 @@ import { ChevronLeft, ChevronRight } from "lucide-react";
 type Props = {
   tabs: Tab[];
   activeId: number;
-  /** Activate a pane entry. `leafId` is null for standalone tabs. */
-  onSelectEntry: (tabId: number, leafId: number | null) => void;
+  /** Activate a pane entry. `leafId` is null for standalone tabs. Named by
+   *  `SelectEntry` rather than re-spelled, like every other hop inside this
+   *  module - this prop is handed straight to `SortableTabGroup`, which names
+   *  it that way, so a hand-written copy here is a signature free to drift from
+   *  the one it feeds. */
+  onSelectEntry: SelectEntry;
   /** Close a pane leaf or standalone tab. `leafId` is null for standalone. */
   onCloseEntry: (tabId: number, leafId: number | null) => void;
   onNewTerminal: () => void;
@@ -138,15 +143,28 @@ export function TabBar({
   useExplorerIconsReady();
   // dnd-kit drag id. `tab:<n>` for whole-group, `leaf:<n>` for in-group reorder. Prefix routes `handleDragEnd`.
   const [activeDragId, setActiveDragId] = useState<string | null>(null);
-  // Resolves a leaf's `sshConnectionId` for the `ssh:<name>` label + tooltip.
-  const sshHosts = useSshHosts();
-  // Same, for an RDP leaf's `rdp:<name>`.
-  const rdpHosts = useRdpHosts();
+  // Resolves a leaf's `sshConnectionId` / `rdpConnectionId` for the
+  // `ssh:<name>` / `rdp:<name>` label + tooltip.
+  const hosts = useHosts();
 
   const entries = useMemo(
-    () => buildEntries(tabs, sshHosts, sshStatuses, aiCliStatuses, rdpHosts),
-    [tabs, sshHosts, sshStatuses, aiCliStatuses, rdpHosts],
+    () => buildEntries(tabs, hosts, sshStatuses, aiCliStatuses),
+    [tabs, hosts, sshStatuses, aiCliStatuses],
   );
+
+  // Which entries may show a close X, decided by the ONE close predicate
+  // (`lib/closable.ts`) rather than by an entry count of the strip's own. A
+  // permanent Hosts page and the last entry left both come back unclosable, and
+  // the pane header + Ctrl+Shift+X refuse the identical set.
+  const closableKeys = useMemo(() => {
+    const keys = new Set<string>();
+    for (const e of entries) {
+      // A standalone entry is a whole tab, so it asks the tab-level question.
+      const ok = e.kind === "pane-leaf" ? canCloseLeaf(tabs, e.leafId) : canCloseTab(tabs, e.tabId);
+      if (ok) keys.add(e.key);
+    }
+    return keys;
+  }, [entries, tabs]);
 
   /** Snapshot of pane tabs for the Move to Group menu. Full tabs are listed but disabled so the menu stays stable. */
   const paneGroupsForMove = useMemo(
@@ -373,14 +391,28 @@ export function TabBar({
         <div data-tauri-drag-region="false" className="flex w-max items-center gap-0.5">
           <Tabs
             value={activeKey ?? ""}
+            // Radix's route in, and it is the ARROW keys that keep it alive:
+            // the roving tabindex moves focus, `TabsTrigger`'s `onFocus` sees
+            // `!isSelected` under the default automatic activation mode, and
+            // that genuinely is a value change, so it lands here.
+            //
+            // Enter and Space do NOT come through here, which this comment used
+            // to imply. They go `onKeyDown` -> `context.onValueChange(value)`
+            // with no guard at all, and on a chip that is already active -
+            // `useControllableState` drops it for `value2 === prop`, exactly
+            // like the mouse. What makes them work is that Radix renders a real
+            // `<button>`, so the browser dispatches a native `click` and the
+            // chip's own unconditional handler runs. That is an accident of the
+            // element type: an `asChild` on something that is not a button
+            // would take Enter/Space away without touching a line of this file.
+            //
+            // Both routes resolve their target through `entrySelectTarget`, so
+            // the pair they select cannot drift apart.
             onValueChange={(k) => {
               const entry = entries.find((e) => e.key === k);
               if (!entry) return;
-              if (entry.kind === "pane-leaf") {
-                onSelectEntry(entry.tabId, entry.leafId);
-              } else {
-                onSelectEntry(entry.tabId, null);
-              }
+              const { tabId, leafId } = entrySelectTarget(entry);
+              onSelectEntry(tabId, leafId);
             }}
           >
             <DndContext
@@ -399,6 +431,7 @@ export function TabBar({
                       tabId={group.tabId}
                       entries={group.entries}
                       totalEntries={entries.length}
+                      closableKeys={closableKeys}
                       activeKey={activeKey}
                       lastEntryKey={lastEntryKey}
                       compact={compact}
@@ -406,10 +439,11 @@ export function TabBar({
                       leafSortable={!!onReorderLeafInGroup}
                       groupDragging={activeDragId !== null}
                       isDragging={activeDragId === `tab:${group.tabId}`}
+                      onSelectEntry={onSelectEntry}
                       onPinLeaf={onPinLeaf}
                       onCloseEntry={onCloseEntry}
                       onCloseEntriesAfter={closeEntriesAfter}
-                      sshHosts={sshHosts}
+                      hosts={hosts}
                       onMoveLeafToGroup={onMoveLeafToGroup}
                       onMoveLeafToNewTab={onMoveLeafToNewTab}
                       onRotateLeafSplit={onRotateLeafSplit}

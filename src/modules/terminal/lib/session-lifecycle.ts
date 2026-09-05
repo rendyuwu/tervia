@@ -54,10 +54,12 @@ import {
 import {
   canRetrySsh,
   emitSshStatus,
+  parkSshConnectFailure,
   retrySsh,
   scheduleSshReconnect,
   writeSshBanner,
 } from "./ssh-session";
+import { classifySshConnectFailure, decideSshConnectFailure } from "./ssh-exit-decision";
 import { loadWebglRenderer, syncRendererForWallpaper } from "./webgl";
 
 /**
@@ -587,6 +589,17 @@ export function attachSession(
             s.sshReconnectAttempts = 0;
             writeSshBanner(s, `\r\n\x1b[31m[tervia] ${msg}\x1b[0m\r\n`);
             emitSshStatus(s, { kind: "error", message: msg, canRetry: true });
+            return;
+          }
+          // Not every connect failure is a dropped connection. One that
+          // the frontend established on its own - the saved host has nothing to
+          // authenticate with, its jump chain is broken, the user declined the
+          // server's key - cannot come out differently on the next attempt, so
+          // it parks with one banner instead of walking 1s + 3s + 7s of
+          // identical failures. Only the transport category keeps the ladder.
+          const decision = decideSshConnectFailure(classifySshConnectFailure(e, msg));
+          if (decision.action === "park") {
+            parkSshConnectFailure(s, decision.message);
             return;
           }
           writeSshBanner(s, `\r\n\x1b[31m[tervia] ssh connect failed: ${msg}\x1b[0m\r\n`);

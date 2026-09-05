@@ -77,7 +77,11 @@ for (const file of files) {
     offenders.push(`${relative(root, file)}: ${m[0].trim()}`);
   }
 }
-check("no stylesheet sets a scrollbar width or colour of its own", offenders.length === 0, offenders);
+check(
+  "no stylesheet sets a scrollbar width or colour of its own",
+  offenders.length === 0,
+  offenders,
+);
 
 console.log(failed === 0 ? "\nALL PASS" : `\n${failed} FAILED`);
 process.exit(failed === 0 ? 0 : 1);

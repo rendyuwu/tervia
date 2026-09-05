@@ -1,7 +1,7 @@
-// Unified pane tree. Leaves are terminal, editor, rdp, or board.
+// Unified pane tree. Leaves are terminal, editor, rdp, board, or page.
 // `kind: "leaf"` stays for back-compat; the discriminator is `leafKind`.
 
-import type { RdpSizeMode } from "@/modules/rdp/connections";
+import type { RdpSizeMode } from "@/modules/hosts/types";
 import type { AiCliKind } from "./aiCliStatus";
 
 export type PaneId = number;
@@ -132,7 +132,7 @@ export type BoardLeafState = {
  */
 export type RdpLeafState = {
   leafKind: "rdp";
-  /** Id of the saved connection in `rdp/connections.ts`. */
+  /** Id of the saved RDP host in the hosts store (`modules/hosts/store.ts`). */
   rdpConnectionId: string;
   /**
    * How this pane's desktop resolution is chosen. Only `"preset"` exists today,
@@ -144,7 +144,61 @@ export type RdpLeafState = {
   customTitle?: string;
 };
 
-export type LeafState = TerminalLeafState | EditorLeafState | RdpLeafState | BoardLeafState;
+/** The three pages the activity rail can show. Only one of them may be a pane
+ *  LEAF - see {@link TabPageKind}. */
+export type PageKind = "hosts" | "vault" | "forwards";
+
+/**
+ * The page kinds that may live in a tab as a pane leaf. Hosts, and only Hosts.
+ *
+ * The tab strip is for connections, and Hosts earns a place there because
+ * it is where connections come from. Vault and Port Forwarding are rail VIEWS
+ * shown over the tab area (`app/components/RailViewArea.tsx`), so there is no
+ * such thing as a tab for one - and narrowing the leaf's `page` here is what
+ * makes "open Vault as a tab" a type error rather than a leaf the rail's pressed
+ * state, `openPageTab` and `PageLeafBody` would each have to refuse separately.
+ *
+ * Declared beside the leaf it constrains rather than in `tabs/lib/pages.ts`
+ * (which re-exports it alongside the rail-view half): a module that owns a type
+ * cannot import its own constraint back from a module that imports it.
+ */
+export type TabPageKind = "hosts";
+
+export const PAGE_KINDS: readonly PageKind[] = ["hosts", "vault", "forwards"];
+
+export function isPageKind(value: string): value is PageKind {
+  return (PAGE_KINDS as readonly string[]).includes(value);
+}
+
+/**
+ * Single source for what to call a page, read by the rail buttons, the tab
+ * strip label (`leafLabel`), and the startup fallback tab - so the three
+ * cannot drift into naming the same leaf differently.
+ */
+export const PAGE_LABELS: Record<PageKind, string> = {
+  hosts: "Hosts",
+  vault: "Vault",
+  forwards: "Port Forwarding",
+};
+
+/**
+ * A page tab: the Hosts page, opened from the left rail. Stateless beyond the
+ * discriminator, exactly like `BoardLeafState` - restorable from nothing but its
+ * own existence.
+ *
+ * `TabPageKind`, not `PageKind`: a Vault or Port-Forwarding leaf is
+ * unrepresentable. The workspace restore path drops one saved by an
+ * older build; see `workspaces/serialize.ts`.
+ */
+export type PageLeafState = {
+  leafKind: "page";
+  page: TabPageKind;
+  /** User-chosen tab name; see {@link TerminalLeafState.customTitle}. */
+  customTitle?: string;
+};
+
+export type LeafState =
+  TerminalLeafState | EditorLeafState | RdpLeafState | BoardLeafState | PageLeafState;
 
 export type PaneLeaf = { kind: "leaf"; id: PaneId } & LeafState;
 
@@ -419,8 +473,12 @@ export function cloneLeafState(leaf: PaneLeaf): LeafState {
       sizeMode: leaf.sizeMode,
     };
   }
-  // Board: no state of its own - the columns are rebuilt from the live tab tree.
-  return { leafKind: "board" };
+  if (leaf.leafKind === "board") {
+    // Board: no state of its own - the columns are rebuilt from the live tab tree.
+    return { leafKind: "board" };
+  }
+  // Page: nothing but which page it is - the body itself carries no state here.
+  return { leafKind: "page", page: leaf.page };
 }
 
 /**

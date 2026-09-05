@@ -1,18 +1,20 @@
 import { toast } from "@/components/ui/toast";
-import { activeLeaf, MAX_PANES_PER_TAB, type Tab } from "@/modules/tabs";
+import {
+  activeLeaf,
+  canCloseLeaf,
+  canCloseTab,
+  leafCloseConfirmReason,
+  MAX_PANES_PER_TAB,
+  tabCloseConfirmReason,
+  type Tab,
+} from "@/modules/tabs";
 import {
   agentToolKind,
   MAX_AGENT_SPAWN,
   useCliAgentsStore,
   type CliAgent,
 } from "@/modules/terminal/lib/cliAgents";
-import {
-  hasLeaf,
-  leafIds,
-  leaves,
-  type PaneLayout,
-  type TerminalPaneHandle,
-} from "@/modules/terminal";
+import { hasLeaf, leafIds, type PaneLayout, type TerminalPaneHandle } from "@/modules/terminal";
 import { useCallback, useState, type Dispatch, type RefObject, type SetStateAction } from "react";
 import { type TabsApi } from "./tabsApi";
 
@@ -110,45 +112,55 @@ export function useTabActions({
     return term ? term.isProcessRunning() : false;
   }, []);
 
-  // True when any terminal pane in the tab is running a process.
-  const tabHasRunningProcess = useCallback(
-    (tab: Tab): boolean => {
-      if (tab.kind !== "pane") return false;
-      return leaves(tab.paneTree).some(
-        (l) => l.leafKind === "terminal" && leafHasRunningProcess(l.id),
-      );
-    },
-    [leafHasRunningProcess],
-  );
-
   // Whole-tab close. Confirms first on unsaved editor changes or a running
   // terminal process; otherwise disposes immediately.
+  //
+  // The close rule (`tabs/lib/closable.ts`) is asked BEFORE the confirmation,
+  // not after: prompting "close the running terminal?" for a close that will
+  // then be refused is worse than the silent no-op it replaces. Nothing is said
+  // here because nothing offered the action - the tab strip and pane header do
+  // not render an X for a tab this refuses, and `Ctrl+W` is the only way in.
+  //
+  // WHETHER to confirm is asked of `closable.ts` too, and both close paths ask
+  // the same pair of functions. Hand-rolling the question here is how the two
+  // came to disagree about a dirty editor - see `leafCloseConfirmReason`.
   const handleClose = useCallback(
     (id: number) => {
-      const t = tabs.find((x) => x.id === id);
-      if (t?.kind === "pane" && t.dirty) {
-        setPendingClose({ target: { kind: "tab", tabId: id }, reason: "unsaved", title: t.title });
-        return;
-      }
-      if (t?.kind === "pane" && tabHasRunningProcess(t)) {
-        setPendingClose({ target: { kind: "tab", tabId: id }, reason: "running", title: t.title });
+      if (!canCloseTab(tabs, id)) return;
+      const reason = tabCloseConfirmReason(tabs, id, leafHasRunningProcess);
+      if (reason !== null) {
+        const t = tabs.find((x) => x.id === id);
+        setPendingClose({
+          target: { kind: "tab", tabId: id },
+          reason,
+          title: t?.kind === "pane" ? t.title : undefined,
+        });
         return;
       }
       disposeTab(id);
     },
-    [tabs, disposeTab, tabHasRunningProcess],
+    [tabs, disposeTab, leafHasRunningProcess],
   );
 
-  // Single-pane close (tab-strip leaf X, pane-header X, Ctrl+W on a split).
-  // Confirms when the pane is a terminal running a process; otherwise drops the
-  // pane immediately. Editor leaves always close without a prompt.
+  // Single-pane close (tab-strip leaf X, pane-header X on a split, Ctrl+W on a
+  // multi-pane tab, Ctrl+Shift+X, "Close Tabs to the Right"). Confirms on an
+  // unsaved editor or a busy terminal; otherwise drops the pane immediately.
   const requestCloseLeaf = useCallback(
     (leafId: number) => {
-      if (leafHasRunningProcess(leafId)) {
+      // Same two questions as `handleClose`, in the same order, from the same
+      // module - which is the point. This is the funnel for five affordances, so
+      // a question it answers differently is one the user gets a different
+      // answer to depending on which of them they used. It used to prompt only
+      // on a busy terminal and drop a dirty editor buffer without a word, while
+      // the pane-header X of a single-pane tab (which routes to `handleClose`)
+      // prompted for the same file.
+      if (!canCloseLeaf(tabsRef.current, leafId)) return;
+      const reason = leafCloseConfirmReason(tabsRef.current, leafId, leafHasRunningProcess);
+      if (reason !== null) {
         const tab = tabsRef.current.find((x) => x.kind === "pane" && hasLeaf(x.paneTree, leafId));
         setPendingClose({
           target: { kind: "leaf", leafId },
-          reason: "running",
+          reason,
           title: tab?.kind === "pane" ? tab.title : undefined,
         });
         return;

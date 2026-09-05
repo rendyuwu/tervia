@@ -84,6 +84,14 @@ If an issue already exists for what you want to do, comment "I'll take this" bef
 - TypeScript: no `any` unless you really mean it.
 - Rust: `cargo fmt` + `clippy` clean.
 - Few comments. Code should explain itself; comments are for the _why_, not the _what_.
+- Comments cite only what a clone can reach - the test is whether a reader holding nothing but the
+  clone can open what you named. A checked-in file, a symbol, a path in the repo. An upstream
+  project's public tracker (`xterm.js #4054`) or a pinned dependency's own source counts too, since
+  the lockfile gets you there; name the project, because a bare `#1251` doesn't. Not this project's
+  planning docs or a row id from one, not a bare `issues/nn` (our tracker isn't in the tree), not a
+  section number of something that isn't in git, not a `/tmp` path, not a date or a commit hash.
+  Those look checkable and aren't. Put the fact in the comment and the provenance in the commit
+  message.
 - No emoji in code or commit messages.
 
 ### Formatting standard

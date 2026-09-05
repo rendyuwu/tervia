@@ -1,5 +1,5 @@
 /**
- * Workspace serialization audit. Five properties, all silent when broken:
+ * Workspace serialization audit. Eight properties, all silent when broken:
  *
  * 1. A remote (SFTP) editor leaf must never round-trip through its SESSION.
  *    `sshSessionId` is a live russh number: dead after a restart, and since the
@@ -27,28 +27,65 @@
  *    migration, which is worthless if the serializer drops it. Together these
  *    are property 4's whitelist problem on a kind where the symptom is a dead
  *    pane rather than a wrong name.
+ * 6. A page leaf must round-trip its `page` value and rename, inside a split
+ *    exactly like any other kind, and an unrecognised `page` value (a newer
+ *    build's page, or hand-edited state) must restore as Hosts rather than crash
+ *    or drop the leaf. Hosts is the only page that may BE a leaf; a
+ *    saved `vault`/`forwards` leaf is dropped on restore, which is
+ *    `scripts/rail-views-verify.ts`.
+ * 7. Switching to (or creating) a workspace with no saved tabs must land on
+ *    the Hosts page, matching the startup fallback instead of
+ *    reverting to a local shell; a workspace that does have saved tabs must
+ *    still restore them untouched. And the fallback tab must itself survive a
+ *    restart, since it is snapshotted like any other tab.
+ * 8. Closing a leaf must be refused only when it is the last thing ON SCREEN,
+ *    never when it is merely the last TERMINAL. Since the default tab became a
+ *    Hosts page a workspace can hold zero terminals and still be full, so the
+ *    old proxy both resurrected a terminal the user had just exited and made
+ *    Ctrl+Shift+X a silent no-op.
  *
  * Run: `npx tsx scripts/workspace-serialize-verify.ts`.
  *
- * serialize.ts pulls in panes.ts (type-only imports) and the zustand title
- * store, so this runs under plain node with hand-built pane trees.
+ * serialize.ts and tabs/lib/entries.ts pull in panes.ts (type-only imports) and
+ * the zustand title store, so this runs under plain node with hand-built pane
+ * trees.
  */
 import {
+  defaultHostsTab,
   serializeTabs,
   savedActiveTabIndex,
   savedToTab,
+  tabsForWorkspaceEntry,
 } from "../src/modules/workspaces/serialize";
+import { countTabEntries, isLastEntryInWorkspace } from "../src/modules/tabs/lib/entries";
 import {
   foldSshBinding,
   type SshConnectionBinding,
   type SshStatus,
 } from "../src/modules/ssh/status";
 import type { SavedPaneNode, SavedTab } from "../src/modules/workspaces/store";
-import { editorPaneSession, type PaneNode } from "../src/modules/terminal/lib/panes";
+import {
+  editorPaneSession,
+  type PaneNode,
+  type TabPageKind,
+} from "../src/modules/terminal/lib/panes";
 import type { Tab } from "../src/modules/tabs";
 
 let nextId = 1;
 const id = () => nextId++;
+
+/**
+ * `savedToTab` returns null for a tab that does not survive restore - the
+ * dropped Vault/Port-Forwarding leaves. Every case below restores a tab that is
+ * supposed to come back, so a null here is the check failing, not a branch to
+ * handle. The rail-view cases assert on `savedToTab` / `restoreSavedTabs`
+ * directly.
+ */
+function restoreOne(saved: SavedTab, allocId: () => number): Tab {
+  const tab = savedToTab(saved, allocId);
+  if (tab === null) throw new Error("expected the saved tab to survive restore");
+  return tab;
+}
 
 function term(leafId: number, cwd = "/w"): PaneNode {
   return { kind: "leaf", id: leafId, leafKind: "terminal", cwd };
@@ -89,6 +126,12 @@ function savedRemoteEditor(leafId: number, path: string): PaneNode {
  *  Nothing else - no host, no credential, no session. */
 function rdp(leafId: number, rdpConnectionId: string): PaneNode {
   return { kind: "leaf", id: leafId, leafKind: "rdp", rdpConnectionId, sizeMode: "preset" };
+}
+/** A page leaf: nothing but which page it is. `TabPageKind`, so a Vault or
+ *  Port-Forwarding leaf cannot be built here either - that is a
+ *  type error, not a fixture. See `scripts/rail-views-verify.ts`. */
+function page(leafId: number, p: TabPageKind): PaneNode {
+  return { kind: "leaf", id: leafId, leafKind: "page", page: p };
 }
 function split(dir: "row" | "col", children: PaneNode[], sizes?: number[]): PaneNode {
   return { kind: "split", id: id(), dir, children, ...(sizes ? { sizes } : {}) };
@@ -230,7 +273,7 @@ function onlyLeaf(t: SavedTab): Extract<SavedPaneNode, { kind: "leaf" }> {
 {
   const s = serializeTabs([tab(savedRemoteEditor(1201, "/srv/a.ts"), 1201)]);
   let next = 1;
-  const restored = savedToTab(s[0], () => next++);
+  const restored = restoreOne(s[0], () => next++);
   if (restored.kind !== "pane" || restored.paneTree.kind !== "leaf") {
     throw new Error("expected a restored single-leaf pane tab");
   }
@@ -410,7 +453,20 @@ console.log("\n[active index] savedActiveTabIndex must match what serializeTabs 
     split("row", [
       named(term(1200, "/w/api"), "backend"),
       named(editor(1201, "/w/api/main.rs"), "entrypoint"),
-      named({ kind: "leaf", id: 1202, leafKind: "browser", url: "https://x.dev" }, "docs"),
+      // `browser` is a saved-only, legacy leaf kind (removed as a live pane in
+      // v0.4.22+) - it can never occur in a real `PaneNode`, so the cast, not a
+      // widened type, is what's honest here. Same shape as the `scm` legacy-tab
+      // cast below: a defunct kind, simulated to prove the serializer still
+      // whitelists its `customTitle` rather than dropping it.
+      named(
+        {
+          kind: "leaf",
+          id: 1202,
+          leafKind: "browser",
+          url: "https://x.dev",
+        } as unknown as PaneNode,
+        "docs",
+      ),
     ]),
     1200,
   );
@@ -425,7 +481,7 @@ console.log("\n[active index] savedActiveTabIndex must match what serializeTabs 
     "docs",
   ]);
 
-  const restored = savedToTab(pane(serializeTabs([t])[0]), () => id());
+  const restored = restoreOne(serializeTabs([t])[0], () => id());
   const liveNames =
     restored.paneTree.kind === "split"
       ? restored.paneTree.children.map((c) => (c.kind === "leaf" ? c.customTitle : undefined))
@@ -479,7 +535,7 @@ console.log("\n[rdp] an rdp leaf must round-trip its connection id and size mode
     ["kind", "leafKind", "rdpConnectionId", "sizeMode"],
   );
 
-  const restored = savedToTab(pane(s[0]), () => id());
+  const restored = restoreOne(s[0], () => id());
   const liveLeaf =
     restored.paneTree.kind === "split" ? restored.paneTree.children[1] : restored.paneTree;
   check(
@@ -501,6 +557,236 @@ console.log("\n[rdp] an rdp leaf must round-trip its connection id and size mode
     savedNamed.kind === "leaf" && savedNamed.customTitle,
     "domain controller",
   );
+}
+
+console.log("\n[page] a page leaf round-trips its page value, name and tree shape");
+
+// 6. A page leaf's whole restorable identity is which page it is.
+//
+// `hosts` throughout, not `vault`: the only page that may be a tab
+// leaf is Hosts, and a saved `vault`/`forwards` leaf is DROPPED on restore rather
+// than round-tripped. That migration is `scripts/rail-views-verify.ts`; what is
+// checked here is that the surviving kind is unaffected by it.
+{
+  const t = tab(page(1400, "hosts"), 1400);
+  const s = serializeTabs([t]);
+  const leaf = onlyLeaf(s[0]);
+  check("saved as a page leaf", leaf.leafKind, "page");
+  check("the page value is persisted", leaf.leafKind === "page" && leaf.page, "hosts");
+
+  const restored = restoreOne(s[0], () => id());
+  const liveLeaf = restored.paneTree;
+  check(
+    "and comes back on restore",
+    liveLeaf.kind === "leaf" && liveLeaf.leafKind === "page" ? liveLeaf.page : null,
+    "hosts",
+  );
+}
+
+// A rename has to survive on this kind too, same whitelist, same symptom.
+{
+  const named = tab(
+    { ...(page(1401, "hosts") as object), customTitle: "tunnels" } as PaneNode,
+    1401,
+  );
+  const savedNamed = onlyLeaf(serializeTabs([named])[0]);
+  check(
+    "a renamed page leaf keeps its name",
+    savedNamed.leafKind === "page" && savedNamed.customTitle,
+    "tunnels",
+  );
+}
+
+// Clearing a name must delete the key, not persist `""` - a blank string would
+// restore as a nameless tab. Tested on `page` and not only on `terminal`
+// because each kind spells its own `customTitle` spread, so the guard is
+// per-kind rather than shared.
+{
+  const cleared = tab({ ...(page(1404, "hosts") as object), customTitle: "" } as PaneNode, 1404);
+  const savedCleared = onlyLeaf(serializeTabs([cleared])[0]);
+  check("a cleared page name persists no key", "customTitle" in savedCleared, false);
+}
+
+// Inside a split: the tree shape and divider ratios survive around a page
+// leaf exactly as they do around any other kind - BOTH directions, since a
+// column split is a separate code path in the pane tree.
+{
+  const t = tab(split("col", [page(1405, "hosts"), term(1406)], [35, 65]), 1405);
+  const s = serializeTabs([t]);
+  check("a page leaf is saved in a column split", shape(s[0]), "split(page,terminal)");
+  check("the column's divider ratios survive", sizes(s[0]), [35, 65]);
+  check("the page leaf is the active one", activeIdx(s[0]), 0);
+
+  const restored = restoreOne(s[0], () => id());
+  const tree = restored.paneTree;
+  check(
+    "and the column direction survives restore",
+    tree.kind === "split" ? [tree.dir, tree.children.length] : null,
+    ["col", 2],
+  );
+}
+
+{
+  const t = tab(split("row", [term(1402), page(1403, "hosts")], [40, 60]), 1403);
+  const s = serializeTabs([t]);
+  check("a page leaf is saved beside its sibling", shape(s[0]), "split(terminal,page)");
+  check("divider ratios survive", sizes(s[0]), [40, 60]);
+  check("the page leaf is still the active one", activeIdx(s[0]), 1);
+
+  const restored = restoreOne(s[0], () => id());
+  const tree = restored.paneTree;
+  check(
+    "and the split shape survives restore",
+    tree.kind === "split"
+      ? tree.children.map((c) => (c.kind === "leaf" ? c.leafKind : "split"))
+      : null,
+    ["terminal", "page"],
+  );
+}
+
+// An unrecognised `page` value (a newer build's page, or hand-edited state) must
+// not crash restore, and is DROPPED - the same treatment a `vault`/`forwards`
+// leaf gets, by the same predicate (`isUnrestorablePageLeaf` asks
+// `!isTabPageKind`, so there is no list of known-bad pages to keep in step).
+//
+// This used to default to Hosts, on the reasoning that `page` is a leaf kind
+// this build recognises with a value it does not - the shape of RDP's
+// `sizeMode ?? "preset"`. That reasoning does not survive the page leaf becoming
+// PERMANENT (`tabs/lib/closable.ts` invariant 1): the fallback minted a SECOND
+// Hosts tab, and neither of the two could then be closed. A page leaf holds
+// nothing but which page it is, so dropping it loses no state - unlike an RDP
+// leaf, where the fallback is the difference between a dialable host and nothing.
+// The migration itself is `scripts/rail-views-verify.ts`.
+{
+  const corrupt = { kind: "leaf", leafKind: "page", page: "snippets" } as unknown as SavedPaneNode;
+  check(
+    "a tab holding only an unknown page value is dropped, not rewritten to Hosts",
+    savedToTab({ kind: "pane", paneTree: corrupt, activeLeafIndex: 0 }, () => id()),
+    null,
+  );
+  // Beside a sibling: the leaf goes, the tab stays, and the split collapses.
+  const savedTerm: SavedPaneNode = { kind: "leaf", leafKind: "terminal", cwd: "/w" };
+  const withSibling = restoreOne(
+    {
+      kind: "pane",
+      paneTree: { kind: "split", dir: "row", children: [savedTerm, corrupt] },
+      activeLeafIndex: 1,
+    },
+    () => id(),
+  );
+  check(
+    "beside a terminal, only the unknown page leaf is dropped",
+    withSibling.paneTree.kind === "leaf" ? withSibling.paneTree.leafKind : "split",
+    "terminal",
+  );
+}
+
+console.log(
+  "\n[switch] switching to (or creating) an empty workspace opens Hosts, not a shell; a saved one restores untouched",
+);
+
+// `tabsForWorkspaceEntry` is the runtime counterpart to
+// `useWorkspacePersistence`'s startup fallback, and the single resolver both
+// `switchToWorkspace` and `closeWorkspace` go through. It lives in serialize.ts
+// (not beside those callers in `useWorkspaceSwitching`, whose module pulls in
+// `@xterm/xterm` and so cannot be imported outside a bundler) precisely so it
+// can be exercised here for real, rather than pinned by grepping the hook's
+// source - a test that reddens on a pure refactor and stays green on a
+// regression in the function itself.
+{
+  let n = 1;
+  const allocId = () => n++;
+
+  const empty = tabsForWorkspaceEntry({ tabs: [] }, allocId);
+  check("an empty workspace's fallback is a single tab", empty.length, 1);
+  const emptyLeaf = empty[0].paneTree;
+  check(
+    "and it is a Hosts page leaf, not a terminal",
+    emptyLeaf.kind === "leaf" && emptyLeaf.leafKind === "page" ? emptyLeaf.page : null,
+    "hosts",
+  );
+
+  const saved = serializeTabs([tab(term(1701), 1701), tab(page(1702, "hosts"), 1702)]);
+  const restored = tabsForWorkspaceEntry({ tabs: saved }, allocId);
+  check(
+    "a workspace with saved tabs restores the same leaf kinds untouched",
+    restored.map((t) => (t.paneTree.kind === "leaf" ? t.paneTree.leafKind : "split")),
+    ["terminal", "page"],
+  );
+  check("and the fallback is not prepended to them", restored.length, 2);
+}
+
+// The fallback tab has to survive a restart like any other tab: it is
+// snapshotted on the first save, so a page leaf that failed to round-trip would
+// turn a fresh profile's only tab into an empty terminal on the next launch -
+// silently reintroducing exactly the shell the Hosts fallback replaced.
+{
+  let n = 1;
+  const allocId = () => n++;
+  const s = serializeTabs([defaultHostsTab(allocId)]);
+  check("the fallback tab is persisted", s.length, 1);
+  const back = restoreOne(s[0], allocId);
+  const backLeaf = back.paneTree;
+  check(
+    "and comes back as the same Hosts page",
+    backLeaf.kind === "leaf" && backLeaf.leafKind === "page" ? backLeaf.page : null,
+    "hosts",
+  );
+  check("with its title intact", back.title, "Hosts");
+}
+
+console.log(
+  "\n[close] a leaf is unclosable only when it is the last thing on screen, not the last terminal",
+);
+
+// 8. The proxy that broke in 6c. `isLastEntryInWorkspace` is what both close
+// paths ask: `handleLeafExit` respawns exactly here (and closes everywhere
+// else), and it is the one close `closePaneByLeaf` refuses. Answering "is this
+// the last TERMINAL" instead resurrected a shell the user had just `exit`ed
+// whenever a Hosts tab was the other thing on screen.
+{
+  const hostsTab = tab(page(1801, "hosts"), 1801);
+  const termTab = tab(term(1802), 1802);
+
+  check("a lone leaf is the last thing on screen", isLastEntryInWorkspace([termTab], 1802), true);
+  // The regression: one terminal, one Hosts page. Zero OTHER terminals, so the
+  // old guard respawned; but the window keeps the Hosts page, so it must close.
+  check(
+    "the only terminal is closable when a page tab is also open",
+    isLastEntryInWorkspace([hostsTab, termTab], 1802),
+    false,
+  );
+  check(
+    "and the page leaf beside it is closable too",
+    isLastEntryInWorkspace([hostsTab, termTab], 1801),
+    false,
+  );
+  // A lone page tab is the last thing on screen just as a lone terminal is:
+  // "last entry" is about the window emptying, not about which kind it holds.
+  check(
+    "a lone page leaf is the last thing on screen too",
+    isLastEntryInWorkspace([hostsTab], 1801),
+    true,
+  );
+  // Two panes in ONE tab: the tab list is length 1, so a tabs-only count would
+  // wrongly refuse this close.
+  const splitTab = tab(split("row", [term(1803), page(1804, "hosts")]), 1803);
+  check(
+    "a pane in a split is never the last thing on screen",
+    isLastEntryInWorkspace([splitTab], 1803),
+    false,
+  );
+  // A leaf that is not on screen at all must not be mistaken for the last one,
+  // or a stale exit event would respawn a shell into a workspace it left.
+  check(
+    "an unknown leaf id is not the last thing on screen",
+    isLastEntryInWorkspace([termTab], 9999),
+    false,
+  );
+  // The oracle underneath, and the count the broken guard should have used: a
+  // Hosts tab plus a terminal is TWO things on screen, not one.
+  check("a page tab and a terminal tab are two entries", countTabEntries([hostsTab, termTab]), 2);
+  check("a two-pane split is two entries", countTabEntries([splitTab]), 2);
 }
 
 // `throw` (not process.exit) for a non-zero exit, matching the other verify scripts.

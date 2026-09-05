@@ -30,8 +30,32 @@ export function TrailingIconButton({
         <button
           type="button"
           aria-label={label}
-          // Stop propagation so click doesn't activate the tab or start a drag.
+          // THREE separate native events, and the X has to stop all three,
+          // because closing a tab must never first ACTIVATE it - a background
+          // tab's X under an open Vault or Port Forwarding view would otherwise
+          // throw the user out of the view they were reading (`tabView.ts`'s
+          // `rehomeTabView`: a removal is not a route into the tab area).
+          // Naming them individually rather than as "so click doesn't activate
+          // the tab or start a drag", which is what the old comment said while
+          // stopping only two of them:
+          //
+          // - pointerdown: dnd-kit's `PointerSensor` activator on the enclosing
+          //   trigger. Without it a press on the X starts a tab drag.
+          // - mousedown: Radix's OWN activation route. `TabsTrigger`'s
+          //   `onMouseDown` calls `context.onValueChange(value)` with no guard
+          //   on the current value, so for a BACKGROUND chip the value really
+          //   does change, `useControllableState` lets it through, and
+          //   `focusTabView` clears `railView` before `onCloseEntry` runs.
+          //   A separate event from pointerdown - stopping that one does not
+          //   stop this one, which is exactly how it was missed.
+          // - click: the trigger's own select route (`lib/selectEntry.ts`),
+          //   which is unconditional on purpose and so fires on the X too.
+          //
+          // Stopped here at the button rather than by teaching those handlers
+          // what an X is: the trigger's route stays unconditional, which is what
+          // makes an already-active chip clickable at all.
           onPointerDown={(ev) => ev.stopPropagation()}
+          onMouseDown={(ev) => ev.stopPropagation()}
           onClick={(ev) => {
             ev.stopPropagation();
             onClick();

@@ -4,8 +4,16 @@
     "windows": [
       {
         "label": "main",
+        "title": "Tervia",
+        "width": 800,
+        "height": 600,
         "decorations": false,
-        "transparent": true
+        "transparent": true,
+        "visible": false,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "minWidth": 640,
+        "minHeight": 480
       }
     ]
   },

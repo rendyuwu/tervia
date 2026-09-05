@@ -271,15 +271,22 @@ export const SHORTCUTS: Shortcut[] = [
         ],
   },
   {
-    // Closes the focused terminal pane. No-op for the last terminal.
+    // Closes the focused PANE, whatever it holds - terminal, RDP session,
+    // editor or board. `tabs/lib/closable.ts` decides, so this refuses exactly
+    // what the pane-header and tab-strip X buttons refuse: the Hosts page and
+    // the last entry in the workspace. Named for a terminal while it was gated
+    // to one, which is how it came to drop the chord for an RDP pane both X
+    // buttons closed happily. The id keeps its `terminal.` prefix
+    // because a user's rebinding is stored under it; only the wording moves.
     id: "terminal.close",
-    label: "Close focused terminal",
-    group: "Terminal",
+    label: "Close focused pane",
+    group: "Panes",
     defaultBindings: [{ ctrl: true, shift: true, key: "x" }],
   },
   {
-    // Opens the header's RDP connection list, which is the picker: pick a saved
-    // host to connect, or add one.
+    // Opens the Hosts page: pick a saved host to connect, or add one. Used
+    // to raise the header's RDP connection list before that dropdown was
+    // deleted; the id is kept so a user's custom binding survives the repoint.
     //
     // NO default binding, deliberately. Every free Mod+letter is either a shell
     // control code a focused terminal owns or already spoken for, and this is a
@@ -288,7 +295,7 @@ export const SHORTCUTS: Shortcut[] = [
     // and the palette can run it regardless (`runCommand` goes through the
     // registry, not the keyboard).
     id: "rdp.connect",
-    label: "Connect RDP...",
+    label: "Open Hosts...",
     group: "General",
     defaultBindings: [],
   },

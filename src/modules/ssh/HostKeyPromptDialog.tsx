@@ -54,7 +54,8 @@ export function HostKeyPromptDialog() {
   // answer is best-effort by nature - the IPC message is posted synchronously
   // but nothing can guarantee it lands once the webview is being torn down -
   // which is exactly why the per-connect teardowns in `RdpPane` and
-  // `RdpConnectionDialog` are the primary guarantee and this is the backstop.
+  // `HostEditorDialog` (its RDP Test probe, `hosts/editor/rdpProbe.ts`) are the
+  // primary guarantee and this is the backstop.
   //
   // Deliberately NOT done on this component's own unmount: that would reject
   // live prompts whose owning pane is still up and still waiting for an answer.

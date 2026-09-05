@@ -1,11 +1,4 @@
-import {
-  createContext,
-  useContext,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { gitIgnored, gitStatus } from "@/modules/scm/api";
 import type { GitChangeStatus, GitStatus } from "@/modules/scm/types";
 import { FS_REFRESH_EVENT } from "./useFileTree";
@@ -84,10 +77,7 @@ function norm(p: string): string {
   return p.toLowerCase();
 }
 
-function higher(
-  current: GitChangeStatus | undefined,
-  next: GitChangeStatus,
-): GitChangeStatus {
+function higher(current: GitChangeStatus | undefined, next: GitChangeStatus): GitChangeStatus {
   if (!current) return next;
   return STATUS_RANK[next] < STATUS_RANK[current] ? next : current;
 }
@@ -96,10 +86,7 @@ function higher(
  *  Folder status rolls up from changed descendants and stops at `rootPath`;
  *  ignored matching treats each entry as a prefix so a collapsed ignored
  *  directory (e.g. `node_modules`) also dims its contents when expanded. */
-export function buildDecorations(
-  data: GitDecorationData,
-  rootPath: string | null,
-): Decorations {
+export function buildDecorations(data: GitDecorationData, rootPath: string | null): Decorations {
   if (!rootPath) return EMPTY_DECORATIONS;
   const rootNorm = norm(rootPath).replace(/\/+$/, "");
   const files = new Map<string, GitChangeStatus>();
@@ -277,9 +264,7 @@ export function GitDecorationsProvider({
   children: React.ReactNode;
 }) {
   const value = useMemo(() => buildDecorations(data, rootPath), [data, rootPath]);
-  return (
-    <GitDecorationsContext.Provider value={value}>{children}</GitDecorationsContext.Provider>
-  );
+  return <GitDecorationsContext.Provider value={value}>{children}</GitDecorationsContext.Provider>;
 }
 
 /** Git decoration for a single tree row: a tracked-change badge (`deco`) and/or

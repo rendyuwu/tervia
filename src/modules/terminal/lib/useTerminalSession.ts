@@ -2,6 +2,7 @@ import { usePreferencesStore } from "@/modules/settings/preferences";
 import { resolveTerminalPreset } from "@/modules/settings/terminalPalette";
 import { buildTerminalTheme } from "@/styles/terminalTheme";
 import { buildContentFontFamily } from "@/lib/fonts";
+import { paneCaret } from "@/lib/paneCaret";
 import { useCallback, useEffect, useLayoutEffect, useRef } from "react";
 import type { SearchAddon } from "@xterm/addon-search";
 import { type TerviaOpenInput, type TerviaSpawnTabInput } from "./osc-handlers";
@@ -128,6 +129,44 @@ export function useTerminalSession({
     onPtyId,
   };
 
+  /**
+   * `visible` / `focused` as of the LATEST render.
+   *
+   * The attach effect's dep array is `[leafId]`, so everything it closes over is
+   * frozen at mount - and `tryAttach` can land seconds later: it waits up to
+   * `MAX_ATTACH_FRAMES` for the container ref (the react-resizable-panels measure
+   * pass during workspace restore) and then polls. Taking focus on the mount-time
+   * answer pulls the caret out of whatever the user switched to in the meantime.
+   *
+   * This is also what `paneCaret` reads to decide, one frame after a claim,
+   * whether the claim is still warranted - so the same ref covers the slow
+   * attach and the fast tab switch with one answer instead of two.
+   */
+  const liveFocus = useRef({ visible, focused });
+  liveFocus.current = { visible, focused };
+
+  /**
+   * Ask for the caret, rather than take it.
+   *
+   * Every path in this hook that wants the caret goes through here, and none of
+   * them calls `term.focus()` directly: a `.focus()` issued while reacting to a
+   * tab switch is overwritten a moment later by the browser focusing the tab
+   * chip that was clicked (`@/lib/paneCaret` has the measured sequence). The
+   * arbiter re-reads `liveFocus` at flush time, so a claim from an attach that
+   * resolved seconds ago is dropped rather than honoured.
+   */
+  const claimCaret = useCallback(() => {
+    paneCaret.claim(leafId, {
+      // The whole leaf frame, not just the xterm host: a click on this pane's
+      // own header buttons has to count as "the caret is already in my pane",
+      // or the claim would pull it back off the button a frame later. Falls
+      // back to the xterm host in a float window, which has no pane frame.
+      pane: () => container.current?.closest<HTMLElement>("[data-pane-leaf]") ?? container.current,
+      stillOnScreen: () => liveFocus.current.visible && liveFocus.current.focused,
+      take: () => sessions.get(leafId)?.term.focus(),
+    });
+  }, [leafId, container]);
+
   useEffect(() => {
     let cancelled = false;
     let rafId: number | null = null;
@@ -170,7 +209,7 @@ export function useTerminalSession({
       if (cancelled) return;
       if (container.current) {
         attachSession(leafId, container.current, callbacks);
-        if (visible && focused) s.term.focus();
+        claimCaret();
         return;
       }
       if (framesLeft <= 0) {
@@ -191,7 +230,7 @@ export function useTerminalSession({
             attachIntervalId = null;
           }
           attachSession(leafId, container.current, callbacks);
-          if (visible && focused) s.term.focus();
+          claimCaret();
         }, ATTACH_FALLBACK_INTERVAL_MS);
         return;
       }
@@ -246,6 +285,9 @@ export function useTerminalSession({
         attachIntervalId = null;
       }
       if (stuckTimer !== null) clearTimeout(stuckTimer);
+      // A claim outlives the render that made it by a frame, so an unmount
+      // between the two would otherwise focus a disposed session's terminal.
+      paneCaret.release(leafId);
       detachSession(leafId);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -330,8 +372,14 @@ export function useTerminalSession({
       // hidden->visible since dimensions don't change, so we sync explicitly.
       syncPtySize(s);
     }
-    if (focused) s.term.focus();
-  }, [leafId, visible, focused]);
+    // Claimed, not taken. This effect runs INSIDE the mousedown that switched
+    // the tab (Radix `Tabs` changes value on mousedown and React 19 flushes the
+    // commit synchronously there), so a `term.focus()` here is undone by the
+    // browser focusing the tab chip immediately afterwards - which is how the
+    // caret stopped coming back to the terminal at all. The arbiter
+    // re-checks visible/focused before it hands the caret over.
+    if (focused) claimCaret();
+  }, [leafId, visible, focused, claimCaret]);
 
   const write = useCallback((data: string) => sessions.get(leafId)?.pty?.write(data), [leafId]);
 

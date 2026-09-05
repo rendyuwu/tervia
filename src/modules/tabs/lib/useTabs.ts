@@ -33,8 +33,18 @@ import {
 } from "@/modules/terminal/lib/panes";
 import type { AiCliKind } from "@/modules/terminal/lib/aiCliStatus";
 import { type PaneTab, type Tab } from "./tabTypes";
+import { leafCloseRefusal, tabCloseRefusal } from "./closable";
 import { syncPaneMirror } from "./tabHelpers";
 import { useAuxTabs } from "./useAuxTabs";
+import { type RailViewKind } from "./pages";
+import {
+  focusTabView,
+  INITIAL_TAB_VIEW,
+  rehomeTabView,
+  showTabsIn,
+  toggleRailViewIn,
+  type TabView,
+} from "./tabView";
 
 // Re-export the tab types from their new home so existing imports of
 // `@/modules/tabs/lib/useTabs` (and the `@/modules/tabs` barrel) keep working.
@@ -59,29 +69,29 @@ function editorRemoteKey(l: Pick<EditorLeafState, "sshConnectionId" | "sshSessio
   return l.sshConnectionId ?? l.sshSessionId ?? null;
 }
 
-export function useTabs(initial?: { cwd?: string; title?: string }) {
-  const [tabs, setTabs] = useState<Tab[]>(() => {
-    const tabId = 1;
-    const leafId = 2;
-    const leaf: PaneLeaf = {
-      kind: "leaf",
-      id: leafId,
-      leafKind: "terminal",
-      cwd: initial?.cwd,
-      terminalOrdinal: 1,
-    };
-    return [
-      syncPaneMirror({
-        id: tabId,
-        kind: "pane",
-        title: initial?.title ?? "shell",
-        paneTree: leaf,
-        activeLeafId: leafId,
-      }),
-    ];
-  });
-  const [activeId, setActiveId] = useState(1);
-  const nextIdRef = useRef(3);
+export function useTabs() {
+  // Empty on mount, deliberately: workspace restore hasn't run yet, and a
+  // seeded terminal here would be indistinguishable from "nothing to
+  // restore" once it does. The Hosts-page fallback (and the real
+  // restore) both apply AFTER restore resolves, in `useWorkspacePersistence`
+  // - never here, and never twice.
+  const [tabs, setTabs] = useState<Tab[]>(() => []);
+  /**
+   * The active tab AND the rail view covering it, as one value - see
+   * `./tabView.ts` for why they cannot be two. `activeId` starts at 0, which
+   * matches no tab (ids allocated below start at 1), so nothing is "active"
+   * until restore populates the list.
+   *
+   * `setView` is the ONLY raw writer, and it is called from exactly the four
+   * funnels below: `setActiveId` (every route into the tab area),
+   * `rehomeActiveId` (a removal re-pointing the active id), `showTabs`, and
+   * `toggleRailView`. Nothing else in this file - and nothing outside it - may
+   * touch it, which is what makes "activating a tab leaves the rail view" true
+   * of every caller instead of the nine that remembered.
+   */
+  const [view, setView] = useState<TabView>(INITIAL_TAB_VIEW);
+  const { activeId, railView } = view;
+  const nextIdRef = useRef(1);
   // Sync ref of `tabs` so callbacks can read the latest array without relying
   // on React's eager state computation (skipped when the fiber already has
   // other pending updates).
@@ -91,10 +101,47 @@ export function useTabs(initial?: { cwd?: string; title?: string }) {
   // any path pick the next unused integer. Drag/reorder doesn't bump this;
   // the ordinal belongs to the leaf, not its position.
   const nextOrdinalRef = useRef(2);
+
+  /**
+   * Activate tab `id` and show the tabs. THE write of `activeId` - every mint,
+   * chord, click and restore in this file (and every consumer of the returned
+   * api) goes through it, which is what leaves the rail view exactly once,
+   * rather than at the ten call sites that would each have to remember.
+   *
+   * `(id: number)`, not `Dispatch<SetStateAction<number>>`: the functional form
+   * is how the two removal paths below used to write this state, and it read
+   * identically to a focus. Passing one is now a type error, and a removal says
+   * `rehomeActiveId` instead.
+   */
+  const setActiveId = useCallback((id: number) => {
+    setView((curr) => focusTabView(curr, id));
+  }, []);
+
+  /**
+   * Re-point `activeId` after the entry holding it was closed. Takes the updater
+   * (the reducer that computes it needs the CURRENT active id, and a `[]`-dep
+   * callback cannot read it from a closure) but is a different function from
+   * `setActiveId`, because it is a different thing: it must NOT leave the rail
+   * view. See `rehomeTabView`.
+   */
+  const rehomeActiveId = useCallback((pick: (active: number) => number) => {
+    setView((curr) => rehomeTabView(curr, pick(curr.activeId)));
+  }, []);
+
+  /** Show the tabs without changing which one is active. */
+  const showTabs = useCallback(() => {
+    setView(showTabsIn);
+  }, []);
+
+  /** Rail button: the lit one goes back to the tabs. */
+  const toggleRailView = useCallback((next: RailViewKind) => {
+    setView((curr) => toggleRailViewIn(curr, next));
+  }, []);
+
   // Non-pane tab openers. Extracted into a sub-hook for size; the callbacks
   // close over the same setters/refs and are spread into this hook's return
   // object below with identical keys.
-  const { openBoardTab, newRdpTab } = useAuxTabs({
+  const { openBoardTab, newRdpTab, openPageTab } = useAuxTabs({
     setTabs,
     setActiveId,
     nextIdRef,
@@ -156,7 +203,7 @@ export function useTabs(initial?: { cwd?: string; title?: string }) {
       setActiveId(tabId);
       return tabId;
     },
-    [allocOrdinal],
+    [allocOrdinal, setActiveId],
   );
 
   /**
@@ -191,7 +238,7 @@ export function useTabs(initial?: { cwd?: string; title?: string }) {
       setActiveId(tabId);
       return tabId;
     },
-    [allocOrdinal],
+    [allocOrdinal, setActiveId],
   );
 
   /** Open a tab whose initial terminal leaf is bound to a saved SSH connection. Routes through `ssh_open`. */
@@ -221,7 +268,7 @@ export function useTabs(initial?: { cwd?: string; title?: string }) {
       setActiveId(tabId);
       return tabId;
     },
-    [allocOrdinal],
+    [allocOrdinal, setActiveId],
   );
 
   /** Find a pane tab with an editor leaf matching `predicate`. Used by openFileTab for dedup. */
@@ -378,7 +425,7 @@ export function useTabs(initial?: { cwd?: string; title?: string }) {
       if (targetTabId !== null) setActiveId(targetTabId);
       return targetTabId as number | null;
     },
-    [findEditorLeafIn],
+    [findEditorLeafIn, setActiveId],
   );
 
   /** Promote the active leaf of `id` out of preview. */
@@ -396,22 +443,38 @@ export function useTabs(initial?: { cwd?: string; title?: string }) {
     );
   }, []);
 
-  const closeTab = useCallback((id: number) => {
-    setTabs((curr) => {
-      if (curr.length <= 1) return curr;
-      const idx = curr.findIndex((t) => t.id === id);
-      const next = curr.filter((t) => t.id !== id);
-      setActiveId((active) => (id === active ? next[Math.max(0, idx - 1)].id : active));
-      return next;
-    });
-  }, []);
+  const closeTab = useCallback(
+    (id: number) => {
+      setTabs((curr) => {
+        // The mutation-site half of the close rule (`lib/closable.ts`). The render
+        // gates keep the X buttons off an unclosable tab; this is what a caller
+        // that never asked runs into, so the rule cannot be routed around.
+        if (tabCloseRefusal(curr, id) !== null) return curr;
+        const idx = curr.findIndex((t) => t.id === id);
+        const next = curr.filter((t) => t.id !== id);
+        // A removal, not a route into the tab area: `rehomeActiveId` leaves the
+        // rail view alone, so closing a tab in the strip while the Vault is up
+        // does not throw the user out of the Vault.
+        //
+        // `?? 0` (= no tab active) rather than indexing blind: `tabCloseRefusal`
+        // refuses the last entry, so `next` cannot be empty today - but a rule
+        // enforced one layer up should not be the only thing between a typo in
+        // that predicate and a TypeError thrown INSIDE a `setTabs` reducer, which
+        // is an unhandled render crash rather than a misplaced focus.
+        const landing = next[Math.max(0, idx - 1)] ?? next[0];
+        rehomeActiveId((active) => (id === active ? (landing?.id ?? 0) : active));
+        return next;
+      });
+    },
+    [rehomeActiveId],
+  );
 
   const selectByIndex = useCallback(
     (idx: number) => {
       const t = tabs[idx];
       if (t) setActiveId(t.id);
     },
-    [tabs],
+    [tabs, setActiveId],
   );
 
   /** Update a terminal leaf's cwd. Mirrors to the tab when the leaf is active. */
@@ -559,33 +622,69 @@ export function useTabs(initial?: { cwd?: string; title?: string }) {
     );
   }, []);
 
-  const focusPane = useCallback((tabId: number, leafId: number) => {
-    setTabs((curr) =>
-      curr.map((t) => {
-        if (t.id !== tabId || t.kind !== "pane") return t;
-        if (!hasLeaf(t.paneTree, leafId)) return t;
-        if (t.activeLeafId === leafId) return t;
-        return syncPaneMirror({ ...t, activeLeafId: leafId });
-      }),
-    );
-  }, []);
+  /**
+   * Focus a leaf inside a tab. Shows the tabs for the same reason `setActiveId`
+   * does: every caller is a deliberate "put me in that pane" - a pane click, the
+   * header's entry list, `focusLeafInTab` - and a focus that lands under a rail
+   * view is a focus the user cannot see.
+   *
+   * Hands `curr` straight back when no tab moved. `.map` alone will not: it
+   * allocates a new array whether or not any element changed, and a fresh `tabs`
+   * IDENTITY is exactly what `useWorkspacePersistence`'s `[tabs, activeId, ...]`
+   * effect watches. The chip's own unconditional click route is what made that
+   * cost real - a strip chip now
+   * reaches here TWICE per click (Radix activates on `mousedown`, then the
+   * chip's own unconditional `onClick` runs), so without this every click on a
+   * terminal or editor chip re-ran `serializeTabs` + `wsSaveTabs` and
+   * re-rendered the strip twice. The three early `return t` branches already say
+   * when nothing changes; this only makes the array agree with them.
+   *
+   * `showTabs()` above stays unconditional and stays first - section 8 of
+   * `scripts/rail-views-verify.ts` enumerates `focusPane` as a route that must
+   * funnel, and `showTabsIn` already returns `curr` for the no-op case itself.
+   */
+  const focusPane = useCallback(
+    (tabId: number, leafId: number) => {
+      showTabs();
+      setTabs((curr) => {
+        let moved = false;
+        const next = curr.map((t) => {
+          if (t.id !== tabId || t.kind !== "pane") return t;
+          if (!hasLeaf(t.paneTree, leafId)) return t;
+          if (t.activeLeafId === leafId) return t;
+          moved = true;
+          return syncPaneMirror({ ...t, activeLeafId: leafId });
+        });
+        return moved ? next : curr;
+      });
+    },
+    [showTabs],
+  );
 
-  const focusNextPaneInTab = useCallback((tabId: number, delta: 1 | -1) => {
-    setTabs((curr) =>
-      curr.map((t) => {
-        if (t.id !== tabId || t.kind !== "pane") return t;
-        const next = nextLeafId(t.paneTree, t.activeLeafId, delta);
-        if (next === t.activeLeafId) return t;
-        return syncPaneMirror({ ...t, activeLeafId: next });
-      }),
-    );
-  }, []);
+  /** Ctrl+] / Ctrl+[. A chord whose whole purpose is "show me that pane". */
+  const focusNextPaneInTab = useCallback(
+    (tabId: number, delta: 1 | -1) => {
+      showTabs();
+      setTabs((curr) =>
+        curr.map((t) => {
+          if (t.id !== tabId || t.kind !== "pane") return t;
+          const next = nextLeafId(t.paneTree, t.activeLeafId, delta);
+          if (next === t.activeLeafId) return t;
+          return syncPaneMirror({ ...t, activeLeafId: next });
+        }),
+      );
+    },
+    [showTabs],
+  );
 
   /**
    * Split the active leaf of `tabId` along `dir`. New leaf defaults to a
    * terminal regardless of the active leaf, so Ctrl+D from an editor still
    * spawns a shell. Pass `newKind = "editor"` for side-by-side code.
    * All combinations (terminal/editor, editor/editor) are allowed.
+   *
+   * Mints a pane and focuses it, so it shows the tabs too: Ctrl+D under an open
+   * rail view would otherwise spawn a shell the user never sees.
    */
   const splitActivePane = useCallback(
     (
@@ -595,6 +694,7 @@ export function useTabs(initial?: { cwd?: string; title?: string }) {
       cwdOverride?: string,
     ): number | null => {
       let newLeafId: number | null = null;
+      showTabs();
       setTabs((curr) =>
         curr.map((t) => {
           if (t.id !== tabId || t.kind !== "pane") return t;
@@ -650,75 +750,94 @@ export function useTabs(initial?: { cwd?: string; title?: string }) {
       );
       return newLeafId;
     },
-    [allocOrdinal],
+    [allocOrdinal, showTabs],
   );
 
-  const closePaneByLeaf = useCallback((leafId: number): void => {
-    setTabs((curr) => {
-      const tab = curr.find((t) => t.kind === "pane" && hasLeaf(t.paneTree, leafId));
-      if (!tab || tab.kind !== "pane") return curr;
-      const newTree = removeLeaf(tab.paneTree, leafId);
-      if (newTree === null) {
-        if (curr.length <= 1) return curr;
-        const idx = curr.findIndex((x) => x.id === tab.id);
-        const next = curr.filter((x) => x.id !== tab.id);
-        setActiveId((active) => (active === tab.id ? next[Math.max(0, idx - 1)].id : active));
-        return next;
-      }
-      const remaining = leafIds(newTree);
-      let newActive = tab.activeLeafId;
-      if (tab.activeLeafId === leafId) {
-        const sib = siblingLeafOf(tab.paneTree, leafId);
-        newActive = sib && remaining.includes(sib) ? sib : remaining[0];
-      }
-      return curr.map((x) => {
-        if (x.id !== tab.id || x.kind !== "pane") return x;
-        return syncPaneMirror({
-          ...x,
-          paneTree: newTree,
-          activeLeafId: newActive,
+  const closePaneByLeaf = useCallback(
+    (leafId: number): void => {
+      setTabs((curr) => {
+        const tab = curr.find((t) => t.kind === "pane" && hasLeaf(t.paneTree, leafId));
+        if (!tab || tab.kind !== "pane") return curr;
+        // Both halves of the close rule, at the mutation itself - see
+        // `lib/closable.ts`. `leafCloseRefusal` subsumes the `curr.length <= 1`
+        // guard this used to carry inline (it refuses whenever the workspace is
+        // down to one entry), and adds the permanent-page rule the inline guard
+        // could not express.
+        if (leafCloseRefusal(curr, leafId) !== null) return curr;
+        const newTree = removeLeaf(tab.paneTree, leafId);
+        if (newTree === null) {
+          const idx = curr.findIndex((x) => x.id === tab.id);
+          const next = curr.filter((x) => x.id !== tab.id);
+          // Same two points as `closeTab`: a removal keeps the rail view, and the
+          // landing tab is looked up defensively rather than indexed blind.
+          const landing = next[Math.max(0, idx - 1)] ?? next[0];
+          rehomeActiveId((active) => (active === tab.id ? (landing?.id ?? 0) : active));
+          return next;
+        }
+        const remaining = leafIds(newTree);
+        let newActive = tab.activeLeafId;
+        if (tab.activeLeafId === leafId) {
+          const sib = siblingLeafOf(tab.paneTree, leafId);
+          newActive = sib && remaining.includes(sib) ? sib : remaining[0];
+        }
+        return curr.map((x) => {
+          if (x.id !== tab.id || x.kind !== "pane") return x;
+          return syncPaneMirror({
+            ...x,
+            paneTree: newTree,
+            activeLeafId: newActive,
+          });
         });
       });
-    });
-  }, []);
+    },
+    [rehomeActiveId],
+  );
 
   /**
    * Workspace switch. Replaces the tab list and active id atomically,
    * rebases `nextIdRef`, and backfills `terminalOrdinal` on legacy leaves
    * in tab/tree order so older state numbers like a fresh creation.
    */
-  const replaceAllTabs = useCallback((nextTabs: Tab[], nextActiveId: number | null) => {
-    let maxId = 0;
-    let maxOrdinal = 0;
-    for (const t of nextTabs) {
-      if (t.id > maxId) maxId = t.id;
-      if (t.kind === "pane") {
-        for (const l of leaves(t.paneTree)) {
-          if (l.id > maxId) maxId = l.id;
-          if (l.leafKind === "terminal" && typeof l.terminalOrdinal === "number") {
-            if (l.terminalOrdinal > maxOrdinal) maxOrdinal = l.terminalOrdinal;
+  const replaceAllTabs = useCallback(
+    (nextTabs: Tab[], nextActiveId: number | null) => {
+      let maxId = 0;
+      let maxOrdinal = 0;
+      for (const t of nextTabs) {
+        if (t.id > maxId) maxId = t.id;
+        if (t.kind === "pane") {
+          for (const l of leaves(t.paneTree)) {
+            if (l.id > maxId) maxId = l.id;
+            if (l.leafKind === "terminal" && typeof l.terminalOrdinal === "number") {
+              if (l.terminalOrdinal > maxOrdinal) maxOrdinal = l.terminalOrdinal;
+            }
           }
         }
       }
-    }
-    let nextOrdinal = maxOrdinal + 1;
-    const stamp = (node: PaneNode): PaneNode => {
-      if (node.kind === "leaf") {
-        if (node.leafKind === "terminal" && node.terminalOrdinal == null) {
-          return { ...node, terminalOrdinal: nextOrdinal++ };
+      let nextOrdinal = maxOrdinal + 1;
+      const stamp = (node: PaneNode): PaneNode => {
+        if (node.kind === "leaf") {
+          if (node.leafKind === "terminal" && node.terminalOrdinal == null) {
+            return { ...node, terminalOrdinal: nextOrdinal++ };
+          }
+          return node;
         }
-        return node;
-      }
-      return { ...node, children: node.children.map(stamp) };
-    };
-    const stamped = nextTabs.map((t) =>
-      t.kind === "pane" ? syncPaneMirror({ ...t, paneTree: stamp(t.paneTree) }) : t,
-    );
-    setTabs(stamped);
-    if (nextActiveId !== null) setActiveId(nextActiveId);
-    nextIdRef.current = Math.max(nextIdRef.current, maxId + 1);
-    nextOrdinalRef.current = nextOrdinal;
-  }, []);
+        return { ...node, children: node.children.map(stamp) };
+      };
+      const stamped = nextTabs.map((t) =>
+        t.kind === "pane" ? syncPaneMirror({ ...t, paneTree: stamp(t.paneTree) }) : t,
+      );
+      setTabs(stamped);
+      // The whole tab list changed under it, so the tabs are what to show either
+      // way: with a target, focusing it leaves the rail view; with none (a
+      // workspace whose restore produced nothing to focus) the view still has to
+      // go, or the switch lands behind it.
+      if (nextActiveId !== null) setActiveId(nextActiveId);
+      else showTabs();
+      nextIdRef.current = Math.max(nextIdRef.current, maxId + 1);
+      nextOrdinalRef.current = nextOrdinal;
+    },
+    [setActiveId, showTabs],
+  );
 
   /** Allocate a fresh id from the same counter as tabs and leaves. */
   const allocId = useCallback(() => nextIdRef.current++, []);
@@ -879,49 +998,76 @@ export function useTabs(initial?: { cwd?: string; title?: string }) {
    * of the opposite direction. Other siblings stay put, so rotating B in
    * `[A, B, C]` affects only B and C. The tree is normalized afterwards
    * so a second click cleanly undoes the change.
+   *
+   * Shows the tabs, and this is one of the two the rail-view sweep found by
+   * enumerating pane-tree WRITES instead of chords: it is reached from
+   * the header's entry menu, which stays on screen while a rail view covers the
+   * workspace, so rotating from there rearranged panes nobody could see. The
+   * rearrangement IS the whole result, so showing it is the only thing the
+   * action can mean.
    */
-  const rotateLeafSplit = useCallback((leafId: number) => {
-    setTabs((curr) =>
-      curr.map((t) => {
-        if (t.kind !== "pane") return t;
-        if (!hasLeaf(t.paneTree, leafId)) return t;
-        const splitId = nextIdRef.current++;
-        const rotated = rotateLeafWithNeighbor(t.paneTree, leafId, splitId);
-        if (rotated === null) return t;
-        return syncPaneMirror({
-          ...t,
-          paneTree: normalizePaneTree(rotated),
-        });
-      }),
-    );
-  }, []);
+  const rotateLeafSplit = useCallback(
+    (leafId: number) => {
+      showTabs();
+      setTabs((curr) =>
+        curr.map((t) => {
+          if (t.kind !== "pane") return t;
+          if (!hasLeaf(t.paneTree, leafId)) return t;
+          const splitId = nextIdRef.current++;
+          const rotated = rotateLeafWithNeighbor(t.paneTree, leafId, splitId);
+          if (rotated === null) return t;
+          return syncPaneMirror({
+            ...t,
+            paneTree: normalizePaneTree(rotated),
+          });
+        }),
+      );
+    },
+    [showTabs],
+  );
 
   /**
    * Reorder a leaf within its own split group. Places `leafId` before
    * `beforeLeafId`, or at the end when null. No-op when the two leaves
    * aren't direct siblings. Use Move to New Tab / Join Group for cross-group.
+   *
+   * Shows the tabs for the same reason `rotateLeafSplit` does: the drag that
+   * drives it happens in the header's entry list, which a rail view does not
+   * cover, and the reorder it produces is only visible in the panes.
    */
-  const reorderLeafInGroup = useCallback((leafId: number, beforeLeafId: number | null) => {
-    setTabs((curr) =>
-      curr.map((t) => {
-        if (t.kind !== "pane") return t;
-        if (!hasLeaf(t.paneTree, leafId)) return t;
-        const paneTree = reorderLeafInTree(t.paneTree, leafId, beforeLeafId);
-        if (paneTree === t.paneTree) return t;
-        return syncPaneMirror({ ...t, paneTree });
-      }),
-    );
-  }, []);
+  const reorderLeafInGroup = useCallback(
+    (leafId: number, beforeLeafId: number | null) => {
+      showTabs();
+      setTabs((curr) =>
+        curr.map((t) => {
+          if (t.kind !== "pane") return t;
+          if (!hasLeaf(t.paneTree, leafId)) return t;
+          const paneTree = reorderLeafInTree(t.paneTree, leafId, beforeLeafId);
+          if (paneTree === t.paneTree) return t;
+          return syncPaneMirror({ ...t, paneTree });
+        }),
+      );
+    },
+    [showTabs],
+  );
 
   /**
    * Drag-and-drop a leaf onto one edge of another leaf in the same tab.
    * Repositions the source as a left/right/top/bottom sibling of the target,
    * preserving its id (and thus its PTY / editor session). No-op across tabs
    * or when the move can't apply.
+   *
+   * Shows the tabs like the other pane-tree writes, even though the drag that
+   * starts it is inside the covered surface and so cannot begin while a rail
+   * view is up. That is an unreachability claim about affordances, and the
+   * whole point of sweeping by state write is not to rest on one: it also moves
+   * focus to the dragged leaf, which is a route into the tab area whatever
+   * started it. A no-op when no view is showing.
    */
   const movePaneLeafToEdge = useCallback(
     (sourceLeafId: number, targetLeafId: number, edge: PaneEdge) => {
       if (sourceLeafId === targetLeafId) return;
+      showTabs();
       setTabs((curr) =>
         curr.map((t) => {
           if (t.kind !== "pane") return t;
@@ -939,10 +1085,17 @@ export function useTabs(initial?: { cwd?: string; title?: string }) {
         }),
       );
     },
-    [],
+    [showTabs],
   );
 
-  /** Reorder tabs: move `fromTabId` before `beforeTabId`, or append when null. */
+  /**
+   * Reorder tabs: move `fromTabId` before `beforeTabId`, or append when null.
+   *
+   * Does NOT show the tabs, and is one of the writes the sweep deliberately
+   * leaves alone: it changes neither a pane tree nor which tab is active, only
+   * the order of the strip - and the strip is the one part of the tab area a
+   * rail view does not cover, so the result is already on screen.
+   */
   const reorderTabs = useCallback((fromTabId: number, beforeTabId: number | null) => {
     setTabs((curr) => {
       const from = curr.find((t) => t.id === fromTabId);
@@ -961,6 +1114,11 @@ export function useTabs(initial?: { cwd?: string; title?: string }) {
     tabs,
     activeId,
     setActiveId,
+    // The rail view rides with `activeId` because it is the other half of "what
+    // the workspace area is showing". App renders it; only the funnels above
+    // write it, and `toggleRailView` is the one way IN.
+    railView,
+    toggleRailView,
     newTab,
     newPaneGroupTab,
     newSshTab,
@@ -968,6 +1126,7 @@ export function useTabs(initial?: { cwd?: string; title?: string }) {
     openFileTab,
     pinTab,
     openBoardTab,
+    openPageTab,
     closeTab,
     selectByIndex,
     setLeafCwd,

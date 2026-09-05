@@ -1,7 +1,7 @@
 /**
  * Self-check for the three things in the RDP frontend that must not outlive
  * their owner: a trust prompt, a held key, and a Test probe.
- * Run: `npx tsx scripts/rdp-lifetime-verify.ts`.
+ * Run: `pnpm verify rdp-lifetime`.
  *
  * Source text, not imports, and for the same reason `toast-verify.ts` gives:
  * these live inside a React component's effects and event handlers, and there is
@@ -32,15 +32,39 @@
  *    check is not "is there a unicode set" but the general form: every held set
  *    the pane declares is in `releaseAll`'s guard, cleared by it, and cleared
  *    when a redial resets state - which also fails for a FOURTH set added later
- *    and forgotten.
+ *    and forgotten. The forward-looking half ("a new press-side kind records
+ *    what it pressed") reads the STATEMENT LIST the write sits in, not a fixed
+ *    number of characters behind it: with comments stripped, the 220 this used
+ *    to look back reached out of `unicodeDown`'s own branch into `keyDown`'s and
+ *    borrowed its `heldKeys.current.add`, so deleting the unicode record passed.
  *
- * 3. A TEST PROBE CANNOT WRITE TO A ROW IT NO LONGER BELONGS TO. The RDP dialog
- *    is mounted persistently once latched and the trust prompt is global, so
+ * 3. A TEST PROBE CANNOT WRITE TO A ROW IT NO LONGER BELONGS TO. The merged host
+ *    editor (`HostEditorDialog`, which used to be `RdpConnectionDialog`) is
+ *    mounted persistently once latched and the trust prompt is global, so
  *    closing the dialog neither cancels a probe nor hides its question: row A ->
- *    Test -> cancel -> open row B -> answer, and an ungated
- *    `setPinnedFingerprint` writes A's certificate into B's form state, which
+ *    Test -> cancel -> open row B -> answer, and an ungated write into the draft
+ *    pin map puts A's certificate (or SSH host key) into B's form state, which
  *    Save then persists onto B. It fails closed (B's next connect aborts as a
- *    mismatch) but it is a pinned certificate on a row the user never tested.
+ *    mismatch) but it is a pinned key on a row the user never tested.
+ *
+ *    One `runTest` and one `onTrusted` serve both protocols now, and the two
+ *    success writes are reached through their OWN arm of the protocol branch
+ *    rather than by searching for `kind: "ok"` - which occurs twice, so a single
+ *    search examined the SSH write and the RDP one could lose its guard in
+ *    silence.
+ *
+ *    There used to be a SECOND pin write here, straight to the store, gated on
+ *    the saved record still naming the address the probe dialled. It is gone
+ *    rather than re-gated: the gate stopped a cancelled dialog leaving a foreign
+ *    machine's fingerprint on a record, and did nothing about Forget (a draft
+ *    edit) making the next Test TOFU over the address the record DOES name, so
+ *    accepting replaced the stored pin and Cancel kept the replacement. Nothing
+ *    in this dialog persists a pin now; Save does. So the only trust write left
+ *    is the form's own, and the row guard below is what keeps a probe that
+ *    outlived its row from putting A's certificate into B's form.
+ *    `host-editor-verify.ts`'s section [3] owns the absence rule in full; what
+ *    is here is that the row guard covers EVERY such write, counted, rather
+ *    than the first.
  *
  * 4. THE `pagehide` BACKSTOP ANSWERS BOTH PROTOCOLS. `HostKeyPromptDialog` is
  *    shared, so its backstop fires for an SSH host key as well as an RDP
@@ -48,6 +72,27 @@
  *    holding the same mid-handshake socket - and it is pinned here because it
  *    reads like an accident of sharing, so the obvious "tidy-up" is to scope it
  *    back to certificates. This check makes that argue with the comment first.
+ *
+ * Two things every check below depends on, and both are load-bearing rather than
+ * tidiness.
+ *
+ * COMMENTS ARE REMOVED FIRST. Every guard here is described in prose directly
+ * above itself, in detail, in the same identifiers: "an ungated write puts A's
+ * certificate into B's pin state" satisfies a search for the guard it describes.
+ * A sibling script's whole suite passed against `const keepPin = true; // was:
+ * const keepPin = !existing || existing.host === host;` for exactly that reason,
+ * so trailing comments go as well as whole-line ones - and the stripper is
+ * quote-aware, because a `//` inside a string literal is not a comment.
+ *
+ * GUARD SCOPE IS READ BY WALKING BRACES, not by measuring distance. Two proxies
+ * for "this write is inside that guard" have now failed in this file. A fixed
+ * 90-character lookback found the PREVIOUS statement's guard and called a
+ * deliberately ungated write gated. The `;`-counting rule that replaced it
+ * passed BOTH halves of section [3] - the positive AND the negative - against
+ * the exact regression the negative half exists to catch, because a write that
+ * is the second statement inside a guard has a `;` behind it and one that is the
+ * first does not. Section [0] holds the replacements to samples whose answers
+ * are known: a structural check nobody has watched fail is a comment.
  */
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -82,12 +127,382 @@ function between(src: string, from: string, to: string): string {
   return src.slice(start, end);
 }
 
-const paneSrc = read("src/modules/rdp/RdpPane.tsx");
-const dialogSrc = read("src/modules/rdp/RdpConnectionDialog.tsx");
-const promptDialogSrc = read("src/modules/ssh/HostKeyPromptDialog.tsx");
+/**
+ * A line with its trailing `//` comment removed, string literals respected.
+ *
+ * Quote-aware rather than a regex because a `//` inside a string is not a
+ * comment. An apostrophe in unquoted JSX text opens a quote state that never
+ * closes, which loses the strip for that one line - it fails towards keeping
+ * text, never towards deleting code.
+ */
+function stripLineComment(line: string): string {
+  let quote = "";
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (quote) {
+      if (c === "\\") i++;
+      else if (c === quote) quote = "";
+      continue;
+    }
+    if (c === '"' || c === "'" || c === "`") {
+      quote = c;
+      continue;
+    }
+    if (c === "/" && line[i + 1] === "/") return line.slice(0, i);
+  }
+  return line;
+}
+
+/**
+ * The same source with comments removed. The docblock's first "load-bearing"
+ * note is the why; the shape is `host-editor-verify.ts`'s, deliberately, so the
+ * two files cannot drift into disagreeing about what counts as code.
+ */
+function stripComments(src: string): string {
+  // JSX comment expressions - `{/* ... */}` - are the only comment syntax
+  // legal INSIDE JSX children, and the line-based filter below only ever
+  // recognised `//`, `/*` and `*` starting a trimmed line, none of which match
+  // a line starting `{`. `paneSrc`/`editorSrc`/`promptDialogSrc` below all
+  // strip `.tsx` files, so this file is exposed to it - and demonstrated live:
+  // deleting `HostEditorDialog.tsx`'s `applied.current = token;` write and
+  // leaving it in exactly this shape passed section [3]'s row guard entirely,
+  // 81 ok / 0 FAIL, with the guard removed.
+  //
+  // The inner group must NOT be allowed to cross a `*/` while hunting
+  // for one followed by `}` - a lazy `[\s\S]*?` is still permitted to do that,
+  // and a type literal opening `{ /** ... */ x: T }` then swallows everything
+  // up to some later, unrelated `*/}`. The negative lookahead below forbids
+  // that: the first `*/` is final, either a real `{/* ... */}` or the match
+  // fails right there. Copied from `host-editor-verify.ts`'s `stripComments`;
+  // see that file's comment for the measured damage the lazy form did.
+  const withoutJsxComments = src.replace(/\{\s*\/\*(?:(?!\*\/)[\s\S])*\*\/\s*\}/g, "");
+  return withoutJsxComments
+    .split("\n")
+    .filter((line) => {
+      const t = line.trim();
+      return !(t.startsWith("//") || t.startsWith("/*") || t.startsWith("*"));
+    })
+    .map(stripLineComment)
+    .join("\n");
+}
+
+/**
+ * Does the `{` at `brace` open a statement list, or an object literal?
+ *
+ * `) {` is an `if`/`for`/`while`/function, `> {` is an arrow body, and
+ * `;`/`{`/`}` mean the brace follows a statement. `(`, `,`, `:`, `=`, `[` and `$`
+ * all introduce a VALUE, so the brace opens a literal and anything inside it is
+ * an argument rather than a statement. The distinction is what lets a check name
+ * a field of an argument object (`kind: "keyDown"`) and still be told which
+ * BLOCK the call it belongs to sits in.
+ */
+function opensABlock(src: string, brace: number): boolean {
+  let i = brace - 1;
+  while (i >= 0 && /\s/.test(src[i])) i--;
+  if (i < 0) return true;
+  const prev = src[i];
+  if (")>;{}".includes(prev)) return true;
+  const word = /(\w+)$/.exec(src.slice(0, i + 1))?.[1] ?? "";
+  return word === "else" || word === "try" || word === "do" || word === "finally";
+}
+
+/**
+ * Does the `}` at `brace` close a statement list?
+ *
+ * Its partner is found first, because right-to-left a closing brace says nothing
+ * about what it closes: `focus({ ok: true });` and `if (a) { other(); }` end the
+ * same way, and only one of them ends a STATEMENT. Called only at depth 0, where
+ * the answer changes an outcome.
+ */
+function closesABlock(src: string, brace: number): boolean {
+  let depth = 0;
+  for (let i = brace; i >= 0; i--) {
+    if (src[i] === "}") depth++;
+    else if (src[i] === "{") {
+      depth--;
+      if (depth === 0) return opensABlock(src, i);
+    }
+  }
+  return false;
+}
+
+/**
+ * The innermost statement list containing `at`: where its block opens, and the
+ * text of the list up to `at` with nested groups elided.
+ *
+ * Walking out over object-literal braces is what makes a needle inside an
+ * ARGUMENT (`kind: "mouseDown"`) report the block its call sits in. Eliding
+ * nested groups, and standing a `;` where a nested BLOCK closed, is what stops
+ * `if (a) { record(); }\nsend(…)` from reading as though `send` were inside that
+ * guard or as though `record()` were a statement of its own list. Both are
+ * merely text that precedes it - which is all a slice could ever report, and is
+ * exactly how a fixed lookback lies.
+ */
+function scopeOf(src: string, at: number): { block: number; before: string } {
+  let before = "";
+  let depth = 0;
+  for (let i = at - 1; i >= 0; i--) {
+    const c = src[i];
+    if (c === "}") {
+      if (depth === 0 && closesABlock(src, i)) before = ";" + before;
+      depth++;
+      continue;
+    }
+    if (c === "{") {
+      if (depth > 0) {
+        depth--;
+        continue;
+      }
+      if (opensABlock(src, i)) return { block: i, before };
+      continue;
+    }
+    if (depth === 0) before = c + before;
+  }
+  return { block: -1, before };
+}
+
+/** The statements of that list, with the partial one `at` itself sits in dropped. */
+function statementsBefore(src: string, at: number): string[] {
+  const parts = scopeOf(src, at).before.split(";");
+  // Whatever follows the last `;` is the statement in progress - the one `at` is
+  // inside - however far into it `at` happens to point.
+  parts.pop();
+  return parts.map((s) => s.trim()).filter((s) => s.length > 0);
+}
+
+/**
+ * The condition of the innermost `if` whose block `needle` sits inside, or of the
+ * `if` attached to its own statement, or "" if neither exists.
+ *
+ * This is `host-editor-verify.ts`'s `guardFor` with its one-hop limit removed,
+ * and the divergence is deliberate rather than drift: one hop reports NOTHING
+ * for a write that is the second statement inside a correct guard, which is a
+ * false alarm against a legitimate reordering. Walking out is only safe because
+ * every assertion below compares the condition it gets against the one that has
+ * to be there - a guard from further out than intended is not that string and
+ * fails. Asking merely whether SOME guard exists is the unsound way to use this.
+ *
+ * The needle must name a STATEMENT (`setTest({`, not `kind: "ok"`) or the
+ * statement text read back is a fragment of an argument list.
+ */
+function enclosingGuard(region: string, needle: string): string {
+  return guardAt(region, region.indexOf(needle));
+}
+
+/**
+ * The same answer for EVERY occurrence of `needle`, in source order.
+ *
+ * The all-matches rule, which this file already follows for
+ * `kind: "ok"` by reaching each protocol arm separately. The form it exists for is
+ * the other one: a second write of the same kind added beside a correctly guarded
+ * first one, which `enclosingGuard` reports nothing about. A caller asserts the
+ * COUNT as well, because `[].every(...)` is true - a write that disappears must not
+ * pass either.
+ */
+function enclosingGuards(region: string, needle: string): string[] {
+  const out: string[] = [];
+  for (let at = region.indexOf(needle); at >= 0; at = region.indexOf(needle, at + 1)) {
+    out.push(guardAt(region, at));
+  }
+  return out;
+}
+
+/** The shared walk, from a position rather than a needle, so one implementation
+ *  serves both forms above. */
+function guardAt(region: string, start: number): string {
+  let at = start;
+  if (at < 0) return "";
+  // Bounded rather than `for (;;)`: eight levels of nesting is already more than
+  // anything here has, and a bound cannot spin on a source this does not expect.
+  for (let level = 0; level < 8; level++) {
+    const { block, before } = scopeOf(region, at);
+    const parts = before.split(";");
+    const stmt = (parts[parts.length - 1] ?? "")
+      .trim()
+      // A statement may open with an operator keyword before the call a check
+      // names (`void pinFingerprint(…)`), and that is still the same statement.
+      // Dropped only at the END, so it cannot swallow a guard.
+      .replace(/\b(?:void|await|return)$/, "")
+      .trim();
+    const own = /^if \((.*)\)$/s.exec(stmt);
+    if (own) return own[1];
+    // Some other statement head - a `for`, an arrow declaration, a call whose
+    // argument list this needle is inside. Not a guard, and not something to
+    // look past either.
+    if (stmt.length > 0 || block < 0) return "";
+    at = block;
+  }
+  return "";
+}
+
+function count(src: string, re: RegExp): number {
+  return [...src.matchAll(re)].length;
+}
+
+const paneRaw = read("src/modules/rdp/RdpPane.tsx");
+const editorRaw = read("src/modules/hosts/HostEditorDialog.tsx");
+const promptDialogRaw = read("src/modules/ssh/HostKeyPromptDialog.tsx");
+const paneSrc = stripComments(paneRaw);
+const editorSrc = stripComments(editorRaw);
+const promptDialogSrc = stripComments(promptDialogRaw);
 
 // ---------------------------------------------------------------------------
-console.log("[1] a certificate prompt raised after the teardown is ANSWERED");
+console.log("[0] the helpers the checks below depend on");
+{
+  check(
+    "enclosingGuard reads the condition of a block-bodied guard",
+    enclosingGuard("if (a === b) {\n  writeIt();\n}\n", "writeIt()") === "a === b",
+    enclosingGuard("if (a === b) {\n  writeIt();\n}\n", "writeIt()"),
+  );
+  check(
+    "and of a single-statement guard",
+    enclosingGuard("if (a === b) writeIt();\n", "writeIt()") === "a === b",
+  );
+  check(
+    "and of a guard whose body opens with void, which is how a fire-and-forget write reads",
+    enclosingGuard("if (a === b) {\n  void writeIt();\n}\n", "writeIt()") === "a === b",
+    enclosingGuard("if (a === b) {\n  void writeIt();\n}\n", "writeIt()"),
+  );
+  // The two failures this section exists to keep out. The fixed lookback's was a
+  // false PASS: it saw the previous statement's guard and called an ungated write
+  // gated. The `;`-rule's went the other way - it reported a correctly guarded
+  // SECOND statement as ungated, and the negative assertion built on that then
+  // passed against the exact regression it names.
+  check(
+    "but an unguarded write does not borrow the guard of the statement above it",
+    enclosingGuard("if (a === b) other();\nwriteIt();\n", "writeIt()") === "",
+    enclosingGuard("if (a === b) other();\nwriteIt();\n", "writeIt()"),
+  );
+  check(
+    "not even when that write opens with void",
+    enclosingGuard("if (a === b) other();\nvoid writeIt();\n", "writeIt()") === "",
+    enclosingGuard("if (a === b) other();\nvoid writeIt();\n", "writeIt()"),
+  );
+  check(
+    "while a write that IS the second statement inside a guard still reports it",
+    enclosingGuard("if (a === b) {\n  other();\n  void writeIt();\n}\n", "writeIt()") === "a === b",
+    enclosingGuard("if (a === b) {\n  other();\n  void writeIt();\n}\n", "writeIt()"),
+  );
+  check(
+    "and one AFTER that guard's block closes does not, however close it reads",
+    enclosingGuard("if (a === b) {\n  other();\n}\nwriteIt();\n", "writeIt()") === "",
+    enclosingGuard("if (a === b) {\n  other();\n}\nwriteIt();\n", "writeIt()"),
+  );
+  check(
+    "nor does one inside a block the guard does not control",
+    enclosingGuard(
+      "if (a === b) {\n  other();\n}\nfor (const x of xs) {\n  writeIt();\n}\n",
+      "writeIt()",
+    ) === "",
+    enclosingGuard(
+      "if (a === b) {\n  other();\n}\nfor (const x of xs) {\n  writeIt();\n}\n",
+      "writeIt()",
+    ),
+  );
+  check(
+    "the INNERMOST guard is the one reported, not the outermost",
+    enclosingGuard("if (a) {\n  if (b === c) {\n    writeIt();\n  }\n}\n", "writeIt()") ===
+      "b === c",
+    enclosingGuard("if (a) {\n  if (b === c) {\n    writeIt();\n  }\n}\n", "writeIt()"),
+  );
+  check(
+    "an unguarded write in a bare block reports nothing",
+    enclosingGuard("{\n  writeIt();\n}\n", "writeIt()") === "",
+  );
+  check(
+    "a missing needle reports nothing rather than throwing",
+    enclosingGuard("x();\n", "writeIt()") === "",
+  );
+
+  // The all-matches form, and the false pass it exists to remove: a second write
+  // of the same kind added beside a correctly guarded first one.
+  {
+    const two = "if (a === b) writeIt();\nwriteIt();\n";
+    check(
+      "enclosingGuards reports every occurrence, not just the one enclosingGuard finds",
+      enclosingGuard(two, "writeIt()") === "a === b" &&
+        JSON.stringify(enclosingGuards(two, "writeIt()")) === JSON.stringify(["a === b", ""]),
+      { first: enclosingGuard(two, "writeIt()"), all: enclosingGuards(two, "writeIt()") },
+    );
+    check(
+      "and an empty list for a needle that is not there, which no caller may read as a pass",
+      enclosingGuards("x();\n", "writeIt()").length === 0,
+    );
+  }
+
+  const sample = 'if (a) {\n  mark();\n  send({ kind: "x" });\n}\n';
+  check(
+    "statementsBefore walks out of an argument position to the block the call is in",
+    statementsBefore(sample, sample.indexOf('kind: "x"')).join(" | ") === "mark()",
+    statementsBefore(sample, sample.indexOf('kind: "x"')),
+  );
+  const sibling = 'if (a) { mark(); }\nsend({ kind: "x" });\n';
+  check(
+    "and does not report a statement from a nested block that merely precedes it in the text",
+    !statementsBefore(sibling, sibling.indexOf('kind: "x"')).join(" | ").includes("mark()"),
+    statementsBefore(sibling, sibling.indexOf('kind: "x"')),
+  );
+  const literal = 'f({ kind: "yDown" });\nsend({ kind: "x" });\n';
+  check(
+    "a nested literal's fields are not statements of the list either",
+    !statementsBefore(literal, literal.indexOf('kind: "x"')).join(" | ").includes("yDown"),
+    statementsBefore(literal, literal.indexOf('kind: "x"')),
+  );
+  const two = "a();\nb();\n";
+  check(
+    "and the statement the needle itself sits in is not reported as preceding it",
+    statementsBefore(two, two.indexOf("b()")).join(" | ") === "a()",
+    statementsBefore(two, two.indexOf("b()")),
+  );
+  const arrow = "h = (e) => {\n  mark(e);\n  send({ k: 1 });\n}";
+  check(
+    "an arrow body counts as a statement list, which is what every handler here is",
+    statementsBefore(arrow, arrow.indexOf("k: 1")).join(" | ") === "mark(e)",
+    statementsBefore(arrow, arrow.indexOf("k: 1")),
+  );
+
+  check(
+    "stripComments drops a comment that merely NAMES a guard",
+    !stripComments("// if (a === b)\nwriteIt();").includes("a === b"),
+  );
+  check(
+    "and drops it when it TRAILS the line that removed the guard",
+    !stripComments("const keep = true; // was: keep = a === b;").includes("a === b"),
+    stripComments("const keep = true; // was: keep = a === b;"),
+  );
+  check(
+    "but leaves a // that is inside a string, which is not a comment",
+    stripComments('const s = "a // b";').includes("a // b"),
+  );
+  check("and keeps the code around it", stripComments("// x\nwriteIt();").includes("writeIt();"));
+
+  // The JSX-comment branch, both directions.
+  const STRIPPER_PROBE =
+    "type P = { /** c */ x: X };\nconst KEEP = 1;\nconst j = <div>{/* c */}</div>;";
+  check(
+    "stripComments does not over-strip past a type literal's doc comment (the lazy-regex trap)",
+    stripComments(STRIPPER_PROBE).includes("KEEP"),
+  );
+  check(
+    "stripComments does remove a JSX comment expression's own body",
+    !stripComments(STRIPPER_PROBE).includes("{/*"),
+  );
+
+  for (const [path, raw, stripped] of [
+    ["RdpPane.tsx", paneRaw, paneSrc],
+    ["HostEditorDialog.tsx", editorRaw, editorSrc],
+    ["HostKeyPromptDialog.tsx", promptDialogRaw, promptDialogSrc],
+  ] as const) {
+    check(
+      `${path} survived stripping, and something was removed from it`,
+      stripped.length > 1000 && stripped.length < raw.length,
+      [stripped.length, raw.length],
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n[1] a certificate prompt raised after the teardown is ANSWERED");
 {
   const handler = between(paneSrc, "onCertPrompt: (prompt) => {", "onResize:");
   check("the cert-prompt handler was found", handler.length > 100, handler.length);
@@ -97,13 +512,13 @@ console.log("[1] a certificate prompt raised after the teardown is ANSWERED");
   check("it guards on liveness", guard >= 0);
   check("and records the id for the teardown to answer", records > guard, [guard, records]);
 
-  // The whole finding in one assertion: the liveness branch has to answer,
-  // because it runs BEFORE the id exists anywhere the teardown can reach.
-  const branch = handler.slice(guard, records < 0 ? undefined : records);
+  // The whole finding in one assertion: the rejection is what the liveness
+  // branch DOES, and it has to be, because that branch runs before the id exists
+  // anywhere the teardown can reach.
   check(
     "the liveness branch rejects the prompt itself",
-    /confirmRdpCert\(\s*prompt\.promptId,\s*false\s*\)/.test(branch),
-    branch.trim().slice(-120),
+    enclosingGuard(handler, "confirmRdpCert(prompt.promptId, false)") === "!alive",
+    enclosingGuard(handler, "confirmRdpCert(prompt.promptId, false)"),
   );
   check(
     "and does not merely return, which would drop it with nobody to answer",
@@ -183,14 +598,21 @@ console.log("\n[2] every held set the pane keeps is released on blur");
     downKinds.length >= 3,
     downKinds.map((d) => d.kind),
   );
+  const isRecord = (stmt: string) => /held\w+\.current\.add\(/.test(stmt);
   for (const { kind, at } of downKinds) {
-    // Looking backwards, because the record is taken before the event is
-    // queued - the order the handlers are written in.
-    const before = paneSrc.slice(Math.max(0, at - 220), at);
+    // The statement list this write sits in, not a window of characters behind
+    // it: the record is taken before the event is queued, which is a fact about
+    // the block and not about how much prose the handler carries.
+    const before = statementsBefore(paneSrc, at);
+    check(`${kind} records what it pressed in a held set`, before.some(isRecord), before.slice(-3));
+    // Adjacency, deliberately: a fourth kind bolted on AFTER an existing
+    // record/queue pair sits in the same block as that record and would borrow
+    // it. The pairing is one statement wide in all three handlers, and a
+    // refactor that separates them should have to say why here.
     check(
-      `${kind} records what it pressed in a held set`,
-      /held\w+\.current\.add\(/.test(before),
-      before.trim().slice(-80),
+      `and takes that record immediately before queueing ${kind}, not somewhere above it`,
+      isRecord(before[before.length - 1] ?? ""),
+      before.slice(-2),
     );
   }
 }
@@ -199,44 +621,107 @@ console.log("\n[2] every held set the pane keeps is released on blur");
 console.log("\n[3] a Test probe cannot write to a row it no longer belongs to");
 {
   check(
-    "the dialog tracks the row it is showing right now",
-    /editingIdRef\.current = editing\?\.id \?\? null;/.test(dialogSrc),
+    "the editor tracks the target it is showing right now",
+    /applied\.current = token;/.test(editorSrc),
   );
 
-  const runTest = between(dialogSrc, "const runTest = async () => {", "const save = async () => {");
+  const runTest = between(editorSrc, "const runTest = async () => {", "const save = async () => {");
   check("runTest was found", runTest.length > 500, runTest.length);
+  check("a probe captures the token it started on", /const probeToken = token;/.test(runTest));
+
+  // The row guard by what it IS, not by the name it goes by: a callable, so it
+  // is evaluated when the answer arrives rather than captured with the probe,
+  // comparing the target on screen against that capture. Reading the name out of
+  // the source is also what keeps a rename from turning the four guard checks
+  // below into searches for a string no longer in the file.
+  const rowGuard =
+    /const (\w+) = \(\) => applied\.current === probeToken;/.exec(runTest)?.[1] ?? "";
   check(
-    "a probe captures the row it started on",
-    /const probeRow = editing\?\.id \?\? null;/.test(runTest),
+    "and the row guard compares the target on screen against that capture, live",
+    rowGuard.length > 0,
+    runTest.slice(0, 600),
   );
+  const onRow = `${rowGuard}()`;
+
+  const onTrusted = between(runTest, "const onTrusted = (fingerprint: string) => {", "\n    try {");
+  check("its trust callback was found", onTrusted.length > 50, onTrusted.length);
+
+  // EVERY write to the form's pins, with the count asserted: the first-match form
+  // this replaces reports the guard of the one that is still correct and says
+  // nothing about a second one added beside it, and an empty list would satisfy
+  // `every` if the write were deleted outright.
+  const formPins = enclosingGuards(onTrusted, "setPins(");
+  check("the callback holds exactly one write to the form's pins", formPins.length === 1, formPins);
   check(
-    "and compares it against the row on screen, not against its own capture",
-    /editingIdRef\.current === probeRow/.test(runTest),
+    "and every one of them is written only while the editor is still on the row that was probed",
+    formPins.length > 0 && formPins.every((g) => g === onRow),
+    formPins,
   );
 
-  /** Is this write gated on the dialog still being on the probe's row? */
-  const gated = (needle: string): boolean => {
-    const at = runTest.indexOf(needle);
-    if (at < 0) return false;
-    return runTest.slice(Math.max(0, at - 90), at).includes("onProbeRow()");
-  };
+  // The other half of the split is GONE rather than guarded, so the check is the
+  // absence. Gating the store write on the saved address closed the cancelled-dialog
+  // case where a FOREIGN fingerprint landed on a record and left the one
+  // where it lands on the address the record does name: Forget removes the pin from
+  // the draft, so Test TOFUs instead of raising the mismatch, accepting overwrites
+  // the stored pin because the addresses agree, and Cancel keeps it. Save is the
+  // only thing that commits a pin now.
   check(
-    "accepting a certificate writes the form's pin only while the row matches",
-    gated("setPinnedFingerprint(prompt.fingerprint)"),
+    "the trust callback persists nothing, so a cancelled dialog cannot change a stored pin",
+    !onTrusted.includes("pinFingerprint("),
+    onTrusted.trim(),
   );
-  // The saved row is the opposite case and must NOT be gated: `editing` is the
-  // row that was tested, so the pin belongs there however long the answer took.
   check(
-    "but the SAVED row is pinned unconditionally, since that is the row tested",
-    !gated("pinFingerprint(editing.id, prompt.fingerprint)"),
+    "and the editor does not reach the store's pin writer from anywhere",
+    !editorSrc.includes("pinFingerprint"),
+    /.*pinFingerprint.*/.exec(editorSrc)?.[0],
   );
-  check("a successful result is gated", gated('kind: "ok"'));
-  check("and so is a failure", gated('kind: "fail"'));
+
+  // Both protocol arms, reached separately. `kind: "ok"` occurs twice, so one
+  // search over `runTest` examined the SSH write and left the RDP guard
+  // unchecked; the `setTest` count per arm is what keeps a drifted anchor from
+  // quietly merging them again.
+  const arms = [
+    {
+      what: "the SSH probe's success",
+      region: between(
+        runTest,
+        'if (protocol === "ssh") {',
+        "const credential = rdpCredentialForTest(",
+      ),
+      kind: 'kind: "ok"',
+    },
+    {
+      what: "the RDP probe's success",
+      region: between(runTest, "const result = await runRdpProbe(", "} catch (e) {"),
+      kind: 'kind: "ok"',
+    },
+    {
+      what: "either probe's failure",
+      region: between(runTest, "} catch (e) {", "\n  };"),
+      kind: 'kind: "fail"',
+    },
+  ];
+  for (const { what, region, kind } of arms) {
+    check(`${what} arm was found`, region.length > 50, region.length);
+    check(
+      `${what} arm holds exactly one result write, so this is that arm's own`,
+      count(region, /setTest\(/g) === 1,
+      count(region, /setTest\(/g),
+    );
+    check(`${what} arm writes ${kind}`, region.includes(kind), region.trim().slice(0, 120));
+    check(
+      `${what} is reported only while the editor is still on the row that was probed`,
+      enclosingGuard(region, "setTest({") === onRow,
+      enclosingGuard(region, "setTest({"),
+    );
+  }
+
   // The synchronous one at the top of the probe is deliberately not gated: it
   // runs before any await, so it cannot be stale.
   check(
     "the probe's own 'running' state is not gated, being written before any await",
-    !gated('setTest({ kind: "running" })'),
+    enclosingGuard(runTest, 'setTest({ kind: "running" })') === "",
+    enclosingGuard(runTest, 'setTest({ kind: "running" })'),
   );
 }
 
@@ -253,6 +738,8 @@ console.log("\n[4] the pagehide backstop answers BOTH protocols' prompts");
   // only an RDP certificate. Scoping it to `certificate` would leave `ssh_open`
   // parked on its own 120-second wait for the same reason, so a later narrowing
   // has to argue with the comment above the effect rather than slip through.
+  // Comments are gone by here, so the prose that explains the decision cannot be
+  // mistaken for the filter it is arguing against.
   check(
     "and does not filter on the field that distinguishes the two",
     !backstop.includes("certificate"),

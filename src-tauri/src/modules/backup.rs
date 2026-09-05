@@ -7,21 +7,17 @@
 //! folder. This module is the whole crypto surface; everything above it in JS
 //! handles only the already-sealed blob.
 //!
-//! Two format generations live here, and the difference is not only what is
-//! sealed but WHO touches the plaintext:
-//!
-//! - **v1** (`tervia-ssh-connections`, SSH only) sealed just the credential
-//!   block. `backup_open` hands that plaintext back to JS, which writes it to
-//!   the keychain with `secrets_set`. Kept for reading old files only.
-//! - **v2** (`tervia-connections`) seals the WHOLE payload - both connection
-//!   inventories and every credential - and the plaintext never leaves this
-//!   process. On export, JS passes keychain REFERENCES and
-//!   [`backup_seal_payload`] reads the values itself. On import,
-//!   [`backup_open_payload`] returns only the connection metadata and parks the
-//!   credentials here behind a handle; JS validates the metadata, says which
-//!   ids survived, and [`backup_apply_secrets`] writes those straight to the
-//!   keychain. That is the same property `rdp_open`'s keychain reference
-//!   exists to protect, extended to the backup path.
+//! One format lives here (`tervia-connections`), and it seals the WHOLE
+//! payload - both connection inventories and every credential - so the
+//! plaintext never leaves this process. On export, JS passes keychain
+//! REFERENCES and [`backup_seal_payload`] reads the values itself. On import,
+//! [`backup_open_payload`] returns only the connection metadata and parks the
+//! credentials here behind a handle; JS validates the metadata, says which
+//! ids survived, and [`backup_apply_secrets`] writes those straight to the
+//! keychain. That is the same property `rdp_open`'s keychain reference exists
+//! to protect, extended to the backup path. There used to be an exception - an
+//! older format handed decrypted credentials back to JS - and there no longer
+//! is one.
 //!
 //! Not solved here: the decrypted plaintext is ordinary `String`/`serde_json`
 //! data and is dropped unscrubbed, same as every other secret in the process
@@ -176,17 +172,6 @@ fn open_blob(blob: SealedBlob, passphrase: &str) -> Result<String, String> {
         .map_err(|_| "backup: decrypted data is not valid UTF-8".into())
 }
 
-/// Decrypt the credential block of a **v1** (`tervia-ssh-connections`) file.
-///
-/// The only remaining reason plaintext credentials cross into the webview: a v1
-/// file's sealed block is the credential map itself, and the importer on the JS
-/// side is what writes it to the keychain. v2 files never reach this - see
-/// [`backup_open_payload`].
-#[tauri::command]
-pub async fn backup_open(blob: SealedBlob, passphrase: String) -> Result<String, String> {
-    open_blob(blob, &passphrase)
-}
-
 /// Where one secret lives in the keychain, and where it belongs inside the
 /// sealed payload.
 ///
@@ -194,7 +179,7 @@ pub async fn backup_open(blob: SealedBlob, passphrase: String) -> Result<String,
 /// are the three levels of the path inside the payload JSON and are supplied by
 /// the caller verbatim, so this module holds no knowledge of either protocol's
 /// field names - `password` versus `privateKey`, `secrets` versus `rdpSecrets`
-/// are all decided in `src/modules/ssh/backupFile.ts`.
+/// are all decided in `src/modules/backup/file.ts`.
 #[derive(Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct SecretRef {
@@ -550,6 +535,56 @@ mod tests {
     }
 
     #[test]
+    fn split_withholds_all_three_secret_groups() {
+        // The property three groups buys over one: none of hostSecrets,
+        // identitySecrets or keySecrets plaintext reaches `rest` - the JSON
+        // that goes to the webview's validator - while every one of them is
+        // still reachable through `pick` afterwards.
+        let sealed_plain = merge_secrets(
+            r#"{"connections":[{"id":"c-1","host":"example.com"}]}"#,
+            &[
+                (
+                    secret_ref("hostSecrets", "c-1", "password"),
+                    "hunter2".into(),
+                ),
+                (
+                    secret_ref("identitySecrets", "i-1", "passphrase"),
+                    "id-pass".into(),
+                ),
+                (
+                    secret_ref("keySecrets", "k-1", "privateKey"),
+                    "KEYMATERIAL".into(),
+                ),
+            ],
+        )
+        .unwrap();
+        let (rest, taken) = split_groups(
+            &sealed_plain,
+            &[
+                "hostSecrets".into(),
+                "identitySecrets".into(),
+                "keySecrets".into(),
+            ],
+        )
+        .unwrap();
+        for needle in ["hunter2", "id-pass", "KEYMATERIAL"] {
+            assert!(!rest.contains(needle), "{needle} leaked into {rest}");
+        }
+        assert_eq!(
+            pick(&taken, &secret_ref("hostSecrets", "c-1", "password")),
+            Some("hunter2".to_string())
+        );
+        assert_eq!(
+            pick(&taken, &secret_ref("identitySecrets", "i-1", "passphrase")),
+            Some("id-pass".to_string())
+        );
+        assert_eq!(
+            pick(&taken, &secret_ref("keySecrets", "k-1", "privateKey")),
+            Some("KEYMATERIAL".to_string())
+        );
+    }
+
+    #[test]
     fn split_rejects_a_non_object_payload() {
         assert!(split_groups("[]", &["secrets".into()]).is_err());
     }
@@ -621,16 +656,32 @@ mod tests {
     }
 
     #[test]
-    fn a_v2_export_leaks_no_metadata() {
-        // Exit-gate item 5: nothing greppable in the file. The envelope JS
-        // writes around this blob carries only kind/version/exportedAt.
+    fn a_sealed_export_leaks_no_metadata() {
+        // A sealed blob leaks no metadata - not the hostname, the username, the
+        // port, or a keychain credential. This is all Rust ever sees of an
+        // export; the envelope wrapped around it is TypeScript's concern. The
+        // username sits inside the host's `credential` object rather than on
+        // the row itself, which is where the SSH inline-credentials type puts
+        // it. 54321 stands in for the port rather than the real default 22: a
+        // two-digit run turns up in base64 output by chance often enough to
+        // make that assertion flaky instead of strict.
         let plain = merge_secrets(
-            r#"{"connections":[{"id":"c-1","host":"vps.example.com","user":"root","port":22}],"rdpConnections":[]}"#,
-            &[(secret_ref("secrets", "c-1", "password"), "hunter2".into())],
+            r#"{"hosts":[{"id":"h-1","name":"vps","protocol":"ssh","host":"vps.example.com","port":54321,"credential":{"kind":"inline","hostId":"h-1","user":"root","authMode":"password","hasPassword":true,"hasPrivateKey":false,"hasKeyPassphrase":false}}],"groups":[],"identities":[],"keys":[],"rules":[]}"#,
+            &[(secret_ref("hostSecrets", "h-1", "password"), "hunter2".into())],
         )
         .unwrap();
+        // Negative assertions below are free to pass if a needle is simply
+        // absent from the fixture, so a dropped field would read as coverage
+        // instead of a hole. This confirms every needle is actually present
+        // before the sealing loop gets to claim it hid them.
+        for needle in ["vps.example.com", "root", "hunter2", "54321"] {
+            assert!(
+                plain.contains(needle),
+                "{needle} is missing from the fixture"
+            );
+        }
         let blob = seal(&plain, "pw");
-        for needle in ["vps.example.com", "root", "hunter2"] {
+        for needle in ["vps.example.com", "root", "hunter2", "54321"] {
             assert!(
                 !blob.ciphertext.contains(needle),
                 "{needle} is readable in the sealed blob"

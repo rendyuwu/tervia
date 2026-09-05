@@ -1,7 +1,6 @@
 import { basename } from "@/lib/path";
-import { findLeaf, type PaneLeaf } from "@/modules/terminal/lib/panes";
-import { type SshConnection } from "@/modules/ssh/connections";
-import { type RdpConnection } from "@/modules/rdp/connections";
+import { findLeaf, PAGE_LABELS, type PaneLeaf } from "@/modules/terminal/lib/panes";
+import { type Host } from "@/modules/hosts/types";
 import { type PaneTab, type Tab } from "./tabTypes";
 
 /**
@@ -27,13 +26,12 @@ export function leafKindTag(leaf: PaneLeaf): string | null {
  */
 export function leafRenameSeed(
   leaf: PaneLeaf,
-  sshHosts?: Map<string, SshConnection>,
+  hosts?: Map<string, Host>,
   fallbackCwd?: string,
-  rdpHosts?: Map<string, RdpConnection>,
 ): string {
   if (leaf.customTitle) return leaf.customTitle;
   const tag = leafKindTag(leaf);
-  const label = leafLabel(leaf, sshHosts, fallbackCwd, rdpHosts);
+  const label = leafLabel(leaf, hosts, fallbackCwd);
   if (!tag) return label;
   // A leaf whose connection was deleted reads as a bare "ssh": that is all tag
   // and no name, so seed it empty rather than handing back the tag to be
@@ -49,19 +47,12 @@ export function leafRenameSeed(
  * list. They all have to agree, or a renamed tab keeps showing its old folder
  * name somewhere.
  *
- * `sshHosts` resolves an SSH leaf to `ssh:<name>`; a caller with no connection
- * map (`tab.title`, which is recomputed before the map is even loaded) gets the
- * bare "ssh" interim label. `fallbackCwd` is the owning tab's cwd, used only
- * when the leaf itself carries none. `rdpHosts` does the same job for an RDP
- * leaf, and is last because it is the newest: a caller that has no use for it
- * (nothing but RDP leaves reads it) can keep the three-argument call.
+ * `hosts` resolves an SSH or RDP leaf to `ssh:<name>` / `rdp:<name>`; a caller
+ * with no host map (`tab.title`, which is recomputed before the map is even
+ * loaded) gets the bare "ssh"/"rdp" interim label. `fallbackCwd` is the owning
+ * tab's cwd, used only when the leaf itself carries none.
  */
-export function leafLabel(
-  leaf: PaneLeaf,
-  sshHosts?: Map<string, SshConnection>,
-  fallbackCwd?: string,
-  rdpHosts?: Map<string, RdpConnection>,
-): string {
+export function leafLabel(leaf: PaneLeaf, hosts?: Map<string, Host>, fallbackCwd?: string): string {
   // A user-set name wins over every derived one. Renaming exists precisely
   // because "the folder this opened in" is often not what the tab should say,
   // so nothing below may override it - except the KIND tag, which is not a
@@ -72,20 +63,21 @@ export function leafLabel(
   }
   if (leaf.leafKind === "editor") return basename(leaf.path);
   if (leaf.leafKind === "board") return "Board";
+  if (leaf.leafKind === "page") return PAGE_LABELS[leaf.page];
   // RDP leaves: `rdp:<name>` off the saved connection, falling back to its
   // host, then to a bare "rdp" for a deleted connection or a caller with no
   // map. Exactly the SSH ladder, because the failure modes are the same.
   if (leaf.leafKind === "rdp") {
-    const conn = rdpHosts?.get(leaf.rdpConnectionId);
-    if (!conn) return "rdp";
-    return `rdp:${conn.name.trim() || conn.host}`;
+    const host = hosts?.get(leaf.rdpConnectionId);
+    if (!host) return "rdp";
+    return `rdp:${host.name.trim() || host.host}`;
   }
   // SSH leaves: show "ssh:<name>" when the saved connection has a name, else
   // fall back to the host/IP. Bare "ssh" if the connection was deleted.
   if (leaf.sshConnectionId) {
-    const conn = sshHosts?.get(leaf.sshConnectionId);
-    if (!conn) return "ssh";
-    return `ssh:${conn.name.trim() || conn.host}`;
+    const host = hosts?.get(leaf.sshConnectionId);
+    if (!host) return "ssh";
+    return `ssh:${host.name.trim() || host.host}`;
   }
   for (const cwd of [leaf.cwd, fallbackCwd]) {
     const b = cwd ? basename(cwd) : "";
@@ -113,8 +105,8 @@ export function syncPaneMirror(tab: PaneTab): PaneTab {
     next.dirty = leaf.dirty;
     next.preview = leaf.preview;
   } else {
-    // RDP or board leaf: neither has a cwd or a file, so the top-level mirrors
-    // are cleared rather than left holding the previous active leaf's.
+    // RDP, board, or page leaf: none has a cwd or a file, so the top-level
+    // mirrors are cleared rather than left holding the previous active leaf's.
     delete next.cwd;
     delete next.path;
     delete next.dirty;
@@ -132,15 +124,18 @@ export function activeLeaf(tab: Tab): PaneLeaf | null {
 export function activeLeafKind(tab: Tab): "terminal" | "editor" | "rdp" | null {
   const leaf = activeLeaf(tab);
   if (!leaf) return null;
-  // Board leaves aren't one of the kinds the chrome derivations branch on;
-  // report null so callers fall to their defaults instead of every one having to
-  // special-case them.
+  // Board and page leaves aren't one of the kinds the chrome derivations
+  // branch on; report null so callers fall to their defaults instead of every
+  // one having to special-case them.
   //
-  // RDP is reported, unlike board, for one reason: a focused RDP pane owns the
-  // keyboard the way a focused terminal does, and App's shortcut `isDisabled`
-  // gate needs to know that or every bare-Ctrl chord would fire an app action
-  // instead of reaching the remote desktop.
-  return leaf.leafKind === "board" ? null : leaf.leafKind;
+  // RDP is still reported rather than folded into that null, but no caller
+  // branches on it today: the one that did was App's shortcut `isDisabled`
+  // gate, and 54832a7 repointed that at `ownsRawKeyboard`, which asks the DOM
+  // where the caret is instead of asking which leaf is active in the tab. What
+  // is left is a truthful report of the active leaf's kind - `=== "terminal"`
+  // and `=== "editor"` callers read it exactly as they would a null - so
+  // narrowing the type would only cost the next consumer the distinction.
+  return leaf.leafKind === "board" || leaf.leafKind === "page" ? null : leaf.leafKind;
 }
 
 export function isTerminalLikeTab(tab: Tab): boolean {

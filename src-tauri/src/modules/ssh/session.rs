@@ -55,7 +55,7 @@ const HOST_KEY_ALGOS: &[Algorithm] = &[
     },
 ];
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, Debug)]
 // `rename_all` only camelCases the variant TAGS (e.g. `hostKeyPrompt`); it does
 // NOT touch the fields inside struct variants - that needs `rename_all_fields`.
 // Without it, `HostKeyPrompt::prompt_id` went over the IPC channel as snake_case
@@ -99,9 +99,46 @@ pub enum SshEvent {
     /// Base64-encoded stderr chunk. Rare for an interactive shell but
     /// possible with server-side `2>&1` suppression.
     Stderr { data: String },
-    /// Remote process exited with this status. Mirrors PtyEvent::Exit so the
-    /// frontend can reuse its handler shape.
+    /// The remote reported its own exit status (`ChannelMsg::ExitStatus`)
+    /// before the channel closed - a deliberate, in-band termination. `code`
+    /// 0 is e.g. the user typing `exit`; nonzero is the process's own
+    /// failure code. Mirrors `PtyEvent::Exit` so the frontend can reuse its
+    /// handler shape. Distinct from `Disconnected` below: the frontend must
+    /// NOT treat this as a dropped connection (no reconnect).
     Exit { code: i32 },
+    /// The remote process was killed by a signal (`ChannelMsg::ExitSignal`)
+    /// before the channel closed. Also a deliberate, in-band termination -
+    /// the process died for a reason on the REMOTE side (OOM killer, `kill`,
+    /// a crash), not because the transport dropped - so this is likewise not
+    /// reconnect-eligible. There is no numeric exit code in this message
+    /// (RFC 4254 6.10: a channel gets exactly one of exit-status or
+    /// exit-signal), so the frontend names the signal instead.
+    Signal { name: String, core_dumped: bool },
+    /// The channel ended - `Eof`/`Close`, or the read loop's `wait()`
+    /// returning `None` for a peer that hung up mid-read - without EITHER
+    /// `Exit` or `Signal` ever being reported first. This is the genuinely
+    /// ambiguous case: the remote may have exited cleanly (a fast `exit` can
+    /// race Eof/Close ahead of exit-status on some servers - dropbear
+    /// always, OpenSSH whenever the child's stdout closes before it is
+    /// reaped; see the ordering note on `exec_capture`) or the transport may
+    /// really have died. Only this variant is reconnect-eligible on the
+    /// frontend.
+    Disconnected,
+}
+
+/// Decide the one terminal `SshEvent` for a channel from whatever exit
+/// status / signal the pump observed before the channel actually ended
+/// (Close, or `wait()` returning `None`). Kept as a free function so the
+/// three-way decision is unit-testable without a live channel - see
+/// `exit_classification_tests` below.
+fn build_exit_event(exit_status: Option<i32>, exit_signal: Option<(String, bool)>) -> SshEvent {
+    if let Some((name, core_dumped)) = exit_signal {
+        SshEvent::Signal { name, core_dumped }
+    } else if let Some(code) = exit_status {
+        SshEvent::Exit { code }
+    } else {
+        SshEvent::Disconnected
+    }
 }
 
 /// How long `check_server_key` waits for the user's first-connect decision
@@ -268,6 +305,27 @@ pub struct SshSession {
     /// context (SSH has no daemon-side scrollback). Capped.
     mirror_ring: Arc<std::sync::Mutex<VecDeque<u8>>>,
     alive: Arc<AtomicBool>,
+}
+
+/// Abort ONE forward's accept loop, freeing its local port, and report whether
+/// there was one to abort.
+///
+/// A free function over the map rather than a method, so it is testable without
+/// an `SshSession`: the only two constructors (`:1183`, `:1323`) are the tail of
+/// a live handshake, and the only existing forward test is `#[ignore]`. This is
+/// the whole decision `ssh_forward_close` makes, so this is where it is pinned.
+///
+/// `false` is not an error: the forward may have gone with a reconnect, or a
+/// teardown may be firing twice. Idempotent on purpose - a caller must be able
+/// to Stop without tracking whether Start finished.
+async fn abort_forward(forwards: &Mutex<HashMap<u16, JoinHandle<()>>>, bound_port: u16) -> bool {
+    match forwards.lock().await.remove(&bound_port) {
+        Some(task) => {
+            task.abort();
+            true
+        }
+        None => false,
+    }
 }
 
 impl SshSession {
@@ -437,6 +495,12 @@ impl SshSession {
         self.forwards.lock().await.insert(bound, task);
         log::info!("ssh -L {label}");
         Ok(bound)
+    }
+
+    /// Stop the one `ssh -L` listener bound to `bound_port`, leaving the session
+    /// and every other forward up. `false` means there was no such forward.
+    pub async fn close_forward(&self, bound_port: u16) -> bool {
+        abort_forward(&self.forwards, bound_port).await
     }
 
     /// Return the cached SFTP session, opening a fresh subsystem channel on
@@ -908,12 +972,37 @@ async fn authenticate_hop(
     }
 }
 
+/// Whether a hop has anything to authenticate WITH. One predicate for the target
+/// and for every jump hop: the two used to be separate inline expressions, and
+/// they must agree by construction, because the frontend mirrors this exact test
+/// before it dials (`canAuthenticate` in
+/// src/modules/terminal/lib/ssh-exit-decision.ts) so that a host saved with no
+/// credential is reported as a configuration error rather than fed to the
+/// reconnect ladder as if the server had hung up.
+///
+/// `is_none`, not emptiness: an empty password is a credential the user chose to
+/// send, and the server - not this guard - decides what to make of it.
+fn has_credential(use_agent: bool, password: Option<&str>, private_key: Option<&str>) -> bool {
+    use_agent || password.is_some() || private_key.is_some()
+}
+
+/// The target-side wording of that guard. Named because the frontend's
+/// pre-flight check reproduces it verbatim (`NO_CREDENTIALS_MESSAGE` in
+/// src/modules/terminal/lib/ssh-session.ts): a user must read the same sentence
+/// whether they arrived through a terminal leaf, the forward tunnel, or the host
+/// editor's Test probe, only the last two of which reach this guard now.
+const NO_CREDENTIALS_ERROR: &str = "ssh: no credentials: set use_agent, password, or private_key";
+
 pub async fn connect(
     input: SshOpenInput,
     on_event: IpcChannel<SshEvent>,
 ) -> Result<Arc<SshSession>, String> {
-    if !input.use_agent && input.password.is_none() && input.private_key.is_none() {
-        return Err("ssh: no credentials: set use_agent, password, or private_key".into());
+    if !has_credential(
+        input.use_agent,
+        input.password.as_deref(),
+        input.private_key.as_deref(),
+    ) {
+        return Err(NO_CREDENTIALS_ERROR.into());
     }
 
     // --- Jump chain (ProxyJump / Termius-style "host chaining") -------------
@@ -926,7 +1015,11 @@ pub async fn connect(
     // riding on it (including the target), so they must outlive the session.
     let mut jump_handles: Vec<Handle<HostKeyVerifier>> = Vec::new();
     for hop in &input.jumps {
-        if !hop.use_agent && hop.password.is_none() && hop.private_key.is_none() {
+        if !has_credential(
+            hop.use_agent,
+            hop.password.as_deref(),
+            hop.private_key.as_deref(),
+        ) {
             return Err(format!(
                 "ssh: jump host {} has no ssh-agent, password or private key configured",
                 hop.host
@@ -1154,6 +1247,18 @@ pub async fn connect(
                 sinks.retain(|ch| ch.send(ev.clone()).is_ok());
             }
         };
+        // Exit status / signal can legitimately arrive AFTER Eof (dropbear
+        // always sends Eof first; OpenSSH does too whenever the child's
+        // stdout closes before it is reaped - same ordering `exec_capture`
+        // above documents). So neither ExitStatus nor ExitSignal ends the
+        // loop by itself: both are just recorded here, and the terminal
+        // SshEvent is decided once the channel actually ends (Close, or
+        // wait() returning None). Ending on Eof the way this used to would
+        // make a server with that ordering report every exit as the
+        // ambiguous `Disconnected` shape, since the real exit-status/-signal
+        // would never be read.
+        let mut exit_status: Option<i32> = None;
+        let mut exit_signal: Option<(String, bool)> = None;
         while let Some(msg) = read_half.wait().await {
             match msg {
                 ChannelMsg::Data { ref data } => {
@@ -1176,16 +1281,26 @@ pub async fn connect(
                     let _ = on_event_pump.send(ev.clone());
                     fan(&ev);
                 }
-                ChannelMsg::ExitStatus { exit_status } => {
-                    let ev = SshEvent::Exit {
-                        code: exit_status as i32,
-                    };
-                    let _ = on_event_pump.send(ev.clone());
-                    fan(&ev);
+                ChannelMsg::ExitStatus {
+                    exit_status: status,
+                } => {
+                    exit_status = Some(status as i32);
                 }
-                ChannelMsg::Eof | ChannelMsg::Close => {
+                ChannelMsg::ExitSignal {
+                    signal_name,
+                    core_dumped,
+                    ..
+                } => {
+                    exit_signal = Some((format!("{signal_name:?}"), core_dumped));
+                }
+                ChannelMsg::Eof => {
+                    // Deliberately not a break - see the ordering note above.
+                    // Keep draining for Close (and a possibly-delayed
+                    // exit-status/exit-signal).
+                }
+                ChannelMsg::Close => {
                     pump_alive.store(false, Ordering::Release);
-                    let ev = SshEvent::Exit { code: 0 };
+                    let ev = build_exit_event(exit_status, exit_signal);
                     let _ = on_event_pump.send(ev.clone());
                     fan(&ev);
                     return;
@@ -1193,9 +1308,9 @@ pub async fn connect(
                 _ => {}
             }
         }
-        // wait() returned None; peer closed without sending exit-status.
+        // wait() returned None: peer closed without ever sending Close.
         pump_alive.store(false, Ordering::Release);
-        let ev = SshEvent::Exit { code: 0 };
+        let ev = build_exit_event(exit_status, exit_signal);
         let _ = on_event_pump.send(ev.clone());
         fan(&ev);
     });
@@ -1272,6 +1387,237 @@ async fn try_keyboard_interactive(
         }
     }
     Err("ssh: keyboard-interactive: too many prompt rounds".into())
+}
+
+/// The pump's three exit shapes (reported status, reported signal,
+/// unreported/ambiguous) must stay distinguishable at the event level - a
+/// test that only exercised the happy `ExitStatus` case would not catch a
+/// regression that collapsed the other two back into each other or back
+/// into `Exit`. No network, no tokio runtime: `build_exit_event` is a plain
+/// function of the two `Option`s the pump accumulates.
+#[cfg(test)]
+mod exit_classification_tests {
+    use super::*;
+
+    #[test]
+    fn reported_exit_status_alone_is_exit() {
+        let ev = build_exit_event(Some(0), None);
+        assert!(matches!(ev, SshEvent::Exit { code: 0 }), "{ev:?}");
+
+        // Nonzero must survive too - collapsing every reported status to 0
+        // would make a failing remote command indistinguishable from a
+        // clean `exit`.
+        let ev = build_exit_event(Some(17), None);
+        assert!(matches!(ev, SshEvent::Exit { code: 17 }), "{ev:?}");
+    }
+
+    #[test]
+    fn reported_signal_alone_is_signal_not_exit() {
+        let ev = build_exit_event(None, Some(("KILL".to_string(), false)));
+        assert!(
+            matches!(ev, SshEvent::Signal { ref name, core_dumped: false } if name == "KILL"),
+            "{ev:?}"
+        );
+    }
+
+    #[test]
+    fn neither_reported_is_the_ambiguous_disconnected_shape() {
+        // This is the exact case the bug was: Eof/Close/wait()->None with no
+        // exit-status and no exit-signal ever having arrived. It used to be
+        // indistinguishable from a reported `exit 0`.
+        let ev = build_exit_event(None, None);
+        assert!(matches!(ev, SshEvent::Disconnected), "{ev:?}");
+    }
+
+    /// RFC 4254 6.10 says a channel gets exactly one of exit-status /
+    /// exit-signal, so this combination should not occur on the wire - but
+    /// the function must still resolve it deterministically rather than
+    /// panicking or picking arbitrarily. Signal wins: it is the more
+    /// specific, more surprising fact for the user to see.
+    #[test]
+    fn both_reported_prefers_signal_deterministically() {
+        let ev = build_exit_event(Some(0), Some(("TERM".to_string(), true)));
+        assert!(
+            matches!(ev, SshEvent::Signal { ref name, core_dumped: true } if name == "TERM"),
+            "{ev:?}"
+        );
+    }
+}
+
+/// The pre-dial credential guard. Its exact shape is load-bearing twice over -
+/// the target and every jump hop are judged by it here, and the frontend
+/// reproduces it before dialling so that "this host has nothing to authenticate
+/// with" is classified as a configuration error instead of entering the
+/// reconnect ladder. It has to run its own copy rather than wait for this one
+/// to answer, because the discriminant on that side is WHOSE fact ended the
+/// attempt, not how far the attempt got: anything the backend reports comes
+/// back as a plain error string, which `classifySshConnectFailure` files as
+/// transport by construction, and transport is the reconnect-eligible
+/// category. A guard that quietly accepted one of the empty shapes would send
+/// the frontend and the backend down different paths for the same input.
+#[cfg(test)]
+mod credential_guard_tests {
+    use super::*;
+
+    #[test]
+    fn each_credential_alone_is_enough() {
+        assert!(has_credential(true, None, None), "ssh-agent alone");
+        assert!(has_credential(false, Some("pw"), None), "password alone");
+        assert!(
+            has_credential(false, None, Some("KEY")),
+            "private key alone"
+        );
+    }
+
+    #[test]
+    fn nothing_configured_is_refused() {
+        // Exactly the state this guard exists for: a saved host with no
+        // credential of any kind. Saving one is legal: a blank password field
+        // stores the host and lists it with a missing-secret warning
+        // (`passwordHelp` in src/modules/hosts/editor/SshCredentialSection.tsx),
+        // so refusing the dial is this guard's job, not the save path's.
+        assert!(!has_credential(false, None, None));
+    }
+
+    #[test]
+    fn an_empty_secret_still_counts_as_a_credential() {
+        // Deliberate: an empty password is something to SEND, and the server
+        // rejecting it is a different (and reconnect-relevant) outcome from
+        // there being nothing to send. The frontend's mirror tests presence the
+        // same way, so both sides agree on this input.
+        assert!(has_credential(false, Some(""), None));
+        assert!(has_credential(false, None, Some("")));
+    }
+
+    #[test]
+    fn the_target_message_is_the_one_the_frontend_mirrors() {
+        // src/modules/terminal/lib/ssh-session.ts's NO_CREDENTIALS_MESSAGE is
+        // this string. Reworded on one side only, the two callers of the same
+        // guard start telling the user different things about the same host.
+        assert_eq!(
+            NO_CREDENTIALS_ERROR,
+            "ssh: no credentials: set use_agent, password, or private_key"
+        );
+    }
+}
+
+/// `abort_forward` is the whole decision `ssh_forward_close` makes: which entry
+/// leaves the map, whether its accept loop is actually aborted, and what a
+/// second Stop on the same port reports. Tested here over a bare map because an
+/// `SshSession` cannot be built without a live handshake - a test that needed
+/// one would have to be `#[ignore]`d like `forwards_a_local_port` below, and
+/// would give CI nothing.
+#[cfg(test)]
+mod forward_abort_tests {
+    use super::*;
+
+    /// Spawn an accept loop that OWNS the listener, the way `open_forward`'s
+    /// task does: the local port stays bound for exactly as long as the task
+    /// lives, so the port is a readable proxy for "is the forward still up".
+    async fn bound_accept_loop() -> (u16, JoinHandle<()>) {
+        // 0 = ephemeral, so a busy dev machine can't fail the test on a port
+        // collision that has nothing to do with forwarding.
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind an ephemeral loopback port");
+        let port = listener.local_addr().expect("read the bound port").port();
+        let task = tokio::spawn(async move {
+            loop {
+                if listener.accept().await.is_err() {
+                    return;
+                }
+            }
+        });
+        (port, task)
+    }
+
+    /// Poll `bind` rather than testing it once: `abort()` only MARKS the task,
+    /// and the listener is not dropped until the runtime next polls it, so a
+    /// single immediate bind would flake. Same 20 x 50ms shape as the live
+    /// `forwards_a_local_port`.
+    async fn port_rebinds_within_a_second(port: u16) -> bool {
+        for _ in 0..20 {
+            if tokio::net::TcpListener::bind(("127.0.0.1", port))
+                .await
+                .is_ok()
+            {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        false
+    }
+
+    /// The port is in the assertion and not just the return value because
+    /// removing the handle from the map without aborting the task ALSO returns
+    /// `true`: Stop would report success while the port stayed unusable for the
+    /// rest of the session and no reconnect could re-open the forward.
+    #[tokio::test]
+    async fn abort_forward_frees_the_port() {
+        let (port, task) = bound_accept_loop().await;
+        let forwards = Mutex::new(HashMap::from([(port, task)]));
+
+        assert!(
+            abort_forward(&forwards, port).await,
+            "a registered forward must report that there was one to abort"
+        );
+        assert!(
+            port_rebinds_within_a_second(port).await,
+            "port {port} is still bound a second after its forward was closed"
+        );
+        assert!(
+            forwards.lock().await.is_empty(),
+            "the closed forward must leave the map, or the next open would collide with a dead entry"
+        );
+    }
+
+    /// Stop is idempotent on purpose: the frontend can fire it for a forward a
+    /// reconnect already took away, or twice on a double-click, and neither is
+    /// an error - `false` is the state the caller asked for, already reached.
+    #[tokio::test]
+    async fn abort_forward_reports_an_unknown_port() {
+        let empty: Mutex<HashMap<u16, JoinHandle<()>>> = Mutex::new(HashMap::new());
+        assert!(
+            !abort_forward(&empty, 4242).await,
+            "an unknown port must report that there was nothing to abort"
+        );
+
+        let (port, task) = bound_accept_loop().await;
+        let forwards = Mutex::new(HashMap::from([(port, task)]));
+        assert!(
+            abort_forward(&forwards, port).await,
+            "the first close of a live forward reports true"
+        );
+        assert!(
+            !abort_forward(&forwards, port).await,
+            "the second close of the same port must report false, not repeat true"
+        );
+    }
+
+    /// The defect this pins is `close_forward` being written the way `close`
+    /// is - `close` drains every forward deliberately, and one Stop button
+    /// taking the whole session's other tunnels down with it would look
+    /// identical from the caller's side.
+    #[tokio::test]
+    async fn abort_forward_leaves_the_other_forwards_alone() {
+        let (closed_port, closed_task) = bound_accept_loop().await;
+        let (kept_port, kept_task) = bound_accept_loop().await;
+        let forwards = Mutex::new(HashMap::from([
+            (closed_port, closed_task),
+            (kept_port, kept_task),
+        ]));
+
+        assert!(abort_forward(&forwards, closed_port).await);
+
+        let guard = forwards.lock().await;
+        let survivor = guard
+            .get(&kept_port)
+            .expect("the forward that was not closed must still be in the map");
+        assert!(
+            !survivor.is_finished(),
+            "closing one forward must not abort another forward's accept loop"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1364,12 +1710,36 @@ mod chain_tests {
         });
     }
 
+    /// Poll `bind` for up to a second: `abort()` only marks the accept loop, so
+    /// the listener is not dropped until the runtime next polls it and a single
+    /// immediate bind would flake.
+    async fn port_rebinds_within_a_second(port: u16) -> bool {
+        for _ in 0..20 {
+            if tokio::net::TcpListener::bind(("127.0.0.1", port))
+                .await
+                .is_ok()
+            {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        false
+    }
+
     /// Live end-to-end check for `ssh -L`: forward a local port to the remote's
     /// OWN sshd (the one service we know is listening over there), then read the
     /// version banner back through the tunnel. `SSH-` on the wire proves the
     /// listener bound, the `direct-tcpip` channel opened, and bytes copy in both
-    /// directions. Same env fixture as the chain test above; run with
-    /// `cargo test --release forward -- --ignored`.
+    /// directions. Then closes that ONE forward while the session stays up -
+    /// the Stop button's path - before checking the session teardown still frees
+    /// a port of its own.
+    ///
+    /// NOT CI COVERAGE. This is `#[ignore]`d and needs a live VPS plus the env
+    /// fixture above, so none of it runs on a pull request. `close_forward`'s CI
+    /// coverage is `forward_abort_tests` over `abort_forward`; what this test
+    /// adds is that the same decision holds against a real listener with a real
+    /// `direct-tcpip` channel on it. Same env fixture as the chain test above;
+    /// run with `cargo test --release forward -- --ignored`.
     #[test]
     #[ignore]
     fn forwards_a_local_port() {
@@ -1401,26 +1771,37 @@ mod chain_tests {
                 .expect("read through tunnel failed");
             assert_eq!(&banner, b"SSH-", "expected the remote sshd banner");
 
+            // Stop this one forward with the session still up. Everything after
+            // this point would also hold if `close_forward` had closed the
+            // session, so the re-open below is what separates the two.
+            assert!(
+                session.close_forward(local).await,
+                "closing a live forward must report there was one to close"
+            );
+            assert!(
+                port_rebinds_within_a_second(local).await,
+                "close_forward left port {local} bound"
+            );
+            assert!(
+                !session.close_forward(local).await,
+                "a second close of port {local} must report false, not repeat true"
+            );
+
+            // The session survived, so it can still open forwards - and the
+            // teardown check below now has a listener of its own to free
+            // instead of passing on a port close_forward already released.
+            let second = session
+                .open_forward(0, "127.0.0.1".into(), remote_port)
+                .await
+                .expect("re-open after close_forward failed - it closed the session");
+
             session.close().await;
             // close() must free the port, or every reconnect would fail to bind.
-            // `abort()` only marks the accept loop, so give the runtime a beat
-            // to actually drop the listener before calling it stuck.
-            let mut freed = false;
-            for _ in 0..20 {
-                if tokio::net::TcpListener::bind(("127.0.0.1", local))
-                    .await
-                    .is_ok()
-                {
-                    freed = true;
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
             assert!(
-                freed,
-                "forward listener still holds port {local} after close"
+                port_rebinds_within_a_second(second).await,
+                "forward listener still holds port {second} after close"
             );
-            eprintln!("[forward_tests] OK: localhost:{local} tunneled to the remote sshd");
+            eprintln!("[forward_tests] OK: localhost:{local} tunneled to the remote sshd, closed on its own, and localhost:{second} freed by teardown");
         });
     }
 

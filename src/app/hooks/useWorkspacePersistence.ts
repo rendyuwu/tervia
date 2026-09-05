@@ -1,10 +1,13 @@
 import { type Tab } from "@/modules/tabs";
 import {
+  defaultHostsTab,
   savedActiveTabIndex,
-  savedToTab,
   serializeTabs,
   useWorkspacesStore,
 } from "@/modules/workspaces";
+// Deep import, like `useWorkspaceSwitching`: `restoreWorkspaceEntry` lives beside
+// the serializer so the verify scripts can execute it (see its doc comment).
+import { restoreWorkspaceEntry } from "@/modules/workspaces/serialize";
 import { useEffect, useRef, type RefObject } from "react";
 
 type Workspace = ReturnType<typeof useWorkspacesStore.getState>["workspaces"][number];
@@ -60,28 +63,42 @@ export function useWorkspacePersistence({
   }, [wsHydrate]);
 
   // Once the workspace store hydrates, load the active workspace's saved
-  // tabs into live state. Skip if there are none (first run already covered
-  // by the default `useTabs` state).
+  // tabs into live state - or land on the Hosts page when
+  // there is nothing to restore (first run, an empty workspace, or a dev
+  // session that skips restore below). `useTabs`' own initial state is an
+  // empty tab list precisely so this effect is the only place that decides;
+  // it runs exactly once (`hydratedWorkspaceRef`), synchronously within the
+  // render where `wsHydrated` first turns true, so nothing downstream (the
+  // daemon-session adopt poll, gated on the same flag) can observe the gap
+  // between "hydrated" and "tabs decided".
   const hydratedWorkspaceRef = useRef(false);
   useEffect(() => {
     if (!wsHydrated || hydratedWorkspaceRef.current) return;
+    hydratedWorkspaceRef.current = true;
+
+    const openHostsFallback = () => {
+      const tab = defaultHostsTab(allocId);
+      replaceAllTabs([tab], tab.id);
+    };
+
     if (!restoreTabsOnHydrate) {
-      hydratedWorkspaceRef.current = true;
+      openHostsFallback();
       return;
     }
     const active = wsList.find((w) => w.id === wsActiveId);
-    if (!active) {
-      hydratedWorkspaceRef.current = true;
+    if (!active || active.tabs.length === 0) {
+      openHostsFallback();
       return;
     }
-    if (active.tabs.length === 0) {
-      hydratedWorkspaceRef.current = true;
-      return;
-    }
-    const liveTabs: Tab[] = active.tabs.map((s) => savedToTab(s, allocId));
-    const target = liveTabs[Math.min(active.activeTabIndex, liveTabs.length - 1)];
-    replaceAllTabs(liveTabs, target?.id ?? null);
-    hydratedWorkspaceRef.current = true;
+    // `restoreWorkspaceEntry` applies the rail-view migration (a page leaf this
+    // build will not restore as a tab is dropped, and so is a tab that empties
+    // out),
+    // falls back to Hosts if that leaves nothing, and re-bases the saved active
+    // index onto the tabs that survived - a dropped tab shifts every later one.
+    // The three callers used to each do the last part themselves, and two of
+    // them clamped the raw index instead.
+    const restored = restoreWorkspaceEntry(active, allocId);
+    replaceAllTabs(restored.tabs, restored.activeId);
   }, [wsHydrated, wsList, wsActiveId, replaceAllTabs, allocId]);
 
   // Auto-snapshot tabs whenever they change. Lightly debounced via the

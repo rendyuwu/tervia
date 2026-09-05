@@ -1,5 +1,6 @@
 import { LazyStore } from "@tauri-apps/plugin-store";
 import type { AiCliKind } from "@/modules/terminal/lib/aiCliStatus";
+import type { PageKind } from "@/modules/terminal/lib/panes";
 import { create } from "zustand";
 
 const STORE_PATH = "tervia-workspaces.json";
@@ -99,9 +100,9 @@ export type SavedBrowserLeaf = {
 export type SavedRdpLeaf = {
   kind: "leaf";
   leafKind: "rdp";
-  /** Id of a saved connection in `rdp/connections.ts`. A leaf whose connection
-   *  has since been deleted restores anyway and reports it in the pane, rather
-   *  than vanishing from the layout without explanation. */
+  /** Id of a saved host in `hosts/store.ts`. A leaf whose host has since been
+   *  deleted restores anyway and reports it in the pane, rather than vanishing
+   *  from the layout without explanation. */
   rdpConnectionId: string;
   /** Persisted from day one even though `"preset"` is the only value, so adding
    *  `"fit"` needs no migration of everyone's saved workspaces. */
@@ -122,12 +123,25 @@ export type SavedBoardLeaf = {
   customTitle?: string;
 };
 
+/**
+ * A rail-opened page (Hosts, Vault, Port Forwarding). Holds nothing but which
+ * page it is: like the Board, existence is the whole of its saved state.
+ */
+export type SavedPageLeaf = {
+  kind: "leaf";
+  leafKind: "page";
+  page: PageKind;
+  /** User-chosen tab name from the tab's right-click "Rename". */
+  customTitle?: string;
+};
+
 export type SavedPaneNode =
   | SavedTerminalLeaf
   | SavedEditorLeaf
   | SavedRdpLeaf
   | SavedBrowserLeaf
   | SavedBoardLeaf
+  | SavedPageLeaf
   | {
       kind: "split";
       dir: "row" | "col";

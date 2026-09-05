@@ -144,7 +144,7 @@ export function confirmRdpCert(promptId: string, accept: boolean): Promise<void>
 /**
  * Every live session the host process is holding.
  *
- * One of two wrappers here that nothing in this phase calls - the other being
+ * One of two wrappers here that nothing in `src/` calls - the other being
  * {@link rdpAttach}. Neither is speculative API: both commands are registered
  * in `lib.rs`, and a registered command with no typed wrapper is one that gets
  * invoked by hand with a mistyped argument the first time someone needs it.
@@ -173,7 +173,7 @@ export function rdpClose(id: number): Promise<void> {
  * keyframe first, then the same deltas the primary sink sees. Resolves with
  * whether the session is still alive.
  *
- * Uncalled in this phase - detach-to-window is out of scope. See
+ * Uncalled: there is no detach-to-window. See
  * {@link rdpListSessions} for why the wrapper exists anyway.
  */
 export function rdpAttach(id: number, handlers: RdpHandlers): Promise<boolean> {
@@ -280,7 +280,7 @@ function dispatch(message: RdpEvent | ArrayBuffer, handlers: RdpHandlers): void 
     // The remote cursor is composited into the framebuffer by the server, so
     // these carry nothing the canvas needs: the CSS cursor stays default and
     // a warp is already visible in the pixels. Drawing a second cursor from
-    // them would render two. Cursor-bitmap rendering is deferred as RDP-12.
+    // them would render two. No cursor bitmap is drawn from them at all.
     case "pointerDefault":
     case "pointerHidden":
     case "pointerPosition":

@@ -1,6 +1,5 @@
 import { openSettingsWindow } from "@/modules/settings/openSettingsWindow";
-import { type SshConnection } from "@/modules/ssh/connections";
-import { type RdpConnection } from "@/modules/rdp/connections";
+import { type RdpHost, type SshHost } from "@/modules/hosts/types";
 import { MAX_PANES_PER_TAB, type PaneTab } from "@/modules/tabs";
 import { leafIds } from "@/modules/terminal";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -37,8 +36,8 @@ export function useHeaderActions({
   handleHeaderCloseEntry: (tabId: number, leafId: number | null) => void;
   handleHeaderPinLeaf: (tabId: number, leafId: number) => void;
   handleHeaderOpenSettings: () => void;
-  handleHeaderConnectSsh: (conn: SshConnection) => void;
-  handleHeaderConnectRdp: (conn: RdpConnection) => void;
+  handleHeaderConnectSsh: (conn: SshHost) => void;
+  handleHeaderConnectRdp: (conn: RdpHost) => void;
   headerCanSplit: boolean;
 } {
   // The pane header's globe pill: hand the detected dev-server url to the OS
@@ -73,14 +72,14 @@ export function useHeaderActions({
   );
   const handleHeaderOpenSettings = useCallback(() => void openSettingsWindow(), []);
   const handleHeaderConnectSsh = useCallback(
-    (conn: SshConnection) => newSshTab(conn.id, conn.name),
+    (conn: SshHost) => newSshTab(conn.id, conn.name),
     [newSshTab],
   );
   // The name is only the interim tab title: `syncPaneMirror` recomputes it
   // through `leafLabel`, which resolves the connection to `rdp:<name>` and
   // keeps following it across a rename.
   const handleHeaderConnectRdp = useCallback(
-    (conn: RdpConnection) => newRdpTab(conn.id, conn.name),
+    (conn: RdpHost) => newRdpTab(conn.id, conn.name),
     [newRdpTab],
   );
   const headerCanSplit = useMemo(

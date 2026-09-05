@@ -4,9 +4,18 @@ import { AlertDialog as AlertDialogPrimitive } from "radix-ui";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { X } from "lucide-react";
+import { openModal } from "@/modules/shortcuts/lib/modalRegistry";
 
-function AlertDialog({ ...props }: React.ComponentProps<typeof AlertDialogPrimitive.Root>) {
-  return <AlertDialogPrimitive.Root data-slot="alert-dialog" {...props} />;
+function AlertDialog({ open, ...props }: React.ComponentProps<typeof AlertDialogPrimitive.Root>) {
+  // See the matching comment in components/ui/dialog.tsx - same
+  // registration, same reasoning (every AlertDialog in this codebase is
+  // controlled via `open`, confirmed by grep for AlertDialogTrigger).
+  React.useEffect(() => {
+    if (!open) return;
+    return openModal();
+  }, [open]);
+
+  return <AlertDialogPrimitive.Root data-slot="alert-dialog" open={open} {...props} />;
 }
 
 function AlertDialogTrigger({

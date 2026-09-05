@@ -9,6 +9,7 @@
  *
  * Where behaviors are set up (each is its own hook unless noted):
  *   - useWorkspaceRoot         - home / picked root + `tervia <path>` CLI targets
+ *   - useStoreRecoveryNotices  - toasts a store recovered from its `.bak`
  *   - useWorkspacePersistence  - hydrate + auto-snapshot workspaces
  *   - useQuitGuard             - pre-quit snapshot flush + busy-terminal prompt
  *   - useWorkspaceSwitching    - switch / create / close orchestration
@@ -24,15 +25,17 @@
 import { pathToFileUrl } from "@/lib/path";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { ResizableHandle, ResizablePanelGroup } from "@/components/ui/resizable";
-import { Toaster } from "@/components/ui/toast";
+import { toast, Toaster } from "@/components/ui/toast";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { type EditorPaneHandle } from "@/modules/editor";
 import { Header, type SearchInlineHandle } from "@/modules/header";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import { useSshRightPanelStore } from "@/modules/ssh/sshRightPanelStore";
 import {
+  focusTargetOf,
   isTerminalControlChord,
   isTerminalMetaChord,
+  ownsRawKeyboard,
   useGlobalShortcuts,
   type ShortcutHandlers,
 } from "@/modules/shortcuts";
@@ -53,7 +56,8 @@ import {
 } from "@/modules/terminal";
 import { useCliAgentsStore } from "@/modules/terminal/lib/cliAgents";
 import { ThemeProvider } from "@/modules/theme";
-import { type SshConnection } from "@/modules/ssh/connections";
+import { purgeLegacySecrets } from "@/modules/hosts/store";
+import { isRdpHost, isSshHost, type Host } from "@/modules/hosts/types";
 import { useWorkspacesStore } from "@/modules/workspaces";
 import type { SearchAddon } from "@xterm/addon-search";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -74,6 +78,7 @@ import { useWorkspaceRoot } from "./hooks/useWorkspaceRoot";
 import { useQuitGuard } from "./hooks/useQuitGuard";
 import { useWorkspacePersistence } from "./hooks/useWorkspacePersistence";
 import { useSessionDisposal } from "./hooks/useSessionDisposal";
+import { useStoreRecoveryNotices } from "./hooks/useStoreRecoveryNotices";
 import { useAdoptDaemonSessions } from "./hooks/useAdoptDaemonSessions";
 import { useActiveLeafSurface } from "./hooks/useActiveLeafSurface";
 import { useProjectUrl } from "./hooks/useProjectUrl";
@@ -84,6 +89,7 @@ import { AppDialogs } from "./components/AppDialogs";
 import { AppSidebar } from "./components/AppSidebar";
 import { WorkspaceArea } from "./components/WorkspaceArea";
 import { AppRightSlot } from "./components/AppRightSlot";
+import { ActivityRail } from "./components/ActivityRail";
 
 export default function App() {
   const isDevSession = import.meta.env.DEV;
@@ -91,6 +97,8 @@ export default function App() {
     tabs,
     activeId,
     setActiveId,
+    railView,
+    toggleRailView,
     newTab,
     newPaneGroupTab,
     newSshTab,
@@ -98,6 +106,7 @@ export default function App() {
     openFileTab,
     pinTab,
     openBoardTab,
+    openPageTab,
     closeTab,
     selectByIndex,
     setLeafCwd,
@@ -121,6 +130,16 @@ export default function App() {
     renameLeaf,
     setLeafTerminalTheme,
   } = useTabs();
+
+  // `railView` (Vault and Port Forwarding are views over the tab area, not
+  // tabs) comes from `useTabs` rather than being state here, because it and
+  // `activeId` carry an invariant between them: a tab cannot become active while
+  // a view is still covering it. As App state it was the caller's job to clear,
+  // and nine of the eleven routes into the tab area did not - so Ctrl+1,
+  // Ctrl+Tab, a file click and a workspace switch all looked like they had done
+  // nothing. See `tabs/lib/tabView.ts`. Nothing below wraps a tab action to
+  // clear it any more; `openPageTab`, `handleHeaderSelectEntry`, `focusPane` and
+  // the rest do it by construction.
 
   // Drop a file from the OS file manager onto a terminal pane to paste its
   // shell-quoted path. Tauri captures OS drops globally, so one listener
@@ -170,21 +189,6 @@ export default function App() {
   const searchInlineRef = useRef<SearchInlineHandle | null>(null);
 
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
-
-  // The header's RDP connection list. Owned here rather than inside `RdpMenu`
-  // because it is the connection PICKER, and the command palette's
-  // "Connect RDP..." has to raise it - a palette command cannot click a
-  // dropdown trigger.
-  const [rdpMenuOpen, setRdpMenuOpen] = useState(false);
-
-  const [editingSshConn, setEditingSshConn] = useState<SshConnection | null>(null);
-  const [sshEditorOpen, setSshEditorOpen] = useState(false);
-  // Latches the first time each lazy dialog opens. Stays true; see the
-  // dialog mount sites for why.
-  const [sshEditorMounted, setSshEditorMounted] = useState(false);
-  useEffect(() => {
-    if (sshEditorOpen) setSshEditorMounted(true);
-  }, [sshEditorOpen]);
 
   // `+` -> Agent...: the CLI-agent picker. Mount-once like the editor dialog so
   // the chunk loads on first open and Radix's exit animation still plays.
@@ -281,6 +285,47 @@ export default function App() {
     void hydrateCliAgents();
   }, [hydrateCliAgents]);
 
+  // -------- one-shot legacy secret purge --------
+  // The two old connection stores are gone, and with them the only code that
+  // could name `tervia-ssh :: <id>::*` or `tervia-rdp :: <id>::password`. There
+  // is no `secrets_list` command, so whatever they left in the macOS keychain,
+  // the Windows `secrets.bin` or the Linux mode-0600 JSON would otherwise be
+  // unreachable forever - private keys included. This clears it once and
+  // remembers that it did.
+  //
+  // Fired and forgotten deliberately: it runs after paint, gates nothing, and
+  // never rejects. A partial pass leaves the marker unwritten so the next launch
+  // tries again - and it is said out loud rather than swallowed, because the
+  // accounts it could not clear are exactly the ones nothing can name again.
+  useEffect(() => {
+    void purgeLegacySecrets()
+      .then((result) => {
+        if (result.failed.length > 0) {
+          const [first, ...rest] = result.failed;
+          const more = rest.length > 0 ? ` (+${rest.length} more)` : "";
+          toast(`Could not finish clearing old saved credentials: ${first}${more}`, {
+            variant: "error",
+          });
+        } else if (result.note) {
+          // Cleared, but the marker did not stick. Harmless - every delete is
+          // idempotent - and worth saying, since it repeats on every launch.
+          toast(result.note, { variant: "warning" });
+        }
+      })
+      .catch((e: unknown) => {
+        toast(
+          `Could not clear old saved credentials: ${e instanceof Error ? e.message : String(e)}`,
+          { variant: "error" },
+        );
+      });
+  }, []);
+
+  // -------- crash-recovery notices --------
+  // Runs each store's recovery pass at startup and says out loud when one came
+  // back from its `.bak`. Without this the recovery happened silently: the
+  // notice was produced and nothing ever took it.
+  useStoreRecoveryNotices();
+
   // -------- workspaces wiring --------
   const wsHydrate = useWorkspacesStore((s) => s.hydrate);
   const wsHydrated = useWorkspacesStore((s) => s.hydrated);
@@ -321,7 +366,6 @@ export default function App() {
     wsCreate,
     wsRemove,
     allocId,
-    home,
     replaceAllTabs,
     liveTabsByWorkspace,
     skipNextSnapshotRef,
@@ -554,20 +598,21 @@ export default function App() {
         requestCloseLeaf,
         setNewEditorOpen,
         setAgentDialogOpen,
-        setRdpMenuOpen,
+        openPageTab,
         searchInlineRef,
         editorRefs,
         terminalRefs,
-        tabsRef,
         activeId,
         activeLeafIdInTab,
         activeLeafKindCurrent,
+        railView,
         commandPaletteOpen: commandPaletteHandler,
       }),
     [
       activeId,
       activeLeafIdInTab,
       activeLeafKindCurrent,
+      railView,
       requestCloseLeaf,
       cycleTab,
       handleCloseTabOrPane,
@@ -577,11 +622,12 @@ export default function App() {
       focusNextPaneInTab,
       toggleSidebar,
       commandPaletteHandler,
+      openPageTab,
     ],
   );
 
   // The options object is read fresh each keydown (see useGlobalShortcuts), so
-  // closing over activeLeafKindCurrent without a dep array is fine.
+  // closing over `railView` without a dep array is fine.
   useGlobalShortcuts(shortcutHandlers, {
     isDisabled: (id, e) =>
       // A focused terminal owns every bare-Ctrl control code (Ctrl+E, Ctrl+W,
@@ -600,8 +646,25 @@ export default function App() {
       // Windows rather than close the pane showing it. (Ctrl+Alt+Del is the one
       // chord no gate can deliver - the OS eats it - which is why the pane
       // header has a button for it.)
+      //
+      // "FOCUSED" IS ASKED OF THE DOM. This used to read
+      // `activeLeafKindCurrent === "terminal" || === "rdp"` - which is where
+      // the caret is *in the tab*, not where it is on screen - and its own
+      // comment justified it with "a FOCUSED terminal". The two differ exactly
+      // when the surface is not holding the keys: click the tab strip and
+      // Ctrl+W stayed suppressed, so it closed no tab anywhere; open a rail
+      // view and Ctrl+T / Ctrl+] / Ctrl+[ were eaten by a terminal that was
+      // invisible and pointer-events-none. `ownsRawKeyboard` asks the keydown's
+      // own target instead - see `shortcuts/lib/keyboardOwner.ts`.
+      //
+      // `railView === null` on top of that, rather than trusting the browser to
+      // blur what it hides: a covered surface does not own the keyboard by
+      // definition, and making that a state question rather than a focus
+      // question is what keeps the rail-view case from depending on whether
+      // Chromium happens to move focus off a `visibility: hidden` subtree.
       id !== "pane.splitRight" &&
-      (activeLeafKindCurrent === "terminal" || activeLeafKindCurrent === "rdp") &&
+      railView === null &&
+      ownsRawKeyboard(focusTargetOf(e)) &&
       (isTerminalControlChord(e) || isTerminalMetaChord(e)),
   });
 
@@ -644,6 +707,24 @@ export default function App() {
     newRdpTab,
   });
 
+  // Single dispatcher for a saved host of either protocol, routed by
+  // `host.protocol` rather than a narrowing cast: a merged host list can
+  // return either arm for a given id, and `isSshHost`/`isRdpHost` are what
+  // keep a stray RDP row from being read as an SSH one or vice versa. Backs
+  // BOTH the header quick-connect and the page-leaf body (via PaneTreeView's
+  // context) - one path, not two copies of the same routing.
+  const handleConnectHost = useCallback(
+    (host: Host) => {
+      if (isSshHost(host)) handleHeaderConnectSsh(host);
+      else if (isRdpHost(host)) handleHeaderConnectRdp(host);
+    },
+    [handleHeaderConnectSsh, handleHeaderConnectRdp],
+  );
+
+  const handleOpenHostsPage = useCallback(() => {
+    openPageTab("hosts");
+  }, [openPageTab]);
+
   // Activate a tab and focus a specific leaf inside it. Backs the Workspaces
   // panel's terminal list (jump straight to a running terminal).
   const focusLeafInTab = useCallback(
@@ -674,10 +755,8 @@ export default function App() {
             onSplit={splitActivePaneInActiveTab}
             canSplit={headerCanSplit}
             onOpenSettings={handleHeaderOpenSettings}
-            onConnectSsh={handleHeaderConnectSsh}
-            onConnectRdp={handleHeaderConnectRdp}
-            rdpMenuOpen={rdpMenuOpen}
-            onRdpMenuOpenChange={setRdpMenuOpen}
+            onConnectHost={handleConnectHost}
+            onOpenHostsPage={handleOpenHostsPage}
             onMoveLeafToGroup={moveLeafToGroup}
             onMoveLeafToNewTab={moveLeafToNewTab}
             onRotateLeafSplit={rotateLeafSplit}
@@ -687,12 +766,21 @@ export default function App() {
             searchRef={searchInlineRef}
           />
 
-          {/* Bento tray: the deep `bg-sidebar` well holds the three body columns
-              as separate 1px-bordered cards, inset from the header/status bar and
-              gapped from each other (`p-1.5` + `gap-1.5`). Under glass the gaps
-              reveal the wallpaper, matching the floating-panels look. */}
-          <main className="bg-sidebar flex min-h-0 flex-1 flex-col">
-            <ResizablePanelGroup orientation="horizontal" className="min-h-0 flex-1 gap-1.5 p-1.5">
+          {/* Bento tray: the deep `bg-sidebar` well holds the rail plus the three
+              body columns as separate 1px-bordered cards, inset from the
+              header/status bar and gapped from each other (`p-1.5` + `gap-1.5`).
+              Under glass the gaps reveal the wallpaper, matching the
+              floating-panels look. The rail sits outside the ResizablePanelGroup
+              (a fixed-width strip, never part of the resizable/collapsible
+              layout) rather than inside AppSidebar. */}
+          <main className="bg-sidebar flex min-h-0 flex-1 gap-1.5 p-1.5">
+            <ActivityRail
+              activeTab={activeTab}
+              onOpenPage={openPageTab}
+              railView={railView}
+              onToggleRailView={toggleRailView}
+            />
+            <ResizablePanelGroup orientation="horizontal" className="min-h-0 flex-1 gap-1.5">
               <AppSidebar
                 sidebarRef={sidebarRef}
                 explorerRoot={explorerRoot}
@@ -734,6 +822,7 @@ export default function App() {
                 aiCliStatuses={aiCliStatuses}
                 sshBindingByConnection={sshBindingByConnection}
                 onReconnectSsh={handleReconnectSshForEditor}
+                onConnectHost={handleConnectHost}
                 mdPreviewLeafIds={mdPreviewLeafIds}
                 onToggleMdPreview={toggleMdPreviewForLeaf}
                 detectedBrowserUrl={detectedBrowserUrl}
@@ -741,6 +830,7 @@ export default function App() {
                 movePaneLeafToEdge={movePaneLeafToEdge}
                 setLeafTerminalTheme={setLeafTerminalTheme}
                 onSplitSizes={setSplitSizes}
+                railView={railView}
               />
               <AppRightSlot
                 rightSections={rightSections}
@@ -808,11 +898,6 @@ export default function App() {
             explorerRoot={explorerRoot}
             home={home}
             openFileTab={openFileTab}
-            sshEditorMounted={sshEditorMounted}
-            sshEditorOpen={sshEditorOpen}
-            setSshEditorOpen={setSshEditorOpen}
-            editingSshConn={editingSshConn}
-            setEditingSshConn={setEditingSshConn}
             pendingClose={pendingClose}
             cancelClose={cancelClose}
             confirmClose={confirmClose}

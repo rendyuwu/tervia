@@ -1,6 +1,6 @@
-import type { PaneTab, Tab } from "@/modules/tabs";
+import { isTabPageKind, TAB_PAGE_KIND, type PaneTab, type Tab } from "@/modules/tabs";
 import type { PaneLeaf, PaneNode } from "@/modules/terminal/lib/panes";
-import { leaves } from "@/modules/terminal/lib/panes";
+import { leaves, PAGE_LABELS } from "@/modules/terminal/lib/panes";
 import { useTerminalTitles } from "@/modules/terminal/lib/terminalTitles";
 import type { SavedPaneNode, SavedTab } from "./store";
 
@@ -16,21 +16,15 @@ export function countSavedTerminalLeaves(node: SavedPaneNode): number {
   return n;
 }
 
-/** Count all leaves (terminal + editor) in a serialised pane tree. */
-export function countSavedLeaves(node: SavedPaneNode): number {
-  if (node.kind === "leaf") return 1;
-  let n = 0;
-  for (const child of node.children) n += countSavedLeaves(child);
-  return n;
-}
-
 /** Tab-strip entry count for a serialised (unvisited) workspace: every leaf of
  *  each pane tab plus one per standalone (preview) tab. Mirrors the live
  *  `countTabEntries` so the badge stays consistent once the workspace is
- *  opened - a multi-pane group tab counts as its panes, not 1. */
+ *  opened - a multi-pane group tab counts as its panes, not 1, and a rail-view
+ *  page leaf from an older snapshot counts as none, because opening the
+ *  workspace drops it (see {@link isUnrestorablePageLeaf}). */
 export function countSavedTabEntries(tabs: SavedTab[]): number {
   let n = 0;
-  for (const t of tabs) n += t.kind === "pane" ? countSavedLeaves(t.paneTree) : 1;
+  for (const t of tabs) n += t.kind === "pane" ? countRestorableLeaves(t.paneTree) : 1;
   return n;
 }
 
@@ -86,12 +80,38 @@ function leafToSaved(leaf: PaneLeaf): SavedPaneNode {
       ...(leaf.customTitle ? { customTitle: leaf.customTitle } : {}),
     };
   }
-  // Board: restorable from nothing but its own existence, since the columns are
-  // rebuilt from the live tab tree.
+  if (leaf.leafKind === "board") {
+    // Board: restorable from nothing but its own existence, since the columns
+    // are rebuilt from the live tab tree.
+    return {
+      kind: "leaf",
+      leafKind: "board",
+      ...(leaf.customTitle ? { customTitle: leaf.customTitle } : {}),
+    };
+  }
+  // Page: restorable from nothing but which page it is - same as Board.
+  if (leaf.leafKind === "page") {
+    return {
+      kind: "leaf",
+      leafKind: "page",
+      page: leaf.page,
+      ...(leaf.customTitle ? { customTitle: leaf.customTitle } : {}),
+    };
+  }
+  // Unreachable through the types - every live leaf kind is handled above - but
+  // this used to be where the `page` branch sat, unguarded, so a leaf kind from a
+  // build whose union was WIDER (the `browser` pane up to v0.4.22, reached by a
+  // downgrade or a hand-edited file) was saved as a page leaf with no page. That
+  // is the one thing it must not become: restore drops a page value it cannot
+  // render, and before that it restored the leaf as a permanent, unclosable Hosts
+  // tab nothing had asked for. Saved as a terminal instead - what RESTORE turns an
+  // unrecognised SAVED leaf into - so the tree's shape and the user's name for the
+  // pane both survive.
+  const unknown = leaf as PaneLeaf;
   return {
     kind: "leaf",
-    leafKind: "board",
-    ...(leaf.customTitle ? { customTitle: leaf.customTitle } : {}),
+    leafKind: "terminal",
+    ...(unknown.customTitle ? { customTitle: unknown.customTitle } : {}),
   };
 }
 
@@ -203,8 +223,46 @@ export function serializeTabs(tabs: Tab[]): SavedTab[] {
 
 // saved -> live
 
-function savedToNode(node: SavedPaneNode, allocId: () => number, outLeafIds: number[]): PaneNode {
+/**
+ * True for a saved page leaf that must NOT come back as a tab - which is every
+ * page but Hosts, asked as "is it the tab page?" rather than "is it one of the
+ * two rail views?".
+ *
+ * Two cases, and the second is why the question is put that way round:
+ *
+ *  - A `vault` or `forwards` leaf, which a snapshot saved before those pages
+ *    became rail views can hold.
+ *    Those pages are now views the rail shows over the tab area, so there is no
+ *    such thing as a tab for one. Restoring it as a page leaf would put a tab in
+ *    the strip that the rail's pressed state, `openPageTab` and `PageLeafBody`
+ *    have all stopped believing in.
+ *  - A page value THIS build does not recognise: a newer build's page, or a
+ *    hand-edited state file. It used to be rewritten INTO Hosts, which silently
+ *    minted a SECOND Hosts tab - and a page leaf is permanent (`closable.ts`
+ *    invariant 1), so neither could then be closed. Enumerating the two known
+ *    rail views left that case on the fallback path; naming the one page that
+ *    may be a tab puts it on the drop path, where a page nothing in this build
+ *    can render belongs.
+ *
+ * Dropped exactly like an unrestorable remote editor leaf: the leaf goes, its
+ * siblings are kept, the tab goes with it if that empties it, and a workspace
+ * emptied that way falls back to Hosts. Nothing is silently reinterpreted as a
+ * page it never was.
+ */
+export function isUnrestorablePageLeaf(node: SavedPaneNode): boolean {
+  return node.kind === "leaf" && node.leafKind === "page" && !isTabPageKind(node.page);
+}
+
+/** Restores a pane subtree, dropping leaves that must not come back (see
+ *  {@link isUnrestorablePageLeaf}). Returns null when nothing in this subtree
+ *  survives. Mirrors `nodeToSaved`'s pruning on the way out, collapse included. */
+function savedToNode(
+  node: SavedPaneNode,
+  allocId: () => number,
+  outLeafIds: number[],
+): PaneNode | null {
   if (node.kind === "leaf") {
+    if (isUnrestorablePageLeaf(node)) return null;
     const id = allocId();
     outLeafIds.push(id);
     if (node.leafKind === "terminal") {
@@ -266,29 +324,60 @@ function savedToNode(node: SavedPaneNode, allocId: () => number, outLeafIds: num
         ...(node.customTitle ? { customTitle: node.customTitle } : {}),
       };
     }
+    if (node.leafKind === "page") {
+      return {
+        kind: "leaf",
+        id,
+        leafKind: "page",
+        // Hosts, and only Hosts - and now that is a narrowing rather than a
+        // rewrite: `isUnrestorablePageLeaf` dropped every page but this one
+        // above, so `node.page` IS the tab page by the time control gets here.
+        // It used to be written unconditionally over whatever the file said,
+        // which turned an unrecognised page into a second permanent Hosts tab.
+        page: TAB_PAGE_KIND,
+        ...(node.customTitle ? { customTitle: node.customTitle } : {}),
+      };
+    }
     // Unknown leafKind, including the `browser` leaves saved by builds up to
     // v0.4.22. Restore it as an empty terminal rather than dropping the node:
     // the tree's shape (and the split sizes saved alongside it) stays valid,
-    // and the user gets a usable pane where the page used to be.
+    // and the user gets a usable pane where the browser tab used to be.
     return {
       kind: "leaf",
       id,
       leafKind: "terminal",
     };
   }
-  const children = node.children.map((c) => savedToNode(c, allocId, outLeafIds));
+  const children: PaneNode[] = [];
+  for (const c of node.children) {
+    const restored = savedToNode(c, allocId, outLeafIds);
+    if (restored !== null) children.push(restored);
+  }
+  if (children.length === 0) return null;
+  // A lone survivor collapses into its parent: a one-child split is not a valid
+  // pane tree. Same rule `nodeToSaved` applies when it prunes on the way out.
+  if (children.length === 1) return children[0];
   return {
     kind: "split",
     id: allocId(),
     dir: node.dir,
     children,
     // Restore divider positions only when the saved sizes still line up with
-    // the child count; otherwise fall back to an equal split.
+    // the child count; otherwise fall back to an equal split. A pruned child
+    // invalidates the ratios, which is exactly what the length compare catches.
     ...(node.sizes && node.sizes.length === children.length ? { sizes: node.sizes } : {}),
   };
 }
 
-export function savedToTab(saved: SavedTab, allocId: () => number): Tab {
+/**
+ * One saved tab, restored - or `null` when nothing in it survives restore.
+ *
+ * `null` is the restore migration's "drop the tab if dropping its leaves empties
+ * it" case: a workspace with a Vault tab in it comes back with that tab gone,
+ * not with an empty one. Prefer {@link restoreSavedTabs}, which handles the
+ * dropping and the fall back to Hosts when a whole workspace empties out.
+ */
+export function savedToTab(saved: SavedTab, allocId: () => number): Tab | null {
   if (saved.kind === "preview") {
     // Legacy standalone browser ("preview") tab, from a build that still had an
     // embedded browser. Restore it as an empty terminal pane so the tab (and
@@ -307,8 +396,15 @@ export function savedToTab(saved: SavedTab, allocId: () => number): Tab {
   const id = allocId();
   const leafIds: number[] = [];
   const paneTree = savedToNode(saved.paneTree, allocId, leafIds);
-  const activeLeafId =
-    leafIds[Math.min(Math.max(0, saved.activeLeafIndex), leafIds.length - 1)] ?? leafIds[0];
+  if (paneTree === null) return null;
+  // Re-based, not clamped: `leafIds` holds the SURVIVORS, `saved.activeLeafIndex`
+  // indexes the saved list, and a dropped leaf shifts every later one. Clamping
+  // the raw index focused the wrong pane whenever the drop was BEFORE it - a
+  // saved `[termA, vault, termB, termC]` on termB (index 2) came back on termC.
+  // The outbound side has always done this (`tabToSaved`'s `kept.findIndex`);
+  // this is its counterpart, one level below `restoredActiveTabIndex`.
+  const wanted = restoredActiveLeafIndex(saved.paneTree, saved.activeLeafIndex);
+  const activeLeafId = leafIds[Math.min(Math.max(0, wanted), leafIds.length - 1)] ?? leafIds[0];
   const tab: PaneTab = {
     id,
     kind: "pane",
@@ -319,19 +415,152 @@ export function savedToTab(saved: SavedTab, allocId: () => number): Tab {
   return tab;
 }
 
-/** Default pane tab with one terminal leaf. `terminalOrdinal` is omitted; `useTabs.replaceAllTabs` backfills it. */
-export function defaultTabForEmptyWorkspace(allocId: () => number, cwd: string | undefined): Tab {
+/**
+ * Startup fallback tab: one pane tab holding a Hosts page leaf,
+ * used by `useWorkspacePersistence` in place of a local shell when there is
+ * nothing to restore - first run, an empty workspace, or a dev session that
+ * skips restore entirely.
+ */
+export function defaultHostsTab(allocId: () => number): Tab {
   const leafId = allocId();
   return {
     id: allocId(),
     kind: "pane",
-    title: "shell",
+    title: PAGE_LABELS.hosts,
     paneTree: {
       kind: "leaf",
       id: leafId,
-      leafKind: "terminal",
-      cwd,
+      leafKind: "page",
+      page: TAB_PAGE_KIND,
     },
     activeLeafId: leafId,
   };
+}
+
+/**
+ * Every saved tab restored, with the rail-view migration applied: a `vault` or
+ * `forwards` page leaf is dropped, the tab goes with it if that empties it, and
+ * a workspace emptied that way falls back to the Hosts page rather than to a
+ * window with no tabs at all.
+ *
+ * THE restore entry point. `savedToTab` is still exported for the cold-workspace
+ * row builder and the verify scripts, but every path that produces the live tab
+ * list goes through here, so a snapshot taken before rail views existed cannot
+ * put a Vault tab back in the strip.
+ */
+export function restoreSavedTabs(saved: SavedTab[], allocId: () => number): Tab[] {
+  const out: Tab[] = [];
+  for (const s of saved) {
+    const tab = savedToTab(s, allocId);
+    if (tab !== null) out.push(tab);
+  }
+  return out.length === 0 ? [defaultHostsTab(allocId)] : out;
+}
+
+/**
+ * The saved active-tab index, re-based onto what {@link restoreSavedTabs}
+ * actually produced. Dropping a tab shifts every later one, so the raw saved
+ * index would land on a tab the user was not looking at - or, for the last tab,
+ * past the end.
+ *
+ * Counts the surviving tabs BEFORE the saved index, which is the same shape as
+ * `savedActiveTabIndex` on the way out; a dropped active tab lands on its
+ * neighbour. Restore is destructive to nothing, so this only ever reads the
+ * saved array - it needs no ids and allocates none.
+ */
+export function restoredActiveTabIndex(saved: SavedTab[], activeIndex: number): number {
+  let idx = 0;
+  for (let i = 0; i < saved.length && i < activeIndex; i++) {
+    if (survivesRestore(saved[i])) idx++;
+  }
+  return idx;
+}
+
+/**
+ * The saved active-LEAF index, re-based onto the leaves that survived restore.
+ * {@link restoredActiveTabIndex} one level down, and the mirror of
+ * `tabToSaved`'s `kept.findIndex` on the way out.
+ *
+ * Counts the surviving leaves BEFORE the saved index, in the same depth-first
+ * order `savedToNode` pushes ids in, so the result indexes the id array it is
+ * used against. A dropped active leaf lands on its neighbour.
+ */
+export function restoredActiveLeafIndex(tree: SavedPaneNode, activeLeafIndex: number): number {
+  const survives: boolean[] = [];
+  collectLeafSurvival(tree, survives);
+  let idx = 0;
+  for (let i = 0; i < survives.length && i < activeLeafIndex; i++) {
+    if (survives[i]) idx++;
+  }
+  return idx;
+}
+
+/** Whether each leaf of a saved subtree restores, depth-first. */
+function collectLeafSurvival(node: SavedPaneNode, out: boolean[]): void {
+  if (node.kind === "leaf") {
+    out.push(!isUnrestorablePageLeaf(node));
+    return;
+  }
+  for (const child of node.children) collectLeafSurvival(child, out);
+}
+
+/** True for exactly the tabs {@link restoreSavedTabs} keeps. Decided without
+ *  allocating ids so {@link restoredActiveTabIndex} can ask it too. */
+function survivesRestore(saved: SavedTab): boolean {
+  if (saved.kind === "preview") return true;
+  return countRestorableLeaves(saved.paneTree) > 0;
+}
+
+/** Leaves of a saved subtree that restore, i.e. all of them minus the rail-view
+ *  page leaves {@link isUnrestorablePageLeaf} drops. */
+function countRestorableLeaves(node: SavedPaneNode): number {
+  if (node.kind === "leaf") return isUnrestorablePageLeaf(node) ? 0 : 1;
+  let n = 0;
+  for (const child of node.children) n += countRestorableLeaves(child);
+  return n;
+}
+
+/**
+ * Live tabs for a workspace with no cached live-tab entry (i.e. it hasn't been
+ * visited yet this session): its saved tabs restored, or - if it has none - the
+ * Hosts page. The runtime counterpart of {@link defaultHostsTab}'s startup
+ * fallback in `useWorkspacePersistence`, so switching to (or creating) an empty
+ * workspace lands on the same screen a fresh profile does instead of a local
+ * shell.
+ *
+ * Lives here rather than beside its `useWorkspaceSwitching` callers because it
+ * needs nothing from that hook, and here it is reachable from
+ * `workspace-serialize-verify` - which cannot import the hook, whose module
+ * pulls in `@xterm/xterm` (no `exports` map, so Node can't resolve `Terminal`
+ * outside a bundler). Only `tabs` is read; callers pass a whole workspace.
+ */
+export function tabsForWorkspaceEntry(entry: { tabs: SavedTab[] }, allocId: () => number): Tab[] {
+  // `restoreSavedTabs` already falls back to Hosts on an empty result, which
+  // covers both "no saved tabs" and "every saved tab was a rail view".
+  return restoreSavedTabs(entry.tabs, allocId);
+}
+
+/**
+ * A cold workspace's live tabs AND the tab to focus, from ONE call, so the index
+ * and the array it indexes cannot be computed from different lists.
+ *
+ * The three callers - workspace switch, workspace close (the neighbour it falls
+ * back to), and the startup hydrate - got this right once between them. The
+ * other two clamped the RAW saved index against the RESTORED array, which lands
+ * on the wrong tab whenever a dropped tab sat before it: a workspace saved as
+ * `[Hosts, Vault, termA, termB]` focused on termA came back focused on termB.
+ * Handing back an id rather than an index is what makes that unexpressible.
+ *
+ * `activeId` is null only when there is no tab to focus, which
+ * {@link restoreSavedTabs}' Hosts fallback means cannot happen today; the
+ * signature keeps saying so rather than asserting it.
+ */
+export function restoreWorkspaceEntry(
+  entry: { tabs: SavedTab[]; activeTabIndex: number },
+  allocId: () => number,
+): { tabs: Tab[]; activeId: number | null } {
+  const tabs = tabsForWorkspaceEntry(entry, allocId);
+  const wanted = restoredActiveTabIndex(entry.tabs, entry.activeTabIndex);
+  const target = tabs[Math.min(Math.max(0, wanted), tabs.length - 1)] ?? tabs[0];
+  return { tabs, activeId: target?.id ?? null };
 }

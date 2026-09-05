@@ -3,7 +3,7 @@ import { EntryIcon } from "@/modules/tabs/components/EntryIcon";
 import { buildEntries, type PaneEntry } from "@/modules/tabs/lib/entries";
 import type { Tab } from "@/modules/tabs";
 import { useGitBranch } from "@/modules/scm/branch";
-import { useSshHosts } from "@/modules/ssh/connections";
+import { useHosts } from "@/modules/hosts/useHosts";
 import type { SshStatus } from "@/modules/ssh/status";
 import {
   aiCliStateColorClass,
@@ -60,15 +60,15 @@ export function WorkspaceBoard({
    *  source that feeds it. */
   mirrorToFloat?: (cards: PaneEntry[], titles: Record<number, string>) => void;
 }) {
-  const sshHosts = useSshHosts();
+  const hosts = useHosts();
   const titles = useTerminalTitles((s) => s.titles);
 
   const cards = useMemo(
     () =>
-      buildEntries(tabs, sshHosts, sshStatuses, aiCliStatuses).filter(
+      buildEntries(tabs, hosts, sshStatuses, aiCliStatuses).filter(
         (e): e is PaneEntry => e.kind === "pane-leaf" && e.leafKind === "terminal",
       ),
-    [tabs, sshHosts, sshStatuses, aiCliStatuses],
+    [tabs, hosts, sshStatuses, aiCliStatuses],
   );
 
   // Push every change to the float window. Keyed on the computed cards, so a
