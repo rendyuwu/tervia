@@ -12,6 +12,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { forgetKeyNote, forgetKeyRowLabel } from "./credentialChoice";
 import { Field, ToggleButton } from "./FormControls";
 import type { SshCredentialDraft } from "./types";
 
@@ -67,6 +68,25 @@ export type SshCredentialSectionProps = {
    * The same split, for the same reason, as the vault key editor's.
    */
   keyRefusal: string | null;
+  /**
+   * The key material the STORED record still holds and this row may offer to
+   * delete, by name - `hostKeySecretNames` in `credentialChoice.ts`, already
+   * gated by the dialog on this row being the only surface promising anything
+   * about those two accounts.
+   *
+   * An empty list means no row, and it is the ONE gate on that: the dialog
+   * answers `[]` for a create-mode form, for a vault-bound row (which owns no
+   * accounts of its own) and while a credential change is pending (which already
+   * deletes or moves the same accounts). Passed in rather than derived here
+   * because this component never sees the stored record - it holds the draft,
+   * whose key body is an open-time snapshot that says nothing about what is
+   * stored.
+   */
+  forgettableKeySecrets: readonly string[];
+  /** Whether Forget has been pressed in this sitting. The dialog's state,
+   *  applied by Save and discarded by Cancel - see `forgetSshKey` there. */
+  forgetKey: boolean;
+  onForgetKey: () => void;
 };
 
 /**
@@ -156,6 +176,9 @@ export function SshCredentialSection({
   onChange,
   hasStoredPassword,
   keyRefusal,
+  forgettableKeySecrets,
+  forgetKey,
+  onForgetKey,
 }: SshCredentialSectionProps) {
   const [agent, setAgent] = useState<AgentState>({ kind: "checking" });
   const [imported, setImported] = useState<ImportState>({ kind: "idle" });
@@ -441,7 +464,76 @@ export function SshCredentialSection({
           </Field>
         </>
       )}
+
+      {/* AFTER the auth-mode ternary and gated on the mode itself, rather than
+          added to the two non-key arms above: one render site, one gate, and
+          the gate is the claim - the key textarea IS the route to clearing a
+          stored key, so this row exists only where that textarea does not.
+          Under key auth it must not appear at all: the field the user is
+          looking at is the thing that removes the key, and a second surface
+          promising the same deletion is how the two come to say different
+          things. */}
+      {value.authMode !== "key" && forgettableKeySecrets.length > 0 ? (
+        <ForgetKeyRow
+          keySecrets={forgettableKeySecrets}
+          forgetting={forgetKey}
+          onForget={onForgetKey}
+        />
+      ) : null}
     </>
+  );
+}
+
+/**
+ * The key material a host still stores under an auth mode that cannot use it,
+ * with its Forget action.
+ *
+ * The shape is `PinnedKeyRow`'s in `HostEditorDialog.tsx` - a `Field`, a bordered
+ * row naming what is held, a small outline button, a footnote saying when it
+ * applies - and deliberately a SIBLING of it rather than the two sharing a shell.
+ * They hold different content (a fingerprint against a list of accounts) and have
+ * different empty states, and a shared card shell was priced and declined.
+ *
+ * Forget records an INTENT, which is the whole design and not an ordering
+ * preference: the same button wrote its deletion straight to the store for the
+ * pinned key, and Cancel then reverted the visible field while nothing reverted
+ * the deletion. So the button disappears once pressed and the note says what Save
+ * will do - the press is visible, and nothing has happened yet.
+ *
+ * Every string here comes from `credentialChoice.ts`, where it can be exercised by
+ * value: the note has to read correctly for a stored passphrase with no stored
+ * body, which is a case no fixed sentence covers.
+ */
+function ForgetKeyRow({
+  keySecrets,
+  forgetting,
+  onForget,
+}: {
+  keySecrets: readonly string[];
+  forgetting: boolean;
+  onForget: () => void;
+}) {
+  return (
+    <Field label="Stored key material">
+      {/* Same box as the read-only status blocks in this editor. */}
+      <div className="border-border/60 bg-muted/30 flex items-center justify-between gap-2 rounded-md border px-2 py-1">
+        <span className="truncate text-[10.5px]">{forgetKeyRowLabel(keySecrets)}</span>
+        {forgetting ? null : (
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="h-6 shrink-0 px-2 text-[10.5px]"
+            onClick={onForget}
+          >
+            Forget
+          </Button>
+        )}
+      </div>
+      <span className="text-muted-foreground text-[10.5px]">
+        {forgetKeyNote(keySecrets, forgetting)}
+      </span>
+    </Field>
   );
 }
 

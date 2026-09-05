@@ -139,11 +139,21 @@ import { dirname, join } from "node:path";
 import ts from "typescript";
 
 import {
+  forgetKeyNote,
+  forgetKeyRowLabel,
+  hostKeySecretNames,
+} from "../src/modules/hosts/editor/credentialChoice";
+import {
   NOTHING_SEEDED,
   sshSecretsForSave,
   type SshSecretSeeded,
 } from "../src/modules/hosts/editor/sshSecrets";
-import type { SshCredentialDraft, SshSecretTouched } from "../src/modules/hosts/editor/types";
+import {
+  NO_SSH_SECRETS_TOUCHED,
+  type SshCredentialDraft,
+  type SshSecretTouched,
+} from "../src/modules/hosts/editor/types";
+import type { Host } from "../src/modules/hosts/types";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const read = (p: string) => readFileSync(join(root, p), "utf8");
@@ -580,6 +590,22 @@ function insideJsxAttribute(node: ts.Node): boolean {
   return false;
 }
 
+/**
+ * The NEAREST `{ … }` block `node` sits in, or null.
+ *
+ * Section [12] needs it to ask about ORDER: "the intent is retired above the arm
+ * that re-seeds the auth mode" is a question about which statement comes first in
+ * one block, and a presence check passes with the two swapped. Nearest rather
+ * than outermost, or every statement in the component would answer with the
+ * component's own body and every order would look the same.
+ */
+function enclosingBlock(node: ts.Node): ts.Block | null {
+  for (let n: ts.Node | undefined = node.parent; n; n = n.parent) {
+    if (ts.isBlock(n)) return n;
+  }
+  return null;
+}
+
 /** Whether `ancestor` is on `node`'s parent chain. */
 function isDescendantOf(node: ts.Node, ancestor: ts.Node): boolean {
   for (let n: ts.Node | undefined = node.parent; n; n = n.parent) {
@@ -858,6 +884,29 @@ console.log("[0] the helpers the checks below depend on");
     assignedIn("const a = b?.c;", "a") === "b?.c",
   );
   check("and nothing for a local it cannot find", assignedIn("const a = b;", "z") === "");
+
+  // `enclosingBlock`, which section [12] asks an ORDER question of. The probe
+  // carries the one way it can be wrong: returning the outermost block instead
+  // of the nearest would report the fragment's own body, whose statement count
+  // is deliberately different here, and every order in the file would then look
+  // the same.
+  {
+    const sf = parseFragment("if (a) { first(); } second(); third(); }");
+    const inner = findCalls(sf, sf, ["first"])[0];
+    const block = inner === undefined ? null : enclosingBlock(inner);
+    check(
+      "enclosingBlock returns the NEAREST block a statement sits in, not the function body around it",
+      block !== null && block.statements.length === 1,
+      block === null ? null : block.statements.length,
+    );
+    const outer = findCalls(sf, sf, ["second"])[0];
+    const outerBlock = outer === undefined ? null : enclosingBlock(outer);
+    check(
+      "and the enclosing body for one that sits directly in it",
+      outerBlock !== null && outerBlock.statements.length === 3,
+      outerBlock === null ? null : outerBlock.statements.length,
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1056,10 +1105,14 @@ console.log("\n[2] a secret is sent only when touched, and cleared only when it 
 
   for (const f of SECRET_FIELDS) {
     for (const row of table) {
+      // The forget-key intent is OFF for every row of this table, which is what
+      // makes the table the evidence that it changed nothing: the three-state
+      // rule above is unaltered, and the override lives in section [12].
       const out = sshSecretsForSave(
         draft(row.value),
         { ...all(false), [f]: row.touched },
         row.seeded ? only(f) : NOTHING_SEEDED,
+        false,
       );
       const present = f in out;
       check(
@@ -1074,7 +1127,7 @@ console.log("\n[2] a secret is sent only when touched, and cleared only when it 
   // The cross-field version of the same bug, and a `seeded` read with the wrong
   // index passes every check above.
   {
-    const out = sshSecretsForSave(draft(""), all(true), only("password"));
+    const out = sshSecretsForSave(draft(""), all(true), only("password"), false);
     check(
       "a seeded password authorises clearing the password and nothing else",
       "password" in out && out.password === "" && !("privateKey" in out),
@@ -1085,7 +1138,7 @@ console.log("\n[2] a secret is sent only when touched, and cleared only when it 
 
   // A fourth field added to the draft cannot arrive by spread.
   {
-    const out = sshSecretsForSave(draft("v"), all(true), NOTHING_SEEDED);
+    const out = sshSecretsForSave(draft("v"), all(true), NOTHING_SEEDED, false);
     check(
       "and nothing but the three secret fields is ever sent",
       JSON.stringify(Object.keys(out).sort()) === JSON.stringify([...SECRET_FIELDS].sort()),
@@ -1113,9 +1166,14 @@ console.log("\n[2] a secret is sent only when touched, and cleared only when it 
   // BOTH live records. Reading either from state instead is that defect wearing
   // the fix's shape, and a stale seeded record is the same fault one field over -
   // it would license a clear the user could not see, which is the whole finding.
+  // The fourth argument is section [12]'s, and it is pinned there over the
+  // parsed call as well - argument by argument, which is the form this
+  // line-shaped regex is not. Named here too because this is the check that
+  // would otherwise have gone quietly green over three arguments and a dropped
+  // intent.
   check(
-    "the SSH secrets are taken from the live touched AND seeded records",
-    /sshSecretsForSave\(sshCred, \w+\.current, \w+\.current\)/.test(save),
+    "the SSH secrets are taken from the live touched AND seeded records, plus the forget-key intent",
+    /sshSecretsForSave\(sshCred, \w+\.current, \w+\.current, forgetKey\)/.test(save),
     /.*sshSecretsForSave\([^;]*/s.exec(save)?.[0]?.slice(0, 160),
   );
   // The RDP half of the same convention, which has no touched record because the
@@ -2731,6 +2789,665 @@ console.log(
   //          Prettier adds when it wraps sits outside the claim. It DID redden
   //          24 checks in sections [1], [2], [4], [6] and [8], whose anchors
   //          and regexes are line-shaped. Those are pre-existing and untouched.
+}
+
+/**
+ * [12] A HOST THAT STOPPED USING KEY AUTH CAN BE TOLD TO FORGET THE KEY, AND
+ * ONLY FROM A ROW THAT SAYS SO.
+ *
+ * The trap this closes had four parts and every one of them was correct on its
+ * own. The record stays honest about holding a private key, because `writeSecret`
+ * returns the STORED flag for a field the save does not mention. Nothing releases
+ * it, because `releaseStaleAccounts` releases the accounts the new record cannot
+ * NAME and an inline SSH row names all three under every auth mode - releasing on
+ * a narrower rule would destroy the only copy of a secret this layer cannot read
+ * back. The export carries it, because `hostRefs` enumerates every field the
+ * protocol owns. And the field is not on screen, because the key textarea renders
+ * only under key auth. So the one route that removes a stored key - clear the
+ * textarea, save, and `writeSecret` turns `""` into a delete - disappears at
+ * exactly the moment it becomes the thing the user wants, and the key ships in
+ * every export forever.
+ *
+ * `hostRefs` is deliberately NOT filtered by the presence flags, which was the
+ * other candidate fix: a store restored from its `.bak` snapshot rolls metadata
+ * back while the secret store does not, and an export that quietly omits a LIVE
+ * credential is worse than one carrying a secret the user can now delete.
+ *
+ * WHAT THIS SECTION IS FOR, and it is not "the button exists". A button wired to
+ * nothing passes that. The chain is pinned link by link: the button's `onClick`
+ * is the row's `onForget`, which is the section's `onForgetKey`, which the dialog
+ * hands `forgetSshKey`, which is the only thing that arms the intent, which
+ * `save` passes as `sshSecretsForSave`'s fourth argument, which forces both key
+ * fields to the store's clear. Plus the render gate, structurally: the row is a
+ * function of the STORED record's flags and of the auth modes that have no key
+ * field - never of the draft, whose key body is an open-time snapshot of the
+ * secret store and is blank both when nothing is stored and when the read has not
+ * landed.
+ *
+ * The intent is a DRAFT intent for the reason `forgetPin` is: writing the deletion
+ * as the button is pressed was a real defect there, because Cancel reverted the
+ * visible field and nothing reverted the write.
+ */
+console.log(
+  "\n[12] a host that stopped using key auth can be told to forget the key, from a row that says so",
+);
+{
+  // --- the payload, over the real function ---------------------------------
+  //
+  // Values, not source text, for section [2]'s reason: an omitted key and one
+  // set to `""` are the store's "leave it alone" and "delete the account", and
+  // no regex tells them apart. The whole point of the flag is that it works with
+  // NOTHING TOUCHED AND NOTHING SEEDED - the field cannot be touched when it is
+  // not rendered - so every row below is that state unless it says otherwise.
+  const cred = (over: Partial<SshCredentialDraft> = {}): SshCredentialDraft => ({
+    user: "u",
+    authMode: "password",
+    password: "",
+    privateKey: "",
+    keyPassphrase: "",
+    ...over,
+  });
+  const touching = (fields: (keyof SshSecretSeeded)[]): SshSecretTouched => ({
+    ...NO_SSH_SECRETS_TOUCHED,
+    ...Object.fromEntries(fields.map((f) => [f, true])),
+  });
+  const seeding = (fields: (keyof SshSecretSeeded)[]): SshSecretSeeded => ({
+    ...NOTHING_SEEDED,
+    ...Object.fromEntries(fields.map((f) => [f, true])),
+  });
+
+  {
+    const out = sshSecretsForSave(cred(), NO_SSH_SECRETS_TOUCHED, NOTHING_SEEDED, true);
+    check(
+      "the intent clears the key body with nothing touched and nothing seeded, which is the only state it is ever in",
+      "privateKey" in out && out.privateKey === "",
+      out,
+    );
+    check(
+      "and the key passphrase with it - a passphrase whose body is gone opens nothing and no field in this editor can reach it",
+      "keyPassphrase" in out && out.keyPassphrase === "",
+      out,
+    );
+    check(
+      "and it sends no password at all: an untouched password is still left exactly alone",
+      !("password" in out),
+      out,
+    );
+    check(
+      "and nothing but those two fields",
+      JSON.stringify(Object.keys(out).sort()) === JSON.stringify(["keyPassphrase", "privateKey"]),
+      Object.keys(out),
+    );
+  }
+  {
+    // The auth mode the host has MOVED TO must survive the intent, and this is
+    // the check that would catch a clear written as "blank the whole draft".
+    const out = sshSecretsForSave(
+      cred({ password: "typed" }),
+      touching(["password"]),
+      NOTHING_SEEDED,
+      true,
+    );
+    check(
+      "a password typed in the same sitting still carries its typed value",
+      out.password === "typed",
+      out,
+    );
+    check(
+      "while both key fields still go down as the clear",
+      out.privateKey === "" && out.keyPassphrase === "",
+      out,
+    );
+  }
+  {
+    // The intent WINS over a body that is touched and seeded, rather than being
+    // a fallback for an empty one. Unreachable as the form stands - switching to
+    // key auth retracts the intent, pinned below - and pinned anyway, because
+    // "the flag decides" is the contract the row's promise rests on.
+    const out = sshSecretsForSave(
+      cred({ privateKey: "-----BEGIN", keyPassphrase: "p" }),
+      touching(["privateKey", "keyPassphrase"]),
+      seeding(["privateKey", "keyPassphrase"]),
+      true,
+    );
+    check(
+      "the intent overrides a key body that is touched AND seeded, rather than only an empty one",
+      out.privateKey === "" && out.keyPassphrase === "",
+      out,
+    );
+  }
+  {
+    // The complement, and the reason section [2]'s table is the evidence that
+    // nothing else moved: with the intent off, an untouched form still sends
+    // nothing at all.
+    const out = sshSecretsForSave(
+      cred({ privateKey: "-----BEGIN", keyPassphrase: "p" }),
+      NO_SSH_SECRETS_TOUCHED,
+      seeding(["privateKey", "keyPassphrase"]),
+      false,
+    );
+    check(
+      "with the intent OFF, a seeded but untouched key body is still left alone - the flag is off by construction, not on by accident",
+      JSON.stringify(out) === "{}",
+      out,
+    );
+  }
+
+  // --- which records own key material, over real records --------------------
+  const sshRow = (over: {
+    authMode?: "password" | "key" | "agent";
+    hasPassword?: boolean;
+    hasPrivateKey?: boolean;
+    hasKeyPassphrase?: boolean;
+  }): Host => ({
+    id: "h-1",
+    name: "prod",
+    host: "example.com",
+    port: 22,
+    protocol: "ssh",
+    credential: {
+      kind: "inline",
+      hostId: "h-1",
+      user: "u",
+      authMode: over.authMode ?? "password",
+      hasPassword: over.hasPassword ?? false,
+      hasPrivateKey: over.hasPrivateKey ?? false,
+      hasKeyPassphrase: over.hasKeyPassphrase ?? false,
+    },
+  });
+  const boundRow: Host = {
+    ...sshRow({}),
+    credential: { kind: "identity", identityId: "i-1" },
+  };
+  const rdpRow: Host = {
+    id: "h-2",
+    name: "win",
+    host: "win.example.com",
+    port: 3389,
+    protocol: "rdp",
+    credential: { kind: "inline", hostId: "h-2", username: "u", hasPassword: true },
+    desktopWidth: 1920,
+    desktopHeight: 1080,
+    sizeMode: "preset",
+  };
+
+  check(
+    "both flags set names both accounts, in the order the field list enumerates them",
+    JSON.stringify(hostKeySecretNames(sshRow({ hasPrivateKey: true, hasKeyPassphrase: true }))) ===
+      JSON.stringify(["private key", "key passphrase"]),
+    hostKeySecretNames(sshRow({ hasPrivateKey: true, hasKeyPassphrase: true })),
+  );
+  check(
+    "a key body alone names one",
+    JSON.stringify(hostKeySecretNames(sshRow({ hasPrivateKey: true }))) ===
+      JSON.stringify(["private key"]),
+    hostKeySecretNames(sshRow({ hasPrivateKey: true })),
+  );
+  // The orphan the row exists for as much as the key body does: a stored
+  // passphrase whose key is already gone is unreachable from every field in
+  // this editor, and it is why the copy is a function of the flags.
+  check(
+    "and a stored key passphrase with NO stored body still gets the row",
+    JSON.stringify(hostKeySecretNames(sshRow({ hasKeyPassphrase: true }))) ===
+      JSON.stringify(["key passphrase"]),
+    hostKeySecretNames(sshRow({ hasKeyPassphrase: true })),
+  );
+  check(
+    "a stored password is not key material",
+    hostKeySecretNames(sshRow({ hasPassword: true })).length === 0,
+    hostKeySecretNames(sshRow({ hasPassword: true })),
+  );
+  check(
+    "a row with neither flag has nothing to forget",
+    hostKeySecretNames(sshRow({})).length === 0,
+    hostKeySecretNames(sshRow({})),
+  );
+  // Not a belt: a bound host owns no accounts of its own, and `bind` already
+  // deleted them and said so in its own confirmation.
+  check(
+    "a vault-bound row owns no key material to forget",
+    hostKeySecretNames(boundRow).length === 0,
+    hostKeySecretNames(boundRow),
+  );
+  check(
+    "and an RDP row never held any",
+    hostKeySecretNames(rdpRow).length === 0,
+    hostKeySecretNames(rdpRow),
+  );
+  // The flags decide, NOT the stored auth mode: a record still on key auth whose
+  // draft has been switched to a password is the whole case, and it is the
+  // RENDER that owns the auth-mode half of the gate (pinned structurally below).
+  check(
+    "and the answer is the flags rather than the stored auth mode, which the render gate owns instead",
+    JSON.stringify(
+      hostKeySecretNames(sshRow({ authMode: "key", hasPrivateKey: true, hasKeyPassphrase: true })),
+    ) === JSON.stringify(["private key", "key passphrase"]),
+    hostKeySecretNames(sshRow({ authMode: "key", hasPrivateKey: true, hasKeyPassphrase: true })),
+  );
+
+  // --- the copy, by value ---------------------------------------------------
+  //
+  // In `credentialChoice.ts` rather than inline JSX for the reason every string
+  // in that file is: it can be exercised here. Three flag cases, because a
+  // sentence naming a private key is wrong for the passphrase-only orphan.
+  {
+    const bodyOnly = ["private key"];
+    const passOnly = ["key passphrase"];
+    const both = ["private key", "key passphrase"];
+    for (const forgetting of [false, true]) {
+      const notes = [bodyOnly, passOnly, both].map((s) => forgetKeyNote(s, forgetting));
+      check(
+        `the note names the secrets it is called with (forgetting=${forgetting})`,
+        notes[0].includes("private key") &&
+          !notes[0].includes("key passphrase") &&
+          notes[1].includes("key passphrase") &&
+          !notes[1].includes("private key") &&
+          notes[2].includes("private key") &&
+          notes[2].includes("key passphrase"),
+        notes,
+      );
+      check(
+        `and differs across body-only, passphrase-only and both (forgetting=${forgetting})`,
+        new Set(notes).size === 3,
+        notes,
+      );
+      check(
+        `and agrees with the count of them (forgetting=${forgetting})`,
+        / is never read| is deleted/.test(notes[0]) && / are /.test(notes[2]),
+        notes,
+      );
+    }
+    // The three things it has to say, and the third is the difference between
+    // this and a button that writes as it is pressed.
+    const before = forgetKeyNote(both, false);
+    check(
+      "the un-pressed note says the host does not authenticate with a key",
+      /does not authenticate with a key/.test(before),
+      before,
+    );
+    check("and that SAVE is what deletes it", /when you save/.test(before), before);
+    check(
+      "and that nothing undoes the deletion afterwards",
+      /undoes that deletion/.test(before),
+      before,
+    );
+    const after = forgetKeyNote(both, true);
+    check(
+      "the pressed note still says Save is what deletes it",
+      /when you save/.test(after),
+      after,
+    );
+    check(
+      "and that cancelling this editor leaves the stored secrets alone, which is what makes the press an intent",
+      /Cancelling this editor/.test(after),
+      after,
+    );
+    check("and the two arms are different sentences", before !== after, [before, after]);
+    check(
+      "the row's own label names what is held and differs per case",
+      new Set([bodyOnly, passOnly, both].map(forgetKeyRowLabel)).size === 3 &&
+        forgetKeyRowLabel(bodyOnly).includes("private key"),
+      [bodyOnly, passOnly, both].map(forgetKeyRowLabel),
+    );
+  }
+
+  // --- the render gate, structurally ---------------------------------------
+  const rowRenders = findOpeningElementsByTag(sshSectionSf, "ForgetKeyRow", sshSectionSf);
+  check(
+    "the SSH section renders exactly one ForgetKeyRow - a second one is a second promise about the same two accounts",
+    rowRenders.length === 1,
+    rowRenders.length,
+  );
+  if (rowRenders.length === 1) {
+    const row = rowRenders[0];
+    const arm = conditionalArmOf(row);
+    check("the row sits in a conditional arm at all", arm !== null);
+    if (arm) {
+      check(
+        "and it is the THEN arm, so the gate is what makes it appear rather than what hides it",
+        arm.arm === "then",
+        arm.arm,
+      );
+      // The exact-text pin, and both halves of it are the finding. The auth-mode
+      // half: the key textarea IS the route to clearing a stored key, so this
+      // row may not exist where that textarea does. The list half: it comes off
+      // the STORED record (see the dialog's own pin below) - gating on
+      // `value.privateKey` instead would show the row for a host with nothing
+      // stored and hide it while the keychain read was still in flight.
+      check(
+        "and the gate is exactly the non-key auth modes AND the stored record's own key accounts",
+        norm(arm.cond.condition.getText(sshSectionSf)) ===
+          norm('value.authMode !== "key" && forgettableKeySecrets.length > 0'),
+        arm.cond.condition.getText(sshSectionSf),
+      );
+    }
+    check(
+      "the row is handed the stored list, the intent and the intent's setter, and nothing else decides what it shows",
+      jsxAttrExprText(row, "keySecrets", sshSectionSf) === "forgettableKeySecrets" &&
+        jsxAttrExprText(row, "forgetting", sshSectionSf) === "forgetKey" &&
+        jsxAttrExprText(row, "onForget", sshSectionSf) === "onForgetKey",
+      {
+        keySecrets: jsxAttrExprText(row, "keySecrets", sshSectionSf),
+        forgetting: jsxAttrExprText(row, "forgetting", sshSectionSf),
+        onForget: jsxAttrExprText(row, "onForget", sshSectionSf),
+      },
+    );
+  }
+
+  // --- the button is wired to the intent, and retires once pressed ----------
+  const rowBody = findFunctionBody(sshSectionSf, "ForgetKeyRow");
+  check("ForgetKeyRow's body was found (compiler API)", rowBody !== null);
+  if (rowBody) {
+    const buttons = findOpeningElementsByTag(rowBody, "Button", sshSectionSf).filter(
+      (el) => jsxAttrExprText(el, "onClick", sshSectionSf) === "onForget",
+    );
+    check(
+      "exactly one Button in the row calls the intent - a button wired to nothing is what an existence check would have passed",
+      buttons.length === 1,
+      buttons.length,
+    );
+    if (buttons.length === 1) {
+      const arm = conditionalArmOf(buttons[0]);
+      check(
+        "and it is rendered in the ELSE arm of the intent itself, so pressing it visibly retires it - the only feedback there is that anything happened",
+        arm !== null &&
+          arm.arm === "else" &&
+          norm(arm.cond.condition.getText(sshSectionSf)) === norm("forgetting"),
+        arm ? { arm: arm.arm, cond: arm.cond.condition.getText(sshSectionSf) } : null,
+      );
+    }
+    // Both strings from the checkable module, neither restated here: a literal
+    // in this component is a sentence nothing in the suite can read.
+    const labelCalls = findCalls(rowBody, sshSectionSf, ["forgetKeyRowLabel"]);
+    const noteCalls = findCalls(rowBody, sshSectionSf, ["forgetKeyNote"]);
+    check("the row takes its label from credentialChoice.ts", labelCalls.length === 1, {
+      count: labelCalls.length,
+    });
+    check("and its note too", noteCalls.length === 1, { count: noteCalls.length });
+    if (noteCalls.length === 1) {
+      check(
+        "and the note is asked about the same list it is showing AND the intent, so the two arms cannot drift from what is on screen",
+        JSON.stringify(argTexts(noteCalls[0], sshSectionSf)) ===
+          JSON.stringify([norm("keySecrets"), norm("forgetting")]),
+        argTexts(noteCalls[0], sshSectionSf),
+      );
+    }
+  }
+  const sectionImports = importDeclarations(sshSectionSf);
+  const choiceImport = sectionImports.find((d) => moduleSpecifierOf(d) === "./credentialChoice");
+  check(
+    "the section imports both strings from credentialChoice.ts rather than carrying copies of them",
+    choiceImport !== undefined &&
+      namedImportsOf(choiceImport).includes("forgetKeyNote") &&
+      namedImportsOf(choiceImport).includes("forgetKeyRowLabel"),
+    choiceImport ? namedImportsOf(choiceImport) : sectionImports.map(moduleSpecifierOf),
+  );
+  check(
+    "and declares neither of them locally",
+    !/function forgetKeyNote\b|function forgetKeyRowLabel\b/.test(sshSectionRaw),
+    /.{0,40}function forgetKey(Note|RowLabel).{0,40}/.exec(sshSectionRaw)?.[0],
+  );
+
+  // --- the list is the STORED record's, and no other surface is promising ---
+  const editorBody = findFunctionBody(editorSf, "HostEditorDialog");
+  check("the dialog's body was found (compiler API)", editorBody !== null);
+  if (editorBody) {
+    // Rooted at the body AND counted, per `findVariableDeclarations`: rooting
+    // excludes a decoy declared outside the component, only the count excludes
+    // one declared as a nested arrow inside it.
+    const decls = findVariableDeclarations(editorBody, "forgettableKeySecrets");
+    check(
+      "`forgettableKeySecrets` is declared exactly once inside the component",
+      decls.length === 1,
+      decls.length,
+    );
+    const init = decls.length === 1 ? decls[0].initializer : undefined;
+    check("and that declaration has an initializer to pin", init !== undefined);
+    if (init) {
+      // Every operand is load-bearing. `existing` is the STORED record, which is
+      // what makes the row a function of what is stored rather than of a draft
+      // that is blank while the keychain read is in flight. `pendingChange` and
+      // `changing` are the two moments another surface is already promising
+      // something about these same accounts - a convert moves them, a bind
+      // deletes them, both saying so in their own confirmation - and two
+      // surfaces promising something about one secret is how the two come to say
+      // different things.
+      check(
+        "and it is exactly this expression, whitespace aside: the stored record, and neither a pending credential change nor one in flight",
+        norm(init.getText(editorSf)) ===
+          norm(
+            "existing && pendingChange === null && !changing ? hostKeySecretNames(existing) : []",
+          ),
+        init.getText(editorSf),
+      );
+    }
+    const nameCalls = findCalls(editorBody, editorSf, ["hostKeySecretNames"]);
+    check(
+      "and the dialog asks for the names exactly once, about the stored record",
+      nameCalls.length === 1 &&
+        JSON.stringify(argTexts(nameCalls[0], editorSf)) === JSON.stringify(["existing"]),
+      nameCalls.map((c) => argTexts(c, editorSf)),
+    );
+    // The save's own end of the chain, over the parsed call - the line-shaped
+    // regex in section [2] says the same thing and does not survive a reformat.
+    const saveBody = findConstArrowBody(editorSf, "save");
+    check("save's body was found for the payload pin", saveBody !== null);
+    if (saveBody) {
+      const calls = findCalls(saveBody, editorSf, ["sshSecretsForSave"]);
+      check("save builds the SSH secrets exactly once", calls.length === 1, calls.length);
+      if (calls.length === 1) {
+        check(
+          "and hands the intent down as its own fourth argument, beside the live touched and seeded records",
+          JSON.stringify(argTexts(calls[0], editorSf)) ===
+            JSON.stringify([
+              norm("sshCred"),
+              norm("sshTouched.current"),
+              norm("sshSeeded.current"),
+              norm("forgetKey"),
+            ]),
+          argTexts(calls[0], editorSf),
+        );
+      }
+    }
+  }
+  const sshSectionRenders = findOpeningElementsByTag(editorSf, "SshCredentialSection", editorSf);
+  if (sshSectionRenders.length === 1) {
+    check(
+      "the dialog hands the section the list, the intent and the one function that arms it",
+      jsxAttrExprText(sshSectionRenders[0], "forgettableKeySecrets", editorSf) ===
+        "forgettableKeySecrets" &&
+        jsxAttrExprText(sshSectionRenders[0], "forgetKey", editorSf) === "forgetKey" &&
+        jsxAttrExprText(sshSectionRenders[0], "onForgetKey", editorSf) === "forgetSshKey",
+      {
+        list: jsxAttrExprText(sshSectionRenders[0], "forgettableKeySecrets", editorSf),
+        intent: jsxAttrExprText(sshSectionRenders[0], "forgetKey", editorSf),
+        setter: jsxAttrExprText(sshSectionRenders[0], "onForgetKey", editorSf),
+      },
+    );
+  }
+
+  // --- exactly one thing arms the intent, and four things retire it ---------
+  check(
+    "the intent is armed in exactly one place in the dialog",
+    count(editorSrc, /setForgetKey\(true\)/g) === 1,
+    count(editorSrc, /setForgetKey\(true\)/g),
+  );
+  check(
+    "and that place is forgetSshKey, which does nothing else - Save is what writes",
+    assignedIn(editorSrc, "forgetSshKey") === "() => setForgetKey(true)",
+    assignedIn(editorSrc, "forgetSshKey"),
+  );
+
+  const effect = between(editorSrc, "if (applied.current === token) return;", "void load();");
+  const reset = between(effect, 'setTest({ kind: "idle" });', "const stale = () =>");
+  check("the load effect's reset block was found", reset.length > 20, reset.length);
+  // Per row, exactly as the touched and seeded records are: an intent carried
+  // onto the next row would delete a key nothing on screen has mentioned.
+  check(
+    "a new row starts with no forget intent",
+    /setForgetKey\(false\);/.test(reset),
+    reset.trim(),
+  );
+
+  // The remaining three retirements are pinned over the PARSED dialog rather
+  // than over `between()` regions, and that is not a preference: the region form
+  // was written first, and the `--print-width 60` control below reddened all
+  // three of them over unchanged code - their anchors are line-shaped, exactly
+  // as sections [1], [2], [4], [6] and [8] are. The reset above survives it, so
+  // it stays as it is.
+  const patchBody = findConstArrowBody(editorSf, "patchSshCred");
+  check("patchSshCred's body was found (compiler API)", patchBody !== null);
+  if (patchBody) {
+    const clears = findCalls(patchBody, editorSf, ["setForgetKey"]);
+    check(
+      "patchSshCred retires the intent in exactly one place",
+      clears.length === 1 && JSON.stringify(argTexts(clears[0], editorSf)) === '["false"]',
+      clears.map((c) => argTexts(c, editorSf)),
+    );
+    if (clears.length === 1) {
+      // The interaction that makes this a retraction rather than a nicety: from
+      // the moment key auth is back the textarea is on screen holding the seeded
+      // body, and the field itself is the route - so an intent left set would
+      // delete the body the user is now looking at, with no row anywhere saying
+      // so. Exactly ONE enclosing `if`, pinned: a second condition would be a
+      // case where the switch happens and the intent survives it.
+      const conds = ifConditionsEnclosing(clears[0], editorSf);
+      check(
+        "and the only thing gating it is the switch back to key auth itself",
+        conds.length === 1 && norm(conds[0]) === norm('patch.authMode === "key"'),
+        conds,
+      );
+    }
+  }
+
+  const applyBody = findConstArrowBody(editorSf, "applyCredentialChange");
+  check("applyCredentialChange's body was found (compiler API)", applyBody !== null);
+  if (applyBody) {
+    const clears = findCalls(applyBody, editorSf, ["setForgetKey"]);
+    check(
+      "a credential change retires the intent, because it changes which accounts the host owns",
+      clears.length === 1 && JSON.stringify(argTexts(clears[0], editorSf)) === '["false"]',
+      clears.map((c) => argTexts(c, editorSf)),
+    );
+    if (clears.length === 1) {
+      // UNCONDITIONAL, and that is the claim rather than the absence of one:
+      // convert moves those accounts, bind deletes them and detach copies an
+      // identity's secrets into fresh ones. Detach is the arm that would bite -
+      // it leaves the row inline again with a private key just copied in, and a
+      // stale intent would delete that copy on the next Save - so a version of
+      // this gated on the change kind is a version with a hole in it.
+      check(
+        "and it retires it for every arm, not one of them",
+        ifConditionsEnclosing(clears[0], editorSf).length === 0,
+        ifConditionsEnclosing(clears[0], editorSf),
+      );
+    }
+  }
+
+  const saveBodyNode = findConstArrowBody(editorSf, "save");
+  if (saveBodyNode) {
+    const clears = findCalls(saveBodyNode, editorSf, ["setForgetKey"]);
+    check(
+      "save's stale-stamp recovery retires the intent, once",
+      clears.length === 1 && JSON.stringify(argTexts(clears[0], editorSf)) === '["false"]',
+      clears.map((c) => argTexts(c, editorSf)),
+    );
+    if (clears.length === 1) {
+      // The fourth route, and the one that is not obvious: the arm BELOW this
+      // re-seeds `authMode` from the refreshed record, so a record now on key
+      // auth would put the textarea back on screen with the intent still set and
+      // the second press of Save would delete the body on it. Asserted as
+      // POSITION within the same block as the refresh, which is what says
+      // "before the re-seed" - a presence check passes with the clear moved
+      // below it, and that ordering is the whole point.
+      const block = enclosingBlock(clears[0]);
+      check("the recovery's own block was found", block !== null);
+      if (block) {
+        const stmts = [...block.statements];
+        const at = (pred: (s: ts.Statement) => boolean) => stmts.findIndex(pred);
+        const refreshIdx = at((s) => findCalls(s, editorSf, ["setExisting"]).length > 0);
+        const clearIdx = at((s) => isDescendantOf(clears[0], s));
+        const reseedIdx = at(
+          (s) => ts.isIfStatement(s) && s.expression.getText(editorSf).includes('!== "inline"'),
+        );
+        check(
+          "and it sits beside the record refresh, ABOVE the arm that re-seeds the auth mode",
+          refreshIdx !== -1 &&
+            clearIdx !== -1 &&
+            reseedIdx !== -1 &&
+            refreshIdx < clearIdx &&
+            clearIdx < reseedIdx,
+          { refreshIdx, clearIdx, reseedIdx },
+        );
+      }
+    }
+  }
+
+  // --- what was watched fail, and what `tsc` did while it did ---------------
+  //
+  // Every mutation below was applied to the file named, the script and `tsc` were
+  // both run, the FAIL lines were recorded as printed, and the source was
+  // restored from a snapshot whose checksum was verified afterwards.
+  //
+  // F1  `sshSecretsForSave`'s `forgetKey` branch deleted, the parameter kept
+  //       -> FIVE: the three in the first payload block, "while both key fields
+  //          still go down as the clear", and "the intent overrides a key body
+  //          that is touched AND seeded". `tsc` DOES redden here - TS6133 on the
+  //          now-unread parameter, `noUnusedParameters` being on - so the
+  //          compiler catches the deletion while these five are what say which
+  //          behaviour went with it.
+  // F2  the branch blanks the draft's password along with the two key fields
+  //       -> THREE: "and it sends no password at all", "and nothing but those two
+  //          fields", and "a password typed in the same sitting still carries its
+  //          typed value". `tsc` at 0. This is the mutation the row's whole
+  //          promise turns on: the password is the credential the host has moved
+  //          TO.
+  // F3  the fourth argument dropped at the call site in `save`
+  //       -> TWO: section [2]'s call-text check and this section's argument-wise
+  //          pin. `tsc` reddens TS2554 (4 arguments expected, 3 given), which is
+  //          why the parameter is REQUIRED rather than defaulted - a default
+  //          would have made this silent in the compiler and left the two pins as
+  //          the only cover.
+  // F4  the render gate changed to `value.privateKey.trim() !== ""`, the draft
+  //     instead of the stored record
+  //       -> ONE: the exact-text gate pin. `tsc` at 0. That gate shows the row
+  //          for a host with nothing stored and hides it while the read is in
+  //          flight, which is the confusion `sshSeeded` exists to keep out.
+  // F5  the `patch.authMode === "key"` retraction deleted
+  //       -> ONE: "patchSshCred retires the intent in exactly one place",
+  //          reporting `[]`. `tsc` at 0.
+  // F5b the retraction kept but UNGATED, which a presence check reads as correct
+  //       -> ONE: "and the only thing gating it is the switch back to key auth
+  //          itself". `tsc` at 0. This is the mutation only the
+  //          enclosing-condition half catches, and it fails the other way -
+  //          every keystroke would retract an intent the user had set.
+  // F6  the row rendered unconditionally (the ternary removed)
+  //       -> ONE: "the row sits in a conditional arm at all". The two checks
+  //          guarded on it do not run - `ok` drops by three, not one - which is
+  //          worth knowing before reading their silence as cover. `tsc` at 0.
+  // F7  `forgetKeyNote` inlined as a literal in `ForgetKeyRow`
+  //       -> ONE: "and its note too", at `{"count":0}`. The argument pin is
+  //          guarded on that count and does not run, and the IMPORT-SET check
+  //          still passes, because the import itself stayed. `tsc` reddens TS6133
+  //          on the unused import.
+  // F9  `applyCredentialChange`'s retirement deleted
+  //       -> ONE: "a credential change retires the intent". `tsc` at 0.
+  // F10 the recovery's retirement kept, still exactly one, but moved BELOW the
+  //     arm that re-seeds the auth mode
+  //       -> ONE: the ordering check, at
+  //          `{"refreshIdx":0,"clearIdx":2,"reseedIdx":1}`. `tsc` at 0. The
+  //          presence half stays green throughout, which is why position is
+  //          asserted rather than presence.
+  // F8  `prettier --print-width 60 --write` over the four source files - the
+  //     reformat pair every exact-text pin here owes
+  //       -> NOTHING in this section, and that is what the three parsed pins
+  //          above were rewritten for: the first version of them was
+  //          `between()`-anchored and this same control reddened all three (six
+  //          checks) over unchanged code. It still reddens 24 checks in sections
+  //          [1], [2], [4], [6] and [8], whose anchors and regexes are
+  //          line-shaped - the same 24 sections [10] and [11] record. One of them
+  //          is section [2]'s own `sshSecretsForSave` call-text check, extended
+  //          here for the fourth argument and no less line-shaped than it was.
 }
 
 console.log(failed === 0 ? "\nAll host-editor checks passed." : `\n${failed} check(s) FAILED.`);

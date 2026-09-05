@@ -49,6 +49,7 @@ import {
   credentialChangeNote,
   credentialChangeTitle,
   currentCredentialChoice,
+  hostKeySecretNames,
   hostOwnedSecretNames,
   identityChoice,
   identityIdFromChoice,
@@ -232,6 +233,26 @@ export function HostEditorDialog({
    * await and read by the save, and neither renders from it.
    */
   const sshSeeded = useRef<SshSecretSeeded>(NOTHING_SEEDED);
+  /**
+   * Whether the user has asked this host to forget the key material it still
+   * stores under an auth mode that cannot use it - IN THE DRAFT.
+   *
+   * STATE rather than a ref, unlike the two above, and for the opposite reason:
+   * those two exist because they are read after the keychain seed's await, so a
+   * captured value would be the one from before the user could type. This one is
+   * RENDERED - the row's own button disappears once it is pressed, which is the
+   * only feedback there is that anything happened - and nothing writes it across
+   * an await.
+   *
+   * An intent rather than a write, exactly as {@link forgetPin} is: Save turns it
+   * into `sshSecretsForSave`'s clear and Cancel discards it by unmounting. Cleared
+   * in four places, each one a route by which the field it is about could come
+   * back on screen or the accounts it names could change underneath it - the load
+   * effect (a different row), {@link patchSshCred} (a switch back to key auth),
+   * {@link applyCredentialChange} (the accounts moved or were deleted) and the
+   * save's own stale-stamp recovery (the auth mode is re-seeded from the record).
+   */
+  const [forgetKey, setForgetKey] = useState(false);
   const [proxyJumpId, setProxyJumpId] = useState("");
   const [rdpCred, setRdpCred] = useState<RdpCredentialDraft>(EMPTY_RDP_CRED);
   const [presetId, setPresetId] = useState(RDP_DEFAULT_PRESET.id);
@@ -373,6 +394,10 @@ export function HostEditorDialog({
     // last row's seed would license clearing this one's secret.
     sshTouched.current = NO_SSH_SECRETS_TOUCHED;
     sshSeeded.current = NOTHING_SEEDED;
+    // Per row for the same reason: the intent names the accounts of the row this
+    // editor was pointed away from, and carrying it onto the next one would
+    // delete a key nothing on screen has said a word about.
+    setForgetKey(false);
     setExisting(null);
     setReady(false);
     setMode(target.mode);
@@ -610,6 +635,26 @@ export function HostEditorDialog({
     existing.protocol === "ssh" &&
     existing.credential.kind === "inline" &&
     existing.credential.hasPassword;
+  /**
+   * The key material the SSH section may offer to forget, or `[]` for no row.
+   *
+   * Off the STORED record, never the draft: the draft's key body is what the
+   * keychain seed put there when the dialog opened, so a blank one means "the
+   * read has not landed" just as often as it means "there is nothing stored",
+   * and that is the same confusion `sshSeeded` exists to keep out of the save.
+   * `hostKeySecretNames` answers `[]` for a vault-bound row and for an RDP row,
+   * so neither needs a test here - a bound host owns no accounts of its own, and
+   * an RDP host never held key material.
+   *
+   * The two conditions this DOES carry are about another surface having promised
+   * something about the same accounts. A pending convert moves them and a pending
+   * bind deletes them, both saying so in their own confirmation, and `changing` is
+   * that write in flight; two surfaces promising something about one secret is how
+   * the two come to say different things. Create mode falls out of `existing`
+   * being null, which is also the honest answer: there is nothing stored yet.
+   */
+  const forgettableKeySecrets =
+    existing && pendingChange === null && !changing ? hostKeySecretNames(existing) : [];
   // The address the form is proposing, trimmed exactly as Test and Save trim it,
   // so all three agree about which pin is the current one.
   const draftAddress = shared.host.trim();
@@ -693,6 +738,15 @@ export function HostEditorDialog({
     // the same two inputs. Kept here rather than handed down as a callback
     // because the state is the dialog's and every edit already arrives here.
     if (patch.privateKey !== undefined || patch.keyPassphrase !== undefined) setKeyRefusal(null);
+    // Switching back to key auth RETRACTS a forget intent, and this is the one
+    // place that can see it happen. From this moment the key textarea is on
+    // screen, seeded with the stored body, and the field itself is the route to
+    // clearing it - so an intent left set would delete the very body the user is
+    // now looking at and editing, without the row that promised it being
+    // rendered anywhere. The other two modes keep it: neither shows a key field,
+    // so the row is still there saying what Save will do. `forgetPin` retires a
+    // stale Test result for the same class of reason.
+    if (patch.authMode === "key") setForgetKey(false);
   };
 
   const changeProtocol = (next: "ssh" | "rdp") => {
@@ -745,6 +799,27 @@ export function HostEditorDialog({
     // A stale "mismatch" result no longer means anything.
     setTest({ kind: "idle" });
   };
+
+  /**
+   * Forget the key material this host stores but cannot use - IN THE DRAFT, on
+   * exactly the terms {@link forgetPin} spells out. Save applies it through
+   * `sshSecretsForSave`, and Cancel discards it by unmounting this dialog.
+   *
+   * The gap it closes: an SSH host that authenticated with a private key and now
+   * authenticates with a password keeps that key in the secret store for good.
+   * The record is honest about holding it and nothing releases it - an auth-mode
+   * change is not a protocol change, so the store still NAMES all three accounts
+   * and correctly declines to release any of them - and the export enumerates
+   * every field the protocol owns, so the stale key travels in every backup file.
+   * The one route that ever removed it is the key textarea, which is rendered
+   * only under key auth: the route disappears at exactly the moment it becomes
+   * the thing the user wants.
+   *
+   * `existing` is not an operand here, and nothing needs it to be: this sets a
+   * draft flag, and the row that calls it renders only from the stored record's
+   * own flags, so an unsaved host cannot reach it.
+   */
+  const forgetSshKey = () => setForgetKey(true);
 
   const runTest = async () => {
     // UNREACHABLE as the form stands, and kept anyway: the Test button is
@@ -1003,9 +1078,15 @@ export function HostEditorDialog({
         // Nothing at all for a vault-bound row: `upsertHost` REFUSES a secret
         // handed in with a vault binding, and the fields it would come from are
         // ones this form never fills.
+        // `forgetKey` is the fourth argument and an EXPLICIT one: it forces both
+        // key fields to the store's clear whatever the touched and seeded records
+        // say, because the field it is about is not rendered in the auth mode
+        // that wants it gone and therefore cannot be touched. Faking it by
+        // marking those two fields touched and seeded would break the invariant
+        // that licenses every other clear - see `sshSecretsForSave`.
         secrets = boundIdentity
           ? {}
-          : sshSecretsForSave(sshCred, sshTouched.current, sshSeeded.current);
+          : sshSecretsForSave(sshCred, sshTouched.current, sshSeeded.current, forgetKey);
       } else {
         record = {
           ...base,
@@ -1089,6 +1170,15 @@ export function HostEditorDialog({
         const fresh = await findHost(e.hostId).catch(() => undefined);
         if (fresh) {
           setExisting(fresh);
+          // The one draft value this recovery does drop, and it has to: the arm
+          // below re-seeds `authMode` from `fresh`, so a record that is now on
+          // key auth would put the key textarea back on screen with the intent
+          // still set - the second press of Save would then delete the body the
+          // user is looking at, with the row that promised it nowhere in the
+          // form. Dropped in the safe direction: nothing has been deleted, the
+          // row renders again from `fresh`'s own flags with its button back, and
+          // its note still says what pressing it does.
+          setForgetKey(false);
           // The most common way this refusal is reached now is the
           // credential picker above, on ANOTHER open editor for the same host:
           // this form loaded a row BOUND to an identity, that binding was
@@ -1209,6 +1299,15 @@ export function HostEditorDialog({
     if (!existing) return;
     setPendingChange(null);
     setError(null);
+    // Every arm here changes which accounts this host owns - convert moves them,
+    // bind deletes them, detach copies an identity's secrets into fresh ones - so
+    // a forget intent recorded before it names accounts that are no longer the
+    // ones it was about. Detach is the one that would bite: it leaves the row
+    // inline again with a private key just copied in, and a stale intent would
+    // delete that copy on the next Save. Cleared before the write rather than
+    // after it, so a write that fails drops the intent too: nothing has been
+    // deleted, and the row is still on screen to be pressed again.
+    setForgetKey(false);
     setChanging(true);
     try {
       if (change.kind === "convert") {
@@ -1312,8 +1411,11 @@ export function HostEditorDialog({
           result = await detachHostFromVault({ host: existing, inline });
           // Non-secret fields only. `sshTouched`/`sshSeeded` deliberately stay
           // as they are - seeding them would license a later blank Save to
-          // clear the secrets `detachHostFromVault` just copied
-          // (`editor/sshSecrets.ts:48-79`).
+          // clear the secrets `detachHostFromVault` just copied (the rule
+          // `sshSecretsForSave` in `editor/sshSecrets.ts` enforces). Re-pointed
+          // at the symbol rather than at the line range it used to name: that
+          // range was the head of that function's doc comment, which has since
+          // grown, and a range is exactly the kind of citation that rots.
           setSshCred({ ...inline, password: "", privateKey: "", keyPassphrase: "" });
         } else {
           const inline = { username: identity?.username ?? "", domain: identity?.domain ?? "" };
@@ -1500,6 +1602,9 @@ export function HostEditorDialog({
                     onChange={patchSshCred}
                     hasStoredPassword={hasStoredSshPassword}
                     keyRefusal={keyRefusal}
+                    forgettableKeySecrets={forgettableKeySecrets}
+                    forgetKey={forgetKey}
+                    onForgetKey={forgetSshKey}
                   />
                 ) : (
                   <RdpCredentialSection
