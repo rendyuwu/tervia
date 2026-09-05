@@ -1839,6 +1839,123 @@ console.log("\n[16. placement] the compare is a direct statement of the queued w
   pinPlacement("upsertIdentity", "vaultIdentityStamp", "writeSecret");
 }
 
+// ============================================================================
+// 17. The two refusal messages tell the user what to do, not to press Save
+//     again. (COMPILER API to locate each arm; SOURCE-TEXT over its content.)
+// ============================================================================
+// Protects: `KNOWN-LIMITS.md`'s entry accepting no refresh/recovery on this
+// refusal rests on the strength of these two messages saying what to do -
+// close and reopen - instead of inviting a second press that is refused the
+// same way every time. Nothing else holds either sentence: both are
+// assembled inline in a `.tsx` catch arm, never exported, so there is no
+// function to pin by return value the way `vault-draft-verify.ts` section [9]
+// pins `encryptedKeyRefusal`. This section is the closest equivalent that
+// shape allows - the ternary each `save` branches on, found structurally so a
+// swap of its two arms cannot hide from a check that reads the file as one
+// blob, and its own two arm texts read directly off the AST rather than by a
+// fragile string anchor.
+//
+// PINS THE PROPERTY, NOT THE SENTENCE: neither arm may read as an invitation
+// to press Save again, and each arm must still say its own instruction - the
+// deleted-record arm says "close this editor" (no reopen: there is nothing
+// left to reopen against), the moved-record arm says "close and reopen"
+// (there is). A pure negative set passes a message reduced to nothing, which
+// is why each arm also carries its own positive.
+//
+// ONE SPELLING DECISION IS DISCLOSED HERE, because it decides how a future
+// rewrite of either message may be worded: the deleted-record arm's own
+// correct text says "pressing Save again will not help" - it NAMES the
+// invitation in order to refuse it, which a bare `!/save again/i` test cannot
+// tell from an actual invitation. `dulled()` below removes exactly that one
+// phrase before the negative checks run, so the negatives read the rest of
+// the sentence. Rewording that phrase (e.g. "won't help" for "will not
+// help") requires updating `dulled()` alongside it, or the negative goes
+// stale and starts failing the correct, committed text.
+//
+// WHAT THIS CANNOT SEE: whether either message ever reaches a render at all -
+// section 14's own entry above this one is the closest existing coverage of
+// that, and it is an absence, not a check.
+console.log("\n[17. refusal wording] neither vault refusal message invites a second press");
+{
+  /** The first ConditionalExpression under `root` whose own condition text
+   *  names `name` - the same nesting question `findAncestorConditionOn`
+   *  above answers walking UP; this walks DOWN from a `save` body to find
+   *  the `e.actual === VAULT_STAMP_ABSENT` ternary structurally, so a swap of
+   *  its two arms moves with the node and cannot be missed by treating the
+   *  region as one blob of text. */
+  function findConditionalOn(
+    root: ts.Node,
+    name: string,
+    sf: ts.SourceFile,
+  ): ts.ConditionalExpression | null {
+    let result: ts.ConditionalExpression | null = null;
+    const visit = (n: ts.Node): void => {
+      if (result) return;
+      if (ts.isConditionalExpression(n) && n.condition.getText(sf).includes(name)) {
+        result = n;
+      }
+      ts.forEachChild(n, visit);
+    };
+    visit(root);
+    return result;
+  }
+
+  /** Strips the one phrase the deleted-record arm legitimately contains -
+   *  see this section's header comment on why a bare negative cannot tell
+   *  the refusal's own "will not help" from an actual invitation. */
+  const dulled = (s: string): string => s.replace(/save again will not help/gi, "");
+
+  const pinRefusalArm = (
+    fileLabel: string,
+    armLabel: string,
+    text: string,
+    positive: RegExp,
+    positiveLabel: string,
+  ): void => {
+    const d = dulled(text);
+    check(`${fileLabel}: ${armLabel} does not say to save again`, !/save again/i.test(d), d);
+    check(`${fileLabel}: ${armLabel} does not say to press Save`, !/press save\b/i.test(d), d);
+    check(`${fileLabel}: ${armLabel} does not say to try again`, !/try again/i.test(d), d);
+    check(
+      `${fileLabel}: ${armLabel} says ${positiveLabel} - so an empty or gutted message fails this`,
+      positive.test(text),
+      text,
+    );
+  };
+
+  for (const key of ["keyDialog", "identityDialog"] as const) {
+    const sf = sourceFile(key);
+    const saveBody = findConstArrowBody(sf, "save");
+    check(`${FILES[key]}: save's body was located (section 17)`, saveBody !== null);
+    if (!saveBody) continue;
+
+    const ternary = findConditionalOn(saveBody, "VAULT_STAMP_ABSENT", sf);
+    check(
+      `${FILES[key]}: the e.actual === VAULT_STAMP_ABSENT ternary was located`,
+      ternary !== null,
+    );
+    if (!ternary) continue;
+
+    const deletedArm = ternary.whenTrue.getText(sf);
+    const movedArm = ternary.whenFalse.getText(sf);
+
+    pinRefusalArm(
+      FILES[key],
+      "the deleted-record arm",
+      deletedArm,
+      /close this editor/i,
+      '"close this editor"',
+    );
+    pinRefusalArm(
+      FILES[key],
+      "the moved-record arm",
+      movedArm,
+      /close and reopen/i,
+      '"close and reopen"',
+    );
+  }
+}
+
 console.log(`\n${checked - failed}/${checked} vault-editor checks passed`);
 if (failed > 0) console.error(`${failed} check(s) FAILED.`);
 process.exit(failed === 0 ? 0 : 1);
