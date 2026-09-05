@@ -2,7 +2,7 @@ import { type RailViewKind } from "./pages";
 
 /**
  * WHAT THE WORKSPACE AREA IS SHOWING: the active tab, plus the rail view
- * covering it (DCR-1) when there is one.
+ * covering it, when there is one.
  *
  * ONE state object rather than two `useState`s, because the pair carries an
  * invariant that two independent setters cannot express: **a tab cannot become

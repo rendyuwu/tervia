@@ -1,12 +1,12 @@
 /**
  * Import/Export live here because the Hosts page replaced the header SSH
- * dropdown that used to own these two actions (`SshMenu.tsx`, before 6d).
+ * dropdown that used to own these two actions.
  * Ported near verbatim - the state and the dialog are unchanged, only the
  * presentation (two page buttons instead of two menu items) and the error
  * placement (next to the buttons instead of inside a menu that has already
- * closed by then) differ. `openImport`'s ordering gained one more step in
- * VLT-60: the envelope is validated between the read and the dialog opening,
- * not only picked-then-read-then-opened.
+ * closed by then) differ. `openImport`'s ordering gained one more step: the
+ * envelope is validated between the read and the dialog opening, not only
+ * picked-then-read-then-opened.
  *
  * The format is **v3**, and v1 and v2 files are refused by name rather than by
  * a parse error - which is why the picker still offers the v1 extension. A v3
@@ -108,7 +108,7 @@ export function HostsBackupActions(): ReactNode {
           collapsed state's accessible name silently track whatever text the
           span happens to hold, rather than being an explicit, always-present
           label. */}
-      {/* DCR-3 (owner, 2026-08-28): the DESKTOP arrow convention - export
+      {/* The DESKTOP arrow convention, chosen deliberately - export
           points OUT of the box, import points IN. Lucide's `Upload` is an
           arrow leaving a tray and `Download` an arrow entering one, so the two
           names read backwards against these two labels and that is the whole
@@ -141,7 +141,7 @@ export function HostsBackupActions(): ReactNode {
       </Button>
       {/* The menu this replaces closed itself before a failed pick could be
           reported, so the message had nowhere to land - the improvement is a
-          surface that outlives the click. VLT-36: that surface used to be an
+          surface that outlives the click. That surface used to be an
           inline line with NO dismiss of its own - cleared only implicitly, at
           the top of the next `openExport`/`openImport`, so a failed pick from
           one attempt could sit here through several unrelated successful

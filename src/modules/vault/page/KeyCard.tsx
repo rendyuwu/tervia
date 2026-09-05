@@ -6,11 +6,11 @@
  * prop named `key` never reaches the component at all, and the list key the
  * page must also supply is a different thing entirely.
  *
- * Edit opens the key editor (wave 3). Still no selection and no card-level
+ * Edit opens the key editor. There is no selection and no card-level
  * `onClick`: this card is a static row, not the interactive surface `HostCard`
- * is, and giving it one for no caller would be the dead-affordance class
- * already filed against this app once (a header drag that silently does
- * nothing under a rail view).
+ * is, and giving it one for no caller would be a dead affordance of the kind
+ * this app has shipped before (a header drag that silently does nothing under a
+ * rail view).
  */
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -28,10 +28,9 @@ export type KeyCardProps = {
   identityCount: number;
   /** The record claims a private key the store does not hold. */
   missingPrivateKey?: boolean;
-  /** Open the editor for this record. Required, not optional: after wave 3
-   *  there is no surface that lists these rows without being able to edit
-   *  one, and an optional callback would let a future caller render a card
-   *  whose Edit button does nothing. */
+  /** Open the editor for this record. Required, not optional: no surface lists
+   *  these rows without being able to edit one, and an optional callback would
+   *  let a future caller render a card whose Edit button does nothing. */
   onEdit: () => void;
   onDelete: () => void;
 };

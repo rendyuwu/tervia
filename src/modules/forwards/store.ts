@@ -37,8 +37,8 @@ export type ForwardsStore = {
   /**
    * Refuses a `hostId` that does not name a saved SSH host, a `localPort`
    * outside `0` or `1-65535`, a `remotePort` outside `1-65535`, a blank `name`,
-   * or a blank `remoteHost`. See the six named checks in the plan's step body -
-   * each refusal names both the rule and the id or value it is refusing.
+   * or a blank `remoteHost`. Each refusal names both the rule and the id or
+   * value it is refusing.
    */
   upsertRule(rule: ForwardRule, hosts: HostLookup): Promise<ForwardRule>;
   /** Refuses nothing. A rule references a host; nothing references a rule, so

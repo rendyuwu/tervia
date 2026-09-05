@@ -43,8 +43,8 @@ type Props = {
   onOpenPreview: () => void;
   /** Persist a split node's per-child size percentages after a divider drag. */
   onSplitSizes: (splitId: number, sizes: number[]) => void;
-  /** The rail view covering the tab area, or null when the tabs are showing
-   *  (DCR-1). Vault and Port Forwarding arrive here instead of as tabs. */
+  /** The rail view covering the tab area, or null when the tabs are showing.
+   *  Vault and Port Forwarding arrive here instead of as tabs. */
   railView: RailViewKind | null;
 } & Pick<TabsApi, "movePaneLeafToEdge" | "setLeafTerminalTheme">;
 
@@ -175,15 +175,13 @@ export function WorkspaceArea({
                   nothing and Vault / Port Forwarding arrived nameless.
 
                   Written ONCE, here in the container, rather than as a bar
-                  added inside `VaultPage` and `ForwardsPage`: that is two
-                  copies of the same chrome to keep in sync by hand, which is
-                  DCR-5's exact failure mode.
+                  added inside `VaultPage` and `ForwardsPage`, which would be two
+                  copies of the same chrome to keep in sync by hand.
 
                   The pane header's TYPOGRAPHY, and none of its controls: no
                   grip, close, split, float or gear. A rail view cannot be
-                  dragged, split or closed as a leaf, and an affordance that
-                  does nothing when pressed is D-NAV1's complaint in another
-                  costume.
+                  dragged, split or closed as a leaf, and a control that does
+                  nothing when pressed is a dead affordance.
 
                   Its `@container` is the one token of that bar NOT copied:
                   the pane header carries it so the per-file cluster inside it

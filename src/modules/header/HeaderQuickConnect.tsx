@@ -27,7 +27,7 @@ type Props = {
 };
 
 /**
- * §5.8: type to filter saved hosts by name or `user@host`, Enter connects the
+ * Type to filter saved hosts by name or `user@host`; Enter connects the
  * top match. A query that matches no saved host but parses as
  * `user@host[:port]` opens the Hosts page with the editor prefilled instead -
  * there is no first-class ad-hoc connect path to dial straight into, and

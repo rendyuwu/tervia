@@ -591,7 +591,7 @@ export function attachSession(
             emitSshStatus(s, { kind: "error", message: msg, canRetry: true });
             return;
           }
-          // VLT-57: not every connect failure is a dropped connection. One that
+          // Not every connect failure is a dropped connection. One that
           // the frontend established on its own - the saved host has nothing to
           // authenticate with, its jump chain is broken, the user declined the
           // server's key - cannot come out differently on the next attempt, so

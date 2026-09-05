@@ -6,13 +6,13 @@ import { LEGACY_PURGE_KEY } from "./types";
 
 // A one-shot sweep of the secrets the two old connection modules leave behind.
 //
-// Decision 3 accepts losing the RECORDS: `tervia-ssh-connections.json` and
-// `tervia-rdp-connections.json` are simply not read after this sub-phase (§9.1),
-// and the saved hosts get re-entered once. Nobody accepted leaving the SECRETS.
+// Losing the RECORDS is accepted: `tervia-ssh-connections.json` and
+// `tervia-rdp-connections.json` are simply not read any more, and the saved
+// hosts get re-entered once. Nobody accepted leaving the SECRETS.
 // The moment those modules are deleted, `tervia-ssh :: <id>::{password,
 // privateKey, keyPassphrase}` and `tervia-rdp :: <id>::password` become
 // UNENUMERABLE: the IPC surface is `secrets_get`, `secrets_get_all`, `secrets_set`
-// and `secrets_delete`, with no `secrets_list` (§9.7), so nothing left in the
+// and `secrets_delete`, with no `secrets_list`, so nothing left in the
 // macOS keychain, the Windows `secrets.bin` or the Linux mode-0600 JSON could ever
 // be named from inside the app again. Private keys, permanently, with no delete
 // button anywhere.
@@ -32,8 +32,8 @@ const LEGACY_ROWS_KEY = "connections";
 
 /**
  * The two old store files, each with the keychain service and field list that
- * belonged to it: `SSH_SECRET_FIELDS` from `ssh/connections.ts`,
- * `RDP_SECRET_FIELDS` from `rdp/connections.ts`.
+ * belonged to it: `SSH_SECRET_FIELDS` and `RDP_SECRET_FIELDS`, from the two
+ * connection modules that have since been deleted.
  *
  * Copied rather than imported, deliberately - see the module header. These are the
  * OLD services' names, which is the whole point: nothing else can name those
@@ -133,9 +133,9 @@ function pathIn(dir: string, fileName: string): string {
  * every delete is still idempotent - `secrets_delete` reports an absent account as
  * success on all three platforms.
  *
- * The old store FILES are deliberately left in place. They cost nothing, this
- * phase writes no migration (decision 3), and a user who wants their old host list
- * back for reference still has it sitting there to read.
+ * The old store FILES are deliberately left in place. They cost nothing, nothing
+ * migrates them, and a user who wants their old host list back for reference
+ * still has it sitting there to read.
  *
  * Never rejects. The worst outcome it reports is a partial purge, which is the one
  * thing the caller might want to say out loud.

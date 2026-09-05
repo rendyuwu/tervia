@@ -18,8 +18,8 @@ type Props = {
   tabs: Tab[];
   activeId: number;
   /**
-   * False while something covers the whole pane area - today, a rail view
-   * (DCR-1). Folded into each tab's `tabVisible` rather than handled by the
+   * False while something covers the whole pane area - today, a rail view.
+   * Folded into each tab's `tabVisible` rather than handled by the
    * caller hiding this subtree, because "visible" is what a leaf acts on: an
    * xterm told it is visible holds a WebGL context nobody is looking at and
    * keeps the caret while the user types into the surface on top of it. Panes

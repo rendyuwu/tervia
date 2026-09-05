@@ -48,11 +48,10 @@ export type SecretInput = string | null | undefined;
  * branch by carrying the right characters - and the caller that would hand one
  * over is the one parsing an untrusted backup. Do not simplify it to a string.
  *
- * Two callers, one of them not written yet. `credentialMove.ts` copies a host's
- * secret onto a vault account with `secrets_copy`, which never returns the value,
- * so the record it then writes has no other way to claim the secret honestly.
- * 6g's import is the second: `backup_apply_secrets` writes from Rust and hands
- * JS a `boolean[]`.
+ * Two callers. `credentialMove.ts` copies a host's secret onto a vault account
+ * with `secrets_copy`, which never returns the value, so the record it then
+ * writes has no other way to claim the secret honestly. `backup/apply.ts` is the
+ * second: `backup_apply_secrets` writes from Rust and hands JS a `boolean[]`.
  *
  * Declared HERE rather than in `modules/hosts`, and re-exported from there, so
  * there is exactly ONE of it: two symbols with the same description are not
@@ -195,12 +194,14 @@ export function createVaultStore(io: VaultIo): VaultStore {
    * For a record that DOES exist the accounts stay reachable through `deleteKey`,
    * and clearing them would destroy a stored secret this layer cannot put back -
    * it never reads one, so it holds no previous value. That case is metadata
-   * drift, already registered as VLT-22, not an orphan.
+   * drift, not an orphan.
    *
    * A failing rollback is swallowed - the only swallow in this module. The caller
    * is already rethrowing the write's own error, which is the one the user can act
    * on, and a keychain that refused the write usually refuses this too. What
-   * survives that is VLT-23.
+   * survives that is bytes at a vault account no record names, and nothing can
+   * sweep them: `secrets.rs` exposes `get`, `get_all`, `set`, `delete` and
+   * `copy`, and no command that lists accounts.
    *
    * {@link SECRET_ALREADY_STORED} does not change this arm. A caller passing it
    * for `privateKey` and a real string for `passphrase` that then throws has the
@@ -352,7 +353,8 @@ export function createVaultStore(io: VaultIo): VaultStore {
       // with `autoSave`, so the record is already in the plugin's cache with a
       // debounced retry behind it - deleting the secrets here would race that into
       // a record whose flags name material that is gone, permanently, since the
-      // flags are never read back. Orphaned on a failure that never clears: VLT-23.
+      // flags are never read back. Orphaned on a failure that never clears, and
+      // unreachable afterwards: nothing enumerates keychain accounts.
       await persist(VAULT_KEYS_KEY, next);
       return warning ? { record, warning } : { record };
     });

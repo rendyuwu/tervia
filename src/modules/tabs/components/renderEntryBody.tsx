@@ -55,8 +55,8 @@ export type RenderEntryArgs = {
   selfDragging?: boolean;
   /** Activate this entry. Required, not optional: the trigger's own click route
    *  (`lib/selectEntry.ts`) is the ONLY thing that reaches a chip whose key is
-   *  already the active one, so an entry rendered without it would be the exact
-   *  chip D-NAV1 was about - inert under a rail view. Every caller has one. */
+   *  already the active one, so an entry rendered without it would be inert
+   *  under a rail view. Every caller has one. */
   onSelectEntry: SelectEntry;
   onPinLeaf: (tabId: number, leafId: number) => void;
   onCloseEntry: (tabId: number, leafId: number | null) => void;
@@ -129,7 +129,7 @@ export function renderEntryBody(args: RenderEntryArgs): ReactNode {
       // Drag attrs/listeners supplied by caller. Nullish spreads preserve default click semantics when absent.
       {...(dragAttrs ?? {})}
       {...(dragListeners ?? {})}
-      // D-NAV1: the chip's own click route. It sits AFTER the two drag spreads
+      // The chip's own click route. It sits AFTER the two drag spreads
       // DEFENSIVELY - not to repair a collision that exists today. In
       // @dnd-kit/core 6.3.1 neither object carries an `onClick`: `attributes` is
       // `{role, tabIndex, aria-*}` and `listeners` is `{onPointerDown}`, since
@@ -200,7 +200,8 @@ export function renderEntryBody(args: RenderEntryArgs): ReactNode {
           // rename field would otherwise activate the tab and throw the user out
           // of the rail view they opened the rename from. Stopped here rather
           // than by teaching the trigger's handler about `renaming` - that
-          // handler stays unconditional, which is the whole of the D-NAV1 fix.
+          // handler stays unconditional, which is what makes an already-active
+          // chip clickable at all.
           // InlineInput is the explorer's rename field, reused here because it
           // already survives the hazard this flow creates - the context menu's
           // Radix portal steals focus as it unmounts, and it re-focuses through

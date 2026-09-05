@@ -87,7 +87,7 @@ export function GroupStrip({
   // Every one of the three mutations can be refused by the store. Surface the
   // rejection here instead of letting it reach the console unhandled.
   //
-  // VLT-36: this used to be its own persistent inline `error` state with no
+  // This used to be its own persistent inline `error` state with no
   // dismiss control at all - cleared only implicitly, at the top of the NEXT
   // `runMutation` call, so a rename refused five minutes ago could sit under
   // the strip until the user happened to try another create/rename/delete.

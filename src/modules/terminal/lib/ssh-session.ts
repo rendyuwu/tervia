@@ -140,7 +140,7 @@ export async function openSshForSession(
     s.sshRoute = null;
     const message = describeError(e);
     emitSshStatus(s, { kind: "error", message, canRetry: true });
-    // VLT-57: everything this block can fail on is a fact about THIS machine -
+    // Everything this block can fail on is a fact about THIS machine -
     // the profile is gone, it names an RDP host, its jump chain is broken or
     // cyclic, its vault binding no longer resolves, it has no credential. None
     // of them involve the network and none of them can come out differently on
@@ -167,13 +167,13 @@ export async function openSshForSession(
     `\x1b[2m[tervia] connecting to ${auth.user}@${conn.host}:${conn.port}…\x1b[0m\r\n`,
   );
 
-  // VLT-57: refuse to dial with nothing to authenticate with. Saving a host with
-  // no password has been a supported state since VLT-44 relaxed the save
-  // validation, which made this previously-unreachable failure routine - and the
-  // backend can only report it as one more connect-failed string, at which point
-  // the ladder cannot tell it apart from a server that is merely down. Asked
-  // here, the answer is attributable: it is a fact about the saved host, and no
-  // amount of retrying changes a saved host.
+  // Refuse to dial with nothing to authenticate with. A host saved with no
+  // password at all is a legal record - `validateSshCredential` deliberately
+  // allows a blank secret - which makes this failure routine rather than
+  // unreachable, and the backend can only report it as one more connect-failed
+  // string, at which point the ladder cannot tell it apart from a server that is
+  // merely down. Asked here, the answer is attributable: it is a fact about the
+  // saved host, and no amount of retrying changes a saved host.
   //
   // Deliberately AFTER the banner above rather than up in the resolve block, so
   // the failure still reads like every other connect failure - "connecting to
@@ -301,7 +301,7 @@ export async function openSshForSession(
   // Track the first-connect host-key prompt so it can be cleaned up if this
   // attempt dies before the user answers it (see the catch below).
   let hostKeyPromptId: string | null = null;
-  // VLT-57: every ANSWER this attempt's host-key questions were given, in the
+  // Every ANSWER this attempt's host-key questions were given, in the
   // order they arrived. Recorded at the moment the answer is MADE - see the
   // `confirm` wrapper below - rather than inferred at failure time from how many
   // prompts were raised against how many were trusted.
@@ -376,7 +376,7 @@ export async function openSshForSession(
           useHostKeyPrompt.getState().enqueue(
             {
               ...prompt,
-              // VLT-57: the queue answers every prompt through the prompt's own
+              // The queue answers every prompt through the prompt's own
               // `confirm`, so wrapping it here is the one place that sees EVERY
               // answer this attempt's questions get - the user's Trust, the
               // user's Reject, and the rejection `abandon` sends on the user's
@@ -431,7 +431,7 @@ export async function openSshForSession(
       useHostKeyPrompt.getState().dismiss(hostKeyPromptId);
       hostKeyPromptId = null;
     }
-    // VLT-57: a key this attempt asked about and was REFUSED trust for is the
+    // A key this attempt asked about and was REFUSED trust for is the
     // other failure the frontend can attribute on its own. A refusal aborts the
     // handshake before any credential is sent, and the ladder's answer to that
     // was to ask the same question again, up to three more times. The user
@@ -443,7 +443,7 @@ export async function openSshForSession(
     // The backend's own 120s confirm window lapsing lands in the same bucket for
     // the same reason - it is the backend's decision, made where this side
     // cannot see it, and telling it apart from a drop needs the connect failure
-    // to carry a phase (the wire change VLT-63 describes). Left transport, so
+    // to carry a phase, which the wire does not do today. Left transport, so
     // the reconnect re-raises the question for whoever comes back to it, rather
     // than parking a pane whose link merely blinked.
     //
@@ -462,7 +462,7 @@ export async function openSshForSession(
 
   // Saved `ssh -L` rules used to be re-opened here on every fresh session.
   // `Host` carries no `forwards` field any more - a forward rule is its own
-  // `ForwardRule` record (6f), so this reads the rules that name THIS host and
+  // `ForwardRule` record, so this reads the rules that name THIS host and
   // starts the ones flagged `startWithHost` on the session just opened.
   //
   // Fire-and-forget on purpose, and safe because `startHostForwards` never
@@ -567,8 +567,8 @@ export async function forwardDetectedUrl(
 }
 
 /**
- * VLT-57: the ladder's counterpart for a connect failure that retrying cannot
- * change. One attempt, one banner, then wait for the user.
+ * The ladder's counterpart for a connect failure that retrying cannot change.
+ * One attempt, one banner, then wait for the user.
  *
  * Parks in `error` with `canRetry` - the same state a host-key mismatch parks in
  * (`runSshReconnect` below, and its twin in session-lifecycle's spawn catch),
@@ -666,7 +666,7 @@ async function runSshReconnect(s: Session): Promise<void> {
       emitSshStatus(s, { kind: "error", message: msg, canRetry: true });
       return;
     }
-    // VLT-57: the ladder re-enters here for attempts 2 and 3, so the same gate
+    // The ladder re-enters here for attempts 2 and 3, so the same gate
     // has to stand here as on the first attempt - otherwise a host edited into a
     // credential-less state mid-session would still walk the whole ladder.
     const decision = decideSshConnectFailure(classifySshConnectFailure(e, msg));

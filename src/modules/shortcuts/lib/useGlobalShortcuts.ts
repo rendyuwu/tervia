@@ -8,7 +8,7 @@ export type ShortcutHandler = (e: KeyboardEvent) => void;
 export type ShortcutHandlers = Partial<Record<ShortcutId, ShortcutHandler>>;
 
 /**
- * VLT-30's one exemption from the modal gate below: the Command Palette's own
+ * The one exemption from the modal gate below: the Command Palette's own
  * toggle chord. `CommandDialog` is built on the shared `Dialog` primitive, so
  * once the palette is open it registers as an open modal like any other -
  * which means the very chord that opened it would otherwise be swallowed by
@@ -16,13 +16,13 @@ export type ShortcutHandlers = Partial<Record<ShortcutId, ShortcutHandler>>;
  * (Escape and outside-click still could, so this was never a stranding bug,
  * just a toggle that stopped toggling).
  *
- * THE EXEMPTION IS ON THE TARGET, NOT ON THE CHORD (VLT-59). Keyed by id
+ * THE EXEMPTION IS ON THE TARGET, NOT ON THE CHORD. Keyed by id
  * alone it read "this chord is always allowed through", and the justification
  * offered for that - the handler is `setCommandPaletteOpen(prev => !prev)` and
  * touches no other dialog's state - is true of the palette CLOSING ITSELF and
  * false of it OPENING over something else: with the host editor up,
  * Mod+Shift+P put the palette on top of a form the user was mid-edit in, which
- * is the modal-stacking version of exactly what VLT-30 forbids. So the value
+ * is the modal-stacking version of exactly what the gate forbids. So the value
  * here is the modal the chord may act on, and the gate asks whether that modal
  * is the one currently on TOP of the stack. Palette on top -> the chord can
  * only be closing it -> let it through. Anything else on top - the host editor,
@@ -32,7 +32,8 @@ export type ShortcutHandlers = Partial<Record<ShortcutId, ShortcutHandler>>;
  * Keep this map to exactly this one entry. Anything added here must have the
  * same shape - a pure open/closed toggle of its OWN named dialog's visibility
  * and nothing more - never a chord whose handler touches tab/pane/editor/
- * session state, which is exactly the class of chord VLT-30 exists to keep out.
+ * session state, which is exactly the class of chord the gate exists to keep
+ * out.
  * `tab.newEditor` and `tab.newAgent` open dialogs too, but with `set(true)`,
  * not a toggle, so they have no closing half to exempt and stay fully gated.
  */
@@ -56,7 +57,7 @@ export function useGlobalShortcuts(
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      // VLT-30: no catalogued chord fires while a Dialog/AlertDialog is open -
+      // No catalogued chord fires while a Dialog/AlertDialog is open -
       // a background action (Ctrl+W closing the tab, say) must not run out
       // from under a modal the user is mid-edit in. Three things are
       // deliberately unaffected: Escape, because it is not in SHORTCUTS (see

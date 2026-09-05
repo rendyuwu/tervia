@@ -13,13 +13,13 @@ import {
 
 type Props = {
   /** The current tab. "Active" means THIS tab holds the page leaf, not any
-   *  tab in the workspace - two Hosts tabs can't exist (§5.1), but the rail
+   *  tab in the workspace - two Hosts tabs can't exist, but the rail
    *  still shouldn't light up for one sitting in a background tab. */
   activeTab: Tab | undefined;
   /** Open (or focus) the Hosts tab and return to the tab area. */
   onOpenPage: (page: TabPageKind) => void;
   /** The rail view currently covering the tab area, or null when the tabs are
-   *  showing. Not persisted: a relaunch comes up on the tabs (DCR-1). */
+   *  showing. Not persisted: a relaunch comes up on the tabs. */
   railView: RailViewKind | null;
   /** Show this rail view, or - when it is the one already showing - go back to
    *  the tabs. The same button both ways, so the lit button is never a dead one. */
@@ -29,9 +29,9 @@ type Props = {
 /**
  * Fixed-width icon strip left of the sidebar. Holds no selection state of its
  * own - "active" is derived from the live tab list and the current rail view on
- * every render - and, unlike the sidebar, is never collapsible (§9.6/§12.10).
+ * every render - and, unlike the sidebar, is never collapsible.
  *
- * Two kinds of button, which is DCR-1's whole shape (see `tabs/lib/pages.ts`):
+ * Two kinds of button, which is the whole shape (see `tabs/lib/pages.ts`):
  * Hosts activates a TAB, because it is where connections come from and belongs
  * in the strip of them; Vault and Port Forwarding are views shown OVER the tab
  * area, because they are not connections and were only ever taking up room in a

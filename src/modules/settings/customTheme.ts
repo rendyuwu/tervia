@@ -552,7 +552,7 @@ export function applyCustomTheme(theme: CustomTheme | null): void {
 /**
  * Synchronous fast-path. Call before React mounts so the first paint uses
  * the persisted custom theme instead of the base palette. Lazy-import the
- * default palette to keep this module independent of `themePresets.ts`
+ * default palette to keep this module independent of `themePresets/`
  * (the latter imports types from here, so a static import would cycle).
  */
 export function applyCustomThemeFastPath(): void {
@@ -583,7 +583,7 @@ export function applyCustomThemeFastPath(): void {
 
 /**
  * Minimal fallback palettes baked into this module so the fast-path stays
- * synchronous and doesn't pull in `themePresets.ts` (which has the rich
+ * synchronous and doesn't pull in `themePresets/` (which has the rich
  * presets and depends on this file's types). Any field missing from a
  * legacy shadow falls back to these.
  */

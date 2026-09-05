@@ -1,6 +1,6 @@
 /**
  * The Vault page: a header with its own search box, then two sections -
- * Identities and Keys (research §5.6).
+ * Identities and Keys.
  *
  * A RAIL VIEW, not a pane leaf. `app/components/WorkspaceArea.tsx:160-238`'s
  * `railView !== null` branch mounts this only while the rail's Vault button is
@@ -17,7 +17,7 @@
  * state a shell has - the query, and which delete is awaiting confirmation.
  *
  * It never reads a secret to decide what a row shows. The `has*` flags on the
- * records are what the pips come from (research §5.2), and nothing here
+ * records are what the pips come from, and nothing here
  * protects a secret better than it was protected before: on Linux a private
  * key sits in a mode-0600 plaintext file before and after this work. What a
  * shared identity buys is FEWER COPIES of one secret.
@@ -25,9 +25,9 @@
  * The two editor dialogs are mounted here, one instance of each for the whole
  * page: every affordance that opens one - both New buttons and both cards'
  * Edit button - sets the same `identityTarget`/`keyTarget` state this file
- * owns, and the dialog itself owns its own load and its own save. Wave 4 adds
- * convert-to-vault and the identity picker that binds a host to one of these
- * records.
+ * owns, and the dialog itself owns its own load and its own save. Convert-to-
+ * vault and the picker that binds a host to one of these records are NOT here:
+ * they live in `hosts/HostEditorDialog.tsx`, beside the host being bound.
  */
 import {
   AlertDialog,
@@ -95,8 +95,8 @@ export function VaultPage(): ReactNode {
   // the Vault view is the one showing. Written at RENDER scope and falsified in
   // the effect cleanup below, so the claim - which is decided one animation
   // frame after it is made - can never act on a world that has already moved. A
-  // closure over a value, or a literal `() => true`, is the stale-claim half of
-  // VLT-39 written a different way.
+  // closure over a value, or a literal `() => true`, is the stale-claim bug
+  // written a different way.
   const onScreenRef = useRef(true);
   onScreenRef.current = true;
 
@@ -229,14 +229,12 @@ export function VaultPage(): ReactNode {
     // what a reader is likely to assume and what once put 420 here.
     <div ref={pageRef} className="bg-background @container flex h-full w-full min-w-0 flex-col">
       <div className="flex flex-col gap-2 border-b p-3">
-        {/* The same wrapping header row the Hosts page uses, with one child
-            today. `flex-wrap` and the search box's `basis-full` rule are
-            anticipatory in this wave - a single child has nothing to wrap
-            against - and they are here rather than in wave 3 because the wrap
-            rule and the min-width floor are one decision: `flex-1` alone gives
+        {/* The same wrapping header row the Hosts page uses. `flex-wrap`, the
+            search box's `@max-[420px]:basis-full` rule and its min-width floor
+            are one decision, not three: `flex-1` alone gives
             `flex-basis: 0%`, so the input contributes no intrinsic size and
-            CLIPS in place instead of wrapping when wave 3's New buttons arrive
-            beside it. The floor is what bites today. */}
+            would CLIP in place rather than wrap onto its own line under the two
+            New buttons beside it. */}
         <div className="flex flex-wrap items-center gap-2">
           {/* Both labels collapse at the same `@container` threshold the Hosts
               page's New host button and the two backup buttons use

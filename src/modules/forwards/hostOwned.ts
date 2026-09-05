@@ -12,8 +12,8 @@
  * THE OTHER SIDE OF `runtime.ts:12-20`. That store is the PAGE's and is keyed
  * by `ruleId` alone; this one is the TERMINAL's, and it is keyed by `ruleId`
  * alone too - which is exactly why it CANNOT REPRESENT TWO OWNERS, and why the
- * answer to a second owner is to refuse it rather than to record it. VLT-94:
- * a forward rule runs under one owner at a time.
+ * answer to a second owner is to refuse it rather than to record it: a forward
+ * rule runs under one owner at a time.
  *
  * TWO EXCLUSIONS, EACH WITH ITS OWN CHECK, and neither is "by construction":
  *
@@ -97,8 +97,8 @@ export const useHostOwnedForwards = create<HostOwnedState>((set) => ({
 // Every selector below returns a PRIMITIVE, for the reason `runtime.ts:79-85`
 // spells out and against the same failure: a selector building a fresh object
 // or array literal is never `Object.is` its own last return, and under zustand
-// v5 that loops with "Maximum update depth exceeded" (research §12.7, plan
-// §4.9). `useShallow` is imported nowhere in `src/` and stays that way.
+// v5 that loops with "Maximum update depth exceeded". `useShallow` is imported
+// nowhere in `src/` and stays that way.
 
 /** True while this rule has a forward open on some live terminal session. */
 export function useIsHostOwned(ruleId: string): boolean {

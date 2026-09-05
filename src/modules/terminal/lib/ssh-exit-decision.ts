@@ -12,12 +12,12 @@
 //
 // Two different questions live here, and they are genuinely different:
 //
-//   VLT-42 (`decideSshEnding`): a channel EXISTED and then ended. See the
+//   `decideSshEnding`: a channel EXISTED and then ended. See the
 //   `SshEvent`/`SshExitReason` doc comments in session.rs / bridge.ts for the
 //   reasoning behind the three ending shapes it switches on.
 //
-//   VLT-57 (`classifySshConnectFailure`/`decideSshConnectFailure`): the connect
-//   failed before any channel existed, so none of the ending shapes apply and
+//   `classifySshConnectFailure`/`decideSshConnectFailure`: the connect failed
+//   before any channel existed, so none of the ending shapes apply and
 //   `decideSshEnding` is never reached at all.
 
 /** How the shell channel ended, in the shape `finishSsh` (in ssh-session.ts)
@@ -29,9 +29,8 @@ export type SshEnding =
   | { kind: "signal"; name: string; coreDumped: boolean }
   | { kind: "ambiguous"; reason: string };
 
-/** What `finishSsh` should do about an ending. VLT-42 in one sentence: a
- *  reported exit or signal death must never reconnect - only "ambiguous"
- *  may. */
+/** What `finishSsh` should do about an ending, in one sentence: a reported exit
+ *  or signal death must never reconnect - only "ambiguous" may. */
 export type SshEndingAction =
   | { action: "userClosed" }
   | { action: "closePane"; code: number }
@@ -60,9 +59,9 @@ export function decideSshEnding(ending: SshEnding, sshUserClose: boolean): SshEn
 }
 
 /**
- * VLT-57. A connect that failed before a shell channel existed, in the shape the
- * two catch blocks around `openPtyForSession` need to decide whether the
- * reconnect ladder applies at all.
+ * A connect that failed before a shell channel existed, in the shape the two
+ * catch blocks around `openPtyForSession` need to decide whether the reconnect
+ * ladder applies at all.
  *
  * "local" is the fourth category, alongside `SshEnding`'s three: the attempt
  * failed for a reason that lives on THIS side of the wire - either the inputs it
@@ -111,6 +110,14 @@ export function classifySshConnectFailure(e: unknown, message: string): SshConne
   // anything else - a string rejection, a russh failure relayed by the backend,
   // a rejected promise from a Tauri command - is by definition a fact we did not
   // establish here, so it stays transport and stays reconnect-eligible.
+  //
+  // That makes "relayed by the backend" mean `transport` BY CONSTRUCTION, and
+  // the consequence is visible in the pane: a wrong key passphrase is refused
+  // on the backend and arrives here as a string, so it runs the full 1/3
+  // reconnect ladder instead of parking on the first attempt. That is accepted,
+  // not an oversight - see the catch block in `ssh-session.ts` for why a
+  // server-refused credential has nothing structural to tell it apart from a
+  // link that merely blinked.
   if (e instanceof SshLocalConnectError) return { kind: "local", message };
   return { kind: "transport", message };
 }
@@ -130,7 +137,7 @@ export function decideSshConnectFailure(failure: SshConnectFailure): SshConnectF
 }
 
 /**
- * VLT-57: did this attempt's host-key questions end in a refusal?
+ * Did this attempt's host-key questions end in a refusal?
  *
  * `answers` holds one entry per ANSWER a first-connect prompt was given - the
  * user's Trust, the user's Reject, or the rejection the app sends on its own

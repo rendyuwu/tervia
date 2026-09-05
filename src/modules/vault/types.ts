@@ -228,9 +228,9 @@ export type VaultRef = { id: string; name: string };
 /**
  * The hosts that reference one identity.
  *
- * INJECTED, never imported. The host store does not exist yet, and once it does it
- * will import {@link SshCredentialBinding} and {@link RdpCredentialBinding} from
- * this module - so a vault -> hosts import would close a cycle. The wiring is
+ * INJECTED, never imported. `modules/hosts` imports
+ * {@link SshCredentialBinding} and {@link RdpCredentialBinding} from
+ * this module, so a vault -> hosts import would close a cycle. The wiring is
  * `(id) => listHosts().then((hosts) => hosts.filter(usesIdentity(id)).map(toRef))`.
  *
  * Required, never optional: a caller allowed to pass nothing would silently skip

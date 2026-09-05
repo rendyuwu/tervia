@@ -52,8 +52,8 @@ export function TrailingIconButton({
           //   which is unconditional on purpose and so fires on the X too.
           //
           // Stopped here at the button rather than by teaching those handlers
-          // what an X is: the trigger's route stays unconditional, which is the
-          // whole of the D-NAV1 fix.
+          // what an X is: the trigger's route stays unconditional, which is what
+          // makes an already-active chip clickable at all.
           onPointerDown={(ev) => ev.stopPropagation()}
           onMouseDown={(ev) => ev.stopPropagation()}
           onClick={(ev) => {

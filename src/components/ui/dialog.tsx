@@ -11,14 +11,14 @@ function Dialog({
   modalName,
   ...props
 }: React.ComponentProps<typeof DialogPrimitive.Root> & {
-  /** Registers this dialog under a name so `isTopModal` can be asked about it
-   *  (VLT-59). Only the Command Palette needs one: it is the single chord
+  /** Registers this dialog under a name so `isTopModal` can be asked about it.
+   *  Only the Command Palette needs one: it is the single chord
    *  allowed through the modal gate, and only while its own dialog is the one
    *  on top. Everything else stays anonymous - being counted is all the gate
    *  needs from it. Not forwarded to Radix, which has no such prop. */
   modalName?: string;
 }) {
-  // VLT-30: registered here, at the shared primitive, so every dialog built
+  // Registered here, at the shared primitive, so every dialog built
   // on top of it suppresses global shortcuts while open - see modalRegistry.ts.
   // Keyed on `open` rather than an onOpenChange hook: every dialog in this
   // codebase is controlled (grep confirms there is no DialogTrigger-driven

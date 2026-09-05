@@ -14,7 +14,7 @@ import type { VaultIdentity, VaultKey } from "./types";
 // once per rendered card, and a list would make each one a linear scan inside a
 // render pass. Maps are also what keeps the presence pips free of IPC - the
 // `has*` flags are already on the record, so nothing here reads a secret back to
-// decide what a card shows (research §5.2).
+// decide what a card shows.
 
 /**
  * Both collections as one value.
@@ -69,8 +69,8 @@ function useVaultKeys(): Map<string, VaultKey> {
  * lists this in a `useMemo` dependency array - which the Hosts page does, for
  * every derived row it builds - would otherwise re-derive on every single
  * render, because a freshly built object is never `Object.is` the last one. Same
- * class of mistake as the zustand v5 selector trap in research §12.7, and the
- * same fix: hand back a reference that only changes when the data does.
+ * class of mistake as a zustand selector that returns a fresh object literal,
+ * and the same fix: hand back a reference that only changes when the data does.
  */
 export function useVault(): VaultMaps {
   const identities = useVaultIdentities();

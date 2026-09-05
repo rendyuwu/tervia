@@ -1,6 +1,5 @@
 /**
- * The Hosts page: a header row, the group strip, then the host grid (research
- * §5.5).
+ * The Hosts page: a header row, the group strip, then the host grid.
  *
  * This file is assembly and page-level state. Everything it draws lives
  * somewhere else - the cards, the strip, the backup buttons and the editor are
@@ -10,8 +9,8 @@
  * selected, and which dialog is open.
  *
  * Two things it deliberately does NOT do. It never reads a secret to decide what
- * a card shows - the `has*` flags on the record are what the pips come from
- * (§5.2), because a hundred rows must not cost three keychain reads each. And it
+ * a card shows - the `has*` flags on the record are what the pips come from,
+ * because a hundred rows must not cost three keychain reads each. And it
  * does not open tabs: `onConnect` arrives as a prop because opening a tab needs
  * `setTabs` and `nextIdRef` from `useTabs`, which a pane leaf body cannot reach.
  *
@@ -105,7 +104,7 @@ function errorText(e: unknown): string {
  *
  * `VaultInUseError` already carries a perfectly good message, and it is not the
  * one to show: it says "still used by 2 hosts", which reads as a tidiness
- * complaint. It is not. Research §5.2 - deleting this row would turn a machine
+ * complaint. It is not: deleting this row would turn a machine
  * deliberately confined to a bastion into a direct dial, with a pinned
  * fingerprint that still matches and so nothing at all on screen to notice. So
  * the copy names the ROUTE and names the rows, because those are the rows that
@@ -157,10 +156,10 @@ export function HostsPage({ onConnect, onScreen }: HostsPageProps): ReactNode {
   // effect runs and must not act on what was true when it was scheduled.
   const onScreenRef = useRef(onScreen);
   onScreenRef.current = onScreen;
-  // §5.5: search is the primary navigation at 100 hosts, so the page opens with
-  // the caret already in it. That is also the first half of the no-virtualization
-  // plan (§12.6): search-first keeps the steady-state DOM a filtered handful, and
-  // the card's own `content-visibility` covers the unfiltered case.
+  // Search is the primary navigation at 100 hosts, so the page opens with the
+  // caret already in it. That is also the first half of doing without
+  // virtualization: search-first keeps the steady-state DOM a filtered handful,
+  // and the card's own `content-visibility` covers the unfiltered case.
   //
   // Keyed on `onScreen`, not `[]`: `PaneStack` keeps a backgrounded tab's
   // leaves mounted (`visibility:hidden`), so a mount-only effect fires once,
@@ -170,14 +169,14 @@ export function HostsPage({ onConnect, onScreen }: HostsPageProps): ReactNode {
   // mount) and every later switch back to an already-mounted tab.
   //
   // And it CLAIMS the caret rather than taking it. Taking it is what this did
-  // for two rounds, and it never worked from a tab click: the tab strip is a
+  // originally, and it never worked from a tab click: the tab strip is a
   // Radix `Tabs`, which changes value on mousedown, React 19 flushes this
   // effect synchronously inside that same mousedown, and the browser then runs
   // the mousedown's default action and focuses the tab chip - over the top of
   // whatever this had just focused. `@/lib/paneCaret` has the measured
   // sequence and hands the caret over one frame later instead, once that is
-  // done. R11.3/R11.5 are that bug; R11.6 is the same bug seen from the
-  // terminal's side.
+  // done. The search box losing the caret and a split terminal never getting
+  // it back are the same bug seen from the two panes' sides.
   useEffect(() => {
     if (!onScreen) return;
     paneCaret.claim(searchRef, {
@@ -254,8 +253,8 @@ export function HostsPage({ onConnect, onScreen }: HostsPageProps): ReactNode {
         }
       })
       // `duplicateHost` returns THROUGH `upsertHost`, whose guards refuse rather
-      // than ignore (handoff §5.11). A call site handling only `null` gets an
-      // unhandled rejection.
+      // than ignore. A call site handling only `null` gets an unhandled
+      // rejection.
       .catch((e: unknown) => toast(errorText(e), { variant: "error" }));
   }, []);
 
@@ -304,7 +303,7 @@ export function HostsPage({ onConnect, onScreen }: HostsPageProps): ReactNode {
     // size off THIS box, not `sm:`/`xl:` viewport breakpoints. See the header
     // row and grid comments below for what that buys each of them.
     //
-    // VLT-48: the `@max-[420px]` narrow layout below is reachable only by
+    // The `@max-[420px]` narrow layout below is reachable only by
     // shrinking the OS WINDOW, never by dragging a divider at a wide window -
     // and there is no single "pane minimum" constant to blame or to lower.
     // EVERY size floor between here and the window edge is a PERCENTAGE, not
@@ -327,13 +326,12 @@ export function HostsPage({ onConnect, onScreen }: HostsPageProps): ReactNode {
     // is reachable only at the window's own edge. TWO DIFFERENT 420s, and
     // conflating them is what put the wrong number here: `@max-[420px]` is a
     // CONTAINER breakpoint and is unchanged, while the WINDOW floor is the
-    // config's and is 640. The tester (report N-4)
-    // confirmed this by hand at both divider stops across four window
-    // widths, landing on an effective floor in the 500s of px - an EMERGENT
-    // number (25% of whatever window width they were at), not a constant
-    // anyone can find or lower. Per the owner: the pane minimums stay where
-    // they are; `hosts-header-narrow-verify.ts` forces the container width
-    // directly instead of relying on a hand test that cannot get here.
+    // config's and is 640. Confirmed by hand at both divider stops across four
+    // window widths, landing on an effective floor in the 500s of px - an
+    // EMERGENT number (25% of whatever window width the tester was at), not a
+    // constant anyone can find or lower. The pane minimums stay where they are;
+    // `hosts-header-narrow-verify.ts` forces the container width directly
+    // instead of relying on a hand test that cannot get here.
     <div ref={pageRef} className="bg-background @container flex h-full w-full min-w-0 flex-col">
       <div className="flex flex-col gap-2 border-b p-3">
         {/* Every control below either has no hard-minimum floor, or collapses
@@ -375,7 +373,7 @@ export function HostsPage({ onConnect, onScreen }: HostsPageProps): ReactNode {
               is wider than this page's box can go. Wrapping them onto their
               own line(s) bounds this group by its WIDEST SINGLE chip
               (~45px), not their sum - `Chip` is GroupStrip's, reused rather
-              than re-typed here (see the P2 note there). */}
+              than re-typed here (see its doc comment there). */}
           <div
             className="flex min-w-0 flex-wrap items-center gap-1.5"
             role="group"
@@ -391,7 +389,7 @@ export function HostsPage({ onConnect, onScreen }: HostsPageProps): ReactNode {
             ))}
           </div>
 
-          {/* VLT-41: `min-w-0` alone let this shrink to whatever `flex-1` left
+          {/* `min-w-0` alone let this shrink to whatever `flex-1` left
               it - typeable, but past a point the rendered box is a few px
               wide and the placeholder/typed text clips at the edge ("Se…" at
               ~417px), which is not "shrinks", it's "clips". Below the same
@@ -451,7 +449,7 @@ export function HostsPage({ onConnect, onScreen }: HostsPageProps): ReactNode {
           </div>
         </div>
 
-        {/* VLT-36: a refused action used to pin an inline line to the page
+        {/* A refused action used to pin an inline line to the page
             header, `×`-dismissable but otherwise permanent - a stale refusal
             from one click read as live during the next unrelated one. Routed
             through the shared `toast()` (used the same way in
@@ -480,7 +478,7 @@ export function HostsPage({ onConnect, onScreen }: HostsPageProps): ReactNode {
 
       {/* No transform and no fixed row height anywhere between here and the
           card: either one defeats the card's `content-visibility: auto`, which is
-          the only thing standing in for virtualization (§12.6). */}
+          the only thing standing in for virtualization. */}
       <div className="min-h-0 flex-1 overflow-y-auto p-3">
         {visible.length === 0 ? (
           <EmptyState filtering={filtering} hasHosts={hosts.length > 0} />

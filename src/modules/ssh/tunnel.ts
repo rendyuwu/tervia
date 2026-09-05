@@ -554,7 +554,8 @@ export async function closeForwardForConnection(
     // the page looks like "Start silently does nothing every other time".
     // Awaiting serialises Stop-then-Start for callers that await (the page's
     // `stopRule` does); two concurrent callers that do not still need the
-    // backend to carry a generation, which is what VLT-96 stays open against.
+    // backend to carry a generation, which it does not, so that window is
+    // still open for them.
     //
     // The `.catch` stays: a dial that died has no listener to close, and that is
     // not a failure for whoever is letting go of it.

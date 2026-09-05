@@ -587,8 +587,7 @@ function keyRecord(key: VaultKey, stored: VaultKey | undefined, landedBody: bool
  * than unlikely: every account written names a record that is in a store, so the
  * delete that owns it can still reach it. The old order wrote every credential
  * first, so a record write that threw left the rest of the file unimported AND
- * its credentials at accounts no record named - and nothing enumerates those
- * (§9.7).
+ * its credentials at accounts no record named - and nothing enumerates those.
  *
  * Every write is contained to its own record. A refusal is counted and reported,
  * never allowed to abandon the records behind it: a 40-host file whose host 12 the

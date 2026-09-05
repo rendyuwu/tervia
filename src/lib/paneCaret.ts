@@ -1,10 +1,10 @@
 /**
  * Which pane owns the keyboard caret when the tabs change underneath it.
  *
- * VLT-39. The mechanism below was MEASURED in a headless Chromium against a
+ * The mechanism below was MEASURED in a headless Chromium against a
  * structural copy of this app's tab strip (Radix `Tabs` + panes that stay
  * mounted behind `visibility:hidden`/`display:none`), not reasoned about, after
- * two rounds of reasoning about it got the wrong answer:
+ * reasoning about it twice got the wrong answer:
  *
  *   - The tab strip is a Radix `Tabs` (`TabBar.tsx`), and Radix changes the
  *     selected value on MOUSEDOWN, not on click.
@@ -25,9 +25,9 @@
  * Every focus a pane sets while reacting to "my tab just became visible" is
  * therefore overwritten a moment later, whichever pane set it and whichever
  * kind of effect it used. That is one defect with two faces: the Hosts search
- * box never got the caret on a click-through (R11.3/R11.5), and a terminal
- * sharing a split with Hosts never got it back after a tab round-trip
- * (R11.6). Nothing was stealing anything from anything - both panes lost to
+ * box never got the caret on a click-through, and a terminal
+ * sharing a split with Hosts never got it back after a tab round-trip.
+ * Nothing was stealing anything from anything - both panes lost to
  * the browser, and the caret ended up on the tab chip, where typing does
  * nothing.
  *

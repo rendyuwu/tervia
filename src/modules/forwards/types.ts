@@ -26,17 +26,17 @@ export type ForwardRule = {
    * Bring this rule up when that host's terminal connects, on the TERMINAL's own
    * session - which dies with the tab.
    *
-   * Reproduces what `conn.forwards` used to do before the SSH/RDP unification
-   * (accepted gap 1), and is the other half of that regression: the forward used
+   * Reproduces what `conn.forwards` used to do before the SSH/RDP unification,
+   * and is the other half of that regression: the forward used
    * to ride the connection record itself, and splitting rules into their own
-   * store (decision 7) is what makes a rule editable without the host it rides
+   * store is what makes a rule editable without the host it rides
    * being on screen, at the cost of needing this flag to say when it starts.
    */
   startWithHost: boolean;
   description?: string;
 };
 
-// No `type: "local"` field - see the 6f plan's §5 boundary 2 for the argument
-// (only a local-to-remote forward is modelled today) and the read-time-adoption
-// migration path a remote/dynamic variant would take later, the same shape
-// `hosts/types.ts`'s `hostPins` already uses for its own read-time migration.
+// No `type: "local"` field: only a local-to-remote forward is modelled today.
+// A remote or dynamic variant would arrive by read-time adoption rather than a
+// migration - the same shape `hosts/types.ts`'s `hostPins` already uses for its
+// own read-time migration.

@@ -32,7 +32,7 @@ import {
 // unreadable and unwritable for the rest of the process, on a profile where the
 // good snapshot is sitting next to the broken primary.
 
-/** §12.12: every store in this family is a `LazyStore` with this autosave. */
+/** Every store in this family is a `LazyStore` with this autosave. */
 const AUTO_SAVE_MS = 200;
 
 /**

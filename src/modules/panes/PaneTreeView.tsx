@@ -189,7 +189,7 @@ type Props = {
   /** Focus any leaf in any tab, for a board leaf's cards. */
   onFocusEntry?: (tabId: number, leafId: number) => void;
   /** Connect a saved host through App's connect path, routed by
-   *  `host.protocol`. Backs the Hosts page leaf body's connect action (6d). */
+   *  `host.protocol`. Backs the Hosts page leaf body's connect action. */
   onConnectHost?: (host: Host) => void;
 };
 
@@ -248,7 +248,7 @@ type PaneMetaValue = {
    *  their own tab, which the per-tab `onFocusLeaf` cannot express. */
   onFocusEntry?: (tabId: number, leafId: number) => void;
   /** Connect a saved host through App's connect path, routed by
-   *  `host.protocol`. Read by `PageLeafBody`'s Hosts case (6d); it rides this
+   *  `host.protocol`. Read by `PageLeafBody`'s Hosts case; it rides this
    *  context rather than a prop on `PageLeafBody` alone because App's connect
    *  handlers are workspace-wide, same reasoning as `onFocusEntry` above. */
   onConnectHost?: (host: Host) => void;
@@ -285,8 +285,8 @@ function BoardLeafBody({ leafId }: { leafId: number }) {
 }
 
 /**
- * A page leaf's body. Hosts is the only case there is: DCR-1 made Vault and Port
- * Forwarding rail VIEWS rather than tabs, and `PageLeafState.page` is
+ * A page leaf's body. Hosts is the only case there is: Vault and Port
+ * Forwarding are rail VIEWS rather than tabs, and `PageLeafState.page` is
  * `TabPageKind`, so no other page can reach here.
  *
  * A `switch` rather than an `if`, so widening `TabPageKind` later fails to

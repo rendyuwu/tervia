@@ -9,7 +9,7 @@ import {
 
 // One record per machine, discriminated on `protocol`.
 //
-// This replaces `SshConnection` and `RdpConnection` (decision 2), so grouping,
+// This replaces `SshConnection` and `RdpConnection`, so grouping,
 // search and vault binding are built once instead of twice. The union
 // discriminates on `protocol` rather than making every field optional, which is
 // what keeps `desktopWidth` off an SSH row instead of making every consumer
@@ -39,9 +39,9 @@ export const RDP_DEFAULT_PORT = 3389;
 
 /**
  * Every keychain field one host can own, by protocol, each in one list so a
- * caller that has to enumerate them cannot miss one. `backup.ts` is that caller:
- * an export builds a keychain reference per field, and a field left out of the
- * list simply does not travel.
+ * caller that has to enumerate them cannot miss one. `backup/apply.ts`'s
+ * `hostRefs` is that caller: an export builds a keychain reference per field,
+ * and a field left out of the list simply does not travel.
  *
  * The field NAMES belong to `modules/vault` because `resolve.ts` is what
  * dereferences these accounts. The lists are here because the HOST is what owns
@@ -119,7 +119,7 @@ export type HostBase = {
   name: string;
   host: string;
   port: number;
-  /** At most one, and groups do not nest (decision 6). */
+  /** At most one, and groups do not nest. */
   groupId?: string;
   description?: string;
   /** Unix ms of the last successful connect. */
@@ -156,8 +156,9 @@ export type HostBase = {
  * A machine reached over SSH.
  *
  * `credential` sits on each ARM of {@link Host} rather than on
- * {@link HostBase} - the one place this diverges from the plan's sketch. On the
- * base it would be independent of `protocol`, so `host.protocol === "rdp"` would
+ * {@link HostBase}, and that placement is the whole reason the union earns its
+ * keep. On the base it would be independent of `protocol`, so
+ * `host.protocol === "rdp"` would
  * narrow the desktop fields and leave the credential a two-protocol union that
  * every consumer then has to re-check. On the arm, one guard narrows both.
  */
@@ -221,7 +222,7 @@ export type RdpHost = HostBase & {
  * One saved machine.
  *
  * Note what is absent: there is no `forwards` field. A forward rule is its own
- * record in `modules/forwards` (decision 7), so a rule is edited in one place
+ * record in `modules/forwards`, so a rule is edited in one place
  * whether or not the host it rides is on screen.
  */
 export type Host = SshHost | RdpHost;
@@ -320,7 +321,7 @@ export function credentialStamp(host: Host | null | undefined): string {
  * function writes is decided by `boundIdentity` as this render holds it, not by
  * what is stored now, so a stale `save()` keeps writing `{kind:"identity"}` back
  * whatever changed underneath it. Narrowed to `save()` because it is no longer
- * true of the editor as a whole - 6e wave 4's credential picker changes a bound
+ * true of the editor as a whole - its credential picker changes a bound
  * host's binding on purpose, through `convertHostToVault` / `bindHostToIdentity`
  * / `detachHostFromVault`, each a separate, immediately-committed write that
  * carries its own `credentialStamp` check rather than riding inside this one.)

@@ -14,11 +14,11 @@
  *
  *  - Click the tab strip, the sidebar or a rail view and the terminal is no
  *    longer holding the caret, but the active leaf has not changed - so Ctrl+W
- *    stayed suppressed and closed no tab anywhere (VLT-59). A suppression that
+ *    stayed suppressed and closed no tab anywhere. A suppression that
  *    suppresses everywhere is indistinguishable from an unbound chord.
  *  - Open a rail view over the tab area and the terminal is invisible and
  *    `pointer-events-none`, yet still the active leaf - so Ctrl+T, Ctrl+] and
- *    Ctrl+[ were swallowed by a terminal nobody could see (VLT-58).
+ *    Ctrl+[ were swallowed by a terminal nobody could see.
  *
  * So ask the DOM. Both surfaces already mark themselves for other features -
  * `data-terminal-leaf-id` on `TerminalPane`'s container (the file-drop

@@ -194,7 +194,7 @@ export function buildShortcutHandlers(deps: ShortcutHandlerDeps): ShortcutHandle
     // agreeing with the pane-header and tab-strip X buttons rather than refusing
     // what they allow - or, as it did, allowing what they refuse.
     //
-    // IT HAD A SECOND GATE (VLT-62). `activeLeafKindCurrent !== "terminal"`
+    // IT HAD A SECOND GATE. `activeLeafKindCurrent !== "terminal"`
     // dropped the chord for an RDP pane, whose leaf kind is `"rdp"` - so both X
     // buttons closed an RDP tab and the chord silently did nothing, which is the
     // exact disagreement the single-arbiter argument above claims cannot happen.

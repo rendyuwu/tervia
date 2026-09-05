@@ -102,7 +102,7 @@ export function canCloseTab(tabs: Tab[], tabId: number): boolean {
  * prompted from the pane-header X of a single-pane tab and was discarded without
  * a word by the tab-strip leaf X, by that same header X on a split, and by
  * `Ctrl+Shift+X`. The chord is only how it was reported: removing its leaf-kind
- * test (VLT-62) let it reach an editor for the first time, which surfaced a
+ * test let it reach an editor for the first time, which surfaced a
  * disagreement the other two paths had been carrying all along.
  *
  * `isProcessRunning` is a parameter rather than something read here: whether a

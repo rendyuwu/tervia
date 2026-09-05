@@ -105,7 +105,7 @@ export function useAuxTabs({ setTabs, setActiveId, nextIdRef, tabsRef }: AuxTabs
    * logins with nothing to fight over.
    *
    * `TabPageKind`, not `PageKind`: this is one of the two page-leaf
-   * constructors, and DCR-1 says only Hosts is a tab (see `./pages.ts`). Asking
+   * constructors, and only Hosts is a tab (see `./pages.ts`). Asking
    * for a Vault tab is a type error rather than a leaf nothing would render a
    * tab strip entry for.
    */
@@ -136,7 +136,7 @@ export function useAuxTabs({ setTabs, setActiveId, nextIdRef, tabsRef }: AuxTabs
     const tabId = nextIdRef.current++;
     const leafId = nextIdRef.current++;
     const leaf: PaneLeaf = { kind: "leaf", id: leafId, leafKind: "page", page };
-    // Leftmost, not appended (DCR-1): Hosts is where a workspace starts, so the
+    // Leftmost, not appended: Hosts is where a workspace starts, so the
     // strip reads left-to-right as "the machines, then what you opened from
     // them". The startup fallback already puts it first; this branch is for a
     // workspace whose saved tabs hold no page leaf at all - one snapshotted by a

@@ -398,7 +398,7 @@ export function TabBar({
             //
             // Enter and Space do NOT come through here, which this comment used
             // to imply. They go `onKeyDown` -> `context.onValueChange(value)`
-            // with no guard at all, and on the covered chip - the D-NAV1 case -
+            // with no guard at all, and on a chip that is already active -
             // `useControllableState` drops it for `value2 === prop`, exactly
             // like the mouse. What makes them work is that Radix renders a real
             // `<button>`, so the browser dispatches a native `click` and the

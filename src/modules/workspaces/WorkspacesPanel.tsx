@@ -155,8 +155,8 @@ function savedRows(tabs: SavedTab[], hosts: Map<string, Host>): EntryRow[] {
   const allocId = () => next--;
   const entries = buildEntries(
     // `savedToTab` returns null for a tab that does not survive restore (a
-    // pre-DCR-1 Vault tab). Showing a row for one would name a tab that opening
-    // the workspace will not produce.
+    // Vault tab from a build where Vault was one). Showing a row for one would
+    // name a tab that opening the workspace will not produce.
     tabs.flatMap((t) => {
       const tab = savedToTab(t, allocId);
       return tab === null ? [] : [tab];
@@ -182,7 +182,7 @@ function savedTitles(tabs: SavedTab[]): (string | undefined)[] {
       node.children.forEach(walk);
       return;
     }
-    // Skip exactly the leaves restore drops, or every title after a pre-DCR-1
+    // Skip exactly the leaves restore drops, or every title after a dropped
     // Vault leaf would be zipped onto the wrong row.
     if (isUnrestorablePageLeaf(node)) return;
     out.push(node.leafKind === "terminal" ? node.title : undefined);

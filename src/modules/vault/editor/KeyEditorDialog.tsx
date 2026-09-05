@@ -537,7 +537,7 @@ function StoredKeyRow({ vaultKey }: { vaultKey: VaultKey }): ReactNode {
  * private function inside a file `scripts/key-inspect-verify.ts` section 5
  * anchors on, including a wording rule scoped to its own body, so lifting it
  * out is a change to a checked host-editor file for a vault feature. The
- * duplication is reported instead - see the plan's §1.9.
+ * duplication is deliberate and accepted.
  */
 function KeyInspectPanel({ state }: { state: KeyInspectState }): ReactNode {
   if (state.kind === "idle") return null;

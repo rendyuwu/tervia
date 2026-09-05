@@ -145,7 +145,7 @@ function CommandPaletteImpl({ open, onOpenChange, explorerRoot, onOpenFile }: Pr
     <CommandDialog
       open={open}
       onOpenChange={onOpenChange}
-      // Names this dialog in the modal stack (VLT-59). `commandPalette.open` is
+      // Names this dialog in the modal stack. `commandPalette.open` is
       // the one chord exempt from the modal gate, and the exemption applies
       // only while THIS dialog is the topmost open modal - so the chord can
       // close the palette but cannot open it over the host editor. Threaded

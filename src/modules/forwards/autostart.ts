@@ -3,10 +3,10 @@
  * SSH session, as that session connects.
  *
  * Reproduces what `conn.forwards` used to do before the SSH/RDP unification
- * (`types.ts`'s `startWithHost` doc, accepted gap 1), on the session the
+ * (`types.ts`'s `startWithHost` doc), on the session the
  * terminal already holds - never through `ssh/tunnel.ts`, which would dial a
  * SECOND russh session to a host this pane is already connected to and show up
- * on the server as two logins (research §5.4, VLT-11). That is why the bridge
+ * on the server as two logins. That is why the bridge
  * call here is `openSshForward` (a forward on a session id) rather than
  * `openForwardForConnection` (a forward on a host id, dialling if needed).
  *
@@ -51,7 +51,7 @@ export type AutostartDeps = {
    *  RESOLVED into a rule somebody else had meanwhile taken - the PAGE (its
    *  `markStarting` is synchronous) or ANOTHER PANE's own autostart run, which
    *  is not staggered by anything and so passes its own pre-bind read before
-   *  either side claims. First claim wins (VLT-94), so the loser closes the
+   *  either side claims. First claim wins, so the loser closes the
    *  listener it just bound rather than leaving a second one standing that
    *  nothing on either side names. */
   closeForward: (id: number, boundPort: number) => Promise<boolean>;
@@ -102,12 +102,14 @@ export const defaultAutostartDeps: AutostartDeps = {
 
 /**
  * `terminal/lib/session-helpers.ts`'s `describeError`, copied rather than
- * imported - the third copy, and the same trade `controller.ts:104` already
- * made one file over. That module cannot even be LOADED outside the app: it
+ * imported - the third copy, and the same trade `controller.ts`'s own
+ * `describeError` already made one file over. That module cannot even be
+ * LOADED outside the app: it
  * imports `@xterm/xterm` and `@tauri-apps/plugin-os`, and importing it under
  * `tsx` throws `Cannot read properties of undefined (reading 'currentWindow')`
  * before a single line of this file would run. Six lines is the cheaper of the
- * two prices; VLT-33's extraction is the real remedy.
+ * two prices; lifting `describeError` into a module with no Tauri and no DOM
+ * imports is the real remedy.
  *
  * The string branch is the load-bearing one and not boilerplate: a Tauri
  * `invoke` rejects with a RAW STRING, so that is how the backend's own
@@ -130,7 +132,8 @@ function describeError(e: unknown): string {
 //
 // The success line names `bound`, the port the open RESOLVED WITH, and never
 // `rule.localPort`: an auto rule asked for 0 and a pinned rule can be handed a
-// different port, so naming the requested one is §4.10's second defect exactly.
+// different port, so naming the requested one prints a port the forward is not
+// actually listening on.
 
 function forwardingBanner(rule: ForwardRule, bound: number): string {
   return `\x1b[2m[tervia] forwarding localhost:${bound} -> ${rule.remoteHost}:${rule.remotePort} (${rule.name})\x1b[0m\r\n`;
@@ -145,14 +148,14 @@ function failedBanner(rule: ForwardRule, message: string): string {
 }
 
 /**
- * Mutual exclusion (VLT-94): a rule the PAGE has, is left alone, and said out
+ * Mutual exclusion: a rule the PAGE has, is left alone, and said out
  * loud - a rule silently not coming up is the shape of a bug.
  *
  * SPLIT BY STATUS, and the difference is not a nicety. `starting` is a page
  * Start still dialling, which can then FAIL - and a rule that is down on both
  * sides, having been told it was up elsewhere, is a wrong answer rather than a
- * louder one. VLT-94's accepted cost covers "already up from the page", not
- * "tried and failed".
+ * louder one. The accepted cost of mutual exclusion covers "already up from the
+ * page", not "tried and failed".
  */
 function skippedBanner(rule: ForwardRule, status: "running" | "starting"): string {
   return status === "running"

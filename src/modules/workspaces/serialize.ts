@@ -230,7 +230,8 @@ export function serializeTabs(tabs: Tab[]): SavedTab[] {
  *
  * Two cases, and the second is why the question is put that way round:
  *
- *  - A `vault` or `forwards` leaf, which a snapshot from before DCR-1 can hold.
+ *  - A `vault` or `forwards` leaf, which a snapshot saved before those pages
+ *    became rail views can hold.
  *    Those pages are now views the rail shows over the tab area, so there is no
  *    such thing as a tab for one. Restoring it as a page leaf would put a tab in
  *    the strip that the rail's pressed state, `openPageTab` and `PageLeafBody`
@@ -371,7 +372,7 @@ function savedToNode(
 /**
  * One saved tab, restored - or `null` when nothing in it survives restore.
  *
- * `null` is the DCR-1 migration's "drop the tab if dropping its leaves empties
+ * `null` is the restore migration's "drop the tab if dropping its leaves empties
  * it" case: a workspace with a Vault tab in it comes back with that tab gone,
  * not with an empty one. Prefer {@link restoreSavedTabs}, which handles the
  * dropping and the fall back to Hosts when a whole workspace empties out.
@@ -415,7 +416,7 @@ export function savedToTab(saved: SavedTab, allocId: () => number): Tab | null {
 }
 
 /**
- * Startup fallback tab (decision 9): one pane tab holding a Hosts page leaf,
+ * Startup fallback tab: one pane tab holding a Hosts page leaf,
  * used by `useWorkspacePersistence` in place of a local shell when there is
  * nothing to restore - first run, an empty workspace, or a dev session that
  * skips restore entirely.
@@ -437,7 +438,7 @@ export function defaultHostsTab(allocId: () => number): Tab {
 }
 
 /**
- * Every saved tab restored, with DCR-1's migration applied: a `vault` or
+ * Every saved tab restored, with the rail-view migration applied: a `vault` or
  * `forwards` page leaf is dropped, the tab goes with it if that empties it, and
  * a workspace emptied that way falls back to the Hosts page rather than to a
  * window with no tabs at all.
@@ -511,7 +512,7 @@ function survivesRestore(saved: SavedTab): boolean {
 }
 
 /** Leaves of a saved subtree that restore, i.e. all of them minus the rail-view
- *  page leaves DCR-1 dropped. */
+ *  page leaves {@link isUnrestorablePageLeaf} drops. */
 function countRestorableLeaves(node: SavedPaneNode): number {
   if (node.kind === "leaf") return isUnrestorablePageLeaf(node) ? 0 : 1;
   let n = 0;
@@ -522,9 +523,10 @@ function countRestorableLeaves(node: SavedPaneNode): number {
 /**
  * Live tabs for a workspace with no cached live-tab entry (i.e. it hasn't been
  * visited yet this session): its saved tabs restored, or - if it has none - the
- * Hosts page. The runtime counterpart of decision 9's startup fallback in
- * `useWorkspacePersistence`, so switching to (or creating) an empty workspace
- * lands on the same screen a fresh profile does instead of a local shell.
+ * Hosts page. The runtime counterpart of {@link defaultHostsTab}'s startup
+ * fallback in `useWorkspacePersistence`, so switching to (or creating) an empty
+ * workspace lands on the same screen a fresh profile does instead of a local
+ * shell.
  *
  * Lives here rather than beside its `useWorkspaceSwitching` callers because it
  * needs nothing from that hook, and here it is reachable from

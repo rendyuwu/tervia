@@ -93,8 +93,9 @@ export type KeyRow = {
  *
  * THE row builder, for every mount point that will ever list identities -
  * exactly as `searchRows` is the row builder every Hosts page mount point calls.
- * A future picker (wave 4's convert-to-vault, an identity combobox) must call
- * this rather than assembling its own rows: the header quick-connect and the
+ * Every picker that lists identities calls this rather than assembling its own
+ * rows - the host editor's credential combobox takes its `identityRows` from
+ * here. The reason: the header quick-connect and the
  * Hosts page both called one ranking function and still disagreed about which
  * hosts a query matched, because each built its own rows in its own loop - one
  * resolved a vault identity's username while the other did not, and the header

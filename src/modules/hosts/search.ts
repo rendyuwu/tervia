@@ -3,13 +3,13 @@ import type { VaultIdentity } from "@/modules/vault/types";
 
 import type { Host, HostGroup } from "./types";
 
-// One ranking function, two mount points: the Hosts page search box (research
-// §5.5) and the header quick-connect (§5.8) both filter the same saved-host
+// One ranking function, two mount points: the Hosts page search box and the
+// header quick-connect both filter the same saved-host
 // list and MUST agree on what the top match is - a user who sees one answer in
 // the header and a different one on the page for the identical query has no
 // way to tell which is "right". Building this once in `modules/hosts` and
 // having both callers import it is what makes that impossible instead of
-// merely unlikely (research §12.11).
+// merely unlikely.
 //
 // The ROW BUILDER lives here for the same reason, and it has to: sharing only
 // `rankHosts` while each mount point assembled its own rows is what let them
@@ -166,7 +166,7 @@ export function searchRows(
   }));
 }
 
-/** §5.8: a quick-connect string that matches no saved host but parses as
+/** A quick-connect string that matches no saved host but parses as
  *  `user@host[:port]` opens the host editor prefilled. Returns null when it does
  *  not parse. */
 export function parseAdHocTarget(

@@ -20,8 +20,8 @@ import { isSshHost, type Host, type HostGroup } from "../types";
 //
 // Nothing here reads a secret. Every "is a credential missing?" answer comes off
 // the `has*` flags already on the record, which is what they are FOR: a page
-// rendering a hundred rows must not issue three keychain reads per row (research
-// §5.2), and the flags are maintained on write. A pip computed from a read-back
+// rendering a hundred rows must not issue three keychain reads per row, and the
+// flags are maintained on write. A pip computed from a read-back
 // would also be wrong more often, not less - it would report "fine" for a
 // keychain that happens to be unlocked and "missing" for one that is not.
 //
@@ -106,8 +106,8 @@ function rdpInlineMissing(cred: RdpInlineCredentials): boolean {
  * Branches on PROTOCOL first and the binding kind second, which is what keeps
  * this cast-free: narrowing `host` re-derives `host.credential` from the arm, so
  * testing the binding first and the protocol second would throw the binding's
- * narrowing away (§5.11 - a merged host list makes a narrowing cast a runtime
- * read of a field that is not there).
+ * narrowing away, and on a merged host list a narrowing cast becomes a runtime
+ * read of a field that is not there.
  *
  * The RDP identity branch deliberately ignores `authMode`, matching
  * `resolveRdpAuth`: `hasPassword` is independent of the mode, so a key identity

@@ -2,12 +2,12 @@
  * One forward rule in the Port Forwarding page list. Pure presentation for
  * everything EXCEPT Start/Stop: `HostCard.tsx` and `IdentityCard.tsx` both
  * take every value as a prop and own only the rendering, but this row is
- * also the ONE place `startRule`/`stopRule` (`../controller`, step 9) are
+ * also the ONE place `startRule`/`stopRule` (`../controller`) are
  * called from a component - the page hands over `row` and two callbacks for
  * Edit and Delete, and this file reads the rule's live status for itself
  * through the three primitive selectors `../runtime` exports plus the two
- * `../hostOwned` exports (§1.6: one selector per primitive, never one object
- * selector).
+ * `../hostOwned` exports: one selector per primitive, never one object
+ * selector.
  *
  * TWO OWNERS, ONE ROW. A rule started from this page lives in `../runtime`; a
  * rule the terminal started for itself lives in `../hostOwned` and is
@@ -73,7 +73,7 @@
  * innocent neighbours would grow with it.
  *
  * THE ROUTE AND `localLabel` ARE STILL BOTH HERE, and neither was the one to
- * drop for room (6f script E1). The route is what the rule is CONFIGURED as -
+ * drop for room. The route is what the rule is CONFIGURED as -
  * `ruleRows` (`./derive`) builds it with no runtime state at all - and
  * `localLabel` is the port something is ACTUALLY LISTENING on. They read
  * identically for a stopped rule, and they differ for exactly the rule where
@@ -172,8 +172,8 @@ export function RuleCard({ row, onEdit, onDelete }: RuleCardProps): ReactNode {
   const boundPort = useForwardBoundPort(rule.id);
   const error = useForwardError(rule.id);
   // The terminal's own map, read-only from here (`../hostOwned.ts`). Two more
-  // primitive selectors beside the three above, per §1.6 - never one object
-  // selector for the pair.
+  // primitive selectors beside the three above - never one object selector for
+  // the pair.
   const hostOwned = useIsHostOwned(rule.id);
   const hostOwnedPort = useHostOwnedPort(rule.id);
 
@@ -275,8 +275,8 @@ export function RuleCard({ row, onEdit, onDelete }: RuleCardProps): ReactNode {
 
       {/* The row's own status line - `useForwardError` for a failed bind, or
           `stopNote()` for a running one, never a third error surface of its
-          own (VLT-36 is untouched by this wave: failures already reach
-          `toast()` through `startRule`/`stopRule` themselves).
+          own - failures already reach `toast()` through
+          `startRule`/`stopRule` themselves.
 
           `hostOwned` is checked FIRST and suppresses `error`: that error is
           this page's last failed Start, and a rule the terminal has since
@@ -291,8 +291,8 @@ export function RuleCard({ row, onEdit, onDelete }: RuleCardProps): ReactNode {
           this row, so a red "port 18080 is already in use" can sit on screen
           beside "Running (with host)". Both sentences are true and together
           they read as a bug. Not fixed here - a toast that retracts itself is
-          a different mechanism from a conditional render, VLT-36 (this page
-          owning its own error surface) is untouched by this wave, and the
+          a different mechanism from a conditional render, this page owns no
+          error surface of its own, and the
           reachable window is narrow: the page yields to a mid-dial terminal
           claim with `markStopped` and a warning rather than `markFailed`
           (`controller.ts`), so what is left is a page Start that genuinely

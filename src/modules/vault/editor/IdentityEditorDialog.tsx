@@ -42,7 +42,7 @@ import {
 // the identity record's own load.
 //
 // `identityRecordFrom` (`./draft.ts`) is where `keyId` gets normalised away from
-// a non-key auth mode (VLT-73) - not here. This file keeps the picked key in the
+// a non-key auth mode - not here. This file keeps the picked key in the
 // DRAFT across a toggle so a sitting that flips password -> key -> password does
 // not lose the selection; only the write drops it. Adding a second normalisation
 // in the toggle handler below would be a second implementation of one rule, and

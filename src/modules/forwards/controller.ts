@@ -149,7 +149,7 @@ function hostOwnedYieldText(rule: ForwardRule): string {
  * button is a rendering and not an invariant - and the row's `hostOwned` can
  * become true while this page's own Start is in flight, so the guard has to live
  * where the dial does and it has to be read on BOTH sides of the await. First
- * claim wins (VLT-94): if the terminal's claim was already taken this never
+ * claim wins: if the terminal's claim was already taken this never
  * dials, and if it lands during the dial this hands the reference it just
  * received straight back.
  */

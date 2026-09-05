@@ -124,9 +124,9 @@ function compareRuleRows(a: ForwardRuleRow, b: ForwardRuleRow): number {
  * (`vault/page/derive.ts:192`).
  *
  * `localPort` and `remotePort` are matched as STRINGS, in the substring tier
- * ONLY - never as a prefix, the same trap §4.37 already named for a different
- * field. A port is a short, dense numeric string, so a prefix test over one
- * matches far too much: a query of "1" would prefix-match every rule bound to
+ * ONLY - never as a prefix. A port is a short, dense numeric string, so a
+ * prefix test over one matches far too much: a query of "1" would prefix-match
+ * every rule bound to
  * port 1, 18080, 1194 or 100 alike. The discriminating part of a port is the
  * whole of it, which only a substring test respects.
  */
@@ -185,8 +185,8 @@ export function rankRules(rows: readonly ForwardRuleRow[], query: string): Forwa
  * asked for - a pinned rule whose requested port differs from the port it was
  * actually bound to (mid-connect PID reuse, another process winning the race)
  * must show the port that is ACTUALLY LISTENING, never the number the rule
- * merely asked for. Showing the requested port for a running rule is exactly
- * what §4.10's second defect produced.
+ * merely asked for. Showing the requested port for a running rule names a port
+ * nothing is listening on.
  */
 export function localPortLabel(rule: ForwardRule, boundPort: number | undefined): string {
   if (boundPort !== undefined) return `localhost:${boundPort}`;
@@ -203,7 +203,7 @@ function needsAdminRightsSentence(port: number): string {
 
 /**
  * Turns `ssh: bind 127.0.0.1:<port> failed: <io error>` into one of four
- * sentences (research §12.8), matched on the io error text itself. This is
+ * sentences, matched on the io error text itself. This is
  * inherently string-matching against an OS message, not a structural
  * decision - none of the four cases below claims otherwise.
  *
@@ -276,8 +276,8 @@ export function bindFailureText(error: string, localPort: number): string {
 
 /**
  * A sentence for a `localPort` the editor should warn about before the user
- * ever tries to start the rule (research §12.8: the editor warns at entry,
- * not at start), or `undefined` for a port that needs no warning.
+ * ever tries to start the rule - the editor warns at entry, not at start - or
+ * `undefined` for a port that needs no warning.
  *
  * `0` ("let the OS pick") gets no warning: the OS never hands out an
  * ephemeral port below 1024, so the fact this checks for cannot be true of

@@ -375,8 +375,8 @@ export function useTerminalSession({
     // Claimed, not taken. This effect runs INSIDE the mousedown that switched
     // the tab (Radix `Tabs` changes value on mousedown and React 19 flushes the
     // commit synchronously there), so a `term.focus()` here is undone by the
-    // browser focusing the tab chip immediately afterwards - that was half of
-    // VLT-39, R11.6's "the caret never comes back to the terminal". The arbiter
+    // browser focusing the tab chip immediately afterwards - which is how the
+    // caret stopped coming back to the terminal at all. The arbiter
     // re-checks visible/focused before it hands the caret over.
     if (focused) claimCaret();
   }, [leafId, visible, focused, claimCaret]);

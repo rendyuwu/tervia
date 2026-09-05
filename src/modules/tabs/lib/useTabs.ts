@@ -72,7 +72,7 @@ function editorRemoteKey(l: Pick<EditorLeafState, "sshConnectionId" | "sshSessio
 export function useTabs() {
   // Empty on mount, deliberately: workspace restore hasn't run yet, and a
   // seeded terminal here would be indistinguishable from "nothing to
-  // restore" once it does. Decision 9's Hosts-page fallback (and the real
+  // restore" once it does. The Hosts-page fallback (and the real
   // restore) both apply AFTER restore resolves, in `useWorkspacePersistence`
   // - never here, and never twice.
   const [tabs, setTabs] = useState<Tab[]>(() => []);
@@ -631,7 +631,8 @@ export function useTabs() {
    * Hands `curr` straight back when no tab moved. `.map` alone will not: it
    * allocates a new array whether or not any element changed, and a fresh `tabs`
    * IDENTITY is exactly what `useWorkspacePersistence`'s `[tabs, activeId, ...]`
-   * effect watches. D-NAV1 is what made that cost real - a strip chip now
+   * effect watches. The chip's own unconditional click route is what made that
+   * cost real - a strip chip now
    * reaches here TWICE per click (Radix activates on `mousedown`, then the
    * chip's own unconditional `onClick` runs), so without this every click on a
    * terminal or editor chip re-ran `serializeTabs` + `wsSaveTabs` and
@@ -999,7 +1000,7 @@ export function useTabs() {
    * so a second click cleanly undoes the change.
    *
    * Shows the tabs, and this is one of the two the rail-view sweep found by
-   * enumerating pane-tree WRITES instead of chords (VLT-58): it is reached from
+   * enumerating pane-tree WRITES instead of chords: it is reached from
    * the header's entry menu, which stays on screen while a rail view covers the
    * workspace, so rotating from there rearranged panes nobody could see. The
    * rearrangement IS the whole result, so showing it is the only thing the

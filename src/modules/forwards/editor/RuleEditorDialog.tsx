@@ -39,9 +39,9 @@ import {
 // editor's.
 //
 // `savedHostOptions` (`@/modules/hosts/editor/hostOptions`) is reused verbatim
-// for the SSH host picker rather than written again here - DCR-4's answer
-// (2026-09-02): `Field`, `Combobox` and `savedHostOptions` out of
-// `hosts/editor/` are three instances of an already-counted decision. That
+// for the SSH host picker rather than written again here, as are `Field` and
+// `Combobox` out of `hosts/editor/`: three imports across one forwards -> hosts
+// dependency this file already has, not three new ones. That
 // function already filters to `SshHost[]` and already omits an RDP host,
 // which is what makes an unknown- or wrong-protocol-host defect structurally
 // unreachable from a FRESH selection in this editor. It cannot reach a host
@@ -54,10 +54,10 @@ import {
 // write invalidates the key that rule's own Stop would name - see `save`
 // below. That is why `../controller` is in this file's import graph at all.
 //
-// VLT-90's placement rule, applied: `privilegedPortWarning` renders under the
-// Local port field; the store's refusal for a non-SSH or missing host renders
-// under the SSH host field; the generic save error renders at the bottom,
-// where store and IPC failures belong that point at no one field.
+// A message renders next to the field it is about: `privilegedPortWarning`
+// under the Local port field; the store's refusal for a non-SSH or missing host
+// under the SSH host field; the generic save error at the bottom, where store
+// and IPC failures belong that point at no one field.
 
 export type RuleEditorTarget = { mode: "create" } | { mode: "edit"; ruleId: string };
 
@@ -92,13 +92,14 @@ export function RuleEditorDialog({ target, onClose, hosts }: RuleEditorDialogPro
   const [existing, setExisting] = useState<ForwardRule | null>(null);
   const [ready, setReady] = useState(false);
   const [saving, setSaving] = useState(false);
-  /** The generic save/IPC error, rendered at the bottom - VLT-90's "neither"
-   *  case. Never the store's host refusal; see {@link hostError} below. */
+  /** The generic save/IPC error, rendered at the bottom because it belongs to
+   *  neither field. Never the store's host refusal; see {@link hostError}
+   *  below. */
   const [error, setError] = useState<string | null>(null);
   /** The SSH host field's own error: "no host chosen", or the store's refusal
    *  for a saved rule whose host was deleted or turned into an RDP host in
-   *  another window. Rendered under the SSH host field, never at the bottom -
-   *  VLT-90. */
+   *  another window. Rendered under the SSH host field, never at the
+   *  bottom. */
   const [hostError, setHostError] = useState<string | null>(null);
 
   const token = tokenFor(target);
@@ -157,8 +158,8 @@ export function RuleEditorDialog({ target, onClose, hosts }: RuleEditorDialogPro
     () => savedHostOptions(sshHosts, "Select an SSH host…"),
     [sshHosts],
   );
-  /** Live, on every keystroke - research §12.8: the editor warns at entry, not
-   *  at start. Reads {@link parseLocalPort} rather than a second parse, so
+  /** Live, on every keystroke: the editor warns at entry, not at start.
+   *  Reads {@link parseLocalPort} rather than a second parse, so
    *  this can never disagree with what `ruleRecordFrom` is about to write. */
   const localPortWarning = privilegedPortWarning(parseLocalPort(draft.localPort));
 
@@ -217,7 +218,7 @@ export function RuleEditorDialog({ target, onClose, hosts }: RuleEditorDialogPro
       // `ruleRecordFrom(id, draft)` is handed to `upsertRule` UNMODIFIED - no
       // spread, no override, no second call to it anywhere else in this
       // function. See `./draft.ts`'s header for why a second assembly here
-      // would be exactly the drift that split exists to prevent (VLT-76).
+      // would be exactly the drift that split exists to prevent.
       await upsertRule(ruleRecordFrom(id, draft), findHost);
       onClose();
     } catch (e) {

@@ -4,8 +4,8 @@
  *
  * A LEAF module on purpose: the only import is `import type { Entry }`, which is
  * erased, so `scripts/rail-views-verify.ts` can import this at runtime under
- * `tsx` and EXECUTE the click route instead of pinning a substring of it (§5
- * decision 17: pin the expression, not the name). A value import would drag
+ * `tsx` and EXECUTE the click route instead of pinning a substring of it - pin
+ * the expression, not the name. A value import would drag
  * `entries.ts` in, and through it the `@/`-aliased modules that a script with no
  * bundler cannot resolve. Keep it that way.
  */
@@ -42,7 +42,7 @@ export function entrySelectTarget(entry: Entry): { tabId: number; leafId: number
 /**
  * The trigger's OWN click route, as props to spread onto it.
  *
- * D-NAV1: with a rail view (Vault, Port Forwarding) covering the tab area, the
+ * With a rail view (Vault, Port Forwarding) covering the tab area, the
  * strip stays on screen but `activeKey` still names the tab underneath it - so
  * clicking that tab's own chip is not a value CHANGE, and the controlled Radix
  * `Tabs` in `TabBar` never calls `onValueChange`. The click that most plainly

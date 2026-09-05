@@ -4,11 +4,11 @@
  * page owns the data (the row builder, the reference counts, the missing-secret
  * answer) and this file owns only the rendering.
  *
- * Edit opens the identity editor (wave 3). Still no selection, no connect
+ * Edit opens the identity editor. There is no selection, no connect
  * action and no card-level `onClick`: this card is a static row, not the
- * interactive surface `HostCard` is, and giving it one for no caller would be
- * the dead-affordance class already filed against this app once (a header
- * drag that silently does nothing under a rail view). Delete is here because
+ * interactive surface `HostCard` is, and giving it one for no caller would be a
+ * dead affordance of the kind this app has shipped before (a header drag that
+ * silently does nothing under a rail view). Delete is here because
  * the refusal behind it is real code today.
  *
  * Nothing here says anything about how well a secret is protected, because
@@ -44,10 +44,9 @@ export type IdentityCardProps = {
   hostCount: number;
   /** The record names a secret it does not have. Renders as a warning pip. */
   missingSecret?: boolean;
-  /** Open the editor for this record. Required, not optional: after wave 3
-   *  there is no surface that lists these rows without being able to edit
-   *  one, and an optional callback would let a future caller render a card
-   *  whose Edit button does nothing. */
+  /** Open the editor for this record. Required, not optional: no surface lists
+   *  these rows without being able to edit one, and an optional callback would
+   *  let a future caller render a card whose Edit button does nothing. */
   onEdit: () => void;
   onDelete: () => void;
 };

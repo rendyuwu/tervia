@@ -61,7 +61,7 @@ import {
 //
 //   NO ACCOUNT OUTLIVES THE RECORD NAMING IT, AND NO RECORD OUTLIVES ITS ACCOUNT.
 //   There is no `secrets_list` command, so an account nothing references is not
-//   merely untidy, it is unreachable (§9.7). A delete clears the host's accounts,
+//   merely untidy, it is unreachable. A delete clears the host's accounts,
 //   and an upsert clears the ones the new record can no longer name - AFTER the
 //   new record is on disk, never before, because nothing here can read a secret
 //   back to undo a release that a failed write leaves unjustified. `legacyPurge.ts`
@@ -74,7 +74,7 @@ import {
  * The fourth state, and it exists for exactly one caller. A backup import has
  * `backup_apply_secrets` write the credential to the keychain from Rust and get
  * back only a `boolean[]` - the value never reaches JS, which for an RDP password
- * is a Phase 5 invariant rather than a preference. Without this, the import can
+ * is a standing invariant rather than a preference. Without this, the import can
  * only pass `undefined`, and a host the store has never seen then takes its flags
  * from an absent record: every flag false over a live secret. SSH survives that
  * (`resolveSshAuth` resolves by auth mode and never reads a flag) but RDP does
@@ -110,8 +110,9 @@ export type HostSecretInput = {
  * Drop every forward rule that rides one host.
  *
  * INJECTED, never imported, for the reason {@link IdentityHostRefs} is:
- * `modules/forwards` does not exist until 6f, and when it does it will import
- * {@link Host} from here - so a hosts -> forwards import would close a cycle.
+ * `modules/forwards` already imports from `modules/hosts` - {@link Host} from
+ * `./types`, and `findHost` from this file - so a hosts -> forwards import
+ * would close a cycle.
  *
  * Required, never optional. A caller allowed to pass nothing would skip it
  * silently, and a rule left behind names a host id that resolves to nothing,
@@ -127,8 +128,8 @@ export type ForwardRuleCleanup = (hostId: string) => void | Promise<void>;
 /**
  * The stand-in until `modules/forwards` exists.
  *
- * Named rather than an inline `() => {}` at each call site so 6f finds every one
- * of them with a single grep, and so "no rules were cleaned up here" is a
+ * Named rather than an inline `() => {}` at each call site so every one of them
+ * is findable with a single grep, and so "no rules were cleaned up here" is a
  * deliberate statement rather than an omission.
  *
  * `modules/forwards` now exists and `HostsPage.tsx`'s production call site
@@ -312,7 +313,7 @@ function withPins(host: Host, pins: HostPins): Host {
  * A MAP was handed over: the caller has said which address each key belongs to, so
  * there is nothing to infer and nothing else is consulted. That is every save from
  * the editor - and every row an import writes, because `carryPins` in
- * `ssh/backupFile.ts` builds the map there rather than leaving it to be guessed
+ * `backup/file.ts` builds the map there rather than leaving it to be guessed
  * here.
  *
  * NO MAP AND NO STORED RECORD - a first save: the flat pin can only mean this
@@ -323,9 +324,8 @@ function withPins(host: Host, pins: HostPins): Host {
  * STORED record named, never moved onto the new machine - that is the
  * mis-attribution the old `keepPin` existed to prevent, and a pin compared against
  * the wrong machine aborts the next connect as an attack. Not dropped either:
- * re-pointing back finds it again. This is the branch a `{ ...stored, host: next }`
- * spread in 6e or 6f lands in, and it is correct without that caller knowing pins
- * exist.
+ * re-pointing back finds it again. This is the branch any `{ ...stored, host: next }`
+ * spread lands in, and it is correct without that caller knowing pins exist.
  *
  * AND IT ONLY FILES INTO AN EMPTY SLOT, which is the one thing this cannot take on
  * trust. The branch's premise is that the flat pin was read off the stored row, and
@@ -335,14 +335,14 @@ function withPins(host: Host, pins: HostPins): Host {
  * whose flat pin came from anywhere else, with no map and a changed address, cannot
  * be identified, and the two ways of being wrong about it are not symmetric.
  * OVERWRITING puts a different machine's key at an address the user may return to,
- * and that connect aborts as a MISMATCH - which reads as an attack (§5.16), out of
+ * and that connect aborts as a MISMATCH - which reads as an attack - out of
  * a save that was about something else. DROPPING leaves that address exactly as
  * fail-open as it was before the pin existed. Both leave the new address unpinned;
  * only overwriting manufactures a false alarm. So a key already keyed at the stored
  * address wins, and the unattributable pin is discarded rather than filed over it.
  *
  * A file WAS that caller - same inputs, opposite correct answer - which is why the
- * disambiguation belongs at the call site: `carryPins` in `ssh/backupFile.ts` builds
+ * disambiguation belongs at the call site: `carryPins` in `backup/file.ts` builds
  * the map from the FILE's own address, so no import reaches this branch at all.
  */
 function nextPins(host: Host, existing: Host | undefined): HostPins {
@@ -418,8 +418,9 @@ export function createHostsStore(io: HostsIo): HostsStore {
    * - persisting the group removal without clearing `groupId` on its members.
    * Benign by design (a dangling `groupId` renders as ungrouped, which is what
    * deleting the group was for) and named here because it is the one place the
-   * multi-key contract is weaker than it reads. A real fix is VLT-19's atomic store
-   * write, not a second commit here.
+   * multi-key contract is weaker than it reads. A real fix is an atomic
+   * multi-key store write - which `tauri-plugin-store` does not offer - not a
+   * second commit here.
    */
   async function persist(entries: [string, unknown][]): Promise<void> {
     for (const [key, value] of entries) await io.store.set(key, value);
@@ -484,11 +485,10 @@ export function createHostsStore(io: HostsIo): HostsStore {
    * found: the source record's flags arrive for free through the `rebound` spread,
    * and if the source claims a secret the keychain no longer holds, propagating
    * that claim writes a flag that is wrong forever - this layer never reads a
-   * secret back, so nothing can ever correct it. §5.4 is the same failure with a
-   * different cause. So a field that copied comes back as
-   * {@link SECRET_ALREADY_STORED} - present, nothing left to write - and a field
-   * that did not is OMITTED, which for an id the store has never seen resolves to
-   * `false` with no further IPC.
+   * secret back, so nothing can ever correct it. So a field that copied comes
+   * back as {@link SECRET_ALREADY_STORED} - present, nothing left to write - and
+   * a field that did not is OMITTED, which for an id the store has never seen
+   * resolves to `false` with no further IPC.
    *
    * NO VALUE PASSES THROUGH HERE. `secrets_copy` reads and writes in-process,
    * which is what lets an RDP password travel at all: the old code could only
@@ -562,9 +562,9 @@ export function createHostsStore(io: HostsIo): HostsStore {
    * again, and there is no `secrets_list` command, so "unreferenced" means
    * unreachable.
    *
-   * Only what the STORED record owned is touched, so a convert-to-vault following
-   * §5.3's order - copy the secrets to the vault FIRST, then rewrite the binding -
-   * loses nothing. A converter that rewrote the binding first would.
+   * Only what the STORED record owned is touched, so a convert-to-vault that
+   * copies the secrets to the vault FIRST and rewrites the binding second loses
+   * nothing. A converter that rewrote the binding first would.
    *
    * A field BOTH protocols own survives a protocol change, and that is the
    * behaviour rather than an oversight: nothing has been copied anywhere, so
@@ -805,13 +805,12 @@ export function createHostsStore(io: HostsIo): HostsStore {
     // into a record whose flags name material that is gone.
     await persist([[HOSTS_KEY, next]]);
 
-    // AFTER the rewrite, never before, which is §5.3's ordering: every step up to
-    // the rewrite is additive, so a `persist` that throws leaves the old record
-    // still naming secrets that are still there. Releasing first is the "step 5
-    // before step 4" the spec calls out - and a protocol change has NO copy step,
-    // so nothing preserves the secret anywhere and a throw at `persist` costs the
-    // user their only copy of a key while the stored record still claims it. What
-    // is left instead is the lesser evil the spec ranks below it: an orphan
+    // AFTER the rewrite, never before: every step up to the rewrite is additive,
+    // so a `persist` that throws leaves the old record still naming secrets that
+    // are still there. Releasing first inverts that - and a protocol change has
+    // NO copy step, so nothing preserves the secret anywhere and a throw at
+    // `persist` costs the user their only copy of a key while the stored record
+    // still claims it. The lesser evil, and what is left instead, is an orphan
     // account after a good write.
     await releaseStaleAccounts(host, existing);
     return record;
@@ -897,8 +896,8 @@ export function createHostsStore(io: HostsIo): HostsStore {
       // SECRETS FIRST, RECORD SECOND, and the order is not interchangeable.
       // Copying is additive: it touches only accounts under an id no record names
       // yet, so a failure between here and `persist` leaves bytes at an
-      // unreferenced account - VLT-23's orphan class, and nothing that is WRONG,
-      // just unreachable. The other order leaves a saved record claiming secrets
+      // unreferenced account - an orphan, and nothing that is WRONG, just
+      // unreachable. The other order leaves a saved record claiming secrets
       // that are not there, which this layer can never correct because it never
       // reads one back. `rollbackNewHost` clears what a partial copy did land,
       // which is safe for exactly one reason: `copyId` is brand new, so there was
@@ -959,7 +958,7 @@ export function createHostsStore(io: HostsIo): HostsStore {
       // rules both intact, which is recoverable; the other order leaves rules
       // naming a host that no longer exists. Unconditional because a rule can name
       // an id that is already gone - deleted in another window, or lost with a torn
-      // store file - and orphaning those rules is this sub-phase's job. Skipping
+      // store file - and clearing those rules is this call's job. Skipping
       // the call for a missing host is what left exactly those rules behind, and it
       // costs one no-op.
       await forwards(id);

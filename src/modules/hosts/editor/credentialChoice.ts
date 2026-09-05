@@ -8,15 +8,14 @@ import {
   type SshInlineCredentials,
 } from "@/modules/vault/types";
 
-// The credential picker's own vocabulary, pure and new for 6e wave 4: what its
-// value MEANS against a stored record, and what pressing "Change credential"
-// would then do.
+// The credential picker's own vocabulary, pure: what its value MEANS against a
+// stored record, and what pressing "Change credential" would then do.
 //
 // No React, no store, no Tauri, so `scripts/credential-move-verify.ts`
 // exercises every string here BY VALUE, the same discipline
 // `vault/page/derive.ts` and `vault/editor/draft.ts` are held to.
 //
-// CREATE MODE (amendment A1, 2026-09-01): binding a NEW host to an identity is
+// CREATE MODE: binding a NEW host to an identity is
 // an immediate, unconfirmed pick - there is no stored credential to destroy,
 // so `credentialChangeFor(null, choice)` never returns anything but
 // `{kind:"none"}`. What a create-mode dialog actually does with the picker's
@@ -44,8 +43,8 @@ export function identityChoice(identityId: string): string {
  * The identity id one picker value names, or `null` for either sentinel.
  *
  * Two callers. The picker's own change handler turns a selection back into an
- * id; `HostEditorDialog`'s `boundIdentity`, in CREATE MODE ONLY (amendment
- * A1), reads this straight off the draft picker value at Save - a `null`
+ * id; `HostEditorDialog`'s `boundIdentity`, in CREATE MODE ONLY, reads this
+ * straight off the draft picker value at Save - a `null`
  * return there is what makes an unbound new host build an inline credential
  * instead of a binding, with no separate "create mode" branch anywhere in
  * this file.
@@ -77,8 +76,8 @@ export type CredentialChange =
  * picker's value. `{kind:"none"}` when the picker is on what is already true,
  * and for every combination the UI must not offer.
  *
- * `host === null` is create mode, and it always answers `{kind:"none"}`
- * (amendment A1): there is no stored credential to convert, destroy or bind
+ * `host === null` is create mode, and it always answers `{kind:"none"}`:
+ * there is no stored credential to convert, destroy or bind
  * away from immediately, so the picker's value takes effect only at Save,
  * read directly through {@link identityIdFromChoice}.
  */
@@ -131,7 +130,7 @@ function rdpOwnedFlag(credential: RdpInlineCredentials, field: string): boolean 
 
 /**
  * Every account the stored record owns, by name, for the bind confirmation to
- * enumerate. Empty for a vault-bound host, which owns none (§1.4).
+ * enumerate. Empty for a vault-bound host, which owns none.
  *
  * Enumerated from {@link HOST_SSH_SECRET_FIELDS} / {@link HOST_RDP_SECRET_FIELDS}
  * rather than listing the three flags by hand, so a field added to either list
@@ -162,7 +161,8 @@ export function credentialChangeTitle(change: CredentialChange): string {
 
 /** "a" / "a and b" / "a, b, and c", plus the verb that agrees with the count -
  *  a shared comma-join reads as correct for two items and silently wrong for
- *  three or for one, which is exactly the property step 5 checks by value. */
+ *  three or for one, which is exactly the property
+ *  `scripts/credential-move-verify.ts` checks by value. */
 function joinWithVerb(names: readonly string[]): { list: string; verb: string } {
   if (names.length === 0) return { list: "credentials", verb: "are" };
   if (names.length === 1) return { list: names[0], verb: "is" };

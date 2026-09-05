@@ -78,7 +78,7 @@ export function Combobox({
           <CommandInput placeholder={searchPlaceholder} className="text-[12px]" />
           <CommandList
             className="max-h-56"
-            // VLT-47: this popover is portaled to `document.body` as a sibling
+            // This popover is portaled to `document.body` as a sibling
             // of the host editor's `Dialog`, not a descendant of it - so when
             // the editor is open (every caller so far is inside a modal
             // `Dialog` - the three host-editor pickers and the vault identity
@@ -108,8 +108,7 @@ export function Combobox({
             // scroll then runs UNMODIFIED - real momentum/inertia included,
             // unlike a hand-rolled `scrollTop += deltaY`. It is also a no-op,
             // not a bug, wherever this component is mounted with no modal
-            // Dialog above it (6e's vault picker is the likely next such
-            // caller): with no `RemoveScroll` mounted there is no document
+            // Dialog above it: with no `RemoveScroll` mounted there is no document
             // listener to stop propagation to, and native wheel-scroll simply
             // runs on its own, so nothing here double-scrolls it. An earlier
             // version of this fix wrote `scrollTop += deltaY` unconditionally,

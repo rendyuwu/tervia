@@ -27,8 +27,8 @@ export type RdpCredentialSectionProps = {
    *  itself. A bound row shows a read-only panel and nothing editable. */
   boundIdentity: string | null;
   /** `boundIdentity`'s NAME, resolved by the dialog from the `identityRows`
-   *  prop it already holds (wave 4) - this component does no vault read of its
-   *  own. `undefined` renders the id alone, which covers a dangling binding. */
+   *  prop it already holds - this component does no vault read of its own.
+   *  `undefined` renders the id alone, which covers a dangling binding. */
   identityName?: string;
   value: RdpCredentialDraft;
   onChange: (patch: Partial<RdpCredentialDraft>) => void;
@@ -150,11 +150,11 @@ export function RdpCredentialSection({
  * bound to a shared vault identity.
  *
  * Read-only, and it names which parts of the form still work: refusing to open
- * the dialog at all would leave an imported host unable to be renamed, resized or
- * re-pointed until the identity picker ships. The identity used to be named by
+ * the dialog at all would leave an imported host unable to be renamed, resized
+ * or re-pointed at all. The identity used to be named by
  * id alone because resolving the name meant a vault read this dialog had no
  * reason to do - it no longer does: `HostEditorDialog` holds `identityRows` for
- * its own picker (wave 4) and passes the resolved name down, so the id is now a
+ * its own credential picker and passes the resolved name down, so the id is now a
  * footnote under it rather than the only thing on screen, kept for the one case
  * a name cannot cover - a binding naming an identity that no longer exists.
  */

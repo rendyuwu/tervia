@@ -219,13 +219,14 @@ export function HostEditorDialog({
   /**
    * Which SSH secret fields the keychain seed put a value the user can SEE into.
    *
-   * A DIFFERENT FACT from `sshTouched`, not a second copy of it - §5.14's "keep
-   * exactly one such record" is about the touched mark, which is still one cell
-   * read by both the seed and the save. `touched` says the user edited the field;
-   * this says the field was showing a stored value while they did, and only that
-   * makes emptying it an instruction to delete something. Without it, one
-   * character typed and backspaced before the read landed sent `""` down to the
-   * store, which is its CLEAR instruction, and the keychain account went with it.
+   * A DIFFERENT FACT from `sshTouched`, not a second copy of it - the rule that
+   * there be exactly one such record is about the touched mark, which is still
+   * one cell read by both the seed and the save. `touched` says the user edited
+   * the field; this says the field was showing a stored value while they did,
+   * and only that makes emptying it an instruction to delete something. Without
+   * it, one character typed and backspaced before the read landed sent `""` down
+   * to the store, which is its CLEAR instruction, and the keychain account went
+   * with it.
    *
    * A ref for the same reason `sshTouched` is one: it is written after the seed's
    * await and read by the save, and neither renders from it.
@@ -289,7 +290,7 @@ export function HostEditorDialog({
    * The change `credentialChangeFor` reported for `choice` at the moment
    * "Change credential" was pressed, waiting on the confirmation below.
    *
-   * Amendment A1 (2026-09-01) keeps create mode's picker UNCONFIRMED:
+   * Create mode's picker is UNCONFIRMED:
    * `credentialChangeFor` answers `{kind:"none"}` for every create-mode choice
    * because `existing` is null, so this is only ever set from the edit-mode
    * button - there is no create-mode branch that opens it.
@@ -426,8 +427,8 @@ export function HostEditorDialog({
         setTunnelSshHostId("");
         setPins({});
         // The create arm returns before the `currentCredentialChoice(host)`
-        // reset below is reached, so it gets its own - amendment A1: a choice
-        // left over from a previous EDIT sitting must not leak into a new host.
+        // reset below is reached, so it gets its own: a choice left over from a
+        // previous EDIT sitting must not leak into a new host.
         setChoice(CREDENTIAL_CHOICE_INLINE);
         setReady(true);
         return;
@@ -562,18 +563,17 @@ export function HostEditorDialog({
 
   /**
    * The identity this row is bound to - the STORED binding in edit mode, the
-   * draft picker's own choice in create mode (amendment A1, 2026-09-01).
+   * draft picker's own choice in create mode.
    *
    * In EDIT mode this is the stored record's binding and nothing else. A draft
    * value here would let a stale picker rebuild a bound host's credential
-   * inside `save()`, which is exactly §4.3's defect - a silently detached vault
-   * binding - so `save()` itself is unchanged by this widening and stays
-   * ignorant of `choice` entirely.
+   * inside `save()`, silently detaching a vault binding - so `save()` itself is
+   * unchanged by this widening and stays ignorant of `choice` entirely.
    *
    * In CREATE mode there is no stored record, so the draft choice is the only
    * source there is: `save()`'s three `boundIdentity ?` ternaries build the
    * binding from it with NO CHANGE TO `save()` AT ALL, which is why
-   * `scripts/host-editor-verify.ts` section [4] stays green under this wave.
+   * `scripts/host-editor-verify.ts` section [4] stays green.
    *
    * The test is `mode === "create"`, deliberately NOT `!existing`: the load
    * effect resets `existing` to `null` before its own fetch, so `existing` is
@@ -635,9 +635,8 @@ export function HostEditorDialog({
     hint: row.identity.username,
     search: `${row.identity.name} ${row.identity.id} ${row.identity.username}`,
   }));
-  // `CREDENTIAL_CHOICE_NEW_IDENTITY` is EDIT MODE ONLY (amendment A1): a new
-  // host stores no credentials to move, so offering to convert one would be a
-  // dead affordance (§4.20).
+  // `CREDENTIAL_CHOICE_NEW_IDENTITY` is EDIT MODE ONLY: a new host stores no
+  // credentials to move, so offering to convert one would be a dead affordance.
   const credentialOptions: ComboboxOption[] = [
     {
       value: CREDENTIAL_CHOICE_INLINE,
@@ -788,9 +787,9 @@ export function HostEditorDialog({
       if (onProbeRow()) setPins((current) => ({ ...current, [host]: fingerprint }));
       // AND THE STORE IS NOT WRITTEN AT ALL. There used to be a `pinFingerprint`
       // call here, gated on the saved record still naming the address the probe
-      // dialled (§5.16, which that gate closed: a cancelled dialog must not leave
-      // a FOREIGN machine's fingerprint on a record, because the next real connect
-      // aborts as a MISMATCH and that reads as an attack). The gate was sound and
+      // dialled (a cancelled dialog must not leave a FOREIGN machine's
+      // fingerprint on a record, because the next real connect aborts as a
+      // MISMATCH and that reads as an attack). The gate was sound and
       // still incomplete - it stopped the write landing on the wrong address, not
       // on the right one:
       //
@@ -805,7 +804,7 @@ export function HostEditorDialog({
       // No gate fixes that, because the destructive write is the one the gate
       // permits. Deleting the write does, and it costs nothing: `pins` above is
       // already the single source of truth, Save writes the whole map, and Cancel
-      // disposes of it. §5.16's question - does this survive Cancel, and should it -
+      // disposes of it. The question - does a pin survive Cancel, and should it -
       // now has no store write in this dialog to ask it of. Save is the only thing
       // that commits a pin, which is what the comment on `pins` has always claimed.
       //
@@ -948,8 +947,8 @@ export function HostEditorDialog({
       // under their own keys instead of discarding them.
       // Built field by field rather than spread over the stored record, and that is
       // the point rather than verbosity: a spread is how a credential naming
-      // ANOTHER host reaches a save (§5.1), and how the other protocol's fields
-      // ride along on a record that has no business carrying them.
+      // ANOTHER host reaches a save, and how the other protocol's fields ride
+      // along on a record that has no business carrying them.
       // `lastConnectedAt` is the only field the form does not own, so it is the
       // only one carried across.
       const base = {
@@ -1090,7 +1089,7 @@ export function HostEditorDialog({
         const fresh = await findHost(e.hostId).catch(() => undefined);
         if (fresh) {
           setExisting(fresh);
-          // VLT-29. The most common way this refusal is reached now is the
+          // The most common way this refusal is reached now is the
           // credential picker above, on ANOTHER open editor for the same host:
           // this form loaded a row BOUND to an identity, that binding was
           // detached in the meantime, and `boundIdentity` recomputes off
@@ -1197,12 +1196,11 @@ export function HostEditorDialog({
    * `existing` from what a write actually returned.
    *
    * `setExisting` is ALWAYS given the record the write returned, never one
-   * built here - VLT-29's first obligation. Without it, the very next Save in
-   * the same sitting would send `credentialStamp(existing)` from BEFORE this
-   * action and be refused against this editor's own write - `save()` itself is
-   * not touched by any of this, so it is the only thing standing between a
-   * completed action and a refusal that reads as this editor arguing with
-   * itself.
+   * built here. Without it, the very next Save in the same sitting would send
+   * `credentialStamp(existing)` from BEFORE this action and be refused against
+   * this editor's own write - `save()` itself is not touched by any of this, so
+   * it is the only thing standing between a completed action and a refusal that
+   * reads as this editor arguing with itself.
    *
    * `choice` is reset from the SAME record for the same reason: leaving it
    * would show the picker on a value the row no longer has.
@@ -1269,9 +1267,9 @@ export function HostEditorDialog({
         // No `authMode`: `convertHostToVault` derives it from the STORED record
         // instead of taking it from here. This dialog used to pass the draft's
         // radio, which could disagree with what the record actually holds - and
-        // that disagreement was both of this round's P0s, one stranding a
-        // plaintext password per press and one orphaning the host's only private
-        // key. The four identity fields left are the ones the user may have
+        // that disagreement produced two defects, one stranding a plaintext
+        // password per press and one orphaning the host's only private key.
+        // The four identity fields left are the ones the user may have
         // edited, and none of them carries an invariant against the accounts
         // being moved. `facts` is on the record's side of that same rule, which
         // is what the gate above enforces - it describes the material that
@@ -1455,7 +1453,7 @@ export function HostEditorDialog({
                   </Field>
                 </div>
 
-                {/* Renders in BOTH modes (amendment A1) - only the options differ,
+                {/* Renders in BOTH modes - only the options differ,
                   not the picker's presence. `credentialOptions` already omits
                   `CREDENTIAL_CHOICE_NEW_IDENTITY` outside edit mode, and
                   `credentialChangeFor` already answers `{kind:"none"}` for

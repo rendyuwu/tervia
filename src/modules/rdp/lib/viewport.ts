@@ -7,7 +7,8 @@
  * click landed a few pixels from the cursor", which is unpleasant to chase
  * through a canvas and trivial to reason about here.
  *
- * `sizeMode` is `"preset"` only for now (see `connections.ts`), so the remote
+ * `sizeMode` is `"preset"` only - `RdpSizeMode` in `hosts/types.ts` has no
+ * other member - so the remote
  * desktop never changes size to match the pane and letterboxing is not
  * optional: the aspect ratios genuinely differ.
  */

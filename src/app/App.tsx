@@ -131,8 +131,8 @@ export default function App() {
     setLeafTerminalTheme,
   } = useTabs();
 
-  // `railView` (DCR-1: Vault and Port Forwarding are views over the tab area,
-  // not tabs) comes from `useTabs` rather than being state here, because it and
+  // `railView` (Vault and Port Forwarding are views over the tab area, not
+  // tabs) comes from `useTabs` rather than being state here, because it and
   // `activeId` carry an invariant between them: a tab cannot become active while
   // a view is still covering it. As App state it was the caller's job to clear,
   // and nine of the eleven routes into the tab area did not - so Ctrl+1,
@@ -647,7 +647,7 @@ export default function App() {
       // chord no gate can deliver - the OS eats it - which is why the pane
       // header has a button for it.)
       //
-      // "FOCUSED" IS ASKED OF THE DOM (VLT-58 / VLT-59). This used to read
+      // "FOCUSED" IS ASKED OF THE DOM. This used to read
       // `activeLeafKindCurrent === "terminal" || === "rdp"` - which is where
       // the caret is *in the tab*, not where it is on screen - and its own
       // comment justified it with "a FOCUSED terminal". The two differ exactly

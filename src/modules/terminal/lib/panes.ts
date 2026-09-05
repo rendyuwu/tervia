@@ -144,15 +144,14 @@ export type RdpLeafState = {
   customTitle?: string;
 };
 
-/** The three pages the activity rail can show. §2 decision 10: exactly these
- *  three this phase. Only one of them may be a pane LEAF - see
- *  {@link TabPageKind}. */
+/** The three pages the activity rail can show. Only one of them may be a pane
+ *  LEAF - see {@link TabPageKind}. */
 export type PageKind = "hosts" | "vault" | "forwards";
 
 /**
  * The page kinds that may live in a tab as a pane leaf. Hosts, and only Hosts.
  *
- * DCR-1: the tab strip is for connections, and Hosts earns a place there because
+ * The tab strip is for connections, and Hosts earns a place there because
  * it is where connections come from. Vault and Port Forwarding are rail VIEWS
  * shown over the tab area (`app/components/RailViewArea.tsx`), so there is no
  * such thing as a tab for one - and narrowing the leaf's `page` here is what
@@ -188,7 +187,7 @@ export const PAGE_LABELS: Record<PageKind, string> = {
  * own existence.
  *
  * `TabPageKind`, not `PageKind`: a Vault or Port-Forwarding leaf is
- * unrepresentable (DCR-1). The workspace restore path drops one saved by an
+ * unrepresentable. The workspace restore path drops one saved by an
  * older build; see `workspaces/serialize.ts`.
  */
 export type PageLeafState = {

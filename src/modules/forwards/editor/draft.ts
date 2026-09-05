@@ -132,8 +132,8 @@ export function validateRuleDraft(draft: RuleDraft): string | null {
  * `RuleEditorDialog`'s save calls `upsertRule(ruleRecordFrom(id, draft),
  * findHost)` and hands the result through UNMODIFIED - no spread, no
  * override, no second call to this function anywhere else in that method.
- * VLT-76's whole class of defect is a one-line spread at exactly this call
- * site, so this function existing at all is the fix: a caller that wants to
+ * The whole class of defect this guards against is a one-line spread at exactly
+ * this call site, so this function existing at all is the fix: a caller that wants to
  * change one field has to change it HERE, in the draft, not at the call site.
  */
 export function ruleRecordFrom(id: string, draft: RuleDraft): ForwardRule {

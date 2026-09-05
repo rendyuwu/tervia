@@ -276,7 +276,7 @@ export const SHORTCUTS: Shortcut[] = [
     // what the pane-header and tab-strip X buttons refuse: the Hosts page and
     // the last entry in the workspace. Named for a terminal while it was gated
     // to one, which is how it came to drop the chord for an RDP pane both X
-    // buttons closed happily (VLT-62). The id keeps its `terminal.` prefix
+    // buttons closed happily. The id keeps its `terminal.` prefix
     // because a user's rebinding is stored under it; only the wording moves.
     id: "terminal.close",
     label: "Close focused pane",
@@ -284,7 +284,7 @@ export const SHORTCUTS: Shortcut[] = [
     defaultBindings: [{ ctrl: true, shift: true, key: "x" }],
   },
   {
-    // Opens the Hosts page (6d): pick a saved host to connect, or add one. Used
+    // Opens the Hosts page: pick a saved host to connect, or add one. Used
     // to raise the header's RDP connection list before that dropdown was
     // deleted; the id is kept so a user's custom binding survives the repoint.
     //

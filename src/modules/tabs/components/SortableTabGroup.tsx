@@ -34,7 +34,7 @@ type SortableTabGroupProps = {
   isDragging: boolean;
   /** Activate an entry. Threaded through to every entry rather than left to the
    *  `Tabs` root's `onValueChange`, which Radix skips when the clicked chip is
-   *  already the active one - the D-NAV1 case under a rail view. */
+   *  already the active one - the case that matters under a rail view. */
   onSelectEntry: SelectEntry;
   onPinLeaf: (tabId: number, leafId: number) => void;
   onCloseEntry: (tabId: number, leafId: number | null) => void;

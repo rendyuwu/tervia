@@ -75,8 +75,8 @@ import { useForwards } from "./useForwards";
  * makes it correct; the DECISION to stop the forward is a claim about now, so
  * `confirmDelete` re-reads both owners live through `pageMustStopFirst`
  * (`./controller`) instead of trusting either field. The page still reads
- * neither store during a RENDER (§1.6: the card is the one place that needs
- * them, and it already has them) - that live read is inside an event handler
+ * neither store during a RENDER - the card is the one place that needs
+ * them, and it already has them - and that live read is inside an event handler
  * and goes through `getState()`, the idiom `controller.ts` and `runtime.ts`
  * both spell out.
  *
@@ -352,7 +352,7 @@ export function ForwardsPage(): ReactNode {
 
 /** Nothing to show, said in whichever of the two ways is true - adapted from
  *  `VaultPage.tsx:458-483`; see that file for the full reasoning
- *  (`matching = hasAny && filtering`, VLT-72: `hasAny` is fed from the
+ *  (`matching = hasAny && filtering`: `hasAny` is fed from the
  *  UNFILTERED row list, which is what makes a query against an empty store
  *  still say "No saved forward rules yet." rather than the lie "No rules
  *  match."). */

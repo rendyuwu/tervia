@@ -4,7 +4,7 @@ import { type PageKind, type TabPageKind } from "@/modules/terminal/lib/panes";
  * Which of the rail's pages may live in the connection tab strip, and which are
  * views of their own.
  *
- * DCR-1: the tab strip is for connections. Hosts earns a place there because it
+ * The tab strip is for connections. Hosts earns a place there because it
  * is where connections come FROM - it is the workspace's default tab and the one
  * surface that is always reachable. Vault and Port Forwarding are neither
  * connections nor entry points to one, so they stopped being tabs: the rail

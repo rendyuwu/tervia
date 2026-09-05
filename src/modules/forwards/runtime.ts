@@ -4,20 +4,18 @@
  * running) the loopback port it bound and the claim its session is held
  * under.
  *
- * SESSION-SCOPED ONLY - nothing here is persisted. Research §5 decision 8 and
- * the handoff's decision 13 both say a relaunch comes up with every rule
- * stopped; do not add a `LazyStore` (or any other persistence) to "fix" that,
- * it is the design, not an omission.
+ * SESSION-SCOPED ONLY - nothing here is persisted, so a relaunch comes up with
+ * every rule stopped. That is the design and not an omission: do not add a
+ * `LazyStore` (or any other persistence) to "fix" it.
  *
- * KEYED BY `ruleId` ALONE, not `(ruleId, owner)`. That is §4(a) Q1's
- * mutual-exclusion answer, and it has a consequence worth stating up front: a
+ * KEYED BY `ruleId` ALONE, not `(ruleId, owner)`, because a rule runs under one
+ * owner at a time. That has a consequence worth stating up front: a
  * rule with `startWithHost: true` is started by `startWithHost` on the
  * TERMINAL's own session, dies with the tab, and this store never hears about
  * it - the page shows it "Running (with host)" read-only, off a SEPARATE map
- * the terminal writes in wave 3 and this page only reads. A terminal-owned
- * forward is therefore never in `byRule`; the two are mutually exclusive by
- * construction, not by a check either side has to make. That second map is
- * not this step's - do not build it here.
+ * the terminal writes (`./hostOwned.ts`) and this page only reads. A
+ * terminal-owned forward is therefore never in `byRule`; the two are mutually
+ * exclusive by construction, not by a check either side has to make.
  *
  * The `claim` field is what makes Stop safe. `SshForward.claim`
  * (`ssh/tunnel.ts:51-74`) is monotonic and names the ENTRY a caller took its
@@ -55,9 +53,10 @@ type ForwardRuntimeState = {
   /**
    * Resets the entry to `{ status: "stopped" }` and NOTHING else - no
    * `boundPort`, no `sessionId`, no `claim`, no `error` survive. A retained
-   * claim is a token whose entry is gone: step 9's Stop is a no-op when there
-   * is no claim recorded, precisely so a stale one left behind by a previous
-   * run can never be spent against a session another consumer is now using.
+   * claim is a token whose entry is gone: `controller.ts`'s `stopRule` is a
+   * no-op when there is no claim recorded, precisely so a stale one left by a
+   * previous run can never be spent against a session another consumer is now
+   * using.
    */
   markStopped(ruleId: string): void;
 };
@@ -79,8 +78,8 @@ export const useForwardRuntime = create<ForwardRuntimeState>((set) => ({
 // Every selector below returns a PRIMITIVE. `useShallow` is imported nowhere
 // in `src/` and stays that way here: a selector that builds a fresh object or
 // array literal is never `Object.is` its own last return, and under zustand
-// v5 that loops with "Maximum update depth exceeded" (research §12.7, plan
-// §4.9). If a future selector genuinely needs an object, the fix is
+// v5 that loops with "Maximum update depth exceeded". If a future selector
+// genuinely needs an object, the fix is
 // `useShallow` from `zustand/react/shallow` - not a bare object selector, and
 // not a workaround that avoids importing it.
 

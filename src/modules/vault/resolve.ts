@@ -27,11 +27,11 @@ import {
 //
 //   RDP gets a REFERENCE. `rdp_open` takes a keychain service/account and the
 //   host process reads the plaintext itself, so an RDP password never enters the
-//   webview. That is a Phase 5 invariant, and here it is preserved BY
+//   webview. That is a standing invariant, and here it is preserved BY
 //   CONSTRUCTION: `resolveRdpAuth` makes no keychain read at all.
 //
 //   SSH gets VALUES, because that is what `openSsh` takes today. This is a
-//   pre-existing defect (issues/11), not one the vault introduces: SSH
+//   pre-existing defect, not one the vault introduces: SSH
 //   round-trips plaintext through JS on every connect and every ProxyJump hop,
 //   bound to a vault identity or not.
 //

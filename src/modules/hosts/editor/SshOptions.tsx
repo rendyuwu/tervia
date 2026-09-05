@@ -7,8 +7,8 @@ import { savedHostOptions } from "./hostOptions";
 //
 // What used to sit beside it is gone rather than moved. Port forwarding was
 // edited here against `SshConnection.forwards`; `Host` carries no such field,
-// because a forward rule is now its own record (decision 7) edited on its own
-// page instead of buried in the per-host dialog.
+// because a forward rule is now its own record, edited on its own page instead
+// of buried in the per-host dialog.
 
 export function SshOptions({
   hosts,

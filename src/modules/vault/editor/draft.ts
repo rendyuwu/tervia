@@ -102,25 +102,24 @@ export function validateIdentityDraft(draft: IdentityDraft): string | null {
  * How {@link identityRecordFrom} decides `keyId` - the one thing about that
  * function a caller may vary, named rather than reimplemented.
  *
- * `"auth-mode"` is VLT-73's rule and the DEFAULT, so the safe answer is the one
- * a caller that says nothing gets: only a key-auth identity names a key.
+ * `"auth-mode"` is the DEFAULT, so the safe answer is the one a caller that
+ * says nothing gets: only a key-auth identity names a key.
  *
  * `"keep"` names whatever key the draft holds, whatever the mode says, and it
  * exists for exactly ONE caller - `convertHostToVault`
  * (`../../hosts/credentialMove.ts`), which MINTS a `VaultKey` out of a stored
  * host's PEM and then has to leave something naming it. A key nothing names is
- * not merely untidy: `deleteKey`'s in-use guard (`../store.ts:337-347`) has no
- * holder to refuse over, so one click on the Vault page destroys what may be
- * the user's only copy of that private key. The record `"keep"` builds is
- * therefore deliberately the one VLT-73 calls off-spec - a key chip on a
- * password identity - because the alternative is that delete. The rendering
- * question VLT-73 deferred to 6g is reopened by it; see the convert function
- * for the owner's decision and its date.
+ * not merely untidy: `deleteKey`'s in-use guard has no holder to refuse over,
+ * so one click on the Vault page destroys what may be the user's only copy of
+ * that private key. The record `"keep"` builds therefore deliberately breaks
+ * the rule above - it puts a key chip on a password identity - because the
+ * alternative is that delete. What that chip should say on a non-key identity
+ * is still unanswered.
  *
  * The opt-out lives HERE, on the builder, and not as a hand-assembled
- * `VaultIdentity` at the call site: this function is VLT-73's single normaliser
- * (wave-3 boundary 6), and a second assembly elsewhere is exactly the drift it
- * exists to prevent.
+ * `VaultIdentity` at the call site: this function is the single normaliser of
+ * `keyId`, and a second assembly elsewhere is exactly the drift it exists to
+ * prevent.
  */
 export type IdentityKeyIdRule = "auth-mode" | "keep";
 
@@ -137,7 +136,7 @@ function identityKeyId(draft: IdentityDraft, rule: IdentityKeyIdRule): string | 
 /**
  * The record `upsertIdentity` is handed.
  *
- * `keyId` IS THE POINT OF THIS FUNCTION (VLT-73). `VaultIdentity.keyId`'s doc
+ * `keyId` IS THE POINT OF THIS FUNCTION. `VaultIdentity.keyId`'s doc
  * says "Set when `authMode === 'key'`" (`../types.ts:107-108`) and nothing
  * enforced it: the store refuses key auth with no key and refuses a `keyId`
  * naming a key that does not exist (`../store.ts:208-213`), but it accepts a
@@ -183,7 +182,7 @@ export function identityRecordFrom(
  *
  * A blank field is OMITTED, so the store is never given the empty string it
  * reads as a delete. This editor therefore cannot remove a stored password at
- * all, which is a real gap and an old one - VLT-28 - and it is the cautious
+ * all, which is a real gap and a long-standing one, and it is the cautious
  * direction: the alternative is a form where a backspace over a field that was
  * never filled deletes a credential and reports success.
  *
@@ -235,15 +234,15 @@ export function keyDraftFrom(key: VaultKey): KeyDraft {
  * A BODY is required only when CREATING, and the asymmetry is the whole rule.
  * On a create, a key with no private key body has no reachable outcome but a
  * failed connect and nothing outside this editor ever fills one in - the same
- * argument the owner upheld twice for the RDP password (VLT-50). On an EDIT,
+ * argument that governs the RDP password. On an EDIT,
  * blank is the only way to say "keep the stored key", so it must be allowed;
  * refusing it would mean retyping a PEM to rename a key.
  *
  * Consequence, stated rather than discovered: `missingPrivateKey: true` on a
- * key row stays unreachable from the UI after this wave. It is covered
- * behaviourally in `scripts/vault-page-verify.ts` section 15 and reachable from
- * a hand-written `tervia-vault.json`; 6g's import is the next thing that can
- * produce one.
+ * key row is unreachable from the UI. It is covered behaviourally in
+ * `scripts/vault-page-verify.ts` section 15, and it is reachable from a
+ * hand-written `tervia-vault.json` and from a backup import, whose `keyRecord`
+ * in `backup/apply.ts` leaves `hasPrivateKey` false when no body arrived.
  */
 export function validateKeyDraft(draft: KeyDraft, mode: "create" | "edit"): string | null {
   if (!draft.name.trim()) return "Name is required";
@@ -307,8 +306,8 @@ export function keyRecordFrom(
  *
  * When the body is NOT replaced, neither secret is: a blank passphrase leaves
  * the stored one alone, and a typed one replaces it. There is therefore no way
- * to remove a passphrase without replacing the key - VLT-28 again, and the same
- * cautious direction the identity password takes.
+ * to remove a passphrase without replacing the key - the same gap the identity
+ * password has, taken in the same cautious direction.
  */
 export function keySecretsForSave(draft: KeyDraft): {
   privateKey?: string;

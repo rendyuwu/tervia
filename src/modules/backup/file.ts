@@ -14,7 +14,7 @@
  * no longer NAME: a row that arrives bound to a vault identity names none, and a
  * row that arrives on the other protocol names fewer. Landing either one over a
  * saved host deletes that host's secrets with nothing copied anywhere first, and
- * there is no `secrets_list` to find what is left (§9.7). See
+ * there is no `secrets_list` to find what is left. See
  * {@link resolveIdentityBindings} and {@link refuseProtocolConflicts}.
  *
  * THREE MORE RECORD KINDS cross the same boundary, and what a bad row costs
@@ -891,7 +891,7 @@ function isSameIdentity(
  * host releases everything that host owned - all three accounts for SSH
  * (password, private key, key passphrase), the password for RDP. Nothing copied
  * them anywhere first, and there is no `secrets_list` command, so "released"
- * means unreachable rather than untidy (§9.7).
+ * means unreachable rather than untidy.
  *
  * THREE OUTCOMES. `identityIds` is what separates the second from the third.
  *

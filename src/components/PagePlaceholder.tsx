@@ -6,10 +6,10 @@ import { PAGE_LABELS, type PageKind } from "@/modules/terminal/lib/panes";
  * - a rail view (`app/components/RailViewArea.tsx`) and the page-leaf body in
  * `panes/PaneTreeView.tsx` - say it identically instead of each keeping a copy.
  *
- * Vault's real UI lands in 6e and Port Forwarding's in 6f; each replaces one
- * branch of `RailViewArea` and nothing else, because the rail, its labels and
- * its pressed state are already driven by `PageKind` rather than by what is
- * rendered inside.
+ * Both Vault and Port Forwarding have real UI now, each in its own branch of
+ * `RailViewArea`; replacing a branch was all either one took, because the rail,
+ * its labels and its pressed state are driven by `PageKind` rather than by what
+ * is rendered inside.
  */
 export function PagePlaceholder({ page }: { page: PageKind }) {
   const Icon = PAGE_ICONS[page];

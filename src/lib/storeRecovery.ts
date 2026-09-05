@@ -209,7 +209,7 @@ async function recover(fileName: string, io: StoreFileIo): Promise<StoreRecovery
   // is on fingerprint - so importing the original key would "find" that record
   // and bind a host to the wrong material. Presence flags drift the same way,
   // permanently, because they are deliberately never read back. Nothing here
-  // reconciles the two, and nothing above it does either: deferred as VLT-22.
+  // reconciles the two, and nothing above it does either.
   try {
     await io.write(primary, backup.content);
   } catch (e) {

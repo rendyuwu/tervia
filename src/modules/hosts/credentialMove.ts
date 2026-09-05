@@ -200,8 +200,8 @@ function inlineNeedsKey(host: Host): boolean {
  * {@link inlineNeedsKey} reads from, which is the whole point of it existing.
  *
  * The two used to come from different places: this from the caller's draft,
- * `inlineNeedsKey` from the record. Every credential defect this round fixed was
- * that disagreement. A draft on "key" over a record holding no key made
+ * `inlineNeedsKey` from the record. That disagreement is what produced both of
+ * the defects below. A draft on "key" over a record holding no key made
  * `upsertIdentity` refuse ("uses key auth but names no key") AFTER the copies
  * had already landed, stranding a plaintext password at an unenumerable vault
  * account once per press; a draft on "password" over a record holding a PEM
@@ -209,11 +209,11 @@ function inlineNeedsKey(host: Host): boolean {
  * is one Vault-page click from gone. Reading both from the record removes the
  * disagreement structurally rather than checking for it.
  *
- * Convert is an operation on the STORED record, and §1.4 already settles
- * "record, not mode" for which accounts travel; this is the same rule applied to
- * the field that says what those accounts are for. The user's edits to `name`,
- * `username`, `domain` and `description` still come from the draft: those carry
- * no invariant against the accounts being moved.
+ * Convert is an operation on the STORED record, and which accounts travel is
+ * already settled by what the record holds rather than by any mode; this is the
+ * same rule applied to the field that says what those accounts are for. The
+ * user's edits to `name`, `username`, `domain` and `description` still come from
+ * the draft: those carry no invariant against the accounts being moved.
  *
  * RDP is `"password"`, as it has always been: an RDP inline arm has no auth mode
  * of its own, and its one account is a password. The non-inline arm is the
@@ -313,7 +313,7 @@ export function reusableVaultKey(keys: readonly VaultKey[], facts: VaultKeyFacts
  * EVERY FAILURE IN HERE IS SWALLOWED - the same swallow, for the same reason,
  * as `vault/store.ts`'s key-secret rollback. The caller is already rethrowing
  * the host write's own error, which is the one the user can act on and the one
- * `HostEditorDialog`'s recovery arm branches on by instance (VLT-29). A cleanup
+ * `HostEditorDialog`'s recovery arm branches on by instance. A cleanup
  * failure must never become the error that arrives there.
  */
 async function undoConvertRecords(
@@ -340,8 +340,9 @@ async function undoConvertRecords(
  * Move an inline host's credentials into a brand-new identity (and, when the
  * host stores key material, a brand-new key), then bind the host to it.
  *
- * The order is the whole design (research §5.3, and `./store.ts:804-812` is
- * where step 5 of it already happens):
+ * The order is the whole design; step 8's second half is not written here at
+ * all, but in `upsertHost`'s own trailing `releaseStaleAccounts` call in
+ * `./store.ts`:
  *
  * 1. Refuse unless the host is inline.
  * 2. Refuse when the host stores key material but no key was given.
@@ -351,15 +352,15 @@ async function undoConvertRecords(
  * 4. Mint the new ids.
  * 5. Copy every account, sequentially.
  * 6. Write the key WHEN ONE IS BEING MINTED, through `keyRecordFrom` - not a
- *    hand-assembled `VaultKey` (wave-3 boundary 7: one builder).
+ *    hand-assembled `VaultKey`, because that builder is the only one.
  * 7. Write the identity through `identityRecordFrom`, the single normaliser
- *    of `keyId` (wave-3 boundary 6, VLT-73).
+ *    of `keyId`.
  * 8. Bind the host. `releaseStaleAccounts` then clears its accounts, because
  *    a non-inline record owns none.
  * 9. Return all three records. On the reuse path the key is the EXISTING record,
  *    read at step 3b and written to by nothing here.
  *
- * Steps 5 to 8 do not move: copy-then-write is §4.5's ordering, where an orphan
+ * Steps 5 to 8 do not move: copy-then-write is the ordering, where an orphan
  * account after a good write is the lesser evil and a crash between the copy
  * and the write must never cost a key. What step 8 gained is a FAILURE path.
  * `upsertHost` is the first call here that can refuse for anything other than
@@ -371,12 +372,12 @@ async function undoConvertRecords(
  * See {@link undoConvertRecords} for why undoing them is admissible here and
  * would not be for a record that already existed.
  *
- * THE IDENTITY'S AUTH MODE IS NOT A PARAMETER, deliberately (owner's decision,
- * 2026-09-01). It is derived from the stored record by {@link inlineAuthMode},
- * which is where the reasoning lives; the short version is that a caller able to
- * pass one was able to disagree with `inlineNeedsKey`, and both P0s this round
- * fixed were that disagreement. Removing the parameter is what makes the class
- * unreachable rather than merely guarded: no caller can get it wrong.
+ * THE IDENTITY'S AUTH MODE IS NOT A PARAMETER, deliberately. It is derived from
+ * the stored record by {@link inlineAuthMode}, which is where the reasoning
+ * lives; the short version is that a caller able to pass one was able to
+ * disagree with `inlineNeedsKey`, and both of the defects {@link inlineAuthMode}
+ * describes were that disagreement. Removing the parameter is what makes the
+ * class unreachable rather than merely guarded: no caller can get it wrong.
  *
  * THE KEY, ON THE OTHER HAND, IS A DECISION AND SO IT IS A PARAMETER. `{name,
  * facts}` mints a new record; `{reuseKeyId}` points the new identity at one the
@@ -556,22 +557,21 @@ export async function convertHostToVault(
   const identitySecrets: { password?: VaultSecretValue } = {};
   if (copied[HOST_SSH_FIELDS.password]) identitySecrets.password = SECRET_ALREADY_STORED;
   // `"keep"` - the identity names the key WHENEVER one was minted, and not only
-  // when the mode uses it (owner's decision, 2026-09-01). This is accepted gap
-  // 12's case: a host that once used key auth, now authenticates by password,
-  // still carries its PEM. That PEM must travel (§1.4), and a `VaultKey` nothing
-  // names is one Vault-page click from destroyed - `deleteKey`'s in-use guard
-  // (`vault/store.ts:337-347`) has no holder to refuse over. So the record built
-  // here is deliberately the one VLT-73 called off-spec, a key chip on a
-  // password identity, and the owner took that trade with the consequence
-  // understood: a misleading chip is strictly better than losing the user's only
-  // copy of a private key. It reopens VLT-73's rendering question - what that
-  // chip should say on a non-key identity - EARLIER than 6g, which is where that
-  // was scheduled.
+  // when the mode uses it, deliberately. The case is a host that once used key
+  // auth, now authenticates by password, and still carries its PEM. That PEM
+  // must travel, because the accounts that move are read off the stored record
+  // and not off the mode, and a `VaultKey` nothing names is one Vault-page click
+  // from destroyed - `deleteKey`'s in-use guard has no holder to refuse over. So
+  // the record built here deliberately puts a key chip on a password identity,
+  // and that trade was taken with the consequence understood: a
+  // misleading chip is strictly better than losing the user's only copy of a
+  // private key. What that chip should say on a non-key identity is still
+  // unanswered.
   //
   // The opt-out is a named argument on `identityRecordFrom`, never a
-  // `VaultIdentity` assembled here: that function is VLT-73's single normaliser
-  // (wave-3 boundary 6), and a second assembly in this file is the drift it
-  // exists to prevent.
+  // `VaultIdentity` assembled here: that function is the single normaliser of
+  // `keyId`, and a second assembly in this file is the drift it exists to
+  // prevent.
   // `VAULT_STAMP_ABSENT` for the reason the key upsert above passes it: the id
   // came out of `newIdentityId()` in this call, so absent is what the store
   // genuinely holds under it.
@@ -592,7 +592,7 @@ export async function convertHostToVault(
     await undoConvertRecords(deps, identityId, mintedKeyId);
     // The ORIGINAL error, unchanged and by identity: `HostEditorDialog`'s
     // recovery arm tests `instanceof HostBindingChangedError` and reads
-    // `hostId` / `expected` / `actual` off it (VLT-29), so wrapping this or
+    // `hostId` / `expected` / `actual` off it, so wrapping this or
     // replacing it with the cleanup's own would turn a recoverable refusal
     // into an unrecognised one.
     throw e;
@@ -696,7 +696,7 @@ function buildInlineRecord(host: Host, inline: SshInlineArgs | RdpInlineArgs): H
  * back and the cleanup runs only while it is still bound. A record that is GONE
  * does not stop it: nothing names the accounts then either. A re-read that
  * itself throws stops it, because an orphan is the lesser of the two outcomes -
- * §4.5's own ranking, one level up.
+ * the same ranking copy-then-write applies one level up.
  *
  * EVERY FAILURE IN HERE IS SWALLOWED and every field is still attempted, for the
  * reason {@link undoConvertRecords} gives: the caller is rethrowing the host
@@ -739,7 +739,7 @@ async function undoDetachCopies(
  * material is reported missing.
  *
  * The copies land BEFORE the host write, the mirror of convert's ordering and
- * for the same reason (§4.5). So the same failure path applies: a refused
+ * for the same reason. So the same failure path applies: a refused
  * `upsertHost` left a plaintext copy of what may be a SHARED vault key at
  * `tervia-hosts::<hostId>::privateKey`, named by nothing, and unenumerable
  * because there is no `secrets_list`. {@link undoDetachCopies} takes them back.
@@ -776,8 +776,9 @@ export async function detachHostFromVault(
   // `undoDetachCopies` never ran over it. That is the exact orphan class the
   // rethrow arm exists to prevent, reachable one statement earlier. It is not
   // reachable from the shipped dialog today (the protocol toggle is create-mode
-  // only, and this path is edit-only), but 6f/6g's callers would arm it, and
-  // building the record first costs nothing: it reads no store and no keychain.
+  // only, and this path is edit-only), but any future caller that detaches with
+  // the other protocol's inline shape would arm it, and building the record
+  // first costs nothing: it reads no store and no keychain.
   const record = buildInlineRecord(args.host, args.inline);
   const copied = await copyMoves(deps.secrets, moves);
   const secrets = hostSecretsFromCopies(copied);
@@ -788,8 +789,7 @@ export async function detachHostFromVault(
     await undoDetachCopies(deps, args.host.id, moves, copied);
     // The ORIGINAL error, unchanged and by identity, for the reason spelled out
     // at convert's own rethrow: `HostEditorDialog`'s recovery arm branches on
-    // `instanceof HostBindingChangedError` and reads three fields off it
-    // (VLT-29).
+    // `instanceof HostBindingChangedError` and reads three fields off it.
     throw e;
   }
 

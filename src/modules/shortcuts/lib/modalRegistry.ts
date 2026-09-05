@@ -1,5 +1,5 @@
 /**
- * VLT-30: open-modal registry.
+ * The open-modal registry.
  *
  * Registered from the two shared dialog primitives (`Dialog` in
  * components/ui/dialog.tsx, `AlertDialog` in components/ui/alert-dialog.tsx),
@@ -11,10 +11,10 @@
  *
  * Without this, a global shortcut (e.g. Ctrl+W "close tab") fires straight
  * through an open dialog's capture-phase listener and mutates app state the
- * user can't see happen behind the modal - see the Hosts editor dialog +
- * Ctrl+W repro in VLT-30.
+ * user can't see happen behind the modal: the Hosts editor was open and
+ * Ctrl+W closed the tab underneath it.
  *
- * A STACK, not a boolean and not a bare count (VLT-59): two dialogs can
+ * A STACK, not a boolean and not a bare count: two dialogs can
  * legitimately be open at once (a destructive-confirm AlertDialog over a form
  * Dialog), so the inner one closing must not re-enable shortcuts while the
  * outer one is still up - which a count already gave. What a count could NOT

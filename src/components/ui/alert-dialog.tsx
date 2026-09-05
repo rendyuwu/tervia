@@ -7,7 +7,7 @@ import { X } from "lucide-react";
 import { openModal } from "@/modules/shortcuts/lib/modalRegistry";
 
 function AlertDialog({ open, ...props }: React.ComponentProps<typeof AlertDialogPrimitive.Root>) {
-  // VLT-30: see the matching comment in components/ui/dialog.tsx - same
+  // See the matching comment in components/ui/dialog.tsx - same
   // registration, same reasoning (every AlertDialog in this codebase is
   // controlled via `open`, confirmed by grep for AlertDialogTrigger).
   React.useEffect(() => {

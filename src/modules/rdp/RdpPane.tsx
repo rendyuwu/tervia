@@ -67,8 +67,8 @@ import { CTRL_ALT_DEL_SCANCODES, scancodeFor } from "./scancodes";
  *
  * The remote cursor is composited into the framebuffer by the server, so the
  * CSS cursor stays at its default and no cursor bitmap is drawn - two cursors
- * is worse than one in the wrong shape (RDP-12). Clipboard, audio, device
- * redirection and dynamic resize are out of scope for this phase.
+ * is worse than one in the wrong shape. Clipboard, audio, device redirection
+ * and dynamic resize are not implemented.
  */
 
 type Props = {
@@ -498,8 +498,8 @@ export function RdpPane({ leafId, connectionId, visible, focused = true }: Props
   // switched the tab (Radix `Tabs` changes value on mousedown and React 19
   // flushes the commit synchronously there), so a `.focus()` call here is
   // undone a moment later by the browser focusing the tab chip that was
-  // clicked - VLT-39's defect, present here verbatim until VLT-64 (see
-  // `@/lib/paneCaret` for the measured sequence). The arbiter re-checks
+  // clicked - the same defect the terminal pane had, fixed here the same way
+  // (see `@/lib/paneCaret` for the measured sequence). The arbiter re-checks
   // `liveFocus` one frame later before handing the caret over.
   useEffect(() => {
     if (!visible || !focused) return;

@@ -63,7 +63,7 @@ export function useWorkspacePersistence({
   }, [wsHydrate]);
 
   // Once the workspace store hydrates, load the active workspace's saved
-  // tabs into live state - or, per decision 9, land on the Hosts page when
+  // tabs into live state - or land on the Hosts page when
   // there is nothing to restore (first run, an empty workspace, or a dev
   // session that skips restore below). `useTabs`' own initial state is an
   // empty tab list precisely so this effect is the only place that decides;
@@ -90,8 +90,9 @@ export function useWorkspacePersistence({
       openHostsFallback();
       return;
     }
-    // `restoreWorkspaceEntry` applies DCR-1's migration (a page leaf this build
-    // will not restore as a tab is dropped, and so is a tab that empties out),
+    // `restoreWorkspaceEntry` applies the rail-view migration (a page leaf this
+    // build will not restore as a tab is dropped, and so is a tab that empties
+    // out),
     // falls back to Hosts if that leaves nothing, and re-bases the saved active
     // index onto the tabs that survived - a dropped tab shifts every later one.
     // The three callers used to each do the last part themselves, and two of

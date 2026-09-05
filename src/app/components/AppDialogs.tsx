@@ -51,8 +51,8 @@ type Props = {
  *
  * The SSH host editor used to mount here too, behind `sshEditorOpen` /
  * `editingSshConn` state in App.tsx - but nothing ever set that state to open
- * it (SshMenu opened its own copy of the dialog instead). 6d's merged editor
- * replaces it: `HostEditorDialog` lives inside `HostsPage` itself and is
+ * it (SshMenu opened its own copy of the dialog instead). The merged host
+ * editor replaces it: `HostEditorDialog` lives inside `HostsPage` itself and is
  * raised by `requestHostEditor` (`modules/hosts/pendingEditor.ts`), which the
  * header's quick-connect already calls.
  */

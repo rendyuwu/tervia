@@ -80,8 +80,8 @@ export function BackupDialog({ open, onOpenChange, mode }: Props) {
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
       if (isExport) {
-        // Export's failure stays inline - consolidating it with import's is
-        // VLT-36's deferred "three surfaces become one" half, out of scope here.
+        // Export's failure stays inline. Consolidating it with import's onto
+        // one surface is a separate change and is not made here.
         setError(message);
       } else {
         // Import's failure routes through the shared toast instead of the old

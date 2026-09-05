@@ -57,8 +57,8 @@ export type SecretsIo = {
    * there is no single-value read on this port at all, precisely so no caller can
    * assemble one. `secrets_copy` reads and writes in-process, so an RDP password
    * can travel with a duplicated host or into a vault identity while staying
-   * inside the Phase 5 invariant - a duplicated RDP host used to get no password
-   * for exactly this reason.
+   * inside the invariant that an RDP password never enters the webview - a
+   * duplicated RDP host used to get no password for exactly this reason.
    *
    * Resolves `true` when the source held something and the destination now holds
    * it, `false` when the source was empty and NOTHING was written. A caller

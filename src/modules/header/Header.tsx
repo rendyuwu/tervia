@@ -43,7 +43,7 @@ type Props = {
   onOpenSettings: () => void;
   /** Connect a host of either protocol through App's connect path, routed by
    *  `host.protocol`. Backs the quick-connect input - the header's only
-   *  connect surface now that the SSH/RDP dropdowns are gone (6d). */
+   *  connect surface now that the SSH/RDP dropdowns are gone. */
   onConnectHost: (host: Host) => void;
   /** Open the Hosts tab. Backs quick-connect's ad-hoc "no saved match, but it
    *  parses as a target" path. */

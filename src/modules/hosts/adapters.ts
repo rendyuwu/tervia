@@ -21,8 +21,8 @@ const HOSTS_CHANGED_EVENT = "tervia://hosts-changed";
  * so this module's vocabulary stays local.
  *
  * The ordering it owns - recover a torn file, THEN force the load, then snapshot
- * - is not re-implemented here. §12.12: this module passes a path, a load key and
- * an event name, and nothing else.
+ * - is not re-implemented here: this module passes a path, a load key and an
+ * event name, and nothing else.
  */
 export type HostsStoreIo = RecoveredStoreIo;
 
