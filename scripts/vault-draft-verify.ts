@@ -16,17 +16,21 @@
  * than imported: there is no `scripts/lib`, and every script in this suite
  * duplicates these.
  *
- * Section 10 reaches OUTSIDE `draft.ts` - to `vault/types.ts`, `vault/refs.ts`
- * and `backup/file.ts` - and says why in its own comment. All three are pure in
- * the same sense `draft.ts` is, so nothing about that section needs a runtime
- * this file does not have.
+ * Section 10 reaches OUTSIDE `draft.ts` - to `vault/types.ts`, `vault/refs.ts`,
+ * `vault/keyInspect.ts` and `backup/file.ts` - and says why in its own comment.
+ * All four are pure in the same sense `draft.ts` is, so nothing about that
+ * section needs a runtime this file does not have.
  */
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { sanitizeKey } from "../src/modules/backup/file";
-import { vaultKeyFactsFrom, type KeyInspectResult } from "../src/modules/vault/keyInspect";
+import {
+  vaultKeyFactsFrom,
+  type KeyInspectResult,
+  type VaultKeyFacts,
+} from "../src/modules/vault/keyInspect";
 import { keyMissingSecret, keyNeedsPassphrase } from "../src/modules/vault/refs";
 import {
   EMPTY_IDENTITY_DRAFT,
@@ -685,7 +689,11 @@ console.log(
   // already carry the first two links, so the chain is checked end to end in
   // one place instead of asserted in four files that can each go green while
   // the chain is broken. Moving each row to its own suite later changes nothing
-  // about the property; leaving the chain unchecked would.
+  // about the property; leaving the chain unchecked would. The convert-mint
+  // rows at the tail are a fourth group and the least arguable of the four:
+  // they call `keyRecordFrom`, which is this file's own subject, and what they
+  // hold is which of its arms carries the answer the rest of the chain
+  // delivers.
 
   const aKey = (over: Partial<VaultKey> = {}): VaultKey => ({
     id: "k-1",
@@ -878,6 +886,101 @@ console.log(
     "and that same row once the body IS stored reads as needing a passphrase - the state the whole field exists for",
     imported !== null && keyNeedsPassphrase({ ...imported, hasPrivateKey: true }),
   );
+
+  // THE CONVERT MINT, both of its arms, and the reason it is checked at all is
+  // that the prose about it has been wrong three rounds running with nothing
+  // here to catch it. `encryptedKeyRefusal`'s doc in
+  // `src/modules/vault/editor/draft.ts` and `keyNeedsPassphrase`'s doc in
+  // `src/modules/vault/refs.ts` both justify the host-to-vault convert NOT
+  // refusing an encrypted body with no passphrase by what the minted record
+  // reports - and that justification holds on ONE arm. `applyCredentialChange`
+  // in `src/modules/hosts/HostEditorDialog.tsx` inspects the stored key body
+  // only while the field still holds it unedited, because facts read off an
+  // edited body would describe a different key from the one whose accounts
+  // travel; a touched field or a thrown inspection leaves `facts` at `{}`.
+  //
+  // THE TWO ARMS ARE ONE CHECK. Either row alone reads as an accident: the
+  // empty-facts row says nothing about what a real inspection would have
+  // recorded, and the inspected row on its own is section 5's create row again.
+  // What the docs claim is the DIFFERENCE between them.
+  //
+  // Through the real `keyRecordFrom`, with the arguments the convert passes:
+  // `convertHostToVault` in `src/modules/hosts/credentialMove.ts` builds a
+  // `KeyDraft` carrying the new key's name with both secret fields and the
+  // description blank, passes `existing` as null because the id was minted in
+  // that same call, and passes the arm's `facts` straight through.
+  const convertMint = (facts: VaultKeyFacts): VaultKey =>
+    keyRecordFrom("k-new", keyDraft({ name: "prod key" }), null, facts);
+
+  check(
+    "convert's skipped-inspection arm - a mint from facts = {} records NONE of the four, `encrypted` included",
+    convertMint({}),
+    {
+      id: "k-new",
+      name: "prod key",
+      description: undefined,
+      hasPrivateKey: false,
+      hasPassphrase: false,
+    },
+  );
+
+  // `keyRecordFrom`'s two presence flags are placeholders that `upsertKey`
+  // overwrites with what it actually stored (`writeKeySecrets` in
+  // `src/modules/vault/store.ts`). On the convert path the host's private key
+  // copies onto the new key's account and no passphrase is written, so the row a
+  // reader eventually asks about is the mint with `hasPrivateKey: true` and
+  // `hasPassphrase: false`. That overwrite is MODELLED here, not exercised - see
+  // the limits note below - and it has to be applied for these two rows to ask
+  // anything at all: `keyNeedsPassphrase` requires a stored body, so both arms
+  // would answer `false` off the raw mint, the second one for the wrong reason.
+  const asStored = (record: VaultKey): VaultKey => ({
+    ...record,
+    hasPrivateKey: true,
+    hasPassphrase: false,
+  });
+  ok(
+    "so keyNeedsPassphrase answers false for that minted key - nothing reports the state, and the key card is silent for it",
+    keyNeedsPassphrase(asStored(convertMint({}))) === false,
+  );
+
+  const inspectedFacts = vaultKeyFactsFrom(keyInspectResult({ encrypted: true }));
+  check(
+    "convert's inspected arm - a mint from real inspected facts records the encryption answer with the other three",
+    convertMint(inspectedFacts),
+    {
+      id: "k-new",
+      name: "prod key",
+      description: undefined,
+      hasPrivateKey: false,
+      hasPassphrase: false,
+      keyType: "ed25519",
+      fingerprint: "SHA256:x",
+      publicKey: "ssh-ed25519 A",
+      encrypted: true,
+    },
+  );
+  ok(
+    "and keyNeedsPassphrase answers true for THAT one - the arm the two docs' justification is scoped to",
+    keyNeedsPassphrase(asStored(convertMint(inspectedFacts))) === true,
+  );
+  // THE PAIR STATEMENT, which is the claim the docs make and neither row makes
+  // alone: the same builder, the same draft, the same id, differing only in
+  // whether the inspection ran - and exactly one of the two ends up reported.
+  ok(
+    "the two convert arms differ only in whether the inspection ran, and only the inspected one is reported",
+    keyNeedsPassphrase(asStored(convertMint(inspectedFacts))) === true &&
+      keyNeedsPassphrase(asStored(convertMint({}))) === false,
+  );
+  // WHAT THESE FOUR ROWS DO NOT HOLD, said here rather than left in a review
+  // note. They hold the RECORD SHAPE each arm produces and what a reader answers
+  // for it. They do NOT hold that the gate in `HostEditorDialog.tsx` routes any
+  // given interaction to the arm you think it does: that gate reads two React
+  // refs and a textarea, and nothing in this repo EXECUTES it -
+  // `credential-move-verify.ts` pins its conjuncts as source text through the
+  // compiler API and calls `convertHostToVault` with `facts` already decided, so
+  // which arm a real convert takes is held by reading the component, not by
+  // running it. The `hasPrivateKey: true` above is modelled on what
+  // `writeKeySecrets` reports for a landed copy rather than read back from it.
 }
 
 console.log(failed === 0 ? "\nAll vault-draft checks passed." : `\n${failed} check(s) FAILED.`);
@@ -961,7 +1064,20 @@ process.exit(failed === 0 ? 0 : 1);
 //                                                       it
 //   W6: refs.ts - the same test changed to               section 10's ABSENT row
 //     `key.encrypted !== false`, i.e. absent read as      and its non-boolean row
-//     encrypted                                           (2)
+//     encrypted                                           (2). RE-RUN after the
+//                                                       convert-mint rows below
+//                                                       were added: it is 4 now,
+//                                                       the two extra being the
+//                                                       skipped-inspection arm's
+//                                                       keyNeedsPassphrase row and
+//                                                       the pair statement. That
+//                                                       is the same defect those
+//                                                       rows exist for, arriving
+//                                                       from the reader's side
+//                                                       instead of the mint's: an
+//                                                       arm that recorded no
+//                                                       answer must not be read as
+//                                                       having given one.
 //   W7: backup/file.ts - sanitizeKey's typeof test       section 10's "preserves
 //     narrowed to `raw.encrypted === true`                 encrypted: false" row (1)
 //   W8: backup/file.ts - `encrypted` forced to false     section 10's preserves-
@@ -1073,6 +1189,47 @@ process.exit(failed === 0 ? 0 : 1);
 //                                                       W8 above are the source-
 //                                                       side mutations of that same
 //                                                       function.
+//
+// The convert mint's two arms. These rows exist because the paragraph they hold
+// - `encryptedKeyRefusal`'s doc and `keyNeedsPassphrase`'s - was wrong in three
+// consecutive rounds with no check anywhere over it. Both mutations were run,
+// the counts are from that run's own output, and `draft.ts` was restored from a
+// snapshot blob and diffed clean afterwards.
+//
+//   Mutation                                          Check(s) it killed
+//   -------------------------------------------------  ---------------------------
+//   C1: draft.ts - keyRecordFrom's facts branch         the skipped-inspection
+//     changed to `{ ...base, encrypted: true,            arm's shape row, its
+//     ...facts }`, so an arm that read no facts at       keyNeedsPassphrase row and
+//     all manufactures the answer anyway                 the pair statement (3),
+//                                                       exit 1. Every other row in
+//                                                       sections 5 and 10 stayed
+//                                                       green - all of their fact
+//                                                       fixtures carry `encrypted`
+//                                                       already, which is exactly
+//                                                       why the empty-facts arm
+//                                                       needed rows of its own.
+//   C2: draft.ts - the same branch changed to           the shape row ALONE (1),
+//     `{ ...base, ...facts, encrypted:                   exit 1. The two reader
+//     facts.encrypted ?? false }`, so absent             rows survive it, and
+//     degrades to the inspected-and-unencrypted          correctly: `encrypted:
+//     claim                                              false` still answers
+//                                                       `false`, so the card stays
+//                                                       silent either way. This is
+//                                                       the mutation that says the
+//                                                       shape row is not redundant
+//                                                       with the reader row beside
+//                                                       it - only the shape row
+//                                                       can tell ABSENT from
+//                                                       present-and-false, which
+//                                                       is the difference between
+//                                                       "nobody looked" and "we
+//                                                       looked and it is not
+//                                                       encrypted".
+//
+// NEITHER MUTATION IS ON THE GATE, and none can be from this file: the routing
+// between the two arms lives in a React component's refs. See the limits note
+// at the end of section 10 for what holds that instead.
 //
 // Section 2b's mutations were run from credential-move-verify's side, where
 // the caller lives - see that file's own table. The one that lands here:

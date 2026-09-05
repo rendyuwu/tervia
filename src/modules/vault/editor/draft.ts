@@ -385,22 +385,37 @@ export function passphraseHelp(replacingBody: boolean): string {
  * gate on every route into the state differs by route. An IMPORT cannot carry
  * one: `sanitizeKey` in `modules/backup/file.ts` reads a file and inspects
  * nothing, so it has no answer to refuse over. A HOST-TO-VAULT CONVERSION does
- * inspect - `applyCredentialChange` in `../../hosts/HostEditorDialog.tsx` calls
- * `inspectSshKey` for the facts it mints onto the new key, and the host's own
- * stored passphrase is seeded in the field beside it, so both operands this
- * function takes are already in hand at that site. It deliberately does not
- * refuse, and that is the right answer: the host already holds an encrypted key
- * with no passphrase, so the convert MOVES that state rather than creating one,
- * and refusing would strand the credential in a host record the user is trying
- * to empty.
+ * inspect, on ONE of its arms - `applyCredentialChange` in
+ * `../../hosts/HostEditorDialog.tsx` calls `inspectSshKey` for the facts it
+ * mints onto the new key, but only while the key field still holds the stored
+ * body it was seeded with, and the host's own stored passphrase is seeded in the
+ * field beside it, so on that arm both operands this function takes are already
+ * in hand at that site. It deliberately does not refuse, and that is the right
+ * answer: the host already holds an encrypted key with no passphrase, so the
+ * convert MOVES that state rather than creating one, and refusing would strand
+ * the credential in a host record the user is trying to empty.
  *
- * What answers for both routes is the saved record, and it now does:
- * `VaultKey.encrypted` carries the inspection's answer, the minted key carries
- * `encrypted: true` with `hasPassphrase: false`, and `keyNeedsPassphrase` in
- * `../refs.ts` is what the key card asks - and only for a row that HOLDS a
- * private key, because a record carrying the flag with no stored body has no
- * passphrase question to answer. `keyMissingSecret` next to it reads only
- * `hasPrivateKey` and deliberately still does; it is what speaks for that row.
+ * What answers for that route is the saved record, ON THE ARM WHERE THE FACTS
+ * WERE READ: `VaultKey.encrypted` carries the inspection's answer, so a key
+ * minted from an unedited stored body carries `encrypted: true` with
+ * `hasPassphrase: false`, and `keyNeedsPassphrase` in `../refs.ts` is what the
+ * key card asks - and only for a row that HOLDS a private key, because a record
+ * carrying the flag with no stored body has no passphrase question to answer.
+ * `keyMissingSecret` next to it reads only `hasPrivateKey` and deliberately
+ * still does; it is what speaks for that row.
+ *
+ * ON THE CONVERT ARMS WHERE THE INSPECTION DOES NOT RUN, NOTHING REPORTS THE
+ * STATE, and that is a gap in what is reported rather than a lie in the record.
+ * The gate above skips the inspection whenever the key field is no longer the
+ * seeded stored body - one keystroke in the textarea marks it touched, which is
+ * ordinary interaction - and an inspection that throws degrades to the same
+ * place, so `facts` is `{}` and the minted record names none of the four,
+ * `encrypted` included. Absent is the honest answer there, exactly as it is for
+ * `keyType`, `fingerprint` and `publicKey`: nobody inspected the material that
+ * travelled. So `keyNeedsPassphrase` answers `false` for that key and the card
+ * is silent about it, while the body that travelled by account move may well be
+ * encrypted with no passphrase. Both arms' record shapes are held side by side
+ * in `scripts/vault-draft-verify.ts` section 10.
  *
  * THE MESSAGE MAY NOT DESCRIBE THE SAVED RECORD, and that constraint is what its
  * last clause turns on. Two editors render this one string, and their records are

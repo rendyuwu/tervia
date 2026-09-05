@@ -111,13 +111,20 @@ export function keyMissingSecret(key: VaultKey): boolean {
  * no passphrase. `encryptedKeyRefusal` in the same file blocks the two EDITOR
  * routes into the state. An IMPORT cannot be gated the same way because it
  * inspects nothing at all (`sanitizeKey` again, which reads a file). A
- * HOST-TO-VAULT CONVERSION can: `applyCredentialChange` in
+ * HOST-TO-VAULT CONVERSION can, on ONE of its arms: `applyCredentialChange` in
  * `modules/hosts/HostEditorDialog.tsx` inspects the stored body for the facts it
- * mints onto the new key, with the host's own stored passphrase seeded beside
- * it, so it could refuse and deliberately does not - the host already holds that
- * encrypted body with no passphrase, so the convert MOVES the state rather than
- * creating it. What makes that safe is this predicate: the minted record carries
- * `encrypted: true` with `hasPassphrase: false`, and the key card reports it.
+ * mints onto the new key - but only while the key field still holds that body
+ * unedited - with the host's own stored passphrase seeded beside it, so there it
+ * could refuse and deliberately does not: the host already holds that encrypted
+ * body with no passphrase, so the convert MOVES the state rather than creating
+ * it. On THAT arm this predicate is what makes not refusing safe: the minted
+ * record carries `encrypted: true` with `hasPassphrase: false`, and the key card
+ * reports it. On the arms where the inspection is skipped - the field was
+ * touched, which one keystroke does - or throws, the mint gets no facts at all,
+ * so the record carries no `encrypted`, this predicate answers `false` for it,
+ * and nothing reports the state. Absent is the honest answer there, because
+ * nobody inspected the material that travelled; what is missing is a report, not
+ * a refusal. `scripts/vault-draft-verify.ts` section 10 holds both arms.
  *
  * `encrypted === true`, never a truthiness test: {@link VaultKey.encrypted} is
  * three-state, absent means no inspection ever answered, and the store reads
