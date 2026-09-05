@@ -198,3 +198,25 @@ registered secret-command surface.
 
 **Trigger.** A `secrets_list` command being added for another reason, or a
 user reporting keychain clutter.
+
+### Clearing the key textarea removes the key body and strands its passphrase
+
+**Accepted state.** Under key auth, clearing a seeded private key body and
+saving sends an empty body and deletes that account, but the key passphrase
+field is untouched, so it is omitted from the save and its account survives.
+What is left is a passphrase that opens nothing - one instance of the orphan
+above, arrived at from the ordinary editing route. It is also unreachable from
+the screen that made it: the row offering to forget a stored key renders only
+in the auth modes that have no key field, so the user has to switch to password
+or agent auth before anything offers to clean it up.
+
+**Carried by.** `sshSecretsForSave` in `src/modules/hosts/editor/sshSecrets.ts`,
+whose rule that both key fields go down together holds for the explicit forget
+override and not for the textarea route, and `ForgetKeyRow`'s placement in
+`SshCredentialSection.tsx`.
+
+**Trigger.** The forget row becoming reachable under key auth, or the textarea
+route being made to carry the passphrase down with the body. The help copy
+under the textarea deliberately does not mention this: the passphrase input is
+masked and looks identical stored or empty, so the advice cannot be acted on
+from that screen.

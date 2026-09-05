@@ -645,6 +645,23 @@ export function HostEditorDialog({
     existing.protocol === "ssh" &&
     existing.credential.kind === "inline" &&
     existing.credential.hasPassword;
+  // Whether the stored record holds a private key BODY, in the same shape and
+  // with the same guards, and here for the same reason plus one: what "leave this
+  // blank" produces is the opposite on the two sides of it, AND under key auth a
+  // blank body is also the one route that deletes the stored key. Off the record
+  // rather than off the draft, because the draft's key body is blank both when
+  // nothing is stored and while the keychain read is in flight - the same
+  // confusion `sshSeeded` exists to keep out of the save.
+  //
+  // `hasPrivateKey` alone: `hasKeyPassphrase` is a different account, one this
+  // field neither seeds from nor clears, and folding it in would put the
+  // key-is-stored sentence on a record with no key body. See the
+  // `hasStoredPrivateKey` prop in `editor/SshCredentialSection.tsx`.
+  const hasStoredSshPrivateKey =
+    !!existing &&
+    existing.protocol === "ssh" &&
+    existing.credential.kind === "inline" &&
+    existing.credential.hasPrivateKey;
   /**
    * The key material the SSH section may offer to forget, or `[]` for no row.
    *
@@ -1641,6 +1658,7 @@ export function HostEditorDialog({
                     value={sshCred}
                     onChange={patchSshCred}
                     hasStoredPassword={hasStoredSshPassword}
+                    hasStoredPrivateKey={hasStoredSshPrivateKey}
                     keyRefusal={keyRefusal}
                     forgettableKeySecrets={forgettableKeySecrets}
                     forgetKey={forgetKey}

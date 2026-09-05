@@ -1465,11 +1465,14 @@ console.log("\n[7] the password field says what BLANK does, which is two differe
   // one character and backspaced saw a blank field plus "Leave blank to save the
   // host without one", which describes the destruction the save used to perform and
   // confirms the mental model that makes them press Save.
-  const help = between(
-    sshSectionSrc,
-    "function passwordHelp(",
-    "export function SshCredentialSection",
-  );
+  // The end anchor is the NEXT help function rather than the component, and that
+  // is load-bearing rather than tidy. `fresh` below is "everything in this region
+  // after the stored branch", so with the region running to the component it
+  // would swallow every help function added between the two - and `keyBodyHelp`,
+  // the one section [13] is about, has a no-key arm of its own. Its text would
+  // then be able to satisfy this section's no-password-branch check while
+  // `passwordHelp`'s own arm said something else entirely.
+  const help = between(sshSectionSrc, "function passwordHelp(", "function keyBodyHelp(");
   check("passwordHelp was found", help.length > 200, help.length);
   check(
     "it branches on what the STORED record claims",
@@ -2632,9 +2635,12 @@ console.log(
   //          whole-call pins this section had first: Prettier breaks a wrapped
   //          call AND adds a trailing comma, which `norm()` does not strip, so
   //          both became argument-wise (see `argTexts`). Sections [1], [2],
-  //          [4], [6] and [8] do not survive that reformat - their anchors and
-  //          regexes are line-shaped, they are pre-existing, and nothing here
-  //          touched them.
+  //          [3], [4], [8] and [11] do not survive that reformat - their
+  //          anchors and regexes are line-shaped. Pre-existing, nothing here
+  //          touched them, and the count and the section list are section
+  //          [12]'s F8, measured rather than carried forward: an earlier
+  //          version of this list named [6], which has no casualty, and omitted
+  //          [3] and [11], which each have one.
 }
 
 /**
@@ -2907,11 +2913,27 @@ console.log(
   //          `tsc` at 0. This is the mutation only the position half catches.
   // K9  `prettier --print-width 60 --write` over the dialog - the reformat pair
   //     these exact-text pins owe
-  //       -> nothing in this section, which is the point: every pin above reads
-  //          a node's own span rather than a whole call's, so a trailing comma
-  //          Prettier adds when it wraps sits outside the claim. It DID redden
-  //          24 checks in sections [1], [2], [4], [6] and [8], whose anchors
-  //          and regexes are line-shaped. Those are pre-existing and untouched.
+  //       -> ONE, IN THIS SECTION, and the note above this line used to say
+  //          "nothing". The one is the `key` arm pin above: it reads a call's
+  //          arguments through `argTexts`, which is the reformat-safe form, and
+  //          then asks `includes()` about a NESTED object literal inside one of
+  //          them - and Prettier wraps that literal at this width and adds a
+  //          trailing comma, which `norm()` does not strip. So the hazard
+  //          `argTexts` exists to remove came back one level down, in the
+  //          substring rather than in the argument. Every other pin in this
+  //          section reads a node's own span and survives.
+  //
+  //          NOT FIXED HERE, and that is a decision rather than an oversight:
+  //          `KNOWN-LIMITS.md` already carries this class as an accepted,
+  //          dormant limit, because this repository's `printWidth` is fixed.
+  //          One more member of an accepted class buys no new decision -
+  //          normalising `norm()` or restructuring the pin belongs to whoever
+  //          the limit's trigger fires on.
+  //
+  //          Outside this section it reddens 24 more, in sections [1], [2],
+  //          [3], [4] and [8], whose anchors and regexes are line-shaped. Those
+  //          are pre-existing and untouched. Twenty-five in total - see section
+  //          [12]'s F8 for the per-section count, measured from a run.
   // K10 `sshSeeded.current.privateKey` dropped from the OFFER's gate - the
   //     exact shape of the loss, since the seed alone is what says the body on
   //     screen came from the keychain
@@ -3606,11 +3628,371 @@ console.log(
   //       -> NOTHING in this section, and that is what the three parsed pins
   //          above were rewritten for: the first version of them was
   //          `between()`-anchored and this same control reddened all three (six
-  //          checks) over unchanged code. It still reddens 24 checks in sections
-  //          [1], [2], [4], [6] and [8], whose anchors and regexes are
-  //          line-shaped - the same 24 sections [10] and [11] record. One of them
-  //          is section [2]'s own `sshSecretsForSave` call-text check, extended
-  //          here for the fourth argument and no less line-shaped than it was.
+  //          checks) over unchanged code. It reddens 25 checks elsewhere, and
+  //          this is the per-section count the other two notes point at, taken
+  //          from a run rather than carried forward: [1]=14, [2]=6, [3]=1,
+  //          [4]=2, [8]=1, [11]=1. Their anchors and regexes are line-shaped.
+  //          One of them is section [2]'s own `sshSecretsForSave` call-text
+  //          check, extended here for the fourth argument and no less
+  //          line-shaped than it was; [11]'s is the newest and is described
+  //          where it lives, under K9.
+  //
+  //          THE FIGURE USED TO READ 24, IN SECTIONS [1], [2], [4], [6] AND
+  //          [8], in three places at once, and both halves of that were wrong:
+  //          [6] has no casualty and never appears, [3] has one, and [11]
+  //          acquired one. A count carried between comments rather than
+  //          re-measured is exactly the sentence no check in this file holds -
+  //          the three sites are corrected together and all three now say where
+  //          the number came from.
+  //          Measured identically over three file sets - the dialog alone, the
+  //          two `.tsx` sources, and all four source files - so the control's
+  //          own wording does not change the answer.
+}
+
+/**
+ * [13] THE KEY BODY SAYS WHAT BLANK DOES, AND UNDER KEY AUTH BLANK IS ALSO THE
+ * DELETE.
+ *
+ * Section [7] is the same claim about the password field, and this is the harder
+ * half of it. The password field's blank is a value question: save without one,
+ * or leave the stored one alone. The key textarea's blank is BOTH of those and a
+ * destruction - `sshSecretsForSave` turns a cleared field that was seeded into
+ * the store's clear instruction, and section [12] exists because that route is
+ * the only one there is. The field had no help line at all, so the one moment
+ * that route matters - a user with a stored key looking at a box that is empty
+ * because the keychain read has not landed - was unnarrated.
+ *
+ * WHAT THE TWO ARMS SPLIT ON, and why two arms cover three states. The rule is
+ * per field over (touched, seeded): blank and seeded deletes, blank and not
+ * seeded is omitted, untouched is omitted. Only the first of those is a
+ * deletion, and what separates it from the second is not in the draft at all -
+ * it is whether the STORED record holds a key body. So the split is on the
+ * record, and the third state is what the stored arm's precondition clause is
+ * for: "wait for the stored key to load into this field" is the sentence that
+ * tells the two blanks apart.
+ *
+ * `hasPrivateKey` ALONE decides that split, and the exact-text pin below is what
+ * holds it. A record with a stored key passphrase and no stored body is real -
+ * `forgetKeyNote` is a function of the flags precisely because of it - and on
+ * that record the stored arm is wrong twice: there is no body to keep, and the
+ * removal route it names never fires, because a field the seed never filled is
+ * not seeded and clearing it sends nothing. `hostKeySecretNames` unions the two
+ * accounts on purpose, for a row that offers to delete both; this line must not.
+ *
+ * WHAT THIS SECTION CANNOT SEE, stated because the mutations below are easy to
+ * over-read: nothing in this suite mounts a component. Every check here is over
+ * the parsed source, so it can hold which string the component asks for and
+ * where the answer is rendered, and it cannot observe a rendered string. A
+ * `Field` that never mounts, a prop the dialog computes correctly and React
+ * never repaints, or a stored arm shown against a stale `existing` are all green
+ * here. That gap is the hand test's, not this file's.
+ */
+console.log("\n[13] the key body says what BLANK does, and blank here is also the delete route");
+{
+  /** Every `if` under `root`, so "it branches exactly once" can be asked rather
+   *  than assumed - a second branch is a third string this section says nothing
+   *  about. */
+  const ifStatementsIn = (root: ts.Node): ts.IfStatement[] => {
+    const out: ts.IfStatement[] = [];
+    const visit = (n: ts.Node): void => {
+      if (ts.isIfStatement(n)) out.push(n);
+      ts.forEachChild(n, visit);
+    };
+    visit(root);
+    return out;
+  };
+  /** Every `return "…"` under `root`, in source order, as the string's own VALUE.
+   *  A template literal or a concatenation is deliberately not one of these: the
+   *  arms below are pinned by what they SAY, and a check reading assembled source
+   *  text would be reading the assembly instead. */
+  const stringReturnsIn = (root: ts.Node): { text: string; node: ts.ReturnStatement }[] => {
+    const out: { text: string; node: ts.ReturnStatement }[] = [];
+    const visit = (n: ts.Node): void => {
+      if (ts.isReturnStatement(n) && n.expression && ts.isStringLiteral(n.expression)) {
+        out.push({ text: n.expression.text, node: n });
+      }
+      ts.forEachChild(n, visit);
+    };
+    visit(root);
+    return out;
+  };
+
+  // --- the two arms ---------------------------------------------------------
+  //
+  // Over the parsed function rather than a `between()` region, for the reason
+  // section [12]'s three parsed pins were rewritten: an anchored region is
+  // line-shaped and the `--print-width 60` control below reddens it over
+  // unchanged code.
+  const helpBody = findFunctionBody(sshSectionSf, "keyBodyHelp");
+  check("keyBodyHelp was found (compiler API)", helpBody !== null);
+  let storedArm = "";
+  let unstoredArm = "";
+  if (helpBody) {
+    const ifs = ifStatementsIn(helpBody);
+    check(
+      "it branches exactly once, on the STORED record's flag rather than on anything the draft knows",
+      ifs.length === 1 && ifs[0].expression.getText(sshSectionSf) === "hasStoredPrivateKey",
+      { count: ifs.length, condition: ifs[0]?.expression.getText(sshSectionSf) },
+    );
+    const returns = stringReturnsIn(helpBody);
+    check("and it returns two string literals, one per side", returns.length === 2, returns.length);
+    if (ifs.length === 1) {
+      const arm = ifs[0];
+      storedArm = returns
+        .filter((r) => isDescendantOf(r.node, arm))
+        .map((r) => r.text)
+        .join(" ");
+      unstoredArm = returns
+        .filter((r) => !isDescendantOf(r.node, arm))
+        .map((r) => r.text)
+        .join(" ");
+    }
+    check("the stored-key arm was found", storedArm.length > 60, storedArm.length);
+    check("the no-key arm was found", unstoredArm.length > 60, unstoredArm.length);
+    // One string for both is the state section [7]'s own function was in before a
+    // review priced it, and it is the cheapest way for this one to regress.
+    check(
+      "and the two arms DIFFER, which is the whole reason this is a function and not a constant",
+      storedArm.length > 0 && unstoredArm.length > 0 && storedArm !== unstoredArm,
+      { stored: storedArm.slice(0, 70), unstored: unstoredArm.slice(0, 70) },
+    );
+  }
+
+  // The claim that would be false AND destructive. This arm renders over a host
+  // that HAS a key, and the field is blank for the whole of the keychain read -
+  // "leave blank to save the host without a private key" at that moment describes
+  // a deletion the save refuses to perform and confirms the model that makes the
+  // user press Save to get it.
+  check(
+    "the stored-key arm does not offer to save the host without a key",
+    storedArm.length > 0 && !/without a private key/.test(storedArm),
+    storedArm,
+  );
+  check(
+    "and says positively that blank leaves the stored key exactly as it is",
+    /blank does not remove it/.test(storedArm),
+    storedArm,
+  );
+  // The route is only honest with its precondition attached. Clearing a field the
+  // seed never filled is `sshSecretsForSave`'s OMIT and not its clear, so "clear
+  // it and save" on its own is an instruction that silently does nothing - and
+  // dropping the route altogether would make the honest text "you cannot remove
+  // it", which is false.
+  check(
+    "and names the removal route WITH the precondition sshSecretsForSave enforces",
+    /wait for the stored key to load into this field/.test(storedArm) &&
+      /clear it, and save/.test(storedArm),
+    storedArm,
+  );
+  // Not "blank is allowed" but what blank PRODUCES, both halves of it: the pip
+  // `page/derive.ts` reads off `hasPrivateKey` under key auth, and the refusal
+  // that happens instead of the login failure an earlier version of
+  // `validateSshCredential`'s comment claimed.
+  check(
+    "the no-key arm says what a blank save produces on the card",
+    /missing-secret warning/.test(unstoredArm),
+    unstoredArm,
+  );
+  check(
+    "and what a connect then does, in the words the backend uses",
+    /refused before it dials/.test(unstoredArm) && /no credentials/.test(unstoredArm),
+    unstoredArm,
+  );
+  // The forget row renders only in the auth modes with NO key field, which is the
+  // gate section [12] pins structurally. Naming it from under the textarea would
+  // be the second surface promising one deletion that the gate exists to prevent.
+  check(
+    "and neither arm names the Forget button, whose row renders only where this field does not",
+    storedArm.length > 0 &&
+      unstoredArm.length > 0 &&
+      !/Forget/.test(storedArm) &&
+      !/Forget/.test(unstoredArm),
+    {
+      stored: /.{0,40}Forget.{0,40}/.exec(storedArm)?.[0],
+      unstored: /.{0,40}Forget.{0,40}/.exec(unstoredArm)?.[0],
+    },
+  );
+
+  // --- where the answer renders, and what it is asked about -----------------
+  const componentBody = findFunctionBody(sshSectionSf, "SshCredentialSection");
+  check("the component's body was found (compiler API)", componentBody !== null);
+  const keyFields = findOpeningElementsByTag(sshSectionSf, "Field", sshSectionSf).filter(
+    (el) => jsxAttrExprText(el, "label", sshSectionSf) === "Private key (PEM / OpenSSH)",
+  );
+  check("the key body's own Field was found, exactly once", keyFields.length === 1, {
+    count: keyFields.length,
+  });
+  const helpCalls = componentBody ? findCalls(componentBody, sshSectionSf, ["keyBodyHelp"]) : [];
+  // Zero calls satisfies every placement check below for free, so the count is
+  // asserted before any of them run.
+  check(
+    "the component asks for the help line exactly once - a string it never asks for is the same as no string",
+    helpCalls.length === 1,
+    helpCalls.length,
+  );
+  if (helpCalls.length === 1) {
+    // ARGUMENT-wise, and that is the point rather than the style:
+    // `keyBodyHelp(hasStoredPassword)` type-checks, renders a sentence about a
+    // key, and is decided by the flag for a different account. A pin that read
+    // the call as a shape - "keyBodyHelp is called here" - would be green over
+    // it. `argTexts` for why argument by argument rather than whole-call text.
+    check(
+      "and asks it about the stored KEY flag: not a constant, and not the password flag beside it",
+      JSON.stringify(argTexts(helpCalls[0], sshSectionSf)) ===
+        JSON.stringify([norm("hasStoredPrivateKey")]),
+      argTexts(helpCalls[0], sshSectionSf),
+    );
+    check(
+      "and RENDERS the answer rather than handing it to a child, which is a different claim",
+      !insideJsxAttribute(helpCalls[0]),
+      helpCalls[0].parent.getText(sshSectionSf).slice(0, 80),
+    );
+  }
+  if (keyFields.length === 1 && helpCalls.length === 1) {
+    const fieldEl: ts.Node = keyFields[0].parent;
+    const children = ts.isJsxElement(fieldEl) ? renderedChildren(fieldEl, sshSectionSf) : [];
+    const helpIdx = children.findIndex((c) => isDescendantOf(helpCalls[0], c));
+    const refusalIdx = children.findIndex(
+      (c) =>
+        ts.isJsxExpression(c) &&
+        c.expression !== undefined &&
+        /\bkeyRefusal\b/.test(c.expression.getText(sshSectionSf)),
+    );
+    check("the help line renders inside the key body's own Field", helpIdx !== -1, {
+      helpIdx,
+      children: children.length,
+    });
+    // ORDER, and section [10] already pins the refusal as last on its own. Both
+    // are asserted here because this section is the one that adds a sibling to
+    // that Field: the refusal's sentence points at the passphrase input below it,
+    // so anything inserted after it puts something else there instead.
+    check(
+      "and ABOVE the refusal, which is still the last child of that Field",
+      helpIdx !== -1 &&
+        refusalIdx !== -1 &&
+        helpIdx < refusalIdx &&
+        refusalIdx === children.length - 1,
+      { helpIdx, refusalIdx, count: children.length },
+    );
+  }
+
+  // --- the dialog's end: the flag is read off the record, never the draft ----
+  const dialogBody = findFunctionBody(editorSf, "HostEditorDialog");
+  check("the dialog's body was found (compiler API)", dialogBody !== null);
+  if (dialogBody) {
+    // Rooted at the component's own body and the count asserted, both for
+    // `findVariableDeclarations`' documented reason: the singular helper returns
+    // whichever declaration traversal reaches last, which a decoy defeats.
+    const decls = findVariableDeclarations(dialogBody, "hasStoredSshPrivateKey");
+    check(
+      "the dialog declares the flag exactly once, inside its own body",
+      decls.length === 1,
+      decls.length,
+    );
+    const init = decls.length === 1 ? decls[0].initializer : undefined;
+    check(
+      "and it is exactly this expression, whitespace aside: the STORED record, narrowed to an inline SSH row, and the key-body flag ALONE",
+      init !== undefined &&
+        norm(init.getText(editorSf)) ===
+          norm(
+            '!!existing && existing.protocol === "ssh" && existing.credential.kind === "inline" && existing.credential.hasPrivateKey',
+          ),
+      init?.getText(editorSf),
+    );
+  }
+  const sshSectionRenders = findOpeningElementsByTag(editorSf, "SshCredentialSection", editorSf);
+  check(
+    "the dialog renders exactly one SshCredentialSection",
+    sshSectionRenders.length === 1,
+    sshSectionRenders.length,
+  );
+  if (sshSectionRenders.length === 1) {
+    // Beside the password flag rather than instead of it: swapping the two props
+    // over is a rename away and type-checks in both directions.
+    check(
+      "and threads both flags down, each from its own record field",
+      jsxAttrExprText(sshSectionRenders[0], "hasStoredPrivateKey", editorSf) ===
+        "hasStoredSshPrivateKey" &&
+        jsxAttrExprText(sshSectionRenders[0], "hasStoredPassword", editorSf) ===
+          "hasStoredSshPassword",
+      {
+        key: jsxAttrExprText(sshSectionRenders[0], "hasStoredPrivateKey", editorSf),
+        password: jsxAttrExprText(sshSectionRenders[0], "hasStoredPassword", editorSf),
+      },
+    );
+  }
+
+  // --- what was watched fail, and what `tsc` did while it did ---------------
+  //
+  // Every mutation below was applied to the file named, the script and `tsc` were
+  // both run, the FAIL lines were recorded as printed, and the source was
+  // restored from a snapshot afterwards.
+  //
+  // G1  `keyBodyHelp` reduced to one string for both sides, the `if` removed
+  //       -> ELEVEN, which is every content check this section has: the branch
+  //          count (0), the two-literals count (1), both "arm was found" checks
+  //          (0), arms-differ, and all six arm-content pins, each reporting "".
+  //          `tsc` reddens TS6133 on the now-unread parameter,
+  //          `noUnusedParameters` being on - so the compiler catches THIS shape
+  //          of it, and G2 is the one it cannot see.
+  // G2  the no-key arm's wording copied into the stored arm, both arms kept
+  //       -> FOUR: arms-differ, "does not offer to save the host without a key",
+  //          "blank does not remove it", and the precondition pin. `tsc` at 0.
+  //          This is the destructive one: it tells a user whose key is still
+  //          loading that blank saves the host without a key.
+  // G3  the precondition clause deleted, the route kept ("To remove it, clear
+  //     this field and save.")
+  //       -> ONE: the precondition pin. `tsc` at 0. What survives is an
+  //          instruction that does nothing at all before the read lands, and
+  //          reads as if it had.
+  // G4  the no-key arm reduced to "Leave blank."
+  //       -> THREE: "the no-key arm was found" (12), the card pin and the connect
+  //          pin. `tsc` at 0.
+  // G5  the render deleted from the key `Field`
+  //       -> ONE: the call count (0). The four checks below it are guarded on
+  //          that count and do not run - `ok` drops by FIVE, not one, which is
+  //          worth knowing before reading their silence as cover. `tsc` reddens
+  //          TS6133 on the now-unread destructured prop.
+  // G6  the call changed to `keyBodyHelp(true)`
+  //       -> ONE: the argument pin, `["true"]`.
+  // G7  the call changed to `keyBodyHelp(hasStoredPassword)` - the prop for a
+  //     different account, on a sentence about the key
+  //       -> ONE: the argument pin, `["hasStoredPassword"]`. Every shape-level
+  //          reading of this call ("keyBodyHelp is called here") is green over
+  //          it, which is what argument-wise pinning is here to buy.
+  //          `tsc` DOES redden both G6 and G7, TS6133 on the destructured
+  //          `hasStoredPrivateKey` - and that is INCIDENTAL rather than cover:
+  //          it holds only while this call is the prop's one and only reader.
+  //          Add any second use of the prop and the compiler goes silent on both
+  //          while the wrong sentence still renders.
+  // G8  the help line moved BELOW the refusal inside the same `Field`
+  //       -> TWO: this section's order check
+  //          (`{"helpIdx":4,"refusalIdx":3,"count":5}`) and section [10]'s own
+  //          "the refusal is the LAST child of that Field". `tsc` at 0.
+  // G9  `hasStoredSshPrivateKey` pointed at the draft - `!!sshCred.privateKey`
+  //       -> ONE: the exact-expression pin. `tsc` at 0. The draft's body is blank
+  //          both when nothing is stored and while the read is in flight, so this
+  //          shows the no-key arm to a host that has a key, which is G2's defect
+  //          arrived at from the other end.
+  // G10 the flag widened to `… .hasPrivateKey || existing.credential.hasKeyPassphrase`
+  //       -> ONE: the exact-expression pin. `tsc` at 0. That is the union
+  //          `hostKeySecretNames` takes for a row that deletes both accounts, and
+  //          it puts the key-is-stored sentence on a record with no key body.
+  // G11 `prettier --print-width 60 --write` over the two source files - the
+  //     reformat control every pin in this section owes
+  //       -> NOTHING in this section, which is what it is written in the
+  //          compiler-API form for, and nothing in section [7] either: its
+  //          narrowed end anchor is a prefix of `keyBodyHelp`'s signature, which
+  //          survives the signature being wrapped. The 25 that do redden are
+  //          pre-existing, listed per section under [12]'s F8, and unchanged by
+  //          this section.
+  // G12 the control section [7] owes after that narrowing: `passwordHelp`'s
+  //     stored arm copied over its no-password arm
+  //       -> ONE, in SECTION [7]: "the no-password branch still says blank saves
+  //          a host without one". `tsc` at 0. Run because moving that region's
+  //          end anchor could have voided the check rather than tightened it;
+  //          it still catches its own defect, and `keyBodyHelp` is now outside
+  //          the region whose text can satisfy it.
 }
 
 console.log(failed === 0 ? "\nAll host-editor checks passed." : `\n${failed} check(s) FAILED.`);
