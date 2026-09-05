@@ -3,15 +3,12 @@ import { appDataDir } from "@tauri-apps/api/path";
 
 import type { FsReadResult } from "./ipc";
 
-// Crash recovery for a tauri-plugin-store JSON file.
+// Crash recovery for a JSON store file.
 //
-// The plugin (2.4.4) saves with `fs::create_dir_all` + `fs::write` - an in-place
-// truncate, no temp file, no rename, no fsync - and `StoreBuilder::build`
-// SWALLOWS the load error of a file it cannot parse (`let _ = store_inner.load()`).
-// Those two together are what makes the failure silent: a store file left
-// zero-length or nul-filled by a power cut (plugins-workspace#3085) comes back as
-// an EMPTY store, and the next autosave writes that emptiness over whatever was
-// left of it.
+// The failure this exists for: a store file left zero-length or nul-filled by a
+// power cut (plugins-workspace#3085) comes back as an EMPTY store, because a
+// store layer that cannot parse the file has nothing else to report, and the
+// next save writes that emptiness over whatever was left of it.
 //
 // Survivable for a saved layout or a theme. Not survivable for credentials: the
 // secret store writes atomically, so a lost store file leaves the private key in
@@ -23,6 +20,17 @@ import type { FsReadResult } from "./ipc";
 // CREATES the file with no snapshot at all, since at first load there is nothing
 // to copy. It needs no new Rust: `fs_read_file` and `fs_write_file` already exist,
 // and the latter goes through the app's own atomic temp-plus-rename path.
+//
+// WHICH FILES. Five of the app's six store files go through `createRecoveredStore`
+// and therefore through here: hosts, vault, forwards, workspaces and the CLI
+// agents. `tervia-settings.json` is the sixth and does NOT - it is still read and
+// written by `tauri-plugin-store` (2.4.3, per `src-tauri/Cargo.lock` and
+// `pnpm-lock.yaml`; a comment here long said 2.4.4, which was never a version this
+// repository pinned), whose `StoreBuilder::build` swallows the load
+// error of a file it cannot parse (`let _ = store_inner.load()`) and whose save is
+// `fs::create_dir_all` + `fs::write`, an in-place truncate with no temp file, no
+// rename and no fsync. `KNOWN-LIMITS.md` records why that one stayed, and what
+// would change the answer.
 //
 // EVERY function here is total: it reports a filesystem it could not work with
 // instead of rejecting. A caller that caches the promise of this work - which is
@@ -123,8 +131,18 @@ function reason(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
-/** Where a store file and its snapshot live. */
-function paths(dir: string, fileName: string): { primary: string; snapshot: string } {
+/**
+ * Where a store file and its snapshot live.
+ *
+ * Exported because `lib/fileKeyValueStore.ts` resolves the SAME primary path to
+ * read and write it. Two derivations of `${dir}/${fileName}` would be two
+ * conventions, and the day they disagreed the recovery pass would be checking a
+ * different file from the one the store reads.
+ */
+export function storeFilePaths(
+  dir: string,
+  fileName: string,
+): { primary: string; snapshot: string } {
   // `appDataDir()` carries no trailing separator today; normalise anyway so a
   // future change cannot produce a double slash. Forward slashes are fine on
   // Windows - Rust's `PathBuf` accepts either.
@@ -155,9 +173,10 @@ function inspect(read: StoreFileRead): StoreFileState {
 /**
  * Put a usable store file in place, or report why there isn't one.
  *
- * MUST run before the store is first touched. `LazyStore` caches the promise of
- * its load, so by the time a read comes back empty the plugin has already
- * decided the file was worthless and the next autosave will overwrite it.
+ * MUST run before the store is first touched. Every store layer over this one
+ * caches what its first read found, so by the time a read comes back empty the
+ * store has already decided the file was worthless and the next save writes
+ * that emptiness over it.
  *
  * Never rejects - see the module header.
  */
@@ -177,7 +196,7 @@ export async function recoverStoreFile(
 }
 
 async function recover(fileName: string, io: StoreFileIo): Promise<StoreRecovery> {
-  const { primary, snapshot } = paths(await io.dir(), fileName);
+  const { primary, snapshot } = storeFilePaths(await io.dir(), fileName);
   const found = inspect(await io.read(primary));
   if (found === "ok") return { found, recovered: false };
   if (found === "toolarge") {
@@ -241,7 +260,7 @@ export async function snapshotStoreFile(
   io: StoreFileIo = tauriStoreFileIo,
 ): Promise<StoreSnapshot> {
   try {
-    const { primary, snapshot } = paths(await io.dir(), fileName);
+    const { primary, snapshot } = storeFilePaths(await io.dir(), fileName);
     const read = await io.read(primary);
     if (read.kind !== "text" || inspect(read) !== "ok") return { taken: false };
     await io.write(snapshot, read.content);

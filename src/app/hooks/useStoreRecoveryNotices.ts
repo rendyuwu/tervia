@@ -2,15 +2,30 @@ import { useEffect, useRef } from "react";
 
 import { toast } from "@/components/ui/toast";
 import {
+  ensureLoaded as ensureForwardsLoaded,
+  onForwardsChanged,
+  takeRecoveryNotice as takeForwardsRecoveryNotice,
+} from "@/modules/forwards/store";
+import {
   ensureLoaded as ensureHostsLoaded,
   onHostsChanged,
   takeRecoveryNotice as takeHostsRecoveryNotice,
 } from "@/modules/hosts/store";
 import {
+  ensureLoaded as ensureCliAgentsLoaded,
+  onCliAgentsChanged,
+  takeRecoveryNotice as takeCliAgentsRecoveryNotice,
+} from "@/modules/terminal/lib/cliAgents";
+import {
   ensureLoaded as ensureVaultLoaded,
   onVaultChanged,
   takeRecoveryNotice as takeVaultRecoveryNotice,
 } from "@/modules/vault/store";
+import {
+  ensureLoaded as ensureWorkspacesLoaded,
+  onWorkspacesChanged,
+  takeRecoveryNotice as takeWorkspacesRecoveryNotice,
+} from "@/modules/workspaces/store";
 import {
   announceRecovery,
   drainRecovery,
@@ -18,8 +33,16 @@ import {
   type Say,
 } from "../lib/recoveryNotices";
 
-/** The stores with a crash-recovery pass. Both are `createRecoveredStore`
- *  instances, so both have always produced a notice nothing ever took. */
+/**
+ * The stores whose recovery notice is SAID.
+ *
+ * Hand-maintained, and that is the whole hazard: `createRecoveredStore` produces
+ * a notice for every store built on it, so a new one is silent until somebody
+ * remembers this list - which is exactly how forwards stayed silent after it was
+ * added. `scripts/recovery-notice-verify.ts` asserts set EQUALITY between the
+ * modules under `src/modules` that export `takeRecoveryNotice` and the modules
+ * named here, so the next one cannot be forgotten the same way.
+ */
 const STORES: RecoverableStore[] = [
   {
     label: "Saved machines",
@@ -32,6 +55,27 @@ const STORES: RecoverableStore[] = [
     ensureLoaded: ensureVaultLoaded,
     takeRecoveryNotice: takeVaultRecoveryNotice,
     onChanged: onVaultChanged,
+  },
+  {
+    // What the rail and the tab call this page, so the toast names the thing the
+    // user would go and look at.
+    label: "Port Forwarding",
+    ensureLoaded: ensureForwardsLoaded,
+    takeRecoveryNotice: takeForwardsRecoveryNotice,
+    onChanged: onForwardsChanged,
+  },
+  {
+    label: "Workspaces",
+    ensureLoaded: ensureWorkspacesLoaded,
+    takeRecoveryNotice: takeWorkspacesRecoveryNotice,
+    onChanged: onWorkspacesChanged,
+  },
+  {
+    // What the settings card that edits them is called.
+    label: "Terminal AI agents",
+    ensureLoaded: ensureCliAgentsLoaded,
+    takeRecoveryNotice: takeCliAgentsRecoveryNotice,
+    onChanged: onCliAgentsChanged,
   },
 ];
 

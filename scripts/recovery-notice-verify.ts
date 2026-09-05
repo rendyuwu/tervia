@@ -17,9 +17,11 @@
  * store once per LAUNCH (a `useRef` guard). Both need React. The mount is
  * asserted by source text at the end, which is exactly as strong as reading it.
  */
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+
+import ts from "typescript";
 
 import type { StoreRecovery } from "../src/lib/storeRecovery";
 import {
@@ -104,8 +106,24 @@ console.log("[copy] a recovery names the store and says where the data came from
     // Nothing in this app may suggest that storing a secret here makes it safer,
     // and a restored store is not a safer store - the snapshot is metadata from
     // the last process start while the keychain is current.
-    "and it claims nothing about secrets, safety or protection",
-    !!t && !/secret|password|key|safe|secure|protect|encrypt/i.test(t.message),
+    "and it claims nothing about safety, protection or encryption",
+    !!t && !/safe|secure|protect|encrypt/i.test(t.message),
+    t?.message,
+  );
+  check(
+    // The other half of the same honesty, and the one that costs a user
+    // something when it is missing: the file went back, the OS keychain did not,
+    // so a restored record's `hasPrivateKey` / `hasPassword` / `fingerprint` can
+    // name a secret that has since been deleted or rotated. Nothing in the app
+    // reconciles the two and nothing can enumerate the keychain to find out, so
+    // saying it is the whole of what is done about it.
+    "and it says the stored secrets did not come back with the file",
+    !!t && /not rolled back with it/.test(t.message),
+    t?.message,
+  );
+  check(
+    "without claiming the app did anything about that",
+    !!t && !/fixed|repaired|reconciled|restored your|re-?check/i.test(t.message),
     t?.message,
   );
 }
@@ -117,6 +135,15 @@ console.log("[copy] a recovery names the store and says where the data came from
   check(
     "and it does not claim a recovery that did not happen",
     !!t && !/recovered from a backup/i.test(t.message),
+    t?.message,
+  );
+  check(
+    // Nothing was rolled back on this branch, so the keychain cannot have
+    // diverged from anything. Warning here would be a warning about a hazard
+    // that is not present, on the toast a user sees when a `.bak` merely could
+    // not be written.
+    "nor does it warn about a rollback that did not happen",
+    !!t && !/not rolled back with it/.test(t.message),
     t?.message,
   );
 }
@@ -258,6 +285,10 @@ console.log("\n[wiring] source text: the hook exists, is mounted, and uses the r
     hook.includes('from "@/modules/vault/store"') && hook.includes("ensureVaultLoaded"),
   );
   check(
+    "the hook asks the forwards store",
+    hook.includes('from "@/modules/forwards/store"') && hook.includes("ensureForwardsLoaded"),
+  );
+  check(
     // NOT the once-per-launch guarantee itself - the [drain] check above is
     // what pins that, at the layer it actually holds. This only pins that
     // the hook still has its own same-mount guard (StrictMode double-invoke
@@ -266,6 +297,152 @@ console.log("\n[wiring] source text: the hook exists, is mounted, and uses the r
     hook.includes("startedRef.current"),
   );
   check("and it toasts what comes back", hook.includes("toast(t.message"));
+}
+
+// ---- the list stays complete (structural) -------------------------------
+// The defect this whole script exists for was a list with a store missing from
+// it, and the two source-text checks above cannot catch the next one: they name
+// the three stores that ARE listed, so a fourth store added tomorrow passes them
+// all while saying nothing when it recovers.
+//
+// So: set EQUALITY between the modules that PRODUCE a recovery notice (every
+// `src/modules/*/store.ts` re-exporting `takeRecoveryNotice`, which is generic -
+// `createRecoveredStore` gives one to whatever is built on it) and the modules
+// the hook CONSUMES. Membership would catch a store removed from the list and
+// not one that was never added, and never-added is the failure that happened.
+//
+// Compiler API rather than `indexOf`, per this repository's rule for structural
+// checks: an absent anchor is a state a text search does not have, and both
+// sides here are shapes (an export list, an array of object literals) rather
+// than strings. Order is deliberately NOT the property - both sides are sorted,
+// so rearranging `STORES` stays green.
+console.log("\n[complete] every store that produces a recovery notice is in the list");
+{
+  const parse = (rel: string): ts.SourceFile =>
+    ts.createSourceFile(rel, read(rel), ts.ScriptTarget.ESNext, true, ts.ScriptKind.TS);
+
+  /** Every name a source file exports, in whichever form it exports it. */
+  function exportedNames(sf: ts.SourceFile): Set<string> {
+    const out = new Set<string>();
+    const exported = (n: ts.Node): boolean =>
+      ts.canHaveModifiers(n) &&
+      !!ts.getModifiers(n)?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword);
+    for (const st of sf.statements) {
+      if (ts.isVariableStatement(st) && exported(st)) {
+        for (const d of st.declarationList.declarations) {
+          // `export const takeRecoveryNotice = ...` and the destructured
+          // `export const { ..., takeRecoveryNotice } = forwardsStore` that the
+          // three stores actually use.
+          if (ts.isIdentifier(d.name)) out.add(d.name.text);
+          else if (ts.isObjectBindingPattern(d.name)) {
+            for (const el of d.name.elements) {
+              if (ts.isIdentifier(el.name)) out.add(el.name.text);
+            }
+          }
+        }
+      } else if (
+        (ts.isFunctionDeclaration(st) || ts.isClassDeclaration(st)) &&
+        exported(st) &&
+        st.name
+      ) {
+        out.add(st.name.text);
+      } else if (
+        ts.isExportDeclaration(st) &&
+        st.exportClause &&
+        ts.isNamedExports(st.exportClause)
+      ) {
+        for (const el of st.exportClause.elements) out.add(el.name.text);
+      }
+    }
+    return out;
+  }
+
+  // Every `.ts` under `src/modules`, not just `<module>/store.ts`: the CLI-agent
+  // store lives at `modules/terminal/lib/cliAgents.ts`, and a producer set that
+  // only looked at store files would have missed it - which is this check's own
+  // failure mode, one level up.
+  function tsFilesUnder(dir: string): string[] {
+    const out: string[] = [];
+    for (const name of readdirSync(dir)) {
+      const full = join(dir, name);
+      if (statSync(full).isDirectory()) out.push(...tsFilesUnder(full));
+      else if (name.endsWith(".ts")) out.push(full);
+    }
+    return out;
+  }
+
+  const modulesDir = join(repoRoot, "src", "modules");
+  const producers = tsFilesUnder(modulesDir)
+    .map((full) =>
+      full
+        .slice(repoRoot.length + 1)
+        .split("\\")
+        .join("/"),
+    )
+    .filter((rel) => exportedNames(parse(rel)).has("takeRecoveryNotice"))
+    // Back to the `@/modules/...` specifier the hook would import it by, so both
+    // sides of the comparison are the same kind of name.
+    .map((rel) => rel.replace(/^src\//, "@/").replace(/\.ts$/, ""))
+    .sort();
+
+  const hookRel = "src/app/hooks/useStoreRecoveryNotices.ts";
+  const hookSf = parse(hookRel);
+
+  // Local name -> module specifier, for every `takeRecoveryNotice` the hook
+  // imports. Going through the import list rather than matching on the alias's
+  // spelling means a rename is followed rather than silently dropped.
+  const aliasToModule = new Map<string, string>();
+  for (const st of hookSf.statements) {
+    if (!ts.isImportDeclaration(st) || !ts.isStringLiteral(st.moduleSpecifier)) continue;
+    const spec = st.moduleSpecifier.text;
+    const bindings = st.importClause?.namedBindings;
+    if (!spec.startsWith("@/modules/") || !bindings || !ts.isNamedImports(bindings)) continue;
+    for (const el of bindings.elements) {
+      if ((el.propertyName ?? el.name).text === "takeRecoveryNotice") {
+        aliasToModule.set(el.name.text, spec);
+      }
+    }
+  }
+
+  let entries = 0;
+  const consumers: string[] = [];
+  const visit = (n: ts.Node): void => {
+    if (
+      ts.isVariableDeclaration(n) &&
+      ts.isIdentifier(n.name) &&
+      n.name.text === "STORES" &&
+      n.initializer &&
+      ts.isArrayLiteralExpression(n.initializer)
+    ) {
+      for (const el of n.initializer.elements) {
+        if (!ts.isObjectLiteralExpression(el)) continue;
+        entries++;
+        for (const p of el.properties) {
+          if (!ts.isPropertyAssignment(p)) continue;
+          if (p.name.getText(hookSf) !== "takeRecoveryNotice") continue;
+          const mod = aliasToModule.get(p.initializer.getText(hookSf));
+          if (mod) consumers.push(mod);
+        }
+      }
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(hookSf);
+
+  check(`the hook's STORES array was found and read (${entries} entries)`, entries > 0, entries);
+  check(
+    // Otherwise an entry whose `takeRecoveryNotice` came from somewhere this
+    // does not follow would drop out of the consumer set unnoticed, and the
+    // equality below could hold for the wrong reason.
+    "every entry's takeRecoveryNotice resolves to a module store",
+    consumers.length === entries,
+    { entries, resolved: consumers },
+  );
+  check(
+    "the stores that produce a notice are exactly the stores the hook lists",
+    JSON.stringify(producers) === JSON.stringify([...consumers].sort()),
+    { producers, consumers: [...consumers].sort() },
+  );
 }
 
 if (failed > 0) throw new Error(`${failed} check(s) FAILED`);

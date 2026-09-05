@@ -412,15 +412,13 @@ export function createHostsStore(io: HostsIo): HostsStore {
    * load there is nothing to copy, so the first successful write is the earliest
    * moment the host list is protected at all.
    *
-   * NOT atomic across keys, and one caller passes two. `deleteGroup` sets the group
-   * list and the host list before this commits, so a throw on the second `set`
-   * leaves the first in the plugin's cache with the 200 ms autosave still behind it
-   * - persisting the group removal without clearing `groupId` on its members.
-   * Benign by design (a dangling `groupId` renders as ungrouped, which is what
-   * deleting the group was for) and named here because it is the one place the
-   * multi-key contract is weaker than it reads. A real fix is an atomic
-   * multi-key store write - which `tauri-plugin-store` does not offer - not a
-   * second commit here.
+   * Atomic across keys, which one caller needs: `deleteGroup` passes two, and
+   * the group removal without the matching `groupId` clear on its members is
+   * half an update. A `set` reaches the store's cache only, and the `commit`
+   * writes the whole file in one `atomic_write` - so either both keys land or
+   * neither does. That is a property of `lib/fileKeyValueStore.ts`, not of this
+   * function: `tauri-plugin-store` saves with an in-place truncate and could
+   * tear the pair, which is why the store family stopped using it.
    */
   async function persist(entries: [string, unknown][]): Promise<void> {
     for (const [key, value] of entries) await io.store.set(key, value);
@@ -799,10 +797,14 @@ export function createHostsStore(io: HostsIo): HostsStore {
     const idx = next.findIndex((h) => h.id === host.id);
     if (idx >= 0) next[idx] = record;
     else next.push(record);
-    // A `persist` that throws is deliberately NOT rolled back: `LazyStore` runs
-    // with autoSave, so the record is already in the plugin's cache with a
-    // debounced retry behind it, and clearing the secrets here would race that
-    // into a record whose flags name material that is gone.
+    // A `persist` that throws is deliberately NOT rolled back. There is no
+    // retry behind it any more - the store writes the whole file on `commit`
+    // and nothing re-attempts a write that failed - but the decision is
+    // unchanged, for the reason underneath the old one: `persist` sets the
+    // record into the store's cache BEFORE the write, so this session goes on
+    // reading a list that names these accounts, and the next commit that
+    // succeeds puts it on disk. Clearing the secrets here would leave that live
+    // record naming material that is gone.
     await persist([[HOSTS_KEY, next]]);
 
     // AFTER the rewrite, never before: every step up to the rewrite is additive,

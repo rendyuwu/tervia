@@ -250,3 +250,129 @@ someone who switched modes for an unrelated reason. Or the key passphrase input
 gaining a visible stored/empty state: it is masked today and looks identical
 either way, which is why the help copy under the textarea deliberately does not
 mention the leftover - the advice could not be acted on from that screen.
+
+## Store files and recovery
+
+### The `.bak` snapshot protects against a torn file, never against a save that wrote the wrong thing
+
+**Accepted state.** `createRecoveredStore`'s `commit` saves the store and then
+snapshots the file that save produced, and `snapshotStoreFile` copies whenever
+`inspect` calls the primary `"ok"` - which any JSON object satisfies, an empty
+one included. So a bug that persists a valid but wrong value (an emptied host
+list, a rule list missing a row) is written to the primary and then copied
+straight over the last good snapshot, and the recovery pass on the next launch
+finds an `"ok"` primary and correctly leaves it alone. What the snapshot covers
+is exactly the class where the bytes stop being a usable JSON object: a torn or
+truncated write, a nul-filled file, a hand edit that breaks the syntax, a read
+that comes back as garbage. It has never covered content, and the wording of a
+recovery toast should not be read as claiming otherwise.
+
+Worth stating because the obvious inference runs the wrong way: making the write
+atomic removes the torn-file class but leaves this one untouched, so it is not a
+reason the snapshot could be retired. It is the reason the snapshot's scope is
+narrower than "the store is protected".
+
+No content guard belongs at this layer without teaching it what each store's
+shape means, and each store layer already owns its own integrity rules -
+`persist` in `hosts/store.ts` writes what its caller assembled, deliberately,
+because the rules deciding whether that value is legal live above it.
+
+**Carried by.** `commit` in `src/lib/recoveredStore.ts`, which orders the save
+before `snapshotAfterSave`, and `inspect` in `src/lib/storeRecovery.ts`, whose
+`"ok"` means "parses as a non-array object" and nothing more.
+
+**Trigger.** A store gaining a shape check cheap enough for the recovery layer
+to run before it snapshots - a row count that must not fall to zero in a single
+write is the obvious candidate - or a report of a store that emptied itself and
+took its snapshot down with it.
+
+### An atomic store write is durable against a crash, not against power loss in the moment after the rename
+
+**Accepted state.** `atomic_write` stages into a sibling temp, `sync_all`s it,
+drops the handle and renames over the target. It does not then fsync the parent
+directory, so a power cut in the window after the rename returns and before the
+directory entry is durable can leave the target naming its previous contents.
+That loses the update; it does not tear the file, and what is on disk afterwards
+is the last good version rather than a half-written one - which is why this is
+recorded as a bound on the guarantee rather than as a corruption path the `.bak`
+has to cover. Adding the directory fsync would cost every editor buffer save the
+same latency to close a window measured in microseconds.
+
+**Carried by.** `write_staged` in `src-tauri/src/modules/fs/atomic.rs`, whose
+`sync_all` is on the staging handle only.
+
+**Trigger.** A store whose loss of a single committed write is not acceptable -
+one holding a secret's only record rather than a copy of it - or a report of a
+store reverting one edit after an unclean shutdown.
+
+### A restore rolls the file back and leaves the keychain where it is
+
+**Accepted state.** Recovery replaces a store file with its snapshot, which is
+metadata as of the last process start. The OS keychain is written atomically and
+is therefore current. Nothing reconciles the two, and nothing can: the registered
+secret commands take the accounts to fetch rather than enumerating what exists,
+so the app cannot ask what it still holds. What comes back is a record whose
+`hasPrivateKey`, `hasPassphrase`, `hasPassword` and `hasKeyPassphrase` may name a
+secret that has since been deleted, and whose `fingerprint` may name a PEM the
+account no longer holds. None of those is ever read back and re-derived.
+
+The whole of what is done about it is that the recovery toast says so. It states
+that stored passwords and keys did not come back with the file; it does not claim
+the app checked anything, because it did not.
+
+**Carried by.** `recover` in `src/lib/storeRecovery.ts`, whose own comment states
+the divergence, and `recoveryToast` in `src/app/lib/recoveryNotices.ts`, which is
+where the sentence lives. `reusableVaultKey` in
+`src/modules/hosts/credentialMove.ts` is what would act on a stale one: it binds
+on the first fingerprint match.
+
+**Trigger.** A keychain enumeration existing (there is no `secrets_list`), or a
+user report of a host offering a key it does not hold after a recovery toast.
+
+### `tervia-settings.json` is the one store file with no recovery in front of it
+
+**Accepted state.** Five of the six store files go through
+`createRecoveredStore`: a corruption check before the first read, a `.bak`
+snapshot after every commit, and a whole-file atomic write.
+`tervia-settings.json` does not. It is read and written by `tauri-plugin-store`
+directly, whose save is an in-place truncate and whose load error on a file it
+cannot parse is swallowed - so a torn or nul-filled file comes back as an empty
+store and the next save writes that emptiness over it. The worst case is a
+settings reset: the store holds no secret, and every field in it can be set again
+from the settings page.
+
+It stayed on the plugin for one reason. It is the only store depending on
+`LazyStore.onChange`, the plugin's cross-window `store://change` broadcast, which
+the recovered family does not use; and `writePref` pairs that broadcast with a
+`SELF_LABEL` dedupe of its own mirrored event, so the writing window handles the
+change exactly once. Converting means rewriting that dedupe in a second webview,
+which is a change with no durability payoff proportional to it.
+
+**Carried by.** The `LazyStore` at `src/modules/settings/store.ts` and its
+`onChange` subscription, which is what a conversion would have to replace. The
+module header of `src/lib/storeRecovery.ts` names this file as the one still on
+the plugin.
+
+**Trigger.** The settings store gaining a field that cannot be re-entered from
+the UI, or `LazyStore.onChange` no longer being needed there.
+
+### A store file over 10 MB can be read by nothing and is therefore never written
+
+**Accepted state.** `fs_read_file` refuses a file above its size limit and
+reports `toolarge` instead of the bytes. The recovery pass treats that as real
+data rather than corruption and leaves the file alone, which is right. The store
+layer above it then has no contents to work from, so it refuses to `save()` at
+all rather than write a whole file built on a read it never got - a whole-file
+write over an empty cache would destroy exactly the file that is too big to have
+been read. The consequence is that such a store is inert: it loads as empty and
+every mutation fails with a refusal naming the size. No store in this app
+approaches that limit today, and nothing shrinks one automatically.
+
+**Carried by.** `createFileKeyValueStore` in `src/lib/fileKeyValueStore.ts`,
+whose `refused` flag holds the verdict, and the `[whole-file]` group in
+`scripts/vault-resolve-verify.ts`, which pins the refusal.
+
+**Trigger.** A store file that legitimately grows past the limit - the workspace
+file is the only plausible candidate, since it holds a tab tree per workspace -
+or `fs_read_file` gaining a way to read a large file in portions that this layer
+could use.

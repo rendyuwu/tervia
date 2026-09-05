@@ -37,8 +37,11 @@ type Params = {
  * mount, load the active workspace's saved tabs into live state once, and
  * auto-snapshot live tabs back to the store on every change.
  *
- * The disk snapshot (`serializeTabs` -> `wsSaveTabs`) is lightly debounced by
- * the workspaces LazyStore's autoSave window. `skipNextSnapshotRef` is shared
+ * The disk snapshot (`serializeTabs` -> `wsSaveTabs`) is NOT debounced, and a
+ * comment here said for a long time that it was: `persist` in
+ * `modules/workspaces/store.ts` commits immediately, so every `saveWorkspaceTabs`
+ * that changes anything is a whole write of the workspace file.
+ * `skipNextSnapshotRef` is shared
  * with `useWorkspaceSwitching` (a workspace close sets it so the closing
  * workspace's live tabs don't clobber the neighbor's saved tabs), so it lives
  * in App and is passed in. `hydratedWorkspaceRef` is local. Effects are moved
@@ -101,8 +104,8 @@ export function useWorkspacePersistence({
     replaceAllTabs(restored.tabs, restored.activeId);
   }, [wsHydrated, wsList, wsActiveId, replaceAllTabs, allocId]);
 
-  // Auto-snapshot tabs whenever they change. Lightly debounced via the
-  // autoSave window inside the workspaces LazyStore.
+  // Auto-snapshot tabs whenever they change. Not debounced anywhere: the store's
+  // `persist` writes the file on every change that gets this far.
   useEffect(() => {
     if (!persistTabsSnapshot) return;
     if (!wsHydrated || !wsActiveId || !hydratedWorkspaceRef.current) return;

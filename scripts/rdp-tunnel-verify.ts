@@ -88,7 +88,7 @@
 
 export {};
 
-import type { SshHost } from "../src/modules/hosts/types";
+import { HOSTS_KEY, HOSTS_STORE_PATH, type SshHost } from "../src/modules/hosts/types";
 import type { VaultAuthMode } from "../src/modules/vault/types";
 
 // ---------------------------------------------------------------------------
@@ -123,20 +123,55 @@ let autoAnswerOpen = true;
 let nextSessionId = 100;
 let nextLocalPort = 45000;
 
+/** Where `appDataDir()` resolves for this harness. */
+const APP_DATA_DIR = "/verify-app-data";
+const HOSTS_FILE = `${APP_DATA_DIR}/${HOSTS_STORE_PATH}`;
+/** Every store file other than the host list - the `.bak` snapshot, mostly.
+ *  Kept as raw text because nothing here inspects it. */
+const otherStoreFiles = new Map<string, string>();
+/** Live `plugin:event|listen` subscriptions, by their event id, holding the
+ *  `transformCallback` id to fire. */
+const eventListeners = new Map<number, number>();
+
 async function handleInvoke(cmd: string, args: Record<string, unknown>): Promise<unknown> {
   calls.push({ cmd, args });
   switch (cmd) {
-    // The connection store. One key ("connections"), so one answer.
-    case "plugin:store|load":
-    case "plugin:store|get_store":
-      return 1;
-    case "plugin:store|get":
-      return [sshRows, true];
-    case "plugin:store|set":
-      sshRows = args.value as Row[];
+    // The host store is a whole JSON file read and written through these two
+    // commands (`lib/fileKeyValueStore.ts`), not a key/value plugin. `sshRows`
+    // stays the harness's view of it so a test can still seed and inspect rows.
+    case "plugin:path|resolve_directory":
+      return APP_DATA_DIR;
+    case "fs_read_file": {
+      const path = args.path as string;
+      const content =
+        path === HOSTS_FILE ? JSON.stringify({ [HOSTS_KEY]: sshRows }) : otherStoreFiles.get(path);
+      // Absent is an ERROR from the real command, and `tauriStoreFileIo.read`'s
+      // catch is what turns it into `{kind:"missing"}`. Returning a value here
+      // would be read as corruption instead.
+      if (content === undefined) throw new Error(`no such file: ${path}`);
+      return { kind: "text", content, size: content.length };
+    }
+    case "fs_write_file": {
+      const path = args.path as string;
+      const content = args.content as string;
+      if (path === HOSTS_FILE) {
+        const parsed = JSON.parse(content) as Record<string, unknown>;
+        sshRows = (parsed[HOSTS_KEY] as Row[] | undefined) ?? [];
+      } else otherStoreFiles.set(path, content);
       return undefined;
-    case "plugin:store|save":
+    }
     case "plugin:event|emit":
+      return undefined;
+    case "plugin:event|listen": {
+      // Registered for real, not stubbed away: the store's cache is dropped by
+      // a change event and nothing else, so a harness that swallowed these would
+      // hold the first `reset`'s rows for the whole run.
+      const id = nextCallbackId++;
+      eventListeners.set(id, args.handler as number);
+      return id;
+    }
+    case "plugin:event|unlisten":
+      eventListeners.delete(args.eventId as number);
       return undefined;
     case "secrets_get_all":
       return (args.accounts as string[]).map((a) => secrets[a] ?? null);
@@ -287,6 +322,12 @@ function reset(rows: Row[]): void {
   autoAnswerOpen = true;
   secrets = {};
   sshRows = rows;
+  // Replacing the file behind a live store is what another window's commit
+  // looks like, so say so. Without this the whole-file store keeps the rows it
+  // read first and every scenario after the first is dialling the wrong world.
+  for (const handler of eventListeners.values()) {
+    callbacks.get(handler)?.({ event: "tervia://hosts-changed", id: handler, payload: null });
+  }
 }
 
 // ---------------------------------------------------------------------------

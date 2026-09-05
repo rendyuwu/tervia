@@ -3121,7 +3121,7 @@ console.log(
   );
 
   // `confirmDelete`'s own two statements, in its own order. `deleteRule` is a
-  // `LazyStore` write and is not drivable here; what it does - remove the
+  // store-file write and is not drivable here; what it does - remove the
   // record, so no row can render this rule again - is what makes the CONTROL's
   // leak unrecoverable, and section 11 pins the call itself.
   resetCallLogs();

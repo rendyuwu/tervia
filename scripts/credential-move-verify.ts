@@ -270,6 +270,10 @@ function harness(
     },
     ensureLoaded: async () => null,
     takeRecoveryNotice: () => null,
+    // Nothing here drives the anti-blank guard in `modules/workspaces/store.ts`,
+    // which is the only caller: a good file is the honest answer for a fixture
+    // with no file behind it at all.
+    fileState: async () => ({ found: "ok" as const, recovered: false }),
   };
 
   const vaultIo: VaultStoreIo = {
@@ -288,6 +292,10 @@ function harness(
     },
     ensureLoaded: async () => null,
     takeRecoveryNotice: () => null,
+    // Nothing here drives the anti-blank guard in `modules/workspaces/store.ts`,
+    // which is the only caller: a good file is the honest answer for a fixture
+    // with no file behind it at all.
+    fileState: async () => ({ found: "ok" as const, recovered: false }),
   };
 
   // A REAL copy against `kept`, deliberately not a stub answering `true` - see
@@ -2828,8 +2836,9 @@ console.log("\n[13b] a refused detach takes its copies back off the host's own a
   // The fixture is the persist-half-landed case the guard's comment names, built
   // from the real store rather than mimed: `persist` writes the record through
   // `set` and only then commits, so a commit that throws leaves the host stored
-  // and INLINE while `upsertHost` reports failure. `LazyStore` runs with
-  // autoSave, so a debounced retry sits behind that record in production.
+  // and INLINE while `upsertHost` reports failure. In production that record is
+  // in the store's own cache, which is what the session goes on reading and what
+  // the next successful commit writes out; nothing retries the failed write.
   //
   // WHY DELETING HERE WOULD BE THE CREDENTIAL LOSS. The stored record is now
   // inline and NAMES these three accounts (`secretFieldsFor` returns them for an

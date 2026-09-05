@@ -1480,6 +1480,10 @@ console.log("\n[15. refusal] the store refuses a moved record, touching no keych
       },
       ensureLoaded: async () => null,
       takeRecoveryNotice: () => null,
+      // Nothing here drives the anti-blank guard in `modules/workspaces/store.ts`,
+      // which is the only caller: a good file is the honest answer for a fixture
+      // with no file behind it at all.
+      fileState: async () => ({ found: "ok" as const, recovered: false }),
     };
 
     // Every call is logged, because "the refusal wrote no secret" is the only

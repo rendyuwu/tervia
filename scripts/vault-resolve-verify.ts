@@ -26,11 +26,12 @@
  *    from "the store echoed its caller".
  *
  * 4. A TORN STORE FILE RECOVERS, AND A FILESYSTEM IN A BAD STATE DEGRADES.
- *    tauri-plugin-store writes in place with no temp file and no fsync, and
- *    swallows the load error of a file it cannot parse - so a zeroed or
- *    nul-filled file comes back as an EMPTY store and the next autosave makes
- *    that permanent. For the vault that means a private key left in the keychain
- *    with no record naming it. Recovery therefore never rejects: the settle pass
+ *    A store file can be found zeroed or nul-filled after a power cut, and a
+ *    store layer that cannot parse it comes up EMPTY and then writes that
+ *    emptiness over it. For the vault that means a private key left in the
+ *    keychain with no record naming it. The write is atomic now, which removes
+ *    the tear this app can cause but not the one a crashed OS or another program
+ *    can. Recovery therefore never rejects: the settle pass
  *    runs once and its promise is cached, so a cached rejection would leave the
  *    store unreadable for the rest of the process on exactly the profile where
  *    the good snapshot is sitting next to the broken primary.
@@ -66,6 +67,7 @@
  * ports, so all of this runs under plain node with no Tauri runtime and no
  * mocking library.
  */
+import { createFileKeyValueStore } from "../src/lib/fileKeyValueStore";
 import {
   createRecoveredStore,
   createWriteQueue,
@@ -186,6 +188,10 @@ function harness(
     },
     ensureLoaded: async () => takeNotice(),
     takeRecoveryNotice: takeNotice,
+    // Nothing here drives the anti-blank guard in `modules/workspaces/store.ts`,
+    // which is the only caller: a good file is the honest answer for a fixture
+    // with no file behind it at all.
+    fileState: async () => ({ found: "ok" as const, recovered: false }),
   };
 
   const secrets: SecretsIo = {
@@ -1094,9 +1100,11 @@ console.log("\n[recovery] a filesystem in a bad state degrades, and never reject
   assert(!!s.note, "with a note a caller can show");
 }
 {
-  // Over `fs_read_file`'s 10 MB limit. The plugin has no such limit and reads it
-  // fine, so this is NOT corruption: restoring a snapshot over it, or copying it
-  // onto the good snapshot, would each destroy real data.
+  // Over `fs_read_file`'s 10 MB limit. A refused read is NOT corruption - the
+  // bytes are real data this command will not hand over - so restoring a
+  // snapshot over it, or copying it onto the good snapshot, would each destroy
+  // it. The store layer above declines for the same reason; the `[whole-file]`
+  // group pins that it refuses to SAVE over a file it could not read.
   const fs = memFs({ [PRIMARY]: { kind: "toolarge" }, [SNAPSHOT]: text(GOOD) });
   const r = await recoverStoreFile(STORE_FILE, fs.io);
   check(
@@ -1124,10 +1132,15 @@ const SPEC = {
 };
 
 /**
- * A `KeyValueStore` that behaves the way `LazyStore` does in the two respects
- * that matter here: it loads from the file on first touch and SWALLOWS a load
- * error (which is exactly why recovery has to run before it), and `save()` puts
- * the cache on disk (so a snapshot taken after a commit has something to copy).
+ * A `KeyValueStore` in the two respects that matter here: it loads from the file
+ * on first touch and SWALLOWS a load error (which is exactly why recovery has to
+ * run before it), and `save()` puts the cache on disk (so a snapshot taken after
+ * a commit has something to copy).
+ *
+ * INJECTED on purpose, and every check in this group is written against it. The
+ * ordering below is `createRecoveredStore`'s own property and must hold for any
+ * store it is handed, so it must not depend on which one `deps.store` defaults
+ * to. The default's own behaviour is checked in the `[whole-file]` group.
  */
 function pluginStore(files: Record<string, StoreFileRead>, log: string[]) {
   const data: Record<string, unknown> = {};
@@ -1185,8 +1198,8 @@ function bus() {
 
   const notice = await io.ensureLoaded();
   // The whole property, as one sequence. Any other order loses data: loading
-  // before the restore hands the plugin an empty store it will then autosave,
-  // and snapshotting before the load can copy a torn file over the last good one.
+  // before the restore hands the store layer an empty map it will then save, and
+  // snapshotting before the load can copy a torn file over the last good one.
   check("recover, then force the load, then snapshot", log, [
     "read:primary",
     "read:snapshot",
@@ -1216,8 +1229,8 @@ function bus() {
 }
 {
   // P2-12: `commit` is on the public port, so a commit before any read must still
-  // recover first - otherwise `save()` writes the plugin's empty defaults over a
-  // torn but perfectly recoverable file.
+  // recover first - otherwise `save()` writes an empty map over a torn but
+  // perfectly recoverable file.
   const log: string[] = [];
   const fs = memFs({ [PRIMARY]: text(""), [SNAPSHOT]: text(GOOD) }, {}, log);
   const kv = pluginStore(fs.files, log);
@@ -1362,6 +1375,208 @@ function bus() {
   await io.commit();
   check("and still writable", kv.data.identities, [{ id: "i-late" }]);
   check("with the broadcast still firing", b.emitted, [SPEC.changedEvent]);
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n[whole-file] the default store reads one file whole and writes it whole");
+
+/**
+ * A bus whose FIRST `listen` rejects and whose later ones work.
+ *
+ * That is the case the `invalidate()` wrapped around `onChanged`'s callback
+ * exists for, and it is worth being exact about which case it is NOT. Dispatch
+ * order is not it: both listeners run in one synchronous pass, and any read a
+ * consumer's callback starts is a promise that settles after that pass, so the
+ * internal listener registered in `initialize` has already dropped the cache
+ * whichever of the two Tauri calls first. What the wrapper covers is the
+ * internal listener not EXISTING - `initialize` reports a `listen` that rejects
+ * instead of failing the store with it, so a transient IPC fault at startup
+ * would otherwise leave this webview with a cache nothing ever invalidates, for
+ * the rest of the process, while its reload callbacks fire normally.
+ */
+function faultyListenBus() {
+  const emitted: string[] = [];
+  const listeners = new Set<() => void>();
+  let refusedOnce = false;
+  const broadcast: StoreBroadcast = {
+    async emit(event) {
+      emitted.push(event);
+      for (const l of listeners) l();
+    },
+    async listen(_event, cb) {
+      if (!refusedOnce) {
+        refusedOnce = true;
+        throw new Error("could not subscribe");
+      }
+      listeners.add(cb);
+      return () => void listeners.delete(cb);
+    },
+  };
+  return { broadcast, emitted };
+}
+
+const reads = (log: string[]): number => log.filter((e) => e === "read:primary").length;
+const writes = (log: string[]): number => log.filter((e) => e === "write:primary").length;
+
+{
+  // The cache is what makes a whole-file read affordable: a screen that lists
+  // two keys, or lists the same one twice, costs ONE read of the file.
+  const log: string[] = [];
+  const fs = memFs({ [PRIMARY]: text(GOOD) }, {}, log);
+  const store = createFileKeyValueStore(STORE_FILE, fs.io);
+  check("a first get reads the file", await store.get("identities"), [{ id: "i-1" }]);
+  check("exactly once", reads(log), 1);
+  await store.get("keys");
+  await store.get("identities");
+  check("and later gets do not read it again", reads(log), 1);
+}
+{
+  // Two gets in the same tick share the read in flight rather than each starting
+  // one - `Promise.all([listGroups(), listHosts()])` in `modules/hosts/store.ts`
+  // is the real call site.
+  const log: string[] = [];
+  const fs = memFs({ [PRIMARY]: text(GOOD) }, {}, log);
+  const store = createFileKeyValueStore(STORE_FILE, fs.io);
+  await Promise.all([store.get("identities"), store.get("keys")]);
+  check("two concurrent gets cost one read", reads(log), 1);
+}
+{
+  const log: string[] = [];
+  const fs = memFs({ [PRIMARY]: text(GOOD) }, {}, log);
+  const store = createFileKeyValueStore(STORE_FILE, fs.io);
+  await store.set("keys", [{ id: "k-1" }]);
+  check("a set writes nothing at all", [fs.written, writes(log)], [[], 0]);
+  check("and the file still holds exactly what it held", fs.files[PRIMARY], text(GOOD));
+  check("while the store reads back what was set", await store.get("keys"), [{ id: "k-1" }]);
+
+  await store.save();
+  check("save writes the whole map, in one write", writes(log), 1);
+  check(
+    // Not just the key that changed: a whole-file write that dropped the keys it
+    // did not touch would be a far worse bug than the tearing it replaced.
+    "carrying every key the file already had",
+    fs.files[PRIMARY],
+    text('{"identities":[{"id":"i-1"}],"keys":[{"id":"k-1"}]}'),
+  );
+}
+{
+  // THE property this port exists for. A multi-key write is one file
+  // replacement, so a pair that fails half way through leaves the file
+  // byte-identical - `deleteGroup` in `modules/hosts/store.ts` is the caller,
+  // and half of its pair is a group removed with its members still pointing at
+  // it. Shaped like that module's own `persist`: set each key, then commit.
+  const log: string[] = [];
+  const fs = memFs({ [PRIMARY]: text(GOOD) }, {}, log);
+  const store = createFileKeyValueStore(STORE_FILE, fs.io);
+  const before = fs.files[PRIMARY];
+
+  const persist = async (entries: [string, () => unknown][]): Promise<void> => {
+    for (const [key, value] of entries) await store.set(key, value());
+    await store.save();
+  };
+  let threw = false;
+  await persist([
+    ["identities", () => [{ id: "i-2" }]],
+    [
+      "keys",
+      () => {
+        throw new Error("the second half of the pair failed");
+      },
+    ],
+  ]).catch(() => {
+    threw = true;
+  });
+
+  check("a pair whose second key fails is reported", threw, true);
+  check("and nothing was written", [fs.written, writes(log)], [[], 0]);
+  check("so the file is byte-identical to before it", fs.files[PRIMARY], before);
+  check(
+    // What the `persist` comments in `hosts/store.ts` and `vault/store.ts` now
+    // say is the reason a failed write is deliberately NOT rolled back: the
+    // record is in this session's cache, and the next commit that succeeds
+    // writes it out.
+    "while the first key is in the cache this session goes on reading",
+    await store.get("identities"),
+    [{ id: "i-2" }],
+  );
+}
+{
+  // A file `fs_read_file` refuses is real data, not corruption - `recover` leaves
+  // it alone for exactly that reason. Without this refusal the same read would
+  // give an empty cache and `save()` would write `{}` over it, so the whole-file
+  // write would destroy a file it merely cannot read.
+  const fs = memFs({ [PRIMARY]: { kind: "toolarge" } });
+  const store = createFileKeyValueStore(STORE_FILE, fs.io);
+  check("a refused read leaves the store empty", await store.get("identities"), undefined);
+  let message = "";
+  await store.save().catch((e: unknown) => {
+    message = e instanceof Error ? e.message : String(e);
+  });
+  assert(message.includes("too large"), `saving over it is refused: ${message || "it saved"}`);
+  check("and the file is untouched", fs.written, []);
+}
+{
+  // Another window's commit. The change event is the only thing that can tell
+  // this webview its cache is behind the file.
+  const log: string[] = [];
+  const fs = memFs({ [PRIMARY]: text(GOOD) }, {}, log);
+  const b = bus();
+  const io = createRecoveredStore(SPEC, {
+    store: createFileKeyValueStore(STORE_FILE, fs.io),
+    files: fs.io,
+    broadcast: b.broadcast,
+  });
+
+  await io.ensureLoaded();
+  check("the store comes up on the file as it was", await io.get("identities"), [{ id: "i-1" }]);
+  const settled = reads(log);
+  // The other window replaces the file. Nothing has announced it yet.
+  fs.files[PRIMARY] = text('{"identities":[{"id":"i-other"}]}');
+  check("a get with no event in between reads nothing", await io.get("identities"), [
+    { id: "i-1" },
+  ]);
+  check("and cost no read", reads(log), settled);
+
+  await b.broadcast.emit(SPEC.changedEvent);
+  check("but the event drops the cache", await io.get("identities"), [{ id: "i-other" }]);
+  check("which cost exactly one more read", reads(log), settled + 1);
+}
+{
+  // The startup subscription failed, so the cache has no other route back to the
+  // file. `onChanged` is that route: it drops the cache before it hands the
+  // event on, so a reload callback still reads what the other window wrote.
+  const log: string[] = [];
+  const fs = memFs({ [PRIMARY]: text(GOOD) }, {}, log);
+  const b = faultyListenBus();
+  const io = createRecoveredStore(SPEC, {
+    store: createFileKeyValueStore(STORE_FILE, fs.io),
+    files: fs.io,
+    broadcast: b.broadcast,
+  });
+
+  const notice = await io.ensureLoaded();
+  assert(
+    !!notice?.note?.includes("will not see other windows' changes"),
+    "a startup subscription that fails is reported, not thrown",
+  );
+  await io.get("identities");
+
+  let seen: unknown = "the callback never ran";
+  let done = (): void => {};
+  const ran = new Promise<void>((resolve) => {
+    done = resolve;
+  });
+  await io.onChanged(() => {
+    void io.get("identities").then((v) => {
+      seen = v;
+      done();
+    });
+  });
+
+  fs.files[PRIMARY] = text('{"identities":[{"id":"i-other"}]}');
+  await b.broadcast.emit(SPEC.changedEvent);
+  await ran;
+  check("a reload callback reads the post-commit file, not the cache", seen, [{ id: "i-other" }]);
 }
 
 // ---------------------------------------------------------------------------

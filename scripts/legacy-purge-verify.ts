@@ -76,6 +76,10 @@ function harness(opts: { getThrows?: boolean; setThrows?: boolean } = {}): Harne
     onChanged: async (): Promise<() => void> => () => {},
     ensureLoaded: async (): Promise<StoreRecovery | null> => notice,
     takeRecoveryNotice: (): StoreRecovery | null => notice,
+    // Nothing here drives the anti-blank guard in `modules/workspaces/store.ts`,
+    // which is the only caller: a good file is the honest answer for a fixture
+    // with no file behind it at all.
+    fileState: async () => ({ found: "ok" as const, recovered: false }),
   };
 
   const files: StoreFileIo = {
