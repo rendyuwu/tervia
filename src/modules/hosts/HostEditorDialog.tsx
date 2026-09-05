@@ -196,6 +196,110 @@ function tokenFor(target: HostEditorTarget | null): string | null {
   return `create:${target.protocol}:${JSON.stringify(target.prefill ?? {})}`;
 }
 
+/**
+ * Read one inline SSH host's stored secrets into the draft, and record which of
+ * them the user can now SEE.
+ *
+ * ONE FUNCTION BECAUSE TWO PLACES NEED IT, and what it writes is what decides
+ * whether a later blank Save deletes anything. The load effect runs it when the
+ * editor is pointed at an inline row; `applyCredentialChange`'s detach arm runs
+ * it once `detachHostFromVault` has copied an identity's secrets onto this
+ * host's own accounts. A second copy of this rule was the alternative and it is
+ * exactly the thing to avoid: `sshSeeded` is what licenses `sshSecretsForSave`
+ * to send the store's CLEAR instruction, so two callers deriving it two ways
+ * would be two answers to "may this blank field delete something".
+ *
+ * WHY THE SECOND CALLER EXISTS. A detach leaves the row inline holding a private
+ * key it did not hold a moment earlier, and `keyBodyHelp` in
+ * `editor/SshCredentialSection.tsx` then tells the user to wait for that key to
+ * load into the textarea, clear it, and save. Without this read the wait never
+ * ended - a bound row's load returns before the secret read, and the effect is
+ * keyed on a `token` a detach does not move - so the field stayed blank and
+ * unseeded, clearing it sent nothing, and the sentence under it described a
+ * deletion the save would not perform. The route that copy names IS this read.
+ *
+ * MODULE SCOPE, AND EVERYTHING IT READS IS AN ARGUMENT. It writes after an
+ * await, which is the one place a value captured from a render is the value from
+ * before the user could type - the defect {@link SshSecretTouched} is held in a
+ * ref for. A closure over the component's scope puts "is this the ref, or a
+ * render's copy of it" back as a question this function's shape can get wrong;
+ * one that can only see what it was handed cannot. The two refs arrive as plain
+ * mutable cells rather than as React ref types for the same reason: a cell is
+ * all the rule needs, and saying so is what keeps a third caller from passing
+ * something that merely looks like one.
+ */
+async function seedSshSecrets({
+  hostId,
+  stale,
+  sshTouched,
+  sshSeeded,
+  setSshCred,
+  onError,
+}: {
+  hostId: string;
+  /**
+   * Whether the form has since been pointed at a different row. NEITHER CALLER
+   * MAY SKIP IT: this resolves after an await, and a seed landing on the wrong
+   * row would put one host's key body in another host's textarea AND mark it
+   * seeded - which is a licence to delete the second host's key.
+   */
+  stale: () => boolean;
+  sshTouched: { readonly current: SshSecretTouched };
+  sshSeeded: { current: SshSecretSeeded };
+  setSshCred: (update: (d: SshCredentialDraft) => SshCredentialDraft) => void;
+  /** Where a failed read is reported. Both callers pass the dialog's own error
+   *  line and neither swallows it: a read that failed leaves the textarea blank
+   *  for a reason neither arm of `keyBodyHelp` covers. */
+  onError: (message: string) => void;
+}): Promise<void> {
+  try {
+    // `getHostSshSecrets` answers `{}` for a row that is not an inline SSH host,
+    // which is the store's own guard over the one race this function cannot see
+    // from here: the credential moving again while this read is in flight.
+    const secrets = await getHostSshSecrets(hostId);
+    if (stale()) return;
+    // Per field, and only where the user has not typed. `stale()` is not
+    // enough on its own: it asks whether the form has moved to a DIFFERENT
+    // ROW, and typing does not move it. The form is interactive throughout in
+    // BOTH callers - the load effect arms it before this read deliberately, and
+    // the detach arm does not await this at all - and this read is three
+    // sequential `keyring::Entry::get_password` calls on macOS, any of which can
+    // stop on an OS access prompt. So "the user typed a new password into a
+    // field this seed is about to fill" is an ordinary race, not a corner.
+    // Seeding over it would send the OLD secret back on save (the field
+    // counts as touched) and report success, silently losing the rotation.
+    //
+    // Read out here rather than inside the updater: the ref is already
+    // current at this point, and a keystroke arriving between this call and
+    // the updater running queues its own patch AFTER this one, so it wins
+    // anyway.
+    const typed = sshTouched.current;
+    setSshCred((d) => ({
+      ...d,
+      password: typed.password ? d.password : (secrets.password ?? ""),
+      privateKey: typed.privateKey ? d.privateKey : (secrets.privateKey ?? ""),
+      keyPassphrase: typed.keyPassphrase ? d.keyPassphrase : (secrets.keyPassphrase ?? ""),
+    }));
+    // What the user can now SEE, which is what licenses a later clear -
+    // see `sshSecretsForSave`. Derived from the same `typed` the seed just
+    // yielded to, and from the value that actually arrived: a field the
+    // seed skipped is NOT seeded however much the keychain held, because
+    // the stored value never reached the screen, and a field seeded with
+    // nothing is not either. Computed out here rather than inside the
+    // updater, which must stay pure - React is free to call it twice.
+    sshSeeded.current = {
+      password: !typed.password && !clearsSecret(secrets.password ?? ""),
+      privateKey: !typed.privateKey && !clearsSecret(secrets.privateKey ?? ""),
+      keyPassphrase: !typed.keyPassphrase && !clearsSecret(secrets.keyPassphrase ?? ""),
+    };
+  } catch (e) {
+    // Reported rather than swallowed, and the form stays usable: the three
+    // fields are untouched, so a save now writes none of them and the
+    // stored secrets are left exactly as they are.
+    if (!stale()) onError(e instanceof Error ? e.message : String(e));
+  }
+}
+
 export function HostEditorDialog({
   target,
   onClose,
@@ -214,12 +318,14 @@ export function HostEditorDialog({
    * Which SSH secret fields the USER has edited in this sitting.
    *
    * A ref rather than state, and that is load-bearing rather than an
-   * optimisation. The keychain seed below lands AFTER an await, and a `useState`
+   * optimisation. {@link seedSshSecrets} lands AFTER an await, and a `useState`
    * value it read would be the one captured when the load started - all three
    * false, forever, because the reset at the top of the same effect is what set
    * them. So a field the user filled while the read was in flight would be
    * overwritten by the seed and still count as touched, and the save would send
-   * the seed back over the rotation the user had just typed.
+   * the seed back over the rotation the user had just typed. The cell is handed
+   * to that function rather than closed over, which is what makes "it reads the
+   * ref, not a render's copy" a property of the signature.
    *
    * ONE record, read by both the seed guard and the save, because two records of
    * the same fact is how a guard and the thing it guards drift apart. Nothing
@@ -241,6 +347,14 @@ export function HostEditorDialog({
    *
    * A ref for the same reason `sshTouched` is one: it is written after the seed's
    * await and read by the save, and neither renders from it.
+   *
+   * {@link seedSshSecrets} is the ONLY writer, and that is the invariant rather
+   * than a description of today's call graph: it is written from what a keychain
+   * read actually returned, so a caller that set it any other way would be
+   * claiming a value reached the screen when none did - and every clear
+   * `sshSecretsForSave` performs rests on that claim. The function now has two
+   * call sites (the load effect, and the detach arm of
+   * {@link applyCredentialChange}) precisely so there is still one writer.
    */
   const sshSeeded = useRef<SshSecretSeeded>(NOTHING_SEEDED);
   /**
@@ -523,49 +637,21 @@ export function HostEditorDialog({
         setReady(true);
         // Skipped for a vault-bound row: it owns no accounts, so this returns an
         // empty batch, and asking makes the blank draft look like a read result.
+        // It is also what makes this effect no route to the secrets a DETACH
+        // copies in later - the row is bound when this runs, and the token this
+        // effect is keyed on does not move when the binding does. That arm runs
+        // {@link seedSshSecrets} itself.
         if (!inline) return;
-        try {
-          const secrets = await getHostSshSecrets(host.id);
-          if (stale()) return;
-          // Per field, and only where the user has not typed. `stale()` is not
-          // enough on its own: it asks whether the form has moved to a DIFFERENT
-          // ROW, and typing does not move it. The form has been interactive since
-          // `setReady(true)` above, and this read is three sequential
-          // `keyring::Entry::get_password` calls on macOS, any of which can stop
-          // on an OS access prompt - so "the user typed a new password into a
-          // field this seed is about to fill" is an ordinary race, not a corner.
-          // Seeding over it would send the OLD secret back on save (the field
-          // counts as touched) and report success, silently losing the rotation.
-          //
-          // Read out here rather than inside the updater: the ref is already
-          // current at this point, and a keystroke arriving between this call and
-          // the updater running queues its own patch AFTER this one, so it wins
-          // anyway.
-          const typed = sshTouched.current;
-          setSshCred((d) => ({
-            ...d,
-            password: typed.password ? d.password : (secrets.password ?? ""),
-            privateKey: typed.privateKey ? d.privateKey : (secrets.privateKey ?? ""),
-            keyPassphrase: typed.keyPassphrase ? d.keyPassphrase : (secrets.keyPassphrase ?? ""),
-          }));
-          // What the user can now SEE, which is what licenses a later clear -
-          // see `sshSecretsForSave`. Derived from the same `typed` the seed just
-          // yielded to, and from the value that actually arrived: a field the
-          // seed skipped is NOT seeded however much the keychain held, because
-          // the stored value never reached the screen, and a field seeded with
-          // nothing is not either. Computed out here rather than inside the
-          // updater, which must stay pure - React is free to call it twice.
-          sshSeeded.current = {
-            password: !typed.password && !clearsSecret(secrets.password ?? ""),
-            privateKey: !typed.privateKey && !clearsSecret(secrets.privateKey ?? ""),
-            keyPassphrase: !typed.keyPassphrase && !clearsSecret(secrets.keyPassphrase ?? ""),
-          };
-        } catch (e) {
-          // Reported rather than swallowed, and the form stays usable: the three
-          // fields are untouched, so a save now writes none of them and the
-          // stored secrets are left exactly as they are.
-          if (!stale()) setError(e instanceof Error ? e.message : String(e));
-        }
+        // Awaited, unlike the detach arm's call: `load` is already voided, so
+        // there is nothing here for the await to hold up.
+        await seedSshSecrets({
+          hostId: host.id,
+          stale,
+          sshTouched,
+          sshSeeded,
+          setSshCred,
+          onError: setError,
+        });
         return;
       }
 
@@ -1459,12 +1545,26 @@ export function HostEditorDialog({
         // that removed a caller-vs-record disagreement rather than merely
         // guarding one.
         const result = await detachHostFromVault({ host: existing });
-        // Non-secret fields only, seeded from what the write RETURNED - the
-        // same rule this function's header states for `setExisting`, applied
-        // one level down. `sshTouched`/`sshSeeded` deliberately stay as they
-        // are - seeding them would license a later blank Save to clear the
-        // secrets `detachHostFromVault` just copied (the rule
-        // `sshSecretsForSave` in `editor/sshSecrets.ts` enforces).
+        // Non-secret fields from what the write RETURNED - the same rule this
+        // function's header states for `setExisting`, applied one level down -
+        // and then the SECRET read, which is a fix rather than a convenience.
+        //
+        // This arm used to blank the three secret fields and deliberately leave
+        // `sshTouched`/`sshSeeded` alone, on the grounds that seeding them would
+        // license a later blank Save to clear what `detachHostFromVault` had just
+        // copied. The conclusion was right; the route it left behind was dead.
+        // The detached record HOLDS a private key, so `hasStoredPrivateKey` is
+        // true and `keyBodyHelp` in `editor/SshCredentialSection.tsx` tells the
+        // user to wait for that key to load into the textarea, clear it and save
+        // - and nothing was ever going to load it. Clearing an already-empty box
+        // and saving sent nothing, because a field that is touched, blank and
+        // unseeded is omitted, and the sentence under it said the opposite.
+        //
+        // What licenses the clear was never the flag, it is the BODY REACHING
+        // THE SCREEN, and {@link seedSshSecrets} is what puts it there. Both
+        // records are still written by that read alone and still derived from
+        // what it actually returned, so the rule `editor/sshSecrets.ts` enforces
+        // is untouched - and the sentence under the textarea is now true.
         if (result.host.protocol === "ssh" && result.host.credential.kind === "inline") {
           setSshCred({
             user: result.host.credential.user,
@@ -1472,6 +1572,25 @@ export function HostEditorDialog({
             password: "",
             privateKey: "",
             keyPassphrase: "",
+          });
+          // NOT awaited, unlike the load effect's call, and that is the same
+          // trade the load effect takes when it arms the form before reading:
+          // `changing` is still set here, and it disables Save, Test and the
+          // Confirm button - so awaiting a read that can stop on up to three
+          // macOS access prompts would freeze the whole form behind them. It
+          // needs no `catch`: every failure inside it goes to `onError`.
+          void seedSshSecrets({
+            // The record the WRITE returned, on this function's own rule, not
+            // `existing` - which is still the bound record at this point.
+            hostId: result.host.id,
+            // Same question the load effect asks, asked from here because this
+            // outlives the arm that started it: the editor can be pointed at
+            // another row while the read is in flight.
+            stale: () => applied.current !== token,
+            sshTouched,
+            sshSeeded,
+            setSshCred,
+            onError: setError,
           });
         } else if (result.host.protocol === "rdp" && result.host.credential.kind === "inline") {
           setRdpCred({

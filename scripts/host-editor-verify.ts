@@ -607,6 +607,31 @@ function enclosingBlock(node: ts.Node): ts.Block | null {
 }
 
 /** Whether `ancestor` is on `node`'s parent chain. */
+/**
+ * Every `<ref>.current = …` assignment under `root`.
+ *
+ * A regex over the text cannot tell the assignment from a read, from the same
+ * words inside a comment, or from a property called `current` on something
+ * else - and what this is used to count is the set of places allowed to claim
+ * that a stored secret reached the screen, which is the claim every clear in
+ * `sshSecretsForSave` rests on.
+ */
+function refWrites(root: ts.Node, sf: ts.SourceFile, ref: string): ts.BinaryExpression[] {
+  const out: ts.BinaryExpression[] = [];
+  const visit = (n: ts.Node): void => {
+    if (
+      ts.isBinaryExpression(n) &&
+      n.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+      norm(n.left.getText(sf)) === `${ref}.current`
+    ) {
+      out.push(n);
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(root);
+  return out;
+}
+
 function isDescendantOf(node: ts.Node, ancestor: ts.Node): boolean {
   for (let n: ts.Node | undefined = node.parent; n; n = n.parent) {
     if (n === ancestor) return true;
@@ -915,11 +940,41 @@ console.log("\n[1] the keychain seed cannot overwrite a field the user typed");
   const effect = between(editorSrc, "if (applied.current === token) return;", "void load();");
   check("the load effect was found", effect.length > 1000, effect.length);
 
-  const seed = between(
-    effect,
-    "const secrets = await getHostSshSecrets(host.id);",
-    "} catch (e) {",
+  // THE SEED IS ITS OWN FUNCTION NOW, and this region moved with it rather than
+  // the checks below being rewritten: every assertion in this section is the one
+  // it was, over the same statements, because the statements did not change - only
+  // where they live did. What moved them is the detach arm needing the same read
+  // (see section [9]), and the reason it is one function and not two blocks is
+  // that `sshSeeded` licenses `sshSecretsForSave` to send the store's CLEAR
+  // instruction: two derivations of it are two answers to "may this blank field
+  // delete something".
+  //
+  // Anchored on the declaration and closed at the component, so the region is the
+  // function and nothing after it.
+  const seedFn = between(
+    editorSrc,
+    "async function seedSshSecrets(",
+    "export function HostEditorDialog(",
   );
+  check("the seed function was found", seedFn.length > 500, seedFn.length);
+  // And the effect REACHES it rather than carrying a copy - the half a region
+  // move cannot assert on its own. Without the second conjunct this passes over
+  // an effect that calls the function AND still seeds inline beside it.
+  check(
+    "the load effect reaches that one function instead of seeding inline",
+    effect.includes("seedSshSecrets({") && !effect.includes("sshSeeded.current = {"),
+    {
+      calls: effect.includes("seedSshSecrets({"),
+      seedsInline: effect.includes("sshSeeded.current = {"),
+    },
+  );
+  check(
+    "and the keychain read itself happens in exactly one place in the file",
+    count(editorSrc, /getHostSshSecrets\(/g) === 1,
+    count(editorSrc, /getHostSshSecrets\(/g),
+  );
+
+  const seed = between(seedFn, "const secrets = await getHostSshSecrets(hostId);", "} catch (e) {");
   check("the keychain seed was found", seed.length > 100, seed.length);
   check(
     "it is applied only once the row is still the one that asked for it",
@@ -959,7 +1014,11 @@ console.log("\n[1] the keychain seed cannot overwrite a field the user typed");
   // the seed runs. A `useState` value here is the one captured before the user
   // could have typed anything, which is the defect wearing the fix's shape.
   const guardName = [...guards][0] ?? "";
-  const guardSource = assignedIn(effect, guardName);
+  // Over the seed FUNCTION, which is where the record is now read - the same
+  // statement, one scope out. Reading it from the effect's region would find
+  // nothing and report an empty string, which is a pass shape this check must
+  // not have.
+  const guardSource = assignedIn(seedFn, guardName);
   check(
     "and that record is read live from a ref, not captured from state",
     /\.current$/.test(guardSource),
@@ -1010,11 +1069,39 @@ console.log("\n[1] the keychain seed cannot overwrite a field the user typed");
   }
   // Outside the updater, which must stay pure: React may call an updater twice,
   // the whole lesson is about what a value read in the wrong place says.
+  //
+  // BY PARENTAGE, and that is a correction rather than a tightening. This
+  // compared `indexOf("sshSeeded.current = {")` against `indexOf("}));")`, and
+  // it PASSED over a mutation that moved the write inside the updater -
+  // rewriting the updater to a block body takes the `}));` anchor with it, the
+  // missing anchor scores -1, and every positive index beats -1. So the check
+  // was green in exactly the shape it names. Measured under the mutation, not
+  // reasoned about. Asking the AST who the write's ancestors are has no
+  // absent-anchor state to score.
+  const seedFnDecl = findFunctionBody(editorSf, "seedSshSecrets");
   check(
-    "and it is written outside the draft updater",
-    seed.indexOf("sshSeeded.current = {") > seed.indexOf("}));"),
-    { seededAt: seed.indexOf("sshSeeded.current = {"), updaterEndsAt: seed.indexOf("}));") },
+    "the seed function's body was found for the purity pin (compiler API)",
+    seedFnDecl !== null,
   );
+  if (seedFnDecl) {
+    const updaters = findCalls(seedFnDecl, editorSf, ["setSshCred"]);
+    const seededWritesInFn = refWrites(seedFnDecl, editorSf, "sshSeeded");
+    check(
+      "the draft updater and the seeded write were both found",
+      updaters.length === 1 && seededWritesInFn.length === 1,
+      {
+        updaters: updaters.length,
+        writes: seededWritesInFn.length,
+      },
+    );
+    if (updaters.length === 1 && seededWritesInFn.length === 1) {
+      check(
+        "and the seeded record is written outside the draft updater, which must stay pure",
+        !isDescendantOf(seededWritesInFn[0], updaters[0]),
+        { inside: isDescendantOf(seededWritesInFn[0], updaters[0]) },
+      );
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1900,8 +1987,57 @@ console.log(
   }
 
   // -------------------------------------------------------------------------
-  // The detach arm seeds no secret.
+  // The detach arm puts no secret in the draft ITSELF, and claims no seed a
+  // read did not produce.
+  //
+  // WHAT THIS PIN USED TO SAY, AND WHY IT CHANGED. It used to be "the detach arm
+  // marks nothing touched or seeded", on the grounds that seeding would license a
+  // later blank Save to clear what `detachHostFromVault` had just copied. The
+  // conclusion was right and the route it left behind was dead: the detached
+  // record HOLDS a private key, so `keyBodyHelp` renders its stored arm and tells
+  // the user to wait for that key to load into the textarea, clear it and save -
+  // and nothing loaded it, because a bound row's load returns before the secret
+  // read and the effect's `token` does not move on a detach. So the arm now runs
+  // the same `seedSshSecrets` the load effect runs.
+  //
+  // THE INVARIANT THAT REPLACES IT IS THE ONE THAT WAS ALWAYS DOING THE WORK:
+  // `sshSeeded` may only be written from what a keychain read actually returned.
+  // That is what licenses every clear `sshSecretsForSave` performs - the flag
+  // asserts a value reached the screen - so what must stay pinned is not "the
+  // detach arm writes nothing" but "nothing writes it except the read". Deleting
+  // the check instead of moving it would have left the licence unguarded at the
+  // exact moment a second caller appeared.
+  //
+  // Note the shape the OLD check would have had here: it tests the detach block's
+  // text for `sshSeeded.current =`, and the write now lives one scope out inside
+  // `seedSshSecrets`, so it would have stayed GREEN over this whole change while
+  // its own message went false. That is why the pin below is over the FILE and
+  // over parentage, not over this block's text.
   // -------------------------------------------------------------------------
+  const seedFnBody = findFunctionBody(editorSf, "seedSshSecrets");
+  check("the seed function's body was found (compiler API)", seedFnBody !== null);
+  const seededWrites = refWrites(editorSf, editorSf, "sshSeeded");
+  const seededResets = seededWrites.filter(
+    (w) => norm(w.right.getText(editorSf)) === "NOTHING_SEEDED",
+  );
+  const seededClaims = seededWrites.filter(
+    (w) => norm(w.right.getText(editorSf)) !== "NOTHING_SEEDED",
+  );
+  check(
+    "sshSeeded is written in exactly two places in the whole file",
+    seededWrites.length === 2,
+    seededWrites.map((w) => norm(w.right.getText(editorSf)).slice(0, 48)),
+  );
+  check(
+    "one of them is the per-row reset to the shared NOTHING_SEEDED constant, which claims nothing",
+    seededResets.length === 1,
+    seededResets.length,
+  );
+  check(
+    "and the ONLY write that claims a value reached the screen is inside seedSshSecrets, so it can only come from a read",
+    seededClaims.length === 1 && seedFnBody !== null && isDescendantOf(seededClaims[0], seedFnBody),
+    seededClaims.map((w) => norm(w.right.getText(editorSf)).slice(0, 48)),
+  );
   const detachIf = applyBody
     ? findIfByCondition(applyBody, editorSf, 'change.kind === "detach"')
     : null;
@@ -1927,12 +2063,57 @@ console.log(
         prop.initializer.getText(editorSf),
       );
     }
-    const detachText = detachBlock.getText(editorSf);
+    // Neither record is written HERE, which is the half of the old pin that
+    // survives unchanged: the arm may reach the read, and it may not shortcut it
+    // by asserting the read's conclusion.
     check(
-      "and marks nothing touched or seeded - a later blank Save must not be licensed to clear what detachHostFromVault just copied",
-      !/sshSeeded\.current =/.test(detachText) && !/sshTouched\.current =/.test(detachText),
-      detachText,
+      "the detach arm writes neither ref itself, so nothing in it can claim a seed no read produced",
+      refWrites(detachBlock, editorSf, "sshSeeded").length === 0 &&
+        refWrites(detachBlock, editorSf, "sshTouched").length === 0,
+      {
+        seeded: refWrites(detachBlock, editorSf, "sshSeeded").length,
+        touched: refWrites(detachBlock, editorSf, "sshTouched").length,
+      },
     );
+    const detachReadCalls = findCalls(detachBlock, editorSf, ["seedSshSecrets"]);
+    check(
+      "it reaches the read instead, exactly once - the route keyBodyHelp's stored arm names",
+      detachReadCalls.length === 1,
+      detachReadCalls.length,
+    );
+    if (detachReadCalls.length === 1) {
+      // The record the WRITE returned. `existing` is still the BOUND record at
+      // this point in the arm, and a host bound to an identity owns no accounts -
+      // `getHostSshSecrets` answers `{}` for one - so reading off it would seed
+      // nothing and leave the field blank and unseeded, which is the defect this
+      // whole call exists to remove, arrived at from one identifier.
+      check(
+        "over the record the write RETURNED, never the bound one this form loaded",
+        argTexts(detachReadCalls[0], editorSf)[0]?.includes("hostId:result.host.id") === true,
+        argTexts(detachReadCalls[0], editorSf)[0]?.slice(0, 80),
+      );
+      // The INNERMOST enclosing condition, pinned by value rather than asked
+      // whether an SSH test appears somewhere up the chain: the RDP arm has no key
+      // body to load, and a detach whose record did not come back inline owns no
+      // accounts to read.
+      const readConds = ifConditionsEnclosing(detachReadCalls[0], editorSf);
+      check(
+        "and only where the returned record is an inline SSH row",
+        norm(readConds[0] ?? "") ===
+          norm('result.host.protocol === "ssh" && result.host.credential.kind === "inline"'),
+        readConds[0],
+      );
+      // NOT awaited, and that is the claim rather than an accident of style:
+      // `changing` is still set inside this arm and it disables Save, Test and
+      // Confirm, so awaiting a read that can stop on up to three macOS access
+      // prompts freezes the form behind them - the trade the load effect already
+      // refuses when it arms the form before reading.
+      check(
+        "and it is fired rather than awaited, so a macOS access prompt cannot freeze the form behind `changing`",
+        detachReadCalls[0].parent.kind === ts.SyntaxKind.VoidExpression,
+        ts.SyntaxKind[detachReadCalls[0].parent.kind],
+      );
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -3646,7 +3827,13 @@ console.log(
   //          the number came from.
   //          Measured identically over three file sets - the dialog alone, the
   //          two `.tsx` sources, and all four source files - so the control's
-  //          own wording does not change the answer.
+  //          own wording does not change the answer. SCOPE DOES CHANGE IT,
+  //          ONCE, which those three cannot see: run the same reformat over
+  //          all of `src/` and the figure is 26. The twenty-sixth is section
+  //          [10]'s `Password is required` pin, which reads
+  //          `editor/RdpCredentialSection.tsx` - a file none of the three sets
+  //          above reformats, since adding it to any of them takes the figure
+  //          to 26.
 }
 
 /**
