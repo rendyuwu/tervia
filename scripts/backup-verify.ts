@@ -1096,6 +1096,82 @@ check(
   [["inline", "inline"], 0],
 );
 
+// THE MIRROR DIRECTION. Every fixture above supplies an incoming row whose OWN
+// binding is an identity reference, `inlineOnly` just above being the one
+// exception - and it passes an empty `existing`, so nothing above exercises a
+// file row that ARRIVES inline over a host this machine has already moved into
+// the vault. That is the direction `resolveIdentityBindings` used to return out
+// of before its policy could ever be asked - see the module's own doc for the
+// argument. Three fixtures, mirroring the identity-side ones above them.
+//
+// THE CASE THIS SECTION EXISTS TO CLOSE. `h-11` was moved into the vault on this
+// machine; the file being imported was made before that move, so its row for
+// `h-11` is inline. Applying it would unbind the vault identity and write the
+// file's inline fields over it - the mirror of `overSaved` above, caught the same
+// way: `isSameIdentity` answers false for an inline `wanted` unconditionally, so
+// the saved binding is kept and the row is counted in `dropped`, never `applied`.
+const savedVaultHost: SshHost = {
+  ...sshHost(ssh({ id: "h-11" })),
+  credential: { kind: "identity", identityId: "i-1" },
+};
+const declineInline = resolveIdentityBindings(
+  [host(ssh({ id: "h-11" }))],
+  [savedVaultHost],
+  NO_IDENTITIES,
+);
+check(
+  "an incoming inline row over a saved identity binding keeps the saved binding",
+  [declineInline.hosts[0].credential, declineInline.dropped, declineInline.applied],
+  [{ kind: "identity", identityId: "i-1" }, 1, 0],
+);
+// THE FIRST CASE THIS STOPS FROM OVER-REACHING. A saved INLINE host is not this
+// case: there is no vault binding to unbind, so the file's own row is honoured -
+// the same "nothing to report" outcome 1 already gives its own mirror, and an
+// implementation that declines an inline row whenever ANY record is saved under
+// its id, rather than only a saved IDENTITY one, reports `dropped: 1` here where
+// the right answer is 0.
+const overSavedInlineHost: SshHost = {
+  ...sshHost(ssh({ id: "h-12" })),
+  credential: {
+    kind: "inline",
+    hostId: "h-12",
+    user: "old-user",
+    authMode: "password",
+    hasPassword: true,
+    hasPrivateKey: false,
+    hasKeyPassphrase: false,
+  },
+};
+const overSavedInline = resolveIdentityBindings(
+  [
+    host(
+      ssh({
+        id: "h-12",
+        credential: { kind: "inline", hostId: "h-12", user: "new-user", authMode: "password" },
+      }),
+    ),
+  ],
+  [overSavedInlineHost],
+  NO_IDENTITIES,
+);
+check(
+  "an incoming inline row over a saved inline host is honoured, not the saved one",
+  [sshInline(overSavedInline.hosts[0])?.user, overSavedInline.dropped],
+  ["new-user", 0],
+);
+// THE SECOND CASE. Nothing is saved under `h-13` at all, so there is no vault
+// binding for the file's inline row to unbind - declining it here would blank the
+// credential of every host arriving on a fresh machine, which is exactly what
+// `fresh` above already refuses to do for the identity-side row. An
+// implementation that declines every inline row outright, with no saved-record
+// guard at all, reports `dropped: 1` here where the right answer is 0.
+const freshHostInline = resolveIdentityBindings([host(ssh({ id: "h-13" }))], [], NO_IDENTITIES);
+check(
+  "an incoming inline row with no saved record is honoured, and counted nowhere",
+  [sshInline(freshHostInline.hosts[0])?.user, freshHostInline.dropped, freshHostInline.applied],
+  ["root", 0, 0],
+);
+
 console.log("\n[protocol conflicts] the other way a merge deletes a secret nothing copied");
 // `h-7` is the same saved SSH host, holding the same private key; this time the
 // file says it is an RDP host. An RDP record cannot NAME `privateKey` or
@@ -2354,6 +2430,21 @@ function ifsIn(root: ts.Node | null): ts.IfStatement[] {
   return out;
 }
 
+/** Every `return` inside `root`, in source order. The same shape as
+ *  {@link ifsIn}, needed because {@link returnExprOf} keeps only the FIRST
+ *  return - `keyRecord`'s conservative arm returns bare `key` before its object
+ *  literal, so a pin on the kept fields has to pick the second one out by hand. */
+function returnsIn(root: ts.Node | null): ts.ReturnStatement[] {
+  const out: ts.ReturnStatement[] = [];
+  if (!root) return out;
+  const visit = (n: ts.Node): void => {
+    if (ts.isReturnStatement(n)) out.push(n);
+    ts.forEachChild(n, visit);
+  };
+  visit(root);
+  return out;
+}
+
 /**
  * How many declarations `functionNamed` would have matched, over the same
  * whole-SourceFile search. `functionNamed` itself keeps only the LAST one, so a
@@ -2597,13 +2688,16 @@ check(
 );
 // The two arms of `keyRecord` are a pair, and a check on one is satisfied by an
 // implementation that gets the other wrong - so both are in one condition. A key
-// that is NEW keeps the file's triple whatever landed, because there is nothing
-// stored to keep, and its `hasPrivateKey` stays false, so the fingerprint reads as
-// metadata for a key still to be added rather than a claim about one the store
-// holds. A key already here whose body DID land keeps the file's triple too, over
-// the private key it actually describes.
+// that is NEW keeps the file's four material facts whatever landed, because
+// there is nothing stored to keep, and its `hasPrivateKey` stays false, so the
+// fingerprint reads as metadata for a key still to be added rather than a claim
+// about one the store holds. A key already here whose body DID land keeps the
+// file's four facts too, over the private key it actually describes. The fourth
+// - `encrypted` - is not cosmetic: the file's answer describes another
+// machine's key body, and left standing over a stored body nobody replaced it
+// either warns about a row that is fine or silences the warning a row needs.
 check(
-  "nothing stored, or the body landed: either way the file's triple wins",
+  "nothing stored, or the body landed: either way the file's four facts win",
   ifsIn(keyRecordFn).map((s) => exprOf(s.expression))[0] ?? "(missing)",
   squash("!stored || landedBody"),
 );
@@ -2611,6 +2705,34 @@ check(
 // a decoy `if` added earlier in the same body - ahead of the real, mutated one -
 // would be what that index reads instead.
 check("and keyRecord has exactly one if statement", ifsIn(keyRecordFn).length, 1);
+// THE FOURTH FIELD, PINNED BECAUSE NOTHING ELSE CAN REACH IT. `keyRecord` is
+// module-private, so no fixture here can call it to observe its behaviour, and
+// deleting `encrypted: stored.encrypted` from the object literal below compiles
+// clean - the result is still a valid `VaultKey` with the field simply absent.
+// Proved rather than assumed: deleting that line left `backup-verify`,
+// `vault-draft-verify` and `key-inspect-verify` all at exit 0, which is what
+// makes this a pin and not a note.
+const keyRecordKeptFields = returnsIn(keyRecordFn)
+  .map((r) => r.expression)
+  .find((e): e is ts.ObjectLiteralExpression => !!e && ts.isObjectLiteralExpression(e));
+check(
+  "the stored record's four material facts win over the file's when nothing landed",
+  keyRecordKeptFields?.properties.map((p) =>
+    ts.isSpreadAssignment(p)
+      ? `...${exprOf(p.expression)}`
+      : (p.name?.getText(applySf) ?? "(computed)"),
+  ) ?? ["(missing)"],
+  ["...key", "keyType", "fingerprint", "publicKey", "encrypted"],
+);
+// COUNTED: `.find` above picks the FIRST return inside `keyRecordFn` whose
+// expression is an object literal, so a decoy returned earlier in the same body
+// would be what that pin reads instead of the real kept-fields object.
+check(
+  "and keyRecord returns exactly one object literal",
+  returnsIn(keyRecordFn).filter((r) => r.expression && ts.isObjectLiteralExpression(r.expression))
+    .length,
+  1,
+);
 
 console.log("\n[export source] what buildBackup names, which no fixture here can reach");
 // `buildBackup` calls `invoke`, so this half has no behavioural gate and cannot

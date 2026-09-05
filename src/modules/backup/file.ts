@@ -103,7 +103,6 @@ import type {
   SshCredentialBinding,
   VaultAuthMode,
   VaultIdentity,
-  VaultIdentityBinding,
   VaultKey,
   VaultKeyType,
 } from "@/modules/vault/types";
@@ -894,13 +893,29 @@ export function normaliseIdentityKeys(
   return { identities: out, withoutKeys, keysDropped };
 }
 
-/** Whether the binding already saved here IS the one the file asked for, so
- *  keeping it costs the user nothing and there is nothing to report. */
+/**
+ * Whether the binding already saved here IS the one the file asked for, so
+ * keeping it costs the user nothing and there is nothing to report.
+ *
+ * `wanted` takes either binding union rather than `VaultIdentityBinding` alone,
+ * because the row asking is not always the identity side: an incoming INLINE
+ * row asking to unbind a saved identity is the mirror case
+ * {@link resolveIdentityBindings} now handles, and this is the one comparison
+ * that tells "nothing changed" apart from both directions without a second
+ * counting rule. `true` only when BOTH sides are identity references naming the
+ * same identity - an inline `wanted` can never match, since it carries no
+ * `identityId` to compare, which is exactly right: an inline row can never be
+ * "the same" as a saved identity binding.
+ */
 function isSameIdentity(
   saved: SshCredentialBinding | RdpCredentialBinding,
-  wanted: VaultIdentityBinding,
+  wanted: SshCredentialBinding | RdpCredentialBinding,
 ): boolean {
-  return saved.kind === "identity" && saved.identityId === wanted.identityId;
+  return (
+    saved.kind === "identity" &&
+    wanted.kind === "identity" &&
+    saved.identityId === wanted.identityId
+  );
 }
 
 /**
@@ -974,6 +989,18 @@ function isSameIdentity(
  * group label - which the group pass declines for the same reason. It is counted
  * in `dropped` and one edit changes it.
  *
+ * THE MIRROR DIRECTION IS THE SECOND REASON READ THE OTHER WAY, and it is why an
+ * incoming INLINE row is not a fourth outcome: a host moved into the vault on
+ * purpose and re-imported from a file made before the move arrives with an inline
+ * row over a SAVED IDENTITY binding, and that saved binding is still this
+ * machine's own current answer - the file's copy has no better claim on unbinding
+ * it than the identity-to-identity case above has on repointing it. Nothing is
+ * released either: the row is written with the saved identity binding still in
+ * place, so it owns no accounts of its own and neither `hostRefs` nor
+ * `storedFields` in `apply.ts` ever sees an inline row to build a reference for.
+ * Kept and counted in `dropped`, the same as every other row this outcome
+ * catches.
+ *
  * `dropped` counts only the rows where the file's binding was NOT honoured, so a
  * round trip of one machine's own backup reports zero on both counters.
  *
@@ -1001,15 +1028,33 @@ export function resolveIdentityBindings(
     // Read off `h` once: narrowing `h.protocol` below re-widens `h.credential`,
     // so the identity arm has to be captured before the protocol guard.
     const wanted = h.credential;
-    if (wanted.kind !== "identity") return h;
     const saved = byId.get(h.id);
-    // Outcome 2, and it needs BOTH halves. The row already carries the binding
-    // `sanitizeHost` preserved, so applying it is returning the row untouched -
-    // which also keeps it out of the protocol guard below and its narrowing.
-    if (!saved && identityIds.has(wanted.identityId)) {
-      applied++;
+    if (wanted.kind === "identity") {
+      // Outcome 2, and it needs BOTH halves. The row already carries the binding
+      // `sanitizeHost` preserved, so applying it is returning the row untouched -
+      // which also keeps it out of the protocol guard below and its narrowing.
+      if (!saved && identityIds.has(wanted.identityId)) {
+        applied++;
+        return h;
+      }
+    } else if (saved?.credential.kind !== "identity") {
+      // The mirror of outcome 2's own guard, for the other direction: an
+      // incoming INLINE row with nothing saved under its id, or a saved record
+      // that is itself inline, has no saved identity binding to unbind, so the
+      // file's row is honoured as it stands - the same "nothing to report" outcome
+      // 1 already gives its own mirror case, counted in neither direction.
       return h;
     }
+    // Outcome 3, now reached from both directions. `wanted` may be an identity
+    // asking to bind to a DIFFERENT identity than the one saved (the case this
+    // always caught), or - the case that used to return before reaching here at
+    // all - an inline row asking to UNBIND a saved identity outright. Neither is
+    // honoured, for the reason argued above: the saved binding is this machine's
+    // own current answer, and a file has no better claim on it than on the host's
+    // group label. `isSameIdentity` is what tells "nothing changed" apart from
+    // both without a second counting rule - it answers false for an inline
+    // `wanted` unconditionally, since only an identity reference can name the
+    // identity being kept.
     if (h.protocol === "ssh") {
       // `undefined` rather than a raw object: `sshBinding` owns the blank
       // fallback, so there is one spelling of "an inline binding with nothing in
