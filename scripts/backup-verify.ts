@@ -1239,10 +1239,22 @@ console.log(
 // stays that way - this is not a bug, it is the documented contract made
 // visible. But `resolveIdentityBindings` is exported, so a future caller could
 // reach it without that filter, and `applyV3`'s order is one edit away from
-// changing; this fixture is what would say so. An incoming inline SSH row over
-// a saved RDP record bound to an identity falls to the tail with no SSH record
-// to keep, so `keep` becomes a blank inline binding and the file's own
-// populated credential is lost - the real, current behaviour, asserted as such.
+// changing.
+//
+// WHAT WOULD SAY SO IS A SOURCE PIN, NOT THIS FIXTURE, and the distinction is
+// the whole reason both exist. This fixture calls `resolveIdentityBindings`
+// directly, so no edit at `applyV3`'s call site can redden it - what it does is
+// state the CONSEQUENCE of such an edit, in the behaviour of the function
+// itself. `[apply source] the credential passes are handed the FILTERED list`
+// below is what reddens: it reads `applyV3`'s call and asserts the argument.
+// Neither half is enough alone - the pin would say "the expression changed"
+// without saying what that costs, and this fixture says what it costs without
+// noticing the change.
+//
+// An incoming inline SSH row over a saved RDP record bound to an identity falls
+// to the tail with no SSH record to keep, so `keep` becomes a blank inline
+// binding and the file's own populated credential is lost - the real, current
+// behaviour, asserted as such.
 const savedRdpIdentity: RdpHost = {
   ...rdpHost(rdp({ id: "h-4" })),
   credential: { kind: "identity", identityId: "i-1" },
@@ -2370,17 +2382,17 @@ check(
 );
 
 // ============================================================================
-// SOURCE PINS. Three things in `apply.ts` that no fixture in a plain-node run can
+// SOURCE PINS. Four things in `apply.ts` that no fixture in a plain-node run can
 // reach, and each of them is one expression away from a silent credential loss.
 // ============================================================================
 //
 // `buildBackup` calls `invoke`, so the whole export half is unreachable from
-// here; `applyV3`'s `identityIds` set, its `landed` set and `keyRecord` are all
-// internal to a function that starts with one. Nor does the COMPILER see any of
-// them: each defect below is an edit between two expressions of the same type -
-// two `VaultIdentity[]`s, two `string`s, two `boolean`s - so `tsc` cannot tell
-// the wrong one from the right one, and without these pins nothing in the tree
-// looks at all.
+// here; `applyV3`'s `identityIds` set, the host list it hands its credential
+// passes, its `landed` set and `keyRecord` are all internal to a function that
+// starts with one. Nor does the COMPILER see any of them: each defect below is an
+// edit between two expressions of the same type - two `VaultIdentity[]`s, two
+// `Host[]`s, two `string`s, two `boolean`s - so `tsc` cannot tell the wrong one
+// from the right one, and without these pins nothing in the tree looks at all.
 //
 // READ OFF THE AST, AND ROOTED AT THE FUNCTION THAT OWNS THE EXPRESSION. A
 // substring search is the wrong instrument twice over: `refs` is assembled from
@@ -2695,6 +2707,50 @@ check(
   "and the SAVED half is there, so an identity this machine already holds counts as existing",
   [identityHalves.length, identityHalves[1] ?? "(missing)"],
   [2, squash("existingIdentities.map((i) => i.id)")],
+);
+
+console.log("\n[apply source] the credential passes are handed the FILTERED list");
+// THE MUTATION THIS EXISTS FOR compiles clean and makes the credential blanking
+// asserted in `[resolveIdentityBindings precondition]` above LIVE: hand
+// `resolveIdentityBindings` `parsed.hosts` instead of the survivors
+// `refuseProtocolConflicts` returned, and the cross-protocol row is back in
+// front of it - it falls to the tail with no same-protocol record to keep, so
+// the file's populated credential is replaced by a blank inline binding. Both
+// expressions are `Host[]`, so the compiler cannot tell them apart, and the
+// fixture above cannot see it either: it calls `resolveIdentityBindings`
+// directly, so nothing at this call site reaches it. That fixture states what
+// the edit COSTS; this is what notices the edit.
+const boundArgs = calls(applyV3Fn, "resolveIdentityBindings").map((c) =>
+  c.arguments.map((a) => exprOf(a)),
+);
+// COUNTED BY CONSTRUCTION: the whole list of calls is compared, not `[0]` of it,
+// so a second call inside `applyV3` - one reached without the filter, or one
+// added later beside this one - reddens this rather than sitting unread behind
+// an index. `calls` matches call expressions only, so the import clause naming
+// the same function is not one of them.
+check(
+  "resolveIdentityBindings is called once, over refuseProtocolConflicts' survivors",
+  boundArgs,
+  [["kinds.hosts", "existingHosts", "identityIds"].map(squash)],
+);
+// THE OTHER HALF OF THE SAME FACT, because `kinds.hosts` is the filtered list
+// only for as long as `kinds` is what `refuseProtocolConflicts` returned. Point
+// that name at anything else - `parsed` reshaped into the same field, a second
+// pass inserted between the two - and the pin above still passes while the
+// precondition is gone. Two checks, so one mutation reddens one of them and the
+// pair says which fact broke rather than that "the expression changed".
+//
+// COUNTED: `localInit` takes the LAST `const kinds` inside `applyV3Fn`, so a
+// decoy declaration in a sibling block would let the real, mutated one sit
+// unread while this compares the decoy's correct callee.
+const kindsInit = localInit(applyV3Fn, "kinds");
+check(
+  "and kinds is refuseProtocolConflicts' own return, which is what puts that pass first",
+  [
+    kindsInit && ts.isCallExpression(kindsInit) ? exprOf(kindsInit.expression) : "(not a call)",
+    countLocalInit(applyV3Fn, "kinds"),
+  ],
+  ["refuseProtocolConflicts", 1],
 );
 
 console.log(

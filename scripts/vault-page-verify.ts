@@ -902,23 +902,80 @@ console.log("\n[18] refs.ts and derive.ts do not duplicate keyMissingSecret's pr
   const refsSrc = readFileSync(join(root, "src/modules/vault/refs.ts"), "utf8");
   const deriveSrc = readFileSync(join(root, "src/modules/vault/page/derive.ts"), "utf8");
 
+  // COMMENTS OUT FIRST, so what follows counts the file's CODE. The invariant
+  // is ONE DEFINITION of "this key has no private half" - the convention
+  // refs.ts's own top-of-file doc states - and not the absence of a word. A doc
+  // comment that names the flag in prose is how a reader is told why some
+  // function does NOT read it, which is honest and is the opposite of a
+  // duplicate. The section's other half was scoped for exactly this reason
+  // (`keyRows`, below), and this half was not: unscoped, it banned the prose
+  // outright, and `keyNeedsPassphrase`'s doc had to reach for "the presence
+  // flag" and "both presence flags false" to stay under the count - the
+  // instrument shaping the writing instead of measuring it.
+  //
+  // A TEXT STRIP AND NOT A PARSE, which is what the rest of this file uses to
+  // read source and is enough here for a reason worth writing down rather than
+  // assuming: refs.ts holds no string literal containing `//` or `*/`, and if
+  // one ever appears the strip errs by eating the rest of that line - taking
+  // the real read with it and driving the count to 0, which reddens. The `[^:]`
+  // is what keeps a `//` inside a URL from being read as a comment in the first
+  // place. Only refs.ts is stripped; derive.ts is read raw below, where the
+  // assertion is about one function's body rather than a count.
+  const codeOnly = (src: string): string =>
+    src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
+  const refsCode = codeOnly(refsSrc);
+
+  // THE STRIP IS ITSELF AN INSTRUMENT, exercised on constructed text rather
+  // than trusted. UNDER-stripping is the dangerous direction: it silently
+  // restores the whole-file ban, and the count below stays at 1 and stays green
+  // right up until someone writes the honest sentence. OVER-stripping is the
+  // safe one - it takes the real read away too and the count falls to 0, which
+  // reddens. The real file cannot be mutated to show either, because it is the
+  // module under test, so both cases are written out here: one definition with
+  // the flag named in prose twice beside it, and the same text with the
+  // delegation replaced by a second genuine read.
+  const oneDefinition = [
+    "/** Names `hasPrivateKey` in prose to say why this does not read it. */",
+    "export function keyNeedsPassphrase(key: VaultKey): boolean {",
+    "  return !keyMissingSecret(key); // and not the hasPrivateKey flag itself",
+    "}",
+    "export function keyMissingSecret(key: VaultKey): boolean {",
+    "  return !key.hasPrivateKey;",
+    "}",
+  ].join("\n");
+  const twoReads = oneDefinition.replace("!keyMissingSecret(key)", "!key.hasPrivateKey");
+  check(
+    "the strip keeps prose out of the count: one definition, flag named in two comments",
+    (codeOnly(oneDefinition).match(/hasPrivateKey/g) ?? []).length,
+    1,
+  );
+  check(
+    "and a second genuine read in code still counts as two",
+    (codeOnly(twoReads).match(/hasPrivateKey/g) ?? []).length,
+    2,
+  );
+
   // Locate keyMissingSecret's own body FIRST, as ITS OWN check: a rename here
   // must fail loudly rather than the two checks below silently running over
   // `null`. The anchor is the function's signature line, which mentions
   // neither "hasPrivateKey" nor "keyMissingSecret(key)" - the two substrings
   // checked against the captured body below - so neither of those checks can
-  // be satisfied by the anchor alone.
+  // be satisfied by the anchor alone. Over `refsCode` and not `refsSrc`, so the
+  // located body and the count below are answering about the same text.
   const keyMissingSecretMatch =
-    /function keyMissingSecret\(key: VaultKey\): boolean \{([\s\S]*?)\n\}/.exec(refsSrc);
+    /function keyMissingSecret\(key: VaultKey\): boolean \{([\s\S]*?)\n\}/.exec(refsCode);
   ok("keyMissingSecret's body is located in refs.ts", keyMissingSecretMatch !== null);
   const keyMissingSecretBody = keyMissingSecretMatch?.[1] ?? "";
 
-  // `hasPrivateKey` names the flag exactly once in the whole file. Two means
-  // the `key` arm of `identityMissingSecret` asked the question itself again
-  // instead of delegating - duplication rather than the one shared leaf the
-  // module's own top-of-file doc requires.
-  const hasPrivateKeyCount = (refsSrc.match(/hasPrivateKey/g) ?? []).length;
-  check("refs.ts names hasPrivateKey exactly once", hasPrivateKeyCount, 1);
+  // The flag is READ in exactly one place in refs.ts. Two means some other
+  // predicate in the module answered the private-half question itself instead
+  // of routing through `keyMissingSecret`, and there are two ways to get there:
+  // the `key` arm of `identityMissingSecret`, and - the one that actually
+  // arose - `keyNeedsPassphrase`, whose private-half conjunct is a second read
+  // of the same flag unless it delegates. This check is what requires that
+  // delegation; nothing else in the tree does.
+  const hasPrivateKeyCount = (refsCode.match(/hasPrivateKey/g) ?? []).length;
+  check("refs.ts's CODE reads hasPrivateKey exactly once", hasPrivateKeyCount, 1);
   ok(
     "and that one occurrence sits inside keyMissingSecret's own body",
     keyMissingSecretBody.includes("hasPrivateKey"),
@@ -1149,17 +1206,37 @@ process.exit(failed === 0 ? 0 : 1);
 // confirm this table is still honest.
 //
 //   Y3 (measured): refs.ts's `key` arm duplicates          section 18's
-//     `!key.hasPrivateKey` AND derive.ts's `keyRows`          "hasPrivateKey
-//     reads `!key.hasPrivateKey` directly, BOTH at once -     exactly once" AND
-//     before the fix, all of vault-page (91), hosts-page       "derive.ts names
-//     (58) and vault-shell (76) stayed EXIT=0 and              hasPrivateKey
-//     `keyMissingSecret` became a dead export unnoticed         nowhere at all"
+//     `!key.hasPrivateKey` AND derive.ts's `keyRows`          "refs.ts's CODE
+//     reads `!key.hasPrivateKey` directly, BOTH at once -     reads hasPrivateKey
+//     before the fix, all of vault-page (91), hosts-page      exactly once" AND
+//     (58) and vault-shell (76) stayed EXIT=0 and             "keyRows's body
+//     `keyMissingSecret` became a dead export unnoticed       does not read
+//                                                              .hasPrivateKey
+//                                                              directly"
 //   Y3a: refs.ts half of Y3 alone                           section 18's
-//                                                              "hasPrivateKey
+//                                                              "refs.ts's CODE
+//                                                              reads
+//                                                              hasPrivateKey
 //                                                              exactly once"
 //   Y3b: derive.ts half of Y3 alone                         section 18's
-//                                                              "hasPrivateKey
-//                                                              nowhere at all"
-//                                                              AND "keyRows
+//                                                              "keyRows's body
+//                                                              does not read
+//                                                              .hasPrivateKey
+//                                                              directly" AND
+//                                                              "keyRows
 //                                                              computes... by
 //                                                              CALLING"
+//
+// Both refs.ts checks in section 18 are now scoped to that file's CODE, with
+// comments stripped, so a doc comment may name the flag in prose. That strip is
+// the instrument, and it is exercised on constructed text rather than by
+// editing refs.ts, which is the module under test:
+//
+//   Y3c (measured): section 18's `codeOnly` replaced by     section 18's "the
+//     the identity function, i.e. no strip at all - the       strip keeps prose
+//     under-stripping direction, which silently restores      out of the count"
+//     the whole-file ban on honest prose. Counted 3 and 4     AND "a second
+//     against the two constructed cases. The real-file        genuine read in
+//     count check did NOT redden and cannot: refs.ts holds    code still counts
+//     no comment naming the flag today, so it reads 1         as two"
+//     either way. That is what these two are for.

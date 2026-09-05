@@ -234,10 +234,14 @@ fn merge_secrets(payload: &str, values: &[(SecretRef, String)]) -> Result<String
 /// Seal a payload, reading every credential out of the keychain here rather
 /// than taking it from the caller.
 ///
-/// `payload` is the five collections - hosts, groups, identities, keys, forward
-/// rules - as JSON; `refs` say which keychain entries to fold into it. A
-/// reference that resolves to nothing is skipped, not an error - a connection
-/// whose password was never saved is ordinary.
+/// `payload` is the caller's inventory as JSON - today the five collections
+/// (hosts, groups, identities, keys, forward rules). That parenthesis describes
+/// the one caller there is, not this parameter's contract: nothing here reads a
+/// collection name, for the same reason [`SecretRef`] takes its `group` from the
+/// caller verbatim, so a sixth collection or a different inventory sealed
+/// through this command needs no change on this side. `refs` say which keychain
+/// entries to fold into it. A reference that resolves to nothing is skipped, not
+/// an error - a connection whose password was never saved is ordinary.
 #[tauri::command]
 pub async fn backup_seal_payload(
     app: AppHandle,
@@ -329,8 +333,10 @@ fn split_groups(plain: &str, groups: &[String]) -> Result<(String, Map<String, V
 pub struct OpenedPayload {
     /// Pass to [`backup_apply_secrets`], then to [`backup_release`].
     handle: u32,
-    /// The payload with every requested group removed: the five collections'
-    /// metadata only, safe to hand to the webview's validator.
+    /// The payload with every requested group removed: the caller's inventory
+    /// metadata with no credential left in it, safe to hand to the webview's
+    /// validator. Today that inventory is the five collections; what this side
+    /// guarantees is only that the named groups are gone.
     payload: String,
 }
 
