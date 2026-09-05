@@ -1452,32 +1452,33 @@ export function HostEditorDialog({
         setExisting(saved);
         setChoice(currentCredentialChoice(saved));
       } else if (change.kind === "detach") {
-        // The identity row the picker already holds, not the (blank) draft:
-        // `SshCredentialSection`/`RdpCredentialSection` render nothing
-        // editable for a bound row, so there is no draft user/username to
-        // seed from.
-        const identity = identityRows.find(
-          (row) => row.identity.id === change.identityId,
-        )?.identity;
-        let result: { host: Host; warning?: string };
-        if (protocol === "ssh") {
-          const inline = {
-            user: identity?.username ?? "",
-            authMode: identity?.authMode ?? "password",
-          };
-          result = await detachHostFromVault({ host: existing, inline });
-          // Non-secret fields only. `sshTouched`/`sshSeeded` deliberately stay
-          // as they are - seeding them would license a later blank Save to
-          // clear the secrets `detachHostFromVault` just copied (the rule
-          // `sshSecretsForSave` in `editor/sshSecrets.ts` enforces). Re-pointed
-          // at the symbol rather than at the line range it used to name: that
-          // range was the head of that function's doc comment, which has since
-          // grown, and a range is exactly the kind of citation that rots.
-          setSshCred({ ...inline, password: "", privateKey: "", keyPassphrase: "" });
-        } else {
-          const inline = { username: identity?.username ?? "", domain: identity?.domain ?? "" };
-          result = await detachHostFromVault({ host: existing, inline });
-          setRdpCred({ ...inline, password: "" });
+        // No `identityRows` lookup any more: `detachHostFromVault` no longer
+        // takes an `inline` argument to build, so there is nothing here left
+        // to build it FROM. It derives the non-secret fields itself, from the
+        // same identity it re-reads for the secrets - see its own doc for why
+        // that removed a caller-vs-record disagreement rather than merely
+        // guarding one.
+        const result = await detachHostFromVault({ host: existing });
+        // Non-secret fields only, seeded from what the write RETURNED - the
+        // same rule this function's header states for `setExisting`, applied
+        // one level down. `sshTouched`/`sshSeeded` deliberately stay as they
+        // are - seeding them would license a later blank Save to clear the
+        // secrets `detachHostFromVault` just copied (the rule
+        // `sshSecretsForSave` in `editor/sshSecrets.ts` enforces).
+        if (result.host.protocol === "ssh" && result.host.credential.kind === "inline") {
+          setSshCred({
+            user: result.host.credential.user,
+            authMode: result.host.credential.authMode,
+            password: "",
+            privateKey: "",
+            keyPassphrase: "",
+          });
+        } else if (result.host.protocol === "rdp" && result.host.credential.kind === "inline") {
+          setRdpCred({
+            username: result.host.credential.username,
+            domain: result.host.credential.domain ?? "",
+            password: "",
+          });
         }
         setExisting(result.host);
         setChoice(currentCredentialChoice(result.host));

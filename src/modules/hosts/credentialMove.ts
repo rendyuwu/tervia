@@ -30,7 +30,7 @@ import { CREDENTIAL_STAMP_INLINE, credentialStamp, type Host } from "./types";
 // module that spans both stores for that reason - see `TERVIA.md`'s "The
 // vault" section. `modules/hosts` may import `modules/vault` (it already
 // does, `./store.ts:2-21`); `modules/vault` must never import `modules/hosts`
-// as a value (`vault/refs.ts:19-21`), so this file lives here, not there.
+// as a value (`vault/refs.ts:25-27`), so this file lives here, not there.
 //
 // Every account it touches is built from `HOST_SSH_FIELDS` / `VAULT_SSH_FIELDS`
 // (`vault/resolve.ts`), never from a field name spelled out again - the one
@@ -103,7 +103,7 @@ export function convertMoves(host: Host, identityId: string, keyId: string | nul
  * The reverse: every account the identity and its key own, mapped onto the
  * accounts this host will own - gated by the HOST's protocol, because an
  * inline RDP arm has one account and `nextRdpCredential` throws if key
- * material is handed to it (`./store.ts:677-679`).
+ * material is handed to it (`./store.ts:681-683`).
  */
 export function detachMoves(
   host: Host,
@@ -133,7 +133,7 @@ export function detachMoves(
 
 /** Every move, sequentially - one keychain write is a read-modify-write of the
  *  whole secrets file on Linux and Windows, the same reason
- *  `deleteAccounts` (`./store.ts:547-551`) is not a `Promise.all`. Keyed by
+ *  `deleteAccounts` (`./store.ts:533-541`) is not a `Promise.all`. Keyed by
  *  `field`, so a caller reads "did this field copy" without re-deriving the
  *  account string. */
 async function copyMoves(
@@ -294,11 +294,11 @@ export function reusableVaultKey(keys: readonly VaultKey[], facts: VaultKeyFacts
  * the refusal that would have stopped it is the one it has just removed.
  *
  * IDENTITY FIRST. `deleteKey` refuses while any identity still names the key
- * (`vault/store.ts:337-347`), and the identity minted above names it, so the
+ * (`vault/store.ts:388-398`), and the identity minted above names it, so the
  * reverse order refuses its own cleanup and leaves both records behind.
  *
  * THE ACCOUNTS GO WITH THE RECORDS. Both deletes clear the record's vault
- * accounts as part of removing it (`vault/store.ts:323-327` and `:348-352`),
+ * accounts as part of removing it (`vault/store.ts:376-380` and `:401-405`),
  * which is the half that matters: step 4 put a SECOND copy of the host's secret
  * at those accounts, and a cleanup that dropped only the records would leave
  * exactly the extra copy this whole feature exists to avoid.
@@ -307,7 +307,7 @@ export function reusableVaultKey(keys: readonly VaultKey[], facts: VaultKeyFacts
  * `() => []` shortcut. It finds no holders on the path this runs on - nothing
  * binds the new identity - and it is the store's own guard over the one case
  * the provenance argument does not cover: `upsertHost` throwing at its
- * `persist` (`./store.ts:798-802`), where the record is already in the plugin's
+ * `persist` (`./store.ts:802-806`), where the record is already in the plugin's
  * cache with a debounced retry behind it, so a host DOES name this identity and
  * the delete is refused rather than stranding that host.
  *
@@ -660,10 +660,35 @@ function isRdpInlineArgs(inline: SshInlineArgs | RdpInlineArgs): inline is RdpIn
   return "username" in inline;
 }
 
+/**
+ * The inline shape a detach writes: the HOST's protocol says WHICH shape,
+ * the identity being detached says the non-secret VALUES inside it -
+ * {@link detachHostFromVault}'s own doc has the reasoning for why neither
+ * comes from a caller any more.
+ *
+ * `identity` is `null` for exactly one caller: the dangling-identity arm,
+ * which has nothing to derive from. It gets the empty user/username its own
+ * warning already promises, never a fallback parameter - the whole point of
+ * removing `inline` from the signature was that no caller, including this
+ * one, can hand it a value that disagrees with the identity.
+ */
+function detachInlineFields(
+  host: Host,
+  identity: VaultIdentity | null,
+): SshInlineArgs | RdpInlineArgs {
+  if (host.protocol === "rdp") {
+    return { username: identity?.username ?? "", domain: identity?.domain ?? "" };
+  }
+  return { user: identity?.username ?? "", authMode: identity?.authMode ?? "password" };
+}
+
 /** The inline arm the store overwrites `has*` flags on once it knows what it
  *  actually wrote - the same placeholder pattern `HostEditorDialog.tsx:737-741`
  *  hands over. Refuses rather than guessing when `inline`'s shape does not
- *  match the host's own protocol, which no caller should be able to reach. */
+ *  match the host's own protocol - a contract this function alone enforces:
+ *  its two call sites, both in {@link detachHostFromVault}, derive `inline`
+ *  from `host.protocol` itself via {@link detachInlineFields}, so neither can
+ *  construct the mismatch this throw guards against. */
 function buildInlineRecord(host: Host, inline: SshInlineArgs | RdpInlineArgs): Host {
   if (host.protocol === "rdp" && isRdpInlineArgs(inline)) {
     return {
@@ -700,7 +725,7 @@ function buildInlineRecord(host: Host, inline: SshInlineArgs | RdpInlineArgs): H
  *
  * WHY THESE ACCOUNTS ARE NOT ANYONE'S TO KEEP. The write refused, so the STORED
  * record is still `kind: "identity"` - and `secretFieldsFor` returns `[]` for a
- * non-inline credential (`./store.ts:203-207`), so the stored host names none of
+ * non-inline credential (`./store.ts:208-213`), so the stored host names none of
  * these accounts. They hold bytes only because `copyMoves` put them there a few
  * statements earlier, in this call. The adjacent case lands the same way: if an
  * earlier `releaseStaleAccounts` failure had left an orphan at one of these
@@ -716,7 +741,7 @@ function buildInlineRecord(host: Host, inline: SshInlineArgs | RdpInlineArgs): H
  *
  * THE RE-READ, which is a guard and not a formality. Two paths end with the
  * stored record already INLINE and naming these very accounts: `upsertHost`
- * throwing at its `persist` (`./store.ts:798-802`), where the record is in the
+ * throwing at its `persist` (`./store.ts:802-806`), where the record is in the
  * plugin's cache with a debounced retry behind it, and a concurrent writer that
  * detached this host first - which is exactly what a stamp refusal reports.
  * Deleting there would not strand bytes, it would destroy the host's only copy
@@ -761,7 +786,7 @@ async function undoDetachCopies(
  * A missing identity does NOT refuse: the host is already unable to connect,
  * and refusing would leave it that way permanently. Copy nothing and return a
  * `warning` naming the missing identity - the `VaultUpsert.warning` shape
- * (`vault/store.ts:28-33`) is the precedent. The same treatment applies, one
+ * (`vault/store.ts:31-36`) is the precedent. The same treatment applies, one
  * level down, to a dangling `keyId` on an identity that IS found: the
  * password still copies and the host still detaches, and only the key
  * material is reported missing.
@@ -773,12 +798,27 @@ async function undoDetachCopies(
  * because there is no `secrets_list`. {@link undoDetachCopies} takes them back.
  * The missing-identity arm below needs none of that: it copies nothing, so a
  * refusal there leaves nothing behind, and it must stay that way.
+ *
+ * THE NON-SECRET INLINE FIELDS (`user`/`authMode` for SSH, `username`/`domain`
+ * for RDP) ARE NOT A PARAMETER, on the grounds {@link convertHostToVault}'s
+ * doc gives for `authMode` and {@link inlineAuthMode} describes in full: a
+ * caller able to pass them was able to disagree with the identity this
+ * function re-reads two statements below, for the secrets - and that
+ * disagreement WAS the defect. The caller used to pass the editor's open-time
+ * snapshot of the vault, which could go stale while the identity's username
+ * or `authMode` changed in another window; the FRESH identity's `keyId` still
+ * gated whether a key body copied ({@link detachMoves} reads it, not the
+ * snapshot), so a host could land inline holding a freshly-copied private key
+ * under a stale "password" `authMode` - the orphan state a Forget button was
+ * added for, arrived at silently. {@link detachInlineFields} derives both
+ * fields from the SAME identity this function reads for the secrets, so the
+ * two cannot disagree, structurally rather than by discipline. The
+ * dangling-identity arm passes `null` and gets the empty user/username its
+ * own warning already promises - not a fallback parameter, which would put
+ * the disagreement back for the one caller that cannot check it.
  */
 export async function detachHostFromVault(
-  args: {
-    host: Host;
-    inline: { user: string; authMode: VaultAuthMode } | { username: string; domain: string };
-  },
+  args: { host: Host },
   deps: CredentialMoveDeps = defaultCredentialMoveDeps,
 ): Promise<{ host: Host; warning?: string }> {
   if (args.host.credential.kind !== "identity") {
@@ -788,7 +828,7 @@ export async function detachHostFromVault(
   const identity = await deps.vault.findIdentity(identityId);
 
   if (!identity) {
-    const record = buildInlineRecord(args.host, args.inline);
+    const record = buildInlineRecord(args.host, detachInlineFields(args.host, null));
     const host = await deps.hosts.upsertHost(record, {}, credentialStamp(args.host));
     return {
       host,
@@ -799,15 +839,18 @@ export async function detachHostFromVault(
   const key = identity.keyId ? await deps.vault.findKey(identity.keyId) : undefined;
   const moves = detachMoves(args.host, identity, key ? key.id : null);
   // BEFORE the copies, not between them and the write. `buildInlineRecord`
-  // throws when `inline`'s shape does not match the host's protocol, and that
-  // throw sat one statement past `copyMoves` - outside the `try` below, so
-  // `undoDetachCopies` never ran over it. That is the exact orphan class the
-  // rethrow arm exists to prevent, reachable one statement earlier. It is not
-  // reachable from the shipped dialog today (the protocol toggle is create-mode
-  // only, and this path is edit-only), but any future caller that detaches with
-  // the other protocol's inline shape would arm it, and building the record
-  // first costs nothing: it reads no store and no keychain.
-  const record = buildInlineRecord(args.host, args.inline);
+  // throws when its `inline` argument's shape does not match the host's
+  // protocol, and that throw sat one statement past `copyMoves` - outside the
+  // `try` below, so `undoDetachCopies` never ran over it. That is the exact
+  // orphan class the rethrow arm exists to prevent, reachable one statement
+  // earlier. `inline` is now {@link detachInlineFields}'s output, derived from
+  // `args.host.protocol` itself, so the mismatch this ordering used to merely
+  // risk is unreachable BY CONSTRUCTION rather than by discipline - no caller
+  // passes a shape at all any more, let alone the wrong one. The order stays
+  // anyway: it costs nothing (it reads no store and no keychain), and the
+  // orphan class it guards against is real for every other throw in the `try`
+  // below.
+  const record = buildInlineRecord(args.host, detachInlineFields(args.host, identity));
   const copied = await copyMoves(deps.secrets, moves);
   const secrets = hostSecretsFromCopies(copied);
   let host: Host;

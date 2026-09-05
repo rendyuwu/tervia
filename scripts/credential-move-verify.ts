@@ -2380,10 +2380,15 @@ console.log("\n[10e] a mis-described key: the hazard, the chain, and what the wr
 // ===========================================================================
 console.log("\n[11] detach: SSH key auth copies the identity's and key's values onto the host");
 {
+  // The username is "svc-deploy", not "root" - deliberately distinct from a
+  // plausible hardcoded default. `detachHostFromVault` no longer takes an
+  // `inline` argument, so the ONLY source left for the record's `user` field
+  // is this identity; a fixture whose username happened to be "root" would
+  // let a derivation hardcoding that common default pass by coincidence.
   const idn = identity({
     id: "i-1",
     name: "shared",
-    username: "root",
+    username: "svc-deploy",
     authMode: "key",
     keyId: "k-1",
     hasPassword: true,
@@ -2400,10 +2405,7 @@ console.log("\n[11] detach: SSH key auth copies the identity's and key's values 
       [`${VAULT_KEYRING_SERVICE}::k-1::passphrase`]: "vault-pp",
     },
   });
-  const result = await detachHostFromVault(
-    { host, inline: { user: "root", authMode: "key" } },
-    h.deps,
-  );
+  const result = await detachHostFromVault({ host }, h.deps);
   check("no warning - the identity and its key both resolved", result.warning, undefined);
   check(
     "the three host accounts hold the vault's values, under the host field names",
@@ -2424,6 +2426,24 @@ console.log("\n[11] detach: SSH key auth copies the identity's and key's values 
         ]
       : null,
     [true, true, true],
+  );
+  check(
+    "the record's user comes from the identity, not from a caller - no caller can pass one any more",
+    result.host.protocol === "ssh" && result.host.credential.kind === "inline"
+      ? result.host.credential.user
+      : null,
+    "svc-deploy",
+  );
+  check(
+    // The row this task exists for: the authMode and the copied key body,
+    // asserted TOGETHER, because the defect was these two disagreeing - a
+    // stale "password" mode over a freshly-copied key body. Read separately
+    // they would each pass against a derivation that mixed the two up.
+    "the authMode agrees with the copied key body - both read off the SAME fresh identity",
+    result.host.protocol === "ssh" && result.host.credential.kind === "inline"
+      ? [result.host.credential.authMode, result.host.credential.hasPrivateKey]
+      : null,
+    ["key", true],
   );
   check(
     "the identity record is byte-identical to before",
@@ -2466,10 +2486,7 @@ console.log("\n[12] detach: RDP copies the password alone and does not throw");
       [`${VAULT_KEYRING_SERVICE}::k-2::passphrase`]: "vault-pp",
     },
   });
-  const result = await detachHostFromVault(
-    { host, inline: { username: "administrator", domain: "CORP" } },
-    h.deps,
-  );
+  const result = await detachHostFromVault({ host }, h.deps);
   check(
     "the host account holds the identity's password",
     h.kept.get(`${HOST_KEYRING_SERVICE}::h-2::password`),
@@ -2485,6 +2502,45 @@ console.log("\n[12] detach: RDP copies the password alone and does not throw");
     false,
   );
   check("no warning", result.warning, undefined);
+  check(
+    "the record's username and domain come from the identity",
+    result.host.protocol === "rdp" && result.host.credential.kind === "inline"
+      ? [result.host.credential.username, result.host.credential.domain]
+      : null,
+    ["administrator", "CORP"],
+  );
+
+  // Domain OMITTED on this identity - RDP-legitimate for a local account, per
+  // `VaultIdentity`'s own comment. This is the fixture mutation 3 needs: if
+  // the RDP/SSH shape were derived from something about the IDENTITY (say,
+  // "does it have a domain") rather than from the HOST's `protocol`, a
+  // domain-less identity would flip an RDP host to the SSH shape and
+  // `buildInlineRecord` would throw the protocol-mismatch it exists to catch
+  // - see [13b]'s note on why that throw is otherwise unreachable now.
+  const idnNoDomain = identity({
+    id: "i-2b",
+    name: "shared rdp, no domain",
+    username: "localadmin",
+    authMode: "password",
+    hasPassword: true,
+  });
+  const hostNoDomain = rdpHost({
+    id: "h-2b",
+    credential: { kind: "identity", identityId: "i-2b" },
+  });
+  const hNoDomain = harness({
+    hosts: [hostNoDomain],
+    identities: [idnNoDomain],
+    kept: { [`${VAULT_KEYRING_SERVICE}::i-2b::password`]: "rdp-pw-2" },
+  });
+  const resultNoDomain = await detachHostFromVault({ host: hostNoDomain }, hNoDomain.deps);
+  check(
+    "the RDP shape comes off the HOST's protocol even when the identity has no domain",
+    resultNoDomain.host.protocol === "rdp" && resultNoDomain.host.credential.kind === "inline"
+      ? [resultNoDomain.host.credential.username, resultNoDomain.host.credential.domain]
+      : null,
+    ["localadmin", undefined],
+  );
 }
 
 // ===========================================================================
@@ -2492,16 +2548,24 @@ console.log("\n[13] detach with the identity gone, or with a key the identity na
 {
   const host = sshHost({ id: "h-1", credential: { kind: "identity", identityId: "i-gone" } });
   const h = harness({ hosts: [host] });
-  const result = await detachHostFromVault(
-    { host, inline: { user: "root", authMode: "agent" } },
-    h.deps,
-  );
+  const result = await detachHostFromVault({ host }, h.deps);
   check(
     "a missing identity returns a warning naming it, and an inline record",
     [result.warning, result.host.credential.kind],
     ['identity i-gone no longer exists - "prod" now stores its own, empty credentials', "inline"],
   );
   check("nothing was copied", h.copies(), []);
+  check(
+    // The dangling-identity arm has nothing to derive from - it keeps its old
+    // behaviour rather than gaining a fallback parameter. Mutation: write a
+    // non-empty user here and this reddens; drop the warning above and that
+    // check reddens.
+    "the dangling-identity arm writes an EMPTY user and 'password' authMode - exactly what its warning promises",
+    result.host.protocol === "ssh" && result.host.credential.kind === "inline"
+      ? [result.host.credential.user, result.host.credential.authMode]
+      : null,
+    ["", "password"],
+  );
 
   // An extension beyond group 13: an identity that DOES exist but names a key
   // that does not. The password still copies and the host still detaches; only
@@ -2524,10 +2588,7 @@ console.log("\n[13] detach with the identity gone, or with a key the identity na
     identities: [idn],
     kept: { [`${VAULT_KEYRING_SERVICE}::i-dangling::password`]: "vault-pw" },
   });
-  const result2 = await detachHostFromVault(
-    { host: host2, inline: { user: "root", authMode: "key" } },
-    h2.deps,
-  );
+  const result2 = await detachHostFromVault({ host: host2 }, h2.deps);
   check(
     "the exact warning text, read off the code rather than quoted from a report",
     result2.warning,
@@ -2600,8 +2661,7 @@ console.log("\n[13b] a refused detach takes its copies back off the host's own a
 
   await rejects(
     "detach is refused when the host names a jump host that is gone",
-    () =>
-      detachHostFromVault({ host: boundHost, inline: { user: "root", authMode: "key" } }, h.deps),
+    () => detachHostFromVault({ host: boundHost }, h.deps),
     ["names a jump host", "does not exist"],
   );
 
@@ -2658,7 +2718,7 @@ console.log("\n[13b] a refused detach takes its copies back off the host's own a
   });
   await rejects(
     "the dangling-key arm is refused by the same jump-host check",
-    () => detachHostFromVault({ host: host2, inline: { user: "root", authMode: "key" } }, h2.deps),
+    () => detachHostFromVault({ host: host2 }, h2.deps),
     ["names a jump host", "does not exist"],
   );
   check("only the password landed", landedCopies(h2), 1);
@@ -2669,55 +2729,26 @@ console.log("\n[13b] a refused detach takes its copies back off the host's own a
   ]);
 
   // ---------------------------------------------------------------------------
-  // The one refusal that is not `upsertHost`'s, and the reason `buildInlineRecord`
-  // now runs BEFORE `copyMoves` rather than one statement after it.
+  // A row used to live here: pass an SSH-shaped `inline` against an RDP host
+  // (or vice versa) and assert `buildInlineRecord` refuses it BEFORE
+  // `copyMoves` runs - which is why `buildInlineRecord` is called before the
+  // copies rather than one statement after them, so its throw cannot escape
+  // with `undoDetachCopies` never having run. That ordering argument still
+  // holds and the call still comes first; only reachability changed.
   //
-  // It throws when `inline`'s shape does not match the host's own protocol, and
-  // that throw used to sit between the copies and the `try` - so it escaped with
-  // `undoDetachCopies` never running, leaving a plaintext copy of the identity's
-  // password on a host account nothing names. Precisely the orphan class every
-  // other row in this group exists to prevent, reachable one statement earlier
-  // and past the compensation rather than inside it.
-  //
-  // NOT reachable from the shipped dialog today: `HostEditorDialog` picks the
-  // inline shape off the same `protocol` the host carries, and the protocol
-  // toggle is create-mode only while this path is edit-only. It is pinned anyway
-  // because the ordering is the whole guarantee, and a later caller arms it.
-  //
-  // The two assertions are the same pair the rest of this group uses, read the
-  // other way round: nothing landed, so there was nothing to take back. Group
-  // 8's third arm makes the identical distinction on convert's side.
-  const rdpBound = rdpHost({ id: "h-rdp", credential: { kind: "identity", identityId: "i-1" } });
-  const hMismatch = harness({
-    hosts: [rdpBound],
-    identities: [idn],
-    keys: [key],
-    kept: vaultKept,
-  });
-  await rejects(
-    "detach refuses an inline credential built for the other protocol",
-    () =>
-      detachHostFromVault(
-        // SSH-shaped `inline` against an RDP host - the union admits it, and
-        // `buildInlineRecord` is the only thing that refuses it.
-        { host: rdpBound, inline: { user: "root", authMode: "key" } },
-        hMismatch.deps,
-      ),
-    ["vps", "inline credential for the other protocol"],
-  );
-  check("no copy was issued at all - the refusal precedes copyMoves", hMismatch.copies(), []);
-  check(
-    "so the identity's password never landed on the host's account, with nothing to take it back",
-    hMismatch.kept.has(`${HOST_KEYRING_SERVICE}::h-rdp::password`),
-    false,
-  );
-  check("and nothing was deleted", hostDeletes(hMismatch), []);
-  check("the vault's own accounts are untouched", keptFor(hMismatch, VAULT_KEYRING_SERVICE), [
-    `${VAULT_KEYRING_SERVICE}::i-1::password=vault-pw`,
-    `${VAULT_KEYRING_SERVICE}::k-1::passphrase=vault-pp`,
-    `${VAULT_KEYRING_SERVICE}::k-1::privateKey=vault-pem`,
-  ]);
-  check("the stored host record is unchanged, and still bound", hMismatch.hostRows(), [rdpBound]);
+  // `detachHostFromVault` no longer takes an `inline` argument at all:
+  // `credentialMove.ts`'s `detachInlineFields` derives it from
+  // `args.host.protocol` itself, so the mismatch is unreachable BY
+  // CONSTRUCTION now, not merely unreached by today's shipped dialog. There is
+  // no longer an `inline` value here to mis-shape, so this row cannot be
+  // rewritten to keep checking it BY VALUE - only by casting a shape past the
+  // type system, and a check that reaches a state no real caller can build is
+  // a check about the cast, not about this file. Retired rather than kept as
+  // a cast-built fixture. Group [12]'s "RDP shape comes off the HOST's
+  // protocol even when the identity has no domain" fixture is what exercises
+  // this derivation now, on the boundary a wrong implementation would
+  // actually get wrong, without constructing the unreachable state directly.
+  // ---------------------------------------------------------------------------
 
   // The missing-identity arm copies nothing, so a refusal there has nothing to
   // undo - and must still touch no account. Same jump-host refusal.
@@ -2729,8 +2760,7 @@ console.log("\n[13b] a refused detach takes its copies back off the host's own a
   const h3 = harness({ hosts: [host3] });
   await rejects(
     "the missing-identity arm is refused by the same jump-host check",
-    () =>
-      detachHostFromVault({ host: host3, inline: { user: "root", authMode: "agent" } }, h3.deps),
+    () => detachHostFromVault({ host: host3 }, h3.deps),
     ["names a jump host", "does not exist"],
   );
   check("nothing was copied", h3.copies(), []);
@@ -2755,10 +2785,7 @@ console.log("\n[13b] a refused detach takes its copies back off the host's own a
   });
   let caught: unknown;
   try {
-    await detachHostFromVault(
-      { host: staleLoad, inline: { user: "root", authMode: "key" } },
-      h4.deps,
-    );
+    await detachHostFromVault({ host: staleLoad }, h4.deps);
   } catch (e) {
     caught = e;
   }
@@ -2825,11 +2852,7 @@ console.log("\n[13b] a refused detach takes its copies back off the host's own a
   });
   await rejects(
     "detach surfaces the persist failure rather than swallowing it",
-    () =>
-      detachHostFromVault(
-        { host: persistHost, inline: { user: "root", authMode: "key" } },
-        h5.deps,
-      ),
+    () => detachHostFromVault({ host: persistHost }, h5.deps),
     ["failed to persist"],
   );
   // The branch is REACHED, not merely assumed: the stored record really is
@@ -2883,11 +2906,7 @@ console.log("\n[13b] a refused detach takes its copies back off the host's own a
   });
   await rejects(
     "detach is refused by the same jump-host check when the host itself is gone from the store",
-    () =>
-      detachHostFromVault(
-        { host: boundHost, inline: { user: "root", authMode: "key" } },
-        hGone.deps,
-      ),
+    () => detachHostFromVault({ host: boundHost }, hGone.deps),
     ["names a jump host", "does not exist"],
   );
   check("all three secrets landed on the host's accounts first", landedCopies(hGone), 3);
@@ -3186,6 +3205,10 @@ console.log("\ncredential-move-verify: OK\n");
 //                                                        buildInlineRecord
 //                                                        succeeds, so none of
 //                                                        them can see its throw.
+//     (That arm is gone as of the task that removed `detachHostFromVault`'s
+//     `inline` parameter: the mismatch it exercised became unreachable by
+//     construction, not merely unreached, so there is no longer a way to
+//     build it by value. See 13b's own comment where the arm used to sit.)
 //   H5: a Prettier-legal reflow of every region the    NOTHING, with
 //     fix changed, in all five files                     `pnpm format:check`
 //                                                        still at 0 over the
