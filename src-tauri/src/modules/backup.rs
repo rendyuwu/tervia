@@ -21,8 +21,7 @@
 //!
 //! Not solved here: the decrypted plaintext is ordinary `String`/`serde_json`
 //! data and is dropped unscrubbed, same as every other secret in the process
-//! (tracked as RDP-20, the `SecretsState` cache, which is the larger link in
-//! that chain).
+//! (the `SecretsState` cache is the larger link in that chain).
 //!
 //! This lives in the host process rather than the webview because
 //! `crypto.subtle` is gated to secure contexts and the app origin is plain
@@ -101,7 +100,7 @@ fn derive_key(passphrase: &str, salt: &[u8], iterations: u32) -> Result<[u8; 32]
 /// export file. An empty passphrase is refused here rather than in the UI so
 /// the guarantee holds no matter which caller reaches this.
 ///
-/// Not a command: v2 exports go through [`backup_seal_payload`], which is the
+/// Not a command: exports go through [`backup_seal_payload`], which is the
 /// only caller, so there is no reason to expose a general-purpose encrypt-this
 /// entry point to the webview.
 fn seal_blob(plaintext: String, passphrase: &str) -> Result<SealedBlob, String> {
@@ -178,12 +177,13 @@ fn open_blob(blob: SealedBlob, passphrase: &str) -> Result<String, String> {
 /// The same shape on the way out and the way back in. `group`, `id` and `field`
 /// are the three levels of the path inside the payload JSON and are supplied by
 /// the caller verbatim, so this module holds no knowledge of either protocol's
-/// field names - `password` versus `privateKey`, `secrets` versus `rdpSecrets`
-/// are all decided in `src/modules/backup/file.ts`.
+/// field names - `password` versus `privateKey`, or which of `hostSecrets`,
+/// `identitySecrets` and `keySecrets` a credential belongs to - all decided in
+/// `src/modules/backup/file.ts`.
 #[derive(Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct SecretRef {
-    /// Top-level key of the payload object, e.g. `secrets` or `rdpSecrets`.
+    /// Top-level key of the payload object, e.g. `hostSecrets` or `keySecrets`.
     group: String,
     /// Connection id: the second level.
     id: String,
@@ -196,9 +196,11 @@ pub struct SecretRef {
 /// Insert `values` into `payload` at each ref's `group`/`id`/`field` path.
 ///
 /// Refuses to write into a group the payload already carries. That guard is not
-/// theoretical bookkeeping: the caller sends `{"connections": [...]}` and names
-/// its own group strings, so a typo of `connections` would otherwise replace the
-/// entire inventory with a credential map and the export would look successful.
+/// theoretical bookkeeping: the caller sends five inventory collections - hosts,
+/// groups, identities, keys, rules - and a secret group is meant to never match
+/// one of those names. A bug that let `group` collide with `hosts` would replace
+/// the whole host inventory with a credential map, and the export would still
+/// report success.
 fn merge_secrets(payload: &str, values: &[(SecretRef, String)]) -> Result<String, String> {
     let mut root: Map<String, Value> = serde_json::from_str(payload)
         .map_err(|_| "backup: the payload is not a JSON object".to_string())?;
@@ -227,7 +229,7 @@ fn merge_secrets(payload: &str, values: &[(SecretRef, String)]) -> Result<String
     serde_json::to_string(&Value::Object(root)).map_err(|e| e.to_string())
 }
 
-/// Seal a v2 payload, reading every credential out of the keychain here rather
+/// Seal a payload, reading every credential out of the keychain here rather
 /// than taking it from the caller.
 ///
 /// `payload` is the connection inventory as JSON; `refs` say which keychain
@@ -259,7 +261,7 @@ pub async fn backup_seal_payload(
     seal_blob(plaintext, &passphrase)
 }
 
-/// Credentials decrypted out of a v2 backup, waiting for the importer to say
+/// Credentials decrypted out of a backup, waiting for the importer to say
 /// which connection ids survived validation.
 struct Held {
     groups: Map<String, Value>,
@@ -267,7 +269,7 @@ struct Held {
 
 /// Parked payloads, oldest first.
 ///
-/// Process-global rather than Tauri-managed state so the whole v2 import path
+/// Process-global rather than Tauri-managed state so the whole import path
 /// stays inside this module. The cap is what bounds the damage if a caller ever
 /// fails to release: an abandoned import holds its credentials until four more
 /// imports have run, not until the app exits.
@@ -329,7 +331,7 @@ pub struct OpenedPayload {
     payload: String,
 }
 
-/// Open a v2 payload: return the metadata, park the credentials.
+/// Open a payload: return the metadata, park the credentials.
 ///
 /// The two-step shape exists so validation can stay on the JS side, where the
 /// trust-boundary rules for an imported connection already live, without the
@@ -462,7 +464,7 @@ mod tests {
         assert_eq!(open(seal(pt, "pw"), "pw").unwrap(), pt);
     }
 
-    // --- v2 payload assembly ---------------------------------------------
+    // --- payload assembly: group names are arbitrary, the caller's own ----
 
     #[test]
     fn merge_places_each_secret_at_its_path() {
@@ -509,13 +511,13 @@ mod tests {
     #[test]
     fn merge_with_no_refs_is_a_passthrough() {
         // The shape of an export with no credentials saved anywhere: still a
-        // valid v2 payload, just with no secret groups in it.
+        // valid payload, just with no secret groups in it.
         let out = merge_secrets(r#"{"connections":[],"rdpConnections":[]}"#, &[]).unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
         assert!(v.get("secrets").is_none());
     }
 
-    // --- v2 import: split, pick, park ------------------------------------
+    // --- import: split, pick, park - group names are arbitrary here too ---
 
     #[test]
     fn split_withholds_only_the_named_groups() {
