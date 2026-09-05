@@ -290,16 +290,16 @@ fn min_size_correction(current: (f64, f64), min: (f64, f64)) -> Option<(f64, f64
 /// `set_size(PhysicalSize { .. })` (plugin 2.4.1, `src/lib.rs:212-217`) which lands
 /// as a plain `SetWindowPos`, and that is not clamped against the tracking
 /// size. So any profile carrying a window saved smaller than the floor comes
-/// back below it, and raising the floor never reaches an existing user - which
-/// is handoff §4.27 one level out: the change that makes a setting apply owns
-/// the setting applying, and a second mechanism was quietly bypassing it.
+/// back below it, and raising the floor never reaches an existing user. The
+/// change that makes a setting apply owns the setting actually applying, and a
+/// second mechanism was quietly bypassing it.
 /// GTK3 clamps the same call via its geometry hints so this is Windows-first,
 /// but the fix is correct everywhere and is not gated on a platform.
 ///
 /// The minimum is read back out of the merged runtime config rather than
 /// restated here, so `tauri.conf.json` and the two platform files that must
-/// echo it (§4.22, enforced by `scripts/tauri-config-parity-verify.ts`) stay
-/// the only place the number is written.
+/// echo it (enforced by `scripts/tauri-config-parity-verify.ts`) stay the only
+/// place the number is written.
 fn enforce_configured_min_size(config: &tauri::Config, window: &tauri::WebviewWindow) {
     let Some(window_config) = config
         .app

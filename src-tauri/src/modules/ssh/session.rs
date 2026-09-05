@@ -976,9 +976,9 @@ async fn authenticate_hop(
 /// and for every jump hop: the two used to be separate inline expressions, and
 /// they must agree by construction, because the frontend mirrors this exact test
 /// before it dials (`canAuthenticate` in
-/// src/modules/terminal/lib/ssh-exit-decision.ts, VLT-57) so that a host saved
-/// with no credential is reported as a configuration error rather than fed to
-/// the reconnect ladder as if the server had hung up.
+/// src/modules/terminal/lib/ssh-exit-decision.ts) so that a host saved with no
+/// credential is reported as a configuration error rather than fed to the
+/// reconnect ladder as if the server had hung up.
 ///
 /// `is_none`, not emptiness: an empty password is a credential the user chose to
 /// send, and the server - not this guard - decides what to make of it.
@@ -1389,7 +1389,7 @@ async fn try_keyboard_interactive(
     Err("ssh: keyboard-interactive: too many prompt rounds".into())
 }
 
-/// VLT-42: the pump's three exit shapes (reported status, reported signal,
+/// The pump's three exit shapes (reported status, reported signal,
 /// unreported/ambiguous) must stay distinguishable at the event level - a
 /// test that only exercised the happy `ExitStatus` case would not catch a
 /// regression that collapsed the other two back into each other or back
@@ -1423,8 +1423,8 @@ mod exit_classification_tests {
     #[test]
     fn neither_reported_is_the_ambiguous_disconnected_shape() {
         // This is the exact case the bug was: Eof/Close/wait()->None with no
-        // exit-status and no exit-signal ever having arrived. Before VLT-42
-        // this was indistinguishable from a reported `exit 0`.
+        // exit-status and no exit-signal ever having arrived. It used to be
+        // indistinguishable from a reported `exit 0`.
         let ev = build_exit_event(None, None);
         assert!(matches!(ev, SshEvent::Disconnected), "{ev:?}");
     }
@@ -1444,12 +1444,17 @@ mod exit_classification_tests {
     }
 }
 
-/// VLT-57: the pre-dial credential guard. Its exact shape is load-bearing twice
-/// over - the target and every jump hop are judged by it here, and the frontend
+/// The pre-dial credential guard. Its exact shape is load-bearing twice over -
+/// the target and every jump hop are judged by it here, and the frontend
 /// reproduces it before dialling so that "this host has nothing to authenticate
 /// with" is classified as a configuration error instead of entering the
-/// reconnect ladder. A guard that quietly accepted one of the empty shapes would
-/// send the frontend and the backend down different paths for the same input.
+/// reconnect ladder. It has to run its own copy rather than wait for this one
+/// to answer, because the discriminant on that side is WHOSE fact ended the
+/// attempt, not how far the attempt got: anything the backend reports comes
+/// back as a plain error string, which `classifySshConnectFailure` files as
+/// transport by construction, and transport is the reconnect-eligible
+/// category. A guard that quietly accepted one of the empty shapes would send
+/// the frontend and the backend down different paths for the same input.
 #[cfg(test)]
 mod credential_guard_tests {
     use super::*;
@@ -1466,8 +1471,11 @@ mod credential_guard_tests {
 
     #[test]
     fn nothing_configured_is_refused() {
-        // The VLT-57 state exactly: a host saved with no password at all, which
-        // VLT-44 made a legal thing to save.
+        // Exactly the state this guard exists for: a saved host with no
+        // credential of any kind. Saving one is legal: a blank password field
+        // stores the host and lists it with a missing-secret warning
+        // (`passwordHelp` in src/modules/hosts/editor/SshCredentialSection.tsx),
+        // so refusing the dial is this guard's job, not the save path's.
         assert!(!has_credential(false, None, None));
     }
 

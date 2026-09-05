@@ -243,7 +243,7 @@ where
 ///
 /// Split out to be testable AT ALL: `src-tauri` has no `[dev-dependencies]`, so
 /// `tauri::test::mock_app()` is unavailable and an `AppHandle` cannot be
-/// constructed (handoff gap 16). What has to be pinned down is the ORDERING -
+/// constructed. What has to be pinned down is the ORDERING -
 /// load once, mutate, write while still holding the lock, restore on failure -
 /// and every part of that ordering is here rather than in the wrapper.
 #[cfg(any(target_os = "linux", target_os = "windows"))]
@@ -514,12 +514,13 @@ fn same_entry(from: (&str, &str), to: (&str, &str)) -> bool {
 /// The boolean answers "did the source have something to give", NOT "does the
 /// destination own a secret now". Those agree whenever the destination starts
 /// empty - `duplicateHost`'s destination is always a brand-new id - but a
-/// caller converting onto an id that may already hold a secret (6e's
-/// convert-to-vault, for one) cannot read `Ok(false)` as "nothing there
-/// anymore": this function never clears the destination. Its only writes are
-/// the one above and, on the legacy Windows Credential Manager fallback
-/// inside [`write_secret`], a delete of a *stale entry for the destination
-/// account*, never a clear triggered by an empty or missing source.
+/// caller converting onto an id that may already hold a secret
+/// (`convertHostToVault` in src/modules/hosts/credentialMove.ts, for one) cannot
+/// read `Ok(false)` as "nothing there anymore": this function never clears the
+/// destination. Its only writes are the one above and, on the legacy Windows
+/// Credential Manager fallback inside [`write_secret`], a delete of a *stale
+/// entry for the destination account*, never a clear triggered by an empty or
+/// missing source.
 ///
 /// Source and destination being the same entry skips only the WRITE, not the
 /// read: the answer still has to say whether anything is there, and writing a
@@ -720,8 +721,8 @@ mod tests {
 
     // The only part of `secrets_copy` reachable without an `AppHandle`, and the
     // part with a wrong version that compiles: comparing accounts alone. Under
-    // that version 6e's convert-to-vault - same account name, different service
-    // - reports success and writes nothing.
+    // that version convert-to-vault - same account name, different service -
+    // reports success and writes nothing.
     #[test]
     fn same_entry_compares_the_service_as_well_as_the_account() {
         let src = ("tervia-hosts", "h-1::password");
