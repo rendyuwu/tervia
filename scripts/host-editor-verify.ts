@@ -2661,6 +2661,22 @@ console.log(
  * `tsc` today, but only because the binding it compares goes unused; a
  * regression that removed the binding with it compiles clean, which is exactly
  * the kind of cover that prices a pin wrong.
+ *
+ * The third half is the offer's own gate, and it was a credential loss reachable
+ * by ordinary interaction rather than a race - see the block comment beside
+ * those checks for the interaction and for why each pin is structural. The two
+ * halves land together because either alone leaves the user somewhere useless:
+ * without the gate the offer is still MADE off a body the host does not store,
+ * so the checkbox names a key with nothing to do with this host, and ticking it
+ * yields a refusal instead of an answer.
+ *
+ * WHAT THE FINGERPRINT PIN IS FOR. `convertHostToVault` re-asserts the offer's
+ * claim at the write, against the record it actually resolves, and that
+ * assertion is only worth something if the value it compares came from the
+ * INSPECTION. Passing the candidate record's own `fingerprint` back in would
+ * compare the record against itself, type-check, and read as a belt while
+ * asserting nothing at all - so which value travels is pinned, in both
+ * directions.
  */
 console.log(
   "\n[11] reusing a vault key is the user's answer, and a stale lookup cannot answer for them",
@@ -2689,7 +2705,7 @@ console.log(
       check(
         "`reused` is exactly this expression, whitespace aside - the checkbox is a CONJUNCT, so reuse cannot happen because a candidate merely exists",
         norm(init.getText(editorSf)) ===
-          norm('reuseExistingKey && reuseOffer.kind === "candidate" ? reuseOffer.key : null'),
+          norm('reuseExistingKey && reuseOffer.kind === "candidate" ? reuseOffer : null'),
         init.getText(editorSf),
       );
     }
@@ -2714,7 +2730,20 @@ console.log(
       check("and it is called with exactly one argument", args.length === 1, args.length);
       check(
         "whose `key` arm names only what `reused` resolved to - an id read straight off the offer would route around the choice above",
-        args[0]?.includes(norm("reused ? { reuseKeyId: reused.id }")) === true,
+        args[0]?.includes(
+          norm("reused ? { reuseKeyId: reused.key.id, fingerprint: reused.fingerprint }"),
+        ) === true,
+        args[0],
+      );
+      // The FINGERPRINT half, its own check because the id half above passes
+      // without it. `convertHostToVault` re-asserts the offer's claim against
+      // the record it resolves, and the value it compares has to be the one the
+      // OFFER matched on - `reused.key.fingerprint` would type-check, satisfy
+      // the pin above, and make that comparison a record against itself.
+      check(
+        "and the fingerprint it carries is the OFFER's, never the candidate record's own",
+        args[0]?.includes(norm("fingerprint: reused.fingerprint")) === true &&
+          args[0]?.includes(norm("fingerprint: reused.key.fingerprint")) === false,
         args[0],
       );
     }
@@ -2759,6 +2788,100 @@ console.log(
         guard.elseStatement?.getText(editorSf),
       );
     }
+
+    // --- the offer is made ONLY over a body that is the stored one ----------
+    //
+    // The third half of this section, and the one that was a live credential
+    // loss rather than a race. The offer used to be gated on
+    // `protocol !== "ssh" || !sshCred.privateKey.trim()` - the DRAFT body, with
+    // no ref to say whether that body was the stored one. So: open a key-auth
+    // host, let the seed fill the textarea, paste a different key the vault
+    // already holds over it, and the offer named the vault's record for the
+    // PASTED key. Taking it copied nothing (the reuse arm passes a null minted
+    // id, so `convertMoves` emits the password row alone) while the host write
+    // released all three of the host's accounts as stale. The host's private
+    // key existed nowhere afterwards.
+    //
+    // The remedy is the gate `applyCredentialChange` already applies to the
+    // facts it stamps on a minted record, applied to the offer as well, and it
+    // is pinned the way `credential-move-verify.ts` group [10d] pins that one:
+    // by STRUCTURAL POSITION. A presence check buys neither half - hoisting the
+    // inspection one statement out of the `if` leaves every conjunct below
+    // exact and inert, and burying a ref inside an `||` leaves it present and
+    // powerless.
+    //
+    // The by-value conjunct list is also the check a gate that suppresses EVERY
+    // offer cannot pass, which is the direction the fix can fail in on its own:
+    // `false`, or a conjunction nothing satisfies, closes the loss path and
+    // destroys the feature, and nothing in this suite mounts a component to
+    // notice. Under that pin the honest path IS the four conjuncts, so it
+    // cannot be narrowed without a named failure here.
+    const conjuncts = (e: ts.Expression): string[] =>
+      ts.isBinaryExpression(e) && e.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken
+        ? [...conjuncts(e.left), ...conjuncts(e.right)]
+        : [norm(e.getText(editorSf))];
+
+    const offerInspects = findCalls(offerBody, editorSf, ["inspectSshKey"]);
+    check(
+      "exactly one inspectSshKey call inside offerKeyReuse",
+      offerInspects.length === 1,
+      offerInspects.length,
+    );
+    if (offerInspects.length === 1) {
+      const call = offerInspects[0];
+      const enclosing: ts.IfStatement[] = [];
+      const visit = (n: ts.Node): void => {
+        if (
+          ts.isIfStatement(n) &&
+          n.thenStatement.getStart(editorSf) <= call.getStart(editorSf) &&
+          call.getEnd() <= n.thenStatement.getEnd()
+        ) {
+          enclosing.push(n);
+        }
+        ts.forEachChild(n, visit);
+      };
+      visit(offerBody);
+      check(
+        "and the offer's inspection is lexically inside the then-branch of an if - hoisted out, the conjuncts below stay exact and do nothing",
+        enclosing.length >= 1,
+        enclosing.length,
+      );
+      if (enclosing.length >= 1) {
+        // The INNERMOST enclosing `if` is the gate, the same resolution
+        // `credential-move-verify.ts` group [10d] makes: a wider one is a
+        // different claim.
+        const gate = enclosing.reduce((a, b) =>
+          b.thenStatement.getStart(editorSf) >= a.thenStatement.getStart(editorSf) ? b : a,
+        );
+        const parts = conjuncts(gate.expression);
+        // TWO refs, TWO checks, because neither says it alone: `sshSeeded` is
+        // what the keychain read put on SCREEN, `sshTouched` whether the user
+        // has changed it since. Seeded alone accepts a body typed over the
+        // seed - which is the loss above; untouched alone accepts a field empty
+        // or stale only because the read has not landed.
+        check(
+          "`sshSeeded.current.privateKey` is a top-level conjunct of the offer's gate - no offer over a field the keychain read never filled",
+          parts.includes(norm("sshSeeded.current.privateKey")),
+          parts,
+        );
+        check(
+          "`!sshTouched.current.privateKey` is a top-level conjunct of it too - and only while the user has not typed over it since",
+          parts.includes(norm("!sshTouched.current.privateKey")),
+          parts,
+        );
+        check(
+          "the offer gate's conjuncts, by value and in order - which is also what a gate suppressing EVERY offer fails",
+          JSON.stringify(parts) ===
+            JSON.stringify([
+              norm('protocol === "ssh"'),
+              norm("sshSeeded.current.privateKey"),
+              norm("!sshTouched.current.privateKey"),
+              norm("sshCred.privateKey.trim()"),
+            ]),
+          parts,
+        );
+      }
+    }
   }
 
   // --- what was watched fail, and what `tsc` did while it did ---------------
@@ -2789,6 +2912,46 @@ console.log(
   //          Prettier adds when it wraps sits outside the claim. It DID redden
   //          24 checks in sections [1], [2], [4], [6] and [8], whose anchors
   //          and regexes are line-shaped. Those are pre-existing and untouched.
+  // K10 `sshSeeded.current.privateKey` dropped from the OFFER's gate - the
+  //     exact shape of the loss, since the seed alone is what says the body on
+  //     screen came from the keychain
+  //       -> TWO: the `sshSeeded` conjunct check and the by-value list. `tsc`
+  //          at 0, and every other script in the suite green.
+  // K11 `!sshTouched.current.privateKey` dropped instead
+  //       -> TWO, symmetrically: the `sshTouched` conjunct check and the list.
+  //          `tsc` at 0. Two mutations rather than one because the two refs are
+  //          two facts, and either one alone re-opens the path.
+  // K12 both refs kept but joined with `||` instead of `&&`, so each is present
+  //     and neither decides anything
+  //       -> THREE: both conjunct checks and the list. This is the mutation a
+  //          presence check or a substring count passes, and the reason
+  //          `conjuncts` flattens `&&` only. `tsc` at 0.
+  // K13 the inspection hoisted one statement out of the gate's then-branch,
+  //     leaving the gate standing with an empty body
+  //       -> ONE: the lexical-position check, `0`. The three conjunct checks
+  //          below it are guarded on having found an enclosing `if` and do NOT
+  //          run - correct, and worth knowing before reading their silence as
+  //          cover; the ok count drops by four, not one. `tsc` at 0.
+  // K14 the whole gate replaced by `false` - the "suppress every offer" way to
+  //     pass K10-K13 while destroying the feature
+  //       -> THREE: both conjunct checks and the list, all reporting `["false"]`.
+  //          `tsc` DOES redden here, incidentally: `if (false)` narrows the
+  //          candidate binding to `never`. K14b prices the pin without that.
+  // K14b the same suppression the compiler cannot see - a
+  //      conjunct comparing `sshCred.privateKey.trim()` against a NUL string
+  //      literal, which no trimmed body satisfies
+  //       -> ONE: the by-value list alone. `tsc` at 0, and the loss test
+  //          passes, which is exactly why this section owes a check that a
+  //          narrower gate fails. Nothing in this suite mounts a component, so
+  //          "the offer still appears" is otherwise a hand-test claim only.
+  // K15 `fingerprint: reused.key.fingerprint ?? ""` - the candidate record's
+  //     own value passed back to the write instead of the one the inspection
+  //     produced, which makes `convertHostToVault`'s comparison a record
+  //     against itself
+  //       -> TWO: the `key` arm's exact-text pin and the fingerprint pin beside
+  //          it. `tsc` at 0 and `credential-move-verify` FULLY GREEN at 295 -
+  //          that suite hands the two values in directly, so it cannot see
+  //          which one the dialog chose. This pair is the only cover there is.
 }
 
 /**

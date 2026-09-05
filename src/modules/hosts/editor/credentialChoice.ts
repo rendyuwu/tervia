@@ -212,6 +212,13 @@ function identityLabel(identityName: string | undefined, identityId: string): st
  * The confirmation body. One string per outcome, each naming exactly what
  * happens and what does not, because the three outcomes differ in what is
  * destroyed and a shared sentence would be wrong for two of them.
+ *
+ * CONVERT SAYS THE DRAFT IS NOT INVOLVED, out loud and in its own sentence. What
+ * travels is the host's stored keychain accounts, so a private key typed into
+ * the editor and not yet saved goes nowhere - and the editor cannot show it
+ * going nowhere either, because a converted row is bound and renders no key
+ * field at all. The word "stores" carried that on its own before, which is one
+ * word doing the work of a promise.
  */
 export function credentialChangeNote(
   change: CredentialChange,
@@ -220,7 +227,7 @@ export function credentialChangeNote(
 ): string {
   switch (change.kind) {
     case "convert":
-      return "The credentials this host stores move into a new shared identity, and the host stops owning them. Nothing here is deleted until the move has succeeded. This happens as soon as you confirm - cancelling the editor afterwards does not undo it, and what it buys is fewer copies of one credential, nothing else.";
+      return "The credentials this host stores move into a new shared identity, and the host stops owning them. What moves is what is saved for this host, so a key body typed into the form and not yet saved is not moved, and is discarded. Nothing here is deleted until the move has succeeded. This happens as soon as you confirm - cancelling the editor afterwards does not undo it, and what it buys is fewer copies of one credential, nothing else.";
     case "bind": {
       const identity = identityLabel(identityName, change.identityId);
       const { list, verb } = joinWithVerb(ownedSecrets);

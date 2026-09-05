@@ -1327,7 +1327,9 @@ console.log(
       {
         host,
         identity: { name: "shared", username: "root", domain: "", description: "" },
-        key: { reuseKeyId: "k-shared" },
+        // The fingerprint the OFFER matched on, which on the honest path is the
+        // one this record records. Pre-check 4 compares the two.
+        key: { reuseKeyId: "k-shared", fingerprint: "SHA256:AAAA" },
       },
       spy.deps,
     );
@@ -1418,7 +1420,7 @@ console.log(
           {
             host,
             identity: { name: "shared", username: "root", domain: "", description: "" },
-            key: { reuseKeyId: "k-shared" },
+            key: { reuseKeyId: "k-shared", fingerprint: "SHA256:AAAA" },
           },
           spy.deps,
         ),
@@ -1618,7 +1620,7 @@ console.log(
           {
             host,
             identity: { name: "shared", username: "root", domain: "", description: "" },
-            key: { reuseKeyId: "k-gone" },
+            key: { reuseKeyId: "k-gone", fingerprint: "SHA256:AAAA" },
           },
           h.deps,
         ),
@@ -2024,18 +2026,39 @@ console.log("\n[10d] the dialog inspects key facts ONLY from a body that is stil
  *    copies nothing while step 8 releases that host's accounts, so accepting the
  *    offer destroys the last copy of a key the record does not hold.
  * 3. THE BELT. Pre-check 4 re-asserts, on the record that actually resolves, the
- *    two conditions `reusableVaultKey` enforces when it makes the offer: a body
- *    is present, and a fingerprint is recorded. A record failing either is one no
- *    offer could have named.
+ *    two conditions `reusableVaultKey` enforces when it makes the offer - a body
+ *    is present, and a fingerprint is recorded - and then the claim the OFFER
+ *    made, that this record's fingerprint is the one the host's own key body
+ *    hashed to. A record failing any of the three is one no honest offer could
+ *    have named.
  *
  * WHAT THE BELT DOES NOT CATCH, stated rather than left to be found: a record
- * that HAS a body and HAS a fingerprint, where that fingerprint describes
- * different material. Nothing in this module can see it - it reads no secret, so
- * it cannot compare a recorded fingerprint against a stored body, and the id it
- * is handed resolves to a record that satisfies every condition an honest offer
- * would. That case is closed at the producer, by group [10d]'s gate, and the belt
- * covers the rest: a bodyless record, a fingerprint-less record, and any
- * `reuseKeyId` that did not come from an offer at all.
+ * that HAS a body, HAS the matched fingerprint, and where that fingerprint
+ * describes different material than the body it holds. Nothing in this module
+ * can see it - it reads no secret, so it cannot compare a recorded fingerprint
+ * against a stored body, and the id it is handed resolves to a record that
+ * satisfies every condition an honest offer would.
+ *
+ * THAT CASE IS CLOSED AT THE PRODUCERS, OF WHICH THERE ARE TWO. Group [10d]'s
+ * gate is the MINT gate: it is what stops the dialog stamping facts read off an
+ * edited textarea onto a record holding the stored body. The dialog's
+ * `offerKeyReuse` is the second producer - of the OFFER rather than of a record -
+ * and [10d] does not touch it; it carries the same two-ref gate for the same
+ * reason, so an offer is only ever made over a body that is the stored one, and
+ * group [11] in `scripts/host-editor-verify.ts` is where that half is pinned.
+ *
+ * WHAT SURVIVES BOTH GATES AND THE BELT is a concurrent in-place rotation of the
+ * host's own stored key between the editor opening and the convert, and the two
+ * arms pay for it differently. On the MINT arm the record's fingerprint
+ * describes the body the seed read while `copyMoves` copies the account's
+ * CURRENT body onto it - a mis-described record, of exactly the shape group
+ * [10e].1 measures. On the REUSE arm it costs more than a description: the offer
+ * and the write both match on the seed's fingerprint, honestly, and then nothing
+ * is copied while step 8 releases an account that by now holds the ROTATED key,
+ * which existed nowhere else. Nothing on the host record detects either -
+ * `hasPrivateKey` stays true through an in-place rotation - so only a keychain
+ * read could, and the convert path deliberately takes none. Both are written up
+ * in `KNOWN-LIMITS.md` and not described twice here.
  */
 console.log("\n[10e] a mis-described key: the hazard, the chain, and what the write refuses");
 {
@@ -2083,6 +2106,14 @@ console.log("\n[10e] a mis-described key: the hazard, the chain, and what the wr
     const spy = writeSpy(h);
     // `SHA256:NEW` is the fingerprint of a key the user PASTED and never saved.
     // `PEM-OLD` is what the host's account actually holds, and what travels.
+    //
+    // Measured on the MINT path, which is the only one this hazard now reaches:
+    // the reuse-path twin of the same interaction - paste a key the vault
+    // already holds over the seeded one, then tick the offer - is gated at the
+    // offer by the two refs group [10d] pins on the mint side, so no offer is
+    // made over that body at all. This row is what `applyCredentialChange`'s own
+    // gate would let through if it went, and it is reached here by handing the
+    // facts in directly.
     const result = await convertHostToVault(
       {
         host: keyedHost,
@@ -2148,7 +2179,7 @@ console.log("\n[10e] a mis-described key: the hazard, the chain, and what the wr
           {
             host: keyedHost,
             identity: { name: "shared", username: "root", domain: "", description: "" },
-            key: { reuseKeyId: "k-nobody" },
+            key: { reuseKeyId: "k-nobody", fingerprint: "SHA256:AAAA" },
           },
           spy.deps,
         ),
@@ -2199,7 +2230,10 @@ console.log("\n[10e] a mis-described key: the hazard, the chain, and what the wr
             {
               host: keyedHost,
               identity: { name: "shared", username: "root", domain: "", description: "" },
-              key: { reuseKeyId: "k-nofp" },
+              // A non-blank fingerprint in hand, so the refusal below is the
+              // record's missing one and not the mismatch check one refusal
+              // further down.
+              key: { reuseKeyId: "k-nofp", fingerprint: "SHA256:AAAA" },
             },
             spy.deps,
           ),
@@ -2228,30 +2262,118 @@ console.log("\n[10e] a mis-described key: the hazard, the chain, and what the wr
 
   // -- 10e.4: the arm that must still work ---------------------------------
   {
-    // The belt refuses two shapes and NOTHING else. A record with a body and a
-    // fingerprint reuses exactly as it did - stated as its own row, because a
-    // guard that refused the good path too would be caught by group [10b] only
-    // as a red gate, not as a statement about this change.
-    const good = vaultKey({
-      id: "k-good",
-      name: "laptop key",
-      fingerprint: "SHA256:AAAA",
+    // The belt refuses three shapes and NOTHING else. A record with a body and a
+    // fingerprint that IS the one the offer matched on reuses exactly as it did -
+    // stated as its own row, because a guard that refused the good path too
+    // would be caught by group [10b] only as a red gate, not as a statement
+    // about this change. It is also the row that catches the mismatch check
+    // written with its comparison inverted, which every refusal row below
+    // passes.
+    //
+    // Three spacings, not one, and they are the whole reason the write trims
+    // both sides: `reusableVaultKey` matches on TRIMMED values, so a record
+    // stored with a padded fingerprint is a record an offer can genuinely name -
+    // and a write comparing raw strings would then refuse the very offer the
+    // app just made. The padding is on the record in one row and on the passed
+    // value in the next, because trimming one side only is a live mutation that
+    // one row alone would miss.
+    for (const [label, recorded, matched] of [
+      ["both exact", "SHA256:AAAA", "SHA256:AAAA"],
+      ["padding on the record", "  SHA256:AAAA ", "SHA256:AAAA"],
+      ["padding on the fingerprint the offer matched on", "SHA256:AAAA", " SHA256:AAAA\n"],
+    ] as const) {
+      const good = vaultKey({
+        id: "k-good",
+        name: "laptop key",
+        fingerprint: recorded,
+        hasPrivateKey: true,
+        hasPassphrase: true,
+      });
+      const h = harness({ hosts: [keyedHost], keys: [good], kept: { ...hostKept } });
+      const spy = writeSpy(h);
+      const result = await convertHostToVault(
+        {
+          host: keyedHost,
+          identity: { name: "shared", username: "root", domain: "", description: "" },
+          key: { reuseKeyId: "k-good", fingerprint: matched },
+        },
+        spy.deps,
+      );
+      check(
+        `(${label}) a record with a body and the matched fingerprint still reuses`,
+        result.identity.keyId,
+        "k-good",
+      );
+      check(`(${label}) with no key write of any kind`, spy.log, ["upsertIdentity i-new"]);
+      check(`(${label}) and the caller is handed that record, byte-identical`, result.key, good);
+      // Not inert: `reusableVaultKey` agrees this pairing is offerable, so the
+      // row is about the two places comparing one value the SAME way rather than
+      // about a spacing the app could never produce.
+      check(
+        `(${label}) and reusableVaultKey would have offered exactly this record`,
+        reusableVaultKey([good], { fingerprint: matched })?.id,
+        "k-good",
+      );
+    }
+  }
+
+  // -- 10e.5: the belt, third condition - a record that is no longer the one
+  //           the offer matched on -----------------------------------------
+  {
+    // The gap the first two conditions leave open, and the one that costs a key.
+    // A record with a body and a fingerprint satisfies both of them while being
+    // a DIFFERENT key from the one the offer was about: the id came from
+    // somewhere that never made an offer, or the record at that id was replaced
+    // or re-imported between the offer and this call. Taking it copies nothing
+    // and step 8 releases the host's own three accounts, so the refusal has to
+    // land before a byte moves or the host's private key is simply gone.
+    const other = vaultKey({
+      id: "k-other",
+      name: "someone else's laptop key",
+      fingerprint: "SHA256:BBBB",
       hasPrivateKey: true,
       hasPassphrase: true,
     });
-    const h = harness({ hosts: [keyedHost], keys: [good], kept: { ...hostKept } });
+    const h = harness({ hosts: [keyedHost], keys: [other], kept: { ...hostKept } });
     const spy = writeSpy(h);
-    const result = await convertHostToVault(
-      {
-        host: keyedHost,
-        identity: { name: "shared", username: "root", domain: "", description: "" },
-        key: { reuseKeyId: "k-good" },
-      },
-      spy.deps,
+    await rejects(
+      "a record whose fingerprint is not the one the offer matched on is REFUSED, naming the host and the key",
+      () =>
+        convertHostToVault(
+          {
+            host: keyedHost,
+            identity: { name: "shared", username: "root", domain: "", description: "" },
+            key: { reuseKeyId: "k-other", fingerprint: "SHA256:AAAA" },
+          },
+          spy.deps,
+        ),
+      ["prod", "cannot reuse vault key", "someone else's laptop key", "different fingerprint"],
     );
-    check("a record with a body and a fingerprint still reuses", result.identity.keyId, "k-good");
-    check("with no key write of any kind", spy.log, ["upsertIdentity i-new"]);
-    check("and the caller is handed that record, byte-identical", result.key, good);
+    check("no vault record was written", spy.log, []);
+    check("nothing was copied at all", h.copies(), []);
+    // THE POINT OF THE WHOLE ROW. `kept` still holding all three is what says
+    // the refusal preceded step 8's release - the loss this refusal exists to
+    // prevent is the private key, and it is asserted by value rather than by
+    // presence so a released-and-rewritten account cannot pass it.
+    check(
+      "the host keeps all three of its own accounts, values included - the release never ran",
+      [
+        h.kept.get(`${HOST_KEYRING_SERVICE}::h-1::password`),
+        h.kept.get(`${HOST_KEYRING_SERVICE}::h-1::privateKey`),
+        h.kept.get(`${HOST_KEYRING_SERVICE}::h-1::keyPassphrase`),
+      ],
+      ["hunter2", "PEM-OLD", "this-host-passphrase"],
+    );
+    check("and its record is still inline, bound to nothing", h.hostRows(), [keyedHost]);
+    check("the other host's key record is byte-identical afterwards", h.keys(), [other]);
+    // Proof the refusal is not inert, the discipline group [10e].3 uses: this
+    // record is one `reusableVaultKey` would never have offered for
+    // `SHA256:AAAA` either, so the write and the offer agree about it.
+    check(
+      "and reusableVaultKey would not have offered it for that fingerprint",
+      reusableVaultKey([other], { fingerprint: "SHA256:AAAA" }),
+      null,
+    );
   }
 }
 
@@ -2927,7 +3049,21 @@ console.log("\n[16] credentialChoice.ts, by value");
   check(
     "convert note, exact text",
     credentialChangeNote({ kind: "convert" }, undefined, []),
-    "The credentials this host stores move into a new shared identity, and the host stops owning them. Nothing here is deleted until the move has succeeded. This happens as soon as you confirm - cancelling the editor afterwards does not undo it, and what it buys is fewer copies of one credential, nothing else.",
+    "The credentials this host stores move into a new shared identity, and the host stops owning them. What moves is what is saved for this host, so a key body typed into the form and not yet saved is not moved, and is discarded. Nothing here is deleted until the move has succeeded. This happens as soon as you confirm - cancelling the editor afterwards does not undo it, and what it buys is fewer copies of one credential, nothing else.",
+  );
+  // The unsaved-body sentence, named on its own beside the exact-text pin above.
+  // The exact pin catches the sentence being DELETED; this one is here so a
+  // failure says WHICH claim went, and so a rewrite that keeps a sentence in the
+  // slot while softening what it promises ("may not be moved", "is usually not
+  // moved") is a named failure rather than a diff to read. It is the only thing
+  // the user is told before confirming that the key body on screen is not what
+  // travels - after the convert the row is bound and renders no key field at
+  // all, so there is nothing left to notice.
+  assert(
+    credentialChangeNote({ kind: "convert" }, undefined, []).includes(
+      "a key body typed into the form and not yet saved is not moved, and is discarded",
+    ),
+    "convert note states, without a hedge, that an unsaved key body does not travel and is discarded",
   );
   check(
     "detach note, exact text",
@@ -3249,3 +3385,61 @@ console.log("\ncredential-move-verify: OK\n");
 //                                                       assumed - a rooted region
 //                                                       that resolves to nothing
 //                                                       otherwise passes for free.
+//
+// --- mutation table (the offer gate and the fingerprint at the write) --------
+//
+// K7 above is now closed on the reuse side too, and this round is what closes
+// it: the OFFER is gated like the mint, and the write re-checks the offer's
+// own claim. The offer's half is source-shaped and lives in
+// `scripts/host-editor-verify.ts` section [11]; everything here is by value.
+//
+//   Mutation                                          Check(s) it killed
+//   -------------------------------------------------  ---------------------------
+//   M5: pre-check 4's fingerprint COMPARISON deleted   FIVE, all of 10e.5 and
+//     (the third refusal, not the second's             none elsewhere: the refusal
+//     `records no fingerprint` test)                    "did not reject", the
+//                                                       identity write, the
+//                                                       password copy, the host's
+//                                                       three accounts all
+//                                                       `undefined` afterwards -
+//                                                       which IS the loss - and the
+//                                                       host record now bound.
+//                                                       `tsc` at 0, and
+//                                                       `host-editor-verify.ts`
+//                                                       fully green at 346, because
+//                                                       nothing about the dialog's
+//                                                       source changed.
+//   M6: both sides compared UNTRIMMED                  The run ABORTS at 187 ok,
+//                                                       exit 1, on 10e.4's
+//                                                       "padding on the record"
+//                                                       row: convert throws where
+//                                                       the row expects it to
+//                                                       complete, and an
+//                                                       unhandled rejection is not
+//                                                       a counted FAIL. Loud, and
+//                                                       recorded as an abort rather
+//                                                       than a number so the next
+//                                                       reader does not look for
+//                                                       one.
+//   M6a: only the RECORD's side trimmed                Aborts at 191 ok, on the
+//                                                       "padding on the fingerprint
+//                                                       the offer matched on" row.
+//   M6b: only the PASSED side trimmed                  Aborts at 187 ok, on the
+//                                                       "padding on the record" row.
+//                                                       M6a and M6b are why 10e.4
+//                                                       carries two padded rows and
+//                                                       not one: either alone leaves
+//                                                       half of the trim unheld.
+//   M7: the comparison INVERTED, `===` for `!==`,      Aborts at 79 ok, on 10b.1 -
+//     so a matching record is the one refused          the first honest reuse in the
+//                                                       file. Every refusal row in
+//                                                       10e passes under it, which
+//                                                       is why 10e.4's good path is
+//                                                       a row of its own.
+//   M8: the note's unsaved-body sentence deleted       TWO, in [16]: the convert
+//                                                       note's exact text and the
+//                                                       named claim beside it.
+//   M8a: the same sentence SOFTENED to "may not be     the same TWO. The exact-text
+//     moved", the hedge that reads as a caveat          pin catches both mutations;
+//     while promising nothing                          the named one is what says
+//                                                       WHICH claim went.

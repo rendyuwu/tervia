@@ -248,10 +248,11 @@ function inlineAuthMode(host: Host): VaultAuthMode {
  * left.
  *
  * BOTH CONDITIONS ARE RE-ASSERTED AT THE WRITE, on the record that actually
- * resolves there - see {@link convertHostToVault}'s pre-check 4. This function
- * being the only producer of a `reuseKeyId` today is a fact about today, and the
- * release the reuse path performs is destructive, so the write does not take the
- * offer's word for it.
+ * resolves there - see {@link convertHostToVault}'s pre-check 4, which also
+ * compares the fingerprint the caller matched on against the one that record
+ * records now. This function being the only producer of a `reuseKeyId` today is
+ * a fact about today, and the release the reuse path performs is destructive, so
+ * the write does not take the offer's word for it.
  *
  * A BLANK OR ABSENT FINGERPRINT MATCHES NOTHING, on either side. `""` is what a
  * container this app could not open reports (`keyInspect.ts`'s sealed-container
@@ -347,8 +348,9 @@ async function undoConvertRecords(
  * 1. Refuse unless the host is inline.
  * 2. Refuse when the host stores key material but no key was given.
  * 3. Refuse when the record authenticates BY key and stores none.
- * 3b. Refuse when the key to reuse is gone, stores no private key, or records no
- *     fingerprint.
+ * 3b. Refuse when the key to reuse is gone, stores no private key, records no
+ *     fingerprint, or records one other than the fingerprint the caller matched
+ *     it on.
  * 4. Mint the new ids.
  * 5. Copy every account, sequentially.
  * 6. Write the key WHEN ONE IS BEING MINTED, through `keyRecordFrom` - not a
@@ -380,11 +382,13 @@ async function undoConvertRecords(
  * class unreachable rather than merely guarded: no caller can get it wrong.
  *
  * THE KEY, ON THE OTHER HAND, IS A DECISION AND SO IT IS A PARAMETER. `{name,
- * facts}` mints a new record; `{reuseKeyId}` points the new identity at one the
- * vault already holds ({@link reusableVaultKey} is what finds a candidate). No
- * lookup and no question happen here: reuse hands the new identity a record
- * whose name, description and passphrase belong to an earlier import, so the
- * user is the one who picks, and the caller passes the answer.
+ * facts}` mints a new record; `{reuseKeyId, fingerprint}` points the new
+ * identity at one the vault already holds ({@link reusableVaultKey} is what
+ * finds a candidate). No lookup and no question happen here: reuse hands the new
+ * identity a record whose name, description and passphrase belong to an earlier
+ * import, so the user is the one who picks, and the caller passes the answer -
+ * along with the fingerprint it matched that record on, which pre-check 4
+ * compares against the record it resolves.
  */
 export async function convertHostToVault(
   args: {
@@ -405,12 +409,17 @@ export async function convertHostToVault(
      * identity that names no key, whichever arm is passed.
      *
      * `{name, facts}` mints a new `VaultKey` from this host's own material.
-     * `{reuseKeyId}` names one the vault already holds, found by
+     * `{reuseKeyId, fingerprint}` names one the vault already holds, found by
      * {@link reusableVaultKey} and CHOSEN BY THE USER; see the split at
      * `mintedKeyId` / `namedKeyId` below for what that changes, which is more
      * than which id ends up on the identity.
+     *
+     * `fingerprint` is THE ONE THE OFFER MATCHED ON, read off the body the
+     * caller inspected - not off the record, which would make pre-check 4's
+     * comparison a record against itself and assert nothing at all.
      */
-    key: { name: string; facts: VaultKeyFacts } | { reuseKeyId: string } | null;
+    key:
+      { name: string; facts: VaultKeyFacts } | { reuseKeyId: string; fingerprint: string } | null;
   },
   deps: CredentialMoveDeps = defaultCredentialMoveDeps,
 ): Promise<{ host: Host; identity: VaultIdentity; key: VaultKey | null }> {
@@ -441,9 +450,13 @@ export async function convertHostToVault(
 
   // Which arm the caller picked, resolved once. `newKey` is null on the reuse
   // path and on the no-key path, which is what makes step 6 below a single
-  // condition instead of a second reading of `args.key`.
-  const reuseKeyId = args.key && "reuseKeyId" in args.key ? args.key.reuseKeyId : null;
+  // condition instead of a second reading of `args.key`. `reuse` is the whole
+  // arm rather than its id alone, because pre-check 4 needs the fingerprint that
+  // travelled with it and a second reading of `args.key` to fetch it is the
+  // drift this one narrowing exists to prevent.
+  const reuse = args.key && "reuseKeyId" in args.key ? args.key : null;
   const newKey = args.key && !("reuseKeyId" in args.key) ? args.key : null;
+  const reuseKeyId = reuse?.reuseKeyId ?? null;
 
   // PRE-CHECK 4, beside the other three and before a byte moves, for the reason
   // the key-auth-with-no-body one gives: `upsertIdentity` refuses a `keyId` that
@@ -470,17 +483,27 @@ export async function convertHostToVault(
   // fact about today; a second producer of a mis-described record is refused here
   // whether or not anyone has written one yet.
   //
+  // THE THIRD CONDITION IS THE ONE THE RECORD CANNOT ANSWER ON ITS OWN. A body
+  // and a fingerprint say the record is COMPLETE; neither says it is the record
+  // the offer was about. So the caller passes the fingerprint IT matched on and
+  // the comparison happens here, against the record that actually resolves -
+  // which is what catches an id that never came from an offer at all, and a
+  // record replaced or re-imported at that id between the offer and this call.
+  // Both sides are trimmed, exactly as {@link reusableVaultKey} trims them when
+  // it makes the match: one value compared two ways is how two places that must
+  // agree come apart.
+  //
   // REFUSED, never quietly downgraded to minting a new key. A silent fallback
   // would leave the two paths indistinguishable afterwards - the identity would
   // name a fresh record and nothing would say the reuse the user asked for did
   // not happen - and callers already handle a refusal from the three pre-checks
   // above.
   let reusedKey: VaultKey | null = null;
-  if (needsKey && reuseKeyId !== null) {
-    reusedKey = (await deps.vault.findKey(reuseKeyId)) ?? null;
+  if (needsKey && reuse !== null) {
+    reusedKey = (await deps.vault.findKey(reuse.reuseKeyId)) ?? null;
     if (!reusedKey) {
       throw new Error(
-        `hosts: "${args.host.name}" cannot reuse vault key ${reuseKeyId}, which no longer exists`,
+        `hosts: "${args.host.name}" cannot reuse vault key ${reuse.reuseKeyId}, which no longer exists`,
       );
     }
     if (!reusedKey.hasPrivateKey) {
@@ -491,6 +514,11 @@ export async function convertHostToVault(
     if (!reusedKey.fingerprint?.trim()) {
       throw new Error(
         `hosts: "${args.host.name}" cannot reuse vault key "${reusedKey.name}", which records no fingerprint, so nothing says it holds this host's private key`,
+      );
+    }
+    if (reusedKey.fingerprint.trim() !== reuse.fingerprint.trim()) {
+      throw new Error(
+        `hosts: "${args.host.name}" cannot reuse vault key "${reusedKey.name}", which records a different fingerprint from the one this host's key was matched against, so its own private key would be released against a record holding other material`,
       );
     }
   }

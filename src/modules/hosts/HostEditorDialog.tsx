@@ -160,8 +160,18 @@ const EMPTY_RDP_CRED: RdpCredentialDraft = { username: "", domain: "", password:
  * differently from "we looked and the vault holds nothing like it": the offer is
  * a choice with a consequence in both directions, and blank space where a
  * question is about to appear reads as there being nothing to ask.
+ *
+ * `fingerprint` is the one the INSPECTION produced, carried beside the record
+ * rather than read back off `key.fingerprint` at the point of use. It is what
+ * the offer claims - "the body this host stores hashes to this, and that record
+ * says the same" - and `convertHostToVault` re-checks the claim against the
+ * record it resolves. Read back off the record, that comparison would be the
+ * record against itself and would assert nothing.
  */
-type ReuseOffer = { kind: "checking" } | { kind: "none" } | { kind: "candidate"; key: VaultKey };
+type ReuseOffer =
+  | { kind: "checking" }
+  | { kind: "none" }
+  | { kind: "candidate"; key: VaultKey; fingerprint: string };
 
 const NO_REUSE_OFFER: ReuseOffer = { kind: "none" };
 
@@ -1256,26 +1266,55 @@ export function HostEditorDialog({
    * whose passphrase has not been entered - and no fingerprint means no
    * candidate, never a failure. Same degradation as the `facts = {}` arm below,
    * for the same reason: a cosmetic lookup must not fail the convert.
+   *
+   * AND IT IS GATED THE WAY THE MINTED RECORD'S FACTS ARE, on the same two refs
+   * and for the same reason: what a convert moves is the STORED account, so an
+   * offer made over a body the user typed over the seed names a vault record
+   * that has nothing to do with this host - and taking that offer copies
+   * nothing while step 8 releases the host's own key. The gate USED TO BE
+   * `protocol !== "ssh" || !sshCred.privateKey.trim()`, which is why that path
+   * was reachable by pasting a second key the vault already held over the seeded
+   * one. Neither ref says it alone: `sshSeeded` says the keychain read put a
+   * value the user could SEE into the field, `sshTouched` says they have not
+   * changed it since. Seeded alone accepts a body typed over the seed; untouched
+   * alone accepts a field that is empty or stale only because the read has not
+   * landed.
+   *
+   * A GATE THAT FAILS PUBLISHES NO OFFER, which is what an absent offer already
+   * meant: the convert mints a new key with no facts on it, the honest answer
+   * for a body this dialog cannot vouch for.
    */
   const offerKeyReuse = async () => {
     const generation = ++reuseGeneration.current;
     setReuseExistingKey(false);
-    if (protocol !== "ssh" || !sshCred.privateKey.trim()) {
-      setReuseOffer(NO_REUSE_OFFER);
-      return;
-    }
-    setReuseOffer({ kind: "checking" });
-    let candidate: VaultKey | null = null;
-    try {
-      const facts = vaultKeyFactsFrom(
-        await inspectSshKey(sshCred.privateKey, sshCred.keyPassphrase || undefined),
-      );
-      candidate = reusableVaultKey(await listKeys(), facts);
-    } catch {
-      candidate = null;
+    let candidate: { key: VaultKey; fingerprint: string } | null = null;
+    if (
+      protocol === "ssh" &&
+      sshSeeded.current.privateKey &&
+      !sshTouched.current.privateKey &&
+      sshCred.privateKey.trim()
+    ) {
+      setReuseOffer({ kind: "checking" });
+      try {
+        const facts = vaultKeyFactsFrom(
+          await inspectSshKey(sshCred.privateKey, sshCred.keyPassphrase || undefined),
+        );
+        const key = reusableVaultKey(await listKeys(), facts);
+        // `facts.fingerprint` is what the match was made ON, so it is what the
+        // offer carries. It is non-blank whenever `key` is non-null - a blank or
+        // absent one matches nothing, on either side - and the second operand is
+        // what tells the type checker so rather than a claim of its own.
+        candidate = key && facts.fingerprint ? { key, fingerprint: facts.fingerprint } : null;
+      } catch {
+        candidate = null;
+      }
     }
     if (reuseGeneration.current !== generation) return;
-    setReuseOffer(candidate ? { kind: "candidate", key: candidate } : NO_REUSE_OFFER);
+    setReuseOffer(
+      candidate
+        ? { kind: "candidate", key: candidate.key, fingerprint: candidate.fingerprint }
+        : NO_REUSE_OFFER,
+    );
   };
 
   /**
@@ -1311,11 +1350,12 @@ export function HostEditorDialog({
     setChanging(true);
     try {
       if (change.kind === "convert") {
-        // The key the user chose to reuse, or null for "mint a new record".
+        // The offer the user chose to take, or null for "mint a new record".
         // Read from the offer rather than from the checkbox alone, so a ticked
         // box over an offer that has since been replaced cannot name a record
-        // the user never saw.
-        const reused = reuseExistingKey && reuseOffer.kind === "candidate" ? reuseOffer.key : null;
+        // the user never saw. The whole offer and not its `key`, because the
+        // fingerprint it matched on travels to the write with it.
+        const reused = reuseExistingKey && reuseOffer.kind === "candidate" ? reuseOffer : null;
         // The metadata a newly minted `VaultKey` records, and it is inspected
         // ONLY from a body that is still the STORED one.
         //
@@ -1385,7 +1425,7 @@ export function HostEditorDialog({
             protocol !== "ssh"
               ? null
               : reused
-                ? { reuseKeyId: reused.id }
+                ? { reuseKeyId: reused.key.id, fingerprint: reused.fingerprint }
                 : { name: `${shared.name.trim()} key`, facts },
         });
         setExisting(result.host);

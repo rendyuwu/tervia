@@ -65,12 +65,41 @@ mount a dialog and assert on rendered text).
 
 ## Credential moves (hosts and vault)
 
-### Convert reads no keychain, so a concurrent key rotation can mis-describe a minted key
+### Convert reads no keychain, so a key rotated in place mid-edit is mis-described on the mint path and lost on the reuse path
 
-<!-- Heading created for this sub-wave's hand-off; the body is owed by the
-     task that owns the convert path and is confirming its exact residual
-     shape against the tree. Fill in the three parts above this comment,
-     then delete the comment. -->
+**Accepted state.** `convertHostToVault` copies the host's stored
+private-key account onto the record it mints and stamps that record with the
+`facts` its caller inspected. It reads no secret of its own, so it cannot
+compare the two. The caller's inspection is gated - `HostEditorDialog.tsx`'s
+`applyCredentialChange` for the facts it stamps, `offerKeyReuse` for the offer
+it makes - on the key body on screen being the one the keychain read put there
+and not having been edited since. What that gate cannot see is the stored
+account changing under it: a second window, or another process, rotating this
+host's private key in place between the editor opening and the convert. The
+seed read key A; the account now holds key B.
+
+The two arms then pay differently. On the mint arm, `copyMoves` writes B onto
+a record stamped with A's fingerprint, public half and type - a record that
+describes one key while holding another, whose copyable public half will never
+open the server, and which `reusableVaultKey` will offer to the next host that
+genuinely holds A. On the reuse arm it costs more: the offer and the write both
+match honestly on A, nothing is copied, and the host write releases an account
+holding B, which existed nowhere else.
+
+Nothing on the host record detects either - `hasPrivateKey` stays true through
+an in-place rotation - so only a second keychain read could, and the convert
+path deliberately takes none: `secrets_get` can stop on an OS access prompt on
+macOS, and a read at confirm time would put one in front of a user who has
+already answered.
+
+**Carried by.** `scripts/credential-move-verify.ts` group `[10e]` measures what
+a mis-described record costs and names this as what its two producer gates and
+its own belt leave open. `credentialMove.ts`'s `reusableVaultKey` and
+pre-check 4 each state what they do and do not assert.
+
+**Trigger.** A keychain read the convert path can make without an OS access
+prompt, or any change that lets this app notice a host's stored secret changing
+underneath an open editor.
 
 ## Verify suite
 
