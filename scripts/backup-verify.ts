@@ -980,6 +980,19 @@ check(
   [repoint.hosts[0].credential, repoint.applied, repoint.dropped],
   [{ kind: "identity", identityId: "i-1" }, 0, 1],
 );
+// The RDP side of the same weaker reason: vault-to-vault releases no account, and
+// the row is still not repointed, because the saved binding is this machine's own
+// current answer and a file has no better claim on it here than on the SSH side.
+const repointRdp = resolveIdentityBindings(
+  [host(rdp({ id: "h-r7", credential: { kind: "identity", identityId: "i-2" } }))],
+  [{ ...rdpHost(rdp({ id: "h-r7" })), credential: { kind: "identity", identityId: "i-1" } }],
+  travelled("i-1", "i-2"),
+);
+check(
+  "and the RDP side is not repointed either, even when both travelled",
+  [repointRdp.hosts[0].credential, repointRdp.applied, repointRdp.dropped],
+  [{ kind: "identity", identityId: "i-1" }, 0, 1],
+);
 // OUTCOME 2, and it needs BOTH halves. The host is new, so there is no stored
 // record whose accounts could be released, and the identity it names will exist -
 // which together are what make applying provably free rather than merely likely.
@@ -1124,6 +1137,24 @@ check(
   [declineInline.hosts[0].credential, declineInline.dropped, declineInline.applied],
   [{ kind: "identity", identityId: "i-1" }, 1, 0],
 );
+// THE RDP MIRROR OF THIS CASE, which nothing above exercises: the two RDP
+// fixtures earlier in this section both assert only the resulting credential,
+// and `inlineOnly`'s one RDP row passes an empty `existing`, so it takes the
+// honoured-as-is path and never reaches this arm at all.
+const savedVaultRdpHost: RdpHost = {
+  ...rdpHost(rdp({ id: "h-r11" })),
+  credential: { kind: "identity", identityId: "i-1" },
+};
+const declineInlineRdp = resolveIdentityBindings(
+  [host(rdp({ id: "h-r11" }))],
+  [savedVaultRdpHost],
+  NO_IDENTITIES,
+);
+check(
+  "the RDP side declines an incoming inline row over a saved identity binding too",
+  [declineInlineRdp.hosts[0].credential, declineInlineRdp.dropped, declineInlineRdp.applied],
+  [{ kind: "identity", identityId: "i-1" }, 1, 0],
+);
 // THE FIRST CASE THIS STOPS FROM OVER-REACHING. A saved INLINE host is not this
 // case: there is no vault binding to unbind, so the file's own row is honoured -
 // the same "nothing to report" outcome 1 already gives its own mirror, and an
@@ -1195,6 +1226,54 @@ check(
   "and neither is the same protocol, which is every ordinary re-import",
   refuseProtocolConflicts([host(ssh({ id: "h-7" }))], [savedKeyHost]).conflicts,
   0,
+);
+
+console.log(
+  "\n[resolveIdentityBindings precondition] a documented dependency, pinned rather than fixed",
+);
+// `resolveIdentityBindings` assumes its `existing` half already speaks the
+// incoming row's protocol - `refuseProtocolConflicts` is what establishes that,
+// by FILTERING the conflicting row out rather than merely reporting it, and
+// `applyV3` runs it first. This is a PRECONDITION-VIOLATION case: it is
+// unreachable through the app today because that ordering prevents it, and it
+// stays that way - this is not a bug, it is the documented contract made
+// visible. But `resolveIdentityBindings` is exported, so a future caller could
+// reach it without that filter, and `applyV3`'s order is one edit away from
+// changing; this fixture is what would say so. An incoming inline SSH row over
+// a saved RDP record bound to an identity falls to the tail with no SSH record
+// to keep, so `keep` becomes a blank inline binding and the file's own
+// populated credential is lost - the real, current behaviour, asserted as such.
+const savedRdpIdentity: RdpHost = {
+  ...rdpHost(rdp({ id: "h-4" })),
+  credential: { kind: "identity", identityId: "i-1" },
+};
+const crossProtocol = resolveIdentityBindings(
+  [
+    host(
+      ssh({
+        id: "h-4",
+        credential: { kind: "inline", hostId: "h-4", user: "root", authMode: "password" },
+      }),
+    ),
+  ],
+  [savedRdpIdentity],
+  NO_IDENTITIES,
+);
+check(
+  "an inline row over a cross-protocol saved identity binding blanks the credential",
+  [crossProtocol.hosts[0].credential, crossProtocol.dropped],
+  [
+    {
+      kind: "inline",
+      hostId: "h-4",
+      user: "",
+      authMode: "password",
+      hasPassword: false,
+      hasPrivateKey: false,
+      hasKeyPassphrase: false,
+    },
+    1,
+  ],
 );
 
 console.log("\n[pins] a pin the file carries belongs to the address the FILE names");
