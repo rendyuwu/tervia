@@ -324,10 +324,20 @@ export const VAULT_STAMP_ABSENT = "absent";
  * is three-state: `-` is "no inspection has answered this", which is a
  * different record from one an inspection found unencrypted, and folding them
  * together would hide the first inspection of an imported key.
+ *
+ * `=== true` and `=== false`, never a truthiness test, and every OTHER value
+ * stamps as `-`. The field is typed `boolean | undefined` but the store reads
+ * `tervia-vault.json` without re-validating it, so a hand-edited file can put
+ * `null` or a string there - and `-` is what those are: not an answer. A
+ * truthiness test made `"yes"` stamp identically to `true` while
+ * `keyNeedsPassphrase` in `refs.ts` answered `false` for it, which is one
+ * three-state field read by two rules; and it made `null` stamp as `0`, the
+ * STRONGER claim that something looked and found the body unencrypted. Both
+ * readers now test `=== true` for the encrypted answer.
  */
 export function vaultKeyStamp(key: VaultKey | null | undefined): string {
   if (!key) return VAULT_STAMP_ABSENT;
-  const encrypted = key.encrypted === undefined ? "-" : key.encrypted ? "1" : "0";
+  const encrypted = key.encrypted === true ? "1" : key.encrypted === false ? "0" : "-";
   return `key:${key.hasPrivateKey ? 1 : 0}${key.hasPassphrase ? 1 : 0}${encrypted}:${key.fingerprint ?? ""}`;
 }
 

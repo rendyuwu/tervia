@@ -1341,13 +1341,26 @@ console.log("\n[16. layout parity] the containment pair and the responsive grid 
 // ============================================================================
 // 17. The key card says when a stored key needs a passphrase nobody holds.
 // ============================================================================
-// Protects: a state a saved record can be in that NO code path can repair -
-// `VaultKey.encrypted` true with `hasPassphrase` false. There is no way to add
-// a passphrase to a stored key without replacing the body
-// (`vault/editor/draft.ts`'s `keySecretsForSave`), so the row cannot
-// authenticate anything, and `encryptedKeyRefusal` cannot catch it: that
-// refusal needs a FRESH inspection, which an import and a host-to-vault
-// conversion do not perform. The card is the only surface that says so.
+// Protects: a state a saved record can be in that nothing else about the record
+// distinguishes - `VaultKey.encrypted` true with `hasPassphrase` false, on a row
+// that DOES hold a private key. Every connect with that key fails until the
+// passphrase is stored, and an `openssh-key-v1` body inspected without its
+// passphrase still answers with a real type, fingerprint and public half, so the
+// broken row looks exactly as complete as a working one.
+//
+// The state is RECOVERABLE, which is what makes the line worth rendering rather
+// than a dead end to report: `keySecretsForSave` (`vault/editor/draft.ts`)
+// forwards a LONE passphrase, so typing one into the key editor over a blank
+// body adds it to the stored key without replacing the body. What has no way out
+// is REMOVING a passphrase, which is the asymmetry that function documents - the
+// opposite direction from the one this line is about.
+//
+// `encryptedKeyRefusal` does not cover the two routes that reach it: an import
+// inspects nothing at all, so it has no answer to refuse over, and a
+// host-to-vault conversion DOES inspect and deliberately declines to refuse,
+// because it moves a state the host already held rather than creating one (that
+// function's own doc argues both). So the saved record is what carries the
+// answer, and this card is the only surface that reports it.
 //
 // This section exists because the block was measured to be held by nothing.
 // Deleting it whole left `vault-shell-verify`, `vault-page-verify`,

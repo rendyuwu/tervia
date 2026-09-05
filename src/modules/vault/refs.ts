@@ -83,25 +83,52 @@ export function keyMissingSecret(key: VaultKey): boolean {
  * this in there would replace one false statement about the record with a
  * different one.
  *
+ * THE PRIVATE HALF IS A CONJUNCT, not an assumption, because a record with
+ * `encrypted: true` and NO stored body is reachable: an import whose secret did
+ * not land keeps the file's `encrypted` while forcing both presence flags false
+ * (`sanitizeKey` in `modules/backup/file.ts`), and a hand-written
+ * `tervia-vault.json` can say the same. That row has no passphrase question to
+ * answer - there is no body a passphrase could unlock - and
+ * {@link keyMissingSecret} is what speaks for it, correctly and already.
+ * Without the conjunct both predicates fire on it at once and the key card's
+ * remedy is FALSE: it tells the user the key fails every connect until its
+ * passphrase is entered, and entering one stores it, turns this predicate
+ * `false` and takes the warning away while the row still cannot authenticate.
+ * So exactly one of the two speaks for any given row.
+ *
+ * Asked THROUGH {@link keyMissingSecret} rather than off the presence flag a
+ * second time, for the reason the `key` arm of {@link identityMissingSecret}
+ * delegates to it: the private-half question has one definition in this module,
+ * and a second direct read is how two answers to it come to disagree. It also
+ * makes the sentence above structural rather than a coincidence of two reads -
+ * this predicate is false wherever that one is true, by construction.
+ *
  * A record in this state fails every connect until the passphrase is stored.
  * That IS recoverable - `keySecretsForSave` in `editor/draft.ts` forwards a lone
  * passphrase, so the key editor can add one to a stored key without replacing
  * the body - and this predicate is what makes it findable: nothing else on a
  * saved record distinguishes the row that needs that from a key that simply has
  * no passphrase. `encryptedKeyRefusal` in the same file blocks the two EDITOR
- * routes into the state and only those, because it needs a fresh inspection to
- * refuse over; an import (`sanitizeKey` in `modules/backup/file.ts`) and a
- * conversion (`modules/hosts/credentialMove.ts`) perform none, so for those the
- * saved record is the only thing left to carry the answer.
+ * routes into the state. An IMPORT cannot be gated the same way because it
+ * inspects nothing at all (`sanitizeKey` again, which reads a file). A
+ * HOST-TO-VAULT CONVERSION can: `applyCredentialChange` in
+ * `modules/hosts/HostEditorDialog.tsx` inspects the stored body for the facts it
+ * mints onto the new key, with the host's own stored passphrase seeded beside
+ * it, so it could refuse and deliberately does not - the host already holds that
+ * encrypted body with no passphrase, so the convert MOVES the state rather than
+ * creating it. What makes that safe is this predicate: the minted record carries
+ * `encrypted: true` with `hasPassphrase: false`, and the key card reports it.
  *
  * `encrypted === true`, never a truthiness test: {@link VaultKey.encrypted} is
  * three-state, absent means no inspection ever answered, and the store reads
  * `tervia-vault.json` without re-validating it, so a hand-edited file can put a
  * non-boolean there. Absent and a non-boolean both answer `false` here - the
- * honest answer, since nothing has established the body is encrypted.
+ * honest answer, since nothing has established the body is encrypted. The same
+ * `=== true` is what `vaultKeyStamp` in `./types.ts` tests for its third flag
+ * character, so the stamp and this predicate cannot read one field by two rules.
  */
 export function keyNeedsPassphrase(key: VaultKey): boolean {
-  return key.encrypted === true && !key.hasPassphrase;
+  return !keyMissingSecret(key) && key.encrypted === true && !key.hasPassphrase;
 }
 
 /**

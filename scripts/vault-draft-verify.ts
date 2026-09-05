@@ -715,6 +715,25 @@ console.log(
     "the same key twice, as two separate objects, still stamps the same",
     vaultKeyStamp(aKey({ encrypted: true })) === vaultKeyStamp(aKey({ encrypted: true })),
   );
+  // A hand-edited `tervia-vault.json` can put `null` or a string in a
+  // `boolean | undefined` field - the store reads the file without
+  // re-validating it - and both stamp as the NO-ANSWER character rather than as
+  // `0`. `0` is the stronger claim that an inspection looked and found the body
+  // unencrypted. This is the same `=== true` `keyNeedsPassphrase` tests two
+  // groups below, pinned on both sides so one three-state field cannot drift
+  // back to being read by two rules.
+  ok(
+    "vaultKeyStamp reads a non-boolean as no answer - the same stamp an absent field gets",
+    vaultKeyStamp({ ...aKey(), encrypted: "yes" } as unknown as VaultKey) ===
+      vaultKeyStamp(aKey()) &&
+      vaultKeyStamp({ ...aKey(), encrypted: null } as unknown as VaultKey) ===
+        vaultKeyStamp(aKey()),
+  );
+  ok(
+    "and a null encrypted does NOT stamp as the inspected-and-unencrypted state",
+    vaultKeyStamp({ ...aKey(), encrypted: null } as unknown as VaultKey) !==
+      vaultKeyStamp(aKey({ encrypted: false })),
+  );
 
   // THE PREDICATE. The absent row is the three-state decision: nothing has
   // established that this body is encrypted, so claiming it needs a passphrase
@@ -743,6 +762,43 @@ console.log(
     "keyNeedsPassphrase: a non-boolean from a hand-edited store file -> false, not truthy",
     keyNeedsPassphrase({ ...aKey(), encrypted: "yes" } as unknown as VaultKey) === false,
   );
+
+  // THE BODYLESS ROW, and no other fixture in this suite constructs it: `aKey`
+  // defaults `hasPrivateKey: true`, so every row above describes a record that
+  // HAS a body, which is why a predicate with no `hasPrivateKey` conjunct
+  // shipped green. An import whose secret did not land is exactly this shape -
+  // `sanitizeKey` forces both presence flags false and keeps the file's
+  // `encrypted`, checked by value at the end of this section.
+  const bodyless = aKey({ hasPrivateKey: false, encrypted: true, hasPassphrase: false });
+  ok(
+    "keyNeedsPassphrase: encrypted with NO stored body -> false, because there is no body a passphrase could unlock",
+    keyNeedsPassphrase(bodyless) === false,
+  );
+  ok(
+    "keyNeedsPassphrase: encrypted with no stored body but a passphrase stored anyway -> false as well",
+    keyNeedsPassphrase(aKey({ hasPrivateKey: false, encrypted: true, hasPassphrase: true })) ===
+      false,
+  );
+  // THE PAIR STATEMENT, which is the property rather than the two answers
+  // beside each other: exactly ONE of the two predicates speaks for any row.
+  // Without the conjunct both fire here, and the card then renders the
+  // destructive "Missing private key" badge beside a sentence telling the user
+  // the key fails every connect until its passphrase is entered in the editor -
+  // an instruction that stores a passphrase, turns `keyNeedsPassphrase` false
+  // and takes the warning away while the row still cannot authenticate.
+  ok(
+    "and keyMissingSecret is the one that speaks for the bodyless row - exactly one of the two, never both",
+    keyMissingSecret(bodyless) === true && keyNeedsPassphrase(bodyless) === false,
+  );
+  // The other direction, so the row above cannot be satisfied by a predicate
+  // that answers `false` for everything: the row WITH a body is
+  // `keyNeedsPassphrase`'s, and `keyMissingSecret` stays out of it.
+  const withBody = aKey({ encrypted: true, hasPassphrase: false });
+  ok(
+    "and the encrypted row that DOES hold a body is keyNeedsPassphrase's alone - again exactly one",
+    keyNeedsPassphrase(withBody) === true && keyMissingSecret(withBody) === false,
+  );
+
   // The sibling is NOT widened. It feeds `identityMissingSecret`, and an
   // encrypted key whose passphrase is missing has a private half - reporting it
   // as missing one would swap a false statement for a different false statement.
@@ -779,6 +835,15 @@ console.log(
     !("encrypted" in (sanitizeKey(fileRow({ encrypted: "yes" })) ?? {})) &&
       !("encrypted" in (sanitizeKey(fileRow({ encrypted: 1 })) ?? {})),
   );
+  // `null` specifically, because it is the value a hand-written or
+  // machine-generated JSON file most plausibly carries for "no value" - and
+  // absent is the right landing place for it, not `false`. `false` would be this
+  // record claiming an inspection looked and found the body unencrypted, which
+  // is the stronger claim and the one that silences the warning.
+  ok(
+    "and a null leaves it absent too, rather than arriving as an inspected-and-unencrypted claim",
+    !("encrypted" in (sanitizeKey(fileRow({ encrypted: null })) ?? {})),
+  );
   // The two presence flags are still forced, and this row is why the one above
   // is not simply "the file wins": those two describe the EXPORTING machine's
   // keychain, `encrypted` describes the key material.
@@ -793,12 +858,25 @@ console.log(
     [false, false],
   );
   // The chain, end to end and by value: an encrypted key exported from another
-  // machine, landing here with no passphrase, is a record the page can warn
-  // about. This is the row the whole field exists for.
+  // machine lands here with the file's encryption answer intact, and that answer
+  // is what a reader gets to ask about. WHICH reader depends on the body.
+  // `sanitizeKey` forces both presence flags false - the secrets do not travel
+  // in the metadata it validates - so the row it returns is the bodyless one
+  // above, and `keyMissingSecret` is what speaks for it. `keyNeedsPassphrase`
+  // reads it once a body is actually stored under that id, which is what
+  // `upsertKey` reports back and what `apply.ts`'s second `keyRecord` pass
+  // writes when the private key landed in the same import.
   const imported = sanitizeKey(fileRow({ encrypted: true, fingerprint: "SHA256:x" }));
   ok(
-    "an imported encrypted key with no passphrase reads as needing one",
-    imported !== null && keyNeedsPassphrase(imported),
+    "an imported encrypted key keeps the encryption answer but has no body, so keyMissingSecret is its reader and keyNeedsPassphrase is not",
+    imported !== null &&
+      imported.encrypted === true &&
+      keyMissingSecret(imported) &&
+      !keyNeedsPassphrase(imported),
+  );
+  ok(
+    "and that same row once the body IS stored reads as needing a passphrase - the state the whole field exists for",
+    imported !== null && keyNeedsPassphrase({ ...imported, hasPrivateKey: true }),
   );
 }
 
@@ -862,8 +940,19 @@ process.exit(failed === 0 ? 0 : 1);
 //     branch                                              directions beside it (3).
 //                                                       That branch is the one a
 //                                                       rename-only save travels.
-//   W4: types.ts - vaultKeyStamp reverted to the two-    section 10's two stamp
-//     flag form, dropping the encryption character        rows (2)
+//   W4: types.ts - vaultKeyStamp reverted to the two-    section 10's two original
+//     flag form, dropping the encryption character        stamp rows AND the new
+//                                                       null row (3). RE-RUN after
+//                                                       the rows below were added:
+//                                                       it was 2. The non-boolean
+//                                                       row survives this one -
+//                                                       with the character gone
+//                                                       every record stamps alike,
+//                                                       which is what that row
+//                                                       ASSERTS for a non-boolean,
+//                                                       so it passes for the wrong
+//                                                       reason. That is why the
+//                                                       null row sits beside it.
 //   W5: refs.ts - keyNeedsPassphrase's `=== true`        section 10's non-boolean
 //     changed to `!!key.encrypted`                        row (1) - and ONLY that
 //                                                       one, which is what says
@@ -879,25 +968,111 @@ process.exit(failed === 0 ? 0 : 1);
 //     alongside the two presence flags                    true row, both absent
 //                                                       rows, and the end-to-end
 //                                                       import row (4)
-//   W9: page/KeyCard.tsx - the whole needs-a-passphrase  NOTHING. This file,
-//     block deleted from the card's JSX                   vault-shell-verify,
+//   W9: page/KeyCard.tsx - the whole needs-a-passphrase  NOTHING WHEN IT WAS RUN,
+//     block deleted from the card's JSX                   and that gap is now
+//                                                       CLOSED. At the time: this
+//                                                       file, vault-shell-verify,
 //                                                       vault-page-verify and
 //                                                       key-inspect-verify all
-//                                                       stayed green. The card's
-//                                                       RENDERING of this state is
-//                                                       unchecked, recorded here
-//                                                       rather than left to be
-//                                                       discovered: it is the one
-//                                                       link in the chain no suite
-//                                                       holds. `vault-shell-verify`
-//                                                       is where a check belongs -
-//                                                       it already reads this
-//                                                       card's JSX through the
-//                                                       compiler API, and its
-//                                                       "exactly one <Badge>" check
-//                                                       is also why this state is a
-//                                                       text line rather than a
-//                                                       second chip.
+//                                                       stayed green, `tsc`
+//                                                       included, because the
+//                                                       `const` the block reads
+//                                                       goes with it. The check
+//                                                       landed later in the same
+//                                                       sub-wave, in the file this
+//                                                       row already named as where
+//                                                       it belonged:
+//                                                       `vault-shell-verify`
+//                                                       section 17 holds the block,
+//                                                       and that file's own table
+//                                                       records THIS SAME mutation
+//                                                       as X1 - RED, exit 1. What
+//                                                       is still true is the LIMIT
+//                                                       of that pin: it reads the
+//                                                       card's source through the
+//                                                       compiler API, so it catches
+//                                                       a deleted block, a rewired
+//                                                       condition and a locally
+//                                                       reimplemented predicate -
+//                                                       not a wrong VALUE reaching
+//                                                       a real render. Section 17's
+//                                                       own comment says the same,
+//                                                       and its "exactly one
+//                                                       <Badge>" neighbour is why
+//                                                       this state is a text line
+//                                                       rather than a second chip.
+//
+// The private-half conjunct and the stamp's strict read, each mutated after the
+// rows in section 10 that hold them were added. Every count below is from that
+// run's own output, and the source was restored from a snapshot and diffed
+// clean afterwards.
+//
+//   Mutation                                          Check(s) it killed
+//   -------------------------------------------------  ---------------------------
+//   N1: refs.ts - the `!keyMissingSecret(key)`          section 10's bodyless row,
+//     conjunct removed from keyNeedsPassphrase,          the pair statement beside
+//     leaving `key.encrypted === true &&                 it, and the end-to-end
+//     !key.hasPassphrase`                                import row (3). Exit 1
+//                                                       here; the other four
+//                                                       suites stayed at exit 0,
+//                                                       which is what says this
+//                                                       file is where the property
+//                                                       lives. The
+//                                                       bodyless-WITH-a-passphrase
+//                                                       row survives it, correctly:
+//                                                       that row is held by the
+//                                                       `!hasPassphrase` conjunct,
+//                                                       not by this one, and it is
+//                                                       there to say the two
+//                                                       conjuncts are separate
+//                                                       rules.
+//   N2: types.ts - vaultKeyStamp's encryption           section 10's two new stamp
+//     character reverted to the truthiness form          rows (2)
+//     (`key.encrypted === undefined ? "-" :
+//     key.encrypted ? "1" : "0"`)
+//   N2b: the same, but strict for `1` only              the SAME two rows (2). The
+//     (`... === undefined ? "-" : ... === true ?         narrower reading of the
+//     "1" : "0"`), so a non-boolean still falls          fix - agree with the
+//     to "0"                                             predicate on `1` but leave
+//                                                       `null` stamping as
+//                                                       "inspected and
+//                                                       unencrypted" - and this is
+//                                                       the mutation that says the
+//                                                       two rows are what pin the
+//                                                       wider one.
+//   N3: refs.ts - keyMissingSecret widened to           section 10's other-
+//     `!key.hasPrivateKey || !key.hasPassphrase`,        direction pair row, the
+//     the widening its own doc refuses                   sibling-not-widened row,
+//                                                       and the encrypted-with-no-
+//                                                       passphrase row (4 here,
+//                                                       exit 1) - plus 6 in
+//                                                       vault-page-verify, exit 1.
+//                                                       Run because
+//                                                       keyNeedsPassphrase now
+//                                                       DELEGATES to that function,
+//                                                       so its meaning is this
+//                                                       predicate's dependency; the
+//                                                       coupling is held loudly on
+//                                                       both sides.
+//   N4: this file - the null sanitizeKey row's          that row alone (1), exit 1.
+//     fixture changed from `encrypted: null` to          A CHECK-SIDE mutation, and
+//     `encrypted: false`                                 weaker than the rest: the
+//                                                       branch it guards is
+//                                                       `src/modules/backup/file.ts`'s
+//                                                       `typeof raw.encrypted ===
+//                                                       "boolean"`, and this
+//                                                       mutation leaves that test
+//                                                       alone. So it says the
+//                                                       row really evaluates
+//                                                       sanitizeKey's output and is
+//                                                       sensitive to what that
+//                                                       function does with the
+//                                                       value - NOT that a
+//                                                       widening of the typeof test
+//                                                       would redden here. W7 and
+//                                                       W8 above are the source-
+//                                                       side mutations of that same
+//                                                       function.
 //
 // Section 2b's mutations were run from credential-move-verify's side, where
 // the caller lives - see that file's own table. The one that lands here:

@@ -381,12 +381,26 @@ export function passphraseHelp(replacingBody: boolean): string {
  * stored key without replacing the body. What has no way out is REMOVING a
  * passphrase, which is the asymmetry {@link keySecretsForSave} documents.
  *
- * This refusal is a gate on ONE DOOR - it needs a fresh inspection, so it covers
- * exactly the paths that perform one. An import and a host-to-vault conversion
- * do not, and what answers for them is the saved record: `VaultKey.encrypted`
- * carries the inspection's answer, and `keyNeedsPassphrase` in `../refs.ts` is
- * what the key card asks. `keyMissingSecret` next to it reads only
- * `hasPrivateKey` and deliberately still does.
+ * This refusal is a gate on the two EDITOR doors, and the reason it is not a
+ * gate on every route into the state differs by route. An IMPORT cannot carry
+ * one: `sanitizeKey` in `modules/backup/file.ts` reads a file and inspects
+ * nothing, so it has no answer to refuse over. A HOST-TO-VAULT CONVERSION does
+ * inspect - `applyCredentialChange` in `../../hosts/HostEditorDialog.tsx` calls
+ * `inspectSshKey` for the facts it mints onto the new key, and the host's own
+ * stored passphrase is seeded in the field beside it, so both operands this
+ * function takes are already in hand at that site. It deliberately does not
+ * refuse, and that is the right answer: the host already holds an encrypted key
+ * with no passphrase, so the convert MOVES that state rather than creating one,
+ * and refusing would strand the credential in a host record the user is trying
+ * to empty.
+ *
+ * What answers for both routes is the saved record, and it now does:
+ * `VaultKey.encrypted` carries the inspection's answer, the minted key carries
+ * `encrypted: true` with `hasPassphrase: false`, and `keyNeedsPassphrase` in
+ * `../refs.ts` is what the key card asks - and only for a row that HOLDS a
+ * private key, because a record carrying the flag with no stored body has no
+ * passphrase question to answer. `keyMissingSecret` next to it reads only
+ * `hasPrivateKey` and deliberately still does; it is what speaks for that row.
  *
  * THE MESSAGE MAY NOT DESCRIBE THE SAVED RECORD, and that constraint is what its
  * last clause turns on. Two editors render this one string, and their records are
