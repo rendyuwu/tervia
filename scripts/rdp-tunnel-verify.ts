@@ -150,7 +150,7 @@ async function handleInvoke(cmd: string, args: Record<string, unknown>): Promise
       // suffix, so the wording is load-bearing: without it this reads as a file
       // that is there and would not open. Returning a value here would be read
       // as corruption instead.
-      if (content === undefined) throw new Error(`No such file or directory (os error 2): ${path}`);
+      if (content === undefined) throw new Error("No such file or directory (os error 2)");
       return { kind: "text", content, size: content.length };
     }
     case "fs_write_file": {

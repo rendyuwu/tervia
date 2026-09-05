@@ -111,7 +111,8 @@ if (typeof window !== "undefined" && !window.__TAURI_INTERNALS__) {
       // `{kind: "binary"}`, and recovery reads binary as a nul-filled file - so
       // a store file that is merely NEW would have a snapshot restored over it.
       if (content === null) {
-        throw new Error(`No such file or directory (os error 2): ${path}`);
+        // Rust appends the suffix LAST, so the message ends with it.
+        throw new Error("No such file or directory (os error 2)");
       }
       return { kind: "text", content, size: content.length };
     }

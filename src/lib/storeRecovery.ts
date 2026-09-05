@@ -117,7 +117,14 @@ export type StoreFileIo = {
 };
 
 export type StoreRecovery = {
-  /** What the primary looked like before anything was done to it. */
+  /**
+   * What the primary looked like before anything was done to it, with ONE
+   * deliberate exception: an absent primary beside a snapshot that could not be
+   * read reports `"unreadable"` rather than `"missing"`, because the pair's
+   * verdict is what a caller acts on and "there is nothing here" was not
+   * established. See the branch in `recover` for what acting on the wrong one
+   * costs.
+   */
   found: StoreFileState;
   /** True when the snapshot was copied over the primary. */
   recovered: boolean;
@@ -239,6 +246,20 @@ async function recover(fileName: string, io: StoreFileIo): Promise<StoreRecovery
   if (backup.kind !== "text" || fallback !== "ok") {
     // Both absent is a first run, not a loss: say nothing.
     if (found === "missing" && fallback === "missing") return { found, recovered: false };
+    // An absent primary beside a snapshot that could not be READ is NOT a first
+    // run, and reporting it as one is a data-loss path rather than a wording
+    // choice: a caller that seeds a default on "missing" persists it, and the
+    // snapshot taken after that commit copies the default over the very `.bak`
+    // whose contents nothing here ever saw. So the pair's verdict is the
+    // snapshot's, which is the only honest thing to say - nothing was
+    // established about what is here.
+    if (found === "missing" && (fallback === "unreadable" || fallback === "toolarge")) {
+      return {
+        found: "unreadable",
+        recovered: false,
+        note: `${fileName} is missing and its snapshot is ${fallback}, so nothing here could be checked`,
+      };
+    }
     return {
       found,
       recovered: false,
@@ -329,8 +350,12 @@ export const tauriStoreFileIo: StoreFileIo = {
       // direction: the cost of calling a first run unreadable is that a default
       // is not written until the first real change, and the cost of the reverse
       // is the file.
+      // Anchored to the END, which `to_string()` always is. Unanchored would
+      // match the suffix appearing anywhere in some future wrapped message, and
+      // that is the direction that turns an unreadable file back into a first
+      // run - the failure this whole distinction exists to prevent.
       const message = reason(e);
-      return /\(os error (2|3)\)/.test(message)
+      return /\(os error (?:2|3)\)$/.test(message.trim())
         ? { kind: "missing" }
         : { kind: "unreadable", reason: message };
     }

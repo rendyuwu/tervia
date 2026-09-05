@@ -234,19 +234,63 @@ export function onWorkspacesChanged(cb: () => void): Promise<() => void> {
 
 export const useWorkspacesStore = create<State & Actions>((set, get) => {
   /**
+   * A persist that is queued and has not started yet, so callers can join it.
+   *
+   * Every persist writes the CURRENT state rather than a state its caller
+   * captured, so several requested before any of them runs would each write the
+   * same thing. Collapsing them is not only about the redundant writes: `flush`
+   * below is the pre-quit snapshot and it races a hard timeout in
+   * `app/hooks/useQuitGuard.ts`, so anything queued ahead of it is spending that
+   * budget. The tab snapshot is not debounced anywhere, so a burst is ordinary.
+   *
+   * Safe here for a reason that does NOT transfer: this `persist` takes no
+   * arguments and always writes the whole state. `persist` in
+   * `modules/terminal/lib/cliAgents.ts` takes the key to write, so collapsing
+   * two of its calls would drop one key's value entirely - do not copy this
+   * there.
+   */
+  let waiting: Promise<void> | null = null;
+
+  /**
    * Write both keys and commit them together.
    *
-   * The state is read INSIDE the queued operation, so two persists in flight
-   * both write the state as it is when their turn comes rather than the state
-   * their caller happened to see.
+   * The state is read INSIDE the queued operation, so a persist that joins a
+   * queued one still ends up written: whatever runs reads the latest state.
    */
-  const persist = (): Promise<void> =>
-    io.enqueueWrite(async () => {
+  const persist = (): Promise<void> => {
+    if (waiting) return waiting;
+    const run = io.enqueueWrite(async () => {
+      // Cleared as this op STARTS, not when it finishes. A change made while the
+      // write is in flight is newer than the state being written and has to get
+      // its own pass; one made while this was merely queued does not.
+      waiting = null;
       const { workspaces, activeId } = get();
       await io.set(KEY_LIST, workspaces);
       await io.set(KEY_ACTIVE, activeId);
       await io.commit();
     });
+    // Safe after the call: `enqueueWrite` defers the operation to a microtask,
+    // so nothing has cleared this yet.
+    waiting = run;
+    return run;
+  };
+
+  /**
+   * Persist, and report a failure rather than letting it out as an unhandled
+   * rejection.
+   *
+   * Every mutation below fires and forgets, and `save()` now genuinely rejects
+   * for a file the app could not read - a locked or unreadable workspace file
+   * refuses rather than writing over itself. Without this that is one unhandled
+   * rejection per user action and nothing said anywhere. It is still not a
+   * toast: this store has no notice channel of its own, and the recovery notice
+   * at launch is what covers the case a user can act on.
+   */
+  const persistQuietly = (): void => {
+    void persist().catch((err: unknown) => {
+      console.error("workspaces: failed to persist", err);
+    });
+  };
 
   return {
     hydrated: false,
@@ -329,12 +373,12 @@ export const useWorkspacesStore = create<State & Actions>((set, get) => {
 
     setWorkspaces(workspaces) {
       set({ workspaces });
-      void persist();
+      persistQuietly();
     },
 
     setActiveId(activeId) {
       set({ activeId });
-      void persist();
+      persistQuietly();
     },
 
     createWorkspace(name) {
@@ -345,7 +389,7 @@ export const useWorkspacesStore = create<State & Actions>((set, get) => {
         activeTabIndex: 0,
       };
       set({ workspaces: [...get().workspaces, ws] });
-      void persist();
+      persistQuietly();
       return ws;
     },
 
@@ -353,7 +397,7 @@ export const useWorkspacesStore = create<State & Actions>((set, get) => {
       set({
         workspaces: get().workspaces.map((w) => (w.id === id ? { ...w, name } : w)),
       });
-      void persist();
+      persistQuietly();
     },
 
     removeWorkspace(id) {
@@ -375,7 +419,7 @@ export const useWorkspacesStore = create<State & Actions>((set, get) => {
         const newActive = before.activeId === id ? next[neighborIdx].id : before.activeId;
         set({ workspaces: next, activeId: newActive });
       }
-      void persist();
+      persistQuietly();
     },
 
     saveWorkspaceTabs(id, tabs, activeTabIndex, liveTabCount) {
@@ -396,7 +440,7 @@ export const useWorkspacesStore = create<State & Actions>((set, get) => {
           return { ...w, tabs, activeTabIndex };
         }),
       });
-      if (changed) void persist();
+      if (changed) persistQuietly();
     },
 
     reorderWorkspaces(activeId, overId) {
@@ -410,7 +454,7 @@ export const useWorkspacesStore = create<State & Actions>((set, get) => {
       const [moved] = next.splice(from, 1);
       next.splice(to, 0, moved);
       set({ workspaces: next });
-      void persist();
+      persistQuietly();
     },
   };
 });

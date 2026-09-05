@@ -1570,6 +1570,54 @@ function racingIo(io: StoreFileIo, onDir: () => void): StoreFileIo {
   check("and the write still happened exactly once", writes(log), 1);
 }
 {
+  // A `set` landing while a save is IN FLIGHT is newer than the bytes that write
+  // carries, so it has to stay pending and go out with the next commit. Clearing
+  // pending wholesale after the write folded it into the cache instead, where it
+  // claimed to be what the file said - a value the UI shows as saved, never
+  // written, and gone for good at the next change event.
+  const fs = memFs({ [PRIMARY]: text(GOOD) });
+  let inFlight = false;
+  let store!: ReturnType<typeof createFileKeyValueStore>;
+  const late: Promise<void>[] = [];
+  store = createFileKeyValueStore(
+    STORE_FILE,
+    racingIo(fs.io, () => {
+      if (!inFlight) return;
+      inFlight = false;
+      late.push(store.set("late", [{ id: "late" }]));
+    }),
+  );
+
+  await store.get("identities");
+  await store.set("keys", [{ id: "early" }]);
+  inFlight = true;
+  await store.save();
+  await Promise.all(late);
+
+  check(
+    "a save carries only the keys it snapshotted",
+    fs.files[PRIMARY],
+    text('{"identities":[{"id":"i-1"}],"keys":[{"id":"early"}]}'),
+  );
+
+  // The event is what makes this a LOSS rather than a delay, and it is why the
+  // check cannot stop at the line above. Folding the unwritten key into `cache`
+  // and clearing `pending` looks harmless while the cache survives - the next
+  // save picks the value back up out of it - but the cache is the droppable
+  // half, so the first change event from any other window takes the value with
+  // it. It was never on disk and now it is nowhere.
+  store.invalidate();
+  check("a set that missed a save survives the next event", await store.get("late"), [
+    { id: "late" },
+  ]);
+  await store.save();
+  check(
+    "and the next save is what puts it on disk",
+    fs.files[PRIMARY],
+    text('{"identities":[{"id":"i-1"}],"keys":[{"id":"early"}],"late":[{"id":"late"}]}'),
+  );
+}
+{
   // The other half of the same bug. `set` used to `await load()`, so an event
   // between the two `set`s of one commit made the second one re-read the file
   // and drop the first one's value - `deleteGroup` writing the `groupId` clear

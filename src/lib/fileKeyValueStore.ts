@@ -199,27 +199,52 @@ export function createFileKeyValueStore(fileName: string, files: StoreFileIo): F
         // trip, wide enough for a change event to empty the cache inside it. The
         // commit then wrote `{}`, and `snapshotAfterSave` called that `"ok"` and
         // copied it over the last good `.bak`.
+        //
+        // NOTHING MAY AWAIT between `load()` resolving and the `JSON.stringify`
+        // below. `invalidate()` only ever runs from a Tauri event, which is a
+        // macrotask, so the microtask checkpoint at `await load()` cannot run it
+        // - that is the whole reason the payload is safe here, and an `await`
+        // inserted into this gap would silently reopen the `{}` path.
         const gen = generation;
-        const payload = JSON.stringify({ ...cache, ...pending });
+        // The exact keys this write carries. A `set` landing during the awaits
+        // below joins `pending` but NOT this payload, so clearing `pending`
+        // wholesale afterwards would drop that value unwritten while folding it
+        // into `cache`, where it would then claim to be what the file says.
+        const writing = { ...pending };
+        const payload = JSON.stringify({ ...cache, ...writing });
         const path = await primaryPath();
         if (gen !== generation && attempt < CONTENDED_ATTEMPTS) {
           // The file changed under us. Re-read and rebuild rather than write a
           // payload whose baseline is stale: this session's own pending keys
           // still win, and the other window's other keys survive.
           //
-          // Bounded for the reason `fill` is. Giving up writes a payload that is
-          // this session's pending keys over a baseline one generation old - a
-          // LOST UPDATE of some other key, which is what this store has always
-          // been able to do and what the plugin did too. Never a `{}`: the
-          // payload is built from a cache a completed read installed.
+          // Bounded for the reason `fill` is. Giving up writes this session's
+          // pending keys over a stale baseline, which LOSES another window's
+          // update - specifically, every commit landing between the last
+          // completed read and this write, which is a time window rather than a
+          // fixed count. Never a `{}`: the payload is built from a cache that a
+          // completed read installed.
+          //
+          // This is a mode `tauri-plugin-store` did NOT have, and saying so
+          // rather than implying the cost was already accepted: the plugin keyed
+          // its collection by resolved path and handed both webviews the same
+          // `StoreInner`, so one in-memory map served both and neither could
+          // lose the other's key. It had the tearing this port exists to remove
+          // instead. A whole-file store per webview trades that for this.
           continue;
         }
         await files.write(path, payload);
-        // Saved, so pending is now what the file says. An `invalidate()` that
-        // landed during the write leaves `loaded` false, and the next read picks
-        // up these bytes from disk.
-        Object.assign(cache, pending);
-        pending = {};
+        // What was WRITTEN is now what the file says. A key whose pending value
+        // changed while this write was in flight is newer than the bytes on
+        // disk, so it stays pending and the next save carries it - dropping it
+        // here is how a value the UI shows as saved ends up nowhere.
+        //
+        // An `invalidate()` that landed during the write leaves `loaded` false,
+        // and the next read picks these bytes up from disk.
+        Object.assign(cache, writing);
+        for (const key of Object.keys(writing)) {
+          if (Object.is(pending[key], writing[key])) delete pending[key];
+        }
         return;
       }
     },

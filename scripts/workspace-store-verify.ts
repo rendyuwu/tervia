@@ -65,9 +65,9 @@ async function handleInvoke(cmd: string, args: Record<string, unknown>): Promise
       // what tells them apart: `tauriStoreFileIo.read` sorts on the `(os error N)`
       // suffix Rust appends, so ENOENT becomes `missing` and everything else
       // becomes `unreadable`.
-      if (!held) throw new Error(`No such file or directory (os error 2): ${path}`);
+      if (!held) throw new Error("No such file or directory (os error 2)");
       if (held.kind === "unreadable") {
-        throw new Error(`Permission denied (os error 13): ${path}`);
+        throw new Error("Permission denied (os error 13)");
       }
       if (held.kind === "text") return { kind: "text", content: held.content, size: 1 };
       return held.kind === "toolarge"
@@ -269,6 +269,24 @@ console.log("\n[unreadable] a file that is THERE and will not open is not a firs
   check("an unreadable snapshot restores nothing", primaryWrites().length, 0);
   check("and still hydrates", mod.useWorkspacesStore.getState().hydrated, true);
 }
+{
+  // An ABSENT primary beside an unreadable snapshot. This reads as a first run
+  // on the primary alone, and acting on that costs the user everything: the
+  // seeded default is persisted, and the snapshot the commit takes then copies
+  // that default over the very `.bak` whose contents nothing ever managed to
+  // look at. Reachable on POSIX, where a `.bak` at mode 000 is unreadable and
+  // still replaceable, because a rename needs write permission on the directory
+  // rather than on the file.
+  const mod = await world({ files: { [SNAPSHOT]: { kind: "unreadable" } } });
+  await mod.useWorkspacesStore.getState().hydrate();
+  check(
+    "an absent primary beside an unreadable snapshot writes nothing",
+    primaryWrites().length,
+    0,
+  );
+  check("so the snapshot is still what it was", files[SNAPSHOT], { kind: "unreadable" });
+  check("and it still hydrates", mod.useWorkspacesStore.getState().hydrated, true);
+}
 
 // ---------------------------------------------------------------------------
 console.log("\n[restored] a snapshot that CAN replace it is used, and believed");
@@ -310,6 +328,55 @@ console.log("\n[persist] a change writes both keys once");
     ["Renamed"],
   );
   check("and the active id in the same write", last.activeId, "ws-0");
+}
+{
+  // A burst collapses. Every persist writes the CURRENT state, so several
+  // requested before any of them runs would each write the same thing - and
+  // `flush` is the pre-quit snapshot, racing a hard timeout in
+  // `app/hooks/useQuitGuard.ts`, so anything queued ahead of it spends that
+  // budget on a write somebody else already made. The tab snapshot is not
+  // debounced anywhere, so a burst is the ordinary case rather than the odd one.
+  const mod = await world({ files: { [PRIMARY]: text(saved(["Only"])) } });
+  const store = mod.useWorkspacesStore;
+  await store.getState().hydrate();
+  const before = primaryWrites().length;
+
+  store.getState().renameWorkspace("ws-0", "One");
+  store.getState().renameWorkspace("ws-0", "Two");
+  store.getState().renameWorkspace("ws-0", "Three");
+  await store.getState().flush();
+
+  const written = primaryWrites().length - before;
+  assert(written < 4, `four persists in one tick cost ${written} write(s), not four`);
+  const all = primaryWrites();
+  const last = JSON.parse(all[all.length - 1].content) as { workspaces: { name: string }[] };
+  check(
+    // Collapsing must not lose the last edit: whichever pass runs reads the
+    // state as it is then, not as it was when its caller asked.
+    "and the last edit is the one on disk",
+    last.workspaces.map((w) => w.name),
+    ["Three"],
+  );
+
+  // The other direction, and the one that turns a coalescer into silent data
+  // loss when it is wrong: a change made AFTER the write started is newer than
+  // what that write carried, so it must get a pass of its own. A join slot that
+  // is never released collapses every later edit into a promise that has
+  // already settled, and nothing reaches the file again for the rest of the
+  // session.
+  const settled = primaryWrites().length;
+  store.getState().renameWorkspace("ws-0", "Four");
+  await store.getState().flush();
+  assert(primaryWrites().length > settled, "a change after that write gets its own pass");
+  const afterAll = primaryWrites();
+  const final = JSON.parse(afterAll[afterAll.length - 1].content) as {
+    workspaces: { name: string }[];
+  };
+  check(
+    "and lands",
+    final.workspaces.map((w) => w.name),
+    ["Four"],
+  );
 }
 
 if (failed > 0) throw new Error(`workspace-store-verify: ${failed} FAILED`);
