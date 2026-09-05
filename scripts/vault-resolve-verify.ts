@@ -1384,6 +1384,45 @@ function bus() {
   );
 }
 {
+  // Declining to replace an unreadable snapshot must not silence snapshotting
+  // for the session. The decision is taken per PASS, from a fresh read, so a
+  // transient unreadable `.bak` costs the passes it spans and no more - and the
+  // user is told once rather than once per commit, on the same memo the write
+  // faults above use.
+  const log: string[] = [];
+  const fs = memFs({ [SNAPSHOT]: { kind: "unreadable", reason: "os error 13" } }, {}, log);
+  const kv = pluginStore(fs.files, log);
+  const io = createRecoveredStore(SPEC, {
+    store: kv.store,
+    files: fs.io,
+    broadcast: bus().broadcast,
+  });
+
+  await io.ensureLoaded();
+  await io.set("keys", [{ id: "k-1" }]);
+  await io.commit();
+  assert(
+    !!io.takeRecoveryNotice()?.note?.includes("could not be read"),
+    "a snapshot that cannot be read says the net is not being refreshed",
+  );
+  check("and the unreadable one is untouched", fs.files[SNAPSHOT], {
+    kind: "unreadable",
+    reason: "os error 13",
+  });
+  await io.commit();
+  check("the same refusal is not re-reported", io.takeRecoveryNotice(), null);
+
+  // The condition clears. The very next pass takes the snapshot it skipped.
+  delete fs.files[SNAPSHOT];
+  await io.commit();
+  check(
+    "and a pass that works snapshots again",
+    fs.files[SNAPSHOT],
+    text('{"keys":[{"id":"k-1"}]}'),
+  );
+  check("saying nothing about it", io.takeRecoveryNotice(), null);
+}
+{
   // P1-1, end to end. The replace used to be `fs_delete` then `fs_copy`, with the
   // delete swallowed - so a held handle or a read-only directory produced an
   // `already exists` error, the settle promise cached THAT rejection, and every
