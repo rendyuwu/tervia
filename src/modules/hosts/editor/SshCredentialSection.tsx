@@ -546,7 +546,14 @@ export function SshCredentialSection({
           Under key auth it must not appear at all: the field the user is
           looking at is the thing that removes the key, and a second surface
           promising the same deletion is how the two come to say different
-          things. */}
+          things.
+
+          WHAT THE GATE COSTS is in `KNOWN-LIMITS.md`, and it is this row's
+          placement that carries it: the textarea route can strand a key
+          passphrase behind a deleted body, and this is the only surface that
+          offers to remove one - so the user has to leave key auth before
+          anything does. Accepted, not overlooked; widening the gate retires
+          that entry. */}
       {value.authMode !== "key" && forgettableKeySecrets.length > 0 ? (
         <ForgetKeyRow
           keySecrets={forgettableKeySecrets}
@@ -567,6 +574,9 @@ export function SshCredentialSection({
  * applies - and deliberately a SIBLING of it rather than the two sharing a shell.
  * They hold different content (a fingerprint against a list of accounts) and have
  * different empty states, and a shared card shell was priced and declined.
+ * `KNOWN-LIMITS.md` carries that as an accepted duplication, and records that
+ * only this copy of the shape is pinned by a verify script; a THIRD card wanting
+ * it is what re-runs the calculus, and retires the entry either way.
  *
  * Forget records an INTENT, which is the whole design and not an ordering
  * preference: the same button wrote its deletion straight to the store for the

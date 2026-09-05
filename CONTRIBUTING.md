@@ -92,6 +92,11 @@ If an issue already exists for what you want to do, comment "I'll take this" bef
   section number of something that isn't in git, not a `/tmp` path, not a date or a commit hash.
   Those look checkable and aren't. Put the fact in the comment and the provenance in the commit
   message.
+- An accepted state goes in [KNOWN-LIMITS.md](KNOWN-LIMITS.md), not in a planning doc. Behaviour we
+  weighed and kept, or a deferral whose trigger hasn't fired - three parts per entry: what's
+  accepted, which file and symbol carries it, and the named condition that would change the answer.
+  Comments may cite that file by name (it's checked in, so it passes the rule above), and the symbol
+  an entry names should point back, so whoever edits it next knows there's an entry to retire.
 - No emoji in code or commit messages.
 
 ### Formatting standard

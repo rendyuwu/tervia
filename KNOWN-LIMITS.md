@@ -43,9 +43,11 @@ _secret material itself_ moved. Refreshing there would hand the stale form a
 record whose next Save writes the user's draft over a body or a password
 another window just stored - the very thing the stamp fired to refuse.
 
-**Trigger.** A vault editor gaining a draft expensive enough to retype that
-losing it outweighs the overwrite risk, or a user report of the retyping
-cost.
+**Trigger.** A vault editor gaining a field whose content exists nowhere but
+the form - a key the dialog generates rather than one picked from a file is
+the case, and neither editor has one today: the key body comes from a file
+that is still on disk, and everything else is typed. Or a user report of the
+retyping cost, which does not wait on a new field.
 
 ### Nothing pins where a vault editor's message renders
 
@@ -115,11 +117,34 @@ hits it first, which is a worse outcome than the check never existing.
 Dormant today because this repository's Prettier `printWidth` is fixed.
 Rewriting them now, before anything forces the question, buys nothing.
 
-**Carried by.** `scripts/host-editor-verify.ts` documents which of its own
-sections this affects, in a comment beside its own reformat control.
-`scripts/credential-move-verify.ts`, `scripts/backup-verify.ts` and
-`scripts/vault-editor-verify.ts` each carry more pins of the same shape,
-documented the same way near where they live.
+Sixty-nine checks across nine of the fifty-eight scripts, measured rather
+than estimated: set `printWidth` to 60 in a COPY of this tree, run
+`pnpm format` and then `pnpm verify`, and `host-editor-verify` loses 26,
+`key-inspect-verify` 10, `hosts-header-narrow-verify` 9,
+`backup-import-verify` 8, `hosts-error-toast-verify` 6, `rdp-lifetime-verify`
+4, `vault-editor-verify` 3, `ssh-retry-verify` 2 and `theme-verify` 1. The
+suite loses exactly 69 `ok` lines with it, so no script stopped early and hid
+more. Re-measure before sizing a job off that number, because direction and
+magnitude both move it: widening to 120 instead costs four checks, all in
+`hosts-header-narrow-verify`, and nothing anywhere else.
+
+**Carried by.** Those nine scripts, and two of them say so where a reader
+would find it. `scripts/host-editor-verify.ts` names its own affected
+sections and its own figure, in a comment beside its own reformat control;
+`scripts/key-inspect-verify.ts` names one of its two affected sections, and
+no figure. The other seven say nothing about their casualties.
+
+A reformat comment is not evidence of a casualty, and usually it is the
+opposite. Eight scripts carry one, and every one of the eight documents a pin
+that SURVIVES a reformat - bounded to a regex, whitespace-normalised, or moved
+onto the AST - because a comment gets written where somebody fixed something.
+Four of the eight have no casualty at all: `scripts/backup-verify.ts`,
+`scripts/credential-move-verify.ts`, `scripts/forward-autostart-verify.ts` and
+`scripts/forwards-shell-verify.ts` each measure zero, and an earlier version of
+this entry named the first two as carriers. The other four are in the nine, and
+only `host-editor-verify` and `key-inspect-verify` go on to name what they
+lose; `backup-import-verify` and `vault-editor-verify` document only the pin
+they hardened, which is what makes their comments the easiest to misread.
 
 **Trigger.** A change to this repository's `printWidth`, or a Prettier major
 version that changes how it wraps a call or a template literal.
@@ -204,19 +229,24 @@ user reporting keychain clutter.
 **Accepted state.** Under key auth, clearing a seeded private key body and
 saving sends an empty body and deletes that account, but the key passphrase
 field is untouched, so it is omitted from the save and its account survives.
-What is left is a passphrase that opens nothing - one instance of the orphan
-above, arrived at from the ordinary editing route. It is also unreachable from
-the screen that made it: the row offering to forget a stored key renders only
-in the auth modes that have no key field, so the user has to switch to password
-or agent auth before anything offers to clean it up.
+What is left is a passphrase that opens nothing. It is NOT the orphan above,
+and the difference is the whole of what is accepted here: `hasKeyPassphrase`
+stays true on the host record, so `tervia-hosts.json` still names the account
+and `hostKeySecretNames` in `editor/credentialChoice.ts` still enumerates it.
+What it is instead is unreachable from the screen that made it - the row
+offering to forget stored key material renders only in the auth modes that
+have no key field, so the user has to switch to password or agent auth before
+anything offers to clean it up.
 
 **Carried by.** `sshSecretsForSave` in `src/modules/hosts/editor/sshSecrets.ts`,
 whose rule that both key fields go down together holds for the explicit forget
 override and not for the textarea route, and `ForgetKeyRow`'s placement in
 `SshCredentialSection.tsx`.
 
-**Trigger.** The forget row becoming reachable under key auth, or the textarea
-route being made to carry the passphrase down with the body. The help copy
-under the textarea deliberately does not mention this: the passphrase input is
-masked and looks identical stored or empty, so the advice cannot be acted on
-from that screen.
+**Trigger.** A user report of a host still offering to forget a key passphrase
+after its key was removed - the "Stored key material" row is what shows it, and
+only once that host is on password or agent auth, so the report arrives from
+someone who switched modes for an unrelated reason. Or the key passphrase input
+gaining a visible stored/empty state: it is masked today and looks identical
+either way, which is why the help copy under the textarea deliberately does not
+mention the leftover - the advice could not be acted on from that screen.

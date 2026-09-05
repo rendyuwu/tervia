@@ -919,16 +919,40 @@ if (failed > 0) console.error(`${failed} check(s) FAILED.`);
 //                                                       copy brings the sentence
 //                                                       with it. `tsc` stayed at 0.
 //   E5: `pnpm exec prettier --print-width 60 --write`      NOTHING in section [7],
-//     over HostEditorDialog.tsx - the paired reformat        which is the point of
-//     that an exact-text pin owes                            the pair. It DID redden
-//                                                       the narrowing pin before
-//                                                       `tight()` existed: Prettier
-//                                                       broke the call across lines
-//                                                       AND added a trailing comma,
-//                                                       which whitespace-stripping
-//                                                       alone does not remove.
-//                                                       Section [5]'s own anchors
-//                                                       do not survive that
-//                                                       reformat - pre-existing,
-//                                                       untouched here.
+//     over HostEditorDialog.tsx - the paired reformat        nor anywhere else in
+//     that an exact-text pin owes                            this file, which is the
+//                                                       point of the pair. It DID
+//                                                       redden the narrowing pin
+//                                                       before `tight()` existed:
+//                                                       Prettier broke the call
+//                                                       across lines AND added a
+//                                                       trailing comma, which
+//                                                       whitespace-stripping alone
+//                                                       does not remove.
+//
+// WHAT E5's ZERO DOES NOT COVER: it reformats ONE file, and this file's checks
+// read five. Run the same `--print-width 60` over all of `src/` instead and ten
+// checks here redden, in two sections the row above does not touch - measured per
+// file rather than carried forward, so each number says which reformat produced
+// it:
+//
+//   - SEVEN in [5], from reformatting `editor/SshCredentialSection.tsx`. FOUR
+//     follow the `between()` start anchor `const checkKey = async (pem: string,
+//     passphrase: string) => {`: Prettier splits that declaration one parameter
+//     per line, the anchor stops matching, the region collapses to length 0, and
+//     the three checks that read the region fail behind it. The other THREE are
+//     pickKeyFile's `onChange({ privateKey: ..., keyPassphrase: "" })` broken
+//     across lines, which is exactly the shape E5 describes above.
+//   - THREE in [3b], from reformatting `vault/keyInspect.ts`, all one cause: the
+//     regex locating `vaultKeyFactsFrom`'s body spells that signature as a single
+//     line, and Prettier splits it the same way. Same class as [5]'s first four -
+//     a whole declaration pinned as one line - through a different instrument, a
+//     regex literal rather than a `between()` anchor.
+//
+// The two are disjoint and additive: seven plus three is the ten a whole-`src/`
+// reformat costs, so neither reformat reddens anything the other does. An earlier
+// version of this note named [5] alone and called it a casualty of "that
+// reformat" - true of a reformat over a file this control does not touch, and
+// silent about [3b]. `KNOWN-LIMITS.md` carries the repository-wide figure these
+// ten are part of, and the measurement the number came from.
 process.exit(failed === 0 ? 0 : 1);

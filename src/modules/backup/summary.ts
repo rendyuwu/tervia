@@ -118,9 +118,21 @@ export type ImportSummary = {
   /** The sentence, always `Imported: ...`. A pure function of the result, so
    *  `scripts/backup-verify.ts` can assert it by value. */
   line: string;
-  /** Verbatim from the result: `applyV3` pushes exactly one line per refusal,
-   *  each naming the record. Rendered as a LIST rather than folded into `line`,
-   *  because the line is one sentence and a forty-host import can carry several. */
+  /** Verbatim from the result: `applyV3` pushes exactly one line per refusal it
+   *  catches, and no record can produce two - a failed record write keeps that
+   *  record out of the flag pass that would report it again.
+   *
+   *  EIGHT OF ITS NINE PUSH SITES NAME THE RECORD; the ninth is the credential
+   *  write, and it is the arm this list was built for. Every account the import
+   *  is going to write goes down in ONE `backup_apply_secrets` call - the landed
+   *  keys and identities, plus the landed hosts that own their own accounts - so
+   *  its refusal is a single line for that whole batch, naming nothing: "no
+   *  stored credentials could be written to the keychain". A reader sizing the
+   *  damage off the line count gets one for a file whose every secret was
+   *  refused.
+   *
+   *  Rendered as a LIST rather than folded into `line`, because the line is one
+   *  sentence and a forty-host import can carry several. */
   problems: string[];
 };
 
@@ -155,7 +167,11 @@ export function summarize(r: ImportResult): ImportSummary {
   // unconditional; now that either host clause can be absent it has to follow
   // whichever one is last. Appending "" is a no-op, and an EMPTY `hostParts`
   // cannot coincide with a non-empty split: the split needs a host on both
-  // protocols, which needs at least one of these two clauses.
+  // protocols, which needs at least one of these two clauses. Which means no
+  // fixture can distinguish this guard from one that always fires - widening it
+  // changes no output and reddens nothing, measured. `KNOWN-LIMITS.md` carries
+  // that as an accepted state rather than counted coverage; retire the entry if
+  // the split gains a second attachment point.
   const hostParts: string[] = [];
   if (added > 0) hostParts.push(`${added} added`);
   if (replaced > 0) hostParts.push(`${replaced} updated`);

@@ -16,10 +16,21 @@ import type { SshCredentialDraft, SshSecretTouched } from "./types";
  * is nothing stored" or "the read has not landed yet" - and only the first of
  * those makes emptying it an instruction to delete anything.
  *
- * Set once, when the seed resolves, from what the seed actually applied: a field
- * the seed YIELDED to (because the user was already typing in it) is not seeded,
- * whatever the keychain returned, because the stored value never reached the
- * screen.
+ * Set by `seedSshSecrets` in `HostEditorDialog.tsx`, every time a keychain read
+ * resolves for the row still on screen. There are two such reads, not one: the
+ * editor's load for an inline row, and again once a detach has copied an
+ * identity's secrets onto this host's own accounts - so a sitting that binds or
+ * converts and then detaches sets this twice. A read that throws sets nothing,
+ * and neither does one whose row has moved on.
+ *
+ * REPLACED rather than merged on that second read, which is the safe direction:
+ * all three are re-derived from the touched record as it stands then, so a field
+ * the user typed into after the first read comes back NOT seeded - and a touched,
+ * blank, unseeded field is omitted from the save rather than clearing anything.
+ *
+ * Always from what that read actually applied: a field the seed YIELDED to
+ * (because the user was already typing in it) is not seeded, whatever the
+ * keychain returned, because the stored value never reached the screen.
  */
 export type SshSecretSeeded = {
   password: boolean;
@@ -108,6 +119,14 @@ export function clearsSecret(value: string): boolean {
  * behind would leave an account no screen names and nothing removes - the same
  * argument the vault's own `keySecretsForSave` makes for the same pair, where a
  * replaced body takes its passphrase with it.
+ *
+ * THAT RULE IS THE OVERRIDE'S, NOT THIS FUNCTION'S, and the difference is
+ * recorded rather than hidden: on the ordinary textarea route a cleared body
+ * goes down as `""` while an untouched passphrase is omitted, so the passphrase
+ * account survives its key. `KNOWN-LIMITS.md` carries that as an accepted state.
+ * Making the two fields travel together HERE, outside `forgetKey`, resolves it -
+ * retire the entry in the same change rather than leaving it describing a state
+ * the code no longer reaches.
  *
  * IT DOES NOT TOUCH THE PASSWORD. That is the credential the host has moved TO,
  * and it is still decided by `touched`/`seeded` above: a password typed in the

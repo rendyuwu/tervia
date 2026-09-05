@@ -264,6 +264,13 @@ function inlineAuthMode(host: Host): VaultAuthMode {
  * reachable - importing one key file twice is all it takes - and there is no
  * honest way to pick between them here, so the caller names the record it is
  * offering and the choice is visible rather than silent.
+ *
+ * WHAT NEITHER CONDITION CAN SEE is the host's own stored key moving under the
+ * `facts` they are matched against. `facts` describes the body that was on
+ * screen when the caller inspected it, and nothing on this path reads an
+ * account, so a key rotated in place between the editor opening and the convert
+ * matches honestly on the key that is gone. `KNOWN-LIMITS.md` carries what that
+ * costs on each arm and names the read that would retire it.
  */
 export function reusableVaultKey(keys: readonly VaultKey[], facts: VaultKeyFacts): VaultKey | null {
   const fingerprint = facts.fingerprint?.trim();
@@ -498,6 +505,13 @@ export async function convertHostToVault(
   // name a fresh record and nothing would say the reuse the user asked for did
   // not happen - and callers already handle a refusal from the three pre-checks
   // above.
+  //
+  // WHAT IT STILL CANNOT ASSERT is the other side of the comparison. The
+  // fingerprint handed in describes the key body the caller inspected, not
+  // whatever this host's account holds now, and this path takes no keychain read
+  // to find out - so a key rotated in place under an open editor passes every
+  // condition here. `KNOWN-LIMITS.md` carries that as accepted, on both arms,
+  // and states the trigger that would retire it.
   let reusedKey: VaultKey | null = null;
   if (needsKey && reuse !== null) {
     reusedKey = (await deps.vault.findKey(reuse.reuseKeyId)) ?? null;

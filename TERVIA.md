@@ -698,6 +698,17 @@ never blocks persistence. Not supported in builtin mode:
   the fact in the comment; provenance belongs in the commit message, which is
   in git and reachable with `git log -S` or `--grep`. The tell when writing
   one is a backtick around a filename `git ls-files` would not return.
+- **An accepted state lives in [KNOWN-LIMITS.md](KNOWN-LIMITS.md), not in a
+  planning document.** Behaviour that was weighed and kept on purpose, and a
+  deferral whose trigger has not fired yet, both belong somewhere a reader
+  holding only the clone can reach - which is the same test as the bullet
+  above, applied to the thing the citation rule stops you from pointing at. An
+  entry is three parts and no more: what is accepted, which file and symbol
+  carries it, and the named condition that would change the answer ("a
+  component test runner existing in this repository", not "later"). A comment
+  may cite that file BY NAME, and the symbol an entry names should point back
+  at it, so whoever edits that symbol next finds out there is an entry to
+  retire.
 
 ## Development workflow
 

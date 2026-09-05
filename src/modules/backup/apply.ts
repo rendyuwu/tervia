@@ -611,7 +611,24 @@ function keyRecord(key: VaultKey, stored: VaultKey | undefined, landedBody: bool
  * Every write is contained to its own record. A refusal is counted and reported,
  * never allowed to abandon the records behind it: a 40-host file whose host 12 the
  * store will not take must still import the other 39, and `problems` carries one
- * line per refusal, naming the record.
+ * line per refusal caught, from the nine push sites below.
+ *
+ * EIGHT OF THE NINE NAME THE RECORD THEY REFUSED; the ninth is WRITE 6, and the
+ * quantifier is worth being exact about because that arm is the one a reader
+ * checks first. WRITE 6 is a single `backup_apply_secrets` call carrying every
+ * account this import is going to write, so a throw there is ONE line covering
+ * all of them and naming none - the same single line whether the file carried one
+ * account or four hundred. A refusal SHORT of a throw pushes no line at all: a
+ * `written[i]` that came back false is carried by the `withoutSecrets` counters
+ * instead, where each collection decides for itself which field makes a record
+ * incomplete. So the line count counts caught throws, never records and never
+ * accounts.
+ *
+ * NO RECORD CAN PRODUCE TWO LINES, which is what lets the list be read as one
+ * refusal per line. A record whose own write throws never reaches the collection
+ * it would be reported from again - the `saved*` push sits after the await - and
+ * a WRITE 6 throw leaves `landed` empty, which sends every record in WRITE 7 down
+ * its `continue` before it can push a second time.
  */
 async function applyV3(payload: SealedBlob, passphrase: string): Promise<ImportResult> {
   const opened = await invoke<{ handle: number; payload: string }>("backup_open_payload", {
