@@ -440,17 +440,26 @@ export async function openSshForSession(
     // Refused, not "unanswered". A prompt still sitting in the queue when the
     // connect died says nothing about who ended it: the link dropping under the
     // dialog leaves exactly that state, and it is the blip the ladder is FOR.
-    // The backend's own 120s confirm window lapsing lands in the same bucket for
-    // the same reason - it is the backend's decision, made where this side
-    // cannot see it, and telling it apart from a drop needs the connect failure
-    // to carry a phase, which the wire does not do today. Left transport, so
-    // the reconnect re-raises the question for whoever comes back to it, rather
-    // than parking a pane whose link merely blinked.
     //
-    // Everything else here (a credential the server refused, an unparseable key,
-    // a host that would not resolve) is left transport for the same reason: the
-    // backend reports it as one more string and the frontend has nothing
-    // structural to tell those apart with.
+    // Kept as a BELT, not because it is the only thing that knows. The backend
+    // now reports a user-refused key as `config` and `openSsh` rethrows that as
+    // an `SshLocalConnectError`, so the park below would happen without this
+    // line for the refusals that reach Rust. What it still covers on its own is
+    // the app's own `abandon` path - the pane that asked went away, the queue
+    // answers `false` on its behalf - and it costs one predicate over a list
+    // this scope already has. Removing a working guard in the same change that
+    // moves the classification is how a regression gets blamed on the wrong
+    // half.
+    //
+    // Everything else the backend reports now carries a kind of its own, and
+    // `openSsh` has already turned it into the right wrapper by the time it
+    // arrives here: a credential the server refused parks as `rejected`, an
+    // unparseable key and a wrong passphrase park as `config`, a host that would
+    // not resolve stays transport and ladders. The backend's own 120s confirm
+    // window lapsing is `config` and parks too - `check_server_key` records
+    // that lapse the same way it records a refusal - while a link that died
+    // under the dialog records nothing and stays transport, which is the split
+    // this block always wanted and could not make on its own.
     if (hostKeyRefused(hostKeyAnswers)) {
       throw new SshLocalConnectError(describeError(e), { cause: e });
     }

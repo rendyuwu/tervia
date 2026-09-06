@@ -25,8 +25,8 @@ use serde::{Deserialize, Serialize};
 use tauri::ipc::Channel;
 use tokio::runtime::Runtime;
 
-pub use session::SshEvent;
 use session::SshSession;
+pub use session::{SshConnectError, SshEvent};
 
 /// Shared tokio runtime for every SSH session. russh is async-first; driving
 /// it from per-session executors would duplicate thread pools. A single
@@ -135,7 +135,11 @@ pub struct SshAgentKey {
 pub async fn ssh_agent_keys() -> Result<Vec<SshAgentKey>, String> {
     ssh_runtime()
         .spawn(async {
-            let (_agent, keys) = session::agent_keys().await?;
+            // Flattened back to a string on purpose. This command feeds the
+            // dialog's agent panel, which shows the sentence and has no ladder
+            // to gate - the kind is only meaningful to a caller that decides
+            // whether to retry, and this one does not.
+            let (_agent, keys) = session::agent_keys().await.map_err(|e| e.to_string())?;
             Ok::<_, String>(
                 keys.iter()
                     .map(|k| SshAgentKey {
@@ -463,14 +467,16 @@ pub async fn ssh_open(
     state: tauri::State<'_, SshState>,
     input: SshOpenInput,
     on_event: Channel<SshEvent>,
-) -> Result<u32, String> {
+) -> Result<u32, SshConnectError> {
     let rt = ssh_runtime();
     let session = rt
         .spawn(session::connect(input, on_event))
         .await
-        .map_err(|e| format!("ssh task join failed: {e}"))?
+        // A panicked or cancelled connect task says nothing about the host, so
+        // the next attempt may well succeed.
+        .map_err(|e| SshConnectError::transport(format!("ssh task join failed: {e}")))?
         .map_err(|e| {
-            log::error!("ssh_open failed: {e}");
+            log::error!("ssh_open failed: {e:?}");
             e
         })?;
     let id = state.next_id.fetch_add(1, Ordering::Relaxed);

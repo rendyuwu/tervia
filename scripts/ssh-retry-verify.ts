@@ -18,30 +18,56 @@
  * from the two catch blocks around `openPtyForSession` instead, which is where
  * the fourth category has to be honoured.
  *
+ * The same bug had a second half, fixed later: the failure the BACKEND reports.
+ * A wrong stored password is refused by the server, and `ssh_open` used to relay
+ * that as a bare string - which the classifier files transport by construction,
+ * so it too walked 1s + 3s + 7s. `ssh_open` now rejects with `{kind, message}`
+ * and `sshConnectErrorFrom` (bridge.ts) turns the kind into the same error TYPES
+ * this file already checks, so both halves of the ladder answer one question.
+ *
  * What is checked here:
  *   1. `canAuthenticate` - the pre-dial guard, against the same truth table the
  *      backend's `has_credential` is tested with.
  *   2. `classifySshConnectFailure` - structural (an error TYPE), so it cannot
  *      rot the way a list of message prefixes would.
  *   3. `decideSshConnectFailure` - only the transport category reconnects, and
- *      the two categories stay DISTINCT.
+ *      the categories stay DISTINCT.
  *   4. `hostKeyRefused` - an ANSWER decides, and any refusal in a chain counts.
- *   5. Rust/TS parity for the mirrored guard and its wording.
- *   6. Source text: at both catch sites the park arm lexically CONTROLS the
- *      ladder call - it is a statement of the same block and it terminates it -
- *      and the pre-flight block marks what it throws. Pure functions that nobody
- *      calls fix nothing, and a gate that is merely NEAR the ladder is not a
- *      gate (see the section's own header).
+ *   5. `sshConnectErrorFrom` - the wire boundary: each kind becomes the right
+ *      error type, an unrecognised rejection passes through IDENTICAL, the end-
+ *      to-end verdict is park/park/reconnect, and the two regressions the raw
+ *      object caused (`isHostKeyMismatchError` no longer matching,
+ *      `[object Object]` / `{"kind":…}` reaching the user) stay closed.
+ *   6. Rust/TS parity for the mirrored guard and its wording, and for the set of
+ *      connect-error kinds.
+ *   7. Source text: the `ssh_open` dial's own rejection is chained through
+ *      `sshConnectErrorFrom`, and at both catch sites the park arm lexically
+ *      CONTROLS the ladder call - it is a statement of the same block and it
+ *      terminates it - and the pre-flight block marks what it throws. Pure
+ *      functions that nobody calls fix nothing, and a gate that is merely NEAR
+ *      the ladder is not a gate (see the section's own header).
  */
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+// Imported and CALLED, not read as text. `openSsh` cannot be reached from here
+// (it invokes a Tauri command), which is the whole reason the wrapping decision
+// was extracted into `sshConnectErrorFrom`: the rest of bridge.ts loads under
+// plain node, so the boundary can be covered behaviourally instead of by
+// matching source against an anchor.
+import {
+  HOST_KEY_MISMATCH_PREFIX,
+  isHostKeyMismatchError,
+  sshConnectErrorFrom,
+  type SshConnectErrorKind,
+} from "../src/modules/ssh/bridge";
 import {
   canAuthenticate,
   classifySshConnectFailure,
   decideSshConnectFailure,
   hostKeyRefused,
+  SshAuthRejectedError,
   SshLocalConnectError,
   type SshAuthAttempt,
 } from "../src/modules/terminal/lib/ssh-exit-decision";
@@ -158,6 +184,21 @@ console.log("\n[classifySshConnectFailure] the category rides on the error TYPE,
     sameWordsPlainError.kind === "transport",
     "the identical message thrown as a plain Error is NOT local - the type decides, not the text",
   );
+
+  // The third arm, pinned on the CLASSIFICATION and not on the action. Both
+  // `local` and `rejected` park, so every action-level assertion in this file
+  // stays green if the two wrappers are folded into one arm - and the doc
+  // comment on `SshConnectFailure` argues at length that they must not be. This
+  // is the only check that notices.
+  const refused = classifySshConnectFailure(new SshAuthRejectedError("ssh: auth rejected"), "m");
+  assert(
+    refused.kind === "rejected" && refused.message === "m",
+    "SshAuthRejectedError -> rejected (NOT local - the server's fact, not ours)",
+  );
+  assert(
+    refused.kind !== local.kind,
+    "the two wrappers stay DISTINCT classifications, not two spellings of park",
+  );
 }
 
 console.log("\n[classifySshConnectFailure] anything the frontend did not raise stays transport");
@@ -186,6 +227,164 @@ console.log("\n[decideSshConnectFailure] only the transport category enters the 
   // both categories onto one action would leave every assertion above passing
   // for one of them and still reintroduce the bug.
   assert(parked.action !== laddered.action, "the two categories map to two DISTINCT actions");
+  const refused = decideSshConnectFailure({ kind: "rejected", message: "no" });
+  assert(
+    refused.action === "park" && refused.message === "no",
+    "rejected -> park, message preserved (the server already answered)",
+  );
+  assert(
+    refused.action !== laddered.action,
+    "a server's refusal does NOT map onto the ladder's action",
+  );
+}
+
+// ============================================================================
+// THE WIRE BOUNDARY: `ssh_open` rejects with `{kind, message}`, and exactly one
+// function turns that back into an error the rest of the app can classify.
+//
+// Called, not read. Everything below runs the real `sshConnectErrorFrom` from
+// bridge.ts against the real classifier, so a check here fails for the same
+// reason the app would misbehave rather than because an anchor moved.
+
+/** One payload per kind, with a message distinct enough that a check cannot
+ *  pass by accident on a substring of another. */
+const PAYLOADS: { kind: SshConnectErrorKind; message: string }[] = [
+  { kind: "config", message: "ssh: no credentials: set use_agent, password, or private_key" },
+  { kind: "auth", message: "ssh: authentication rejected" },
+  { kind: "transport", message: "ssh: connect to h:22 timed out" },
+];
+
+console.log("\n[sshConnectErrorFrom] each kind becomes the error type that decides its fate");
+{
+  const [config, auth, transport] = PAYLOADS.map((p) => sshConnectErrorFrom(p));
+
+  assert(
+    config instanceof SshLocalConnectError && config.message === PAYLOADS[0].message,
+    "config -> SshLocalConnectError, message verbatim",
+  );
+  assert(
+    auth instanceof SshAuthRejectedError && auth.message === PAYLOADS[1].message,
+    "auth -> SshAuthRejectedError, message verbatim",
+  );
+  // Neither of the above, spelled out: an `Error` subclass satisfies
+  // `instanceof Error`, so "is an Error" alone would pass for all three and
+  // prove nothing about the one kind that must keep laddering.
+  assert(
+    transport instanceof Error &&
+      !(transport instanceof SshLocalConnectError) &&
+      !(transport instanceof SshAuthRejectedError) &&
+      (transport as Error).message === PAYLOADS[2].message,
+    "transport -> a plain Error that is NEITHER wrapper, message verbatim",
+  );
+
+  // The message is taken from the payload's own field, not from stringifying
+  // it. `String({kind,message})` is `[object Object]`, which is the exact text
+  // that used to reach the user.
+  for (const e of [config, auth, transport]) {
+    assert(
+      !/\[object Object\]/.test((e as Error).message),
+      `the wrapper's message is the payload's, not a stringified object (${(e as Error).name})`,
+    );
+  }
+}
+
+console.log("\n[sshConnectErrorFrom] anything it does not recognise comes back IDENTICAL");
+{
+  // The rollback property. A backend older than this change, a Tauri framework
+  // rejection, or a kind added on the Rust side and not here must not become a
+  // park - it must reach the classifier as something nobody attributed, be
+  // filed transport, and ladder, exactly as it did before the kind existed.
+  const passthrough: [string, unknown][] = [
+    ["a raw string rejection", "ssh: connect failed: connection refused"],
+    ["a bare Error", new Error("ssh: open channel failed: eof")],
+    ["null", null],
+    ["undefined", undefined],
+    ["an empty object", {}],
+    ["an unknown kind", { kind: "nonsense", message: "m" }],
+    ["a kind with no message", { kind: "auth" }],
+    ["a non-string message", { kind: "auth", message: 7 }],
+  ];
+  for (const [label, raw] of passthrough) {
+    const out = sshConnectErrorFrom(raw);
+    assert(out === raw, `${label} comes back identical (===)`);
+    assert(
+      decideSshConnectFailure(classifySshConnectFailure(out, "m")).action === "reconnect",
+      `${label} still ladders - an unrecognised rejection never becomes a park`,
+    );
+  }
+}
+
+console.log("\n[end to end] rejected value -> wrapper -> classifier -> verdict");
+{
+  const verdictFor = (p: { kind: SshConnectErrorKind; message: string }) =>
+    decideSshConnectFailure(classifySshConnectFailure(sshConnectErrorFrom(p), p.message)).action;
+  for (const [p, expected] of [
+    [PAYLOADS[0], "park"],
+    [PAYLOADS[1], "park"],
+    [PAYLOADS[2], "reconnect"],
+  ] as [(typeof PAYLOADS)[number], string][]) {
+    assert(
+      verdictFor(p) === expected,
+      `${p.kind} -> ${expected} (got ${verdictFor(p)}) - the whole path, not one hop of it`,
+    );
+  }
+  // THE criterion the change exists for, stated once as its own row: a refused
+  // credential costs one attempt, not four.
+  assert(
+    verdictFor(PAYLOADS[1]) !== verdictFor(PAYLOADS[2]),
+    "a refused credential and a dropped link do NOT get the same answer",
+  );
+}
+
+console.log("\n[regressions] the two things the raw object broke on its way through");
+{
+  // The "trust new key" prompt: `isHostKeyMismatchError` reads a prefix off
+  // `.message`, and a plain object never had one. It is reported as `config`,
+  // so it arrives here wrapped and the prefix is back.
+  const mismatch = sshConnectErrorFrom({
+    kind: "config",
+    message: `${HOST_KEY_MISMATCH_PREFIX} expected=SHA256:aaa server=SHA256:bbb. The server presented a different key`,
+  });
+  assert(
+    isHostKeyMismatchError(mismatch),
+    "a host-key mismatch relayed through the new path still matches - the trust prompt survives",
+  );
+  assert(
+    !isHostKeyMismatchError(sshConnectErrorFrom(PAYLOADS[1])),
+    "and it does not match a refusal that merely arrived the same way",
+  );
+
+  /**
+   * `describeError` from src/modules/terminal/lib/session-helpers.ts, copied.
+   * That module reads `document` transitively, so it cannot be imported here;
+   * six lines is the price this repo already pays for the same reason in
+   * src/modules/forwards/controller.ts, which keeps its own copy of these
+   * exact lines. Both are what a user actually reads: the host editor's Test
+   * button renders through the original, a forward toast through the copy.
+   */
+  const describeError = (e: unknown): string => {
+    if (typeof e === "string") return e;
+    if (e instanceof Error) return e.message;
+    try {
+      return JSON.stringify(e);
+    } catch {
+      return String(e);
+    }
+  };
+
+  // One assertion closes both symptoms. Unwrapped, `describeError` of the raw
+  // payload is `{"kind":"config","message":…}` (the toast) and `String(...)` of
+  // it is `[object Object]` (the Test button); wrapped, it is the sentence.
+  for (const p of PAYLOADS) {
+    assert(
+      describeError(sshConnectErrorFrom(p)) === p.message,
+      `${p.kind} renders as its sentence, not as JSON or [object Object]`,
+    );
+  }
+  assert(
+    describeError(PAYLOADS[0]) !== PAYLOADS[0].message,
+    "and the assertion above is not vacuous - the UNWRAPPED payload renders as something else",
+  );
 }
 
 // ============================================================================
@@ -278,6 +477,71 @@ console.log("\n[parity] the backend guard and its frontend mirror agree");
   );
 }
 
+console.log("\n[parity] the connect-error kinds are the SAME SET on both sides");
+{
+  // Source-read, because a kind that exists in Rust and not here cannot be
+  // exercised from a node script: it would arrive as an unrecognised payload,
+  // pass through, and ladder - which is the safe fallback working exactly as
+  // designed, and therefore invisible to every behavioural check above. This is
+  // the only thing that notices.
+  const rust = readRust("src-tauri/src/modules/ssh/session.rs");
+  const ts = readTs("src/modules/ssh/bridge.ts");
+
+  const rustEnum = /enum SshConnectErrorKind \{([^}]*)\}/.exec(rust)?.[1] ?? null;
+  assert(rustEnum !== null, "found the SshConnectErrorKind enum in session.rs");
+  // serde's `rename_all = "camelCase"` on single-word variants is just
+  // lowercasing, which is what makes this comparison legitimate. The exact
+  // serialized spelling is pinned in Rust by `connect_error_wire_tests`.
+  const rustKinds = [...(rustEnum ?? "").matchAll(/\b([A-Z]\w*)\b/g)]
+    .map((m) => m[1].toLowerCase())
+    .sort();
+
+  const tsUnion = /type SshConnectErrorKind =([^;]*);/.exec(ts)?.[1] ?? null;
+  assert(tsUnion !== null, "found the SshConnectErrorKind union in bridge.ts");
+  const tsKinds = [...(tsUnion ?? "").matchAll(/"(\w+)"/g)].map((m) => m[1]).sort();
+
+  assert(rustKinds.length === 3, `Rust names three kinds (found ${rustKinds.join(",")})`);
+  // The exact set, stringified - not "every Rust kind appears in TS". A
+  // membership test passes when one side loses an arm, and losing `auth` is
+  // precisely the regression that puts a refused credential back on the ladder.
+  assert(
+    JSON.stringify(rustKinds) === JSON.stringify(tsKinds),
+    `the same set, both sides (rust=[${rustKinds}], ts=[${tsKinds}])`,
+  );
+
+  // The blanket `From` the error type must never gain. It would let `?` compile
+  // at a site that named no kind, and whatever kind it picked would become the
+  // silent default for every failure added after it - the compiler error at
+  // each `?` is the entire enforcement mechanism.
+  //
+  // Counted, not pattern-matched on the `From` itself. `impl\s+From<[^>]*>\s+for`
+  // cannot see `impl From<Box<dyn Error>> for SshConnectError`: the inner `>`
+  // ends the character class early and leaves a `>` where the pattern wants
+  // whitespace. Nesting is exactly what a real conversion impl would use, and
+  // this one assert is the whole thing standing between the tree and the
+  // documented failure mode, so it counts every impl instead.
+  const impls = rust.match(/impl(?:<[^>]*>)?\s+[\w:<>, ]*\bfor\s+SshConnectError\b/g) ?? [];
+  assert(
+    impls.length === 1 && /\bDisplay\b/.test(impls[0]),
+    `Display is the ONLY trait impl'd for SshConnectError - no From, no Error (found ${JSON.stringify(impls)})`,
+  );
+  // Constructors present, and the fields PRIVATE so they really are the only
+  // way in. Without the private half a site could write the struct literal and
+  // pick a kind without going through one, and a relay could rewrite `kind`
+  // while re-wording `message` - which is how an absent ssh-agent reached the
+  // ladder before.
+  assert(
+    /fn config\(/.test(rust) && /fn auth\(/.test(rust) && /fn transport\(/.test(rust),
+    "all three constructors are still there",
+  );
+  const fields = /struct SshConnectError \{([^}]*)\}/.exec(rust)?.[1] ?? "";
+  assert(fields !== "", "found the SshConnectError struct body");
+  assert(
+    !/\bpub\s+(?:kind|message)\s*:/.test(fields),
+    `neither field is pub, so a struct literal cannot pick a kind (fields: ${JSON.stringify(fields.trim())})`,
+  );
+}
+
 // ============================================================================
 // SOURCE TEXT: the decision has to be CONSULTED, and it has to CONTROL the
 // ladder. Both retry sites are in files that cannot be imported under plain node
@@ -301,17 +565,22 @@ console.log("\n[parity] the backend guard and its frontend mirror agree");
 // statement of it, earlier in that same list, and that TERMINATES the list. No
 // index is compared to another index anywhere below.
 
-/** Index of the `}` matching the `{` at `openIdx`, or -1. */
-function matchingBrace(src: string, openIdx: number): number {
+/** Index of the delimiter matching the one at `openIdx`, or -1. */
+function matchingDelim(src: string, openIdx: number, open: string, close: string): number {
   let depth = 0;
   for (let i = openIdx; i < src.length; i++) {
-    if (src[i] === "{") depth++;
-    else if (src[i] === "}") {
+    if (src[i] === open) depth++;
+    else if (src[i] === close) {
       depth--;
       if (depth === 0) return i;
     }
   }
   return -1;
+}
+
+/** Index of the `}` matching the `{` at `openIdx`, or -1. */
+function matchingBrace(src: string, openIdx: number): number {
+  return matchingDelim(src, openIdx, "{", "}");
 }
 
 /** Every offset of `needle`, in source order - search by all matches, not the
@@ -520,6 +789,47 @@ function checkLadderSite(label: string, rel: string): void {
       `${label}: the arm is taken on the classifier's own verdict (guard: ${JSON.stringify(arm?.guard ?? "")})`,
     );
   }
+}
+
+console.log("\n[source-text] the dial's rejection cannot get past the boundary unwrapped");
+{
+  // Every behavioural check above calls `sshConnectErrorFrom` itself, so all of
+  // them stay green if `openSsh` stops calling it and lets the raw `{kind,
+  // message}` through - which is the whole defect, restored in full. `openSsh`
+  // invokes a Tauri command and cannot be run from here, so this one property
+  // is read rather than called. It is the only check that notices.
+  const src = readTs("src/modules/ssh/bridge.ts");
+
+  const dials = allIndexes(src, 'invoke<number>("ssh_open"');
+  assert(dials.length === 1, `one ssh_open dial in bridge.ts (found ${dials.length})`);
+  const argOpen = dials.length === 1 ? src.indexOf("(", dials[0]) : -1;
+  const argClose = argOpen === -1 ? -1 : matchingDelim(src, argOpen, "(", ")");
+  assert(argClose > argOpen, "resolved the dial's argument list");
+
+  // Attached to THIS call, not merely present in the function. A `.catch` on
+  // some other promise in the same body would satisfy a whole-file grep and
+  // leave the dial's own rejection untouched.
+  const tail = argClose === -1 ? "" : src.slice(argClose + 1);
+  const guardOpen = /^\s*\.catch\s*\(/.exec(tail);
+  assert(guardOpen !== null, "the dial's own promise carries a .catch, chained to it directly");
+  const handlerAt = guardOpen === null ? -1 : argClose + guardOpen[0].length;
+  const handlerEnd = handlerAt === -1 ? -1 : matchingDelim(src, handlerAt - 1, "(", ")");
+  const handler = handlerEnd === -1 ? "" : src.slice(handlerAt, handlerEnd);
+  // THROWS it. Computing the wrapper and returning it would resolve the dial
+  // with an Error instead of rejecting, so `openSsh` would hand back a bogus
+  // session id and the catch sites downstream would never run at all.
+  assert(
+    /\bthrow\s+sshConnectErrorFrom\(/.test(handler),
+    `the handler THROWS the wrapped error (handler: ${JSON.stringify(handler.trim())})`,
+  );
+
+  // And that call is the only one: a second reader of the payload elsewhere in
+  // this file would be a second place to keep in step with the Rust kinds.
+  const calls = allIndexes(src, "sshConnectErrorFrom(").length;
+  assert(
+    calls === 2,
+    `sshConnectErrorFrom appears exactly twice - its declaration and this one call (found ${calls})`,
+  );
 }
 
 console.log("\n[source-text] the first attempt's catch: the park arm controls the ladder");

@@ -98,10 +98,18 @@ function isCurrentAttempt(ruleId: string, prompts: Set<string>): boolean {
  * file the "exercisable under plain node" property it exists for. Six lines is
  * the cheaper of the two prices.
  *
- * The string branch is the load-bearing one and not boilerplate: a Tauri
- * `invoke` rejects with a RAW STRING, so that is how the backend's own
+ * The string branch is the load-bearing one and not boilerplate: the forward
+ * commands (`ssh_forward_open`, `ssh_forward_close`) reject with a RAW STRING,
+ * so that is how the backend's own
  * `ssh: bind 127.0.0.1:<port> failed: <io error>` reaches `bindFailureText` at
  * all.
+ *
+ * Not every command in this app does that any more. `ssh_open` rejects with a
+ * `{kind, message}` object, which is why `openSsh` rewraps it into an `Error`
+ * at its own boundary rather than letting it reach a `describeError` anywhere -
+ * this copy included, whose `JSON.stringify` fallback would otherwise put
+ * `{"kind":"transport",…}` in a toast. The forward commands are untouched by
+ * that change, so the branch below stays exactly right for them.
  */
 function describeError(e: unknown): string {
   if (typeof e === "string") return e;

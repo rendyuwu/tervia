@@ -126,6 +126,119 @@ pub enum SshEvent {
     Disconnected,
 }
 
+/// Which side's fact ended a connect attempt, decided HERE - at the site that
+/// knows it - rather than guessed at from the message text on the other side of
+/// the wire.
+///
+/// The frontend's reconnect ladder is the consumer. It runs 1s + 3s + 7s of
+/// retries for a failure that might go differently next time, and parks
+/// immediately for one that cannot. Before this kind existed every failure
+/// reached it as a bare string, so a server that refused a password was
+/// indistinguishable from a link that blinked, and a wrong credential cost four
+/// authentication attempts over about eleven seconds before the user was told
+/// anything.
+///
+/// Placing a new failure site: pick by what a retry with the same saved host
+/// would do, not by how far the attempt got.
+///
+///   - `Config`: the attempt could not be assembled from what this app and this
+///     machine hold, or a recorded pin refuses it. A retry reproduces it byte
+///     for byte.
+///   - `Auth`: the server was asked and said no. Deterministic for the same
+///     credential; the user must change the credential, not wait.
+///   - `Transport`: anything else. The next attempt genuinely may go
+///     differently. This is the default for an unrecognised failure, and the
+///     direction is deliberate - over-parking a blip is a worse outcome than
+///     over-laddering a rejection.
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SshConnectErrorKind {
+    Config,
+    Auth,
+    Transport,
+}
+
+/// The error type of every function on the connect path, and the one thing
+/// `ssh_open` rejects with.
+///
+/// Serialized whole: Tauri turns a `Serialize` command error into a JSON value
+/// and the webview's `invoke` rejects with the parsed object, so the frontend
+/// receives `{kind, message}` rather than a string. `openSsh` in
+/// src/modules/ssh/bridge.ts is the single place that reads it back and rethrows
+/// a typed `Error`, so nothing downstream of that boundary ever sees this shape.
+///
+/// `message` carries the same text this path always produced, verbatim, because
+/// callers still match on it - `isHostKeyMismatchError` reads the
+/// `ssh: host key mismatch:` prefix off it, and every banner prints it.
+///
+/// THERE MUST BE NO `impl From<String> for SshConnectError`. A blanket `From`
+/// lets `?` compile at a site that named no kind, and whichever kind that impl
+/// picked would become the silent default for every failure added afterwards.
+/// The compiler error at each `?` is what makes "no site is forgotten" a fact
+/// rather than a review promise; a `From` impl deletes it.
+///
+/// The fields are private for the same reason: with them public a caller could
+/// write the struct literal directly and pick a kind without going through a
+/// constructor, and a relay could rewrite `kind` while re-wording `message`.
+/// The three constructors and `map_message` are the whole API, and none of them
+/// can change a kind that has already been decided.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct SshConnectError {
+    kind: SshConnectErrorKind,
+    message: String,
+}
+
+impl SshConnectError {
+    pub fn config(message: impl Into<String>) -> Self {
+        Self {
+            kind: SshConnectErrorKind::Config,
+            message: message.into(),
+        }
+    }
+
+    pub fn auth(message: impl Into<String>) -> Self {
+        Self {
+            kind: SshConnectErrorKind::Auth,
+            message: message.into(),
+        }
+    }
+
+    pub fn transport(message: impl Into<String>) -> Self {
+        Self {
+            kind: SshConnectErrorKind::Transport,
+            message: message.into(),
+        }
+    }
+
+    /// Re-word an error that is being relayed - adding the host label a caller
+    /// knows and the raising site did not - WITHOUT touching its kind. The
+    /// alternative at those sites is a fresh constructor call, which silently
+    /// re-decides whose fact ended the attempt; that is how an absent ssh-agent
+    /// ended up on the reconnect ladder.
+    pub fn map_message(mut self, f: impl FnOnce(&str) -> String) -> Self {
+        self.message = f(&self.message);
+        self
+    }
+}
+
+/// The sentence on its own, for the callers that have no use for the kind:
+/// `ssh_agent_keys` flattens back to a `String` for the dialog's agent panel.
+/// The `ssh_open` log line deliberately does NOT use this - it formats `{e:?}`,
+/// which keeps the kind in the log where it is the interesting half.
+///
+/// `std::error::Error` is not implemented, but not because it would give `?` a
+/// conversion path - it would not; `?` converts through `From<E> for
+/// SshConnectError`, and the guard against that is simply that no such impl
+/// exists. It is left off because nothing needs it: no caller boxes this into a
+/// `dyn Error` or an `anyhow::Error`, and adding a trait with no consumer is one
+/// more thing a future change has to keep true.
+impl std::fmt::Display for SshConnectError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
 /// Decide the one terminal `SshEvent` for a channel from whatever exit
 /// status / signal the pump observed before the channel actually ended
 /// (Close, or `wait()` returning `None`). Kept as a free function so the
@@ -694,24 +807,45 @@ fn build_verifier(
 /// Turn a russh handshake failure into a specific, user-actionable message
 /// using the verifier's structured report (user rejected a new key, or a
 /// pinned-key mismatch), falling back to the generic disconnect text.
-async fn handshake_error(report: &Arc<Mutex<HostKeyReport>>, e: russh::Error) -> String {
+async fn handshake_error(report: &Arc<Mutex<HostKeyReport>>, e: russh::Error) -> SshConnectError {
     let report_guard = report.lock().await;
     if let Some(seen) = report_guard.rejected.clone() {
-        return format!(
+        // Two ways to get here, and BOTH are config. The user declined the key,
+        // or the 120s confirm window in `check_server_key` lapsed with nobody
+        // at the screen - that arm sets `rejected` too.
+        //
+        // Filing the lapse here is a deliberate behaviour change, not a side
+        // effect of the user-rejection row. It used to be reported as a string,
+        // land in transport, and ladder, on the argument that a reconnect
+        // re-raises the question for whoever comes back to it. That argument
+        // does not survive the arithmetic: the prompt is a modal that blocks
+        // the whole UI, each retry re-arms another 120s window, and a user away
+        // long enough to miss the first one misses all four and reaches the
+        // same parked end state having held four connections open for eight
+        // minutes. Parking reaches it in two, and Enter re-raises the question
+        // the moment they do come back.
+        //
+        // A link that dropped WHILE the dialog was up is a different case and
+        // is not this one: the connect future dies without `check_server_key`
+        // ever recording an answer, `rejected` stays None, and the fall-through
+        // below reports it transport so the ladder still covers it.
+        return SshConnectError::config(format!(
             "ssh: host key not trusted: the new server key {seen} was not confirmed; \
              connection aborted before sending credentials."
-        );
+        ));
     }
     if let Some((expected, seen)) = report_guard.mismatch.clone() {
-        return format!(
+        // A pin recorded on this machine refuses the key. Same server, same
+        // pin, same outcome next time.
+        return SshConnectError::config(format!(
             "ssh: host key mismatch: expected={expected} server={seen}. \
              The server presented a different key than the one recorded on the last \
              successful connect. If the server key was rotated legitimately, edit the \
              saved connection and clear the recorded fingerprint before reconnecting; \
              otherwise this could be a man-in-the-middle attack."
-        );
+        ));
     }
-    format!("ssh: connect failed: {e}")
+    SshConnectError::transport(format!("ssh: connect failed: {e}"))
 }
 
 /// Drive a russh connect future under the right timeout budget (first connects
@@ -725,7 +859,7 @@ async fn finish_connect<F>(
     prompt_id: &str,
     host: &str,
     port: u16,
-) -> Result<Handle<HostKeyVerifier>, String>
+) -> Result<Handle<HostKeyVerifier>, SshConnectError>
 where
     F: std::future::Future<Output = Result<Handle<HostKeyVerifier>, russh::Error>>,
 {
@@ -734,9 +868,21 @@ where
     } else {
         CONNECT_TIMEOUT
     };
+    // This budget covers the TCP dial plus, on a first connect, the window the
+    // user has to answer the fingerprint dialog - but it is NOT what decides a
+    // lapsed window, and this arm is not where one lands. `check_server_key`
+    // runs its own `HOSTKEY_CONFIRM_TIMEOUT` on the answer channel, and that
+    // one is strictly shorter: it starts when the prompt is emitted, whereas
+    // this one started before the dial and is longer by `CONNECT_TIMEOUT`. So
+    // the inner timeout always fires first, records the fingerprint in
+    // `HostKeyReport::rejected`, and fails the handshake - which `handshake_error`
+    // reports `config`. This arm is therefore only ever a dial that never
+    // completed, which is why it is transport.
     let result = tokio::time::timeout(overall_timeout, connect_fut)
         .await
-        .map_err(|_| format!("ssh: connect to {host}:{port} timed out"))?;
+        .map_err(|_| {
+            SshConnectError::transport(format!("ssh: connect to {host}:{port} timed out"))
+        })?;
     // Drop any unconsumed prompt (handshake failed before/around the check).
     if needs_confirm {
         if let Ok(mut m) = pending_host_keys().lock() {
@@ -762,7 +908,7 @@ async fn open_tunnel(
     port: u16,
     needs_confirm: bool,
     prompt_id: &str,
-) -> Result<russh::Channel<Msg>, String> {
+) -> Result<russh::Channel<Msg>, SshConnectError> {
     let opened = tokio::time::timeout(
         CONNECT_TIMEOUT,
         prev.channel_open_direct_tcpip(host.to_string(), u32::from(port), "127.0.0.1", 0),
@@ -778,11 +924,15 @@ async fn open_tunnel(
     match opened {
         Err(_) => {
             drop_prompt();
-            Err(format!("ssh: open tunnel to {host}:{port} timed out"))
+            Err(SshConnectError::transport(format!(
+                "ssh: open tunnel to {host}:{port} timed out"
+            )))
         }
         Ok(Err(e)) => {
             drop_prompt();
-            Err(format!("ssh: open tunnel to {host}:{port} failed: {e}"))
+            Err(SshConnectError::transport(format!(
+                "ssh: open tunnel to {host}:{port} failed: {e}"
+            )))
         }
         Ok(Ok(channel)) => Ok(channel),
     }
@@ -815,8 +965,14 @@ const AGENT_TIMEOUT: Duration = Duration::from_secs(5);
 /// Success here is NOT proof of an agent: the Pageant transport constructs
 /// happily with nothing listening on the other end. `agent_keys` is what
 /// actually settles it, which is why nothing calls this directly.
+/// `config`, both arms: "there is no agent on this machine" is a fact about the
+/// machine, and the hint tells the user which service to start. A retry a second
+/// later reproduces it byte for byte. Filing it transport would ladder four
+/// times at up to `AGENT_TIMEOUT` each before showing the hint - and would
+/// contradict `authenticate_agent`, which already calls a RUNNING agent holding
+/// no key `config`. An absent agent is the more permanent of the two.
 #[cfg(windows)]
-async fn open_agent() -> Result<Agent, String> {
+async fn open_agent() -> Result<Agent, SshConnectError> {
     let pipe = std::env::var("SSH_AUTH_SOCK")
         .unwrap_or_else(|_| r"\\.\pipe\openssh-ssh-agent".to_string());
     if let Ok(c) = AgentClient::connect_named_pipe(&pipe).await {
@@ -825,15 +981,23 @@ async fn open_agent() -> Result<Agent, String> {
     AgentClient::connect_pageant()
         .await
         .map(|c| c.dynamic())
-        .map_err(|e| format!("no ssh-agent at {pipe} and no Pageant ({e}). {NO_AGENT_HINT}"))
+        .map_err(|e| {
+            SshConnectError::config(format!(
+                "no ssh-agent at {pipe} and no Pageant ({e}). {NO_AGENT_HINT}"
+            ))
+        })
 }
 
 #[cfg(not(windows))]
-async fn open_agent() -> Result<Agent, String> {
+async fn open_agent() -> Result<Agent, SshConnectError> {
     AgentClient::connect_env()
         .await
         .map(|c| c.dynamic())
-        .map_err(|e| format!("no ssh-agent on SSH_AUTH_SOCK ({e}). {NO_AGENT_HINT}"))
+        .map_err(|e| {
+            SshConnectError::config(format!(
+                "no ssh-agent on SSH_AUTH_SOCK ({e}). {NO_AGENT_HINT}"
+            ))
+        })
 }
 
 /// The agent, plus the public keys it holds. Connecting and listing are one
@@ -845,13 +1009,19 @@ async fn open_agent() -> Result<Agent, String> {
 /// Certificates are dropped from the list: they need
 /// `authenticate_certificate_with`, a flow Tervia does not implement, and offering
 /// them as plain keys would only burn the server's auth attempts.
-pub(crate) async fn agent_keys() -> Result<(Agent, Vec<PublicKey>), String> {
+/// Carries `SshConnectError` rather than `String` so its four failures can
+/// disagree about the kind, which they genuinely do: not having an agent is a
+/// state of this machine (`config`), whereas one that accepted a connection and
+/// then would not answer is a live thing misbehaving (`transport`). Collapsing
+/// all four into one string is what made an absent agent ladder.
+pub(crate) async fn agent_keys() -> Result<(Agent, Vec<PublicKey>), SshConnectError> {
     let probe = async {
         let mut agent = open_agent().await?;
-        let identities = agent
-            .request_identities()
-            .await
-            .map_err(|e| format!("no ssh-agent answered ({e}). {NO_AGENT_HINT}"))?;
+        // Transport: something answered the socket - it is there - and then the
+        // exchange broke. The next attempt may find it healthy.
+        let identities = agent.request_identities().await.map_err(|e| {
+            SshConnectError::transport(format!("no ssh-agent answered ({e}). {NO_AGENT_HINT}"))
+        })?;
         let keys = identities
             .into_iter()
             .filter_map(|i| match i {
@@ -859,14 +1029,16 @@ pub(crate) async fn agent_keys() -> Result<(Agent, Vec<PublicKey>), String> {
                 AgentIdentity::Certificate { .. } => None,
             })
             .collect();
-        Ok::<_, String>((agent, keys))
+        Ok::<_, SshConnectError>((agent, keys))
     };
     match tokio::time::timeout(AGENT_TIMEOUT, probe).await {
         Ok(res) => res,
-        Err(_) => Err(format!(
+        // Also transport: a wedged or overloaded agent is the case this bound
+        // exists for, and it can come back.
+        Err(_) => Err(SshConnectError::transport(format!(
             "ssh-agent did not answer within {}s. {NO_AGENT_HINT}",
             AGENT_TIMEOUT.as_secs()
-        )),
+        ))),
     }
 }
 
@@ -887,14 +1059,19 @@ async fn authenticate_agent(
     handle: &mut Handle<HostKeyVerifier>,
     host: &str,
     user: &str,
-) -> Result<bool, String> {
+) -> Result<bool, SshConnectError> {
+    // The kind comes from `agent_keys`, which knows which of its four failures
+    // this was; only the host label is added. Re-deciding it here would put an
+    // absent agent back on the ladder.
     let (mut agent, keys) = agent_keys()
         .await
-        .map_err(|e| format!("ssh: [{host}] {e}"))?;
+        .map_err(|e| e.map_message(|m| format!("ssh: [{host}] {m}")))?;
     if keys.is_empty() {
-        return Err(format!(
+        // A running agent holding nothing is a state of this machine. Retrying
+        // does not add a key to it.
+        return Err(SshConnectError::config(format!(
             "ssh: [{host}] ssh-agent is running but holds no usable key. Add one with `ssh-add`."
-        ));
+        )));
     }
     // Offered in the agent's own order, like OpenSSH does, stopping at the first
     // one the server takes. A server's MaxAuthTries (6 by default) is the real
@@ -914,17 +1091,21 @@ async fn authenticate_agent(
                 agent_hash_alg(key),
                 &mut agent,
             ));
-        let accepted = attempt
-            .await
-            .map_err(|e| format!("ssh: [{host}] ssh-agent auth error: {e}"))?;
+        // The signing exchange itself broke - a russh or agent-transport error
+        // raised WHILE authenticating, not the server's answer. Transport.
+        let accepted = attempt.await.map_err(|e| {
+            SshConnectError::transport(format!("ssh: [{host}] ssh-agent auth error: {e}"))
+        })?;
         if accepted.success() {
             return Ok(true);
         }
     }
-    Err(format!(
+    // Every key was offered and the server refused all of them. That is its
+    // answer, so it is `auth`.
+    Err(SshConnectError::auth(format!(
         "ssh: [{host}] the server accepted none of the {} key(s) held by ssh-agent",
         keys.len()
-    ))
+    )))
 }
 
 /// Authenticate a hop with the ssh-agent, its private key, or its password (with
@@ -940,24 +1121,39 @@ async fn authenticate_hop(
     password: Option<&str>,
     private_key: Option<&str>,
     passphrase: Option<&str>,
-) -> Result<bool, String> {
+) -> Result<bool, SshConnectError> {
     if use_agent {
         authenticate_agent(handle, host, user).await
     } else if let Some(pk_text) = private_key {
-        let key = russh::keys::decode_secret_key(pk_text, passphrase)
-            .map_err(|e| format!("ssh: [{host}] parse private key failed: {e}"))?;
+        // Config, and this is the row the whole ladder fix turns on: a WRONG
+        // PASSPHRASE fails here, before anything is sent, because the key never
+        // decoded. The server was never asked, so it is not `auth` - but it is
+        // just as fixed, and it is the failure users hit most.
+        let key = russh::keys::decode_secret_key(pk_text, passphrase).map_err(|e| {
+            SshConnectError::config(format!("ssh: [{host}] parse private key failed: {e}"))
+        })?;
         let pk = PrivateKeyWithHashAlg::new(Arc::new(key), Some(HashAlg::Sha256));
+        // A russh error raised while authenticating, NOT the server's verdict:
+        // the verdict is the `.success()` below, and it is read by `connect`.
+        // Getting this pair backwards is the likeliest way to file a refused
+        // credential as retryable all over again.
         Ok(handle
             .authenticate_publickey(user, pk)
             .await
-            .map_err(|e| format!("ssh: [{host}] pubkey auth error: {e}"))?
+            .map_err(|e| {
+                SshConnectError::transport(format!("ssh: [{host}] pubkey auth error: {e}"))
+            })?
             .success())
     } else {
         let password = password.unwrap_or_default();
+        // Same split as above: a transport error here, the server's answer in
+        // `first.success()`.
         let first = handle
             .authenticate_password(user, password)
             .await
-            .map_err(|e| format!("ssh: [{host}] password auth error: {e}"))?;
+            .map_err(|e| {
+                SshConnectError::transport(format!("ssh: [{host}] password auth error: {e}"))
+            })?;
         if first.success() {
             Ok(true)
         } else {
@@ -967,7 +1163,27 @@ async fn authenticate_hop(
             // saved password as the first prompt's answer. 2FA multi-prompt
             // setups will fail with a clear "too many prompts" error instead
             // of hanging.
-            try_keyboard_interactive(handle, user, password).await
+            //
+            // A transport failure INSIDE the fallback is swallowed to `false`,
+            // and that is not laziness. We are only here because the server
+            // already answered the password method with a refusal, so a refusal
+            // is the fact that ended this attempt; letting KBI's error escape
+            // would replace it with `transport` and put a wrong saved password
+            // back on the reconnect ladder - the exact defect this error type
+            // exists to close. It is reachable: `MaxAuthTries 1`, fail2ban, and
+            // appliances that disconnect after one failure all leave KBI
+            // reading from a closed connection. The text is logged rather than
+            // lost, and `connect` reports the refusal as `auth`.
+            match try_keyboard_interactive(handle, user, password).await {
+                Ok(ok) => Ok(ok),
+                Err(e) => {
+                    log::warn!(
+                        "ssh: [{host}] keyboard-interactive fallback failed after the server \
+                         refused the password ({e}); reporting the refusal"
+                    );
+                    Ok(false)
+                }
+            }
         }
     }
 }
@@ -996,13 +1212,13 @@ const NO_CREDENTIALS_ERROR: &str = "ssh: no credentials: set use_agent, password
 pub async fn connect(
     input: SshOpenInput,
     on_event: IpcChannel<SshEvent>,
-) -> Result<Arc<SshSession>, String> {
+) -> Result<Arc<SshSession>, SshConnectError> {
     if !has_credential(
         input.use_agent,
         input.password.as_deref(),
         input.private_key.as_deref(),
     ) {
-        return Err(NO_CREDENTIALS_ERROR.into());
+        return Err(SshConnectError::config(NO_CREDENTIALS_ERROR));
     }
 
     // --- Jump chain (ProxyJump / Termius-style "host chaining") -------------
@@ -1020,10 +1236,10 @@ pub async fn connect(
             hop.password.as_deref(),
             hop.private_key.as_deref(),
         ) {
-            return Err(format!(
+            return Err(SshConnectError::config(format!(
                 "ssh: jump host {} has no ssh-agent, password or private key configured",
                 hop.host
-            ));
+            )));
         }
         let (handler, report, prompt_id, needs_confirm) = build_verifier(
             hop.expected_fingerprint.clone(),
@@ -1063,10 +1279,11 @@ pub async fn connect(
         )
         .await?;
         if !ok {
-            return Err(format!(
+            // The hop's server was asked and said no.
+            return Err(SshConnectError::auth(format!(
                 "ssh: authentication rejected for jump host {}",
                 hop.host
-            ));
+            )));
         }
         // Pin the jump's host key against its own saved connection.
         let fp = report.lock().await.seen.clone().unwrap_or_default();
@@ -1119,13 +1336,17 @@ pub async fn connect(
     .await?;
 
     if !authed_ok {
-        return Err("ssh: authentication rejected".into());
+        // The target's own answer. This is the row the user meets when a saved
+        // password is wrong: one attempt, then park.
+        return Err(SshConnectError::auth("ssh: authentication rejected"));
     }
 
+    // Authentication already succeeded; a channel that will not open now is the
+    // transport or a server limit, and may well open on the next attempt.
     let channel = handle
         .channel_open_session()
         .await
-        .map_err(|e| format!("ssh: open channel failed: {e}"))?;
+        .map_err(|e| SshConnectError::transport(format!("ssh: open channel failed: {e}")))?;
 
     // Interactive PTY + shell are best-effort. Locked-down file-transfer
     // accounts (SFTP chroot, `PermitTTY no`, `ForceCommand internal-sftp`,
@@ -1355,12 +1576,16 @@ async fn try_keyboard_interactive(
     handle: &mut Handle<HostKeyVerifier>,
     user: &str,
     password: &str,
-) -> Result<bool, String> {
+) -> Result<bool, SshConnectError> {
     const MAX_KBI_ROUNDS: usize = 8;
+    // Transport: the exchange failed to run at all. The server's own verdict is
+    // the `Success`/`Failure` returned below, not either of these.
     let mut state = handle
         .authenticate_keyboard_interactive_start(user.to_string(), None)
         .await
-        .map_err(|e| format!("ssh: keyboard-interactive start failed: {e}"))?;
+        .map_err(|e| {
+            SshConnectError::transport(format!("ssh: keyboard-interactive start failed: {e}"))
+        })?;
     let mut first_round = true;
     for _ in 0..MAX_KBI_ROUNDS {
         match state {
@@ -1382,11 +1607,19 @@ async fn try_keyboard_interactive(
                 state = handle
                     .authenticate_keyboard_interactive_respond(responses)
                     .await
-                    .map_err(|e| format!("ssh: keyboard-interactive respond failed: {e}"))?;
+                    .map_err(|e| {
+                        SshConnectError::transport(format!(
+                            "ssh: keyboard-interactive respond failed: {e}"
+                        ))
+                    })?;
             }
         }
     }
-    Err("ssh: keyboard-interactive: too many prompt rounds".into())
+    // The server kept asking and the saved password never satisfied it - a 2FA
+    // setup, typically. It answers the same way next time, so `auth`.
+    Err(SshConnectError::auth(
+        "ssh: keyboard-interactive: too many prompt rounds",
+    ))
 }
 
 /// The pump's three exit shapes (reported status, reported signal,
@@ -1444,17 +1677,75 @@ mod exit_classification_tests {
     }
 }
 
+/// The connect error's serialized form is a wire contract, not an internal
+/// detail: `bridge.ts` reads `kind` and `message` off the rejected value and
+/// decides from `kind` alone whether the pane parks or ladders. A `rename_all`
+/// regression, a renamed field or a re-tagged enum would leave every Rust
+/// caller compiling and silently return the frontend to one bug it already had:
+/// an unrecognised shape falls through `sshConnectErrorFrom` unchanged, and
+/// every failure ladders again. Asserted against literal JSON so it fails here
+/// rather than at runtime in the webview.
+#[cfg(test)]
+mod connect_error_wire_tests {
+    use super::*;
+
+    #[test]
+    fn each_kind_serializes_to_the_shape_the_frontend_reads() {
+        for (err, expected) in [
+            (
+                SshConnectError::config("m"),
+                r#"{"kind":"config","message":"m"}"#,
+            ),
+            (
+                SshConnectError::auth("m"),
+                r#"{"kind":"auth","message":"m"}"#,
+            ),
+            (
+                SshConnectError::transport("m"),
+                r#"{"kind":"transport","message":"m"}"#,
+            ),
+        ] {
+            assert_eq!(
+                serde_json::to_string(&err).expect("serialize"),
+                expected,
+                "{err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_message_survives_verbatim() {
+        // `isHostKeyMismatchError` matches this prefix off `.message` after the
+        // frontend has rewrapped it. Anything that decorated or truncated the
+        // text here would take the "trust new key" prompt away without failing
+        // a single Rust caller.
+        let text = "ssh: host key mismatch: expected=SHA256:a server=SHA256:b";
+        assert_eq!(SshConnectError::config(text).message, text);
+        assert_eq!(SshConnectError::transport(text).to_string(), text);
+    }
+
+    #[test]
+    fn the_three_kinds_stay_distinct() {
+        // The collapse guard: a change that mapped two kinds onto one would
+        // leave both assertions above passing for the survivor.
+        assert_ne!(SshConnectErrorKind::Auth, SshConnectErrorKind::Transport);
+        assert_ne!(SshConnectErrorKind::Config, SshConnectErrorKind::Transport);
+        assert_ne!(SshConnectErrorKind::Config, SshConnectErrorKind::Auth);
+    }
+}
+
 /// The pre-dial credential guard. Its exact shape is load-bearing twice over -
 /// the target and every jump hop are judged by it here, and the frontend
 /// reproduces it before dialling so that "this host has nothing to authenticate
 /// with" is classified as a configuration error instead of entering the
-/// reconnect ladder. It has to run its own copy rather than wait for this one
-/// to answer, because the discriminant on that side is WHOSE fact ended the
-/// attempt, not how far the attempt got: anything the backend reports comes
-/// back as a plain error string, which `classifySshConnectFailure` files as
-/// transport by construction, and transport is the reconnect-eligible
-/// category. A guard that quietly accepted one of the empty shapes would send
-/// the frontend and the backend down different paths for the same input.
+/// reconnect ladder. The frontend's copy is now a BELT rather than the only
+/// thing that knows: this guard reports its failure as `config`, so the pane
+/// would park on it even if the pre-flight check were deleted. What the copy
+/// still buys is that the answer never leaves this machine - no dial, no round
+/// trip - and that the same sentence is shown either way, which is why the two
+/// wordings are pinned to each other. A guard that quietly accepted one of the
+/// empty shapes would send the frontend and the backend down different paths
+/// for the same input.
 #[cfg(test)]
 mod credential_guard_tests {
     use super::*;

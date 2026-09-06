@@ -1,4 +1,12 @@
 import { invoke, Channel } from "@tauri-apps/api/core";
+// The two carriers, imported rather than declared here, because
+// `classifySshConnectFailure` reads them back with `instanceof` and that file
+// must stay import-free (it is loaded by scripts that cannot touch a webview
+// API). It imports nothing, so pulling it in costs this file nothing either.
+import {
+  SshAuthRejectedError,
+  SshLocalConnectError,
+} from "@/modules/terminal/lib/ssh-exit-decision";
 
 /** First-connect host-key confirmation request from the backend. */
 export type SshHostKeyPrompt = { promptId: string; fingerprint: string; host: string };
@@ -174,6 +182,61 @@ export type SshSession = {
   close: () => Promise<void>;
 };
 
+/** Which side's fact ended a connect attempt, as `ssh_open` reports it.
+ *  Mirrors `SshConnectErrorKind` in src-tauri/src/modules/ssh/session.rs, whose
+ *  doc comment defines what each one means and how to place a new failure site.
+ *  The two sets are checked against each other rather than trusted - a kind
+ *  added on one side only would arrive here unrecognised and fall back to the
+ *  ladder. */
+export type SshConnectErrorKind = "config" | "auth" | "transport";
+
+/** The rejected value of `ssh_open`, and the only Tauri command in this app
+ *  that rejects with an object rather than a string. */
+export type SshConnectErrorPayload = { kind: SshConnectErrorKind; message: string };
+
+function isSshConnectErrorPayload(raw: unknown): raw is SshConnectErrorPayload {
+  if (typeof raw !== "object" || raw === null) return false;
+  const { kind, message } = raw as { kind?: unknown; message?: unknown };
+  if (typeof message !== "string") return false;
+  return kind === "config" || kind === "auth" || kind === "transport";
+}
+
+/**
+ * THE boundary. Turn `ssh_open`'s rejected value into the typed `Error` the rest
+ * of the frontend already knows how to classify, and make sure nothing
+ * downstream ever sees the raw object.
+ *
+ * Extracted from `openSsh` and exported so it can be CALLED by a check.
+ * `openSsh` itself invokes a Tauri command and is unreachable from a node
+ * script, which is exactly why the decision has to live out here: a pure
+ * function is the only part of this path that can be covered behaviourally
+ * rather than by reading source text.
+ *
+ * Anything that is not a recognised `{kind, message}` object is returned
+ * UNCHANGED - a raw string, a bare `Error`, `null`, a Tauri framework rejection,
+ * a kind this build does not know. That pass-through is not politeness. It is
+ * what keeps this side correct against a backend that is older, newer, or rolled
+ * back: an unrecognised rejection reaches `classifySshConnectFailure` as
+ * something it did not raise, is filed transport, and ladders - the behaviour
+ * this app had before the kind existed, rather than a crash or a wrong park.
+ *
+ * `cause` carries the original so a console trace still shows what arrived.
+ */
+export function sshConnectErrorFrom(raw: unknown): unknown {
+  if (!isSshConnectErrorPayload(raw)) return raw;
+  switch (raw.kind) {
+    case "config":
+      return new SshLocalConnectError(raw.message, { cause: raw });
+    case "auth":
+      return new SshAuthRejectedError(raw.message, { cause: raw });
+    case "transport":
+      // A plain `Error`, deliberately: neither wrapper means "reconnect-
+      // eligible", and transport is what an unwrapped error already classifies
+      // as. Wrapping it in a third class would add a type with no reader.
+      return new Error(raw.message, { cause: raw });
+  }
+}
+
 function decodeBase64(b64: string): Uint8Array {
   const bin = atob(b64);
   const arr = new Uint8Array(bin.length);
@@ -220,6 +283,10 @@ export async function openSsh(input: SshOpenInput, handlers: SshHandlers): Promi
     }
   };
 
+  // The one place the connect error's kind is read. Everything downstream -
+  // the reconnect ladder, the host editor's Test button, the forward tunnel -
+  // receives an `Error` and behaves exactly as it did when this command
+  // rejected with a string.
   const id = await invoke<number>("ssh_open", {
     input: {
       host: input.host,
@@ -245,6 +312,8 @@ export async function openSsh(input: SshOpenInput, handlers: SshHandlers): Promi
       rows: input.rows,
     },
     onEvent: channel,
+  }).catch((e: unknown) => {
+    throw sshConnectErrorFrom(e);
   });
 
   return {

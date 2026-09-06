@@ -111,9 +111,13 @@ export const defaultAutostartDeps: AutostartDeps = {
  * two prices; lifting `describeError` into a module with no Tauri and no DOM
  * imports is the real remedy.
  *
- * The string branch is the load-bearing one and not boilerplate: a Tauri
- * `invoke` rejects with a RAW STRING, so that is how the backend's own
+ * The string branch is the load-bearing one and not boilerplate: the forward
+ * commands (`ssh_forward_open`, `ssh_forward_close`) reject with a RAW STRING,
+ * so that is how the backend's own
  * `ssh: bind 127.0.0.1:<port> failed: <io error>` reaches the banner at all.
+ * `ssh_open` is the exception in this app - it rejects with a `{kind, message}`
+ * object - but `openSsh` rewraps that into an `Error` at its own boundary, so
+ * no `describeError` anywhere ever meets one.
  */
 function describeError(e: unknown): string {
   if (typeof e === "string") return e;
