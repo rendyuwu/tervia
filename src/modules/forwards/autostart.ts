@@ -116,8 +116,17 @@ export const defaultAutostartDeps: AutostartDeps = {
  * so that is how the backend's own
  * `ssh: bind 127.0.0.1:<port> failed: <io error>` reaches the banner at all.
  * `ssh_open` is the exception in this app - it rejects with a `{kind, message}`
- * object - but `openSsh` rewraps that into an `Error` at its own boundary, so
- * no `describeError` anywhere ever meets one.
+ * object - and `openSsh` rewraps a RECOGNISED one into an `Error` at its own
+ * boundary, so no `describeError` anywhere meets one AS LONG AS the two kind
+ * sets agree. They do today - `ssh/bridge.ts`'s `sshConnectErrorFrom`
+ * recognises the same kinds `src-tauri/src/modules/ssh/session.rs` emits, and
+ * `scripts/ssh-retry-verify.ts` pins that they stay matched - but the
+ * agreement is not structural: anything `sshConnectErrorFrom` does not
+ * recognise it returns unchanged, by design, so a kind added on one side only
+ * (a newer or rolled-back backend, precisely the case that passthrough exists
+ * to survive) reaches this file's `describeError` as a raw object, and the
+ * `JSON.stringify` fallback below would render `{"kind":"…","message":"…"}` in
+ * a banner - one of the two symptoms this whole change set out to close.
  */
 function describeError(e: unknown): string {
   if (typeof e === "string") return e;

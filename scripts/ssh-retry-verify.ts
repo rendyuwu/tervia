@@ -39,7 +39,9 @@
  *      object caused (`isHostKeyMismatchError` no longer matching,
  *      `[object Object]` / `{"kind":…}` reaching the user) stay closed.
  *   6. Rust/TS parity for the mirrored guard and its wording, and for the set of
- *      connect-error kinds.
+ *      connect-error kinds - then, in Rust alone, the kind each connect-path
+ *      failure SITE names. That is the only place the choice is actually made,
+ *      and nothing else in the tree pins it.
  *   7. Source text, Rust: the Windows ssh-agent fallback marks itself UNPROVEN,
  *      so an absent agent parks on that platform too. Nothing else in the tree
  *      can see that arm - it is `#[cfg(windows)]` and CI runs no Rust tests on
@@ -394,12 +396,12 @@ console.log("\n[regressions] the two things the raw object broke on its way thro
 // ============================================================================
 // HOST KEYS: which of them the frontend may call its own fault.
 //
-// The rejected shape is the one 76da6a5 shipped: `asked > trusted`, compared at
-// failure time. It reads "a prompt was raised and never trusted" as "the user
-// refused", and those are different worlds - a link that drops while the dialog
-// is still on screen leaves a prompt raised and untrusted with nobody having
-// refused anything, and parking it kills the ladder for exactly the blip the
-// ladder exists for. The row that pins it is the empty one.
+// The rejected shape is the counter pair this replaced: `asked > trusted`,
+// compared at failure time. It reads "a prompt was raised and never trusted"
+// as "the user refused", and those are different worlds - a link that drops
+// while the dialog is still on screen leaves a prompt raised and untrusted with
+// nobody having refused anything, and parking it kills the ladder for exactly
+// the blip the ladder exists for. The row that pins it is the empty one.
 
 console.log("\n[hostKeyRefused] an ANSWER decides, and any refusal in a chain counts");
 {
@@ -544,6 +546,151 @@ console.log("\n[parity] the connect-error kinds are the SAME SET on both sides")
     !/\bpub\s+(?:kind|message)\s*:/.test(fields),
     `neither field is pub, so a struct literal cannot pick a kind (fields: ${JSON.stringify(fields.trim())})`,
   );
+}
+
+// ============================================================================
+// THE FAILURE SITES THEMSELVES: which kind each one NAMES.
+//
+// Everything above this point takes a kind as given and proves what the app does
+// with it. Nothing proves that the site which raises a failure picks the right
+// one - and that is the only place the choice is actually made. The type system
+// forces every site to NAME a kind (there is no blanket `From`, asserted above);
+// it cannot force the name to be true. Change one `SshConnectError::auth(` in
+// `connect` to `::transport(` and the headline defect is back in full - a wrong
+// stored password walks 1s + 3s + 7s again - while every behavioural check in
+// this file, the whole Rust suite, clippy and fmt stay green, because the TS
+// payloads below are invented here and the Rust tests construct no failure at a
+// site.
+//
+// Read as source, and scoped to ONE FUNCTION BODY at a time. A file-wide count
+// proves nothing: the test module at the bottom of session.rs names these same
+// functions and messages. Each row asserts the kind AND how many sites carry the
+// message, because pinning one of a pair leaves the other free to drift.
+
+console.log("\n[parity] each failure site still names the kind its category demands");
+{
+  const rust = readRust("src-tauri/src/modules/ssh/session.rs");
+
+  /**
+   * The whitespace-flattened body of the SOLE `decl` in session.rs, with the
+   * hit count asserted. An anchor that resolves to nothing yields "", and every
+   * `.test()` below "" is trivially false while every count is trivially zero -
+   * a shape this file has been bitten by before, so the miss is reported here
+   * rather than swallowed into a downstream row that reads as a pass.
+   */
+  const fnBody = (decl: string): string => {
+    const hits = allIndexes(rust, decl);
+    assert(
+      hits.length === 1,
+      `exactly one \`${decl}\` declaration in session.rs (found ${hits.length})`,
+    );
+    if (hits.length !== 1) return "";
+    const open = rust.indexOf("{", hits[0]);
+    const close = open === -1 ? -1 : matchingBrace(rust, open);
+    assert(close > open, `resolved the body of \`${decl}\``);
+    return close === -1
+      ? ""
+      : rust
+          .slice(open + 1, close)
+          .replace(/\s+/g, " ")
+          .trim();
+  };
+
+  /**
+   * The kind given to every construction of `message` in `body`, in source
+   * order. The constructor must sit IMMEDIATELY before the literal (optionally
+   * through a `format!(`), so a match cannot be borrowed from some unrelated
+   * `SshConnectError::` earlier in the same function - which is how a
+   * "nearest preceding constructor" search reads a neighbour's kind and calls
+   * it a pass. A message that has moved or been reworded yields an EMPTY list,
+   * and every caller asserts the length, so it fails loudly instead of
+   * vacuously.
+   */
+  const kindsOf = (body: string, message: string): string[] =>
+    allIndexes(body, message).map(
+      (at) =>
+        /SshConnectError::(\w+)\(\s*(?:format!\(\s*)?$/.exec(body.slice(0, at))?.[1] ??
+        "<not constructed at this literal>",
+    );
+
+  const connect = fnBody("pub async fn connect(");
+  assert(connect !== "", "extracted connect()'s body for the failure-site sweep");
+
+  // THE headline row. Both of these are the SERVER'S ANSWER to a credential it
+  // was given - the target's at the end of connect, and each jump hop's in the
+  // chain loop - so both are `auth`, which parks. Either one filed as
+  // `transport` puts a wrong saved password back on the 1s + 3s + 7s ladder for
+  // that path, and no other check in this repo would notice. Counted as well as
+  // kind-checked: pinning only the target leaves the jump-hop return free to
+  // drift, and a ProxyJump user meets that one.
+  const rejected = kindsOf(connect, '"ssh: authentication rejected');
+  assert(
+    rejected.length === 2 && rejected.every((k) => k === "auth"),
+    `both "authentication rejected" returns in connect() are ::auth - the target's and the jump hop's (found ${JSON.stringify(rejected)})`,
+  );
+
+  // The pre-dial guards. Nothing was asked of any server, so a retry cannot
+  // change the answer; `config` is what parks them. These are the failures the
+  // whole ladder fix was opened for.
+  assert(
+    /SshConnectError::config\(NO_CREDENTIALS_ERROR\)/.test(connect),
+    "the target's no-credentials guard returns ::config - a host saved with nothing to authenticate with must not dial four times",
+  );
+  const hopGuard = kindsOf(connect, '"ssh: jump host {} has no ssh-agent');
+  assert(
+    hopGuard.length === 1 && hopGuard[0] === "config",
+    `the jump hop's no-credentials guard is ::config too (found ${JSON.stringify(hopGuard)})`,
+  );
+
+  // And the one site in connect that SHOULD ladder. Asserted so this section
+  // cannot degenerate into "everything is a park": authentication has already
+  // succeeded by here, so a channel that will not open is the link or a server
+  // limit, and the next attempt may well get one.
+  assert(
+    /channel_open_session\(\)\s*\.await\s*\.map_err\(\|e\|\s*SshConnectError::transport\(/.test(
+      connect,
+    ),
+    "channel_open_session's failure stays ::transport - post-auth, so it is the link, and it is what the ladder exists for",
+  );
+  const channel = kindsOf(connect, '"ssh: open channel failed');
+  assert(
+    channel.length === 1 && channel[0] === "transport",
+    `one open-channel failure in connect(), still ::transport (found ${JSON.stringify(channel)})`,
+  );
+
+  const hop = fnBody("async fn authenticate_hop(");
+  assert(hop !== "", "extracted authenticate_hop's body");
+
+  // A key this MACHINE cannot decode - almost always a wrong passphrase. The
+  // server was never asked, so it is not the server's answer; it is a fact
+  // about this machine and retrying re-reads the same bytes. Pinned through the
+  // `decode_secret_key` call itself as well as the message, so a rewording
+  // cannot quietly detach the row from the site it is about.
+  assert(
+    /decode_secret_key\([^)]*\)\s*\.map_err\(\|e\|\s*\{\s*SshConnectError::config\(/.test(hop),
+    "decode_secret_key's map_err builds ::config - a key that will not decode here is fixed until the user changes something",
+  );
+  const parse = kindsOf(hop, '"ssh: [{host}] parse private key failed');
+  assert(
+    parse.length === 1 && parse[0] === "config",
+    `one parse-key failure in authenticate_hop, still ::config (found ${JSON.stringify(parse)})`,
+  );
+
+  // THE pair a future edit is most likely to "correct" to `auth`, because they
+  // are lexically inside the authentication calls. They are not the server's
+  // verdict: the verdict is the `.success()` these `?` operators run BEFORE, and
+  // connect reads it. These are russh errors raised WHILE authenticating - the
+  // socket died mid-exchange, the KEX broke - which is exactly the blip the
+  // ladder is for. Filing them as `auth` parks a recoverable connection on the
+  // first attempt and tells the user their password was refused when it was
+  // never sent.
+  for (const method of ["pubkey", "password"]) {
+    const kinds = kindsOf(hop, `"ssh: [{host}] ${method} auth error`);
+    assert(
+      kinds.length === 1 && kinds[0] === "transport",
+      `the ${method} map_err is ::transport, NOT ::auth - it is a russh error raised while authenticating, not the server's answer (found ${JSON.stringify(kinds)})`,
+    );
+  }
 }
 
 // ============================================================================

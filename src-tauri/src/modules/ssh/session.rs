@@ -881,15 +881,25 @@ where
         CONNECT_TIMEOUT
     };
     // This budget covers the TCP dial plus, on a first connect, the window the
-    // user has to answer the fingerprint dialog - but it is NOT what decides a
-    // lapsed window, and this arm is not where one lands. `check_server_key`
-    // runs its own `HOSTKEY_CONFIRM_TIMEOUT` on the answer channel, and that
-    // one is strictly shorter: it starts when the prompt is emitted, whereas
-    // this one started before the dial and is longer by `CONNECT_TIMEOUT`. So
-    // the inner timeout always fires first, records the fingerprint in
-    // `HostKeyReport::rejected`, and fails the handshake - which `handshake_error`
-    // reports `config`. This arm is therefore only ever a dial that never
-    // completed, which is why it is transport.
+    // user has to answer the fingerprint dialog. It is not usually what decides
+    // a lapsed window: `check_server_key` runs its own `HOSTKEY_CONFIRM_TIMEOUT`
+    // on the answer channel, clocked from when the prompt is emitted, while this
+    // one started before the dial. The inner one therefore fires first PROVIDED
+    // the host-key check is reached within `CONNECT_TIMEOUT`, which is the
+    // ordinary case; it then records the fingerprint in
+    // `HostKeyReport::rejected` and fails the handshake, which `handshake_error`
+    // reports `config`.
+    //
+    // Nothing bounds when that check is reached, though. `build_config` sets
+    // `inactivity_timeout: None`, and neither the TCP connect nor the key
+    // exchange inside `connect_fut` carries a clock of its own - this `timeout`
+    // is the only one over them. On a slow or lossy first connect where dial
+    // plus kex runs past `CONNECT_TIMEOUT`, the prompt is emitted late, its
+    // window outlives this one, and THIS arm fires with the dialog still up.
+    // It still reports transport, because the only fact available here is a
+    // connect future that never resolved; the consequence is that such a connect
+    // ladders, each retry re-arming another full confirm window, which is the
+    // outcome the host-key reasoning in `handshake_error` argues against.
     let result = tokio::time::timeout(overall_timeout, connect_fut)
         .await
         .map_err(|_| {
@@ -1125,9 +1135,13 @@ async fn authenticate_agent(
         )));
     }
     // Offered in the agent's own order, like OpenSSH does, stopping at the first
-    // one the server takes. A server's MaxAuthTries (6 by default) is the real
-    // ceiling; an agent holding more keys than that will be cut off by the
-    // server, and the error below says so rather than looking like a bad key.
+    // one the server takes. The loop caps nothing itself, so an agent holding
+    // more keys than the server's MaxAuthTries (6 by default) gets disconnected
+    // part way through: the next `authenticate_publickey_with` returns an error,
+    // the `map_err` inside the loop files it transport under a raw russh string,
+    // and the refusal arm at the bottom - the one that says how many keys were
+    // tried - is never reached. An exhausted MaxAuthTries is therefore
+    // reconnect-eligible, and the pane ladders over a condition no retry changes.
     for key in &keys {
         // Type-annotated `Box::pin`, not a plain `.await`. russh's `Signer`
         // returns an opaque future, and the compiler cannot generalize its
@@ -1667,7 +1681,11 @@ async fn try_keyboard_interactive(
         }
     }
     // The server kept asking and the saved password never satisfied it - a 2FA
-    // setup, typically. It answers the same way next time, so `auth`.
+    // setup, typically. The kind here only documents intent: the sole caller in
+    // `authenticate_hop` maps every `Err` from this function to `Ok(false)` and
+    // logs the text, deliberately, so a password the server already refused is
+    // reported as that refusal rather than overwritten by a fallback failure.
+    // Neither this kind nor this string reaches the user.
     Err(SshConnectError::auth(
         "ssh: keyboard-interactive: too many prompt rounds",
     ))
