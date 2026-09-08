@@ -5,7 +5,7 @@
  * `purgeLegacySecrets` is the only thing that can ever name the keychain accounts
  * the two OLD connection stores left behind. The IPC surface is `secrets_get`,
  * `secrets_get_all`, `secrets_set`, `secrets_delete` and `secrets_copy` - each
- * handed the account it acts on - with no `secrets_list`, so the moment
+ * named against the specific accounts it acts on - with no `secrets_list`, so the moment
  * `modules/ssh/connections.ts` and `modules/rdp/connections.ts` were deleted,
  * `tervia-ssh :: <id>::privateKey` became unreachable from inside the app. A
  * pass that SKIPS is therefore not a cheap mistake, it is a private key nobody

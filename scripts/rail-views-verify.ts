@@ -1318,14 +1318,14 @@ console.log("\n[funnel] no route into the tab area writes activeId on its own");
 }
 
 // ---- 9. the chip's own click route --------------------------------------
-// D-NAV1, and the reason this section exists at all: the table in section 7
-// proves the funnel's ARITHMETIC, and a table cannot see a route that never
-// calls it. It did not. With a rail view up, `activeKey` still names the tab
+// The reason this section exists at all: the table in section 7 proves the
+// funnel's ARITHMETIC, and a table cannot see a route that never calls it. It did not. With a rail view up, `activeKey` still names the tab
 // underneath, so clicking that tab's own chip is not a value CHANGE - and while
 // controlled, `@radix-ui/react-use-controllable-state`'s `setValue` forwards to
 // `onValueChange` only `if (value2 !== prop)`. (Down THERE, not in the trigger:
 // `TabsTrigger`'s `onMouseDown` and `onKeyDown` both call
-// `context.onValueChange(value)` with no test at all.) `focusTabView` was
+// `context.onValueChange(value)` with no test against the current value.)
+// `focusTabView` was
 // correct, unconditional in the id, and simply never reached. Clicking the
 // HOSTS chip first worked, and only then did the terminal's chip respond.
 //
@@ -1335,8 +1335,10 @@ console.log("\n[funnel] no route into the tab area writes activeId on its own");
 // was missing, and which no behavioural check on a leaf module can see - is
 // pinned in the source of the three components that carry it: `renderEntryBody`
 // spreads the handler, `TabBar` threads the callback and composes the key the
-// fixture below imitates, and `TrailingIconButton` stops the three events that
-// would otherwise activate a tab on its way to closing it.
+// fixture below imitates, and `TrailingIconButton` stops every event that would
+// otherwise activate a tab on its way to closing it. (No count here on purpose -
+// the enumeration lives in one place, below, and a second copy of the number
+// goes stale the moment a route is added to it. It already had.)
 console.log("\n[chip] a chip selects its own entry, even when it is already the active one");
 {
   // Same idiom as section 7, and non-vacuity is pinned there: an emptied
@@ -1543,35 +1545,61 @@ console.log("\n[chip] a chip selects its own entry, even when it is already the 
     renameSpan,
   );
 
-  // The close X's four propagation stops. Pinned for the same reason as the
-  // rename span's, and more urgently: nothing else in the suite reads this file
-  // at all, so before this block any one of them could be deleted with all 58
-  // scripts still green.
+  // The close X's propagation stops. Pinned for the same reason as the rename
+  // span's, and more urgently: nothing else in the suite reads that file at
+  // all, so before this block any one of them could be deleted with the rest of
+  // the suite still green.
   //
   // What they protect is this: closing a tab must not throw the user
   // out of the rail view they are reading. `tabView.ts`'s `rehomeTabView`
   // deliberately leaves `railView` alone for a removal, and that is no help if
-  // something ACTIVATES the tab on the way to closing it. Four separate native
-  // events reach the enclosing trigger from the X, each with its own route:
+  // something ACTIVATES the tab on the way to closing it. FIVE separate native
+  // events reach the enclosing trigger from the X, each by its own route - and
+  // one of the five arrives at a handler that declines it, which is why that
+  // row reads differently:
   //
   //   pointerdown  dnd-kit's `PointerSensor` activator - a press on the X
   //                starts a tab drag.
   //   mousedown    Radix's own activation. `TabsTrigger`'s `onMouseDown` calls
-  //                `context.onValueChange(value)` unguarded, so for a
+  //                `context.onValueChange(value)` with no test against the
+  //                current value and none against the event's target, so for a
   //                BACKGROUND chip the value really does change,
   //                `useControllableState` lets it through, and `focusTabView`
   //                clears `railView` before `onCloseEntry` ever runs. A
   //                separate event from pointerdown: stopping that one does not
   //                stop this one, which is how it went missing.
-  //   click        the trigger's own select route, unconditional by design
-  //                (that is the D-NAV1 fix), so it fires on the X too.
-  //   keydown      Enter and Space on a FOCUSED X. `TabsTrigger` activates on
-  //                both, so an unstopped keydown selects the very tab being
-  //                closed. The `<button>` this element used to be never needed
-  //                this stop - a button turns Enter and Space into a
-  //                synthesised `click`, which the click stop above already
-  //                caught. A `span` does not, so the stop AND the close both
-  //                had to be written by hand here.
+  //   click        the trigger's own select route, unconditional by design -
+  //                which is what makes an already-active chip clickable at all
+  //                - so it fires on the X too.
+  //   focus        the route the other four leave open. Of the trigger's three
+  //                activation handlers, `onKeyDown` is the ONLY one that tests
+  //                `event.target !== event.currentTarget` - mousedown and focus
+  //                activate from a descendant target perfectly well. React maps
+  //                `onFocus` to the bubbling `focusin`, so a focus landing on
+  //                the X reaches the trigger - which under Radix's default
+  //                automatic activation sees `!isSelected` on a background chip
+  //                and changes the value. Two ways in, and the Tab key is the
+  //                deterministic one: Radix's roving-focus item gives the strip
+  //                a single tab stop, leaving background triggers at
+  //                `tabIndex={-1}` while every X inside one stays at `0`, so
+  //                Tab-walking the strip lands on the X of a tab that is not
+  //                open. The other way in is mousedown's DEFAULT action, which
+  //                `stopPropagation` does not cancel and which focuses the
+  //                nearest focusable element - the span itself. That half
+  //                depends on what the webview focuses on mousedown; the
+  //                Tab-key half depends on nothing.
+  //   keydown      DEFENSIVE, and the one route here that is not what holds the
+  //                invariant. `TabsTrigger` does activate on Enter and Space,
+  //                but its `onKeyDown` returns early when
+  //                `event.target !== event.currentTarget`, so a keydown
+  //                originating on the X never reaches that branch. The stop
+  //                covers a Radix version without that guard, and ancestor
+  //                handlers that make no such test. The parts of that handler
+  //                which ARE load-bearing are named in the check's own
+  //                rationale below - and the `<button>` this element used to be
+  //                needed none of them, because a button turns Enter and Space
+  //                into a synthesised `click` that the click stop above already
+  //                caught.
   const closeBtnSrc = stripTsxComments(read("src/modules/tabs/components/TrailingIconButton.tsx"));
   const closeBtnTag = openingTag(closeBtnSrc, "span");
   check(
@@ -1618,16 +1646,53 @@ console.log("\n[chip] a chip selects its own entry, even when it is already the 
       closeOnClick.includes("onClick()"),
     closeOnClick,
   );
+  check(
+    // The fifth stop, and its OWN `check(` rather than a third entry in the
+    // loop above - a check written inside that loop contributes once per
+    // iteration, which silently makes this file's own count arithmetic wrong.
+    //
+    // It holds the route the other four leave open, and the half of that route
+    // no platform can opt out of: Tab-walking the strip lands on a background
+    // tab's X (the roving tab stop leaves the triggers at `-1` and every X at
+    // `0`), `focusin` bubbles to a trigger whose `onFocus` tests only
+    // `!isSelected`, and `railView` is cleared before the close ever runs.
+    // `lib/selectEntry.ts` records one half of the asymmetry: `onFocus` is the
+    // only one of the trigger's three activation handlers that tests
+    // `!isSelected` at all. The half that matters here is the other one -
+    // `onKeyDown` is the only one of the three that tests the event's TARGET,
+    // which is why the keydown stop below is defensive and this one is not.
+    "and stops the focus, so Tab-walking onto a background tab's X cannot activate it",
+    closeBtnTag !== null && closeBtnTag.includes("onFocus={(ev) => ev.stopPropagation()}"),
+    closeBtnTag,
+  );
   const closeOnKeyDown = closeBtnTag === null ? null : propValue(closeBtnTag, "onKeyDown");
   check(
-    // The fourth stop, matched the way the click one is because it too shares a
-    // handler with the close - and it carries more than the click one does. All
-    // five parts are load-bearing and each fails differently: without the two
-    // key tests every keystroke on a focused X closes the tab; without
-    // `preventDefault` Space scrolls the strip; without `stopPropagation` the
-    // trigger selects the tab being closed, which is the whole hazard; without
-    // `onClick()` the X is focusable and dead, because a span gets no
-    // synthesised click from Enter.
+    // Matched the way the click one is because it too shares a handler with the
+    // close - and it carries more than the click one does. Five parts, and they
+    // split two ways rather than being equally load-bearing.
+    //
+    // LOAD-BEARING: the two key tests, without which every keystroke on a
+    // focused X closes the tab; and the `onClick()` call, without which the X
+    // is focusable and dead, because a span gets no synthesised click from
+    // Enter.
+    //
+    // DEFENSIVE, both of them, and pinned anyway because what makes them inert
+    // is not in this repo's control:
+    //   - `stopPropagation`. The trigger's own `onKeyDown` returns early when
+    //     the keydown's target is not the trigger itself, so this suppresses
+    //     nothing reachable today. The guard it leans on belongs to a
+    //     dependency.
+    //   - `preventDefault`. Space's default action is a scroll in the BLOCK
+    //     direction, and there is nothing above the X for it to act on: the
+    //     strip is `overflow-y-hidden` (`TabBar.tsx`), no ancestor between it
+    //     and the root scrolls vertically, and `globals.css` puts
+    //     `overflow: hidden` on `body`. What this guards is a scroll container
+    //     appearing above the strip later, and a webview whose default differs.
+    //
+    // Both were called load-bearing here before, with reasons the tree
+    // disproves - `stopPropagation` "is the whole hazard", `preventDefault`
+    // "Space scrolls the strip". A stop's stated reason has to be what it does,
+    // and "defensive" is a reason.
     "and stops the keydown Enter and Space arrive on, in the handler that runs the close",
     closeOnKeyDown !== null &&
       closeOnKeyDown.includes('ev.key !== "Enter"') &&
@@ -1636,6 +1701,44 @@ console.log("\n[chip] a chip selects its own entry, even when it is already the 
       closeOnKeyDown.includes("ev.stopPropagation()") &&
       closeOnKeyDown.includes("onClick()"),
     closeOnKeyDown,
+  );
+
+  // The reveal, and the reason it is pinned at all: the check above certifies
+  // that the X is keyboard-reachable, and `TRAILING_BTN_BASE` starts the
+  // element at `opacity-0`. Reveal it on hover alone and what has been
+  // certified is a control a keyboard user cannot see - nor its focus ring,
+  // which paints at the same opacity. Two variants, answering two different
+  // questions: `group-focus-within` reveals the row when focus is anywhere
+  // inside the chip, `focus-visible` raises this control specifically. Each
+  // variant name is already in the tree - the card action rows carry the first,
+  // the toast dismiss carries the second - so neither is invented here. Stated
+  // that way round on purpose: no existing site carries BOTH, so this is the
+  // first to combine them, and the earlier claim that it "is not inventing a
+  // convention" was doing more work than the tree supports.
+  //
+  // Non-vacuity is folded in rather than given its own row: the slice must be
+  // found AND still be the `opacity-0` reveal const, so a rename or a deletion
+  // fails here instead of passing over nothing.
+  //
+  // The `(?!0\b)` is the whole check, and it is there because the obvious
+  // spelling is not: `opacity-\d` matches `opacity-0`, so
+  // `group-focus-within:opacity-0 focus-visible:opacity-0` would satisfy a
+  // check whose own name promises a control a keyboard user can SEE. Deleting
+  // the variants is not the likely regression; neutering them to 0 while
+  // tidying an opacity scale is.
+  const trailingBase = (() => {
+    const at = closeBtnSrc.indexOf("TRAILING_BTN_BASE =");
+    if (at === -1) return null;
+    const end = closeBtnSrc.indexOf(";", at);
+    return end === -1 ? null : closeBtnSrc.slice(at, end + 1);
+  })();
+  check(
+    "and reveals itself on focus as well as hover, so the reachable control is visible",
+    trailingBase !== null &&
+      trailingBase.includes("opacity-0") &&
+      /group-focus-within:opacity-(?!0\b)\d/.test(trailingBase) &&
+      /focus-visible:opacity-(?!0\b)\d/.test(trailingBase),
+    trailingBase,
   );
 
   // ---- the nested `<button>` itself, forbidden directly -------------------
@@ -1653,14 +1756,34 @@ console.log("\n[chip] a chip selects its own entry, even when it is already the 
   // So: a real parse, a parentage walk from the trigger, and one hop across the
   // import for every component element found under it.
   //
-  // ONE HOP, deliberately, and the limit is checked rather than assumed. A
-  // transitive walk runs off the end of the repo almost immediately - a
-  // component's own children include props (`<Icon />` is a parameter, not an
-  // import) and Radix primitives reached through a qualified name - so its
-  // frontier could not be asserted empty, and a check whose frontier is silently
-  // skipped is not a check. At one hop the frontier IS assertable: every
-  // component under the trigger must resolve to a file in this repo, or this
-  // block fails.
+  // ONE HOP, deliberately - and it buys less than the phrase suggests, so both
+  // halves are written down rather than one.
+  //
+  // ASSERTED: the frontier of the trigger's DIRECT descendants in this file.
+  // Every capitalised tag under `<TabsTrigger>` has to resolve, through this
+  // file's own imports, to a `.ts`/`.tsx` inside the repo, or the frontier check
+  // below fails. That is the half a transitive walk cannot have: a component's
+  // children include props (`<Icon />` is a parameter, not an import) and
+  // primitives reached through a qualified name, so a recursive frontier could
+  // not be asserted empty at all, and a check whose frontier is silently
+  // skipped is not a check.
+  //
+  // NOT ASSERTED: anything about a followed file's own frontier. Inside one, the
+  // scan matches the literal lowercase `button` tag and stops. It does not
+  // follow that file's imports, and it does not know what a COMPONENT rendered
+  // there resolves to - so a `<button>` one further hop away is invisible, and
+  // so is a wrapper that renders its own `<button>` around the child it was
+  // given. A specifier naming a re-export FILE explicitly would land on a file
+  // with no JSX and report zero buttons off an empty frontier for free - but
+  // that shape is not reachable here: every barrel under `src/` is a directory
+  // `index.ts`, and `resolveInRepo` below tries `.tsx` and `.ts` and never
+  // `/index.ts`, so a directory specifier resolves to null and FAILS the
+  // frontier check instead. The hole is the followed file's imports, not the
+  // barrels.
+  //
+  // Which makes this a bound on ONE hop of the import graph, not a statement
+  // about the rendered tree. Recursing with a visited set is the real fix, and
+  // it trades the frontier claim away.
   const bodyPath = "src/modules/tabs/components/renderEntryBody.tsx";
   const parseTsx = (p: string) =>
     ts.createSourceFile(p, read(p), ts.ScriptTarget.ESNext, true, ts.ScriptKind.TSX);
@@ -1775,10 +1898,111 @@ console.log("\n[chip] a chip selects its own entry, even when it is already the 
   );
   check(
     // THE RULE. `<button>` inside Radix's `<button>` - the console error, and
-    // the reason the four stops above exist at all.
+    // the reason the stops above exist at all. (No count, for the reason given
+    // at the head of this section: the last copy of that number was false
+    // within one wave.)
     "no <button> is rendered inside <TabsTrigger>, directly or one import away",
     nestedButtons.length === 0,
     nestedButtons,
+  );
+
+  // ---- the same rule from the other side ----------------------------------
+  //
+  // The pin near the top of this block says the tab strip's X must be a span
+  // carrying the button role. Alone, that pin reads as "a trailing icon control
+  // is a span" - a nested-button workaround generalised to controls that are
+  // not nested in a button. The Hosts page's group filter strip is the case
+  // that was: its chips render a real `<button>` for the label and a pair of
+  // trailing icon controls as DOM SIBLINGS of it, inside a plain `div`. No such
+  // constraint reaches them, so they are real `<button>`s - role and tab order
+  // natively, Enter and Space arriving as a synthesised click instead of a
+  // hand-rolled key handler.
+  //
+  // Both elements pinned, in the same place, because the failure mode is
+  // collapsing the two components back into one: whichever element survives
+  // that is then wrong somewhere. The split is also what keeps the parentage
+  // walk above load-bearing - the mistake it exists to catch, a real `<button>`
+  // under `<TabsTrigger>`, is an IMPORT into `renderEntryBody.tsx`, which is
+  // precisely what that walk follows and reports.
+  // Both files are read through an existence guard, and that is not
+  // belt-and-braces: `read` is a bare `readFileSync`, so an absent file throws
+  // ENOENT out of the whole script - which is the same class of non-result as an
+  // unparseable file (exit 1, a stack trace, no FAIL line, the checks below this
+  // point never run). And the failure mode this block is FOR is collapsing the
+  // two components back into one, whose most obvious spelling is deleting the
+  // new component's file. That has to arrive as red checks, not as a crash.
+  const stripPath = "src/modules/hosts/page/GroupStrip.tsx";
+  const iconActionPath = "src/components/IconActionButton.tsx";
+  const stripAst = existsSync(join(root, stripPath)) ? parseTsx(stripPath) : null;
+  const stripSrc = stripAst === null ? "" : stripTsxComments(read(stripPath));
+  const iconActionUses =
+    stripAst === null
+      ? -1
+      : jsxDescendantTags(stripAst).filter((t) => t === "IconActionButton").length;
+  const iconActionSpec = stripAst === null ? null : importSpecifierOf(stripAst, "IconActionButton");
+  check(
+    // Non-vacuity, and the row that stops the next check from passing over a
+    // file nobody renders: revert these call sites and the element read below
+    // is no longer the element the group strip shows. Both call sites, and the
+    // span sibling named nowhere in the file, so a half-revert fails too.
+    "the group strip renders both of its trailing controls through IconActionButton",
+    iconActionUses === 2 &&
+      iconActionSpec !== null &&
+      resolveInRepo(stripPath, iconActionSpec) === iconActionPath &&
+      !/TrailingIconButton/.test(stripSrc),
+    { iconActionUses, iconActionSpec },
+  );
+
+  const iconActionAst = existsSync(join(root, iconActionPath)) ? parseTsx(iconActionPath) : null;
+  const iconActionButtonAttrs: string[][] = [];
+  if (iconActionAst !== null) {
+    // The ATTRIBUTE list, by parse, rather than the opening tag's text: the
+    // scanner above takes the FIRST match and cannot count, and this element
+    // must be the only `<button>` in its file. A spread is collected as the
+    // sentinel `...` rather than dropped, so `{...{ role: "button" }}` cannot
+    // slip an attribute past the negative below - `flatMap` skipping it
+    // silently was the hole.
+    const collectButtons = (n: ts.Node) => {
+      const el = ts.isJsxElement(n) ? n.openingElement : ts.isJsxSelfClosingElement(n) ? n : null;
+      if (el !== null && el.tagName.getText() === "button") {
+        iconActionButtonAttrs.push(
+          el.attributes.properties.map((p) =>
+            ts.isJsxAttribute(p) ? `${p.name.getText()}=${p.initializer?.getText() ?? ""}` : "...",
+          ),
+        );
+      }
+      n.forEachChild(collectButtons);
+    };
+    collectButtons(iconActionAst);
+  }
+  check(
+    // Exactly one, a real one, and not one wearing the span's clothes: a
+    // `role` attribute here would mean the workaround had been copied onto the
+    // element that never needed it. No spread either, because a spread is a
+    // `role` this check cannot read.
+    'and that control is a real <button type="button">, with no hand-written role',
+    iconActionButtonAttrs.length === 1 &&
+      iconActionButtonAttrs[0]!.includes('type="button"') &&
+      !iconActionButtonAttrs[0]!.some((a) => a.startsWith("role=") || a === "..."),
+    iconActionButtonAttrs,
+  );
+
+  const baseImportSpec =
+    iconActionAst === null ? null : importSpecifierOf(iconActionAst, "TRAILING_BTN_BASE");
+  check(
+    // One look, two elements. Two wrappers for one control is the cost this
+    // split was priced at; a second class string is a cost nobody agreed to,
+    // and it goes wrong quietly - the two controls drift a class at a time and
+    // no check in this suite could see it. So the styling is imported from the
+    // sibling, not copied into it.
+    "and takes its styling from the span sibling's exported consts, not a second copy",
+    baseImportSpec !== null &&
+      resolveInRepo(iconActionPath, baseImportSpec) ===
+        "src/modules/tabs/components/TrailingIconButton.tsx" &&
+      /cn\(TRAILING_BTN_BASE, TRAILING_BTN_VARIANT\[variant\]\)/.test(
+        iconActionAst === null ? "" : stripTsxComments(read(iconActionPath)),
+      ),
+    baseImportSpec,
   );
 
   const groupTag = openingTag(barSrc, "SortableTabGroup");
@@ -1922,10 +2146,12 @@ console.log("\nALL PASS");
 //
 //       Section 8d was added for this one. The identity guard is a behaviour
 //       change with a real cost behind it (two `wsSaveTabs` per chip click), and
-//       until N6 it was the only thing here that could be undone with
-//       all 58 scripts still green.
+//       until N6 it was the only thing here that could be undone with the rest
+//       of the suite still green. (No count of the scripts, here or above: the
+//       number was wrong within one wave of being written, and "the rest of the
+//       suite" says the load-bearing part and cannot rot.)
 //
-//   N7a TrailingIconButton.tsx: the X reverted to        8 red. Every check that
+//   N7a TrailingIconButton.tsx: the X reverted to        9 red. Every check that
 //       `<button type="button">`, `role`/`tabIndex`       reads the opening tag,
 //       dropped - the nested-button state itself         because `openingTag(
 //       (EXIT=1)                                          src, "span")` then
@@ -1970,3 +2196,66 @@ console.log("\nALL PASS");
 //       why "one hop" is a bound rather than a hole: a descendant the walk
 //       cannot follow FAILS instead of being skipped, and a trigger the walk
 //       never entered FAILS instead of passing for free.
+//
+//   N8a TrailingIconButton.tsx: the `onFocus` stop      "and stops the focus, so
+//       deleted (EXIT=1, exactly 1 red)                  Tab-walking onto a
+//                                                        background tab's X cannot
+//                                                        activate it"
+//   N8b IconActionButton.tsx: its `<button              "and that control is a real
+//       type="button">` flipped to a `<span>`            <button type="button">,
+//       (EXIT=1, exactly 1 red)                          with no hand-written role"
+//   N8c GroupStrip.tsx: both trailing controls          "the group strip renders
+//       reverted to `TrailingIconButton` (EXIT=1,        both of its trailing
+//       exactly 1 red)                                   controls through
+//                                                        IconActionButton"
+//
+//       N8c is what makes that guard a guard rather than decoration: without it the
+//       element check below it reads a component the app no longer renders, and
+//       passes forever while the group chips are spans again.
+//
+//   N8d TrailingIconButton.tsx: the two focus           "and reveals itself on focus
+//       variants deleted from `TRAILING_BTN_BASE`        as well as hover, so the
+//       (EXIT=1, exactly 1 red)                          reachable control is
+//                                                        visible"
+//   N8e IconActionButton.tsx: `cn(TRAILING_BTN_BASE,    "and takes its styling from
+//       ...)` replaced by an inline class string of      the span sibling's exported
+//       its own (EXIT=1, exactly 1 red)                  consts, not a second copy"
+//   N8f TrailingIconButton.tsx: the two focus           the same D1 check as N8d
+//       variants NEUTERED rather than deleted -
+//       `group-focus-within:opacity-0`,
+//       `focus-visible:opacity-0` (EXIT=1, exactly
+//       1 red)
+//
+//       N8f is the row that pays for the `(?!0\b)` in that check. N8d alone
+//       would have left `opacity-\d` in place, and `opacity-\d` matches
+//       `opacity-0` - so a tidy-up that zeroed the two variants instead of
+//       deleting them would have kept a check GREEN whose own name promises a
+//       control a keyboard user can see. Deletion is not the regression to
+//       fear here; neutering is.
+//
+//   N8g IconActionButton.tsx DELETED outright -        3 red, and the point is
+//       the collapse this block exists to catch,        that it is 3 RED and not
+//       spelled the obvious way (EXIT=1, ok=302)        a stack trace: the guard,
+//                                                       the element check and the
+//                                                       styling check, with every
+//                                                       other check in the file
+//                                                       still running.
+//
+//       N8g is why both `parseTsx` calls in that block go through `existsSync`.
+//       `read` is a bare `readFileSync`, so without the guard this mutation threw
+//       ENOENT out of the whole script - exit 1, a stack trace, no FAIL line and
+//       the rest of section 9 never reached. That is the same non-result as an
+//       unparseable file, and it looks like a red run while proving nothing.
+//
+//       N1-N3 and N7a-N7f were re-run verbatim after the two components were split
+//       apart, and not one needed re-spelling: the span kept its element, so every
+//       match string above it is the string it always was. ONE recorded number
+//       moved, for a reason visible in the diff - the fifth stop is a sixth check
+//       reading the same opening-tag slice, so N7a now takes 9 checks with it, not
+//       8. N7f is still 2.
+//
+//       And one trap for whoever re-runs N7c by hand: `tabIndex={0}` appears in the
+//       comment above that attribute as well as in the attribute. Mutate the first
+//       occurrence in the file and you have mutated the comment - every check here
+//       reads `stripTsxComments` output, so the suite stays GREEN and the row looks
+//       like it found a hole. It has not. Mutate the attribute.

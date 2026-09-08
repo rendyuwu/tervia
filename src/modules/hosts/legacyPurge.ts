@@ -12,8 +12,8 @@ import { LEGACY_PURGE_KEY } from "./types";
 // The moment those modules are deleted, `tervia-ssh :: <id>::{password,
 // privateKey, keyPassphrase}` and `tervia-rdp :: <id>::password` become
 // UNENUMERABLE: the IPC surface is `secrets_get`, `secrets_get_all`, `secrets_set`,
-// `secrets_delete` and `secrets_copy` - each of which is handed the account it acts
-// on - with no `secrets_list`, so nothing left in the macOS keychain, the Windows
+// `secrets_delete` and `secrets_copy` - each named against the specific accounts it
+// acts on - with no `secrets_list`, so nothing left in the macOS keychain, the Windows
 // `secrets.bin` or the Linux mode-0600 JSON could ever be named from inside the app
 // again. Private keys, permanently, with no delete button anywhere.
 //
