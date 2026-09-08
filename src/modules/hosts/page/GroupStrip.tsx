@@ -260,7 +260,10 @@ function GroupChip({
     // `group-hover:` and `group-focus-within:` reveals - written for a single
     // level of nesting - key off this element without needing a matching named
     // variant here. Both, not just hover: focus the label button or either icon
-    // and the pair appears, which is what makes them reachable by keyboard.
+    // and the pair appears, which is what makes a control that is ALREADY
+    // keyboard-reachable visible to a keyboard user. Reachable is the element's
+    // job - these are real `<button>`s, so they are in the tab order natively -
+    // and the reveal only decides whether you can see what you have focused.
     <div
       className={cn(
         "group inline-flex items-center gap-0.5 rounded-full border py-1 pr-1 pl-2.5 text-xs font-medium transition-colors",

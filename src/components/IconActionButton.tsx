@@ -68,8 +68,9 @@ export function IconActionButton({
           // the `preventDefault` that masks it.
           //
           // Worth knowing before you touch them: NOTHING pins these four. The
-          // span sibling's stops carry six checks in `rail-views-verify.ts`,
-          // because there they hold a real invariant; here they are defensive,
+          // span sibling's five stops carry five checks in `rail-views-verify.ts`,
+          // one each, because there they hold a real invariant; here they are
+          // defensive,
           // so what covers this file is the element type and the styling
           // import, and all four of these could be deleted with the suite
           // green. The paragraph above is the only thing arguing for them.
