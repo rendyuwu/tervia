@@ -140,6 +140,9 @@ import type { AutostartDeps } from "../src/modules/forwards/autostart";
 import type { HostOwnedEntry } from "../src/modules/forwards/hostOwned";
 import type { ForwardStatus } from "../src/modules/forwards/runtime";
 import type { ForwardRule } from "../src/modules/forwards/types";
+import { stripComments, stripperSelfTest } from "./lib/source";
+import { isDirectlyInFunctionBody } from "./lib/ast";
+import { norm, primitiveSelectorBody, selectorParamName } from "./lib/ast";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const read = (rel: string) => readFileSync(join(repoRoot, rel), "utf8");
@@ -762,68 +765,11 @@ console.log("\n[wiring] defaultAutostartDeps is complete");
 // Source-pin helpers for sections 8-10.
 // ===========================================================================
 
-/** A line with its trailing `//` comment removed, string literals respected -
- *  quote-aware rather than a regex because a `//` inside a string is not a
- *  comment. Copied from `scripts/host-editor-verify.ts`. */
-function stripLineComment(line: string): string {
-  let quote = "";
-  for (let i = 0; i < line.length; i++) {
-    const c = line[i];
-    if (quote) {
-      if (c === "\\") i++;
-      else if (c === quote) quote = "";
-      continue;
-    }
-    if (c === '"' || c === "'" || c === "`") {
-      quote = c;
-      continue;
-    }
-    if (c === "/" && line[i + 1] === "/") return line.slice(0, i);
-  }
-  return line;
-}
-
-/**
- * Comments removed, so a POSITIVE assertion runs over text a comment cannot
- * satisfy. Copied from `scripts/host-editor-verify.ts:191`, JSX branch in the
- * NEGATIVE-LOOKAHEAD form: the lazy form `\{\s*\/\*[\s\S]*?\*\/\s*\}` reads as
- * equivalent and is not - it is allowed to cross an intervening close-comment
- * marker while searching for one followed by `}`, and on a real file it
- * swallowed 50752 characters in another script, silencing a negative that then
- * ran blind over deleted text.
- */
-function stripComments(src: string): string {
-  const withoutJsxComments = src.replace(/\{\s*\/\*(?:(?!\*\/)[\s\S])*\*\/\s*\}/g, "");
-  return withoutJsxComments
-    .split("\n")
-    .filter((line) => {
-      const t = line.trim();
-      return !(t.startsWith("//") || t.startsWith("/*") || t.startsWith("*"));
-    })
-    .map(stripLineComment)
-    .join("\n");
-}
-
-// The mandatory two-assertion self-test for a script that strips a `.tsx`.
-{
-  const probe = stripComments(
-    "type P = { /** c */ x: X };\nconst KEEP = 1;\nconst j = <div>{/* c */}</div>;",
-  );
-  assert(probe.includes("KEEP"), "stripComments self-test: KEEP survives");
-  assert(
-    !/\{\s*\/\*\s*c\s*\*\/\s*\}/.test(probe),
-    "stripComments self-test: the JSX comment {/* c */} does not",
-  );
-}
-
-/**
- * Whitespace AND a comma before a closing bracket are PRETTIER'S; everything
- * else is the claim. Both halves are needed: a legal multi-line reformat under
- * this repo's config (`trailingComma: "all"`) adds a comma that plain
- * whitespace-collapsing does not remove, which reddens a pin over a change
- * that means nothing - the M9 control below is what measures it.
- */
-const norm = (s: string): string => s.replace(/\s+/g, "").replace(/,+([)\]}])/g, "$1");
+// The mandatory two-assertion self-test for a script that strips a `.tsx`. The
+// probe and the verdicts live with the shared stripper; the assertions are run
+// here, because `assert` is this file's own and a call at the library's scope
+// would be counted by nobody.
+for (const t of stripperSelfTest()) assert(t.ok, t.label);
 
 function parse(rel: string, src: string): ts.SourceFile {
   return ts.createSourceFile(
@@ -883,26 +829,6 @@ function findFunctionBody(sf: ts.SourceFile, name: string): ts.Node | null {
   };
   visit(sf);
   return out;
-}
-
-/** Walking up from `node`, is every ancestor up to `fnBody` free of a NESTED
- *  function? Tells a direct statement of a function's own body from a call
- *  buried in a decoy arrow declared in the same scope - the count alone cannot
- *  bite that deletion. */
-function isDirectlyInFunctionBody(node: ts.Node, fnBody: ts.Node): boolean {
-  let cur: ts.Node | undefined = node.parent;
-  while (cur && cur !== fnBody) {
-    if (
-      ts.isFunctionDeclaration(cur) ||
-      ts.isFunctionExpression(cur) ||
-      ts.isArrowFunction(cur) ||
-      ts.isMethodDeclaration(cur)
-    ) {
-      return false;
-    }
-    cur = cur.parent;
-  }
-  return cur === fnBody;
 }
 
 /**
@@ -1005,188 +931,6 @@ function walkSrcFiles(dir: string): string[] {
   return out;
 }
 
-/** The selector arrow's own parameter name, whitespace-normalised, or `""` when
- *  it has none. What {@link primitiveSelectorBody}'s access-chain arm has to be
- *  ROOTED ON: the letter `s` is this codebase's habit and not the claim, and a
- *  check that reddens when somebody writes `(state) => state.byRule[id]?.status`
- *  is a check the next reader weakens rather than reads. Taken off the AST so
- *  the name the arm tests and the name the arrow declares cannot disagree. */
-function selectorParamName(arrow: ts.ArrowFunction, sf: ts.SourceFile): string {
-  const p = arrow.parameters[0];
-  return p ? norm(p.name.getText(sf)) : "";
-}
-
-/**
- * Can this selector body only ever yield a PRIMITIVE?
- *
- * AN ALLOW-LIST, AND THE POLARITY IS THE CLAIM. The failure mode is "the
- * selector returns a FRESH REFERENCE", and the set of ways to produce one is
- * OPEN - an object literal, an array literal, `Object.keys(...)`,
- * `Object.values(...).map(...)`, `Object.entries(...)`, `new Set(...)`,
- * `structuredClone(...)`, `[...x]`, any helper written next year. The set of
- * shapes that can only produce a primitive is small and CLOSED. So anything not
- * named below is guilty until argued, INCLUDING EVERY CALL EXPRESSION: a fresh
- * collection is exactly what a call returns.
- *
- * What this replaced, and why the polarity had to flip rather than the list
- * grow. The deny-list here named four forms and TWO OF THEM COULD NEVER FIRE:
- * an object-literal arrow body must be parenthesised, so the node in this
- * position is a `ParenthesizedExpression` and never an
- * `ObjectLiteralExpression`; and `(s) => ...x` is a syntax error, so a
- * `SpreadElement` can never occupy this position at all. That left
- * `useHostOwnedForwards((s) => ({ a, b }))` - the exact case this section exists
- * to forbid - PASSING, alongside `Object.keys(s.byRule)`, `Object.entries(...)`,
- * `new Set(...)`, `structuredClone(s.byRule)` and bare `s.byRule`, every one of
- * them the same "Maximum update depth exceeded" failure under zustand v5
- * Measured, not argued.
- *
- * Returns the REASON as well as the verdict, so a failure names the shape it
- * refused instead of only echoing the text.
- */
-function primitiveSelectorBody(
-  expr: ts.Expression,
-  sf: ts.SourceFile,
-  param: string,
-): { ok: true } | { ok: false; why: string } {
-  // Parentheses FIRST and to a fixed point, because parenthesising is how an
-  // object-literal arrow body has to be written at all - unwrapping later would
-  // leave the headline case looking like a shape nobody named.
-  let cur: ts.Expression = expr;
-  while (ts.isParenthesizedExpression(cur)) cur = cur.expression;
-
-  // `!x`, `-x`, `+x`, `~x`, `typeof x`: a primitive whatever the operand is.
-  if (ts.isPrefixUnaryExpression(cur) || ts.isTypeOfExpression(cur)) return { ok: true };
-
-  if (ts.isBinaryExpression(cur)) {
-    const kind = cur.operatorToken.kind;
-    // `??`, `||` and `&&` PASS AN OPERAND THROUGH, so each side has to qualify
-    // on its own: `s.byRule[id] ?? {}` is a fresh object on every miss.
-    if (
-      kind === ts.SyntaxKind.QuestionQuestionToken ||
-      kind === ts.SyntaxKind.BarBarToken ||
-      kind === ts.SyntaxKind.AmpersandAmpersandToken
-    ) {
-      const left = primitiveSelectorBody(cur.left, sf, param);
-      if (!left.ok) return left;
-      return primitiveSelectorBody(cur.right, sf, param);
-    }
-    // THE COMMA OPERATOR PASSES ITS RIGHT OPERAND THROUGH, exactly like `??`
-    // three lines above, and it was the hole the "every other binary operator
-    // yields a primitive" line below used to leave open. Measured with a real
-    // new hook in `hostOwned.ts`:
-    // `useHostOwnedForwards((s) => (s.byRule[ruleId]?.boundPort ?? 0, Object.keys(s.byRule)))`
-    // came back GREEN, with this section printing three fresh PASSING
-    // assertions calling it "returns a primitive" - a fresh array per store
-    // read, which is the "Maximum update depth exceeded" loop the whole section
-    // exists to forbid. `(0, X)` on its own is caught by TS2695; any
-    // non-trivial left operand dodges that, and a return annotation cannot see
-    // it either because the comma form satisfies any declared return type while
-    // still handing back a fresh reference.
-    //
-    // The LEFT operand is evaluated and thrown away, so it cannot be what the
-    // selector returns and does not need to qualify.
-    if (kind === ts.SyntaxKind.CommaToken) return primitiveSelectorBody(cur.right, sf, param);
-    // THE ASSIGNMENTS - `=`, `+=`, `??=`, `||=`, `&&=` and the rest - the other
-    // operator class whose value is an operand: `(lastIds = Object.keys(s.byRule))`
-    // measured GREEN the same way. `FirstAssignment`..`LastAssignment` is the
-    // whole closed range, so no member of the family is left out by name.
-    //
-    // BOTH operands have to qualify, because `??=`/`||=`/`&&=` yield EITHER
-    // side. In practice that refuses every assignment, since an assignment
-    // TARGET is an identifier or an access chain that does not reach a
-    // primitive field - and refusing is the right answer: nothing legitimate
-    // assigns inside a zustand selector, and the allow-list's polarity is
-    // "guilty until argued".
-    if (kind >= ts.SyntaxKind.FirstAssignment && kind <= ts.SyntaxKind.LastAssignment) {
-      const left = primitiveSelectorBody(cur.left, sf, param);
-      if (!left.ok) return left;
-      return primitiveSelectorBody(cur.right, sf, param);
-    }
-    // Every other binary operator - the comparisons, the arithmetic, the
-    // bitwise ones - produces a primitive from any pair of operands. TRUE OF
-    // WHAT IS LEFT, which is what the two arms above are for: the general
-    // sentence was false for exactly the two classes whose value is an operand
-    // rather than the operator's own result.
-    return { ok: true };
-  }
-
-  // A ternary is its two arms, for the same reason `??` is.
-  if (ts.isConditionalExpression(cur)) {
-    const whenTrue = primitiveSelectorBody(cur.whenTrue, sf, param);
-    if (!whenTrue.ok) return whenTrue;
-    return primitiveSelectorBody(cur.whenFalse, sf, param);
-  }
-
-  if (
-    ts.isNumericLiteral(cur) ||
-    ts.isStringLiteral(cur) ||
-    ts.isNoSubstitutionTemplateLiteral(cur) ||
-    ts.isTemplateExpression(cur) ||
-    cur.kind === ts.SyntaxKind.TrueKeyword ||
-    cur.kind === ts.SyntaxKind.FalseKeyword ||
-    cur.kind === ts.SyntaxKind.NullKeyword ||
-    (ts.isIdentifier(cur) && cur.text === "undefined")
-  ) {
-    return { ok: true };
-  }
-
-  if (ts.isPropertyAccessExpression(cur) || ts.isElementAccessExpression(cur)) {
-    // `.length` / `.size` is a number however the thing it counts was reached -
-    // an array, a string, a `Map`, a `Set`, or the result of any call in front
-    // of it.
-    //
-    // AND THIS ARM PASSES UNCONDITIONALLY ON THE NAME, which is the honest
-    // description: it is a LEXICAL guess, not a typed one. `x.length` where
-    // `length` is a user-defined field holding an object would be accepted, and
-    // this script builds no `ts.Program`, so there is no checker here that could
-    // tell the two apart. What makes the guess sound for the two stores it is
-    // applied to is that neither entry type HAS such a field: `ForwardRuntimeEntry`
-    // (`runtime.ts:38-48`) and `HostOwnedEntry` (`hostOwned.ts:47`) are a status
-    // string plus numbers, `byRule` is a plain `Record`, and a `.length` or
-    // `.size` written against any of them is a TS error rather than a selector
-    // this arm would wave through. Kept as a comment rather than tightened: the
-    // tightening that would actually close it is a type lookup, and refusing
-    // `.length`/`.size` outright would refuse `useRunningCount`, the one real
-    // selector in either store that builds a collection inside itself.
-    if (
-      ts.isPropertyAccessExpression(cur) &&
-      (cur.name.text === "length" || cur.name.text === "size")
-    ) {
-      return { ok: true };
-    }
-    // Otherwise the chain has to reach PAST the entry, to one of its own
-    // fields. `<param>.byRule` is the whole map and `<param>.byRule[id]` is the
-    // whole entry; both are objects `claim` and `releaseSession` rebuild, so
-    // neither is ever `Object.is` its own last return. Both entry types hold
-    // only `number`/string-literal fields, which is what makes one field off
-    // one entry primitive.
-    //
-    // ROOTED ON THE SELECTOR'S OWN PARAMETER NAME rather than on the letter
-    // `s`: `(state) => state.byRule[id]?.boundPort` is the same claim spelled
-    // differently, and it was REFUSED before this - a check that reddens on a
-    // rename is a check the next reader weakens. The name arrives from
-    // {@link selectorParamName}, off the arrow itself.
-    const text = norm(cur.getText(sf));
-    if (!/^[A-Za-z_$][\w$]*$/.test(param)) {
-      return {
-        ok: false,
-        why: `the selector's parameter \`${param}\` is not a plain identifier, so no access chain can be rooted on it`,
-      };
-    }
-    const entryField = new RegExp(`^${param}\\.byRule\\[[^\\]]+\\]\\??\\.[A-Za-z_$][\\w$]*$`);
-    if (entryField.test(text)) return { ok: true };
-    return {
-      ok: false,
-      why: `access chain \`${text}\` does not reach a primitive field off \`${param}.byRule[…]\``,
-    };
-  }
-
-  return {
-    ok: false,
-    why: `${ts.SyntaxKind[cur.kind]} \`${norm(cur.getText(sf)).slice(0, 60)}\` is not a shape that can only yield a primitive`,
-  };
-}
-
 // The allow-list's own self-test, over SYNTHETIC selectors, so its verdicts are
 // pinned here rather than only by whatever `hostOwned.ts` happens to contain
 // today. Without it the helper is only ever exercised on two inputs that both
@@ -1199,6 +943,15 @@ function primitiveSelectorBody(
     ["s.byRule[ruleId]?.boundPort", true],
     ["s.byRule[ruleId]?.boundPort ?? 0", true],
     ["Object.keys(s.byRule).length", true],
+    // The prefix-unary and `typeof` arm, which no probe in either script
+    // reached: deleting `ts.isPrefixUnaryExpression(cur) ||` from the shared
+    // classifier left both tables green, so the arm was unmeasured on both
+    // sides at once. `!x` and `typeof x` are primitives whatever the operand
+    // is - including operands every other arm refuses, which is what makes the
+    // arm worth having and worth pinning.
+    ["!s.byRule[ruleId]", true],
+    ["typeof s.byRule[ruleId]", true],
+    ["-Object.keys(s.byRule).length", true],
     // The refusals. The first is the case the old deny-list could not see.
     ["({ a: 1, b: 2 })", false],
     ["Object.keys(s.byRule)", false],

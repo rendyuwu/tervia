@@ -77,65 +77,26 @@ import {
   SshLocalConnectError,
   type SshAuthAttempt,
 } from "../src/modules/terminal/lib/ssh-exit-decision";
+import { stripCommentsNoJsx } from "./lib/source";
+import { scopeOf } from "./lib/scope";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const readRaw = (rel: string) => readFileSync(join(repoRoot, rel), "utf8");
 
-/**
- * Comment-stripped, quote-aware - the convention every source-text check in this
- * repo follows (ssh-exit-verify.ts, host-editor-verify.ts, rdp-lifetime-verify.ts).
- *
- * Not optional politeness: a source-text check that reads raw text goes GREEN
- * over `// was: decideSshConnectFailure(...)`, so deleting the gate and leaving
- * its corpse in a comment would pass. Every read below goes through this.
- *
- * `quotes` is parameterised because the two languages need different sets. TS
- * takes `"`, `'` and backtick. Rust must take ONLY `"`: a lifetime (`'static`)
- * or a char literal opens an apostrophe that never closes, and the scanner would
- * swallow the rest of the line - which for `has_credential('a ...)` would hide
- * real code from a check rather than reveal it.
- */
-// No JSX-comment branch here, deliberately. `readTs` strips only
-// `ssh-session.ts` (a `.ts` file), and `readRust` strips Rust source - neither
-// language gives `{/* ... */}` any meaning, so this stripper cannot be fooled
-// the way `host-editor-verify.ts`'s was (fixed in that file's own
-// `stripComments` - copy the branch from there, and not the lazy form
-// `\{\s*\/\*[\s\S]*?\*\/\s*\}`, which is not a substitute: it can still cross
-// an intervening `*/` while hunting for one followed by `}`) and in
-// `vault-editor-verify.ts`'s. If this file is ever pointed at a `.tsx`
-// file, that branch has to be added first - to the `quotes` two-argument form
-// below, not a copy-pasted single-argument one.
-function stripComments(src: string, quotes: string): string {
-  const stripLine = (line: string): string => {
-    let quote = "";
-    for (let i = 0; i < line.length; i++) {
-      const c = line[i];
-      if (quote) {
-        if (c === "\\") i++;
-        else if (c === quote) quote = "";
-        continue;
-      }
-      if (quotes.includes(c)) {
-        quote = c;
-        continue;
-      }
-      if (c === "/" && line[i + 1] === "/") return line.slice(0, i);
-    }
-    return line;
-  };
-  return src
-    .split("\n")
-    .filter((line) => {
-      const t = line.trim();
-      return !(t.startsWith("//") || t.startsWith("/*") || t.startsWith("*"));
-    })
-    .map(stripLine)
-    .join("\n");
-}
-
-/** Every source-text read below is comment-free by construction. */
-const readTs = (rel: string) => stripComments(readRaw(rel), "\"'`");
-const readRust = (rel: string) => stripComments(readRaw(rel), '"');
+// Every source-text read below is comment-free by construction, and not
+// optional politeness: a source-text check that
+// reads raw text goes GREEN over `// was: decideSshConnectFailure(...)`, so
+// deleting the gate and leaving a note behind would read as a pass.
+//
+// `stripCommentsNoJsx` rather than `stripComments` because neither input is
+// JSX - a brace wrapping a block comment here is an object or type literal,
+// and the JSX branch would delete it with the code inside. The quote set is
+// per language: Rust's `'a` lifetime is not a quote, and treating it as one
+// opens a state that never closes and swallows the rest of the line, which for
+// `has_credential('a ...)` would hide real code from a check rather than
+// reveal it.
+const readTs = (rel: string) => stripCommentsNoJsx(readRaw(rel), "\"'`");
+const readRust = (rel: string) => stripCommentsNoJsx(readRaw(rel), '"');
 
 let failed = 0;
 function assert(cond: boolean, msg: string): void {
@@ -856,65 +817,6 @@ function allIndexes(src: string, needle: string): number[] {
   const out: number[] = [];
   for (let at = src.indexOf(needle); at !== -1; at = src.indexOf(needle, at + 1)) out.push(at);
   return out;
-}
-
-// ----------------------------------------------------------------------------
-// The scope walker, ported from scripts/rdp-lifetime-verify.ts. The
-// duplication is deliberate: these scripts exit on load, there is no scripts/lib to share
-// from, and a third divergent copy of "which block is this in" is worse than a
-// second identical one. The doc comments there carry the full reasoning.
-
-/** Does the `{` at `brace` open a statement list rather than a value? `)`, `>`,
- *  `;`, `{`, `}` and the block keywords precede a BLOCK; `(`, `,`, `:`, `=`, `[`
- *  and `$` all introduce a value, so the brace opens a literal. */
-function opensABlock(src: string, brace: number): boolean {
-  let i = brace - 1;
-  while (i >= 0 && /\s/.test(src[i])) i--;
-  if (i < 0) return true;
-  const prev = src[i];
-  if (")>;{}".includes(prev)) return true;
-  const word = /(\w+)$/.exec(src.slice(0, i + 1))?.[1] ?? "";
-  return word === "else" || word === "try" || word === "do" || word === "finally";
-}
-
-/** Does the `}` at `brace` close a statement list? Its partner is found first,
- *  because right-to-left a closing brace says nothing about what it closes. */
-function closesABlock(src: string, brace: number): boolean {
-  let depth = 0;
-  for (let i = brace; i >= 0; i--) {
-    if (src[i] === "}") depth++;
-    else if (src[i] === "{") {
-      depth--;
-      if (depth === 0) return opensABlock(src, i);
-    }
-  }
-  return false;
-}
-
-/** The innermost statement list containing `at`: where its block opens (-1 at
- *  module scope), and the text of the list up to `at` with nested groups elided
- *  and a `;` standing where a nested BLOCK closed. */
-function scopeOf(src: string, at: number): { block: number; before: string } {
-  let before = "";
-  let depth = 0;
-  for (let i = at - 1; i >= 0; i--) {
-    const c = src[i];
-    if (c === "}") {
-      if (depth === 0 && closesABlock(src, i)) before = ";" + before;
-      depth++;
-      continue;
-    }
-    if (c === "{") {
-      if (depth > 0) {
-        depth--;
-        continue;
-      }
-      if (opensABlock(src, i)) return { block: i, before };
-      continue;
-    }
-    if (depth === 0) before = c + before;
-  }
-  return { block: -1, before };
 }
 
 /** The condition of the innermost `if` whose block contains `start`, or "". */

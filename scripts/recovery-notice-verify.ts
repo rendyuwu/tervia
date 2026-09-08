@@ -31,6 +31,7 @@ import {
   type RecoverableStore,
   type RecoveryToast,
 } from "../src/app/lib/recoveryNotices";
+import { callsFunction, namedImportsFrom } from "./lib/ast";
 
 let failed = 0;
 function check(name: string, ok: boolean, detail?: unknown): void {
@@ -274,20 +275,31 @@ console.log("\n[wiring] source text: the hook exists, is mounted, and uses the r
 {
   const app = read("src/app/App.tsx");
   const hook = read("src/app/hooks/useStoreRecoveryNotices.ts");
-  check("App imports the hook", app.includes('from "./hooks/useStoreRecoveryNotices"'));
-  check("App calls it", /useStoreRecoveryNotices\(\);/.test(app));
+  // Import declarations and call expressions, not text over the raw files.
+  // Every one of these was a POSITIVE `.includes` over raw source, which is the
+  // shape a comment satisfies - and the defect this whole section exists for
+  // was a caller that did not exist, so "the text `from "…"` appears somewhere
+  // in the file" is precisely the wrong question.
   check(
-    "the hook asks the hosts store",
-    hook.includes('from "@/modules/hosts/store"') && hook.includes("ensureHostsLoaded"),
+    "App imports the hook",
+    namedImportsFrom("App.tsx", app, "./hooks/useStoreRecoveryNotices") !== null,
   );
-  check(
-    "the hook asks the vault store",
-    hook.includes('from "@/modules/vault/store"') && hook.includes("ensureVaultLoaded"),
-  );
-  check(
-    "the hook asks the forwards store",
-    hook.includes('from "@/modules/forwards/store"') && hook.includes("ensureForwardsLoaded"),
-  );
+  check("App calls it", callsFunction("App.tsx", app, "useStoreRecoveryNotices"));
+  for (const [label, specifier, name] of [
+    ["hosts", "@/modules/hosts/store", "ensureHostsLoaded"],
+    ["vault", "@/modules/vault/store", "ensureVaultLoaded"],
+    ["forwards", "@/modules/forwards/store", "ensureForwardsLoaded"],
+  ] as const) {
+    const imported = namedImportsFrom("useStoreRecoveryNotices.ts", hook, specifier);
+    // The IMPORT, not a call: the hook hands each store's loader to
+    // `announceRecovery` as a value rather than calling it here, so a
+    // call-expression pin would be about a shape this code does not have.
+    check(
+      `the hook asks the ${label} store`,
+      imported !== null && imported.names.includes(name),
+      imported?.names,
+    );
+  }
   check(
     // NOT the once-per-launch guarantee itself - the [drain] check above is
     // what pins that, at the layer it actually holds. This only pins that

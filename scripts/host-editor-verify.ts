@@ -154,6 +154,7 @@ import {
   type SshSecretTouched,
 } from "../src/modules/hosts/editor/types";
 import type { Host } from "../src/modules/hosts/types";
+import { stripComments, stripperSelfTest } from "./lib/source";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const read = (p: string) => readFileSync(join(root, p), "utf8");
@@ -180,83 +181,6 @@ function between(src: string, from: string, to: string): string {
   const end = src.indexOf(to, start + from.length);
   if (end < 0) return "";
   return src.slice(start, end);
-}
-
-/**
- * A line with its trailing `//` comment removed, string literals respected.
- *
- * Quote-aware rather than a regex because a `//` inside a string is not a
- * comment, and this editor's help text is exactly the sort of string that would
- * one day contain one. An apostrophe in unquoted JSX text opens a quote state
- * that never closes, which loses the strip for that one line - it fails towards
- * keeping text, never towards deleting code.
- */
-function stripLineComment(line: string): string {
-  let quote = "";
-  for (let i = 0; i < line.length; i++) {
-    const c = line[i];
-    if (quote) {
-      if (c === "\\") i++;
-      else if (c === quote) quote = "";
-      continue;
-    }
-    if (c === '"' || c === "'" || c === "`") {
-      quote = c;
-      continue;
-    }
-    if (c === "/" && line[i + 1] === "/") return line.slice(0, i);
-  }
-  return line;
-}
-
-/**
- * The same source with comments removed.
- *
- * Every structural check below runs on this rather than on the raw file, because
- * the prose in this component describes its own guards in detail - "the same
- * comparison `save`'s `keepPin` makes" is a sentence that would satisfy a regex
- * looking for that comparison. Deleting a guard and leaving the comment must
- * fail, and stripping first is what makes it fail.
- *
- * Trailing comments are stripped as well as whole-line ones, and that is not
- * tidiness: with only whole lines removed, `const keepPin = true; // was: const
- * keepPin = !existing || existing.host === host;` passed every check in section
- * [3] with the comparison gone. Confirmed by breaking it exactly that way.
- */
-function stripComments(src: string): string {
-  // JSX comment expressions - `{/* ... */}` - are the only comment syntax
-  // legal INSIDE JSX children (a bare `//` there renders as literal text),
-  // and the line-based filter below only ever recognised `//`, `/*` and `*`
-  // starting a trimmed line, none of which match a line starting `{`.
-  // Fixed here per `vault-editor-verify.ts`'s own fix (found live against a
-  // DIFFERENT file): without this, a mutation
-  // that moves code into exactly this shape slips past every comment-stripped
-  // positive in this file, of which section [7] already has one -
-  // `/\{passwordHelp\(hasStoredPassword\)\}/.test(sshSectionSrc)` would still
-  // match a `{/* passwordHelp(hasStoredPassword) */}` left behind by a delete.
-  //
-  // NOT a straight copy of that fix's regex: `vault-editor-verify.ts`'s
-  // `\{\s*\/\*[\s\S]*?\*\/\s*\}` is lazy but still ALLOWED to skip over an
-  // intervening `*/` while searching for one followed by `}` - and
-  // `HostEditorDialogProps`'s own `{ /** null = closed. */ target: … }` type
-  // literal opens with exactly a `{` immediately followed by `/*`, with no
-  // `}` after ITS `*/`. Measured: with that regex, the lazy group kept
-  // extending past every later `*/` that was not immediately followed by `}`
-  // until it found one 50KB downstream that was - eating the entire file in
-  // between, including `save` and everything section [4]/[7]/[8] anchor on.
-  // The negative lookahead below forbids the inner group from ever crossing a
-  // `*/` at all, so the first one found is final: either `}` follows it and
-  // this is a real `{/* … */}`, or it does not and the match fails HERE,
-  // at this `{`, rather than searching onward for a luckier one.
-  const withoutJsxComments = src.replace(/\{\s*\/\*(?:(?!\*\/)[\s\S])*\*\/\s*\}/g, "");
-  return withoutJsxComments
-    .split("\n")
-    .filter((line) => {
-      const t = line.trim();
-      return !(t.startsWith("//") || t.startsWith("/*") || t.startsWith("*"));
-    })
-    .map(stripLineComment)
-    .join("\n");
 }
 
 /**
@@ -886,21 +810,12 @@ console.log("[0] the helpers the checks below depend on");
   // and everything sections [4]/[7]/[8] anchor on. One probe carries both
   // shapes - the type literal on line 1 and a real JSX comment on line 3 - so
   // one string tests both directions at once.
-  const STRIPPER_PROBE =
-    "type P = { /** c */ x: X };\nconst KEEP = 1;\nconst j = <div>{/* c */}</div>;";
-  check(
-    "stripComments does not OVER-strip: a `{ /** … */ …` type literal does not eat the code after it",
-    stripComments(STRIPPER_PROBE).includes("KEEP"),
-    stripComments(STRIPPER_PROBE),
-  );
-  // Worded as "no `{/*` survives" rather than "no `c` survives", because the
-  // `/** c */` on line 1 would satisfy the latter without the JSX comment on
-  // line 3 having been touched at all.
-  check(
-    "and does not UNDER-strip: no JSX comment expression survives it",
-    !stripComments(STRIPPER_PROBE).includes("{/*"),
-    stripComments(STRIPPER_PROBE),
-  );
+  // The probe carries both shapes and lives with the shared stripper. Its
+  // second verdict is worded as "no `{/*` survives" rather than "no `c`
+  // survives", because the type literal's own doc comment on the probe's first
+  // line would satisfy the latter without the JSX comment on the third line
+  // having been touched at all.
+  for (const t of stripperSelfTest()) check(t.label, t.ok);
   check("the editor survived it", editorSrc.includes("export function HostEditorDialog("));
   check("and it removed something", editorSrc.length < editorRaw.length);
 
@@ -1037,7 +952,7 @@ console.log("\n[1] the keychain seed cannot overwrite a field the user typed");
   // Per row: without this, typing on row A would suppress row B's seed and B
   // would save blank fields it never showed.
   const reset = between(effect, 'setTest({ kind: "idle" });', "const stale = () =>");
-  check("the effect's reset block was found", reset.length > 20, reset.length);
+  check("the effect's reset block was found", reset.length > 46, reset.length);
   check(
     "and a new row starts with nothing touched",
     /\.current = NO_SSH_SECRETS_TOUCHED;/.test(reset),
@@ -1590,7 +1505,7 @@ console.log("\n[7] the password field says what BLANK does, which is two differe
   // Everything after the stored-password branch, and "" when that branch is not
   // there at all - so a single-string version of this function reddens both halves
   // rather than passing the second by accident.
-  const fresh = stored.length > 0 ? help.slice(help.indexOf(stored) + stored.length) : "";
+  const fresh = stored.length > 24 ? help.slice(help.indexOf(stored) + stored.length) : "";
   check(
     "the no-password branch still says blank saves a host without one",
     /without one/.test(fresh),
@@ -3646,7 +3561,7 @@ console.log(
 
   const effect = between(editorSrc, "if (applied.current === token) return;", "void load();");
   const reset = between(effect, 'setTest({ kind: "idle" });', "const stale = () =>");
-  check("the load effect's reset block was found", reset.length > 20, reset.length);
+  check("the load effect's reset block was found", reset.length > 46, reset.length);
   // Per row, exactly as the touched and seeded records are: an intent carried
   // onto the next row would delete a key nothing on screen has mentioned.
   check(

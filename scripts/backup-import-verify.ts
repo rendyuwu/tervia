@@ -55,6 +55,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 import { BACKUP_KIND, BACKUP_KIND_V1, parseBackupFile } from "../src/modules/backup/file";
+import { stripComments, stripperSelfTest } from "./lib/source";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const read = (p: string) => readFileSync(join(root, p), "utf8");
@@ -68,87 +69,14 @@ function check(label: string, cond: boolean): void {
   }
 }
 
-/**
- * A line with its trailing `//` comment removed, string literals respected.
- *
- * Quote-aware rather than a regex because a `//` inside a string is not a
- * comment, and this editor's help text is exactly the sort of string that would
- * one day contain one. An apostrophe in unquoted JSX text opens a quote state
- * that never closes, which loses the strip for that one line - it fails towards
- * keeping text, never towards deleting code.
- *
- * Copied verbatim from `host-editor-verify.ts` (also duplicated in
- * `rdp-lifetime-verify.ts`) rather than reimplemented. Extracting this and
- * `stripComments` into a shared `scripts/lib` is out of scope here; this is
- * now the THIRD copy of the same two functions, not the second.
- */
-function stripLineComment(line: string): string {
-  let quote = "";
-  for (let i = 0; i < line.length; i++) {
-    const c = line[i];
-    if (quote) {
-      if (c === "\\") i++;
-      else if (c === quote) quote = "";
-      continue;
-    }
-    if (c === '"' || c === "'" || c === "`") {
-      quote = c;
-      continue;
-    }
-    if (c === "/" && line[i + 1] === "/") return line.slice(0, i);
-  }
-  return line;
-}
-
-/**
- * The same source with comments removed.
- *
- * Every check below runs on this rather than on the raw file, for the reason
- * `host-editor-verify.ts` and `rdp-lifetime-verify.ts` both give: the prose in
- * this file's own docblock names the guarded calls it checks for by their
- * literal text, so a regex over raw source could be satisfied by a comment
- * alone. Deleting (or commenting out) a guarded call and leaving a trailing
- * `// was: ...` behind it must fail, and stripping first is what makes it
- * fail. Confirmed by breaking `parseBackupFile(raw);` exactly that way.
- */
-function stripComments(src: string): string {
-  // JSX comment expressions - `{/* ... */}` - are the only comment syntax
-  // legal INSIDE JSX children, and the line-based filter below only ever
-  // recognised `//`, `/*` and `*` starting a trimmed line, none of which match
-  // a line starting `{`. Both `dialogSrc` and `actionsSrc` below strip a
-  // `.tsx` file, so this file is exposed to it: a deleted guarded call left
-  // behind as `{/* ... */}` would pass every positive check run over the
-  // stripped source.
-  //
-  // The inner group must NOT be allowed to cross a `*/` while hunting
-  // for one followed by `}` - a lazy `[\s\S]*?` is still permitted to do that,
-  // and a type literal opening `{ /** ... */ x: T }` then swallows everything
-  // up to some later, unrelated `*/}`. The negative lookahead below forbids
-  // that: the first `*/` is final, either a real `{/* ... */}` or the match
-  // fails right there. Copied from `host-editor-verify.ts`'s `stripComments`;
-  // see that file's comment for the measured damage the lazy form did.
-  const withoutJsxComments = src.replace(/\{\s*\/\*(?:(?!\*\/)[\s\S])*\*\/\s*\}/g, "");
-  return withoutJsxComments
-    .split("\n")
-    .filter((line) => {
-      const t = line.trim();
-      return !(t.startsWith("//") || t.startsWith("/*") || t.startsWith("*"));
-    })
-    .map(stripLineComment)
-    .join("\n");
-}
-
-// Self-test: both directions of the JSX-comment branch above.
-const STRIPPER_PROBE =
-  "type P = { /** c */ x: X };\nconst KEEP = 1;\nconst j = <div>{/* c */}</div>;";
-check(
-  "stripComments does not over-strip past a type literal's doc comment (the lazy-regex trap)",
-  stripComments(STRIPPER_PROBE).includes("KEEP"),
-);
-check(
-  "stripComments does remove a JSX comment expression's own body",
-  !stripComments(STRIPPER_PROBE).includes("{/*"),
-);
+// `stripComments` and its self-test are shared, in `lib/source`; the reason
+// this file strips at all is its own docblock, which names the guarded calls
+// the pins below search for by their literal text. A regex over raw source
+// would be satisfied by that prose alone. Both directions of the shared
+// stripper's JSX-comment branch are asserted here rather than in the library,
+// because `check` is per script and a `check` at library scope would be counted
+// by nobody.
+for (const t of stripperSelfTest()) check(t.label, t.ok);
 
 const dialogSrc = stripComments(read("src/modules/backup/BackupDialog.tsx"));
 const actionsSrc = stripComments(read("src/modules/hosts/page/HostsBackupActions.tsx"));

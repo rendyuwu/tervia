@@ -21,6 +21,7 @@
  * All four are pure in the same sense `draft.ts` is, so nothing about that
  * section needs a runtime this file does not have.
  */
+import ts from "typescript";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -49,6 +50,7 @@ import {
   type KeyDraft,
 } from "../src/modules/vault/editor/draft";
 import { vaultKeyStamp, type VaultKey } from "../src/modules/vault/types";
+import { importSpecifiersOf } from "./lib/ast";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const read = (p: string) => readFileSync(join(root, p), "utf8");
@@ -550,9 +552,17 @@ console.log(
   // collecting every import specifier the file actually has and asserting the
   // SET is exactly the two pure modules this file is allowed to depend on
   // does.
-  const importSpecifiers = [...draftSrc.matchAll(/from\s*["']([^"']+)["']/g)]
-    .map((m) => m[1])
-    .sort();
+  //
+  // Off the AST rather than off a `from "…"` regex, which was wrong in both
+  // directions. It missed `await import("../../vault/store")` - a form that
+  // has no `from` clause, resolves, and EXECUTES, so it is the resolving
+  // evasion this section is about rather than a hypothetical one. And it
+  // matched the text `from "…"` wherever it appeared, including inside a
+  // comment, so a sentence in this file's own docblock quoting an import would
+  // have broken the set equality over source that had not changed.
+  const importSpecifiers = importSpecifiersOf(
+    ts.createSourceFile("draft.ts", draftSrc, ts.ScriptTarget.ESNext, true, ts.ScriptKind.TS),
+  );
   ok(
     `draft.ts's import specifiers are exactly ["../keyInspect", "../types"] - found ${JSON.stringify(importSpecifiers)}`,
     JSON.stringify(importSpecifiers) === JSON.stringify(["../keyInspect", "../types"]),

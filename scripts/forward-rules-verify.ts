@@ -90,6 +90,7 @@ import type { ForwardsStoreIo } from "../src/modules/forwards/adapters";
 import { createForwardStore, type HostLookup } from "../src/modules/forwards/store";
 import type { ForwardRule } from "../src/modules/forwards/types";
 import type { Host, RdpHost, SshHost } from "../src/modules/hosts/types";
+import { stripComments, stripperSelfTest } from "./lib/source";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const read = (p: string) => readFileSync(join(root, p), "utf8");
@@ -115,54 +116,6 @@ async function rejectsWith(label: string, fn: () => Promise<unknown>, want: stri
     const msg = e instanceof Error ? e.message : String(e);
     check(label, msg, want);
   }
-}
-
-/** A line with its trailing `//` comment removed, string literals respected -
- *  quote-aware rather than a regex because a `//` inside a string is not a
- *  comment. Copied from `scripts/host-editor-verify.ts`. */
-function stripLineComment(line: string): string {
-  let quote = "";
-  for (let i = 0; i < line.length; i++) {
-    const c = line[i];
-    if (quote) {
-      if (c === "\\") i++;
-      else if (c === quote) quote = "";
-      continue;
-    }
-    if (c === '"' || c === "'" || c === "`") {
-      quote = c;
-      continue;
-    }
-    if (c === "/" && line[i + 1] === "/") return line.slice(0, i);
-  }
-  return line;
-}
-
-/**
- * The same source with comments removed, for the POSITIVE half of property 6
- * below - a positive over raw source is satisfied by a comment that merely
- * CLAIMS the wiring, so it must run over text a comment cannot survive.
- *
- * Copied from `scripts/host-editor-verify.ts:191`, including its JSX branch:
- * a JSX comment expression is the only comment syntax legal INSIDE JSX
- * children, and the negative-lookahead form below is deliberate - the lazy
- * form `\{\s*\/\*[\s\S]*?\*\/\s*\}` reads as equivalent but is allowed to
- * cross an intervening close-comment marker while searching for one followed
- * by `}`, and on a real file it swallowed 50752 characters between two
- * unrelated comments, silencing a negative check that then ran blind over
- * deleted text. The negative lookahead forbids the inner group from ever
- * crossing a close-comment marker at all, so the first one found is final.
- */
-function stripComments(src: string): string {
-  const withoutJsxComments = src.replace(/\{\s*\/\*(?:(?!\*\/)[\s\S])*\*\/\s*\}/g, "");
-  return withoutJsxComments
-    .split("\n")
-    .filter((line) => {
-      const t = line.trim();
-      return !(t.startsWith("//") || t.startsWith("/*") || t.startsWith("*"));
-    })
-    .map(stripLineComment)
-    .join("\n");
 }
 
 /** Every `CallExpression` whose callee's own text is one of `calleeNames`,
@@ -463,23 +416,12 @@ console.log(
   "\n[cascade wiring] HostsPage.confirmDelete passes releaseRulesForHost by name - not noForwardRules, and not a wrapper",
 );
 {
-  // Self-test for `stripComments`: a comment that
-  // is NOT a JSX comment expression (a plain block comment mid-line, inside a
-  // type literal) must survive, and code that follows it must too; a JSX
-  // comment expression must not.
-  const probe = stripComments(
-    "type P = { /** c */ x: X };\nconst KEEP = 1;\nconst j = <div>{/* c */}</div>;",
-  );
-  check(
-    "stripComments self-test: code after a non-JSX comment survives",
-    probe.includes("KEEP"),
-    true,
-  );
-  check(
-    "stripComments self-test: the JSX comment expression is gone",
-    probe.includes("{/* c */}"),
-    false,
-  );
+  // The mandatory two-assertion self-test for a script that strips a `.tsx`: a
+  // comment that is NOT a JSX comment expression (a plain block comment
+  // mid-line, inside a type literal) must survive, and code that follows it
+  // must too; a JSX comment expression must not. The probe and the verdicts
+  // live with the shared stripper, the `ok:` lines here.
+  for (const t of stripperSelfTest()) check(t.label, t.ok, true);
 
   const hostsPageRaw = read("src/modules/hosts/HostsPage.tsx");
 

@@ -27,6 +27,14 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import ts from "typescript";
+import { stripComments, stripperSelfTest } from "./lib/source";
+import {
+  isDirectlyInFunctionBody,
+  isUnguardedToItsFunctionBody,
+  norm,
+  primitiveSelectorBody,
+  selectorParamName,
+} from "./lib/ast";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const read = (rel: string) => readFileSync(join(repoRoot, rel), "utf8");
@@ -67,57 +75,9 @@ const src = Object.fromEntries(Object.entries(FILES).map(([k, p]) => [k, read(p)
   string
 >;
 
-// ============================================================================
-// stripComments - the tenth copy of this helper in this suite; extracting it
-// into a shared module is the real remedy and has not been done. Copied from
-// `host-editor-verify.ts`'s own `stripComments`, JSX
-// branch in the NEGATIVE-LOOKAHEAD form - the lazy form reads as equivalent
-// and is not: it crosses an intervening `*/` and once swallowed 50752
-// characters in a different script, silencing a negative that then ran blind
-// over deleted text. Every new script stripping a `.tsx` carries the same
-// two-assertion self-test (below, right after the function).
-// ============================================================================
-function stripLineComment(line: string): string {
-  let quote = "";
-  for (let i = 0; i < line.length; i++) {
-    const c = line[i];
-    if (quote) {
-      if (c === "\\") i++;
-      else if (c === quote) quote = "";
-      continue;
-    }
-    if (c === '"' || c === "'" || c === "`") {
-      quote = c;
-      continue;
-    }
-    if (c === "/" && line[i + 1] === "/") return line.slice(0, i);
-  }
-  return line;
-}
-
-function stripComments(src: string): string {
-  const withoutJsxComments = src.replace(/\{\s*\/\*(?:(?!\*\/)[\s\S])*\*\/\s*\}/g, "");
-  return withoutJsxComments
-    .split("\n")
-    .filter((line) => {
-      const t = line.trim();
-      return !(t.startsWith("//") || t.startsWith("/*") || t.startsWith("*"));
-    })
-    .map(stripLineComment)
-    .join("\n");
-}
-
-// Self-test: KEEP survives, and the JSX comment does not.
-{
-  const selfTest = stripComments(
-    "type P = { /** c */ x: X };\nconst KEEP = 1;\nconst j = <div>{/* c */}</div>;",
-  );
-  check("stripComments self-test: KEEP survives", selfTest.includes("KEEP"));
-  check(
-    "stripComments self-test: the JSX comment {/* c */} does not survive",
-    !/\{\s*\/\*\s*c\s*\*\/\s*\}/.test(selfTest),
-  );
-}
+// Self-test: KEEP survives, and the JSX comment does not. The probe and the
+// verdicts live with the shared stripper; the `ok:` lines are counted here.
+for (const t of stripperSelfTest()) check(t.label, t.ok);
 
 // ============================================================================
 // Shared compiler-API helpers - copied/adapted from `vault-shell-verify.ts`,
@@ -243,27 +203,6 @@ function findPropertyValue(
   return null;
 }
 
-/** Walking up from `node`, is every ancestor up to (and including reaching)
- *  `fnBody` free of crossing into a NESTED function? Used to tell a direct
- *  statement of a function's own body from a call buried inside a decoy arrow
- *  declared in the same scope - the count alone cannot bite that deletion
- *  (see `vault-shell-verify.ts`'s section 6). */
-function isDirectlyInFunctionBody(node: ts.Node, fnBody: ts.Node): boolean {
-  let cur: ts.Node | undefined = node.parent;
-  while (cur && cur !== fnBody) {
-    if (
-      ts.isFunctionDeclaration(cur) ||
-      ts.isFunctionExpression(cur) ||
-      ts.isArrowFunction(cur) ||
-      ts.isMethodDeclaration(cur)
-    ) {
-      return false;
-    }
-    cur = cur.parent;
-  }
-  return cur === fnBody;
-}
-
 /** The source text of `const <name> = <expr>`'s initializer, or `null`. Pins a
  *  derived flag at ITS OWN DEFINITION - a check on the identifier handed to a
  *  callback is defeated by an alias (`const pageStops = running;`), which is
@@ -300,63 +239,6 @@ function findTypeAliasMembers(root: ts.Node, name: string, sf: ts.SourceFile): s
   return result;
 }
 
-/**
- * Walking out from `stmt`, does anything DECIDE whether it runs before the
- * enclosing function's own body is reached? `true` only when every step out is
- * an unconditional one - a plain block, or a `try`'s own `tryBlock` - so an
- * `if`, `switch`, loop or `catch` anywhere on that path answers `false`.
- *
- * Transplanted from `forward-autostart-verify.ts:1342-1348`'s
- * `stmt.parent === body`, with the one extra hop this file's two call sites
- * need: each guarded stop is a direct statement of its function's own `try`, so
- * a bare parent comparison against the function body is `false` for the code as
- * written. Self-terminating on the nearest function so neither caller has to
- * hand it a body - the `if` at `ForwardsPage.tsx`'s confirm sits inside an
- * async IIFE, not inside the `useCallback` factory.
- *
- * WHY IT IS NEEDED BESIDE {@link isDirectlyInFunctionBody}, which is the
- * distinction the comment on section 12's use of that helper used to blur:
- * that one refuses NESTING inside another function and nothing else - its own
- * docstring says so - and neither a count, an index order, an awaited parent
- * nor an exact-condition pin can see a wrapper. Measured against round 4:
- *
- *   // ForwardsPage.tsx        if (target.rule.id === "") {
- *   // RuleEditorDialog.tsx    if (id === "") {
- *
- * around either guarded stop left all four scripts, `tsc --noEmit` and
- * `prettier --check` green with the stop unreachable for every rule. Everything
- * else survives by construction: the count stays 1, the index order holds,
- * `ts.isAwaitExpression(stop.parent)` holds, the argument node is unchanged, and
- * `enclosingIf` walks to the NEAREST `if`, so the exact-condition pin still
- * matches the inner one.
- */
-function isUnguardedToItsFunctionBody(stmt: ts.Statement): boolean {
-  let cur: ts.Node = stmt;
-  for (;;) {
-    const block: ts.Node | undefined = cur.parent;
-    // Not a block at all means a braceless `if (x) <stmt>` / `for (…) <stmt>`,
-    // which is a guard written without the braces.
-    if (block === undefined || !ts.isBlock(block)) return false;
-    const owner: ts.Node | undefined = block.parent;
-    if (owner === undefined) return false;
-    if (
-      ts.isFunctionDeclaration(owner) ||
-      ts.isFunctionExpression(owner) ||
-      ts.isArrowFunction(owner) ||
-      ts.isMethodDeclaration(owner)
-    ) {
-      return true;
-    }
-    // A `try` runs its own block unconditionally; `catch` and `finally` do not,
-    // so only `tryBlock` continues the walk.
-    if (ts.isTryStatement(owner) && owner.tryBlock === block) {
-      cur = owner;
-      continue;
-    }
-    return false;
-  }
-}
-
 /** The arrow function's own returned expression: the concise body directly,
  *  or a block body's single `return <expr>;` statement's expression. `null`
  *  for anything else (multi-statement blocks, no return) - every selector in
@@ -382,203 +264,151 @@ function walkSrcFiles(dir: string): string[] {
   return out;
 }
 
-// Whitespace AND trailing commas are Prettier's; everything else is the
-// claim. E4 measured why the comma half is needed: a legal multi-line
-// reformat of `ruleRecordFrom(id, draft)` under this repo's Prettier config
-// (trailing commas) adds a comma after the last argument, which plain
-// whitespace-collapsing does not remove - a false FAIL on a reformat that
-// changed nothing the claim cares about, which is exactly what a paired
-// reformat control exists to catch.
-const norm = (s: string): string => s.replace(/\s+/g, "").replace(/,+([)\]}])/g, "$1");
-
-// ============================================================================
-// The selector allow-list - A COPY of `scripts/forward-autostart-verify.ts`'s
-// `selectorParamName` + `primitiveSelectorBody`, the eleventh copied helper in
-// this suite. There is no `scripts/lib` to share it through and creating one
-// has not been done; the copy is noted here so the two cannot silently
-// diverge unremarked.
+// AND THERE IS STILL ONLY ONE OF EACH, said as a check rather than as a
+// paragraph's promise.
 //
-// WHAT IT REPLACED, AND WHY THE POLARITY HAD TO FLIP. This section used to run
-// a four-name DENY-LIST (`isForbiddenSelectorBody`: object literal, array
-// literal, spread, and a call to `.map`/`Object.keys`/`Object.values`/
-// `Object.entries`) over `useForwardRuntime`'s selectors, while its twin in
-// `forward-autostart-verify.ts` had already flipped to this allow-list for
-// `useHostOwnedForwards`. So the store EVERY ROW READS was the one still behind
-// the weaker check. Measured against four fresh-reference hooks added to
-// `runtime.ts`, each of which came back GREEN with a fresh PASSING assertion
-// calling it "a primitive shape" (141 -> 157 ok, `tsc` and `prettier` clean):
+// This replaced a comparison of two copies for byte-identity. Both were live,
+// both guarded a store every row reads, and a tightening applied to one alone
+// left the other passing what its twin now refused - which is how the selector
+// allow-list's polarity hole survived, one script ahead of the other. The
+// copies are gone now, but "they agree" was never the property worth holding:
+// the property is that NOBODY REINTRODUCES A SECOND DEFINITION. Deleting the
+// old check and recording nothing in its place would reproduce inside
+// `scripts/` exactly the decay a module-import pin exists to stop - nothing
+// asserting that a module keeps choosing to import rather than to reimplement.
 //
-//   useForwardRuntime((s) => ({ port: …, sid: … }))
-//   useForwardRuntime((s) => (s.byRule[id]?.status ?? "x", Object.keys(s.byRule)))
-//   useForwardRuntime((s) => s.byRule[ruleId] ?? {})
-//   useForwardRuntime((s) => new Set(Object.getOwnPropertyNames(s.byRule)))
+// Structural rather than a grep, because a grep for `function <name>` is blind
+// to `const <name> = (…) =>`, and three arrow-form copies of these helpers were
+// live in this suite while a grep-shaped acceptance bar read clean. Every
+// top-level declaration is taken off the AST, both forms, so the arrow spelling
+// counts the same as the function one.
 //
-// Two of the deny-list's four names could never fire at all (an object-literal
-// arrow body must be parenthesised, so the node here is a
-// `ParenthesizedExpression`; `(s) => ...x` is a syntax error, so a
-// `SpreadElement` cannot occupy this position), and the set of ways to build a
-// fresh reference is OPEN while the set of shapes that can only yield a
-// primitive is small and CLOSED. Hence: anything not named below is guilty until
-// argued, INCLUDING EVERY CALL EXPRESSION.
-//
-// The live code was fine throughout - `runtime.ts`'s four real selectors all
-// return primitives - so this was a check hole, not a defect.
-// ============================================================================
-
-/** The selector arrow's own parameter name, whitespace-normalised, or `""` when
- *  it has none. What {@link primitiveSelectorBody}'s access-chain arm is ROOTED
- *  ON: the letter `s` is this codebase's habit and not the claim, and a check
- *  that reddens when somebody writes `(state) => state.byRule[id]?.status` is a
- *  check the next reader weakens rather than reads. */
-function selectorParamName(arrow: ts.ArrowFunction, sf: ts.SourceFile): string {
-  const p = arrow.parameters[0];
-  return p ? norm(p.name.getText(sf)) : "";
-}
-
-/**
- * Can this selector body only ever yield a PRIMITIVE? Returns the REASON as
- * well as the verdict, so a failure names the shape it refused instead of only
- * echoing the text. See the block comment above for why this is an allow-list.
- */
-function primitiveSelectorBody(
-  expr: ts.Expression,
-  sf: ts.SourceFile,
-  param: string,
-): { ok: true } | { ok: false; why: string } {
-  // Parentheses FIRST and to a fixed point, because parenthesising is how an
-  // object-literal arrow body has to be written at all - unwrapping later would
-  // leave the headline case looking like a shape nobody named.
-  let cur: ts.Expression = expr;
-  while (ts.isParenthesizedExpression(cur)) cur = cur.expression;
-
-  // `!x`, `-x`, `+x`, `~x`, `typeof x`: a primitive whatever the operand is.
-  if (ts.isPrefixUnaryExpression(cur) || ts.isTypeOfExpression(cur)) return { ok: true };
-
-  if (ts.isBinaryExpression(cur)) {
-    const kind = cur.operatorToken.kind;
-    // `??`, `||` and `&&` PASS AN OPERAND THROUGH, so each side has to qualify
-    // on its own: `s.byRule[id] ?? {}` is a fresh object on every miss.
-    if (
-      kind === ts.SyntaxKind.QuestionQuestionToken ||
-      kind === ts.SyntaxKind.BarBarToken ||
-      kind === ts.SyntaxKind.AmpersandAmpersandToken
-    ) {
-      const left = primitiveSelectorBody(cur.left, sf, param);
-      if (!left.ok) return left;
-      return primitiveSelectorBody(cur.right, sf, param);
-    }
-    // THE COMMA OPERATOR PASSES ITS RIGHT OPERAND THROUGH, exactly like `??`,
-    // and the LEFT one is evaluated and thrown away so it need not qualify.
-    // `(0, X)` alone is caught by TS2695; any non-trivial left operand dodges
-    // that, and a return annotation cannot see it either.
-    if (kind === ts.SyntaxKind.CommaToken) return primitiveSelectorBody(cur.right, sf, param);
-    // THE ASSIGNMENTS - `=`, `+=`, `??=`, `||=`, `&&=` and the rest - the other
-    // operator class whose value is an operand. BOTH operands have to qualify,
-    // because `??=`/`||=`/`&&=` yield EITHER side; in practice that refuses
-    // every assignment, since a target is an identifier or an access chain that
-    // does not reach a primitive field - and refusing is the right answer:
-    // nothing legitimate assigns inside a zustand selector.
-    if (kind >= ts.SyntaxKind.FirstAssignment && kind <= ts.SyntaxKind.LastAssignment) {
-      const left = primitiveSelectorBody(cur.left, sf, param);
-      if (!left.ok) return left;
-      return primitiveSelectorBody(cur.right, sf, param);
-    }
-    // Every other binary operator - the comparisons, the arithmetic, the
-    // bitwise ones - produces a primitive from any pair of operands. TRUE OF
-    // WHAT IS LEFT, which is what the two arms above are for.
-    return { ok: true };
-  }
-
-  // A ternary is its two arms, for the same reason `??` is.
-  if (ts.isConditionalExpression(cur)) {
-    const whenTrue = primitiveSelectorBody(cur.whenTrue, sf, param);
-    if (!whenTrue.ok) return whenTrue;
-    return primitiveSelectorBody(cur.whenFalse, sf, param);
-  }
-
-  if (
-    ts.isNumericLiteral(cur) ||
-    ts.isStringLiteral(cur) ||
-    ts.isNoSubstitutionTemplateLiteral(cur) ||
-    ts.isTemplateExpression(cur) ||
-    cur.kind === ts.SyntaxKind.TrueKeyword ||
-    cur.kind === ts.SyntaxKind.FalseKeyword ||
-    cur.kind === ts.SyntaxKind.NullKeyword ||
-    (ts.isIdentifier(cur) && cur.text === "undefined")
-  ) {
-    return { ok: true };
-  }
-
-  if (ts.isPropertyAccessExpression(cur) || ts.isElementAccessExpression(cur)) {
-    // `.length` / `.size` is a number however the thing it counts was reached -
-    // and this arm passes UNCONDITIONALLY ON THE NAME, which is the honest
-    // description of a LEXICAL guess. This script builds no `ts.Program`, so
-    // there is no checker here that could tell `array.length` from a
-    // user-defined field named `length` holding an object. What makes the guess
-    // sound for the store it is applied to: `ForwardRuntimeEntry`
-    // (`runtime.ts:38-48`) is a status string plus numbers, `byRule` is a plain
-    // `Record`, and a `.length`/`.size` written against either is a TS error
-    // rather than a selector this arm waves through. Kept as a comment rather
-    // than tightened - the tightening that would close it is a type lookup, and
-    // refusing the two names outright would refuse `useRunningCount`, the one
-    // real selector here that builds a collection inside itself.
-    if (
-      ts.isPropertyAccessExpression(cur) &&
-      (cur.name.text === "length" || cur.name.text === "size")
-    ) {
-      return { ok: true };
-    }
-    // Otherwise the chain has to reach PAST the entry, to one of its own
-    // fields. `<param>.byRule` is the whole map and `<param>.byRule[id]` is the
-    // whole entry; both are objects the four actions rebuild, so neither is
-    // ever `Object.is` its own last return.
-    const text = norm(cur.getText(sf));
-    if (!/^[A-Za-z_$][\w$]*$/.test(param)) {
-      return {
-        ok: false,
-        why: `the selector's parameter \`${param}\` is not a plain identifier, so no access chain can be rooted on it`,
-      };
-    }
-    const entryField = new RegExp(`^${param}\\.byRule\\[[^\\]]+\\]\\??\\.[A-Za-z_$][\\w$]*$`);
-    if (entryField.test(text)) return { ok: true };
-    return {
-      ok: false,
-      why: `access chain \`${text}\` does not reach a primitive field off \`${param}.byRule[…]\``,
-    };
-  }
-
-  return {
-    ok: false,
-    why: `${ts.SyntaxKind[cur.kind]} \`${norm(cur.getText(sf)).slice(0, 60)}\` is not a shape that can only yield a primitive`,
-  };
-}
-
-// AND THE TWO COPIES STILL AGREE, said as a check rather than as the paragraph
-// above's promise. Both are live and both guard a store every row reads, so a
-// tightening applied to one alone leaves the other passing what its twin now
-// refuses - which is how the polarity hole above survived in the first place,
-// one script ahead of the other. Compared as CODE: both files are
-// comment-stripped first (the two copies' comments differ deliberately, each
-// naming its own store) and whitespace-normalised after, so a legal reformat of
-// either is invisible here. Extraction into a shared module is the real remedy
-// and has not been done; until then this is what makes "cannot silently
-// diverge" true.
+// This check lives in ONE script by design: it is a claim about the whole
+// directory, and running it 59 times would say the same thing 59 times.
 {
-  const twin = "scripts/forward-autostart-verify.ts";
-  const bodyOf = (fileSrc: string, rel: string, name: string): string | null => {
-    const sf = ts.createSourceFile(rel, stripComments(fileSrc), ts.ScriptTarget.ESNext, true);
-    const found = findFunctionBody(sf, name);
-    return found === null ? null : norm(found.getText(sf));
-  };
-  for (const name of ["selectorParamName", "primitiveSelectorBody"]) {
-    const mine = bodyOf(read("scripts/forwards-shell-verify.ts"), "self", name);
-    const theirs = bodyOf(read(twin), twin, name);
+  const libDir = join(repoRoot, "scripts/lib");
+  const scriptFiles = [
+    ...readdirSync(join(repoRoot, "scripts"))
+      .filter((f) => f.endsWith("-verify.ts"))
+      .map((f) => `scripts/${f}`),
+    ...readdirSync(libDir)
+      .filter((f) => f.endsWith(".ts"))
+      .map((f) => `scripts/lib/${f}`),
+  ];
+  // A parse that silently found nothing must not read as a pass: the whole
+  // check below is "how many places declare this", and zero files scanned
+  // answers zero for every name.
+  check("the shared-helper scan found the suite to scan", scriptFiles.length > 50, {
+    files: scriptFiles.length,
+  });
+
+  const SHARED_HELPERS = [
+    "closesABlock",
+    "importSpecifiersOf",
+    "isDirectlyInFunctionBody",
+    "isUnguardedToItsFunctionBody",
+    "opensABlock",
+    "primitiveSelectorBody",
+    "scopeOf",
+    "selectorParamName",
+    "stripBlockComments",
+    "stripComments",
+    "stripCommentsNoJsx",
+    "stripLineComment",
+    "stripperSelfTest",
+  ];
+  const declaredIn = new Map<string, string[]>(SHARED_HELPERS.map((n) => [n, []]));
+  for (const rel of scriptFiles) {
+    const sf = ts.createSourceFile(rel, read(rel), ts.ScriptTarget.ESNext, true);
+    for (const st of sf.statements) {
+      let declared: string | null = null;
+      if (ts.isFunctionDeclaration(st) && st.name) declared = st.name.text;
+      else if (ts.isVariableStatement(st)) {
+        for (const d of st.declarationList.declarations) {
+          if (ts.isIdentifier(d.name) && declaredIn.has(d.name.text)) declared = d.name.text;
+        }
+      }
+      if (declared !== null) declaredIn.get(declared)?.push(rel);
+    }
+  }
+  for (const name of SHARED_HELPERS) {
+    const where = declaredIn.get(name) ?? [];
     check(
-      `${name}'s body is byte-identical (comments aside) to ${twin}'s copy`,
-      mine !== null && theirs !== null && mine === theirs,
-      { mine: mine?.slice(0, 80), theirs: theirs?.slice(0, 80) },
+      `\`${name}\` is declared exactly once, under scripts/lib/`,
+      where.length === 1 && where[0].startsWith("scripts/lib/"),
+      where,
     );
   }
+
+  // AND NO `between()` REGION IS FLOORED BELOW ITS OWN ANCHOR.
+  //
+  // `between(src, from, to)` returns `src.slice(start, end)` - the `from`
+  // anchor is INSIDE the region it produces. So a region whose `to` anchor
+  // turns up immediately after `from` is still `from.length` characters long,
+  // and a `region.length > N` guard with `N < from.length` passes over a region
+  // that contains nothing but the anchor. Every check downstream of that guard
+  // then runs against an empty region: the negatives pass for free, and the
+  // guard that exists to catch a renamed or moved anchor reports success.
+  //
+  // Twelve of these were live, and the five worst were floored at `> 0`, which
+  // any anchor at all satisfies. Written as a scan rather than as twelve
+  // separate assertions because the class is what matters - the next region cut
+  // this way should be caught on the day it is written, not on the day someone
+  // re-measures.
+  //
+  // `N === from.length` is CORRECT and is not reported: the vacuous region is
+  // exactly `from.length` long, and `from.length > from.length` is false. Only
+  // a floor strictly BELOW the anchor length is vacuous. Anchors built by
+  // concatenation or from multi-line templates are not read here, so this is a
+  // lower bound on the class rather than a proof it is empty.
+  const vacuous: string[] = [];
+  for (const rel of scriptFiles) {
+    const sf = ts.createSourceFile(rel, read(rel), ts.ScriptTarget.ESNext, true, ts.ScriptKind.TS);
+    const anchorLen = new Map<string, number>();
+    const collect = (n: ts.Node): void => {
+      if (
+        ts.isVariableDeclaration(n) &&
+        ts.isIdentifier(n.name) &&
+        n.initializer !== undefined &&
+        ts.isCallExpression(n.initializer) &&
+        ts.isIdentifier(n.initializer.expression) &&
+        n.initializer.expression.text === "between" &&
+        n.initializer.arguments.length >= 2
+      ) {
+        const from = n.initializer.arguments[1];
+        if (ts.isStringLiteral(from) || ts.isNoSubstitutionTemplateLiteral(from)) {
+          anchorLen.set(n.name.text, from.text.length);
+        }
+      }
+      ts.forEachChild(n, collect);
+    };
+    collect(sf);
+    const floors = (n: ts.Node): void => {
+      if (
+        ts.isBinaryExpression(n) &&
+        n.operatorToken.kind === ts.SyntaxKind.GreaterThanToken &&
+        ts.isPropertyAccessExpression(n.left) &&
+        n.left.name.text === "length" &&
+        ts.isIdentifier(n.left.expression) &&
+        ts.isNumericLiteral(n.right)
+      ) {
+        const len = anchorLen.get(n.left.expression.text);
+        if (len !== undefined && len > Number(n.right.text)) {
+          const { line } = sf.getLineAndCharacterOfPosition(n.getStart(sf));
+          vacuous.push(
+            `${rel}:${line + 1} ${n.left.expression.text} floor ${n.right.text} anchor ${len}`,
+          );
+        }
+      }
+      ts.forEachChild(n, floors);
+    };
+    floors(sf);
+  }
+  check(
+    "no between() region in the suite is floored below its own anchor length",
+    vacuous.length === 0,
+    vacuous,
+  );
 }
 
 // The allow-list's own self-test, over SYNTHETIC selectors, so its verdicts are
@@ -594,6 +424,15 @@ function primitiveSelectorBody(
     ["s.byRule[ruleId]?.error", true],
     ['Object.values(s.byRule).filter((e) => e.status === "running").length', true],
     ["s.byRule[ruleId] !== undefined", true],
+    // The prefix-unary and `typeof` arm, which no probe reached: deleting
+    // `ts.isPrefixUnaryExpression(cur) ||` from the shared classifier left this
+    // table green, so the arm was unmeasured in both scripts at once. `!x` and
+    // `typeof x` are primitives whatever the operand is - including operands
+    // every other arm refuses, which is what makes the arm worth having and
+    // worth pinning.
+    ["!s.byRule[ruleId]", true],
+    ["typeof s.byRule[ruleId]", true],
+    ["-Object.keys(s.byRule).length", true],
     // The refusals, headed by the four that came back GREEN under the deny-list
     // with a fresh hook in `runtime.ts` for each.
     ["({ port: s.byRule[ruleId]?.boundPort, sid: s.byRule[ruleId]?.sessionId })", false],

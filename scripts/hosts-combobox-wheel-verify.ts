@@ -30,6 +30,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { stripBlockComments, stripComments, stripperSelfTest } from "./lib/source";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const read = (p: string) => readFileSync(join(root, p), "utf8");
@@ -45,15 +46,21 @@ function check(label: string, cond: boolean): void {
 
 const src = read("src/modules/hosts/editor/Combobox.tsx");
 
-/** Prose is not code. This file's own comment on the fix TALKS ABOUT the
- *  rejected `scrollTop +=` form by name (to explain why it was replaced),
- *  which would trip a naive `!/scrollTop/` check on the raw source - same
- *  trap `scrollbar-consistency-verify.ts` strips comments for, and for the
- *  same reason: a mention is not a use. */
-const stripComments = (text: string) =>
-  text.replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
+// Prose is not code. This file's own comment on the fix TALKS ABOUT the
+// rejected `scrollTop +=` form by name (to explain why it was replaced), which
+// would trip a naive `!/scrollTop/` check on the raw source: a mention is not a
+// use.
+//
+// Two strippers composed, because neither alone is enough for a `.tsx`.
+// `stripBlockComments` removes the inline `/* ... */` form the line-based
+// stripper leaves standing; `stripComments` then removes whole-line and
+// trailing `//` comments quote-aware (so a `//` inside a string survives) and
+// the JSX comment expression, which is the one comment syntax legal inside JSX
+// children and the only one that can hide a deletion from a positive check.
+const code = stripComments(stripBlockComments(src));
 
-const code = stripComments(src);
+// The mandatory two-assertion self-test for a script that strips a `.tsx`.
+for (const t of stripperSelfTest()) check(t.label, t.ok);
 
 // Anchored on the `<CommandList` opening tag through its closing `>`, so the
 // extracted block is exactly this element's props - not the whole file, which

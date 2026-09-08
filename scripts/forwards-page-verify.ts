@@ -10,6 +10,7 @@
  * `check`/`ok` pair, fixtures, numbered sections, and a mutation table at the
  * tail recording every mutation actually run against this file.
  */
+import ts from "typescript";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -28,6 +29,7 @@ import {
 } from "../src/modules/forwards/page/derive";
 import type { ForwardRule } from "../src/modules/forwards/types";
 import type { Host, SshHost } from "../src/modules/hosts/types";
+import { importSpecifiersOf } from "./lib/ast";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -812,9 +814,14 @@ console.log(
   // of module specifiers the file imports from does, because a local
   // `hasWordBoundaryMatch` would simply not need the `@/lib/searchTiers`
   // specifier to appear at all.
-  const importSpecifiers = [...deriveSrc.matchAll(/from\s*["']([^"']+)["']/g)]
-    .map((m) => m[1])
-    .sort();
+  //
+  // Off the AST rather than off a `from "…"` regex: the regex saw no
+  // `await import("…")`, which resolves and executes, and it DID see the text
+  // `from "…"` inside a comment, so prose quoting an import broke the set
+  // equality over source that had not changed.
+  const importSpecifiers = importSpecifiersOf(
+    ts.createSourceFile("derive.ts", deriveSrc, ts.ScriptTarget.ESNext, true, ts.ScriptKind.TS),
+  );
   const want = ["../types", "@/lib/searchTiers", "@/modules/hosts/types"].sort();
   ok(
     `derive.ts's import specifiers are exactly ${JSON.stringify(want)} - found ${JSON.stringify(importSpecifiers)}`,

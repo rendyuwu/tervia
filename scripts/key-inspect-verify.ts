@@ -50,6 +50,8 @@ import {
   type KeyInspectResult,
   type VaultKeyFacts,
 } from "../src/modules/vault/keyInspect";
+import { stripComments, stripperSelfTest } from "./lib/source";
+import { namedImportsFrom } from "./lib/ast";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const read = (p: string) => readFileSync(join(root, p), "utf8");
@@ -96,66 +98,6 @@ function count(src: string, re: RegExp): number {
  */
 function tight(src: string): string {
   return src.replace(/\s+/g, "").replace(/,(?=[)\]}])/g, "");
-}
-
-/**
- * A single line with any `//` that starts OUTSIDE a string literal, and
- * everything after it, cut off. Quote-aware so a URL or a literal `//` inside a
- * string survives - same convention as `host-editor-verify.ts` and
- * `rdp-lifetime-verify.ts`'s own `stripLineComment`, duplicated here rather than
- * imported because this file owns no shared module to import it from.
- */
-function stripLineComment(line: string): string {
-  let quote = "";
-  for (let i = 0; i < line.length; i++) {
-    const c = line[i];
-    if (quote) {
-      if (c === "\\") i++;
-      else if (c === quote) quote = "";
-      continue;
-    }
-    if (c === '"' || c === "'" || c === "`") {
-      quote = c;
-      continue;
-    }
-    if (c === "/" && line[i + 1] === "/") return line.slice(0, i);
-  }
-  return line;
-}
-
-/**
- * The same source with comments removed: a whole line is dropped if its
- * trimmed text opens a `//`, `/*` or `*` comment (which is every continuation
- * line of a prettier-formatted block or doc comment), and a trailing `//` is
- * stripped from what is left. Used by section [5]'s whole-file safe/verified
- * check so that check runs over what this file RENDERS rather than over a doc
- * comment that states the rule by quoting the words it forbids.
- */
-function stripComments(src: string): string {
-  // JSX comment expressions - `{/* ... */}` - are the only comment syntax
-  // legal INSIDE JSX children, and the line-based filter below only ever
-  // recognised `//`, `/*` and `*` starting a trimmed line, none of which match
-  // a line starting `{`. Section [5]'s `sectionRaw` strips
-  // `SshCredentialSection.tsx` (`.tsx`), so this file is exposed to it: a
-  // deleted call left behind as `{/* ... */}` would pass every positive check
-  // run over the stripped source.
-  //
-  // The inner group must NOT be allowed to cross a `*/` while hunting
-  // for one followed by `}` - a lazy `[\s\S]*?` is still permitted to do that,
-  // and a type literal opening `{ /** ... */ x: T }` then swallows everything
-  // up to some later, unrelated `*/}`. The negative lookahead below forbids
-  // that: the first `*/` is final, either a real `{/* ... */}` or the match
-  // fails right there. Copied from `host-editor-verify.ts`'s `stripComments`;
-  // see that file's comment for the measured damage the lazy form did.
-  const withoutJsxComments = src.replace(/\{\s*\/\*(?:(?!\*\/)[\s\S])*\*\/\s*\}/g, "");
-  return withoutJsxComments
-    .split("\n")
-    .filter((line) => {
-      const t = line.trim();
-      return !(t.startsWith("//") || t.startsWith("/*") || t.startsWith("*"));
-    })
-    .map(stripLineComment)
-    .join("\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -441,17 +383,9 @@ console.log("\n[4] stripComments - the helper this section's whole-file check de
     stripComments("// safe\nwriteIt();").includes("writeIt();"),
   );
 
-  // The JSX-comment branch, both directions.
-  const STRIPPER_PROBE =
-    "type P = { /** c */ x: X };\nconst KEEP = 1;\nconst j = <div>{/* c */}</div>;";
-  check(
-    "does not over-strip past a type literal's doc comment (the lazy-regex trap)",
-    stripComments(STRIPPER_PROBE).includes("KEEP"),
-  );
-  check(
-    "does remove a JSX comment expression's own body",
-    !stripComments(STRIPPER_PROBE).includes("{/*"),
-  );
+  // The JSX-comment branch, both directions. The probe lives with the shared
+  // stripper; the `ok:` lines are counted here.
+  for (const t of stripperSelfTest()) check(t.label, t.ok);
 }
 
 // ---------------------------------------------------------------------------
@@ -476,7 +410,7 @@ console.log("\n[5] SshCredentialSection.tsx - the wiring, over the raw source");
     "const checkKey = async (pem: string, passphrase: string) => {",
     "const invalidateInspection = () => {",
   );
-  check("checkKey's region was located", checkKeyRegion.length > 50, checkKeyRegion.length);
+  check("checkKey's region was located", checkKeyRegion.length > 111, checkKeyRegion.length);
 
   check(
     "checkKey calls the real bridge function, not a stand-in",
@@ -528,7 +462,7 @@ console.log("\n[5] SshCredentialSection.tsx - the wiring, over the raw source");
   );
   check(
     "invalidateInspection's region was located",
-    invalidateRegion.length > 20,
+    invalidateRegion.length > 56,
     invalidateRegion.length,
   );
   check(
@@ -561,7 +495,7 @@ console.log("\n[5] SshCredentialSection.tsx - the wiring, over the raw source");
   );
   check(
     "the key-passphrase field's region was located",
-    passphraseFieldRegion.length > 20,
+    passphraseFieldRegion.length > 61,
     passphraseFieldRegion.length,
   );
   check(
@@ -627,7 +561,7 @@ console.log("\n[5] SshCredentialSection.tsx - the wiring, over the raw source");
   );
   check(
     "the empty-file guard's own region was located",
-    emptyGuardRegion.length > 20,
+    emptyGuardRegion.length > 47,
     emptyGuardRegion.length,
   );
   check(
@@ -732,15 +666,25 @@ console.log(
   const dialogSrc = stripComments(dialogRaw);
   const sectionRaw = read("src/modules/hosts/editor/SshCredentialSection.tsx");
 
+  // Read as import DECLARATIONS, not as text over `dialogRaw`. Both were
+  // positive regexes over the raw file, and this dialog's own prose names both
+  // of these imports while explaining what they are for - so a deletion that
+  // left the sentence behind passed the check that exists to catch it.
+  const bridgeImport = namedImportsFrom("HostEditorDialog.tsx", dialogRaw, "@/modules/ssh/bridge");
+  const keyInspectImport = namedImportsFrom(
+    "HostEditorDialog.tsx",
+    dialogRaw,
+    "@/modules/vault/keyInspect",
+  );
   check(
     "the dialog inspects through the same bridge function the panel uses, not a second command",
-    /import \{[^}]*\binspectSshKey\b[^}]*\}\s*from\s*"@\/modules\/ssh\/bridge";/.test(dialogRaw),
+    bridgeImport !== null && bridgeImport.names.includes("inspectSshKey"),
+    bridgeImport?.names,
   );
   check(
     "and it imports describeKeyError from this module rather than trimming the prefix itself",
-    /import \{[^}]*\bdescribeKeyError\b[^}]*\}\s*from\s*"@\/modules\/vault\/keyInspect";/.test(
-      dialogRaw,
-    ),
+    keyInspectImport !== null && keyInspectImport.names.includes("describeKeyError"),
+    keyInspectImport?.names,
   );
 
   // Over the COMMENT-STRIPPED source for the positives: the comment written
@@ -754,7 +698,7 @@ console.log(
     "if (!(e instanceof HostBindingChangedError)) {",
     "} else if (e.actual",
   );
-  check("its generic error arm was located", genericArm.length > 40, genericArm.length);
+  check("its generic error arm was located", genericArm.length > 86, genericArm.length);
   // Through `tight` on both sides, needle included: a NEGATIVE that goes
   // vacuous on a reformat is a false pass, which is the worse direction of the
   // two, and the positive beside it would be a landmine.

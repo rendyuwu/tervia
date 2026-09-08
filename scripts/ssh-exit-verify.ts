@@ -30,6 +30,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { decideSshEnding, type SshEnding } from "../src/modules/terminal/lib/ssh-exit-decision";
+import { stripCommentsNoJsx } from "./lib/source";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const read = (rel: string) => readFileSync(join(repoRoot, rel), "utf8");
@@ -119,47 +120,11 @@ for (const ending of [
 // about its strength: this is source text, not execution, and weaker than
 // importing a real function - see the `decideSshEnding` checks above for
 // what a behavioural version of this looks like once the export exists.
-
-/** Comment-stripped, quote-aware (matches the convention in
- *  host-editor-verify.ts / rdp-lifetime-verify.ts) so a case's own prose
- *  can't be mistaken for the code it's read alongside. */
-function stripLineComment(line: string): string {
-  let quote = "";
-  for (let i = 0; i < line.length; i++) {
-    const c = line[i];
-    if (quote) {
-      if (c === "\\") i++;
-      else if (c === quote) quote = "";
-      continue;
-    }
-    if (c === '"' || c === "'" || c === "`") {
-      quote = c;
-      continue;
-    }
-    if (c === "/" && line[i + 1] === "/") return line.slice(0, i);
-  }
-  return line;
-}
-// No JSX-comment branch here, deliberately. Every input this file
-// strips is a `.ts` file - `bridge.ts` and `ssh-session.ts` - and a `{/* ...
-// */}` is only meaningful inside JSX children, so a `.ts` source can never
-// contain one that would hide code from a positive check the way it did in
-// `host-editor-verify.ts` (fixed in that file's own `stripComments` - copy the
-// branch from there, and not the lazy form `\{\s*\/\*[\s\S]*?\*\/\s*\}`,
-// which is not a substitute: it can still cross an intervening `*/` while
-// hunting for one followed by `}`) and in `vault-editor-verify.ts`'s
-// `stripComments`. If this file is ever pointed at a `.tsx` file, that branch
-// has to be added first.
-function stripComments(src: string): string {
-  return src
-    .split("\n")
-    .filter((line) => {
-      const t = line.trim();
-      return !(t.startsWith("//") || t.startsWith("/*") || t.startsWith("*"));
-    })
-    .map(stripLineComment)
-    .join("\n");
-}
+//
+// The shared stripper this reads through is `stripCommentsNoJsx` rather than
+// `stripComments`: every input here is a `.ts` file, where a brace wrapping a
+// block comment is an object or type literal, and the JSX branch would delete
+// it along with the code inside.
 
 /** Index of the `}` matching the `{` at `openIdx`, or -1. */
 function matchingBrace(src: string, openIdx: number): number {
@@ -176,7 +141,7 @@ function matchingBrace(src: string, openIdx: number): number {
 
 console.log("\n[source-text] bridge.ts: SshEvent -> SshExitReason, per wire case");
 {
-  const src = stripComments(read("src/modules/ssh/bridge.ts"));
+  const src = stripCommentsNoJsx(read("src/modules/ssh/bridge.ts"));
   const anchor = src.indexOf("channel.onmessage = (event) => {");
   assert(anchor !== -1, "found channel.onmessage's switch");
   const braceIdx = src.indexOf("{", anchor);
@@ -224,7 +189,7 @@ console.log("\n[source-text] bridge.ts: SshEvent -> SshExitReason, per wire case
 
 console.log("\n[source-text] ssh-session.ts: SshExitReason -> SshEnding, per reason case");
 {
-  const src = stripComments(read("src/modules/terminal/lib/ssh-session.ts"));
+  const src = stripCommentsNoJsx(read("src/modules/terminal/lib/ssh-session.ts"));
   const anchor = src.indexOf("onExit: (code, reason) => {");
   assert(anchor !== -1, "found the onExit: (code, reason) => {...} handler");
   const braceIdx = src.indexOf("{", anchor);

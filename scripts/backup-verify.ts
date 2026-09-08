@@ -3276,6 +3276,76 @@ check(
   1,
 );
 
+console.log("\n[apply source] the four upsert call sites, by their arguments");
+// The two vault upserts are called twice each in `applyV3` - once on the record
+// pass, once on the secrets pass - and NOTHING in this file read either call
+// site. `upsertKey` and `upsertIdentity` are mentioned three times in this
+// script and none of the three is code: two are comments and one is inside a
+// `console.log` string. The behavioural half does drive a real store through
+// the import path, which is why this is a gap rather than a hole - but no
+// fixture here can tell the record pass from the secrets pass, because both
+// end with the same record present, and the difference between them IS the
+// claim.
+//
+// What each argument carries:
+//   record pass, key       `false` - nothing is known to have landed yet, so
+//                          `keyRecord` must not claim a private half
+//   record pass, identity  `{}` - no secret to record
+//   secrets pass, key      `landedBody`, the measured fact, NOT a literal;
+//                          swapping it for `true` marks every key as carrying
+//                          a private half whether one landed or not
+//   secrets pass, identity `{ password: SECRET_ALREADY_STORED }`
+//
+// A coordinated edit that collapsed the two passes onto the same arguments
+// would leave every fixture green and every restored key lying about what it
+// holds. Rooted at `applyV3` and read in source order, so "the first call" is
+// the record pass by position rather than by hoping the search order matched.
+{
+  const applyV3Fn = functionNamed("applyV3");
+  const keyUpserts = calls(applyV3Fn, "upsertKey");
+  const identityUpserts = calls(applyV3Fn, "upsertIdentity");
+  // The count as its own check: a deleted call site must not read as a pass
+  // over the remaining three, and `[].every(...)` is true.
+  check("applyV3 calls upsertKey exactly twice", keyUpserts.length, 2);
+  check("applyV3 calls upsertIdentity exactly twice", identityUpserts.length, 2);
+  if (keyUpserts.length === 2 && identityUpserts.length === 2) {
+    check(
+      "the record pass tells keyRecord that nothing has landed yet",
+      exprOf(keyUpserts[0]),
+      squash("upsertKey(keyRecord(key, storedKeys.get(key.id), false), {})"),
+    );
+    check(
+      "and records no key secrets on that pass",
+      exprOf(keyUpserts[0].arguments[1]),
+      squash("{}"),
+    );
+    check(
+      "the secrets pass passes the MEASURED landedBody, not a literal",
+      exprOf(keyUpserts[1].arguments[0]),
+      squash("keyRecord(key, storedKeys.get(key.id), landedBody)"),
+    );
+    check(
+      "the record pass records no identity secrets",
+      exprOf(identityUpserts[0]),
+      squash("upsertIdentity(identity, {})"),
+    );
+    check(
+      "and the secrets pass records the password as already stored",
+      exprOf(identityUpserts[1]),
+      squash("upsertIdentity(identity, { password: SECRET_ALREADY_STORED })"),
+    );
+    check(
+      // The pair, said as one claim: the two passes must not converge. Each
+      // check above holds one side; this holds that they differ at all, which
+      // is what a coordinated edit breaks without breaking either half's shape.
+      "and the two passes are not the same call",
+      exprOf(keyUpserts[0]) !== exprOf(keyUpserts[1]) &&
+        exprOf(identityUpserts[0]) !== exprOf(identityUpserts[1]),
+      true,
+    );
+  }
+}
+
 console.log("\n[export source] what buildBackup names, which no fixture here can reach");
 // `buildBackup` calls `invoke`, so this half has no behavioural gate and cannot
 // have one: a real export is ciphertext, and the hand test can only do

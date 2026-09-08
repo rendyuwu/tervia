@@ -14,6 +14,9 @@
  * tail recording every mutation actually run against this file.
  */
 import { readFileSync } from "node:fs";
+
+import ts from "typescript";
+
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -36,6 +39,7 @@ import {
 import type { RdpHost, SshHost } from "../src/modules/hosts/types";
 import { VaultInUseError } from "../src/modules/vault/types";
 import type { VaultIdentity, VaultKey } from "../src/modules/vault/types";
+import { callsFunction, importSpecifiersOf, namedImportsFrom } from "./lib/ast";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -693,21 +697,61 @@ console.log(
     ok(`derive.ts does not contain ${JSON.stringify(needle)}`, !deriveSrc.includes(needle));
     ok(`refs.ts does not contain ${JSON.stringify(needle)}`, !refsSrc.includes(needle));
   }
+
+  // AND THE SET, which is what actually closes the class. Every needle above
+  // enumerates a forbidden SPELLING, and the set of spellings that reach the
+  // store is infinite: `../store`, `../../vault/store`, `../../../vault/store`
+  // from a file one directory deeper, `@/modules/vault/store`, and
+  // `await import("../../vault/store")`, which has no `from` clause at all and
+  // still resolves and executes. `import { findKey } from "../../vault/store"`
+  // is not hypothetical - the same evasion went green against an enumeration
+  // in a sibling script and is what put a set pin there.
+  //
+  // Asserting the EXACT set the file is allowed to depend on inverts the
+  // problem: a new import is a new member whatever it is spelled, and the
+  // needles above are kept beside it as belt and braces rather than as the
+  // claim.
+  const specifiersOf = (rel: string, src: string): string[] =>
+    importSpecifiersOf(
+      ts.createSourceFile(rel, src, ts.ScriptTarget.ESNext, true, ts.ScriptKind.TS),
+    );
+  const derivePinned = ["../refs", "../types", "@/lib/searchTiers", "@/modules/hosts/types"];
+  const refsPinned = ["./types", "@/modules/hosts/types"];
+  const deriveFound = specifiersOf("derive.ts", deriveSrc);
+  const refsFound = specifiersOf("refs.ts", refsSrc);
+  ok(
+    `derive.ts's import specifiers are exactly ${JSON.stringify(derivePinned)} - found ${JSON.stringify(deriveFound)}`,
+    JSON.stringify(deriveFound) === JSON.stringify(derivePinned),
+  );
+  ok(
+    `refs.ts's import specifiers are exactly ${JSON.stringify(refsPinned)} - found ${JSON.stringify(refsFound)}`,
+    JSON.stringify(refsFound) === JSON.stringify(refsPinned),
+  );
 }
+
+// --- the shared-import reader ----------------------------------------------
+//
+// Sections 10 to 14 are POSITIVE checks over RAW source, which is the shape a
+// comment can satisfy: `/from "@\/lib\/searchTiers"/.test(searchSrc)` is true
+// of a file whose only mention of that module is a sentence explaining why it
+// used to import it. The negatives beside them are safe raw - an absence check
+// reddens on prose, which costs a round and not a defect - so only the
+// positives move onto the AST here.
+//
+// An import declaration read AS a declaration cannot be spelled in a comment,
+// and neither can a call expression read as a call.
 
 // --- 10. The Host import in refs.ts stays type-only -------------------------
 
 console.log("\n[10] refs.ts imports Host as a TYPE, never as a value");
 {
   const refsSrc = readFileSync(join(root, "src/modules/vault/refs.ts"), "utf8");
+  const hostImport = namedImportsFrom("refs.ts", refsSrc, "@/modules/hosts/types");
   ok(
-    "matches the type-only import form",
-    /import type \{[^}]*Host[^}]*\} from "@\/modules\/hosts\/types"/.test(refsSrc),
+    "imports Host from @/modules/hosts/types",
+    hostImport !== null && hostImport.names.includes("Host"),
   );
-  ok(
-    "does not match a value-import form of the same specifier",
-    !/^import \{[^}]*\} from "@\/modules\/hosts\/types"/m.test(refsSrc),
-  );
+  ok("and the import is type-only, never a value import", hostImport?.typeOnly === true);
 }
 
 // --- 11. hosts/search.ts shares the word-boundary primitive -----------------
@@ -715,9 +759,10 @@ console.log("\n[10] refs.ts imports Host as a TYPE, never as a value");
 console.log("\n[11] hosts/search.ts imports the shared word-boundary check, no local copy");
 {
   const searchSrc = readFileSync(join(root, "src/modules/hosts/search.ts"), "utf8");
+  const shared = namedImportsFrom("search.ts", searchSrc, "@/lib/searchTiers");
   ok(
     "imports hasWordBoundaryMatch from the shared module",
-    /from "@\/lib\/searchTiers"/.test(searchSrc),
+    shared !== null && shared.names.includes("hasWordBoundaryMatch"),
   );
   ok("does not redefine WORD_BOUNDARY locally", !searchSrc.includes("const WORD_BOUNDARY"));
 }
@@ -727,9 +772,10 @@ console.log("\n[11] hosts/search.ts imports the shared word-boundary check, no l
 console.log("\n[12] hosts/page/derive.ts imports the shared missing-secret check, no local copy");
 {
   const deriveSrc = readFileSync(join(root, "src/modules/hosts/page/derive.ts"), "utf8");
+  const shared = namedImportsFrom("derive.ts", deriveSrc, "@/modules/vault/refs");
   ok(
     "imports identityMissingSecret from the shared module",
-    /from "@\/modules\/vault\/refs"/.test(deriveSrc),
+    shared !== null && shared.names.includes("identityMissingSecret"),
   );
   ok(
     "does not redefine sshIdentityMissing locally",
@@ -742,7 +788,7 @@ console.log("\n[12] hosts/page/derive.ts imports the shared missing-secret check
 console.log("\n[13] hosts/store.ts's identityHostRefs delegates to the shared lookup");
 {
   const storeSrc = readFileSync(join(root, "src/modules/hosts/store.ts"), "utf8");
-  ok("calls hostsUsingIdentity(", storeSrc.includes("hostsUsingIdentity("));
+  ok("calls hostsUsingIdentity(", callsFunction("store.ts", storeSrc, "hostsUsingIdentity"));
   ok(
     "does not re-derive the predicate inline",
     !storeSrc.includes("credential.identityId === identityId"),
@@ -754,7 +800,10 @@ console.log("\n[13] hosts/store.ts's identityHostRefs delegates to the shared lo
 console.log("\n[14] vault/store.ts's deleteKey holder lookup delegates to the shared lookup");
 {
   const vaultStoreSrc = readFileSync(join(root, "src/modules/vault/store.ts"), "utf8");
-  ok("calls identitiesUsingKey(", vaultStoreSrc.includes("identitiesUsingKey("));
+  ok(
+    "calls identitiesUsingKey(",
+    callsFunction("vault-store.ts", vaultStoreSrc, "identitiesUsingKey"),
+  );
   ok("does not re-derive the predicate inline", !vaultStoreSrc.includes("i.keyId === id"));
 }
 

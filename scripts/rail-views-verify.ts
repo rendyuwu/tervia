@@ -100,6 +100,7 @@ import {
   serializeTabs,
 } from "../src/modules/workspaces/serialize";
 import type { SavedPaneNode, SavedTab } from "../src/modules/workspaces/store";
+import { stripComments, stripCommentsNoJsx, stripperSelfTest } from "./lib/source";
 
 /**
  * The narrowing itself, checked by the COMPILER rather than at runtime: a pane
@@ -144,62 +145,23 @@ function check(name: string, ok: boolean, detail?: unknown): void {
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const read = (p: string) => readFileSync(join(root, p), "utf8");
 
-/**
- * Comments stripped so a doc comment naming a call is not read AS one. (The
- * third copy of this pair in the suite. Canonical copy lives in
- * `scripts/host-editor-verify.ts`; keep them the same shape. Duplicated
- * rather than shared, because these scripts have no common module.)
- *
- * QUOTE-AWARE, and a character scan rather than a regex: a `//` inside a
- * string is not a comment, and a regex alternation over string literals
- * desyncs on the first unbalanced quote - after which it eats real code. The
- * scan loses the strip for a line with an unclosed quote instead, which fails
- * towards KEEPING text. That is the safe direction: the failure this exists
- * to prevent is a positive check going green off `// was: <deleted code>`.
- */
-const stripLineComment = (line: string): string => {
-  let quote = "";
-  for (let i = 0; i < line.length; i++) {
-    const c = line[i];
-    if (quote) {
-      if (c === "\\") i++;
-      else if (c === quote) quote = "";
-      continue;
-    }
-    if (c === '"' || c === "'" || c === "`") {
-      quote = c;
-      continue;
-    }
-    if (c === "/" && line[i + 1] === "/") return line.slice(0, i);
-  }
-  return line;
-};
-// No JSX-comment branch in THIS one, and that is deliberate rather
-// than an oversight. It does run over `.tsx` files (section 8 reads
-// `src/app/App.tsx`), so a `{/* ... */}` left behind by a deletion survives
-// it - but every check section 8 makes over a `.tsx` file is a NEGATIVE
-// (`!/setRailView/`, `!/useState<RailViewKind/`, `!/openPageTabInTabs/`), and
-// an un-stripped JSX comment there can only cause a FALSE FAILURE (the
-// forbidden text still present, inertly, inside a comment), never a silenced
-// pass - the unsafe direction this bug is about. Section 9 writes POSITIVE
-// checks over `.tsx` files, where the direction reverses, so it uses
-// `stripTsxComments` below. Section 8 is left on this one so its behaviour is
-// unchanged by that addition.
-const stripComments = (src: string): string =>
-  src
-    .split("\n")
-    .filter((line) => {
-      const t = line.trim();
-      return !(t.startsWith("//") || t.startsWith("/*") || t.startsWith("*"));
-    })
-    .map(stripLineComment)
-    .join("\n");
+// Section 8 reads through `stripCommentsNoJsx`, which has no JSX-comment
+// branch, and that is deliberate rather than an oversight. It does run over
+// `.tsx` files (section 8 reads `src/app/App.tsx`), so a `{/* ... */}` left
+// behind by a deletion survives it - but every check section 8 makes over a
+// `.tsx` file is a NEGATIVE (`!/setRailView/`, `!/useState<RailViewKind/`,
+// `!/openPageTabInTabs/`), and an un-stripped JSX comment there can only cause
+// a FALSE FAILURE (the forbidden text still present, inertly, inside a
+// comment), never a silenced pass - the unsafe direction this bug is about.
+// Section 9 writes POSITIVE checks over `.tsx` files, where the direction
+// reverses, so it uses `stripTsxComments` below. Section 8 is left on the
+// weaker one so its behaviour is unchanged by that addition.
 
-// The same, plus the one comment syntax that is legal INSIDE JSX children:
-// a `{/* ... */}` expression. A bare `//` there renders as literal text, so
-// the line-based filter above never had a reason to know about it - and it
-// does not match a line starting `{` either. Required by every POSITIVE check
-// over a `.tsx` file.
+// `stripTsxComments` is the shared `stripComments`: the same, plus the one
+// comment syntax that is legal INSIDE JSX children, a `{/* ... */}`
+// expression. A bare `//` there renders as literal text, so the line-based
+// filter never had a reason to know about it - and it does not match a line
+// starting `{` either. Required by every POSITIVE check over a `.tsx` file.
 //
 // The mutation it is required FOR is N4 in the table at the foot of this file:
 // the trigger's OPENING TAG left behind inside a `{/* ... */}` in a fragment,
@@ -223,18 +185,19 @@ const stripComments = (src: string): string =>
 // stripper justified by a mutation nobody can run is a stripper nobody can
 // check.
 //
-// The regex is the FIXED one from `scripts/host-editor-verify.ts` (around
-// `:216`), NOT the lazy `\{\s*\/\*[\s\S]*?\*\/\s*\}` that
-// `vault-editor-verify.ts` carries. Lazy is not a substitute: it is still
-// ALLOWED to skip over an intervening `*/` while hunting for one that happens
-// to be followed by `}`, and a type literal opening `{ /** null = closed. */
-// target: ... }` is exactly that shape - measured over there to eat 50KB of
-// file between the two. The negative lookahead forbids the inner group from
-// crossing a `*/` at all, so the first one found is final: either `}` follows
-// it and this is a real JSX comment, or the match fails HERE rather than
-// searching on for a luckier closer.
-const stripTsxComments = (src: string): string =>
-  stripComments(src.replace(/\{\s*\/\*(?:(?!\*\/)[\s\S])*\*\/\s*\}/g, ""));
+// The shared regex is the negative-lookahead one, NOT the lazy
+// `\{\s*\/\*[\s\S]*?\*\/\s*\}`. Lazy is not a substitute: it is still ALLOWED
+// to skip over an intervening `*/` while hunting for one that happens to be
+// followed by `}`, and a type literal opening `{ /** null = closed. */
+// target: ... }` is exactly that shape - measured elsewhere in this suite to
+// eat 50KB of file between the two. The negative lookahead forbids the inner
+// group from crossing a `*/` at all, so the first one found is final: either
+// `}` follows it and this is a real JSX comment, or the match fails HERE
+// rather than searching on for a luckier closer. `stripperSelfTest` below is
+// the two-direction proof of that, and this file had none before.
+const stripTsxComments = stripComments;
+
+for (const t of stripperSelfTest()) check(t.label, t.ok);
 
 // ---- fixtures -------------------------------------------------------------
 
@@ -810,7 +773,7 @@ console.log("\n[funnel] no route into the tab area writes activeId on its own");
   const REMOVALS = ["closeTab", "closePaneByLeaf"];
 
   for (const [file, routes] of Object.entries(ROUTES_IN)) {
-    const bodies = callbackBodies(stripComments(read(file)));
+    const bodies = callbackBodies(stripCommentsNoJsx(read(file)));
     for (const name of routes) {
       const body = bodies.get(name);
       check(`${name} is still a callback in ${file.split("/").pop()}`, body !== undefined, [
@@ -833,7 +796,7 @@ console.log("\n[funnel] no route into the tab area writes activeId on its own");
     );
   }
 
-  const tabsSrc = stripComments(read("src/modules/tabs/lib/useTabs.ts"));
+  const tabsSrc = stripCommentsNoJsx(read("src/modules/tabs/lib/useTabs.ts"));
   const tabsBodies = callbackBodies(tabsSrc);
   for (const name of REMOVALS) {
     const body = tabsBodies.get(name);
@@ -1024,7 +987,7 @@ console.log("\n[funnel] no route into the tab area writes activeId on its own");
     const allImports = new Set<string>();
     for (const file of Object.keys(SHOWS_TABS)) {
       const short = file.split("/").pop();
-      const src = stripComments(read(file));
+      const src = stripCommentsNoJsx(read(file));
       const bodies = callbackBodies(src);
       swept.set(file, bodies);
       const imports = panesImports(src);
@@ -1227,12 +1190,12 @@ console.log("\n[funnel] no route into the tab area writes activeId on its own");
   );
   check(
     "and the aux openers get the funnel, not a raw setter",
-    !/\bsetView\(/.test(stripComments(read("src/modules/tabs/lib/useAuxTabs.ts"))),
+    !/\bsetView\(/.test(stripCommentsNoJsx(read("src/modules/tabs/lib/useAuxTabs.ts"))),
   );
 
   // App must no longer own it: as component state, clearing it was the caller's
   // job, and that is the bug.
-  const appSrc = stripComments(read("src/app/App.tsx"));
+  const appSrc = stripCommentsNoJsx(read("src/app/App.tsx"));
   check("App holds no rail-view state of its own", !/setRailView/.test(appSrc));
   check("nor a useState for it", !/useState<RailViewKind/.test(appSrc));
   check(
@@ -1244,8 +1207,8 @@ console.log("\n[funnel] no route into the tab area writes activeId on its own");
   // reason: the index defect was never in the helper - the helper was right
   // and two of its three callers did the arithmetic themselves. A behavioural
   // check on `restoreWorkspaceEntry` cannot see a caller that stops asking it.
-  const switching = stripComments(read("src/app/hooks/useWorkspaceSwitching.ts"));
-  const persistence = stripComments(read("src/app/hooks/useWorkspacePersistence.ts"));
+  const switching = stripCommentsNoJsx(read("src/app/hooks/useWorkspaceSwitching.ts"));
+  const persistence = stripCommentsNoJsx(read("src/app/hooks/useWorkspacePersistence.ts"));
   const calls = (s: string) => (s.match(/restoreWorkspaceEntry\(/g) ?? []).length;
   check(
     "the switch path and the close path both restore through one call",

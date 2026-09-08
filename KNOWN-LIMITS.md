@@ -149,6 +149,80 @@ they hardened, which is what makes their comments the easiest to misread.
 **Trigger.** A change to this repository's `printWidth`, or a Prettier major
 version that changes how it wraps a call or a template literal.
 
+### Thirty-nine positive checks still read raw source, where a comment can satisfy them
+
+**Accepted state.** A positive source-text check — "this text is present" —
+run over a file whose comments have not been stripped is satisfied by a comment
+containing that text. Delete the thing, leave a `// was: ...` behind, and the
+check that exists to catch the deletion passes. Most of the suite strips first,
+for exactly this reason, and every script that strips a `.tsx` now proves its
+stripper with two assertions.
+
+Measured, not estimated: fifty-eight positive checks read a raw (unstripped)
+variable. Nineteen of them were the same shape — an import, or a call — and
+were converted to read the declaration or the call expression off the AST,
+which is a form no comment can spell. Thirty-nine remain, and they are spread
+across ten scripts: `key-inspect-verify` 9, `modal-shortcut-verify` 8,
+`hosts-search-verify` 8, `host-editor-verify` 4, `toast-verify` 3,
+`scrollbar-consistency-verify` 2, `recovery-notice-verify` 2, and one each in
+`forward-rules-verify`, `forward-autostart-verify` and `clipboard-read-verify`.
+
+The thirty-nine are not one shape. They pin a regex against a CSS rule, an
+exact statement inside a component, a `role` attribute, a keyframe name — each
+needs its own structural rewrite rather than a lookup, which is why they were
+not done alongside the nineteen. Two things bound the exposure. The NEGATIVE
+half of each pair is safe over raw text: prose reddens an absence check, which
+costs a round and not a defect. And a check going green off a comment needs
+somebody to both delete the code and leave the exact text behind, which is a
+narrower accident than it sounds.
+
+**Carried by.** The ten scripts named above. `scripts/lib/ast.ts` carries
+`namedImportsFrom`, `callsFunction` and `importSpecifiersOf`, which are the
+three forms the nineteen were converted to and the tools any further conversion
+would use.
+
+**Trigger.** A check in this class observed passing over a deletion — at which
+point the whole class is worth converting rather than the one site — or a
+script in the list gaining a new positive raw-source check, which should be
+written structurally instead of added to the count.
+
+### A utility class can hide a field that every reachability check calls visible
+
+**Accepted state.** The check that the identity editor's Password field
+renders in every auth mode answers four questions about it: no ancestor
+conditional reaches `authMode` (following a local `const` one hop, so an
+indirect boolean does not launder it), it is rendered by the dialog itself
+rather than by a wrapper component, it carries no `hidden` or `style`
+attribute that reaches `authMode`, and nothing inside its own children is
+conditional on the mode. Each of those four was watched fail against the
+mutation that expresses it.
+
+A fifth way to hide it is not covered and is not going to be:
+
+```tsx
+<Field label="Password" className={draft.authMode === "password" ? "" : "hidden"}>
+```
+
+The field renders, its subtree is unconditional, no ancestor decides anything,
+and the row is invisible. Refusing it means deciding which class names hide,
+which is an enumeration of a utility framework's vocabulary — open-ended,
+silently wrong the first time a class is renamed or a variant is added, and
+worse than no check, because a list that looks exhaustive is read as one. The
+same applies to any `style` value computed somewhere this cannot follow.
+
+The four checks that exist are worth having anyway: they close the four ways
+this actually gets broken by a well-meant edit, and the class-name form is the
+one nobody reaches for by accident.
+
+**Carried by.** Section 11 of `scripts/vault-editor-verify.ts`, which names
+`className` in its own comment as the arm it deliberately does not have, and
+`expressionReachesName` in `scripts/lib/ast.ts`, which is the indirection walk
+the other four arms share.
+
+**Trigger.** A rendered-DOM harness in this suite — there is none today, which
+is the reason every check here is structural — or this repository adopting a
+single named utility for hiding that a check could pin by that one name.
+
 ## Backup and import
 
 ### The import dialog's busy gate is source-pinned, never exercised

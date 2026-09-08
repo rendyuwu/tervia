@@ -52,6 +52,8 @@ import {
   type VaultIdentity,
   type VaultKey,
 } from "../src/modules/vault/types";
+import { enclosingFunctionName, expressionReachesName } from "./lib/ast";
+import { stripComments, stripperSelfTest } from "./lib/source";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const read = (p: string) => readFileSync(join(root, p), "utf8");
@@ -97,72 +99,6 @@ function between(str: string, from: string, to: string): string {
 
 function count(str: string, re: RegExp): number {
   return [...str.matchAll(re)].length;
-}
-
-/** A single line with any `//` that starts outside a string literal cut off -
- *  copied from `key-inspect-verify.ts`'s `stripLineComment`. */
-function stripLineComment(line: string): string {
-  let quote = "";
-  for (let i = 0; i < line.length; i++) {
-    const c = line[i];
-    if (quote) {
-      if (c === "\\") i++;
-      else if (c === quote) quote = "";
-      continue;
-    }
-    if (c === '"' || c === "'" || c === "`") {
-      quote = c;
-      continue;
-    }
-    if (c === "/" && line[i + 1] === "/") return line.slice(0, i);
-  }
-  return line;
-}
-
-/** The same source with comments removed - copied from
- *  `key-inspect-verify.ts`'s `stripComments`. Used so a doc comment's own
- *  PROSE about what a function does NOT do (which is free to name the very
- *  words a check forbids, in order to disclaim them) cannot redden that
- *  check. `KeyEditorDialog.tsx`'s `save` has exactly this shape: its comment
- *  says "read off `inspected`" while explaining why it does not. */
-function stripComments(str: string): string {
-  // JSX comment expressions - `{/* ... */}` - are the only comment syntax
-  // legal INSIDE JSX children (a bare `//` there renders as literal text),
-  // and the line-based filter below only ever recognised `//`, `/*` and `*`
-  // starting a trimmed line, none of which match a line starting `{`.
-  // Discovered live, not hypothesised: a paired mutation moved
-  // `chosenKey?.missingPrivateKey` into exactly this shape -
-  // `{/* chosenKey?.missingPrivateKey */}` - and the original version of this
-  // helper passed it straight through, leaving section 7's positive green
-  // over dead, commented-out code.
-  //
-  // The inner group may not CROSS a `*/`. The first form here was
-  // `\{\s*\/\*[\s\S]*?\*\/\s*\}` - lazy, but still allowed to skip past an
-  // intervening `*/` while hunting for one that a `}` follows. A type literal
-  // opening with a doc comment (`{ /** null = closed. */ target: … }`) matches
-  // at that `{`, and the group then keeps extending past every later `*/` not
-  // followed by `}` until it finds one that is, eating everything in between.
-  // In `host-editor-verify.ts` that cost 50752 characters and 70 cascading
-  // failures, and the fix landed there first (in that file's `stripComments`).
-  // Here it was LATENT and reddened nothing, which is the worse half:
-  // measured on `KeyEditorDialog.tsx` with such a comment added, the old form
-  // swallowed 10954 of 22505 characters and the suite still passed 151/151,
-  // because the two `> 3000` floors clear on the remainder and every positive
-  // happens to anchor outside the swallowed span. What it does silence is the
-  // NEGATIVES: a record assembly with a literal `keyType:` planted inside that
-  // span passes section 5 for free - a check over stripped-away text
-  // goes green. With the lookahead the first `*/` is final: either a `}`
-  // follows it and this is a real `{/* … */}`, or the match fails at that `{`
-  // rather than searching onward for a luckier one.
-  const withoutJsxComments = str.replace(/\{\s*\/\*(?:(?!\*\/)[\s\S])*\*\/\s*\}/g, "");
-  return withoutJsxComments
-    .split("\n")
-    .filter((line) => {
-      const t = line.trim();
-      return !(t.startsWith("//") || t.startsWith("/*") || t.startsWith("*"));
-    })
-    .map(stripLineComment)
-    .join("\n");
 }
 
 /** The function DECLARATION body named `name` - `KeyEditorDialog` and
@@ -322,25 +258,31 @@ function findJsxElementByTagAndLabel(
 }
 
 /** Walking UP from `node`, the source text of the first ternary condition or
- *  `&&`/`||` left-hand side whose own text names `name` - or `null` if the
+ *  `&&`/`||` left-hand side that `reaches` answers true for - or `null` if the
  *  walk runs out of parents first. "Is this JSX element wrapped in
  *  a conditional that mentions authMode" is a nesting question a string scan
  *  cannot answer - the field's own comment names `authMode` right beside it,
- *  to disclaim exactly this, which is why this cannot be a substring check. */
-function findAncestorConditionOn(node: ts.Node, name: string, sf: ts.SourceFile): string | null {
+ *  to disclaim exactly this, which is why this cannot be a substring check.
+ *
+ *  `reaches` is a parameter rather than a `.includes(name)` because a condition
+ *  can depend on the name without spelling it: see `expressionReachesName`,
+ *  which callers pass here to follow a local `const` one hop further. */
+function findAncestorConditionOn(
+  node: ts.Node,
+  name: string,
+  sf: ts.SourceFile,
+  reaches: (expr: ts.Expression) => boolean = (expr) => expr.getText(sf).includes(name),
+): string | null {
   let n: ts.Node | undefined = node.parent;
   while (n) {
-    if (ts.isConditionalExpression(n)) {
-      const condText = n.condition.getText(sf);
-      if (condText.includes(name)) return condText;
-    }
+    if (ts.isConditionalExpression(n) && reaches(n.condition)) return n.condition.getText(sf);
     if (
       ts.isBinaryExpression(n) &&
       (n.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken ||
-        n.operatorToken.kind === ts.SyntaxKind.BarBarToken)
+        n.operatorToken.kind === ts.SyntaxKind.BarBarToken) &&
+      reaches(n.left)
     ) {
-      const condText = n.left.getText(sf);
-      if (condText.includes(name)) return condText;
+      return n.left.getText(sf);
     }
     n = n.parent;
   }
@@ -997,10 +939,35 @@ console.log(
 console.log("\n[7. shared picker] IdentityEditorDialog uses the shared Combobox, not its own list");
 {
   const idn = src.identityDialog;
-  check(
-    "imports Combobox from @/modules/hosts/editor/Combobox",
-    /import\s*\{[^}]*\bCombobox\b[^}]*\}\s*from\s*"@\/modules\/hosts\/editor\/Combobox";/.test(idn),
-  );
+  // Off the AST, not off a regex over `idn`. `idn` is RAW source, and this is a
+  // POSITIVE check, so the regex was satisfiable by a comment: a line of prose
+  // quoting the import - in this file's own docblock, or in the dialog's -
+  // passed it with the import itself deleted. Reading the import declarations
+  // as declarations cannot be satisfied by text that is not one.
+  {
+    const idnSf = ts.createSourceFile(
+      FILES.identityDialog,
+      idn,
+      ts.ScriptTarget.ESNext,
+      true,
+      ts.ScriptKind.TSX,
+    );
+    const combobox = idnSf.statements
+      .filter(ts.isImportDeclaration)
+      .find(
+        (d) =>
+          ts.isStringLiteral(d.moduleSpecifier) &&
+          d.moduleSpecifier.text === "@/modules/hosts/editor/Combobox",
+      );
+    const named =
+      combobox?.importClause?.namedBindings !== undefined &&
+      ts.isNamedImports(combobox.importClause.namedBindings)
+        ? combobox.importClause.namedBindings.elements.map((e) => e.name.text)
+        : [];
+    check("imports Combobox from @/modules/hosts/editor/Combobox", named.includes("Combobox"), {
+      named,
+    });
+  }
   const comboboxTags = count(idn, /<Combobox\b/g);
   check("renders exactly one <Combobox", comboboxTags === 1, comboboxTags);
   check("IdentityEditorDialog.tsx has no listKeys( call", !idn.includes("listKeys("));
@@ -1155,19 +1122,10 @@ console.log(
   // while every positive happened to anchor outside the swallowed span.
   // Measured on `KeyEditorDialog.tsx` with that lazy form, it swallowed 10954
   // of 22505 characters and this script still passed 151/151.
-  const STRIPPER_PROBE =
-    "type P = { /** c */ x: X };\nconst KEEP = 1;\nconst j = <div>{/* c */}</div>;";
-  check(
-    "stripComments does not over-strip: a doc comment opening inside a type literal does not eat" +
-      " past it to the next unrelated */} it can find",
-    stripComments(STRIPPER_PROBE).includes("KEEP"),
-  );
-  check(
-    // The needle is worded so it cannot be satisfied by the `/** c */` on line
-    // 1 - only the JSX comment expression's own braces spell "{/*".
-    "stripComments does not under-strip: the JSX comment expression {/* c */} is gone",
-    !stripComments(STRIPPER_PROBE).includes("{/*"),
-  );
+  // The probe lives with the shared stripper, and its second needle is worded
+  // so it cannot be satisfied by the type literal's own doc comment on the
+  // first line - only the JSX comment expression's own braces spell "{/*".
+  for (const t of stripperSelfTest()) check(t.label, t.ok);
 
   for (const key of ["keyDialog", "identityDialog"] as const) {
     const stripped = stripComments(src[key]);
@@ -1215,11 +1173,90 @@ console.log("\n[11] the identity Password field is never wrapped in an authMode 
     passwordFields.length,
   );
   if (passwordFields.length === 1) {
-    const cond = findAncestorConditionOn(passwordFields[0], "authMode", sf);
+    const el = passwordFields[0];
+    const owner: ts.Node = ts.isJsxOpeningElement(el) ? el.parent : el;
+
+    // (i) THE ANCESTOR WALK, now following local initialisers. The direct form
+    // it used to answer - a ternary or `&&` whose condition text contains
+    // "authMode" - is defeated by one line of indirection:
+    //
+    //   const showPassword = draft.authMode === "password";
+    //   {showPassword && <Field label="Password">…}
+    //
+    // `expressionReachesName` resolves the identifier to its declaration and
+    // recurses, so the condition has to be laundered through a call or a prop
+    // before it hides.
+    const cond = findAncestorConditionOn(el, "authMode", sf, (expr) =>
+      expressionReachesName(expr, "authMode", sf),
+    );
     check(
-      "the Password field has no ancestor conditional (ternary or &&/||) whose condition names authMode",
+      "the Password field has no ancestor conditional (ternary or &&/||) whose condition reaches authMode, directly or through a local",
       cond === null,
       cond ?? undefined,
+    );
+
+    // (ii) AND IT IS RENDERED BY THE DIALOG ITSELF, not by a wrapper component
+    // in this file. `function PasswordField() { return <Field
+    // label="Password">…</Field>; }` rendered as
+    // `{draft.authMode === "password" && <PasswordField/>}` satisfies (i) - the
+    // walk out of the field's own body reaches the wrapper's function and
+    // stops, having crossed nothing conditional - and keeps
+    // `passwordFields.length === 1` true. So the question is asked about the
+    // COMPONENT that renders the field, and the answer this pins is the
+    // simplest sound one: there is no wrapper. An extraction that is genuinely
+    // wanted reddens this and has to argue rather than arrive silently.
+    const renderedBy = enclosingFunctionName(el, sf);
+    check(
+      "and it is rendered directly by IdentityEditorDialog, not by a wrapper component that a conditional could hide",
+      renderedBy === "IdentityEditorDialog",
+      renderedBy,
+    );
+
+    // (iii) NOR IS IT HIDDEN BY AN ATTRIBUTE. The DOM `hidden` prop and an
+    // inline `style` both empty the row with no ancestor conditional at all,
+    // and an ancestor walk sees neither. `className` is NOT in this list and
+    // that is a known limit, not an oversight: `className={draft.authMode ===
+    // "password" ? "" : "hidden"}` hides the field just as completely, and
+    // refusing it needs a list of the utility class names that hide - which is
+    // an enumeration this suite has no way to keep true.
+    for (const attr of ["hidden", "style"]) {
+      const text = jsxAttrExprText(el, attr, sf);
+      check(
+        `the Password field carries no \`${attr}\` attribute that reaches authMode`,
+        text === null ||
+          !expressionReachesName(
+            ts.createSourceFile("attr.ts", text, ts.ScriptTarget.ESNext, true),
+            "authMode",
+            sf,
+          ),
+        text ?? undefined,
+      );
+    }
+
+    // (iv) AND NOTHING INSIDE IT IS CONDITIONAL ON THE MODE EITHER. The walk in
+    // (i) is strictly upward, so `<Field label="Password">{draft.authMode ===
+    // "password" ? <Input/> : null}</Field>` passes it - and an empty labelled
+    // row is not "the password field renders".
+    const insideConditions: string[] = [];
+    const visitInside = (n: ts.Node): void => {
+      if (ts.isConditionalExpression(n) && expressionReachesName(n.condition, "authMode", sf)) {
+        insideConditions.push(n.condition.getText(sf));
+      }
+      if (
+        ts.isBinaryExpression(n) &&
+        (n.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken ||
+          n.operatorToken.kind === ts.SyntaxKind.BarBarToken) &&
+        expressionReachesName(n.left, "authMode", sf)
+      ) {
+        insideConditions.push(n.left.getText(sf));
+      }
+      ts.forEachChild(n, visitInside);
+    };
+    if (ts.isJsxElement(owner)) for (const child of owner.children) visitInside(child);
+    check(
+      "and nothing inside the Password field's own children is conditional on authMode",
+      insideConditions.length === 0,
+      insideConditions,
     );
   }
 }
@@ -1236,38 +1273,112 @@ console.log("\n[11] the identity Password field is never wrapped in an authMode 
 console.log("\n[12] no auth-mode toggle handler patches keyId - only identityRecordFrom does");
 {
   const sf = sourceFile("identityDialog");
+
+  /**
+   * The `label` of the nearest enclosing `<Field label="…">`, or `null`.
+   *
+   * The search below runs over the WHOLE dialog rather than over the
+   * Authentication field's own subtree, so every `patch(` has to say which
+   * field it belongs to. Scoping the search instead was the hole: a
+   * normalisation added anywhere outside those lines was invisible with this
+   * section green, and that is not hypothetical - a legitimate
+   * `patch({ keyId })` already lives one sibling away, in the key picker's own
+   * `onChange`, so the narrow window was excluding a real `keyId` patch rather
+   * than proving none existed.
+   */
+  const enclosingFieldLabel = (node: ts.Node): string | null => {
+    let cur: ts.Node | undefined = node;
+    while (cur) {
+      if (ts.isJsxElement(cur) && cur.openingElement.tagName.getText(sf) === "Field") {
+        return jsxAttrExprText(cur.openingElement, "label", sf);
+      }
+      cur = cur.parent;
+    }
+    return null;
+  };
+
+  /**
+   * The names a `patch({...})` argument touches, or `null` when the argument
+   * is not an object literal every one of whose keys is a plain identifier.
+   *
+   * `null` rather than a short list, and that is the fix: mapping a property
+   * without an `Identifier` name to nothing and filtering it out made
+   * `patch({ authMode: "key", ...{ keyId: "" } })` read as `["authMode"]` and
+   * pass. A `SpreadAssignment` has no `.name` at all and a
+   * `ComputedPropertyName` is not an `Identifier`; both survive
+   * `prettier --write` unchanged, so neither is a shape a reformat would
+   * reveal. Anything this function cannot read is a FAILURE, not an absence.
+   */
+  const patchedKeys = (arg: ts.Expression): string[] | null => {
+    if (!ts.isObjectLiteralExpression(arg)) return null;
+    const keys: string[] = [];
+    for (const p of arg.properties) {
+      if (p.name === undefined || !ts.isIdentifier(p.name)) return null;
+      keys.push(p.name.text);
+    }
+    return keys;
+  };
+
   const authField = findJsxElementByTagAndLabel(sf, "Field", "Authentication", sf);
   check('found the <Field label="Authentication"> element to search inside', authField !== null);
-  if (authField) {
-    const patchCalls = findCalls(authField, sf, ["patch"]);
+
+  const allPatches = findCalls(sf, sf, ["patch"]);
+  const authPatches = allPatches.filter((c) => enclosingFieldLabel(c) === "Authentication");
+  // THE COUNT, not a floor. `> 0` made this "every patch this search happened
+  // to find", which is true of a search that finds one of three. There are
+  // three toggle buttons in the Authentication field and one `patch` in each.
+  check(
+    "the Authentication field holds exactly 3 patch( calls - one per toggle button",
+    authPatches.length === 3,
+    authPatches.length,
+  );
+  for (const c of authPatches) {
+    const callText = c.getText(sf);
     check(
-      "found at least one patch( call inside the Authentication field (one per toggle button)",
-      patchCalls.length > 0,
-      patchCalls.length,
+      `${callText}: called with exactly 1 argument`,
+      c.arguments.length === 1,
+      c.arguments.length,
     );
-    for (const c of patchCalls) {
-      const callText = c.getText(sf);
-      check(
-        `${callText}: called with exactly 1 argument`,
-        c.arguments.length === 1,
-        c.arguments.length,
-      );
-      if (c.arguments.length !== 1) continue;
-      const arg = c.arguments[0];
-      const isObjectLiteral = ts.isObjectLiteralExpression(arg);
-      check(`${callText}: argument is an object literal`, isObjectLiteral);
-      if (isObjectLiteral && ts.isObjectLiteralExpression(arg)) {
-        const keys = arg.properties
-          .map((p) => (p.name && ts.isIdentifier(p.name) ? p.name.text : null))
-          .filter((k): k is string => k !== null);
-        check(
-          `${callText}: patches exactly ["authMode"] - not keyId alongside it`,
-          keys.length === 1 && keys[0] === "authMode",
-          keys,
-        );
-      }
-    }
+    if (c.arguments.length !== 1) continue;
+    const keys = c.arguments[0] === undefined ? null : patchedKeys(c.arguments[0]);
+    check(
+      `${callText}: patches exactly ["authMode"] through plain identifier keys - not keyId alongside it, and not through a spread or a computed name`,
+      keys !== null && keys.length === 1 && keys[0] === "authMode",
+      keys,
+    );
   }
+
+  // AND THE WHOLE DIALOG, so the section is about `keyId` rather than about
+  // one field's subtree. Exactly one `patch` in this file may name `keyId`:
+  // the key picker's own `onChange`, which is what the field is FOR. Every
+  // other one naming it is the second assembly `identityRecordFrom` exists to
+  // be the only site of.
+  const keyIdPatches = allPatches.filter((c) => {
+    const arg = c.arguments[0];
+    const keys = arg === undefined ? null : patchedKeys(arg);
+    return keys !== null && keys.includes("keyId");
+  });
+  check(
+    "exactly one patch( in the whole dialog names keyId",
+    keyIdPatches.length === 1,
+    keyIdPatches.map((c) => c.getText(sf)),
+  );
+  check(
+    'and it is the one inside <Field label="Key"> - the key picker\'s own onChange',
+    keyIdPatches.length === 1 && enclosingFieldLabel(keyIdPatches[0]) === "Key",
+    keyIdPatches.map((c) => enclosingFieldLabel(c)),
+  );
+  // The unreadable shapes, counted separately: a `patch` whose argument this
+  // section cannot read is neither "names keyId" nor "does not", and letting
+  // it fall through either list silently is how the spread evasion worked.
+  const unreadable = allPatches.filter(
+    (c) => c.arguments.length !== 1 || patchedKeys(c.arguments[0]) === null,
+  );
+  check(
+    "every patch( in the dialog takes one object literal with plain identifier keys",
+    unreadable.length === 0,
+    unreadable.map((c) => c.getText(sf)),
+  );
 }
 
 // ============================================================================
@@ -1281,37 +1392,89 @@ console.log("\n[12] no auth-mode toggle handler patches keyId - only identityRec
 // creator - reachable from nowhere and dead by construction if it existed.
 console.log("\n[13] every <Button> in either dialog does something; no nested New key/identity");
 {
+  /**
+   * Everything an affordance's label can be spelled as, gathered from the
+   * element's own subtree and from its `label` attribute.
+   *
+   * Five spellings were green under the previous version, which read direct
+   * `JsxText` children only:
+   *
+   *   <Button>{"New key…"}</Button>          a JsxExpression, so no JsxText
+   *   <Button><span>New key…</span></Button> text one level down
+   *   <Button label="New key…" />            self-closing, so no children
+   *   <button>New key…</button>              lowercase, not enumerated
+   *   <DropdownMenuItem>New key…</…>         not enumerated
+   *
+   * The first three are what this function fixes; the last two are the tag
+   * list below. STILL THE ELEMENT'S OWN SUBTREE, not the whole file, so this
+   * cannot be tripped by unrelated prose that happens to contain the same two
+   * words - `IdentityEditorDialog.tsx`'s "no keys saved yet" help line
+   * literally says "use New key first".
+   */
+  const labelTextOf = (
+    el: ts.JsxOpeningElement | ts.JsxSelfClosingElement,
+    owner: ts.Node,
+    sf: ts.SourceFile,
+  ): string => {
+    const parts: string[] = [];
+    const attr = jsxAttrExprText(el, "label", sf);
+    if (attr !== null) parts.push(attr.replace(/^["'`]|["'`]$/g, ""));
+    const visit = (n: ts.Node): void => {
+      if (ts.isJsxText(n)) parts.push(n.getText(sf));
+      else if (
+        ts.isStringLiteral(n) ||
+        ts.isNoSubstitutionTemplateLiteral(n) ||
+        ts.isTemplateHead(n) ||
+        ts.isTemplateMiddle(n) ||
+        ts.isTemplateTail(n)
+      ) {
+        parts.push(n.text);
+      }
+      ts.forEachChild(n, visit);
+    };
+    // The CHILDREN, never the opening tag - walking `owner` whole would sweep
+    // in every attribute string the element carries, and a `className` that
+    // happened to contain these two words would redden a check about rendered
+    // text.
+    if (ts.isJsxElement(owner)) for (const child of owner.children) visit(child);
+    return parts.join(" ").replace(/\s+/g, " ").trim();
+  };
+
+  // The tag list, not one tag. `<Button>` is this repo's habit; a second
+  // creator added as a plain `<button>` or as a menu item is the same dead
+  // affordance and was not enumerated at all.
+  const AFFORDANCE_TAGS = ["Button", "button", "DropdownMenuItem"];
+
   for (const key of ["keyDialog", "identityDialog"] as const) {
     const sf = sourceFile(key);
-    const buttons = findOpeningElementsByTag(sf, "Button", sf);
-    check(`${FILES[key]}: found at least one <Button>`, buttons.length > 0, buttons.length);
+    const buttons = AFFORDANCE_TAGS.flatMap((tag) => findOpeningElementsByTag(sf, tag, sf));
+    check(
+      `${FILES[key]}: found at least one clickable affordance to sweep`,
+      buttons.length > 0,
+      buttons.length,
+    );
     for (const el of buttons) {
       const onClick = jsxAttrExprText(el, "onClick", sf);
       const owner: ts.Node = ts.isJsxOpeningElement(el) ? el.parent : el;
       const insideDialogClose = findAncestorJsxElementByTag(owner, "DialogClose", sf);
       const tagDesc = el.getText(sf).replace(/\s+/g, " ").slice(0, 60);
+      // NOTE ON WHAT THIS CHECKS. `onClick={() => {}}` satisfies it, so this is
+      // structurally "has an onClick attribute" rather than "does something".
+      // The stronger claim needs the handler's body, which is a different
+      // question from the one this sweep exists for: an affordance rendered
+      // with no handler at all.
       check(
         `<${tagDesc}> has an onClick, or stands inside <DialogClose>`,
         onClick !== null || insideDialogClose,
         { onClick, insideDialogClose },
       );
 
-      // The button's own direct text children only - not the whole file - so
-      // this cannot be tripped by unrelated prose elsewhere that happens to
-      // contain the same two words: IdentityEditorDialog.tsx's own "no keys
-      // saved yet" help line literally says "use New key first".
-      if (ts.isJsxOpeningElement(el) && ts.isJsxElement(owner)) {
-        const label = owner.children
-          .filter(ts.isJsxText)
-          .map((t) => t.getText(sf))
-          .join("")
-          .trim();
-        check(
-          `<${tagDesc}>'s own label text is not a second, nested "New key…"/"New identity…" creator: ${JSON.stringify(label)}`,
-          !label.startsWith("New key") && !label.startsWith("New identity"),
-          label,
-        );
-      }
+      const label = labelTextOf(el, owner, sf);
+      check(
+        `<${tagDesc}>'s own label text is not a second, nested "New key…"/"New identity…" creator: ${JSON.stringify(label)}`,
+        !/\bNew (key|identity)\b/.test(label),
+        label,
+      );
     }
   }
 }
