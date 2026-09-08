@@ -40,7 +40,11 @@
  *      `[object Object]` / `{"kind":…}` reaching the user) stay closed.
  *   6. Rust/TS parity for the mirrored guard and its wording, and for the set of
  *      connect-error kinds.
- *   7. Source text: the `ssh_open` dial's own rejection is chained through
+ *   7. Source text, Rust: the Windows ssh-agent fallback marks itself UNPROVEN,
+ *      so an absent agent parks on that platform too. Nothing else in the tree
+ *      can see that arm - it is `#[cfg(windows)]` and CI runs no Rust tests on
+ *      Windows.
+ *   8. Source text: the `ssh_open` dial's own rejection is chained through
  *      `sshConnectErrorFrom`, and at both catch sites the park arm lexically
  *      CONTROLS the ladder call - it is a statement of the same block and it
  *      terminates it - and the pre-flight block marks what it throws. Pure
@@ -539,6 +543,121 @@ console.log("\n[parity] the connect-error kinds are the SAME SET on both sides")
   assert(
     !/\bpub\s+(?:kind|message)\s*:/.test(fields),
     `neither field is pub, so a struct literal cannot pick a kind (fields: ${JSON.stringify(fields.trim())})`,
+  );
+}
+
+// ============================================================================
+// THE WINDOWS ssh-agent ARM. Read rather than run, and read here rather than
+// tested in Rust, because nothing else in the tree can reach it: `open_agent` is
+// `#[cfg]`-split, needs a live transport, and CI runs this crate's tests on
+// Linux only.
+//
+// What it protects: on Windows the Pageant fallback CONSTRUCTS SUCCESSFULLY with
+// nothing listening, so "there is no agent on this machine" cannot be noticed
+// where the transport opens. It surfaces one call later as a listing failure -
+// indistinguishable from a live agent breaking mid-exchange, which is
+// `transport`, which is the ladder. A machine with no agent at all therefore
+// walked 1s + 3s + 7s while a RUNNING agent holding no key parked immediately,
+// the exact inversion this change set out to remove. The marker `open_agent`
+// hands back is the only thing that separates the two, and dropping it is a
+// silent, platform-local regression.
+
+console.log("\n[source-text] the Windows ssh-agent fallback marks itself UNPROVEN");
+{
+  const rust = readRust("src-tauri/src/modules/ssh/session.rs");
+
+  /** The body of one `#[cfg(...)]`-gated `open_agent`, whitespace flattened. */
+  const armBody = (cfg: string): string => {
+    const head = new RegExp(`#\\[cfg\\(${cfg}\\)\\]\\s*async fn open_agent\\(\\)[^{]*\\{`).exec(
+      rust,
+    );
+    if (!head) return "";
+    const open = head.index + head[0].length - 1;
+    const close = matchingBrace(rust, open);
+    return close === -1
+      ? ""
+      : rust
+          .slice(open + 1, close)
+          .replace(/\s+/g, " ")
+          .trim();
+  };
+
+  const windows = armBody("windows");
+  const unix = armBody("not\\(windows\\)");
+  assert(windows !== "", "found the #[cfg(windows)] open_agent body");
+  assert(unix !== "", "found the #[cfg(not(windows))] open_agent body");
+
+  // Both arms return the marker at all. Without it in the signature there is
+  // nothing for `agent_keys` to read and the question is decided by the listing
+  // error again.
+  const signatures = rust.match(/async fn open_agent\(\)\s*->\s*[^{]+/g) ?? [];
+  assert(
+    signatures.length === 2 && signatures.every((s) => /Option<String>/.test(s)),
+    `both open_agent arms return the proof marker (found ${JSON.stringify(signatures.map((s) => s.trim()))})`,
+  );
+
+  // The pipe arm completed a connect against something listening, so it is
+  // proof: `None`. Asserted separately from the Pageant arm below - an arm that
+  // marked EVERYTHING unproven would park a live agent that broke mid-exchange,
+  // which is the opposite mistake and just as invisible from Linux.
+  assert(
+    /return Ok\(\(c\.dynamic\(\), None\)\);/.test(windows),
+    "the named-pipe arm returns None - a completed connect IS proof of an agent",
+  );
+
+  // THE row. `connect_pageant` succeeding proves nothing, so its Ok arm must
+  // carry `Some(...)`.
+  assert(
+    /Ok\(c\) => Ok\(\(c\.dynamic\(\), Some\(/.test(windows),
+    "the Pageant fallback's success is marked UNPROVEN - Some(...), not None",
+  );
+  // And the sentence it carries is built where the pipe path is still in scope.
+  // Rebuilding it later is impossible, and a marker with nothing in it would
+  // leave the user a `config` park that never says which machine was looked at.
+  assert(
+    /let tried = format!\("no ssh-agent at \{pipe\} and no Pageant"\);/.test(windows),
+    "the marker carries the sentence naming what was looked for, pipe path included",
+  );
+  // Both Pageant outcomes end at the same sentence: constructing-but-empty and
+  // not-constructing-at-all are the same fact about this machine.
+  assert(
+    /Err\(SshConnectError::config\(format!\( "\{tried\} \(\{e\}\)\. \{NO_AGENT_HINT\}" \)\)\)/.test(
+      windows,
+    ),
+    "a Pageant transport that will not open at all is config, on that same sentence",
+  );
+
+  // The Unix arm has no unproven case, and saying so is a check rather than a
+  // comment: marking it `Some` would park every mid-exchange agent failure on
+  // the platform where the socket connect really is evidence.
+  assert(
+    /\(c\.dynamic\(\), None\)/.test(unix) && !/Some\(/.test(unix),
+    "the SSH_AUTH_SOCK arm is always proven - connect_env fails outright when nothing listens",
+  );
+
+  // And the marker is CONSULTED. `agent_keys` must hand it to the decision
+  // function rather than reach for a constructor itself; a fresh
+  // `SshConnectError::transport` at the listing site is the defect verbatim.
+  const keysAt = rust.indexOf("pub(crate) async fn agent_keys(");
+  const keysOpen = rust.indexOf("{", keysAt);
+  const keys =
+    keysAt === -1 ? "" : rust.slice(keysOpen, matchingBrace(rust, keysOpen)).replace(/\s+/g, " ");
+  assert(keys !== "", "found agent_keys's body");
+  assert(
+    /\(mut agent, unproven\) = open_agent\(\)/.test(keys),
+    "agent_keys binds the marker rather than discarding it",
+  );
+  const decided = keys.match(/agent_listing_error\(/g) ?? [];
+  assert(
+    decided.length === 1 && /agent_listing_error\(unproven\.as_deref\(\)/.test(keys),
+    `the listing failure's kind comes from the marker, once (found ${decided.length} call(s))`,
+  );
+  // The timeout arm is the only constructor call left in there, and it is
+  // deliberately transport - a wedged agent is what that bound exists for.
+  const constructed = keys.match(/SshConnectError::(config|auth|transport)\(/g) ?? [];
+  assert(
+    constructed.length === 1 && constructed[0] === "SshConnectError::transport(",
+    `the only kind agent_keys still picks itself is the AGENT_TIMEOUT one (found ${JSON.stringify(constructed)})`,
   );
 }
 

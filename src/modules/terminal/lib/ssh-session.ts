@@ -253,8 +253,8 @@ export async function openSshForSession(
         // Also deliberate, not a transport failure, so no auto-reconnect -
         // but unlike a plain exit this is unusual enough to flag rather
         // than silently close under: park the pane with a banner naming
-        // the signal and let the user decide (Enter or the Retry button),
-        // the same manual path used once auto-reconnect below gives up.
+        // the signal and let the user decide (Enter), the same manual path
+        // used once auto-reconnect below gives up.
         s.pty = null;
         s.ptySpawnedAt = null;
         s.sshReconnectAttempts = 0;
@@ -267,7 +267,7 @@ export async function openSshForSession(
           s,
           `\r\n\x1b[33m[tervia] remote process killed by signal ${decision.signalName}${
             decision.coreDumped ? " (core dumped)" : ""
-          }. Press Enter or click Retry to reconnect.\x1b[0m\r\n`,
+          }. Press Enter to reconnect.\x1b[0m\r\n`,
         );
         return;
       case "reconnect":
@@ -584,10 +584,12 @@ export async function forwardDetectedUrl(
  * and for the same reason: nothing about the attempt changes until the user
  * changes something. NOT the state the ladder gives up in; that one is
  * `disconnected` with `canRetry`, which reads as "the link went away", and this
- * failure never had a link. Both satisfy `canRetrySsh`, so Enter and the status
- * pill's Retry behave identically either way - the difference is what the pill
- * says. What differs from the ladder is only how long the user waited to get
- * here: immediately, instead of 11 seconds and three identical failures.
+ * failure never had a link. Both satisfy `canRetrySsh`, which is what the
+ * Enter-to-retry path in session-lifecycle reads, so the key behaves identically
+ * either way - the difference is only what the status text says. A terminal pane
+ * has no clickable retry control, so Enter is the whole manual path and the
+ * banners say so. What differs from the ladder is only how long the user waited
+ * to get here: immediately, instead of 11 seconds and three identical failures.
  *
  * `sshReconnectAttempts` is reset so a later manual retry starts a fresh
  * three-attempt window if it fails for a transport reason instead.
@@ -597,7 +599,7 @@ export function parkSshConnectFailure(s: Session, message: string): void {
   writeSshBanner(
     s,
     `\r\n\x1b[31m[tervia] ssh connect failed: ${message}\x1b[0m\r\n` +
-      `\x1b[33m[tervia] Press Enter or click Retry to reconnect.\x1b[0m\r\n`,
+      `\x1b[33m[tervia] Press Enter to reconnect.\x1b[0m\r\n`,
   );
   emitSshStatus(s, { kind: "error", message, canRetry: true });
 }
@@ -619,7 +621,7 @@ export function scheduleSshReconnect(s: Session, reason: string): void {
     });
     writeSshBanner(
       s,
-      `\r\n\x1b[33m[tervia] disconnected (${reason}). Press Enter or click Retry to reconnect.\x1b[0m\r\n`,
+      `\r\n\x1b[33m[tervia] disconnected (${reason}). Press Enter to reconnect.\x1b[0m\r\n`,
     );
     return;
   }
@@ -724,13 +726,16 @@ export async function disconnectSsh(leafId: number): Promise<void> {
     reason: "closed by user",
     canRetry: true,
   });
-  writeSshBanner(
-    s,
-    `\r\n\x1b[33m[tervia] disconnected. Press Enter or click Reconnect to come back.\x1b[0m\r\n`,
-  );
+  writeSshBanner(s, `\r\n\x1b[33m[tervia] disconnected. Press Enter to come back.\x1b[0m\r\n`);
 }
 
-/** Status pill "Reconnect" handle. */
+/**
+ * Manual reconnect by leaf id, for a caller outside the terminal that holds one.
+ * Nothing in the tree calls it today - the status text is rendered as plain text
+ * in WorkspacesPanel and renderEntryBody, neither of which is clickable - so the
+ * banners promise Enter and nothing else. Kept because `disconnectSsh` next to
+ * it is the same shape and the pair is what a pane control would bind to.
+ */
 export async function reconnectSsh(leafId: number): Promise<void> {
   const s = sessions.get(leafId);
   if (!s) return;

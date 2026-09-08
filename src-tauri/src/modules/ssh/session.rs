@@ -807,7 +807,17 @@ fn build_verifier(
 /// Turn a russh handshake failure into a specific, user-actionable message
 /// using the verifier's structured report (user rejected a new key, or a
 /// pinned-key mismatch), falling back to the generic disconnect text.
-async fn handshake_error(report: &Arc<Mutex<HostKeyReport>>, e: russh::Error) -> SshConnectError {
+///
+/// `host` and `port` are carried only for that fallback: it is the one arm whose
+/// text says nothing about WHICH attempt failed, and a pane that already prefixes
+/// every park with "ssh connect failed" gains nothing from a second sentence
+/// repeating the words.
+async fn handshake_error(
+    report: &Arc<Mutex<HostKeyReport>>,
+    host: &str,
+    port: u16,
+    e: russh::Error,
+) -> SshConnectError {
     let report_guard = report.lock().await;
     if let Some(seen) = report_guard.rejected.clone() {
         // Two ways to get here, and BOTH are config. The user declined the key,
@@ -845,7 +855,9 @@ async fn handshake_error(report: &Arc<Mutex<HostKeyReport>>, e: russh::Error) ->
              otherwise this could be a man-in-the-middle attack."
         ));
     }
-    SshConnectError::transport(format!("ssh: connect failed: {e}"))
+    SshConnectError::transport(format!(
+        "ssh: could not open a connection to {host}:{port}: {e}"
+    ))
 }
 
 /// Drive a russh connect future under the right timeout budget (first connects
@@ -891,7 +903,7 @@ where
     }
     match result {
         Ok(h) => Ok(h),
-        Err(e) => Err(handshake_error(report, e).await),
+        Err(e) => Err(handshake_error(report, host, port, e).await),
     }
 }
 
@@ -956,48 +968,86 @@ const NO_AGENT_HINT: &str = "Start one with `eval $(ssh-agent)`, then add a key 
 /// wedged agent cannot hang a connect (or the dialog's agent panel) for good.
 const AGENT_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Open the agent transport.
+/// Open the agent transport, and say whether opening it PROVED an agent is
+/// there.
 ///
 /// Windows: the OpenSSH agent's named pipe, unless `SSH_AUTH_SOCK` points
 /// somewhere else (Git Bash, 1Password and gpg-agent all set it), then Pageant,
 /// which is what PuTTY and Bitvise expose. Everywhere else: `SSH_AUTH_SOCK`.
 ///
-/// Success here is NOT proof of an agent: the Pageant transport constructs
-/// happily with nothing listening on the other end. `agent_keys` is what
-/// actually settles it, which is why nothing calls this directly.
-/// `config`, both arms: "there is no agent on this machine" is a fact about the
-/// machine, and the hint tells the user which service to start. A retry a second
-/// later reproduces it byte for byte. Filing it transport would ladder four
-/// times at up to `AGENT_TIMEOUT` each before showing the hint - and would
-/// contradict `authenticate_agent`, which already calls a RUNNING agent holding
-/// no key `config`. An absent agent is the more permanent of the two.
+/// The second element of the pair is that proof, and it is why nothing calls
+/// this directly. `None` means a connect completed against something listening.
+/// `Some(what_was_looked_for)` means the transport constructed WITHOUT
+/// establishing that - the Pageant fallback does exactly this, it builds happily
+/// with nothing on the other end - and carries the sentence naming what was
+/// looked for, because by the time the absence surfaces the pipe path is out of
+/// scope. `agent_keys` settles the question one call later and needs the
+/// distinction to file the answer; see `agent_listing_error`.
+///
+/// A transport that will not open AT ALL is `config` on every arm: "there is no
+/// agent on this machine" is a fact about the machine, and the hint tells the
+/// user which service to start. A retry a second later reproduces it byte for
+/// byte. Filing it transport would ladder four times at up to `AGENT_TIMEOUT`
+/// each before showing the hint - and would contradict `authenticate_agent`,
+/// which already calls a RUNNING agent holding no key `config`. An absent agent
+/// is the more permanent of the two.
 #[cfg(windows)]
-async fn open_agent() -> Result<Agent, SshConnectError> {
+async fn open_agent() -> Result<(Agent, Option<String>), SshConnectError> {
     let pipe = std::env::var("SSH_AUTH_SOCK")
         .unwrap_or_else(|_| r"\\.\pipe\openssh-ssh-agent".to_string());
     if let Ok(c) = AgentClient::connect_named_pipe(&pipe).await {
-        return Ok(c.dynamic());
+        return Ok((c.dynamic(), None));
     }
-    AgentClient::connect_pageant()
-        .await
-        .map(|c| c.dynamic())
-        .map_err(|e| {
-            SshConnectError::config(format!(
-                "no ssh-agent at {pipe} and no Pageant ({e}). {NO_AGENT_HINT}"
-            ))
-        })
+    // Reached whenever the named pipe is absent, which on this platform is every
+    // no-agent case - and `connect_pageant` then succeeds anyway. Marking the
+    // result unproven here is the whole fix: without the marker the absence
+    // surfaces as a listing failure, which cannot tell itself apart from a live
+    // agent breaking mid-exchange, and a machine with no agent at all walked the
+    // full ladder while a RUNNING agent holding no key parked immediately.
+    let tried = format!("no ssh-agent at {pipe} and no Pageant");
+    match AgentClient::connect_pageant().await {
+        Ok(c) => Ok((c.dynamic(), Some(tried))),
+        Err(e) => Err(SshConnectError::config(format!(
+            "{tried} ({e}). {NO_AGENT_HINT}"
+        ))),
+    }
 }
 
 #[cfg(not(windows))]
-async fn open_agent() -> Result<Agent, SshConnectError> {
+async fn open_agent() -> Result<(Agent, Option<String>), SshConnectError> {
+    // Always proven: `connect_env` opens the Unix socket, which fails outright
+    // when nothing is listening, so reaching the Ok arm IS the evidence the
+    // Windows Pageant arm cannot produce.
     AgentClient::connect_env()
         .await
-        .map(|c| c.dynamic())
+        .map(|c| (c.dynamic(), None))
         .map_err(|e| {
             SshConnectError::config(format!(
                 "no ssh-agent on SSH_AUTH_SOCK ({e}). {NO_AGENT_HINT}"
             ))
         })
+}
+
+/// The kind a failed identity listing carries, decided by WHICH transport arm
+/// `open_agent` returned through rather than by the listing error, which is the
+/// same "early eof" either way.
+///
+/// `unproven` is `open_agent`'s second element. Kept as a free function so the
+/// decision is unit-testable on every platform: the arm that feeds it `Some` is
+/// Windows-only, and this crate's tests never run on Windows in CI.
+fn agent_listing_error(unproven: Option<&str>, cause: &str) -> SshConnectError {
+    match unproven {
+        // Something answered the socket - it is there - and then the exchange
+        // broke. The next attempt may find it healthy.
+        None => {
+            SshConnectError::transport(format!("no ssh-agent answered ({cause}). {NO_AGENT_HINT}"))
+        }
+        // Nothing was ever shown to be on the other end, so absent and broken are
+        // indistinguishable from here - and absent is both the common case and
+        // the permanent one. Same call `open_agent` makes for a transport that
+        // would not open at all.
+        Some(tried) => SshConnectError::config(format!("{tried} ({cause}). {NO_AGENT_HINT}")),
+    }
 }
 
 /// The agent, plus the public keys it holds. Connecting and listing are one
@@ -1009,19 +1059,20 @@ async fn open_agent() -> Result<Agent, SshConnectError> {
 /// Certificates are dropped from the list: they need
 /// `authenticate_certificate_with`, a flow Tervia does not implement, and offering
 /// them as plain keys would only burn the server's auth attempts.
-/// Carries `SshConnectError` rather than `String` so its four failures can
-/// disagree about the kind, which they genuinely do: not having an agent is a
-/// state of this machine (`config`), whereas one that accepted a connection and
-/// then would not answer is a live thing misbehaving (`transport`). Collapsing
-/// all four into one string is what made an absent agent ladder.
+/// Carries `SshConnectError` rather than `String` so its failures can disagree
+/// about the kind, which they genuinely do: not having an agent is a state of
+/// this machine (`config`), whereas one that accepted a connection and then
+/// would not answer is a live thing misbehaving (`transport`). Collapsing them
+/// into one string is what made an absent agent ladder. The listing failure sits
+/// on both sides of that line at once, which is why its kind comes from
+/// `agent_listing_error` and not from the error in hand.
 pub(crate) async fn agent_keys() -> Result<(Agent, Vec<PublicKey>), SshConnectError> {
     let probe = async {
-        let mut agent = open_agent().await?;
-        // Transport: something answered the socket - it is there - and then the
-        // exchange broke. The next attempt may find it healthy.
-        let identities = agent.request_identities().await.map_err(|e| {
-            SshConnectError::transport(format!("no ssh-agent answered ({e}). {NO_AGENT_HINT}"))
-        })?;
+        let (mut agent, unproven) = open_agent().await?;
+        let identities = agent
+            .request_identities()
+            .await
+            .map_err(|e| agent_listing_error(unproven.as_deref(), &e.to_string()))?;
         let keys = identities
             .into_iter()
             .filter_map(|i| match i {
@@ -1060,9 +1111,9 @@ async fn authenticate_agent(
     host: &str,
     user: &str,
 ) -> Result<bool, SshConnectError> {
-    // The kind comes from `agent_keys`, which knows which of its four failures
-    // this was; only the host label is added. Re-deciding it here would put an
-    // absent agent back on the ladder.
+    // The kind comes from `agent_keys`, which knows which of its failures this
+    // was and which transport arm it came through; only the host label is added.
+    // Re-deciding it here would put an absent agent back on the ladder.
     let (mut agent, keys) = agent_keys()
         .await
         .map_err(|e| e.map_message(|m| format!("ssh: [{host}] {m}")))?;
@@ -1731,6 +1782,58 @@ mod connect_error_wire_tests {
         assert_ne!(SshConnectErrorKind::Auth, SshConnectErrorKind::Transport);
         assert_ne!(SshConnectErrorKind::Config, SshConnectErrorKind::Transport);
         assert_ne!(SshConnectErrorKind::Config, SshConnectErrorKind::Auth);
+    }
+}
+
+/// The ssh-agent listing failure, whose kind cannot be read off the error.
+///
+/// A machine with no agent and an agent that broke mid-exchange raise the same
+/// "early eof" here, so the only thing that separates them is which transport
+/// arm opened - and on Windows the Pageant fallback constructs against nothing,
+/// so the absence has no other chance to be noticed. Filing both `transport` is
+/// what walked a machine with no agent at all through the full ladder while a
+/// RUNNING agent holding no key parked immediately, on the platform where the
+/// fallback is the one that gets taken.
+///
+/// Asserted on the decision rather than on the arm that feeds it: `open_agent`
+/// is `#[cfg]`-split and needs a live transport, and CI runs no Rust tests on
+/// Windows. That the Windows arm actually passes the marker is held by a
+/// source-text check in scripts/ssh-retry-verify.ts.
+#[cfg(test)]
+mod agent_listing_tests {
+    use super::*;
+
+    #[test]
+    fn a_proven_transport_that_then_broke_is_transport() {
+        let e = agent_listing_error(None, "early eof");
+        assert_eq!(e.kind, SshConnectErrorKind::Transport);
+        assert!(e.message.contains("early eof"), "{e:?}");
+        assert!(e.message.contains(NO_AGENT_HINT), "{e:?}");
+    }
+
+    #[test]
+    fn an_unproven_transport_is_config_and_says_what_it_looked_for() {
+        let tried = "no ssh-agent at PIPE and no Pageant";
+        let e = agent_listing_error(Some(tried), "early eof");
+        assert_eq!(e.kind, SshConnectErrorKind::Config);
+        // The sentence `open_agent` built while the pipe path was still in
+        // scope, kept verbatim - it is the only place the user is told WHERE
+        // this machine was looked at.
+        assert!(e.message.starts_with(tried), "{e:?}");
+        assert!(e.message.contains("early eof"), "{e:?}");
+        assert!(e.message.contains(NO_AGENT_HINT), "{e:?}");
+    }
+
+    #[test]
+    fn the_same_cause_gets_two_kinds() {
+        // The collapse guard, and the whole point of the function: identical
+        // listing error, opposite verdicts. A change that decided from the cause
+        // instead of the arm would leave both tests above passing for whichever
+        // kind it settled on.
+        assert_ne!(
+            agent_listing_error(None, "early eof").kind,
+            agent_listing_error(Some("t"), "early eof").kind,
+        );
     }
 }
 
