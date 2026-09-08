@@ -257,7 +257,7 @@ impl Batch {
 /// updates landed in the window. The push transport has no way to learn that
 /// the webview is behind, so a consumer that cannot keep up still falls
 /// further behind - one framebuffer at a time instead of unboundedly. Swapping
-/// push for a pull / credit-based model is tracked as **RDP-01** and is a local
+/// push for a pull / credit-based model is deferred, and would be a local
 /// change: a second [`FrameTransport`] impl plus a different flush trigger in
 /// `session.rs`.
 #[derive(Debug)]
@@ -491,8 +491,8 @@ pub fn encode_batch(fb: FrameBuffer<'_>, batch: &Batch) -> Vec<u8> {
 ///
 /// Today there is a single push implementation: the session task encodes a
 /// batch and hands the bytes to the IPC channel immediately. A pull / credit
-/// model (**RDP-01**) slots in as a second impl plus a different flush trigger
-/// in `session.rs`; nothing else in the module knows how frames get out.
+/// model would slot in as a second impl plus a different flush trigger in
+/// `session.rs`; nothing else in the module knows how frames get out.
 pub trait FrameTransport: Send {
     /// Deliver one encoded batch. `Err` means this sink is gone for good and
     /// the caller should stop using it.

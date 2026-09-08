@@ -38,9 +38,14 @@
  *     4 and 7 could not see that, because a check on a transition cannot notice
  *     a caller that stops asking for it - the same lesson as 3, one layer up.
  */
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+// The parentage check at the foot of section 9(ii) needs a real parse: it asks
+// which JSX elements are DESCENDANTS of another, and follows one of them across
+// an import. A substring scan cannot answer either question - see the comment
+// on that block for the specific green-forever check it replaces.
+import ts from "typescript";
 import {
   isRailViewKind,
   isTabPageKind,
@@ -1538,7 +1543,7 @@ console.log("\n[chip] a chip selects its own entry, even when it is already the 
     renameSpan,
   );
 
-  // The close X's three propagation stops. Pinned for the same reason as the
+  // The close X's four propagation stops. Pinned for the same reason as the
   // rename span's, and more urgently: nothing else in the suite reads this file
   // at all, so before this block any one of them could be deleted with all 58
   // scripts still green.
@@ -1546,7 +1551,7 @@ console.log("\n[chip] a chip selects its own entry, even when it is already the 
   // What they protect is this: closing a tab must not throw the user
   // out of the rail view they are reading. `tabView.ts`'s `rehomeTabView`
   // deliberately leaves `railView` alone for a removal, and that is no help if
-  // something ACTIVATES the tab on the way to closing it. Three separate native
+  // something ACTIVATES the tab on the way to closing it. Four separate native
   // events reach the enclosing trigger from the X, each with its own route:
   //
   //   pointerdown  dnd-kit's `PointerSensor` activator - a press on the X
@@ -1560,15 +1565,40 @@ console.log("\n[chip] a chip selects its own entry, even when it is already the 
   //                stop this one, which is how it went missing.
   //   click        the trigger's own select route, unconditional by design
   //                (that is the D-NAV1 fix), so it fires on the X too.
+  //   keydown      Enter and Space on a FOCUSED X. `TabsTrigger` activates on
+  //                both, so an unstopped keydown selects the very tab being
+  //                closed. The `<button>` this element used to be never needed
+  //                this stop - a button turns Enter and Space into a
+  //                synthesised `click`, which the click stop above already
+  //                caught. A `span` does not, so the stop AND the close both
+  //                had to be written by hand here.
   const closeBtnSrc = stripTsxComments(read("src/modules/tabs/components/TrailingIconButton.tsx"));
-  const closeBtnTag = openingTag(closeBtnSrc, "button");
+  const closeBtnTag = openingTag(closeBtnSrc, "span");
   check(
-    // Non-vacuity: `openingTag` takes the FIRST `<button`, and a slice that
+    // Non-vacuity: `openingTag` takes the FIRST `<span`, and a slice that
     // found some other element would satisfy nothing below rather than fail
     // loudly here.
     "found the trailing icon button's opening tag to scan",
     closeBtnTag !== null && /aria-label=\{label\}/.test(closeBtnTag),
     closeBtnTag === null ? null : closeBtnTag.slice(0, 80),
+  );
+  check(
+    // The element TYPE, pinned here as well as by the parentage walk below, and
+    // for a different reason: this one says what the X must be, that one says
+    // what it must not be inside. Reverting to `<button type="button">` reddens
+    // both, and either one alone would leave the other's half of the rule
+    // resting on nothing.
+    "and it is a span carrying the button role, not a <button> nested in the trigger",
+    closeBtnTag !== null && closeBtnTag.startsWith("<span") && /role="button"/.test(closeBtnTag),
+    closeBtnTag === null ? null : closeBtnTag.slice(0, 80),
+  );
+  check(
+    // The half `role="button"` does not buy. `tabIndex={-1}` would satisfy the
+    // role and still delete a control the `<button>` gave the keyboard, which
+    // is a regression a DOM-shaped fix has no business shipping.
+    "and keeps the X keyboard-reachable, so the fix did not quietly drop a control",
+    closeBtnTag !== null && /tabIndex=\{0\}/.test(closeBtnTag),
+    closeBtnTag,
   );
   for (const handler of ["onPointerDown", "onMouseDown"] as const) {
     check(
@@ -1587,6 +1617,168 @@ console.log("\n[chip] a chip selects its own entry, even when it is already the 
       closeOnClick.includes("ev.stopPropagation()") &&
       closeOnClick.includes("onClick()"),
     closeOnClick,
+  );
+  const closeOnKeyDown = closeBtnTag === null ? null : propValue(closeBtnTag, "onKeyDown");
+  check(
+    // The fourth stop, matched the way the click one is because it too shares a
+    // handler with the close - and it carries more than the click one does. All
+    // five parts are load-bearing and each fails differently: without the two
+    // key tests every keystroke on a focused X closes the tab; without
+    // `preventDefault` Space scrolls the strip; without `stopPropagation` the
+    // trigger selects the tab being closed, which is the whole hazard; without
+    // `onClick()` the X is focusable and dead, because a span gets no
+    // synthesised click from Enter.
+    "and stops the keydown Enter and Space arrive on, in the handler that runs the close",
+    closeOnKeyDown !== null &&
+      closeOnKeyDown.includes('ev.key !== "Enter"') &&
+      closeOnKeyDown.includes('ev.key !== " "') &&
+      closeOnKeyDown.includes("ev.preventDefault()") &&
+      closeOnKeyDown.includes("ev.stopPropagation()") &&
+      closeOnKeyDown.includes("onClick()"),
+    closeOnKeyDown,
+  );
+
+  // ---- the nested `<button>` itself, forbidden directly -------------------
+  //
+  // `TabsTrigger` is `TabsPrimitive.Trigger`, which Radix renders as a real
+  // `<button>`. Anything inside it that renders a `<button>` of its own is
+  // invalid HTML: React logs it, and the parser may close the outer button
+  // early and reparent the inner one out of the chip. The close X was exactly
+  // that, on every closable entry, and NOTHING in this suite could see it - the
+  // trigger is in `renderEntryBody.tsx` and the `<button>` was one import away
+  // in `TrailingIconButton.tsx`. A `bodySrc.indexOf("<button")` would have been
+  // green for the whole life of the defect, which is the shape of check this
+  // suite has already been burned by once.
+  //
+  // So: a real parse, a parentage walk from the trigger, and one hop across the
+  // import for every component element found under it.
+  //
+  // ONE HOP, deliberately, and the limit is checked rather than assumed. A
+  // transitive walk runs off the end of the repo almost immediately - a
+  // component's own children include props (`<Icon />` is a parameter, not an
+  // import) and Radix primitives reached through a qualified name - so its
+  // frontier could not be asserted empty, and a check whose frontier is silently
+  // skipped is not a check. At one hop the frontier IS assertable: every
+  // component under the trigger must resolve to a file in this repo, or this
+  // block fails.
+  const bodyPath = "src/modules/tabs/components/renderEntryBody.tsx";
+  const parseTsx = (p: string) =>
+    ts.createSourceFile(p, read(p), ts.ScriptTarget.ESNext, true, ts.ScriptKind.TSX);
+
+  const jsxTagName = (n: ts.Node): string | null =>
+    ts.isJsxElement(n)
+      ? n.openingElement.tagName.getText()
+      : ts.isJsxSelfClosingElement(n)
+        ? n.tagName.getText()
+        : null;
+
+  /** Every JSX tag name appearing anywhere under `root`, `root` itself excluded. */
+  const jsxDescendantTags = (root: ts.Node): string[] => {
+    const out: string[] = [];
+    const walk = (n: ts.Node) => {
+      const tag = n === root ? null : jsxTagName(n);
+      if (tag !== null) out.push(tag);
+      n.forEachChild(walk);
+    };
+    walk(root);
+    return out;
+  };
+
+  /** The module specifier `name` is imported from in `sf`, or null if it is not imported. */
+  const importSpecifierOf = (sf: ts.SourceFile, name: string): string | null => {
+    for (const st of sf.statements) {
+      if (!ts.isImportDeclaration(st) || st.importClause === undefined) continue;
+      const bindings = st.importClause.namedBindings;
+      const named =
+        bindings !== undefined &&
+        ts.isNamedImports(bindings) &&
+        bindings.elements.some((el) => el.name.text === name);
+      if (st.importClause.name?.text === name || named) {
+        return ts.isStringLiteral(st.moduleSpecifier) ? st.moduleSpecifier.text : null;
+      }
+    }
+    return null;
+  };
+
+  /** A repo-relative `.tsx`/`.ts` path for an import specifier, or null if it leaves the repo. */
+  const resolveInRepo = (fromFile: string, spec: string): string | null => {
+    const base = spec.startsWith("@/")
+      ? join("src", spec.slice(2))
+      : spec.startsWith(".")
+        ? join(dirname(fromFile), spec)
+        : null;
+    if (base === null) return null;
+    for (const ext of [".tsx", ".ts"]) if (existsSync(join(root, base + ext))) return base + ext;
+    return null;
+  };
+
+  const bodyAst = parseTsx(bodyPath);
+  const triggerNodes: ts.Node[] = [];
+  const collectTriggers = (n: ts.Node) => {
+    if (jsxTagName(n) === "TabsTrigger") triggerNodes.push(n);
+    n.forEachChild(collectTriggers);
+  };
+  collectTriggers(bodyAst);
+  check(
+    // Non-vacuity in both directions. Zero means the walk below covers nothing
+    // and passes for free - which is what a renamed or `asChild`-ed trigger
+    // would do. Two means there is a second trigger this block never looked
+    // inside, and the rule would hold on one chip and not the other.
+    "found exactly one <TabsTrigger> in renderEntryBody.tsx to walk",
+    triggerNodes.length === 1,
+    triggerNodes.length,
+  );
+  const nestedButtons: string[] = [];
+  const unfollowable: string[] = [];
+  const followed: string[] = [];
+  if (triggerNodes.length === 1) {
+    for (const tag of jsxDescendantTags(triggerNodes[0]!)) {
+      if (tag === "button") {
+        nestedButtons.push(`TabsTrigger > ${tag}`);
+        continue;
+      }
+      if (!/^[A-Z]/.test(tag)) continue;
+      const spec = importSpecifierOf(bodyAst, tag);
+      const path = spec === null ? null : resolveInRepo(bodyPath, spec);
+      if (path === null) {
+        // Either declared in this file (so the walk above never entered its
+        // body) or imported from outside the repo. Both are blind spots, and
+        // both are reported rather than skipped.
+        unfollowable.push(`${tag} (${spec ?? "not imported"})`);
+        continue;
+      }
+      if (followed.includes(path)) continue;
+      followed.push(path);
+      const childAst = parseTsx(path);
+      const buttons: string[] = [];
+      const findButtons = (n: ts.Node) => {
+        if (jsxTagName(n) === "button") buttons.push(tag);
+        n.forEachChild(findButtons);
+      };
+      findButtons(childAst);
+      for (const b of buttons) nestedButtons.push(`TabsTrigger > ${b} (${path})`);
+    }
+  }
+  check(
+    // Non-vacuity again, and the specific one that matters: the X is the
+    // element the defect was in, so a walk that does not reach
+    // `TrailingIconButton.tsx` is not testing the thing it was written for.
+    "the walk followed the close X's own file across the import",
+    followed.includes("src/modules/tabs/components/TrailingIconButton.tsx"),
+    followed,
+  );
+  check(
+    // The frontier. Empty is what makes "one hop" a bound rather than a hole.
+    "every component under the trigger resolves to a file in this repo, so nothing is skipped",
+    unfollowable.length === 0,
+    unfollowable,
+  );
+  check(
+    // THE RULE. `<button>` inside Radix's `<button>` - the console error, and
+    // the reason the four stops above exist at all.
+    "no <button> is rendered inside <TabsTrigger>, directly or one import away",
+    nestedButtons.length === 0,
+    nestedButtons,
   );
 
   const groupTag = openingTag(barSrc, "SortableTabGroup");
@@ -1732,3 +1924,49 @@ console.log("\nALL PASS");
 //       change with a real cost behind it (two `wsSaveTabs` per chip click), and
 //       until N6 it was the only thing here that could be undone with
 //       all 58 scripts still green.
+//
+//   N7a TrailingIconButton.tsx: the X reverted to        8 red. Every check that
+//       `<button type="button">`, `role`/`tabIndex`       reads the opening tag,
+//       dropped - the nested-button state itself         because `openingTag(
+//       (EXIT=1)                                          src, "span")` then
+//                                                         finds nothing, PLUS
+//                                                         "no <button> is
+//                                                         rendered inside
+//                                                         <TabsTrigger>", which
+//                                                         names the file:
+//                                                         "TabsTrigger >
+//                                                         TrailingIconButton
+//                                                         (.../TrailingIconButton
+//                                                         .tsx)".
+//   N7b TrailingIconButton.tsx: the `onKeyDown` stop    "and stops the keydown
+//       deleted outright (EXIT=1, exactly 1 red)         Enter and Space arrive
+//                                                        on, ..."
+//   N7c TrailingIconButton.tsx: `tabIndex={0}` ->       "and keeps the X
+//       `tabIndex={-1}` (EXIT=1, exactly 1 red)          keyboard-reachable, ..."
+//   N7d renderEntryBody.tsx: a literal                  "no <button> is rendered
+//       `<button type="button">x</button>` added         inside <TabsTrigger>",
+//       inside the trigger (EXIT=1, exactly 1 red)      reported as
+//                                                        "TabsTrigger > button"
+//
+//       N7a and N7d are the two ARMS of the parentage walk - one import away and
+//       directly inside - and both had to be watched, because a walk that only
+//       ever follows imports would miss the second and a scan of the file alone
+//       would miss the first. The first is the one that actually shipped.
+//
+//   N7e renderEntryBody.tsx: `<Fragment>x</Fragment>`   "every component under
+//       added inside the trigger - a component the       the trigger resolves to
+//       one-hop walk cannot follow (EXIT=1)              a file in this repo",
+//                                                        reported as
+//                                                        "Fragment (react)"
+//   N7f renderEntryBody.tsx: a second, inert            "found exactly one
+//       `<TabsTrigger>` added below the real one         <TabsTrigger> ... to
+//       (EXIT=1, 2 red)                                  walk" (got 2), and
+//                                                        collaterally "the walk
+//                                                        followed the close X's
+//                                                        own file", which stops
+//                                                        running at all.
+//
+//       N7e/N7f are the parentage block's two non-vacuity guards, and they are
+//       why "one hop" is a bound rather than a hole: a descendant the walk
+//       cannot follow FAILS instead of being skipped, and a trigger the walk
+//       never entered FAILS instead of passing for free.

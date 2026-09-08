@@ -14,8 +14,11 @@
  * TERMINAL's own session, dies with the tab, and this store never hears about
  * it - the page shows it "Running (with host)" read-only, off a SEPARATE map
  * the terminal writes (`./hostOwned.ts`) and this page only reads. A
- * terminal-owned forward is therefore never in `byRule`; the two are mutually
- * exclusive by construction, not by a check either side has to make.
+ * terminal-owned forward is therefore never in `byRule` - but that is held by
+ * A CHECK ON EACH SIDE, not by construction: `controller.ts`'s `startRule`
+ * refuses a rule a terminal already owns, and `autostart.ts` reads
+ * `runtimeStatus` before the bind and again before the claim, yielding if the
+ * page has it running by then. `./hostOwned.ts`'s header gives both in full.
  *
  * The `claim` field is what makes Stop safe. `SshForward.claim`
  * (`ssh/tunnel.ts:51-74`) is monotonic and names the ENTRY a caller took its

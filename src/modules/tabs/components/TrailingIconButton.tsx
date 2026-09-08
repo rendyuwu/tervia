@@ -27,10 +27,24 @@ export function TrailingIconButton({
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        <button
-          type="button"
+        <span
+          // A span carrying the button ROLE, and not a `<button>`, because the
+          // only caller renders this INSIDE `TabsTrigger`, which Radix renders
+          // as a real `<button>`. A `<button>` nested in a `<button>` is
+          // invalid HTML: React logs it, and the parser is entitled to close
+          // the outer one early and reparent this out of the chip, which would
+          // leave the X painted where it is and hit-testable somewhere else.
+          //
+          // `tabIndex={0}`, not `-1`, because the `<button>` this replaced was
+          // keyboard-reachable and a fix aimed at the DOM must not quietly
+          // delete a control the user can reach today. That reachability is
+          // what the `onKeyDown` below is for: a span gets no synthesised
+          // click from Enter or Space, so without it the X would be focusable
+          // and dead.
+          role="button"
+          tabIndex={0}
           aria-label={label}
-          // THREE separate native events, and the X has to stop all three,
+          // FOUR separate native events, and the X has to stop all four,
           // because closing a tab must never first ACTIVATE it - a background
           // tab's X under an open Vault or Port Forwarding view would otherwise
           // throw the user out of the view they were reading (`tabView.ts`'s
@@ -50,9 +64,16 @@ export function TrailingIconButton({
           //   stop this one, which is exactly how it was missed.
           // - click: the trigger's own select route (`lib/selectEntry.ts`),
           //   which is unconditional on purpose and so fires on the X too.
+          // - keydown: `TabsTrigger` activates on Enter and Space. An unstopped
+          //   keydown from a focused X therefore selects the very tab it is
+          //   closing - the keyboard's copy of the mousedown route above, and
+          //   the one the `<button>` never had, since a button's Enter/Space
+          //   arrives at the trigger as a synthesised `click` that the click
+          //   stop already caught. `preventDefault` before the stop, so Space
+          //   does not also scroll the strip.
           //
-          // Stopped here at the button rather than by teaching those handlers
-          // what an X is: the trigger's route stays unconditional, which is what
+          // Stopped here at the X rather than by teaching those handlers what
+          // an X is: the trigger's route stays unconditional, which is what
           // makes an already-active chip clickable at all.
           onPointerDown={(ev) => ev.stopPropagation()}
           onMouseDown={(ev) => ev.stopPropagation()}
@@ -60,10 +81,16 @@ export function TrailingIconButton({
             ev.stopPropagation();
             onClick();
           }}
+          onKeyDown={(ev) => {
+            if (ev.key !== "Enter" && ev.key !== " ") return;
+            ev.preventDefault();
+            ev.stopPropagation();
+            onClick();
+          }}
           className={cn(TRAILING_BTN_BASE, TRAILING_BTN_VARIANT[variant])}
         >
           <Icon size={TRAILING_ICON_SIZE} strokeWidth={2} />
-        </button>
+        </span>
       </TooltipTrigger>
       <TooltipContent side="bottom">{label}</TooltipContent>
     </Tooltip>

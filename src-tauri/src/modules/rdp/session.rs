@@ -90,7 +90,7 @@ const MAX_FASTPATH_EVENTS: usize = 255;
 /// behaviour the MVP needs: `image.update_pointer` / `image.move_pointer`
 /// composite the cursor into the framebuffer and report the affected region as
 /// an ordinary `GraphicsUpdate`, so no `pointerBitmap` rendering is needed on
-/// the frontend (that is RDP-12, deferred). Upstream `ironrdp-client` defaults
+/// the frontend (that path is deferred). Upstream `ironrdp-client` defaults
 /// to `enable_server_pointer: true` for the same reason; it pairs it with
 /// software rendering off only because it has a native cursor to hand the
 /// bitmap to, which a webview does not.
@@ -171,7 +171,7 @@ impl NetworkClient for NoNetworkClient {
 
 /// Push transport: encode on the session task, hand the bytes straight to the
 /// IPC channel. The only [`FrameTransport`] impl today; see the trait's docs
-/// for what a pull model (RDP-01) would replace.
+/// for what a pull model would replace.
 struct ChannelTransport {
     primary: EventSink,
     mirrors: Arc<Mutex<Vec<EventSink>>>,
@@ -192,8 +192,8 @@ impl FrameTransport for ChannelTransport {
     /// payload - the queued path's JS side is `.catch(console.error)`
     /// (channel.rs:178) and never reports back - so this is not a liveness
     /// signal and the caller must not treat it as backpressure. Kept because it
-    /// is the right shape for the seam and a pull transport (RDP-01) would have
-    /// a real answer here.
+    /// is the right shape for the seam and a pull transport would have a real
+    /// answer here.
     fn deliver(&mut self, bytes: Vec<u8>) -> Result<(), TransportGone> {
         {
             // Prune sinks whose channel has closed, exactly as the SSH pump's
@@ -562,8 +562,8 @@ fn build_config(input: &RdpOpenInput, password: &str) -> Config {
         license_cache: None,
         timezone_info: TimezoneInfo::default(),
         // No bulk compression: it costs CPU on a link that is already carrying
-        // a compressed bitmap codec, and RDP-02 (a wire encoder for our own
-        // frame batches) is the lever that actually matters here.
+        // a compressed bitmap codec, and a wire encoder for our own frame
+        // batches is the lever that actually matters here.
         compression_type: None,
         enable_server_pointer: ENABLE_SERVER_POINTER,
         pointer_software_rendering: POINTER_SOFTWARE_RENDERING,
@@ -997,7 +997,7 @@ async fn run(
                 // Unreachable with POINTER_SOFTWARE_RENDERING: the cursor is
                 // composited into the framebuffer and arrives as a
                 // GraphicsUpdate instead. Handing the bitmap to the frontend
-                // for a hardware cursor is RDP-12, deferred.
+                // for a hardware cursor is deferred.
                 ActiveStageOutput::PointerBitmap(pointer) => {
                     log::trace!(
                         "rdp: ignoring pointer bitmap {}x{} (software rendering is on)",

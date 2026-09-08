@@ -9,11 +9,12 @@
  * and the pane's own `close()` both call {@link HostOwnedState.releaseSession},
  * and a reconnect comes back with a new session id and claims afresh.
  *
- * THE OTHER SIDE OF `runtime.ts:12-20`. That store is the PAGE's and is keyed
- * by `ruleId` alone; this one is the TERMINAL's, and it is keyed by `ruleId`
- * alone too - which is exactly why it CANNOT REPRESENT TWO OWNERS, and why the
- * answer to a second owner is to refuse it rather than to record it: a forward
- * rule runs under one owner at a time.
+ * THE OTHER SIDE OF `runtime.ts`'s "KEYED BY `ruleId` ALONE" paragraph. That
+ * store is the PAGE's and is keyed by `ruleId` alone; this one is the
+ * TERMINAL's, and it is keyed by `ruleId` alone too - which is exactly why it
+ * CANNOT REPRESENT TWO OWNERS, and why the answer to a second owner is to
+ * refuse it rather than to record it: a forward rule runs under one owner at a
+ * time.
  *
  * TWO EXCLUSIONS, EACH WITH ITS OWN CHECK, and neither is "by construction":
  *

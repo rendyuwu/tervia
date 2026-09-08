@@ -306,23 +306,23 @@ function findConstDeclaration(root: ts.Node, name: string): ts.VariableDeclarati
 // ============================================================================
 // 1. The rail branch was replaced, and only that branch.
 // ============================================================================
-// Protects: `RailViewArea.tsx`'s `vault` case renders `<VaultPage />`, its
-// `PagePlaceholder` call is gone, and - the negative control - the `forwards`
-// case, which has its own branch, still renders `<ForwardsPage />`.
-// The third check is what stops an edit that replaced BOTH branches from
+// Protects: `RailViewArea.tsx`'s `vault` case renders `<VaultPage />`, and -
+// the negative control - the `forwards` case, which has its own branch, still
+// renders `<ForwardsPage />`.
+// The second check is what stops an edit that replaced BOTH branches from
 // reading as correct: M2 below flips `forwards` to `<VaultPage />` too, and
-// only the third check can notice.
+// only the second check can notice.
 //
-// RE-AIMED: this check used to read `<PagePlaceholder page="forwards"`, which
-// was correct while the forwards branch was still a placeholder and
+// RE-AIMED: this check used to read the forwards case's placeholder element,
+// which was correct while the forwards branch was still unbuilt and
 // deliberately wrong (a FAIL on purpose) from the moment `RailViewArea.tsx`'s
 // `forwards` case itself changed - the window was exactly this one
 // check, `vault-shell` going 165 ok -> 164 ok + 1 FAIL, and nothing else in
-// this file. Kept as its own check, separate from the vault positives above,
-// so a failure here names WHICH page's branch drifted.
+// this file. Kept as its own check, separate from the vault check above, so a
+// failure here names WHICH page's branch drifted.
 //
 // RE-ANCHORED FROM A CHARACTER BUDGET ONTO THE `return`
-// ITSELF. All three checks used to be a regex of the shape
+// ITSELF. Both checks used to be a regex of the shape
 // `/case "vault":[\s\S]{0,200}<VaultPage\s*\/>/` over the RAW source, and the
 // `{0,200}` was standing in for "the next thing this case returns". It is the
 // wrong shape for that question, because what sits in those 200 characters is
@@ -335,11 +335,11 @@ function findConstDeclaration(root: ts.Node, name: string): ts.VariableDeclarati
 // The AST answers the actual question. `caseReturnsTag` walks to the
 // `CaseClause` whose expression is the string literal, reads its own `return`,
 // and hands back the JSX tag name - so the answer cannot depend on how long the
-// comment above the return is, and a comment that merely MENTIONS
-// `PagePlaceholder` can no longer fail the negative either (the same flank the
-// shared compiler-API helpers below were written to close). The regex form is
-// not merely widened, because a bigger budget is the same bug with a later
-// trigger date.
+// comment above the return is, and a comment that merely MENTIONS either page
+// name can no longer flip a check by accident (the same flank the shared
+// compiler-API helpers below were written to close). The regex form is not
+// merely widened, because a bigger budget is the same bug with a later trigger
+// date.
 console.log("[1. rail branch] only the vault case was replaced");
 {
   const sf = ts.createSourceFile(
@@ -385,11 +385,6 @@ console.log("[1. rail branch] only the vault case was replaced");
   // that returns no JSX at all, which is a different failure from one returning
   // the wrong page and the detail is the only place that distinction shows.
   check("the vault case renders <VaultPage />", vaultTag === "VaultPage", vaultTag ?? "(none)");
-  check(
-    "the vault case no longer renders PagePlaceholder",
-    vaultTag !== "PagePlaceholder",
-    vaultTag ?? "(none)",
-  );
   check(
     "NEGATIVE CONTROL: the forwards case renders <ForwardsPage /> (its own branch)",
     forwardsTag === "ForwardsPage",
@@ -1469,10 +1464,10 @@ console.log(failed === 0 ? "\nAll vault-shell checks passed." : `\n${failed} che
 //
 //   Mutation                                          Check(s) it killed
 //   -------------------------------------------------  ---------------------------
-//   M1: RailViewArea.tsx's vault case reverted to      section 1's first two
-//     <PagePlaceholder page="vault" />                  checks
-//   M2: RailViewArea.tsx's forwards case changed to    section 1's third check
-//     <VaultPage /> (negative-control check)             (the negative control)
+//   M1: RailViewArea.tsx's vault case reverted to      section 1's first
+//     render a placeholder instead of <VaultPage />      check
+//   M2: RailViewArea.tsx's forwards case changed to    section 1's second
+//     <VaultPage /> (negative-control check)             check (the negative control)
 //   M3: identityRows(...) hoisted out of its useMemo   section 3, naming
 //     into the render body                              identityRows(...)
 //   M4: deleteIdentity(target.id, async () => [])      section 5, both the

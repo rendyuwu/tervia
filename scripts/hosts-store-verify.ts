@@ -1902,7 +1902,7 @@ console.log("\n[pins] an unkeyed pin is attributed rather than dropped or moved"
       sshHost({ id: "h-old", host: "a.example", lastFingerprint: "SHA256:OLD" }),
       sshHost({ id: "h-move", host: "a.example", lastFingerprint: "SHA256:OLD" }),
       rdpHost({ id: "h-rdp", host: "r.example", certFingerprint: "SHA256:CERT" }),
-      // The two rows here that are NOT pre-keying, and they exist because a
+      // The next two rows are NOT pre-keying, and they exist because a
       // pre-keying row cannot tell the two halves of the changed-address branch
       // apart: its flat pin IS its map's only entry, so both halves are the same
       // no-op on it.

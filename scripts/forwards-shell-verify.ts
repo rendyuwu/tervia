@@ -653,7 +653,7 @@ function primitiveSelectorBody(
 //
 // RE-ANCHORED FROM A CHARACTER BUDGET ONTO THE `return`
 // ITSELF, in step with `vault-shell-verify.ts`'s section 1 and for the reason
-// its own note spells out: all three checks here used to be a regex of the
+// its own note spells out: both checks here used to be a regex of the
 // shape `/case "forwards":[\s\S]{0,200}<ForwardsPage\s*\/>/` over the RAW
 // source, and the `{0,200}` was standing in for "the next thing this case
 // returns". What actually sits in those 200 characters is mostly PROSE, so the
@@ -711,11 +711,6 @@ console.log("[1. rail branch] only the forwards case was replaced");
   check(
     "the forwards case renders <ForwardsPage />",
     forwardsTag === "ForwardsPage",
-    forwardsTag ?? "(none)",
-  );
-  check(
-    "the forwards case no longer renders PagePlaceholder",
-    forwardsTag !== "PagePlaceholder",
     forwardsTag ?? "(none)",
   );
   check(

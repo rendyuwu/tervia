@@ -425,10 +425,9 @@ function rdpArm(base: HostBase, raw: Record<string, unknown>): RdpHost {
     protocol: "rdp",
     credential: rdpBinding(raw.credential, base.id),
     // Unlike every other field, a bad desktop size does NOT drop the row. It is
-    // the one field a later build could legitimately widen (RDP-08 adds
-    // `"fit"`), and a host is still perfectly dialable at a different
-    // resolution - so an unusable size falls back instead of costing the user
-    // the connection.
+    // the one field a later build could legitimately widen by adding a `"fit"`
+    // mode, and a host is still perfectly dialable at a different resolution -
+    // so an unusable size falls back instead of costing the user the connection.
     desktopWidth: dimension(raw.desktopWidth) ?? RDP_DEFAULT_PRESET.width,
     desktopHeight: dimension(raw.desktopHeight) ?? RDP_DEFAULT_PRESET.height,
     sizeMode,

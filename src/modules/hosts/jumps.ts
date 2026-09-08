@@ -12,8 +12,8 @@ import { isSshHost, type Host, type SshHost } from "./types";
 //
 // Credentials come from `resolveSshAuth`, so a hop bound to a vault identity and
 // a hop owning its credentials inline are the same code here. That is also where
-// the plaintext enters JS, once per hop - the pre-existing SSH defect
-// (issues/11), unchanged by this module and not made worse by it.
+// the plaintext enters JS, once per hop - the pre-existing SSH defect, unchanged
+// by this module and not made worse by it.
 
 /** Hard cap so a malformed chain cannot spin forever building hops. */
 export const MAX_JUMP_HOPS = 16;

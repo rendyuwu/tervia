@@ -6,7 +6,7 @@
 // What this buys is FEWER COPIES of the same secret, not a stronger secret. On
 // Linux a private key sits in a mode-0600 JSON file before and after this work,
 // and the SSH connect path still round-trips plaintext through JS on every
-// connect and every ProxyJump hop (issues/11). Nothing here changes either.
+// connect and every ProxyJump hop. Nothing here changes either.
 
 export const VAULT_STORE_PATH = "tervia-vault.json";
 export const VAULT_IDENTITIES_KEY = "identities";

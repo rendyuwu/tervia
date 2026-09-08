@@ -996,11 +996,11 @@ export function createHostsStore(io: HostsIo): HostsStore {
    * The three SSH secrets one host owns, in plaintext, for the host editor
    * prefilling a draft.
    *
-   * Reading a secret back into JS is the PRE-EXISTING SSH defect (issues/11), not
-   * one this store introduces: `resolveSshAuth` does the same on every connect and
-   * every ProxyJump hop. It is SSH-only and there is deliberately no RDP
-   * counterpart - an RDP password reaches the backend as a keychain reference and
-   * must never enter the webview.
+   * Reading a secret back into JS is the PRE-EXISTING SSH defect, not one this
+   * store introduces: `resolveSshAuth` does the same on every connect and every
+   * ProxyJump hop. It is SSH-only and there is deliberately no RDP counterpart -
+   * an RDP password reaches the backend as a keychain reference and must never
+   * enter the webview.
    *
    * Empty for a vault-bound host, which owns no accounts to read.
    */
