@@ -135,8 +135,8 @@ export type HostEditorDialogProps = {
    * the source this dialog resolves a bound identity's name from. A prop
    * rather than a vault subscription of this file's own: `identityRows` is
    * built once by the page from the vault hook it already subscribes to
-   * (`vault/page/derive.ts:96-103`), so this dialog and the Hosts page cannot
-   * disagree about what an identity is called.
+   * (`identityRows` in `src/modules/vault/page/derive.ts`), so this dialog and
+   * the Hosts page cannot disagree about what an identity is called.
    */
   identityRows: IdentityRow[];
 };
@@ -784,9 +784,11 @@ export function HostEditorDialog({
   ];
 
   // The credential picker's options. Each identity option carries the id in
-  // `search` too, not only in `label` - `Combobox.tsx:27-29` and
-  // `IdentityEditorDialog.tsx:152-155` already hold key options to the same
-  // rule, because two like-named identities must not collapse into one entry.
+  // `search` too, not only in `label` - `ComboboxOption.search` in
+  // `src/modules/hosts/editor/Combobox.tsx` and `keyOptions` in
+  // `src/modules/vault/editor/IdentityEditorDialog.tsx` already hold key
+  // options to the same rule, because two like-named identities must not
+  // collapse into one entry.
   const identityOptions: ComboboxOption[] = identityRows.map((row) => ({
     value: identityChoice(row.identity.id),
     label: row.identity.name,
@@ -1618,9 +1620,10 @@ export function HostEditorDialog({
   const title = mode === "create" ? "New host" : ready ? `Edit ${protocolLabel} host` : "Edit host";
 
   // Radix keeps `AlertDialogContent` mounted for its ~100ms exit animation
-  // (`VaultPage.tsx:197-216` found this first, over its own delete confirm), so
-  // a body reading `pendingChange` directly would render an empty title and
-  // description while the dialog fades out. `shownChange` is the same record,
+  // (`shownDelete` in `src/modules/vault/VaultPage.tsx` found this first,
+  // over its own delete confirm), so a body reading `pendingChange` directly
+  // would render an empty title and description while the dialog fades out.
+  // `shownChange` is the same record,
   // held past the moment `pendingChange` clears, and exists ONLY to answer
   // "what does the dialog show" - `open` below and `applyCredentialChange`'s own
   // argument still key off `pendingChange` itself.

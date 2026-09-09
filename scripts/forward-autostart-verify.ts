@@ -157,8 +157,8 @@ let failed = 0;
  *
  * Not rewritten, because THREE different `check()` signatures exist across this
  * verify suite - `check(label, got, want)` here and in `rdp-tunnel-verify.ts`,
- * `check(name, ok, detail?)` in `vault-shell-verify.ts:32`, `check(label, cond)`
- * in `hosts-header-narrow-verify.ts:47` - and changing one is a cross-script
+ * `check(name, ok, detail?)` in `scripts/vault-shell-verify.ts`, `check(label, cond)`
+ * in `scripts/hosts-header-narrow-verify.ts` - and changing one is a cross-script
  * change with no relation to this step. The rule instead: an assertion whose
  * `want` could be `undefined` uses `assert(... === undefined, ...)`, which
  * compares the value rather than its serialisation. The `[wiring]` block's
@@ -183,7 +183,8 @@ function assert(cond: boolean, msg: string, detail?: unknown): void {
 // ---------------------------------------------------------------------------
 // Stand-in for the Tauri IPC bridge, installed BEFORE the modules under test
 // are imported - the same idiom and the same reason as
-// `scripts/rdp-tunnel-verify.ts:169-179`. `autostart.ts` reaches
+// the `"plugin:event|listen"` case in `handleInvoke` (`scripts/rdp-tunnel-verify.ts`).
+// `autostart.ts` reaches
 // `modules/forwards/store` and `modules/ssh/bridge` for its DEFAULT deps, and
 // both of those touch `@tauri-apps/*` at module scope. Every section below
 // injects its own deps, so nothing here should ever be called: an unexpected
@@ -245,7 +246,8 @@ let nextAutoPort = 45000;
  * is bound literally and comes back as itself, `0` means "the OS picks" and
  * comes back as whatever it chose. Returning a fresh number either way would
  * make the port ASKED FOR and the port BOUND indistinguishable, which is the
- * mock-fidelity defect `rdp-tunnel-verify.ts:151-155` names and which would
+ * mock-fidelity defect the `"fs_read_file"` case in `handleInvoke`
+ * (`scripts/rdp-tunnel-verify.ts`) names and which would
  * turn section 5 into a tautology.
  *
  * `claimHostOwned` writes to the REAL store as well as recording, and
@@ -328,7 +330,8 @@ async function tick(): Promise<void> {
 /** The banners, written out by value rather than imported: a check that
  *  reached for the module's own template would pass with the template
  *  rewritten. `->` is ASCII deliberately - see `autostart.ts`'s note, and
- *  `ssh-session.ts:498-501`'s existing forward banner. */
+ *  `forwardDetectedUrl`'s existing forward banner in
+ *  `src/modules/terminal/lib/ssh-session.ts`. */
 const forwardingBanner = (bound: number, target: string, name: string) =>
   `\x1b[2m[tervia] forwarding localhost:${bound} -> ${target} (${name})\x1b[0m\r\n`;
 const failedBanner = (name: string, message: string) =>
@@ -919,8 +922,8 @@ function findPropertyValue(
 }
 
 /** Every `.ts`/`.tsx` file under `dir`, recursively. Copied from
- *  `scripts/forwards-shell-verify.ts:322-332`, for the repo-wide selector
- *  sweep section 10 needs. */
+ *  `walkSrcFiles` in `scripts/forwards-shell-verify.ts`, for the repo-wide
+ *  selector sweep section 10 needs. */
 function walkSrcFiles(dir: string): string[] {
   const out: string[] = [];
   for (const entry of readdirSync(dir)) {
@@ -1040,8 +1043,11 @@ console.log("\n[8. ssh-session.ts] the call site, and the two releases");
         "{...defaultAutostartDeps,stillLive:()=>!sessionEnded}",
       ],
     );
-    // R1's second half: the file's own idiom at `:336`, `:346` and `:384`.
-    // There is no `unhandledrejection` handler anywhere in `src/`, so a bare
+    // R1's second half: `ssh-session.ts`'s own idiom - the fire-and-forget
+    // `void <call>.catch(() => {})` around `markConnected` in
+    // `onJumpConnected`, `markConnected` in `onConnected`, and `pinFingerprint`
+    // in the host-key-trust callback. There is no `unhandledrejection` handler
+    // anywhere in `src/`, so a bare
     // `void` here rests entirely on reading another function's body.
     assert(
       call.parent !== undefined &&
@@ -1110,7 +1116,8 @@ console.log("\n[8. ssh-session.ts] the call site, and the two releases");
       //       stillLive: () => !sessionEnded,
       //     }).catch(() => {});
       //
-      // `sessionEnded` is `false` at `:206`, so terminal autostart was inert
+      // `sessionEnded` (`ssh-session.ts`'s `openSshForSession`, initialised
+      // `false`) is still `false` at that point, so terminal autostart was inert
       // for every rule with 57/57 scripts, this file 219/219 ok, and `tsc` and
       // `prettier --check` both green. `&&`, `||`, `?:` and `??` are all this
       // shape, and each is one more member of an open set - so this compares
@@ -1490,7 +1497,7 @@ console.log("\n[9. RuleCard.tsx] the read-only row a terminal-owned forward gets
   // THAT COMBINATION IS CURRENTLY UNCONSTRUCTIBLE, and this section is pinning
   // defence in depth rather than a live defect - said plainly, because the
   // previous version of this comment claimed it was reachable and nobody could
-  // build it. `controller.ts:155-161` runs the terminal-owned refusal and
+  // build it. `startRule` (`controller.ts`) runs the terminal-owned refusal and
   // `markStarting` with no `await` between them, so no claim lands in the gap,
   // and a terminal that reads `"starting"` after its own bind now CLAIMS rather
   // than yielding. The precedence is pinned anyway because the ROW's own
@@ -1666,10 +1673,11 @@ console.log("\n[10. the second store] every useHostOwnedForwards( selector is pr
   }
 
   // The negative, over COMMENT-STRIPPED source. Stripped because this file's
-  // own note at `hostOwned.ts:85-89` explains IN PROSE why `useShallow` is
+  // own note above `useIsHostOwned` explains IN PROSE why `useShallow` is
   // avoided, so a sentence there naming the module path would falsely redden a
-  // raw-source regex - the same exception `forwards-shell-verify.ts:417-420`
-  // already carves out for its own copy of this claim. Inconsistent with
+  // raw-source regex - the same exception the `useForwardRuntime(` selector
+  // rule section of `scripts/forwards-shell-verify.ts` already carves out for
+  // its own copy of this claim. Inconsistent with
   // sections 8 and 9, which strip, until now.
   assert(
     !/from ["']zustand\/react\/shallow["']/.test(stripComments(hostOwnedSrc)),
@@ -1691,7 +1699,8 @@ console.log("\n[10. the second store] every useHostOwnedForwards( selector is pr
   // REPO-WIDE, and this is the half that was missing entirely: the section only
   // ever read `hostOwned.ts`, so a bad selector written in a `.tsx` sat outside
   // its parse and outside every other script's. Same shape as
-  // `scripts/forwards-shell-verify.ts:431-438` uses for `useForwardRuntime(`.
+  // the allow-list's own self-test for `primitiveSelectorBody` in
+  // `scripts/forwards-shell-verify.ts` uses for `useForwardRuntime(`.
   // Currently clean - the only two calls are the two above - and keeping it
   // that way is what keeps the two checks above total. Comment-stripped, so a
   // note discussing the hook is not an offender; `useHostOwnedForwards.getState()`
@@ -1722,7 +1731,8 @@ console.log(
 {
   resetHostOwned();
   // LOCAL PORT BLANK, which is the DEFAULT rule shape: `EMPTY_RULE_DRAFT` has
-  // `localPort: ""` (`editor/draft.ts:46-54`), which saves as 0 and renders
+  // `localPort: ""` (`EMPTY_RULE_DRAFT` in `src/modules/forwards/editor/draft.ts`),
+  // which saves as 0 and renders
   // "Auto". That is what makes this reachable with no timing whatsoever - the
   // second bind SUCCEEDS on a different port, so nothing fails and nothing
   // warns. A pinned port would have failed EADDRINUSE and left tab A's entry
@@ -1763,8 +1773,9 @@ console.log(
   // PRESENCE ALONE, and this fixture is the one that changed direction. It used
   // to pin `owner !== sessionId` - "a rule THIS session already owns is not
   // refused" - as correct behaviour. That case is UNREACHABLE in production
-  // (`next_id` is a monotonic `AtomicU32` from 1,
-  // `src-tauri/src/modules/ssh/mod.rs:52,59,476`), so what the fixture was
+  // (`SshState::next_id` is a monotonic `AtomicU32` defaulted to 1 and only
+  // ever advanced by `fetch_add` in `ssh_open`,
+  // `src-tauri/src/modules/ssh/mod.rs`), so what the fixture was
   // really pinning was the UNSAFE half of an unreachable branch: if the
   // comparison ever did fire, the same session would bind a SECOND listener and
   // overwrite its own entry, orphaning the first port for the app's lifetime.
@@ -1972,7 +1983,8 @@ console.log(
   // ALREADY DEAD BEFORE THE FIRST BIND, which the fixture above cannot reach:
   // it kills the session between bind 1 and bind 2, so it only ever exercises
   // the post-bind check. `finishSsh` sets `sessionEnded` UNCONDITIONALLY
-  // (`ssh-session.ts:218`) - before `openSsh` has resolved an id - so a session
+  // (`src/modules/terminal/lib/ssh-session.ts`) - before `openSsh` has resolved
+  // an id - so a session
   // that ended while this run was still awaiting `listRules` is a real state,
   // and with the loop shaped bind-then-check it issued ONE bind on a dead
   // session and orphaned that listener before breaking.
@@ -2168,8 +2180,9 @@ console.log(
 }
 {
   // `"starting"` IS THE INVERSE, and this fixture is written against the new
-  // behaviour: the terminal CLAIMS rather than yielding. `autostart.ts:141-145`
-  // already reasoned this way about the very same status for the PRE-bind
+  // behaviour: the terminal CLAIMS rather than yielding. `skippedBanner`'s
+  // header (`autostart.ts`) already reasoned this way about the very same
+  // status for the PRE-bind
   // banner - "a page Start still dialling, which can then FAIL" - and the
   // post-bind path had not absorbed it.
   //
@@ -2286,8 +2299,9 @@ console.log(
 );
 // ===========================================================================
 // A CONSISTENCY CHECK AND NOTHING MORE, said plainly because the finding it
-// came from claimed nothing more either. `controller.ts:188-194` and `:219-225`
-// argue that a release must be awaited - "a close that landed later could land
+// came from claimed nothing more either. `startRule` (`controller.ts`), both its
+// pre-dial refusal and its post-dial superseded-attempt release, argues that a
+// release must be awaited - "a close that landed later could land
 // on a listener a subsequent Start has since bound on that port" - while
 // `autostart.ts`'s two yield releases fired UN-awaited on the identical hazard.
 // Nothing here was measured against the Rust side, so the claim is that the two
@@ -2443,8 +2457,9 @@ console.log("\nforward-autostart-verify: OK\n");
 //                                                          returned it and the wrapper
 //                                                          check passed while the whole
 //                                                          feature was inert for every
-//                                                          rule (`sessionEnded` is
-//                                                          false at `:206`).
+//                                                          rule (`sessionEnded`
+//                                                          is still false in
+//                                                          `openSshForSession`).
 //   Z7    ssh-session.ts: `close: async () => {` with    RED, fa 236/238 - both new
 //           `await Promise.resolve();` above the           assertions, the not-async
 //           release                                        one and the no-await-above

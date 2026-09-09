@@ -4,7 +4,7 @@
  *
  * Hosts named itself and Vault / Port Forwarding did not, and the asymmetry was
  * never a decision: a Hosts TAB is a page leaf, so it inherits the per-pane
- * header every leaf gets (`PaneTreeView.tsx:703`), while a rail view is
+ * header every leaf gets (`headerBar` in `src/modules/panes/PaneTreeView.tsx`), while a rail view is
  * deliberately NOT a leaf (`RailViewArea.tsx`) and so inherited nothing. The
  * header therefore had to be written, and this pins the four things about it
  * that a later edit can quietly undo.
@@ -23,7 +23,8 @@
  *  2. THE NAME IS SAID ONCE, IN ONE PLACE, AND COMES FROM `PAGE_LABELS`. The
  *     region is labelled with `aria-labelledby` pointing AT the heading rather
  *     than with an `aria-label` repeating the string, and the heading's text is
- *     `PAGE_LABELS[railView]` rather than a literal - `panes.ts:179` exists so
+ *     `PAGE_LABELS[railView]` rather than a literal - `PAGE_LABELS` in
+ *     `src/modules/terminal/lib/panes.ts` exists so
  *     the rail button, the tab strip and the page cannot drift into calling one
  *     page two things, and a literal here would be the fourth name.
  *  3. THE PANE HEADER'S TYPOGRAPHY, NONE OF ITS CONTROLS. A rail view cannot be
@@ -116,12 +117,14 @@ console.log("\n[once] the header is written once, in the container, not once per
 check("exactly one heading in the file", countOf(src, "<h2") === 1, countOf(src, "<h2"));
 const HEADER_BAR = "border-border/60 bg-card flex h-7";
 check(
-  // The bar's own vocabulary, taken from `PaneTreeView.tsx:707`. Two of these is
+  // The bar's own vocabulary, taken from `headerBar` in
+  // `src/modules/panes/PaneTreeView.tsx`. Two of these is
   // a second copy of the same chrome arriving by copy-paste.
   //
   // The pane header's `@container` is deliberately NOT in this literal, because
   // it is deliberately not on the bar: it is there so the pane header's per-file
-  // cluster can shed itself on a narrow pane (`PaneTreeView.tsx:705-706`) and
+  // cluster can shed itself on a narrow pane (`headerBar` in
+  // `src/modules/panes/PaneTreeView.tsx`) and
   // this bar has no `@[…]` descendant to shed. Pinning it here would have made a
   // dead class unremovable without a red check - a pin's job is to hold what is
   // load-bearing, so this one stops at the border, the card background and the
@@ -188,7 +191,7 @@ console.log("\n[chrome] the header borrows the pane header's look and none of it
 const iconBinding = /const (\w+) = PAGE_ICONS\[railView\];/.exec(header);
 check(
   // The same glyph the rail button the user just pressed shows - `PAGE_ICONS` is
-  // the single source `LeafIcon.tsx:42` documents, and three copies of a glyph
+  // the single source `src/components/LeafIcon.tsx` documents, and three copies of a glyph
   // map is the drift it was written to end.
   "the icon comes from PAGE_ICONS[railView]",
   iconBinding !== null,

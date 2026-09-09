@@ -2,7 +2,7 @@
  * Self-check for the clipboard READ path (`readClipboardText`).
  * Run: `npx tsx scripts/clipboard-read-verify.ts`.
  *
- * Paste was dead on Linux (#10) because `navigator.clipboard.readText()` rejects
+ * Paste was dead on Linux because `navigator.clipboard.readText()` rejects
  * there: wry only enables WebKitGTK's `javascript_can_access_clipboard` (which
  * also flips WebCore's `DOMPasteAllowed`, the read gate) when the webview is
  * built with `clipboard: true`, and Tauri defaults that to false with no

@@ -6,8 +6,8 @@
  * scripts/credential-move-verify.ts` to iterate).
  *
  * ONE in-memory `SecretsIo` shared by a REAL `createHostsStore` and a REAL
- * `createVaultStore` - the harness shapes already proven in
- * `hosts-store-verify.ts:222-366` and `vault-resolve-verify.ts:144-238`,
+ * `createVaultStore` - the harness shapes already proven in `harness` in
+ * `scripts/hosts-store-verify.ts` and `harness` in `scripts/vault-resolve-verify.ts`,
  * merged here because this is the one module that spans both stores. The copy
  * is real, against a real `kept` map: a stub answering `true` would make every
  * flag check below vacuous.
@@ -144,7 +144,7 @@ let failed = 0;
 
 /**
  * A canonical rendering of a value, used to compare AND to report, copied from
- * `hosts-store-verify.ts:141-153` rather than reinvented: it drops `undefined`
+ * `shape` in `scripts/hosts-store-verify.ts` rather than reinvented: it drops `undefined`
  * properties (so `{ x: undefined }` and `{}` compare equal, which matters for
  * every optional field on `Host` / `VaultIdentity` / `VaultKey`) and sorts keys
  * (so a spread built in a different order does not fail a check about content).
@@ -224,7 +224,7 @@ function harness(
      * Make the HOST store's `commit` throw.
      *
      * Not a simulation of the persist-half-landed case, but the case itself:
-     * `persist` (`hosts/store.ts:420-423`) writes every key through `set` and
+     * `persist` (`src/modules/hosts/store.ts`) writes every key through `set` and
      * only THEN commits, so a throw here leaves the new record sitting in the
      * store while `upsertHost` reports failure - which is exactly the state
      * `undoDetachCopies`' re-read guard exists to recognise, and the only way to
@@ -299,7 +299,7 @@ function harness(
   };
 
   // A REAL copy against `kept`, deliberately not a stub answering `true` - see
-  // the module header and `hosts-store-verify.ts:295-300`. A missing source
+  // the module header and `copy` in `scripts/hosts-store-verify.ts`. A missing source
   // writes NOTHING, not the empty string.
   const secrets: SecretsIo = {
     async getAll(service, accounts) {
@@ -648,7 +648,7 @@ console.log(
   // a dropdown selection they can make again. It was wrong here, and it was a
   // P0: convert MINTS this key out of the host's own PEM and
   // `releaseStaleAccounts` then deletes the host's copy, so the vault key is the
-  // only copy left - and `deleteKey`'s in-use guard (`vault/store.ts:337-347`)
+  // only copy left - and `deleteKey`'s in-use guard (`src/modules/vault/store.ts`)
   // finds holders by `identity.keyId`. With no identity naming it, the guard has
   // nothing to refuse over and one click on the Vault page destroys it, from a
   // convert that reported SUCCESS.

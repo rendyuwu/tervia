@@ -106,12 +106,13 @@ export type StoreFileIo = {
    * Write `content` over `path`, creating or replacing it.
    *
    * A write rather than a copy, on purpose. `fs_copy` refuses an existing target
-   * (`fs/mutate.rs:85`), so copying meant unlinking first - and a delete that
-   * fails (an antivirus or indexer holding the handle on Windows, a read-only
-   * data directory) turned "the good snapshot is sitting right there" into an
-   * `already exists` error. Both callers here have already READ and validated the
-   * bytes they want in place, so `fs_write_file` does the whole job in one
-   * command, through the app's atomic temp-plus-rename path.
+   * (in `src-tauri/src/modules/fs/mutate.rs`), so copying meant unlinking
+   * first - and a delete that fails (an antivirus or indexer holding the
+   * handle on Windows, a read-only data directory) turned "the good snapshot
+   * is sitting right there" into an `already exists` error. Both callers here
+   * have already READ and validated the bytes they want in place, so
+   * `fs_write_file` does the whole job in one command, through the app's
+   * atomic temp-plus-rename path.
    */
   write(path: string, content: string): Promise<void>;
 };

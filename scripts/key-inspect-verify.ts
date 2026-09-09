@@ -1,5 +1,5 @@
 /**
- * Self-check for the key-import diagnostics (issue #3 / Track C).
+ * Self-check for the key-import diagnostics.
  * Run: `pnpm verify key-inspect`.
  *
  * `src-tauri/src/modules/ssh/mod.rs` already classifies a pasted or picked key

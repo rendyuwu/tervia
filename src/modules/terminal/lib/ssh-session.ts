@@ -478,9 +478,10 @@ export async function openSshForSession(
   // rejects: a rule that cannot bind writes a banner and the connect carries
   // on. Awaiting it would hold the pane's first prompt behind N binds, and
   // letting it throw would turn a busy local port into a failed SSH connect.
-  // `.catch(() => {})` regardless, matching this file's own idiom at `:336`,
-  // `:346` and `:384`: "never rejects" is now structural in that function, and
-  // this is the belt that does not depend on reading it.
+  // `.catch(() => {})` regardless, matching this file's own idiom in
+  // `onJumpConnected`, `onConnected` and `onHostKeyPrompt`: "never rejects" is
+  // now structural in that function, and this is the belt that does not
+  // depend on reading it.
   //
   // The deps object exists for ONE key. `stillLive` is the only dep whose
   // answer lives in this scope - autostart's loop has to be able to ask whether

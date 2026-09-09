@@ -29,8 +29,9 @@ import { CREDENTIAL_STAMP_INLINE, credentialStamp, type Host } from "./types";
 // Where a host's credentials move into the vault and back, and the one
 // module that spans both stores for that reason - see `TERVIA.md`'s "The
 // vault" section. `modules/hosts` may import `modules/vault` (it already
-// does, `./store.ts:2-21`); `modules/vault` must never import `modules/hosts`
-// as a value (`vault/refs.ts:25-27`), so this file lives here, not there.
+// does, via the `@/modules/vault` imports atop `./store.ts`); `modules/vault`
+// must never import `modules/hosts` as a value (the type-only `Host` import
+// in `src/modules/vault/refs.ts`), so this file lives here, not there.
 //
 // Every account it touches is built from `HOST_SSH_FIELDS` / `VAULT_SSH_FIELDS`
 // (`vault/resolve.ts`), never from a field name spelled out again - the one
@@ -103,7 +104,7 @@ export function convertMoves(host: Host, identityId: string, keyId: string | nul
  * The reverse: every account the identity and its key own, mapped onto the
  * accounts this host will own - gated by the HOST's protocol, because an
  * inline RDP arm has one account and `nextRdpCredential` throws if key
- * material is handed to it (`./store.ts:681-683`).
+ * material is handed to it (in `./store.ts`).
  */
 export function detachMoves(
   host: Host,
@@ -133,7 +134,7 @@ export function detachMoves(
 
 /** Every move, sequentially - one keychain write is a read-modify-write of the
  *  whole secrets file on Linux and Windows, the same reason
- *  `deleteAccounts` (`./store.ts:533-541`) is not a `Promise.all`. Keyed by
+ *  `deleteAccounts` (in `./store.ts`) is not a `Promise.all`. Keyed by
  *  `field`, so a caller reads "did this field copy" without re-deriving the
  *  account string. */
 async function copyMoves(
@@ -177,7 +178,7 @@ export type CredentialMoveDeps = {
   secrets: SecretsIo;
 };
 
-/** Modelled on `ResolveDeps` / `defaultResolveDeps` (`vault/resolve.ts:141-143`),
+/** Modelled on `ResolveDeps` / `defaultResolveDeps` (in `vault/resolve.ts`),
  *  which is what makes this whole module exercisable under plain node against
  *  in-memory ports. */
 export const defaultCredentialMoveDeps: CredentialMoveDeps = {
@@ -301,14 +302,15 @@ export function reusableVaultKey(keys: readonly VaultKey[], facts: VaultKeyFacts
  * the refusal that would have stopped it is the one it has just removed.
  *
  * IDENTITY FIRST. `deleteKey` refuses while any identity still names the key
- * (`vault/store.ts:388-398`), and the identity minted above names it, so the
+ * (in `vault/store.ts`), and the identity minted above names it, so the
  * reverse order refuses its own cleanup and leaves both records behind.
  *
  * THE ACCOUNTS GO WITH THE RECORDS. Both deletes clear the record's vault
- * accounts as part of removing it (`vault/store.ts:376-380` and `:401-405`),
- * which is the half that matters: step 4 put a SECOND copy of the host's secret
- * at those accounts, and a cleanup that dropped only the records would leave
- * exactly the extra copy this whole feature exists to avoid.
+ * accounts as part of removing it (`deleteIdentity` and `deleteKey` in
+ * `vault/store.ts`), which is the half that matters: step 4 put a SECOND copy
+ * of the host's secret at those accounts, and a cleanup that dropped only the
+ * records would leave exactly the extra copy this whole feature exists to
+ * avoid.
  *
  * `identityHostRefs` is the real lookup, passed by name, rather than a
  * `() => []` shortcut. It finds no holders on the path this runs on - nothing
@@ -697,9 +699,10 @@ function detachInlineFields(
 }
 
 /** The inline arm the store overwrites `has*` flags on once it knows what it
- *  actually wrote - the same placeholder pattern `HostEditorDialog.tsx:737-741`
- *  hands over. Refuses rather than guessing when `inline`'s shape does not
- *  match the host's own protocol - a contract this function alone enforces:
+ *  actually wrote - the same placeholder pattern `hasStoredSshPrivateKey` in
+ *  `src/modules/hosts/HostEditorDialog.tsx` hands over. Refuses rather than
+ *  guessing when `inline`'s shape does not match the host's own protocol - a
+ *  contract this function alone enforces:
  *  its two call sites, both in {@link detachHostFromVault}, derive `inline`
  *  from `host.protocol` itself via {@link detachInlineFields}, so neither can
  *  construct the mismatch this throw guards against. */
@@ -739,7 +742,7 @@ function buildInlineRecord(host: Host, inline: SshInlineArgs | RdpInlineArgs): H
  *
  * WHY THESE ACCOUNTS ARE NOT ANYONE'S TO KEEP. The write refused, so the STORED
  * record is still `kind: "identity"` - and `secretFieldsFor` returns `[]` for a
- * non-inline credential (`./store.ts:208-213`), so the stored host names none of
+ * non-inline credential (in `./store.ts`), so the stored host names none of
  * these accounts. They hold bytes only because `copyMoves` put them there a few
  * statements earlier, in this call. The adjacent case lands the same way: if an
  * earlier `releaseStaleAccounts` failure had left an orphan at one of these
@@ -801,7 +804,7 @@ async function undoDetachCopies(
  * A missing identity does NOT refuse: the host is already unable to connect,
  * and refusing would leave it that way permanently. Copy nothing and return a
  * `warning` naming the missing identity - the `VaultUpsert.warning` shape
- * (`vault/store.ts:31-36`) is the precedent. The same treatment applies, one
+ * (in `vault/store.ts`) is the precedent. The same treatment applies, one
  * level down, to a dangling `keyId` on an identity that IS found: the
  * password still copies and the host still detaches, and only the key
  * material is reported missing.

@@ -1434,7 +1434,8 @@ console.log("\n[5] the credential copy names no store the platform does not have
   // All five files, `HostEditorDialog.tsx` included: its module header was
   // reworded to the vault convention that phrases this disclaimer AROUND the
   // ban ("Nothing here protects a secret better than it was protected
-  // before", per `vault/page/IdentityCard.tsx:14-16`) rather than the sweep
+  // before", per `IdentityCard`'s module header in
+  // `src/modules/vault/page/IdentityCard.tsx`) rather than the sweep
   // being narrowed to fit the one file most likely to grow a safety claim.
   // `Encrypted` is deliberately not forbidden - the key panel says it
   // about a locked key, truthfully, and that is a different claim

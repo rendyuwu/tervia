@@ -7,7 +7,7 @@
  * imports here, like every other script in the suite, are extensionless).
  *
  * Modelled on `scripts/vault-resolve-verify.ts`'s harness shape and its
- * `check(label, got, want)` signature (`vault-resolve-verify.ts:97`).
+ * `check(label, got, want)` signature.
  *
  * Every property here is one whose failure is SILENT:
  *
@@ -340,7 +340,8 @@ console.log("\n[dropRulesForHost] never consults a host lookup");
 {
   // The property this exists to prove: `dropRulesForHost` runs from inside
   // `deleteHost`'s write queue, BEFORE that queue touches the host list, so the
-  // host it is reacting to may already be gone (`hosts/store.ts:954-961`). A
+  // host it is reacting to may already be gone (`deleteHost` in
+  // `src/modules/hosts/store.ts`). A
   // version that cached the last `HostLookup` seen by `upsertRule` and
   // consulted it here would pass every check above and fail only here.
   const h = harness();

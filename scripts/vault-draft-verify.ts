@@ -235,7 +235,7 @@ console.log("\n[2] identityRecordFrom - keyId is written ONLY when authMode is '
 console.log('\n[2b] identityRecordFrom("keep") - the documented opt-out, and its default');
 {
   // `"keep"` exists for exactly one caller: `convertHostToVault`
-  // (`../../hosts/credentialMove.ts`), which mints a `VaultKey` out of a stored
+  // (`src/modules/hosts/credentialMove.ts`), which mints a `VaultKey` out of a stored
   // host's PEM and then has to leave something naming it - `deleteKey`'s in-use
   // guard finds holders by `identity.keyId`, so a key nothing names is one Vault
   // page click from destroyed. That is worse than the off-spec record - a
@@ -643,7 +643,8 @@ console.log(
   );
   check(
     "encrypted + a WHITESPACE-ONLY passphrase: ALSO refused - writeSecret trims before it decides" +
-      " (../store.ts:126), so an all-spaces passphrase is the same blank to the store, and this" +
+      " (in `src/modules/vault/store.ts`), so an all-spaces passphrase is the same blank to the" +
+      " store, and this" +
       " function has to agree or a save could look successful while storing an unusable key",
     encryptedKeyRefusal(true, "   "),
     REFUSAL,

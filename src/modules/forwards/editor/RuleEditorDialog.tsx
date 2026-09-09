@@ -69,7 +69,8 @@ export type RuleEditorDialogProps = {
    * `hosts.filter(isSshHost)` inside a `useMemo`.
    *
    * A PROP rather than a fresh read of the host store, for the reason
-   * `IdentityEditorDialog.tsx:51-64` gives about its own `keyRows` prop: a
+   * `IdentityEditorDialogProps.keyRows` in
+   * `src/modules/vault/editor/IdentityEditorDialog.tsx` gives: a
    * picker that re-reads the store is how two surfaces come to disagree about
    * one list. The page hands over its UNFILTERED host array - this list must
    * not follow the page's search box.
@@ -183,7 +184,8 @@ export function RuleEditorDialog({ target, onClose, hosts }: RuleEditorDialogPro
       // STOPPED BEFORE THE RECORD IT WAS OPENED UNDER CHANGES, and this side
       // of `upsertRule` rather than the other side is the whole claim.
       // `ssh/tunnel.ts`'s `forwardKey` is
-      // `connectionId|remoteHost|remotePort|localPort` (`tunnel.ts:246-252`)
+      // `connectionId|remoteHost|remotePort|localPort` (`forwardKey` in
+      // `src/modules/ssh/tunnel.ts`)
       // and this form can edit ALL FOUR, so a Stop issued after the write
       // names an entry that does not exist: the row reads "Stopped",
       // `markStopped` has discarded the claim, so no Stop can ever be issued
@@ -210,8 +212,8 @@ export function RuleEditorDialog({ target, onClose, hosts }: RuleEditorDialogPro
       //
       // AND IF THE WRITE BELOW THROWS, the rule is left stopped with its
       // record unchanged and the message the catch shows says nothing about
-      // it: reachable only on the host-deleted-in-another-window case `:215-221`
-      // describes, recoverable with one Start click on the row, and the
+      // it: reachable only on the host-deleted-in-another-window case the
+      // `catch` block below describes, recoverable with one Start click on the row, and the
       // alternative is holding the stop until after a write whose whole point
       // is that it invalidates the key that stop needs.
       if (existing && pageMustStopFirst(existing.id)) await stopRule(existing);
@@ -224,8 +226,8 @@ export function RuleEditorDialog({ target, onClose, hosts }: RuleEditorDialogPro
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
       // `upsertRule`'s only two host-shaped refusals both name the host id
-      // (`forwards/store.ts:112-121`; its own doc at `:37-43` says every
-      // refusal names the value it refuses), so the id is the anchor that
+      // (in `src/modules/forwards/store.ts`; `ForwardsStore.upsertRule`'s own
+      // doc says every refusal names the value it refuses), so the id is the anchor that
       // tells the two kinds of catch apart. Reachable only on an EDIT of a
       // rule whose host was deleted or turned into an RDP host in another
       // window - the picker above only ever offers a currently-saved SSH

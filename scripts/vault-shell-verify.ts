@@ -897,7 +897,7 @@ for (const key of ["identityCard", "keyCard"] as const) {
     check(`${FILES[key]} declares no ${prop} prop`, !src[key].includes(prop));
   }
   // The cards are still non-interactive containers: two icon buttons, and no
-  // focusable card. `HostCard.tsx:63,73-82` carries tabIndex/onClick/
+  // focusable card. `HostCard` in `src/modules/hosts/page/HostCard.tsx` carries tabIndex/onClick/
   // onDoubleClick/onKeyDown because that card IS interactive; adding any of
   // them here would create a focusable element that does nothing.
   for (const smell of ["tabIndex", "onDoubleClick", "onKeyDown"]) {

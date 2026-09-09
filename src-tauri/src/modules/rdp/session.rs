@@ -54,12 +54,12 @@ const FLUSH_WINDOW: Duration = Duration::from_millis(16);
 /// feeds; it is not an optimisation.**
 ///
 /// `FastPathInput::new` rejects any slice outside `1..=255`
-/// (`ironrdp-pdu-0.8.0/src/input/fast_path.rs:284-290`) because `nEvents` is a
-/// single byte on the wire, and `ActiveStage::process_fastpath_input` calls it
-/// on the whole slice unconditionally and propagates the error
-/// (`ironrdp-session-0.10.0/src/active_stage.rs:104`). The session task treats
-/// that as fatal, so an over-long batch would not drop input - it would emit
-/// `error` + `disconnected` and take the tab down.
+/// (`ironrdp-pdu` 0.8.0, `FastPathInput::new`) because `nEvents` is a single
+/// byte on the wire, and `ActiveStage::process_fastpath_input` calls it on the
+/// whole slice unconditionally and propagates the error
+/// (`ironrdp-session` 0.10.0, `ActiveStage::process_fastpath_input`). The
+/// session task treats that as fatal, so an over-long batch would not drop
+/// input - it would emit `error` + `disconnected` and take the tab down.
 ///
 /// This is reachable from ordinary use, with no attacker and no bug on the
 /// frontend's side:
@@ -70,7 +70,7 @@ const FLUSH_WINDOW: Duration = Duration::from_millis(16);
 ///   `unicodeDown`/`unicodeUp` events;
 /// * a single `releaseAll`, on its own: `Database::release_all` walks a 512-bit
 ///   keyboard array plus five mouse buttons and appends every held one to the
-///   same vector (`ironrdp-input-0.6.0/src/lib.rs:351-381`).
+///   same vector (`ironrdp-input` 0.6.0, `Database::release_all`).
 ///
 /// Chunking has to happen on the *emitted* `FastPathInputEvent`s rather than on
 /// the incoming operations: `Database::apply` emits zero, one or two events per
@@ -190,10 +190,10 @@ impl FrameTransport for ChannelTransport {
     /// `Err(TransportGone)` is **currently unreachable**. `Channel::send`
     /// returns `Ok` on both paths whether or not the frontend ever collects the
     /// payload - the queued path's JS side is `.catch(console.error)`
-    /// (channel.rs:178) and never reports back - so this is not a liveness
-    /// signal and the caller must not treat it as backpressure. Kept because it
-    /// is the right shape for the seam and a pull transport would have a real
-    /// answer here.
+    /// (`tauri` 2.11.5, `JavaScriptChannelId::channel_on`) and never reports
+    /// back - so this is not a liveness signal and the caller must not treat it
+    /// as backpressure. Kept because it is the right shape for the seam and a
+    /// pull transport would have a real answer here.
     fn deliver(&mut self, bytes: Vec<u8>) -> Result<(), TransportGone> {
         {
             // Prune sinks whose channel has closed, exactly as the SSH pump's
@@ -431,7 +431,8 @@ fn set_keepalive(tcp: &TcpStream) -> std::io::Result<()> {
 ///
 /// This is not cosmetic. `ironrdp`'s error types print only the *kind*, and the
 /// kind that matters most throws its cause away: `ConnectorErrorKind::Credssp(_)`
-/// renders as the bare word `"CredSSP"` (`ironrdp-connector` lib.rs:358) and
+/// renders as the bare word `"CredSSP"`
+/// (`ironrdp-connector` 0.9.0, `<ConnectorErrorKind as Display>::fmt`) and
 /// hides the entire `sspi::Error` behind `source()`. An NLA failure - wrong
 /// password, disabled account, no Remote Desktop Users membership, by far the
 /// most likely thing a user hits - would otherwise reach the UI as one useless
@@ -548,13 +549,14 @@ fn build_config(input: &RdpOpenInput, password: &str) -> Config {
         platform: MajorPlatformType::UNIX,
         hardware_id: None,
         // `None` makes the connector fill the X.224 Connection Request with
-        // `NegoRequestData::cookie(username)` (`ironrdp-connector-0.9.0`
-        // connection.rs:270-277). That cookie goes out on plain TCP inside
-        // `connect_begin`, i.e. before TLS and therefore before the certificate
-        // check. Kept deliberately: `mstsc` sends it and RD Connection Broker
-        // routes on it, so suppressing it would be a real interop regression to
-        // buy a small disclosure. See the note on `connect` about exactly what
-        // does and does not cross the wire before the certificate is verified.
+        // `NegoRequestData::cookie(username)`
+        // (`ironrdp-connector` 0.9.0, `<ClientConnector as Sequence>::step`).
+        // That cookie goes out on plain TCP inside `connect_begin`, i.e. before
+        // TLS and therefore before the certificate check. Kept deliberately:
+        // `mstsc` sends it and RD Connection Broker routes on it, so
+        // suppressing it would be a real interop regression to buy a small
+        // disclosure. See the note on `connect` about exactly what does and
+        // does not cross the wire before the certificate is verified.
         request_data: None,
         autologon: false,
         enable_audio_playback: false,
@@ -642,10 +644,11 @@ pub async fn connect(
     // Hand the raw TCP stream over.
     //
     // `into_inner_no_leftover()` would be the idiomatic call here, but it checks
-    // for leftover bytes with a `debug_assert_eq!` (`ironrdp-async` framed.rs:86)
-    // - so a RELEASE build silently discards anything still buffered and
-    // desyncs the TLS record stream, which then surfaces as a random-looking
-    // handshake failure. Check it ourselves and fail with something readable.
+    // for leftover bytes with a `debug_assert_eq!`
+    // (`ironrdp-async` 0.9.0, `Framed::into_inner_no_leftover`), so a RELEASE
+    // build silently discards anything still buffered and desyncs the TLS
+    // record stream, which then surfaces as a random-looking handshake
+    // failure. Check it ourselves and fail with something readable.
     // In practice this is unreachable: the connector guarantees the buffer is
     // drained at exactly this handoff point, which is the only place this may
     // be called.
@@ -726,8 +729,9 @@ pub async fn connect(
         .unwrap_or_else(|| tls::fingerprint_sha256(&leaf_der));
 
     // `mark_as_upgraded` is an `assert!` on the connector being in
-    // `EnhancedSecurityUpgrade` (`ironrdp-connector` connection.rs:183), and
-    // with `panic = "abort"` in release an assert takes the whole app down
+    // `EnhancedSecurityUpgrade`
+    // (`ironrdp-connector` 0.9.0, `ClientConnector::mark_security_upgrade_as_done`),
+    // and with `panic = "abort"` in release an assert takes the whole app down
     // rather than failing one tab. `connect_begin` loops until that state is
     // reached and nothing since has stepped the connector, so this is
     // unreachable - it is here so a future reordering fails a connect instead
@@ -952,9 +956,11 @@ async fn run(
         // Outputs are drained OUTSIDE the select above, and that is load
         // bearing: `Framed::write_all` is NOT cancel-safe - it may have
         // partially written the buffer and a later call restarts from the
-        // beginning (`ironrdp-async` framed.rs:213-221), which would corrupt
-        // the stream. It must never sit in a losing `select!` branch. Only
-        // `read_pdu` / `read_by_hint` / `read_exact` are documented cancel-safe.
+        // beginning
+        // (`ironrdp-async` 0.9.0, `<Framed<S> as FramedWrite>::write_all`),
+        // which would corrupt the stream. It must never sit in a losing
+        // `select!` branch. Only `read_pdu` / `read_by_hint` / `read_exact` are
+        // documented cancel-safe.
         // Do not move this write into the select.
         //
         // `ActiveStageOutput` is matched exhaustively on purpose: unlike the
@@ -970,11 +976,12 @@ async fn run(
                 }
                 // One rect per update, and IronRDP has already unioned every
                 // bitmap rect from the same PDU into its bounding box
-                // (`fast_path.rs:297-300`) - so a single update can cover much
-                // more than actually changed, and the win here comes from
-                // coalescing across updates in time, not from packing many
-                // rects into one batch. The batch format stays multi-rect
-                // because it costs nothing and the collapse rule still applies.
+                // (`ironrdp-session` 0.10.0, `Processor::process_bitmap_update`),
+                // so a single update can cover much more than actually changed,
+                // and the win here comes from coalescing across updates in
+                // time, not from packing many rects into one batch. The batch
+                // format stays multi-rect because it costs nothing and the
+                // collapse rule still applies.
                 ActiveStageOutput::GraphicsUpdate(rect) => {
                     // Drop the all-zero sentinel before converting: inclusive
                     // bounds would turn it into a phantom 1x1 update at the
@@ -1013,7 +1020,7 @@ async fn run(
                     // Bounded, unlike every earlier version of this. The
                     // sequence starts in `CapabilitiesExchange`, whose
                     // `next_pdu_hint()` is `Some(&X224_HINT)`
-                    // (`ironrdp-connector-0.9.0` connection_activation.rs:52-84),
+                    // (`ironrdp-connector` 0.9.0, `ConnectionActivationSequence::next_pdu_hint`),
                     // so the first step awaits a read that a server which sent
                     // `ServerDeactivateAll` and then went quiet will never
                     // satisfy. Without a deadline that parks the task here

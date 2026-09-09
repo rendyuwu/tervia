@@ -62,7 +62,7 @@ export type IdentityRow = {
    *  reference renders as {@link UNKNOWN_KEY_LABEL}, and a key the user
    *  actually named "Unknown key" renders identically. Separate from
    *  `missingSecret` because the two are not the same fact - `keyId` is
-   *  independent of `authMode` (`src/modules/vault/types.ts:107-108`), so an
+   *  independent of `authMode` (`VaultIdentity.keyId` in `src/modules/vault/types.ts`), so an
    *  identity on `password` auth with a stale `keyId` has a dangling reference
    *  AND a working credential. A renderer must be able to warn about the chip
    *  without calling the row broken. */
@@ -246,8 +246,8 @@ export function rankIdentities(rows: readonly IdentityRow[], query: string): Ide
  * against, and nothing authenticates off a search result.
  *
  * That residual holds only because nothing today asks this function a
- * verification question. `VaultKey.fingerprint`'s own doc
- * (`src/modules/vault/types.ts:122`) says the field is for "display, and
+ * verification question. `VaultKey.fingerprint`'s own doc in
+ * `src/modules/vault/types.ts` says the field is for "display, and
  * duplicate detection at import" - and `rankKeys`/`keyMatchTier` must NEVER be
  * the implementation of that second half. The moment an import path asks "does
  * the vault already have this fingerprint?" through this search layer, a
@@ -255,12 +255,12 @@ export function rankIdentities(rows: readonly IdentityRow[], query: string): Ide
  * answer about whether a secret is a duplicate. Duplicate detection needs its
  * own case-sensitive equality over the full digest, not this function.
  *
- * `keyType` (`VaultKeyType`, `src/modules/vault/types.ts:113`) is already a short
+ * `keyType` (`VaultKeyType` in `src/modules/vault/types.ts`) is already a short
  * lowercase token, so a `.includes` on it needs no folding of its own.
  *
  * Tier 3 and tier 5 compare DIGEST to digest, never the un-stripped
  * `"sha256:<digest>"` string. Every fingerprint this app produces shares the
- * literal "sha256:" lead (`src-tauri/src/modules/ssh/mod.rs:309`), so testing
+ * literal "sha256:" lead (`key_info` in `src-tauri/src/modules/ssh/mod.rs`), so testing
  * the un-stripped form against the query made any prefix of that constant
  * string - "s", "sh", ..., all the way to "sha256:" itself - a tier-3 hit
  * against EVERY fingerprinted key, independent of the actual digest. That was
@@ -329,9 +329,9 @@ export function rankKeys(rows: readonly KeyRow[], query: string): KeyRow[] {
  * that put the three reference lookups' re-export at the top of this file.
  *
  * `VaultInUseError` already carries a serviceable message
- * (`src/modules/vault/types.ts:249-260`: `cannot delete X: still used by 2
- * hosts (a, b)`), and it is not the one to show, for the reason
- * `deleteRefusalText` in `HostsPage.tsx:119-128` exists: "still used by" reads
+ * (`VaultInUseError` in `src/modules/vault/types.ts`: `cannot delete X: still
+ * used by 2 hosts (a, b)`), and it is not the one to show, for the reason
+ * `deleteRefusalText` in `src/modules/hosts/HostsPage.tsx` exists: "still used by" reads
  * as a tidiness complaint, and this is not one. The holders are records that
  * would stop being able to connect, so the copy names them AND names the edit
  * that clears the way.
@@ -374,14 +374,15 @@ export type DeleteNoteSubject =
  * What the confirm dialog says about the keychain, said in terms of the
  * RECORD being deleted rather than a blanket claim keyed on `kind` alone.
  *
- * Modelled on `deleteKeychainNote` in `HostsPage.tsx:141`, and needed for the
+ * Modelled on `deleteKeychainNote` in `src/modules/hosts/HostsPage.tsx`, and needed for the
  * same reason: a single sentence per kind was ONE thing for every host, but
  * the vault's `hasPassword` on a `VaultIdentity` is independent of `authMode`
- * (`../types.ts:106`) - one identity can be a key over SSH and the same
+ * (`VaultIdentity.hasPassword` in `src/modules/vault/types.ts`) - one identity can be a key over SSH and the same
  * account's password over RDP - so "its stored password is deleted too" was
  * false for an agent- or key-authenticating identity that never got one, and
  * silent about the one thing a key-authenticating identity's owner actually
- * wonders: the key itself is a SEPARATE record (`../types.ts:108`) that this
+ * wonders: the key itself is a SEPARATE record (`VaultIdentity.keyId` in
+ * `src/modules/vault/types.ts`) that this
  * delete does not touch.
  *
  * A key has no such split - `hasPrivateKey` is not modelled here because a

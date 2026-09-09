@@ -196,7 +196,8 @@ export function HostsPage({ onConnect, onScreen }: HostsPageProps): ReactNode {
   // follow this page's search box, the same reason `VaultPage.tsx`'s
   // `keyRowList` prop is unfiltered for the identity editor's key picker.
   // `identityRows` returns a fresh array every call, so the memo is load-
-  // bearing, not an optimisation (`vault/page/derive.ts:105-121`).
+  // bearing, not an optimisation (see `identityRows` in
+  // `src/modules/vault/page/derive.ts`).
   const identityRowList = useMemo(
     () => identityRows(Array.from(vault.identities.values()), vault.keys, hosts),
     [vault.identities, vault.keys, hosts],
@@ -307,11 +308,12 @@ export function HostsPage({ onConnect, onScreen }: HostsPageProps): ReactNode {
     // shrinking the OS WINDOW, never by dragging a divider at a wide window -
     // and there is no single "pane minimum" constant to blame or to lower.
     // EVERY size floor between here and the window edge is a PERCENTAGE, not
-    // a px minimum: the sidebar (`AppSidebar.tsx:215`, `minSize="8%"`, capped
-    // at `maxSize="450px"`), this workspace column
-    // (`WorkspaceArea.tsx:97`, `minSize="25%"`), the right slot
-    // (`AppRightSlot.tsx:178`, `minSize="18%"`), and a pane split inside the
-    // column (`PaneTreeView.tsx:1068`, `minSize="10%"`) - all deliberately
+    // a px minimum: the sidebar (the `id="sidebar"` panel in `AppSidebar.tsx`,
+    // `minSize="8%"`, capped at `maxSize="450px"`), this workspace column
+    // (the `id="workspace"` panel in `WorkspaceArea.tsx`, `minSize="25%"`),
+    // the right slot (the `id="right-slot"` panel in `AppRightSlot.tsx`,
+    // `minSize="18%"`), and a pane split inside the column (`PaneNodes`'s
+    // child-split panel in `PaneTreeView.tsx`, `minSize="10%"`) - all deliberately
     // container-invariant, for the reason `AppSidebar.tsx`'s own comment on
     // `minSize="8%"` gives: a PERCENTAGE floor can't misbehave across a
     // minimize/restore the way a px one did. (`SectionStack.tsx`'s
@@ -486,8 +488,9 @@ export function HostsPage({ onConnect, onScreen }: HostsPageProps): ReactNode {
           // `@[…]` container thresholds, not `sm:`/`xl:`/`2xl:` viewport ones -
           // this grid's width comes from the sidebar drag and the pane split,
           // not the window, so a wide window with a narrow pane used to render
-          // 3-4 columns at a few dozen px each (PaneTreeView.tsx:694 and
-          // ExplorerGrep.tsx:356 already do the same for the same reason).
+          // 3-4 columns at a few dozen px each (`PaneTreeView.tsx`'s
+          // `headerBar` and `ExplorerGrep.tsx`'s root div already do the same
+          // for the same reason).
           // Thresholds are `columns * ~280px card + gaps`, not a copy of the
           // old viewport numbers - those measured the wrong box. Applying
           // `@container` on the page root above, not here, is what makes these

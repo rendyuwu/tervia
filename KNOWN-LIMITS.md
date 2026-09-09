@@ -223,6 +223,48 @@ the other four arms share.
 is the reason every check here is structural — or this repository adopting a
 single named utility for hiding that a check could pin by that one name.
 
+### Thirty-eight partial file spellings in comments are counted, not resolved
+
+**Accepted state.** A comment may cite a file by a spelling that matches more
+than one file in the tree, and the citation check bounds how many such
+spellings exist rather than failing on each one. Thirty-eight sites across
+twelve files are in that state today. They are cited from `scripts/`, naming a
+bare file under `src/` whose directory shares no prefix with the citing script,
+so nearest-module resolution cannot break the tie; the worst carries sixteen
+candidates. Every one names a file that does exist, and a reader resolves each
+from the citing script's own subject, so none is a defect.
+
+The bound is a ratchet: reducing the count never reddens the check, adding a
+spelling does, and the failure message carries the new number and prints the
+full list. That was chosen over a per-site failure because a per-site rule would
+have commissioned thirty-eight edits across twelve files for zero defects found,
+which is a cost with nothing on the other side. Without any bound the class goes
+back to being invisible, which is how it got to thirty-eight.
+
+**Carried by.** `PARTIAL_PATH_CEILING` and the `partial-path` detector in
+`scripts/citation-format-verify.ts`, whose docblock records the measurement.
+Resolution itself is `commentRangesOf` plus the nearest-module step, which
+already dissolved twenty-nine of an original sixty-seven, and that step is why
+the relative-path class became checkable at all.
+
+**Trigger.** Two, and the second matters more than it looks.
+
+1. The first time a partial spelling is found to have sent a reader to the
+   wrong one of its candidates. That is the moment the class stops being
+   harmless and a per-site failure earns its cost. The check cannot detect it:
+   it answers whether a spelling names something, never whether it named the
+   right thing, so this arrives as a human finding in review and not as a gate.
+2. Any request to RAISE the number rather than lower it. A ceiling is only
+   doing its job while it falls. A raise means somebody added an ambiguous
+   citation instead of disambiguating one, and at that point this entry should
+   be re-decided rather than the constant bumped. Without that clause a ratchet
+   becomes a rubber stamp, which is the ordinary way a bounded-count exemption
+   dies.
+
+The mechanical end state is not a trigger but a target: when the count reaches
+zero, `partial-path` joins the kinds that must be zero and the constant is
+deleted.
+
 ## Backup and import
 
 ### The import dialog's busy gate is source-pinned, never exercised

@@ -11,11 +11,12 @@
  *
  * What it pins, and why each one is a bug that already happened or nearly did:
  *
- * 1. THE AUTH CALL SITE RUNS. `tunnel.ts`'s `authFields` call had never executed
- *    in the app's life - the module had zero callers - and it is the line that
- *    decides whether a private key or a password reaches the handshake. A typo
- *    there fails as "no credentials", on a path that reads keys out of the
- *    keychain. Now it is exercised for all three auth modes.
+ * 1. THE AUTH CALL SITE RUNS. The call that decides whether a private key or a
+ *    password reaches the handshake had never executed in the app's life: its
+ *    module had zero callers. That call is `sshCredentialValues`, which
+ *    `tunnel.ts` reaches through `resolveSshAuth`. A typo there fails as "no
+ *    credentials", on a path that reads keys out of the keychain. Now it is
+ *    exercised for all three auth modes.
  *
  * 2. ONE SESSION PER BASTION, and it lives exactly as long as its consumers.
  *    Two forwards over one jump host must cost one russh session, and the first
@@ -106,7 +107,7 @@ let nextCallbackId = 1;
  *  prompt attribution is observed. */
 type Row = SshHost;
 let sshRows: Row[] = [];
-/** Keychain, keyed the way `keyringAccount` builds it. */
+/** Keychain, keyed the way `vaultAccount` in `src/modules/vault/types.ts` builds it. */
 let secrets: Record<string, string> = {};
 
 /** `ssh_open` calls that have not been answered yet, so a test can park a dial
@@ -334,7 +335,8 @@ function reset(rows: Row[]): void {
 
 // ---------------------------------------------------------------------------
 console.log("[auth] the call site that had never executed");
-// `tunnel.ts:61`'s `authFields(conn.authMode, secrets)`: dead code until now, on
+// `sshCredentialValues(authMode, secrets)` (`src/modules/vault/resolve.ts`),
+// reached from `dialSession`'s `resolveSshAuth` call: dead code until now, on
 // the path that reads private keys out of the keychain.
 {
   reset([row({ id: "c-pass", authMode: "password", hasPassword: true })]);
@@ -682,7 +684,8 @@ console.log("\n[stop] releasing the last reference frees the port");
   reset([row({ id: "c-bastion" }), row({ id: "c-parked" })]);
   // A claim only ever comes out of a RESOLVED `SshForward`, so an entry whose
   // open is still parked has none that a caller could be holding. Claims are
-  // monotonic and never reused (`tunnel.ts:229-231`), so the entry built next
+  // monotonic and never reused (`nextClaim` in `src/modules/ssh/tunnel.ts`), so
+  // the entry built next
   // carries this one's plus one - which is how this fixture can name an entry it
   // cannot await. The page reaches the same state legitimately: its Start
   // publishes nothing until the open resolves, and its Stop then finds no claim

@@ -10,16 +10,16 @@ import type { VaultAuthMode, VaultIdentity, VaultKey } from "../types";
 // gets written lives here, where it can be checked without a DOM.
 //
 // THE RULE THE WHOLE FILE IS BUILT ON: a blank secret field means "leave
-// whatever is stored alone", never "delete it". `writeSecret` (`../store.ts:118-133`)
+// whatever is stored alone", never "delete it". `writeSecret` (`src/modules/vault/store.ts`)
 // reads `undefined` as leave-alone and a blank string as DELETE, so the
 // distance between the two is one `if` - and getting it wrong costs a private
 // key nobody can put back, because no layer above the keychain ever reads a
 // secret and so none of them holds a previous value.
 //
 // Unlike the host editor there is no keychain SEED here and therefore no
-// `touched`/`seeded` pair (`../../hosts/editor/sshSecrets.ts:81-93`): the vault
-// store exposes no secret read at all (`../store.ts:39-71`) and `SecretsIo` has
-// no single-value read by design (`../adapters.ts:52-61`), so a secret field is
+// `touched`/`seeded` pair (`sshSecretsForSave` in `src/modules/hosts/editor/sshSecrets.ts`): the vault
+// store exposes no secret read at all (`VaultStore` in `src/modules/vault/store.ts`) and `SecretsIo` has
+// no single-value read by design (`SecretsIo.copy` in `src/modules/vault/adapters.ts`), so a secret field is
 // only ever filled by the user. Blank is unambiguous here in a way it is not
 // there.
 //
@@ -46,7 +46,7 @@ export type IdentityDraft = {
 };
 
 /** Always replaced, never mutated in place - the same discipline
- *  `NO_SSH_SECRETS_TOUCHED` (`../../hosts/editor/types.ts:60-64`) is held to. */
+ *  `NO_SSH_SECRETS_TOUCHED` (`src/modules/hosts/editor/types.ts`) is held to. */
 export const EMPTY_IDENTITY_DRAFT: IdentityDraft = {
   name: "",
   username: "",
@@ -77,19 +77,19 @@ export function identityDraftFrom(identity: VaultIdentity): IdentityDraft {
  * The identity form's validation, or `null` when it passes.
  *
  * `name` and `username` are required and the password is not, which is the same
- * split the host editor settled at `SshCredentialSection.tsx:60-99`: a row
+ * split the host editor settled at `validateSshCredential` in `src/modules/hosts/editor/SshCredentialSection.tsx`: a row
  * without a username is MALFORMED - it has no presence flag, no indicator and
  * no path that fills it later - while a row without a password is merely
  * incomplete, is a state the store persists, and is exactly what the Vault
- * page's "Missing secret" badge exists to show (`page/IdentityCard.tsx:92-95`).
+ * page's "Missing secret" badge exists to show (`IdentityCardProps.missingSecret` in `src/modules/vault/page/IdentityCard.tsx`).
  * Refusing it would make that badge unreachable from the UI, which is the
  * present-correct-and-dead shape.
  *
- * `name` is required here and NOT at the store (`../store.ts:197-236` requires
+ * `name` is required here and NOT at the store (`upsertIdentity` in `src/modules/vault/store.ts` requires
  * only that key auth names a key), so this function is the only guard on it.
  * That asymmetry is admitted rather than hidden: a blank name renders an empty
  * card title and makes the delete refusal fall back to an opaque id
- * (`page/derive.ts:352`).
+ * (`deleteRefusalText` in `src/modules/vault/page/derive.ts`).
  */
 export function validateIdentityDraft(draft: IdentityDraft): string | null {
   if (!draft.name.trim()) return "Name is required";
@@ -137,19 +137,19 @@ function identityKeyId(draft: IdentityDraft, rule: IdentityKeyIdRule): string | 
  * The record `upsertIdentity` is handed.
  *
  * `keyId` IS THE POINT OF THIS FUNCTION. `VaultIdentity.keyId`'s doc
- * says "Set when `authMode === 'key'`" (`../types.ts:107-108`) and nothing
+ * says "Set when `authMode === 'key'`" (`src/modules/vault/types.ts`) and nothing
  * enforced it: the store refuses key auth with no key and refuses a `keyId`
- * naming a key that does not exist (`../store.ts:208-213`), but it accepts a
+ * naming a key that does not exist (`upsertIdentity` in `src/modules/vault/store.ts`), but it accepts a
  * RESOLVABLE `keyId` on a password identity - which then renders a grey key
  * chip on a row that authenticates with a password
- * (`page/derive.ts:130-134` sets `keyName` from `keyId` alone;
- * `page/IdentityCard.tsx:103` renders the chip from `keyName`). It reads as
+ * (`identityRows` in `src/modules/vault/page/derive.ts` sets `keyName` from `keyId` alone;
+ * `IdentityCard` in `src/modules/vault/page/IdentityCard.tsx` renders the chip from `keyName`). It reads as
  * "this identity signs with that key". It does not.
  *
  * So the mode decides, here, at the write. Nothing is destroyed by it: the
- * `VaultKey` is a separate record (`../types.ts:116`), which is what
+ * `VaultKey` is a separate record (`src/modules/vault/types.ts`), which is what
  * `deleteNote` already tells the user about a key-auth identity
- * (`page/derive.ts:409-411`). The DRAFT keeps the selection so a toggle inside
+ * (`src/modules/vault/page/derive.ts`). The DRAFT keeps the selection so a toggle inside
  * one sitting costs nothing.
  *
  * `keyIdRule` is the one documented opt-out from that, defaulted so a caller
@@ -157,8 +157,8 @@ function identityKeyId(draft: IdentityDraft, rule: IdentityKeyIdRule): string | 
  * does and the credential it would otherwise leave deletable.
  *
  * `hasPassword` is a placeholder, not a claim: `upsertIdentity` overwrites it
- * with what it actually stored (`../store.ts:218-227`), the same way
- * `HostEditorDialog.tsx:739-741` hands the host store three `false`s.
+ * with what it actually stored (`src/modules/vault/store.ts`), the same way
+ * `save` in `src/modules/hosts/HostEditorDialog.tsx` hands the host store three `false`s.
  */
 export function identityRecordFrom(
   id: string,
@@ -187,7 +187,7 @@ export function identityRecordFrom(
  * never filled deletes a credential and reports success.
  *
  * Untrimmed on the way out. `writeSecret` trims before it decides
- * (`../store.ts:126`), so trimming again here would only move the decision.
+ * (`src/modules/vault/store.ts`), so trimming again here would only move the decision.
  */
 export function identitySecretsForSave(draft: IdentityDraft): { password?: string } {
   return draft.password.trim() === "" ? {} : { password: draft.password };
@@ -228,7 +228,7 @@ export function keyDraftFrom(key: VaultKey): KeyDraft {
 /**
  * The key form's validation, or `null` when it passes.
  *
- * A NAME is required at the store too (`../store.ts:247`) and is repeated here
+ * A NAME is required at the store too (`upsertKey` in `src/modules/vault/store.ts`) and is repeated here
  * so the message arrives in the form instead of as a rejected promise.
  *
  * A BODY is required only when CREATING, and the asymmetry is the whole rule.
@@ -270,7 +270,7 @@ export function validateKeyDraft(draft: KeyDraft, mode: "create" | "edit"): stri
  * would show it next to the new key's name without anything looking wrong.
  *
  * `hasPrivateKey` and `hasPassphrase` are placeholders: `upsertKey` overwrites
- * both with what it actually stored (`../store.ts:158-180`).
+ * both with what it actually stored (`writeKeySecrets` in `src/modules/vault/store.ts`).
  */
 export function keyRecordFrom(
   id: string,
@@ -306,7 +306,7 @@ export function keyRecordFrom(
  * key the record no longer holds - the same stale-projection failure
  * {@link keyRecordFrom} refuses for the fingerprint, and worse, because
  * `deleteNote` would then promise to delete a passphrase this key never had
- * (`page/derive.ts:402-406`). So: when the body is replaced, the passphrase
+ * (`src/modules/vault/page/derive.ts`). So: when the body is replaced, the passphrase
  * field goes down with it, blank included, and blank is the store's clear.
  *
  * When the body is NOT replaced, neither secret is: a blank passphrase leaves
@@ -329,7 +329,7 @@ export function keySecretsForSave(draft: KeyDraft): {
  * thing on the two sides of `hasStoredPassword`.
  *
  * The same split, for the same reason, as `passwordHelp` in
- * `../../hosts/editor/SshCredentialSection.tsx:117-122`: on an identity that
+ * `src/modules/hosts/editor/SshCredentialSection.tsx`: on an identity that
  * has no password, blank saves an identity without one and saying so is the
  * point; on one that HAS a password, blank means the stored value is left
  * exactly as it is, and telling the user "leave blank to save without one"
@@ -367,7 +367,7 @@ export function passphraseHelp(replacingBody: boolean): string {
  * `encrypted` comes from the inspection, not from the draft: an
  * `openssh-key-v1` container answers `parsed: true` with a real type,
  * fingerprint and public half WITHOUT its passphrase
- * (`../../../../src-tauri/src/modules/ssh/mod.rs:302-313`), so nothing about the
+ * (`ssh_key_inspect_inner` in `src-tauri/src/modules/ssh/mod.rs`), so nothing about the
  * record that would be written says the passphrase is missing. A sealed
  * container - `.ppk`, PKCS#8 - answers `parsed: false, encrypted: true`, and is
  * the same trap with fewer facts.

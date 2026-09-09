@@ -819,8 +819,8 @@ console.log(
   // stripper, that hiding removes it from the stripped text and this FAILs;
   // a stripper missing the JSX branch entirely leaves it in the "stripped"
   // text and this stays green over dead code - which is exactly the defect
-  // this check exists to catch, per `host-editor-verify.ts:191-215`'s own
-  // header.
+  // this check exists to catch, per `guardsFor`'s own header in
+  // `scripts/host-editor-verify.ts`.
   check(
     'RuleCard.tsx\'s hostDangling Badge ("Host missing") is REACHABLE (comment-stripped), not merely present',
     stripComments(src.ruleCard).includes("Host missing"),
@@ -1131,7 +1131,8 @@ console.log(
       // own fix left a hole. Presence, order, the awaits and the argument were
       // all pinned; the CONDITION was not. Measured: with the guard rewritten
       // to `if (target.running && target.hostOwned)` - a combination
-      // `RuleCard.tsx:25-41` argues is unconstructible, so `stopRule` becomes
+      // `RuleCard`'s header (`src/modules/forwards/page/RuleCard.tsx`) argues is
+      // unconstructible, so `stopRule` becomes
       // unreachable for every rule - this section stayed at 57/57 scripts with
       // `tsc` and `prettier` clean. That is the runtime-false-guard shape, newly
       // created by the commit that fixed the old one.
@@ -1224,7 +1225,7 @@ console.log(
   // version of this comment said "a third" and meant something narrower.
   // `RuleCard.tsx`'s header names its trigger as a second caller that STARTS a
   // rule from outside that row: the unconstructibility argument is about
-  // `controller.ts:169-175` running the terminal-owned refusal and
+  // `startRule` (`controller.ts`) running the terminal-owned refusal and
   // `markStarting` with no `await` between them, so it is a new `startRule`
   // caller that opens that gap. The editor's own caller only ever
   // STOPS, which takes a rule out of `running` and cannot manufacture the
@@ -1798,7 +1799,7 @@ console.log(
 // 12. THE EDITOR'S SAVE STOPS FIRST TOO - the same leak on the sibling path,
 //     and it is a pure-click route with no timing in it at all.
 //     `ssh/tunnel.ts`'s `forwardKey` is
-//     `connectionId|remoteHost|remotePort|localPort` (`tunnel.ts:246-252`) and
+//     `connectionId|remoteHost|remotePort|localPort` and
 //     this form edits ALL FOUR, so: Start on 18080, Edit, Local port 18081,
 //     Save, Stop -> the close names `h|10.0.0.9|5432|18081`, there is no entry
 //     under that key, `markStopped` discards the claim in its `finally`, and
@@ -2035,12 +2036,12 @@ function resetCallLogs(): void {
  * stands in for:
  *
  * - `openForward` refuses (rejects) when `promptForHostKey !== true`, the
- *   same shape `tunnel.ts:316-334`'s dialSession takes for an unpinned
- *   target with no way to ask - this is what makes C1's mutation
+ *   same shape `dialSession` (`src/modules/ssh/tunnel.ts`) takes for an
+ *   unpinned target with no way to ask - this is what makes C1's mutation
  *   (`promptForHostKey: false`) bite BEHAVIOURALLY (a refusal instead of a
  *   running row), not merely as a recorded-argument mismatch.
  * - `closeForward` NEVER REJECTS, matching `closeForwardForConnection`'s own
- *   chain, which ends in `.catch(() => {})` (`tunnel.ts:561`) and cannot
+ *   chain, which ends in `.catch(() => {})` and cannot
  *   reject either. C8m's prediction ("nothing should change today") depends
  *   on this being true - a fake that COULD reject would test a contract the
  *   real function does not have, the exact mock-fidelity trap named above.
@@ -2251,7 +2252,7 @@ console.log(
   const starting = startRule(rule, FAKE_RUNTIME);
   await settle();
   const promptId = "c6-prompt";
-  // Fidelity with tunnel.ts's dialSession (:356-371): the backend's
+  // Fidelity with tunnel.ts's dialSession: the backend's
   // hostKeyPrompt event both (a) invokes the CALLER's onHostKeyPrompt and
   // (b) enqueues the SAME prompt into the shared useHostKeyPrompt queue - two
   // things one real event does together. This fixture does both by hand.
@@ -2806,7 +2807,7 @@ console.log(
   "\n[C13] the editor's leak: a Stop issued with the EDITED record MISSES its entry, and the record as loaded HITS it",
 );
 // `ssh/tunnel.ts`'s `forwardKey` is `connectionId|remoteHost|remotePort|localPort`
-// (`tunnel.ts:246-252`) and `RuleEditorDialog.tsx` edits all four, so the write
+// and `RuleEditorDialog.tsx` edits all four, so the write
 // invalidates the key that rule's own Stop names. Pure clicks, no timing: Start
 // on 18080, Edit, Local port 18081, Save, Stop.
 //
@@ -2934,8 +2935,9 @@ console.log(
 //
 // AND THE FIXED PREDICATE IS SAFE RATHER THAN MERELY DIFFERENT, which is the
 // half worth measuring: `stopRule` deletes the attempt Set, so the resolving
-// dial finds itself superseded and hands its reference straight back
-// (`controller.ts:182-196`) - one close, the row `stopped`, no claim retained.
+// dial finds itself superseded and hands its reference straight back, in
+// `startRule`'s superseded-attempt release (`controller.ts`) - one close, the
+// row `stopped`, no claim retained.
 {
   resetFakes();
   resetStores();

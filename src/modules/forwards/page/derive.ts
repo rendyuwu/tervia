@@ -34,7 +34,7 @@ export type ForwardRuleRow = {
   hostName: string;
   /** `hostId` names a host the store does not have, AND the host list has been
    *  loaded at all. A separate field from the label, for the reason
-   *  `IdentityRow.keyDangling` (`vault/page/derive.ts:69`) is separate from
+   *  `IdentityRow.keyDangling` in `src/modules/vault/page/derive.ts` is separate from
    *  `keyName`: a host genuinely named "Unknown host" would render identically
    *  to a dangling reference, and only a structural flag can tell the two
    *  apart. See {@link ruleRows} for why the empty host map is excluded. */
@@ -47,7 +47,7 @@ export type ForwardRuleRow = {
  * One row per rule, everything the page shows precomputed.
  *
  * THE row builder, for every mount point that will ever list rules - mirrors
- * `identityRows` (`vault/page/derive.ts:122`) in contract and for the same
+ * `identityRows` in `src/modules/vault/page/derive.ts` in contract and for the same
  * reason: a shared pure function guarantees nothing about callers that
  * assemble its arguments separately, so the assembly itself has to be the
  * shared thing.
@@ -71,7 +71,8 @@ export type ForwardRuleRow = {
  * hostsById)` memo, and the paragraph above says why the contract is written
  * for every future one) feeds it from `useForwards()` and `useHosts()`, which
  * are two INDEPENDENT async loads both starting from an empty `Map`
- * (`useForwards.ts:26-38`, `hosts/useHosts.ts:15-27`), so there is a render on
+ * (`useForwards` in `src/modules/forwards/useForwards.ts`, `useHosts` in
+ * `src/modules/hosts/useHosts.ts`), so there is a render on
  * every single mount where the rules have arrived and the hosts have not. Reporting `hostDangling` there made every row flicker a red "Host
  * missing" badge with Start and Stop disabled and a tooltip telling the user to
  * edit the rule - all four of them false, and all four on the first frame.
@@ -105,7 +106,7 @@ export function ruleRows(
 
 /**
  * `name` case-insensitively, then `id` - the shared tail of the ordering, on
- * the same terms as `byNameThenId` (`vault/page/derive.ts:168`). The `id`
+ * the same terms as `byNameThenId` in `src/modules/vault/page/derive.ts`. The `id`
  * tie-break is what makes the order TOTAL: without it, two rows equal on name
  * would keep whatever relative order the input happened to have, so two
  * surfaces fed the same rules in different iteration order could disagree
@@ -121,7 +122,7 @@ function compareRuleRows(a: ForwardRuleRow, b: ForwardRuleRow): number {
  * The strongest tier `row` qualifies for against a lowercased, non-empty
  * `query`, or `null` when it matches none. Checked strongest-first and
  * returns on the first hit, mirroring `identityMatchTier`'s shape
- * (`vault/page/derive.ts:192`).
+ * (in `src/modules/vault/page/derive.ts`).
  *
  * `localPort` and `remotePort` are matched as STRINGS, in the substring tier
  * ONLY - never as a prefix. A port is a short, dense numeric string, so a
@@ -215,7 +216,8 @@ function needsAdminRightsSentence(port: number): string {
 export function bindFailureText(error: string, localPort: number): string {
   // Lower-cased ONCE and matched against lower-case needles, because what the
   // backend actually sends is `std::io::Error`'s Display and that is prose with
-  // a capital letter: `session.rs:443` is
+  // a capital letter: `SshSession::open_forward` in
+  // `src-tauri/src/modules/ssh/session.rs` is
   // `format!("ssh: bind 127.0.0.1:{local_port} failed: {e}")`, so a real
   // EADDRINUSE arrives as "Address already in use (os error 98)" on Linux, "…
   // (os error 48)" on macOS, and "Only one usage of each socket address
@@ -305,7 +307,7 @@ export function stopNote(): string {
  * because stopping a page-running rule before deleting it needs its host and
  * both endpoints), but this type only takes what decides which sentence is
  * TRUE. A structural subset on purpose, for the same reason `DeleteNoteSubject`
- * (`vault/page/derive.ts:368`) is one: this file is store-free by design (see
+ * in `src/modules/vault/page/derive.ts` is one: this file is store-free by design (see
  * the header above), so it has no way to ask a `ForwardRuleRow` whether the
  * rule is currently running, or whether a terminal owns it - both answers live
  * in the runtime layer, not in anything persisted.
@@ -349,7 +351,7 @@ export type DeleteNoteSubject = {
  * what actually happens to THIS rule rather than a blanket sentence for every
  * rule alike.
  *
- * Modelled on `deleteNote` (`vault/page/derive.ts:401`), and needed for the
+ * Modelled on `deleteNote` in `src/modules/vault/page/derive.ts`, and needed for the
  * same reason: a single sentence would be one thing for every rule, but a
  * running rule and a rule that starts with its host each have something
  * specific and true to say, and neither fact implies the other.

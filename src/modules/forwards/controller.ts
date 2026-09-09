@@ -305,7 +305,8 @@ export async function startRule(
  * INCLUDING `"starting"` IS SAFE AND NOT MERELY DIFFERENT, which is the half
  * worth writing down: `stopRule` deletes the attempt Set and abandons the
  * host-key questions, so the dial that resolves next finds itself superseded
- * (`:182-196`) and hands the reference it just took straight back. One close,
+ * (see `isCurrentAttempt`) and hands the reference it just took straight
+ * back. One close,
  * the row `stopped`, no claim retained - the same release path a Stop clicked
  * mid-dial has always taken.
  *

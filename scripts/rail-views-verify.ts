@@ -1233,7 +1233,8 @@ console.log("\n[funnel] no route into the tab area writes activeId on its own");
   //
   // What makes that expensive is the consumer 8c already reads:
   // `useWorkspacePersistence.ts`'s auto-snapshot effect is keyed on
-  // `[tabs, activeId, ...]` (`:105-117`), so every fresh identity is a
+  // `[tabs, activeId, ...]` (`useWorkspacePersistence` in
+  // `src/app/hooks/useWorkspacePersistence.ts`), so every fresh identity is a
   // `serializeTabs` + `wsSaveTabs` and a re-render of the strip.
   //
   // And what makes the no-change path the COMMON case rather than a rarity is

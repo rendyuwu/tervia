@@ -424,9 +424,10 @@ pub struct SshSession {
 /// there was one to abort.
 ///
 /// A free function over the map rather than a method, so it is testable without
-/// an `SshSession`: the only two constructors (`:1183`, `:1323`) are the tail of
-/// a live handshake, and the only existing forward test is `#[ignore]`. This is
-/// the whole decision `ssh_forward_close` makes, so this is where it is pinned.
+/// an `SshSession`: the only two constructors (both in `connect`) are the tail
+/// of a live handshake, and the only existing forward test is `#[ignore]`. This
+/// is the whole decision `ssh_forward_close` makes, so this is where it is
+/// pinned.
 ///
 /// `false` is not an error: the forward may have gone with a reconnect, or a
 /// teardown may be firing twice. Idempotent on purpose - a caller must be able

@@ -4,11 +4,12 @@
 //! name so it stays off the shell's resolution path).
 //!
 //! Why it exists: TerviaApp.exe is `windows_subsystem = "windows"` (set in
-//! `main.rs`). PowerShell - the default Windows 11 shell - does NOT
-//! synchronously wait for GUI-subsystem children. The next prompt is drawn
-//! immediately after spawn, and any output the GUI binary later emits via
-//! `AttachConsole(ATTACH_PARENT_PROCESS)` lands on top of that already-drawn
-//! prompt. Cursor ends up mid-line; the user has to press Enter to recover.
+//! `src-tauri/src/main.rs`, not this one). PowerShell - the default Windows 11
+//! shell - does NOT synchronously wait for GUI-subsystem children. The next
+//! prompt is drawn immediately after spawn, and any output the GUI binary later
+//! emits via `AttachConsole(ATTACH_PARENT_PROCESS)` lands on top of that
+//! already-drawn prompt. Cursor ends up mid-line; the user has to press Enter
+//! to recover.
 //!
 //! This stub fixes the wait semantics at the kernel level: PowerShell sees
 //! a console-subsystem child and waits for it the same way it waits for

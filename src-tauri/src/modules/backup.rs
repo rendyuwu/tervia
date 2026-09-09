@@ -27,8 +27,7 @@
 //!
 //! This lives in the host process rather than the webview because
 //! `crypto.subtle` is gated to secure contexts and the app origin is plain
-//! http (same reason `crypto.randomUUID` is unavailable - see
-//! `modules/ai/lib/httpProxy.ts`).
+//! http (the same reason `crypto.randomUUID` is unavailable).
 //!
 //! Construction: PBKDF2-HMAC-SHA256 over the passphrase with a random 16-byte
 //! salt, then AES-256-GCM with a random 12-byte nonce. Salt and nonce are

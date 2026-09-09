@@ -613,7 +613,8 @@ pub async fn ssh_forward_open(
 /// What this does NOT do, and the UI has to say so: aborting the accept task
 /// drops the listener, so the local port is immediately rebindable and no new
 /// connection is accepted - but every connection already established runs in
-/// its own `copy_bidirectional` task (`session.rs:484`) until one side closes.
+/// its own `copy_bidirectional` task (`SshSession::open_forward` in
+/// `src-tauri/src/modules/ssh/session.rs`) until one side closes.
 /// That is what OpenSSH does when a `-L` is cancelled at runtime.
 #[tauri::command]
 pub async fn ssh_forward_close(

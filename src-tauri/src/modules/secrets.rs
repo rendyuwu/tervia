@@ -503,9 +503,9 @@ fn same_entry(from: (&str, &str), to: (&str, &str)) -> bool {
 /// `tervia-hosts :: <src>::password` to `tervia-hosts :: <copy>::password`;
 /// converting an inline credential to a vault identity moves
 /// `tervia-hosts :: <host>::password` to `tervia-vault :: <identity>::password`.
-/// Neither may read the value back first, and for an RDP password that is a
-/// Phase 5 invariant rather than a preference - it is the reason a duplicated
-/// RDP host used to get no password at all.
+/// Neither may read the value back first, and for an RDP password that is an
+/// invariant rather than a preference - it is the reason a duplicated RDP host
+/// used to get no password at all.
 ///
 /// `Ok(false)` means there was nothing at the source (absent, or an empty
 /// string, which is treated as absent) and NOTHING was written. `Ok(true)`

@@ -20,8 +20,8 @@
  * `runtimeStatus` before the bind and again before the claim, yielding if the
  * page has it running by then. `./hostOwned.ts`'s header gives both in full.
  *
- * The `claim` field is what makes Stop safe. `SshForward.claim`
- * (`ssh/tunnel.ts:51-74`) is monotonic and names the ENTRY a caller took its
+ * The `claim` field is what makes Stop safe. `SshForward.claim` (in
+ * `ssh/tunnel.ts`) is monotonic and names the ENTRY a caller took its
  * reference from, not the target: `dropSession` deletes a connection's
  * entries the moment a bastion dies, and the next consumer of the same target
  * creates fresh ones under the same key. A Stop that looked the target up
@@ -41,7 +41,7 @@ type ForwardRuntimeEntry = {
   boundPort?: number;
   sessionId?: number;
   /** The token `closeForwardForConnection` requires. Identity-bearing on
-   *  purpose - see `ssh/tunnel.ts:51-74`. A Stop that looked the target up
+   *  purpose - see `SshForward.claim` in `ssh/tunnel.ts`. A Stop that looked the target up
    *  instead would, on a bastion that dropped and was re-dialled by an RDP
    *  pane, spend THAT pane's reference and close the session it is using. */
   claim?: number;
@@ -120,6 +120,7 @@ export function useRunningCount(): number {
 // `claim`, by contrast, NEVER goes through a selector at all. Stop is an
 // event handler, not a render, so it reads
 // `useForwardRuntime.getState().byRule[id]?.claim` - the same idiom
-// `tunnel.ts:183` and `:368` already use for `useHostKeyPrompt.getState()`. A
+// `watchPrompts` and `dialSession` in `tunnel.ts` already use for
+// `useHostKeyPrompt.getState()`. A
 // `claim` in a selector would be a value that changes on every restart
 // driving a render that does not care.

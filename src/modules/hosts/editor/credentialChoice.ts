@@ -32,8 +32,8 @@ const IDENTITY_CHOICE_PREFIX = "identity:";
 
 /**
  * The picker's value for one identity. Prefixed so it cannot collide with the
- * two sentinels above - an identity id is opaque (`../../vault/store.ts:74-76`)
- * and nothing stops one being the string "new".
+ * two sentinels above - an identity id is opaque (`newId` in
+ * `src/modules/vault/store.ts`) and nothing stops one being the string "new".
  */
 export function identityChoice(identityId: string): string {
   return `${IDENTITY_CHOICE_PREFIX}${identityId}`;

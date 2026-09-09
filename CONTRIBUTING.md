@@ -91,7 +91,15 @@ If an issue already exists for what you want to do, comment "I'll take this" bef
   planning docs or a row id from one, not a bare `issues/nn` (our tracker isn't in the tree), not a
   section number of something that isn't in git, not a `/tmp` path, not a date or a commit hash.
   Those look checkable and aren't. Put the fact in the comment and the provenance in the commit
-  message.
+  message. One carve-out: a comment may name a file that is gone when the deletion is what the
+  sentence asserts, since removing the name removes the subject. Cite it in the past tense and only
+  where the claim is false if the file still exists.
+- Cite a symbol, not a line. A line number is right until the next commit touches the file it names,
+  and that commit need never open the citing file. `scripts/citation-format-verify.ts` fails on a
+  `file:line` in any comment under `src/`, `src-tauri/src/` or `scripts/`, and on a backticked path
+  matching no file in the tree. A pinned dependency's own source is cited as crate, version and
+  symbol on one line, never with a line number; see the citation bullet in
+  [TERVIA.md](TERVIA.md) for the exact form.
 - An accepted state goes in [KNOWN-LIMITS.md](KNOWN-LIMITS.md), not in a planning doc. Behaviour we
   weighed and kept, or a deferral whose trigger hasn't fired - three parts per entry: what's
   accepted, which file and symbol carries it, and the named condition that would change the answer.

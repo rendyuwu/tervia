@@ -536,7 +536,7 @@ console.log(
   );
   // The REAL messages, which the needle spellings above do not carry. What
   // the backend sends is `std::io::Error`'s Display, not an errno name:
-  // `src-tauri/src/modules/ssh/session.rs:443` is
+  // `SshSession::open_forward` (`src-tauri/src/modules/ssh/session.rs`) is
   // `format!("ssh: bind 127.0.0.1:{local_port} failed: {e}")`. So every needle
   // above is a spelling nothing in the pipeline emits today, and these five
   // fixtures are the ones that decide whether a user ever sees the sentence.

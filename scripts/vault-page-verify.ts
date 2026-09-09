@@ -1084,7 +1084,8 @@ console.log(
     hasPassword: false,
   };
   // Not a minimum case, but the honest consequence of
-  // `hasPassword` being independent of `authMode` (`../types.ts:106`): agent
+  // `hasPassword` being independent of `authMode` (`VaultIdentity.hasPassword` in
+  // `src/modules/vault/types.ts`): agent
   // auth never NEEDS a password, but nothing stops the flag being true anyway,
   // and `deleteNote` reads the flag, not the mode, for that half of its answer.
   const agentAuthWithPassword: DeleteNoteSubject = {

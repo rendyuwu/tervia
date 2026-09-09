@@ -698,6 +698,27 @@ never blocks persistence. Not supported in builtin mode:
   the fact in the comment; provenance belongs in the commit message, which is
   in git and reachable with `git log -S` or `--grep`. The tell when writing
   one is a backtick around a filename `git ls-files` would not return.
+
+  **One carve-out, for the case where the absence is the point.** A comment may
+  name a file that is gone when the deletion is what the sentence asserts, as
+  in "the moment those two stores were deleted, that keychain account became
+  unreachable from inside the app". Removing the name there removes the
+  sentence's subject, and the claim is false if the file still exists. The
+  discriminator is tense and grammatical subject, not spelling: naming a dead
+  file in the past tense to say it died passes, and naming one in the present
+  tense to describe how something works today is the ordinary failure this rule
+  exists to catch. No detector can tell those apart from a comment's text, so
+  the check carries a pinned exemption per site rather than a rule.
+
+- **Cite a symbol, not a line.** A line number is correct until the next commit
+  touches the file it names, and that commit need never open the citing file, so
+  nothing brings the two together for review. `scripts/citation-format-verify.ts`
+  fails on a `file:line` inside a comment in `src/`, `src-tauri/src/` or
+  `scripts/`, and on a backticked path that resolves to no file in the tree. A
+  pinned dependency's own source is cited as crate, version and symbol on one
+  line - ``(`ironrdp-session` 0.10.0, `DecodedImage::apply_rgb16_bitmap`)`` -
+  and never with a line number, because no clone checks that source out and
+  nothing in CI can verify it.
 - **An accepted state lives in [KNOWN-LIMITS.md](KNOWN-LIMITS.md), not in a
   planning document.** Behaviour that was weighed and kept on purpose, and a
   deferral whose trigger has not fired yet, both belong somewhere a reader
