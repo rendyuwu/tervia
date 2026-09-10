@@ -46,6 +46,37 @@ export type SshEvent =
   | { type: "disconnected" }
   | { type: "error"; message: string };
 
+/**
+ * A wire event that ends the channel -> the two arguments `onExit` is called
+ * with. Extracted from `channel.onmessage` and exported so it can be CALLED by
+ * a check rather than read as source text: `openSsh` invokes a Tauri command
+ * and is unreachable from a node script, so a pure function is the only part of
+ * this seam that can be covered behaviourally - the same reason
+ * `sshConnectErrorFrom` below is its own function.
+ *
+ * The returned `code` is `onExit`'s first argument and nothing more: the
+ * remote's own status for "exit", and 0 for the two kinds that never reported
+ * one (see `SshExitReason`). Returning both halves together is what lets a
+ * check pin that the duplicate is the event's own code rather than a hardcoded
+ * 0, which is one of the two ways the collapse this split exists to prevent
+ * could come back.
+ */
+export function exitReasonFromSshEvent(
+  event: Extract<SshEvent, { type: "exit" | "signal" | "disconnected" }>,
+): { code: number; reason: SshExitReason } {
+  switch (event.type) {
+    case "exit":
+      return { code: event.code, reason: { kind: "exit", code: event.code } };
+    case "signal":
+      return {
+        code: 0,
+        reason: { kind: "signal", name: event.name, coreDumped: event.coreDumped },
+      };
+    case "disconnected":
+      return { code: 0, reason: { kind: "disconnected" } };
+  }
+}
+
 export type SshHandlers = {
   onConnected?: (fingerprint: string) => void;
   /** A jump host in the ProxyJump chain authenticated. `connectionId` is the
@@ -149,11 +180,30 @@ export function confirmHostKey(promptId: string, accept: boolean): Promise<void>
 }
 
 /**
+ * What names ONE `ssh -L` listener once it is up, and the whole of what
+ * {@link closeSshForward} accepts.
+ *
+ * The bound port alone is not an identity, which is why this is a pair. The
+ * backend keys a session's live forwards by port (`SshSession::open_forward`),
+ * so a listener that has gone and its successor on the same pinned port share
+ * one key - and a close still in flight from the first would abort the second.
+ * `generation` is minted per open and never reused within a session, so a close
+ * naming a spent one is refused instead of landing on whatever is listening now.
+ *
+ * `boundPort` is what the backend actually bound, which for a request of 0 is
+ * not the number that was sent - so a caller that asked for 0 must keep this
+ * answer rather than the request.
+ */
+export type SshForwardHandle = {
+  boundPort: number;
+  generation: number;
+};
+
+/**
  * Start an `ssh -L` local forward on a live session: bind `127.0.0.1:localPort`
  * and tunnel it to `remoteHost:remotePort` as resolved from the server.
- * `localPort` 0 picks a free port. Resolves with the port actually bound, which
- * is the only thing {@link closeSshForward} accepts - so a caller that asked for
- * 0 must keep the answer rather than the request.
+ * `localPort` 0 picks a free port. Resolves with the {@link SshForwardHandle}
+ * that names the listener it started.
  *
  * A forward still dies with its session, but that is no longer the only way one
  * ends: {@link closeSshForward} drops a single listener while the session and
@@ -164,15 +214,21 @@ export function openSshForward(
   localPort: number,
   remoteHost: string,
   remotePort: number,
-): Promise<number> {
-  return invoke<number>("ssh_forward_open", { id, localPort, remoteHost, remotePort });
+): Promise<SshForwardHandle> {
+  return invoke<SshForwardHandle>("ssh_forward_open", { id, localPort, remoteHost, remotePort });
 }
 
-/** Close ONE `ssh -L` listener on a live session. `false` means there was no
- *  such forward - an unknown session, or a port already closed. Not an error:
- *  a teardown fires this without knowing whether the open finished. */
-export function closeSshForward(id: number, boundPort: number): Promise<boolean> {
-  return invoke<boolean>("ssh_forward_close", { id, boundPort });
+/** Close ONE `ssh -L` listener on a live session, naming it with both halves of
+ *  the {@link SshForwardHandle} the open handed back. `false` means there was no
+ *  such forward - an unknown session, a port already closed, or a generation a
+ *  later open on that port has superseded. Not an error: a teardown fires this
+ *  without knowing whether the open finished. */
+export function closeSshForward(
+  id: number,
+  boundPort: number,
+  generation: number,
+): Promise<boolean> {
+  return invoke<boolean>("ssh_forward_close", { id, boundPort, generation });
 }
 
 export type SshSession = {
@@ -269,14 +325,14 @@ export async function openSsh(input: SshOpenInput, handlers: SshHandlers): Promi
         handlers.onData(decodeBase64(event.data));
         break;
       case "exit":
-        handlers.onExit?.(event.code, { kind: "exit", code: event.code });
-        break;
       case "signal":
-        handlers.onExit?.(0, { kind: "signal", name: event.name, coreDumped: event.coreDumped });
+      case "disconnected": {
+        // One call for all three, so the mapping itself is the pure function's
+        // and cannot drift per arm.
+        const ending = exitReasonFromSshEvent(event);
+        handlers.onExit?.(ending.code, ending.reason);
         break;
-      case "disconnected":
-        handlers.onExit?.(0, { kind: "disconnected" });
-        break;
+      }
       case "error":
         handlers.onError?.(event.message);
         break;

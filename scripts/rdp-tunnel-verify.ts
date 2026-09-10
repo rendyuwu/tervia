@@ -78,16 +78,28 @@
  *    it takes the BOUND port - which for an auto-port rule is not the one that
  *    was asked for.
  *
- * 11. AND THE RELEASE WAITS FOR IT. `ssh_forward_close` is keyed by bound port
- *    with no generation, so a close fired and forgotten can land on a listener
- *    that a re-open has since bound on that same port: a Stop returning before
- *    the backend heard it, then a Start on the same pinned port, reads from the
- *    page as "Start silently does nothing every other time". Only a
- *    stop while the dial is STILL IN FLIGHT can tell the two forms apart, which
- *    is what the last `[stop]` fixture sets up.
+ * 11. AND THE RELEASE WAITS FOR IT. A release that resolved before the backend
+ *    had been told would let the page's Stop re-enable Start against a port that
+ *    is still bound. Only a stop while the dial is STILL IN FLIGHT can tell the
+ *    awaited form apart from a fired-and-forgotten one, which is what the last
+ *    `[stop]` fixture sets up.
+ *
+ * 12. AND THE CLOSE NAMES THE LISTENER ITS OWN OPEN BOUND. `ssh_forward_close`
+ *    used to be keyed by bound port alone, so a close still in flight named
+ *    whatever was listening on that port when it landed - a re-open's brand-new
+ *    listener included, which from the page reads as "Start silently does
+ *    nothing every other time". The open now answers with a GENERATION beside
+ *    the port and the close carries it back. This is a wire change and a wire
+ *    change half-lands silently, so `[wire]` below asserts the frontend really
+ *    SENDS the field: nothing else in the suite would notice a half where the
+ *    backend reads a generation the frontend never puts on the call.
  */
 
 export {};
+
+import { readFileSync } from "node:fs";
+import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { HOSTS_KEY, HOSTS_STORE_PATH, type SshHost } from "../src/modules/hosts/types";
 import type { VaultAuthMode } from "../src/modules/vault/types";
@@ -123,6 +135,18 @@ let parkedOpens: ParkedOpen[] = [];
 let autoAnswerOpen = true;
 let nextSessionId = 100;
 let nextLocalPort = 45000;
+/**
+ * Generations the harness has handed out, per session id, the way
+ * `SshSession::forward_seq` mints them: from 1, monotonic, and never reused
+ * within one session.
+ *
+ * PER SESSION and not one global counter, because the two are
+ * indistinguishable for a fixture that only ever compares numbers it was
+ * handed - and a global one would let a close that named the right generation
+ * on the WRONG session pass, which is precisely the pairing the backend's
+ * per-session counter makes impossible.
+ */
+const forwardGenerations = new Map<number, number>();
 
 /** Where `appDataDir()` resolves for this harness. */
 const APP_DATA_DIR = "/verify-app-data";
@@ -191,8 +215,17 @@ async function handleInvoke(cmd: string, args: Record<string, unknown>): Promise
     // comes back as whatever it chose. Returning a fresh number either way
     // would make the port ASKED FOR and the port BOUND indistinguishable, and
     // `ssh_forward_close` takes the bound one.
-    case "ssh_forward_open":
-      return (args.localPort as number) || nextLocalPort++;
+    //
+    // And it answers with a GENERATION beside the port, because
+    // `SshForwardHandle` is a pair: a mock that returned the bare port would
+    // typecheck through `invoke`'s generic and leave every close below carrying
+    // `undefined` for the field the backend compares.
+    case "ssh_forward_open": {
+      const session = args.id as number;
+      const generation = forwardGenerations.get(session) ?? 1;
+      forwardGenerations.set(session, generation + 1);
+      return { boundPort: (args.localPort as number) || nextLocalPort++, generation };
+    }
     case "ssh_forward_close":
       return true;
     case "ssh_close":
@@ -518,11 +551,19 @@ console.log("\n[stop] releasing the last reference frees the port");
   check("the backend is told to close ONE listener", countOf("ssh_forward_close"), 1);
   // The port is written out rather than read back off `stopped`, so a close that
   // named the session's other listener - or a forward re-opened on an OS-chosen
-  // port - is a failure and not a tautology.
-  check("naming the session and the port that was bound", lastOf("ssh_forward_close")?.args, {
-    id: stopped.sessionId,
-    boundPort: 18080,
-  });
+  // port - is a failure and not a tautology. Same for the generation: `stopped`
+  // is the SECOND open on this session (`keep` took the first), so 2 is the
+  // number the backend must have answered with and reading `stopped.generation`
+  // would assert only that the module echoed something.
+  check(
+    "naming the session, the port that was bound, and that bind's generation",
+    lastOf("ssh_forward_close")?.args,
+    {
+      id: stopped.sessionId,
+      boundPort: 18080,
+      generation: 2,
+    },
+  );
   check("and the session stays up for the rule that is still running", countOf("ssh_close"), 0);
 
   // Start again. The entry went with the port, so this binds rather than being
@@ -604,6 +645,8 @@ console.log("\n[stop] releasing the last reference frees the port");
     {
       id: auto.sessionId,
       boundPort: auto.localPort,
+      // The only open on this session, so the first generation it mints.
+      generation: 1,
     },
   );
 }
@@ -629,9 +672,14 @@ console.log("\n[stop] releasing the last reference frees the port");
   await closeForwardForConnection("c-bastion", "10.0.0.9", 5432, 18080, paneB.claim);
   await settle();
   check("pane B's own release closes its own", countOf("ssh_forward_close"), 1);
+  // Generation 1, because the bastion died and pane B's forward is the first on
+  // a BRAND-NEW session - so it carries the same generation pane A's did on the
+  // old one. The session id is what separates them here, which is the whole
+  // reason the backend's counter is per session and a close names both.
   check("naming pane B's session", lastOf("ssh_forward_close")?.args, {
     id: paneB.sessionId,
     boundPort: 18080,
+    generation: 1,
   });
 }
 {
@@ -668,11 +716,13 @@ console.log("\n[stop] releasing the last reference frees the port");
 }
 {
   // The release WAITS for the backend, rather than firing the close and
-  // resolving on the spot. `ssh_forward_close` is keyed by bound port with no
-  // generation, so a close still in flight names whatever is listening on that
-  // port - a re-open's brand-new listener included. A Stop that resolved before
-  // the backend heard it, followed by a Start on the same pinned port, is
-  // therefore "Start silently does nothing every other time".
+  // resolving on the spot. That is this module's contract to the page's Stop,
+  // which will not let the row offer Start again until the release resolves: a
+  // Stop that returned early would re-enable Start against a port still bound.
+  //
+  // What the await does NOT have to carry any more is the stale close itself -
+  // the generation does that, and `[wire]` below is where it is asserted. The
+  // two are separate properties and this fixture is about the first one.
   //
   // Every fixture above closes a forward whose open has already RESOLVED, and
   // for those the fire-and-forget form is INDISTINGUISHABLE from this one: its
@@ -705,9 +755,14 @@ console.log("\n[stop] releasing the last reference frees the port");
   // No `settle()` here on purpose: a settle would let the fire-and-forget form's
   // microtask land too, and the claim is about WHEN this call resolves.
   check("the close is awaited, not fired and forgotten", countOf("ssh_forward_close"), 1);
+  // Generation 1: the parked dial's session is fresh and this is its only
+  // forward. Written out rather than read off `late` below, because `late` has
+  // not resolved yet at this point and awaiting it would settle the very
+  // microtask this fixture is holding back.
   check("naming the port the parked open went on to bind", lastOf("ssh_forward_close")?.args, {
     id: parkedSession,
     boundPort: 18080,
+    generation: 1,
   });
 
   // The abandoned Start still resolves - it bound its port before the release
@@ -1156,7 +1211,7 @@ const rdpRow: RdpHostFixture = {
     [target.host, target.port, target.viaTunnel],
     ["10.10.11.26", 3389, false],
   );
-  target.release();
+  await target.release();
   await settle();
   check("and releasing it touches no SSH session", countOf("ssh_open") + countOf("ssh_close"), 0);
 }
@@ -1176,14 +1231,146 @@ const rdpRow: RdpHostFixture = {
   // Idempotent release: a pane's teardown fires it without knowing whether an
   // error path already did, and a second release would spend the OTHER pane's
   // reference.
-  one.release();
-  one.release();
-  one.release();
+  await one.release();
+  await one.release();
+  await one.release();
   await settle();
   check("releasing one pane, twice over, leaves the other's tunnel up", countOf("ssh_close"), 0);
-  two.release();
+  await two.release();
   await settle();
   check("the last pane out closes the session", countOf("ssh_close"), 1);
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n[wire] the close names the listener its own open bound");
+// The half this section exists for: `tsc` and `cargo check` both pass over a
+// tree where the backend reads a `generation` the frontend never sends, because
+// the field is then simply absent from the payload and nothing inspects the
+// payload until a real close runs on a real session. Nothing else in the suite
+// drives `ssh_forward_close`'s arguments across the IPC boundary at all.
+{
+  reset([row({ id: "c-bastion" })]);
+  // A second rule on the same bastion, so the session - and its generation
+  // counter - outlives the stop below. Without it every release closes the
+  // session, the next open dials a fresh one, and the re-open's generation
+  // starts from 1 again: the two closes would carry the same number and the
+  // last check here would pass for the wrong reason.
+  const keep = await openForwardForConnection("c-bastion", "10.0.0.9", 22, { localPort: 18443 });
+  const first = await openForwardForConnection("c-bastion", "10.0.0.9", 5432, {
+    localPort: 18080,
+  });
+  // Written out, not read back: 1 and 2 are what the session's counter must
+  // have answered for its first and second open, and reading `first.generation`
+  // into its own assertion would say only that the module echoes itself.
+  check("the open's generation reaches the caller", [keep.generation, first.generation], [1, 2]);
+
+  await closeForwardForConnection("c-bastion", "10.0.0.9", 5432, 18080, first.claim);
+  await settle();
+  // BY KEY as well as by value, and that is the point of this section. A
+  // payload that dropped the field entirely compares equal to one carrying
+  // `undefined` under every deep-equal check in this file, because
+  // `JSON.stringify` omits an undefined value - so "the frontend SENDS it" has
+  // to be said with the key list.
+  check(
+    "and the close sends it, under that name",
+    Object.keys(lastOf("ssh_forward_close")?.args ?? {}).sort(),
+    ["boundPort", "generation", "id"],
+  );
+  check("carrying what its own open was given", lastOf("ssh_forward_close")?.args.generation, 2);
+
+  // Stop, then Start on the SAME pinned port: two listeners under one key in
+  // sequence, which is the state the port alone cannot describe and the reason
+  // the generation exists. The two closes must not name the same one.
+  const second = await openForwardForConnection("c-bastion", "10.0.0.9", 5432, {
+    localPort: 18080,
+  });
+  check("a re-open on that port is a NEW generation", second.generation, 3);
+  await closeForwardForConnection("c-bastion", "10.0.0.9", 5432, 18080, second.claim);
+  await settle();
+  check(
+    "so the two closes of one port name different listeners",
+    allOf("ssh_forward_close").map((c) => [c.args.boundPort, c.args.generation]),
+    [
+      [18080, 2],
+      [18080, 3],
+    ],
+  );
+
+  await closeForwardForConnection("c-bastion", "10.0.0.9", 22, 18443, keep.claim);
+  await settle();
+  check("and the rule that was never stopped closes its own", countOf("ssh_forward_close"), 3);
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n[source-text] the two sides of the forward wire name the same arguments");
+// The one class the behavioural section above cannot see: a rename on ONE side.
+// The frontend would keep sending `generation` while the backend asked for
+// something else, `tsc` and `cargo check` would both stay green, and the
+// failure would surface only as a close that rejects at runtime. So the Rust
+// parameter list and the `invoke` payload are compared to each other, in order,
+// through Tauri's own snake_case-to-camelCase convention.
+{
+  const ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
+  const read = (p: string) => readFileSync(join(ROOT, p), "utf8");
+  const rustSource = read("src-tauri/src/modules/ssh/mod.rs");
+  const bridgeSource = read("src/modules/ssh/bridge.ts");
+
+  /** The parameters one `#[tauri::command]` declares, in order, minus the
+   *  `tauri::State` handle the frontend never sends. Filtered to identifiers so
+   *  the comma inside `tauri::State<'_, SshState>` cannot contribute a
+   *  fragment of its own. */
+  const rustParams = (command: string): string[] => {
+    const at = rustSource.indexOf(`pub async fn ${command}(`);
+    if (at < 0) return [];
+    const open = rustSource.indexOf("(", at);
+    return rustSource
+      .slice(open + 1, rustSource.indexOf(")", open))
+      .split(",")
+      .map((p) => p.split(":")[0].trim())
+      .filter((p) => /^[a-z_][a-z0-9_]*$/.test(p) && p !== "state");
+  };
+
+  /** The keys of the object literal one `invoke` call sends. */
+  const invokeKeys = (command: string): string[] => {
+    const at = bridgeSource.indexOf(`"${command}"`);
+    if (at < 0) return [];
+    const open = bridgeSource.indexOf("{", at);
+    return bridgeSource
+      .slice(open + 1, bridgeSource.indexOf("}", open))
+      .split(",")
+      .map((k) => k.split(":")[0].trim())
+      .filter((k) => k.length > 0);
+  };
+
+  const camel = (s: string) => s.replace(/_([a-z])/g, (_, c: string) => c.toUpperCase());
+
+  // BOTH EXTRACTORS PROVED FIRST, in the direction that matters: two empty
+  // lists compare equal, so a regex that quietly stopped matching would turn
+  // the comparison below into a check that cannot fail. These name the values
+  // they must find.
+  check("the Rust reader finds the close's parameters", rustParams("ssh_forward_close"), [
+    "id",
+    "bound_port",
+    "generation",
+  ]);
+  check("and the bridge reader finds the close's payload", invokeKeys("ssh_forward_close"), [
+    "id",
+    "boundPort",
+    "generation",
+  ]);
+  check(
+    "and reports nothing for a command that is not there, so an empty result means absent",
+    [rustParams("ssh_nope"), invokeKeys("ssh_nope")],
+    [[], []],
+  );
+
+  for (const command of ["ssh_forward_open", "ssh_forward_close"]) {
+    check(
+      `${command}: every parameter the backend declares is a key the frontend sends`,
+      invokeKeys(command),
+      rustParams(command).map(camel),
+    );
+  }
 }
 
 console.log(failed === 0 ? "\nAll rdp-tunnel checks passed." : `\n${failed} check(s) FAILED.`);

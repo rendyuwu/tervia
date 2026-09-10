@@ -17,7 +17,8 @@
  * with no Tauri and no DOM.
  */
 
-import { closeSshForward, openSshForward } from "@/modules/ssh/bridge";
+import { describeError } from "@/lib/describeError";
+import { closeSshForward, openSshForward, type SshForwardHandle } from "@/modules/ssh/bridge";
 
 import { useHostOwnedForwards, type HostOwnedEntry } from "./hostOwned";
 import { useForwardRuntime, type ForwardStatus } from "./runtime";
@@ -40,21 +41,30 @@ import type { ForwardRule } from "./types";
 export type AutostartDeps = {
   listRules: () => Promise<ForwardRule[]>;
   /** `ssh/bridge.ts`'s `openSshForward`: binds one `ssh -L` listener on a LIVE
-   *  session and resolves with the port it actually bound. */
+   *  session and resolves with the port it actually bound and the generation
+   *  that names that listener - see `SshForwardHandle` in `ssh/bridge.ts`. */
   openForward: (
     id: number,
     localPort: number,
     remoteHost: string,
     remotePort: number,
-  ) => Promise<number>;
+  ) => Promise<SshForwardHandle>;
   /** `ssh/bridge.ts`'s `closeSshForward`. Needed for the two cases where a bind
    *  RESOLVED into a rule somebody else had meanwhile taken - the PAGE (its
    *  `markStarting` is synchronous) or ANOTHER PANE's own autostart run, which
    *  is not staggered by anything and so passes its own pre-bind read before
    *  either side claims. First claim wins, so the loser closes the
    *  listener it just bound rather than leaving a second one standing that
-   *  nothing on either side names. */
-  closeForward: (id: number, boundPort: number) => Promise<boolean>;
+   *  nothing on either side names.
+   *
+   *  Takes the `generation` its own open handed back, so the close names the
+   *  listener THAT bind opened rather than whatever holds the port when it
+   *  lands. Nothing in this loop reaches that case today - the two binds racing
+   *  for one rule cannot both hold a pinned port, and the loop issues one close
+   *  per bind with no await between the bind and it - so the pair is threaded
+   *  here because it is what the command takes, not to close a window that is
+   *  open on this side. */
+  closeForward: (id: number, boundPort: number, generation: number) => Promise<boolean>;
   /** The page's status for this rule. READ TWICE per rule - once before the
    *  bind and once immediately before the claim - because the user can click
    *  Start at any point during a bind. */
@@ -101,53 +111,15 @@ export const defaultAutostartDeps: AutostartDeps = {
   stillLive: () => true,
 };
 
-/**
- * `terminal/lib/session-helpers.ts`'s `describeError`, copied rather than
- * imported - the third copy, and the same trade `controller.ts`'s own
- * `describeError` already made one file over. That module cannot even be
- * LOADED outside the app: it
- * imports `@xterm/xterm` and `@tauri-apps/plugin-os`, and importing it under
- * `tsx` throws `Cannot read properties of undefined (reading 'currentWindow')`
- * before a single line of this file would run. Six lines is the cheaper of the
- * two prices; lifting `describeError` into a module with no Tauri and no DOM
- * imports is the real remedy.
- *
- * The string branch is the load-bearing one and not boilerplate: the forward
- * commands (`ssh_forward_open`, `ssh_forward_close`) reject with a RAW STRING,
- * so that is how the backend's own
- * `ssh: bind 127.0.0.1:<port> failed: <io error>` reaches the banner at all.
- * `ssh_open` is the exception in this app - it rejects with a `{kind, message}`
- * object - and `openSsh` rewraps a RECOGNISED one into an `Error` at its own
- * boundary, so no `describeError` anywhere meets one AS LONG AS the two kind
- * sets agree. They do today - `ssh/bridge.ts`'s `sshConnectErrorFrom`
- * recognises the same kinds `src-tauri/src/modules/ssh/session.rs` emits, and
- * `scripts/ssh-retry-verify.ts` pins that they stay matched - but the
- * agreement is not structural: anything `sshConnectErrorFrom` does not
- * recognise it returns unchanged, by design, so a kind added on one side only
- * (a newer or rolled-back backend, precisely the case that passthrough exists
- * to survive) reaches this file's `describeError` as a raw object, and the
- * `JSON.stringify` fallback below would render `{"kind":"…","message":"…"}` in
- * a banner - one of the two symptoms this whole change set out to close.
- */
-function describeError(e: unknown): string {
-  if (typeof e === "string") return e;
-  if (e instanceof Error) return e.message;
-  try {
-    return JSON.stringify(e);
-  } catch {
-    return String(e);
-  }
-}
-
 // The banners. `->` in ASCII and not `→`, matching `forwardDetectedUrl`'s
 // existing forward banner (`ssh-session.ts`): a terminal under a non-UTF-8
 // font renders the arrow as garbage. The PAGE's route uses `→` - two
 // surfaces, two correct answers.
 //
-// The success line names `bound`, the port the open RESOLVED WITH, and never
-// `rule.localPort`: an auto rule asked for 0 and a pinned rule can be handed a
-// different port, so naming the requested one prints a port the forward is not
-// actually listening on.
+// The success line names `boundPort`, the port the open RESOLVED WITH, and
+// never `rule.localPort`: an auto rule asked for 0 and a pinned rule can be
+// handed a different port, so naming the requested one prints a port the
+// forward is not actually listening on.
 
 function forwardingBanner(rule: ForwardRule, bound: number): string {
   return `\x1b[2m[tervia] forwarding localhost:${bound} -> ${rule.remoteHost}:${rule.remotePort} (${rule.name})\x1b[0m\r\n`;
@@ -281,7 +253,7 @@ export async function startHostForwards(
         continue;
       }
       try {
-        const bound = await deps.openForward(
+        const { boundPort, generation } = await deps.openForward(
           sessionId,
           rule.localPort,
           rule.remoteHost,
@@ -343,7 +315,7 @@ export async function startHostForwards(
           // Bounded because the whole run is fire-and-forget from
           // `openSshForSession`, so the pane's first prompt is not held either
           // way; a per-close timeout would be the remedy if it is ever seen.
-          await deps.closeForward(sessionId, bound).catch(() => {});
+          await deps.closeForward(sessionId, boundPort, generation).catch(() => {});
           writeBanner(otherTerminalBanner(rule));
           continue;
         }
@@ -366,15 +338,15 @@ export async function startHostForwards(
         if (taken === "running") {
           // Awaited and `.catch`-ed for exactly the reasons the
           // other-terminal arm above gives - one rule, one spelling.
-          await deps.closeForward(sessionId, bound).catch(() => {});
+          await deps.closeForward(sessionId, boundPort, generation).catch(() => {});
           writeBanner(yieldedBanner(rule));
           continue;
         }
         // CLAIMED BEFORE THE BANNER. The banner is what the user sees; the claim
         // is what the page reads. Reversed, anything that threw in between would
         // leave the user told about a forward the page cannot see.
-        deps.claimHostOwned(rule.id, { sessionId, boundPort: bound });
-        writeBanner(forwardingBanner(rule, bound));
+        deps.claimHostOwned(rule.id, { sessionId, boundPort });
+        writeBanner(forwardingBanner(rule, boundPort));
       } catch (e) {
         // Per-rule and non-fatal: this rule says why, and the loop CONTINUES to
         // the next one.

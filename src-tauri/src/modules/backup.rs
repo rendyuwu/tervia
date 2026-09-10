@@ -672,11 +672,20 @@ mod tests {
         // export; the envelope wrapped around it is TypeScript's concern. The
         // username sits inside the host's `credential` object rather than on
         // the row itself, which is where the SSH inline-credentials type puts
-        // it. 54321 stands in for the port rather than the real default 22: a
-        // two-digit run turns up in base64 output by chance often enough to
-        // make that assertion flaky instead of strict.
+        // it.
+        //
+        // Every needle is a run of five or more characters drawn ENTIRELY from
+        // the base64 alphabet, and that is what makes each one discriminating.
+        // The ciphertext is base64, so a needle carrying a `.` - the dotted
+        // host, say - can only fire if the encoding itself breaks, which reads
+        // as coverage without being any; and a short run turns up in base64
+        // output by chance, which makes an assertion flaky rather than strict.
+        // Hence a distinctive label inside the host rather than the whole
+        // dotted name, a distinctive username rather than a four-character one,
+        // and 54321 for the port rather than the real default 22.
+        let needles = ["vpsalpha", "svcdeploy", "hunter2", "54321"];
         let plain = merge_secrets(
-            r#"{"hosts":[{"id":"h-1","name":"vps","protocol":"ssh","host":"vps.example.com","port":54321,"credential":{"kind":"inline","hostId":"h-1","user":"root","authMode":"password","hasPassword":true,"hasPrivateKey":false,"hasKeyPassphrase":false}}],"groups":[],"identities":[],"keys":[],"rules":[]}"#,
+            r#"{"hosts":[{"id":"h-1","name":"vps","protocol":"ssh","host":"vpsalpha.example.com","port":54321,"credential":{"kind":"inline","hostId":"h-1","user":"svcdeploy","authMode":"password","hasPassword":true,"hasPrivateKey":false,"hasKeyPassphrase":false}}],"groups":[],"identities":[],"keys":[],"rules":[]}"#,
             &[(secret_ref("hostSecrets", "h-1", "password"), "hunter2".into())],
         )
         .unwrap();
@@ -684,19 +693,20 @@ mod tests {
         // absent from the fixture, so a dropped field would read as coverage
         // instead of a hole. This confirms every needle is actually present
         // before the sealing loop gets to claim it hid them.
-        for needle in ["vps.example.com", "root", "hunter2", "54321"] {
+        for needle in needles {
             assert!(
                 plain.contains(needle),
                 "{needle} is missing from the fixture"
             );
         }
         let blob = seal(&plain, "pw");
-        for needle in ["vps.example.com", "root", "hunter2", "54321"] {
-            assert!(
-                !blob.ciphertext.contains(needle),
-                "{needle} is readable in the sealed blob"
-            );
-        }
+        // Collected rather than asserted one at a time so a leak names every
+        // needle it exposed, instead of stopping at whichever comes first.
+        let leaked: Vec<&str> = needles
+            .into_iter()
+            .filter(|n| blob.ciphertext.contains(n))
+            .collect();
+        assert!(leaked.is_empty(), "readable in the sealed blob: {leaked:?}");
         assert_eq!(open(blob, "pw").unwrap(), plain);
     }
 }

@@ -62,6 +62,7 @@ import { fileURLToPath } from "node:url";
 // was extracted into `sshConnectErrorFrom`: the rest of bridge.ts loads under
 // plain node, so the boundary can be covered behaviourally instead of by
 // matching source against an anchor.
+import { describeError } from "../src/lib/describeError";
 import {
   HOST_KEY_MISMATCH_PREFIX,
   isHostKeyMismatchError,
@@ -321,24 +322,12 @@ console.log("\n[regressions] the two things the raw object broke on its way thro
     "and it does not match a refusal that merely arrived the same way",
   );
 
-  /**
-   * `describeError` from src/modules/terminal/lib/session-helpers.ts, copied.
-   * That module reads `document` transitively, so it cannot be imported here;
-   * six lines is the price this repo already pays for the same reason in
-   * src/modules/forwards/controller.ts, which keeps its own copy of these
-   * exact lines. Both are what a user actually reads: the host editor's Test
-   * button renders through the original, a forward toast through the copy.
-   */
-  const describeError = (e: unknown): string => {
-    if (typeof e === "string") return e;
-    if (e instanceof Error) return e.message;
-    try {
-      return JSON.stringify(e);
-    } catch {
-      return String(e);
-    }
-  };
-
+  // `describeError` is imported and CALLED here, not copied: it is the real
+  // renderer both surfaces a user reads go through - the host editor's Test
+  // button and a forward toast. It lives in `src/lib/describeError.ts`
+  // precisely so a check can load it, which is why this section no longer
+  // keeps a local twin that could pass while the shipped one disagreed.
+  //
   // One assertion closes both symptoms. Unwrapped, `describeError` of the raw
   // payload is `{"kind":"config","message":…}` (the toast) and `String(...)` of
   // it is `[object Object]` (the Test button); wrapped, it is the sentence.

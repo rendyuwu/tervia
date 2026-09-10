@@ -142,7 +142,7 @@ console.log("[1] ruleRows: hostName and hostDangling resolve independently, rout
   const danglingRule = rule("r-2", { hostId: "h-gone" });
   const namedUnknownRule = rule("r-3", { hostId: "h-named-unknown" });
 
-  const rows = ruleRows([boundRule, danglingRule, namedUnknownRule], hosts);
+  const rows = ruleRows([boundRule, danglingRule, namedUnknownRule], hosts, true);
 
   check(
     "hostName: live host's name, UNKNOWN_HOST_LABEL for a dangling hostId",
@@ -176,6 +176,7 @@ console.log("[1] ruleRows: hostName and hostDangling resolve independently, rout
         }),
       ],
       hosts,
+      true,
     )[0].route,
     "Auto → bastion → 10.0.0.9:5432",
   );
@@ -192,11 +193,17 @@ console.log("[1] ruleRows: hostName and hostDangling resolve independently, rout
   // Pre-existing rather than a regression from the hostOwned work - the flag
   // itself was always `host === undefined` - but on the hand-test path, which
   // is why it is fixed here.
+  //
+  // THREE FRAMES AND NOT TWO, since `hostsLoaded` became an argument. An empty
+  // map is no longer the whole of the pre-load state: it is now whichever of
+  // the two the CALLER says it is, and both of those have to be a fixture.
+  // `hosts.size > 0` used to answer for both and could only ever be right about
+  // one, which is the case the third fixture below closes.
   {
     const orphan = rule("r-preload", { hostId: "h-not-loaded-yet" });
     check(
-      "an EMPTY host map is the pre-load state, not a dangling row",
-      ruleRows([orphan], new Map<string, Host>()).map((r) => r.hostDangling),
+      "an unread host map is the pre-load state, not a dangling row",
+      ruleRows([orphan], new Map<string, Host>(), false).map((r) => r.hostDangling),
       [false],
     );
     // The paired positive, and it is what stops the fix from being an
@@ -204,20 +211,34 @@ console.log("[1] ruleRows: hostName and hostDangling resolve independently, rout
     // them is dangling exactly as before.
     check(
       "with the hosts known, a rule naming a missing one is still dangling",
-      ruleRows([orphan], hosts).map((r) => r.hostDangling),
+      ruleRows([orphan], hosts, true).map((r) => r.hostDangling),
       [true],
     );
-    // And the label is unchanged either way: `hostName` has always been
+    // THE CASE THE `hosts.size > 0` PROXY GOT WRONG, and the whole reason
+    // `hostsLoaded` is a parameter: the hosts were READ and the user has saved
+    // none, so a rule naming one IS dangling - the badge shows and Start is
+    // disabled (`startDisabled` reads `row.hostDangling`, pinned by its own
+    // expression text in `forward-autostart-verify.ts`). Under the old proxy
+    // this row came back `false`, so the page offered an enabled Start that
+    // could only fail at the dial. Byte-identical inputs to the first fixture
+    // apart from the flag, which is what makes this pair the whole property.
+    check(
+      "hosts READ and genuinely empty: the rule IS dangling, so the badge shows and Start is disabled",
+      ruleRows([orphan], new Map<string, Host>(), true).map((r) => r.hostDangling),
+      [true],
+    );
+    // And the label is unchanged across all three: `hostName` has always been
     // "Unknown host" for a host this map does not hold, and during the pre-load
     // frame that is the only honest thing it can say. What the fix removes is
     // the destructive badge and the disabled buttons, not the label.
     check(
-      "the label is UNKNOWN_HOST_LABEL in both cases - only the structural flag changed",
+      "the label is UNKNOWN_HOST_LABEL in all three cases - only the structural flag changed",
       [
-        ruleRows([orphan], new Map<string, Host>())[0].hostName,
-        ruleRows([orphan], hosts)[0].hostName,
+        ruleRows([orphan], new Map<string, Host>(), false)[0].hostName,
+        ruleRows([orphan], hosts, true)[0].hostName,
+        ruleRows([orphan], new Map<string, Host>(), true)[0].hostName,
       ],
-      [UNKNOWN_HOST_LABEL, UNKNOWN_HOST_LABEL],
+      [UNKNOWN_HOST_LABEL, UNKNOWN_HOST_LABEL, UNKNOWN_HOST_LABEL],
     );
   }
 }
@@ -904,6 +925,9 @@ process.exit(failed === 0 ? 0 : 1);
 //                                                                (5 checks)
 //   Y12   ruleRows: hostDangling back to                    section 1's empty-host-map
 //           `host === undefined`, `hostsKnown` dropped          pre-load check ONLY -
+//           [`hostsKnown` was the local `hosts.size > 0`
+//           proxy, gone since the loaded fact became the
+//           `hostsLoaded` parameter - see Z1 to Z3]
 //                                                                the paired positive and
 //                                                                the label check stayed
 //                                                                green, which is exactly
@@ -924,3 +948,26 @@ process.exit(failed === 0 ? 0 : 1);
 //                                                                forwards-shell-verify.ts's
 //                                                                section 11, which reddens
 //                                                                at 227/228.
+//   Z1    ruleRows: `hostsLoaded` read replaced with        section 1's pre-load check
+//           the literal `true` - the flicker back              ONLY. Both positives stayed
+//                                                              green, which is what makes
+//                                                              this the flag's direction
+//                                                              rather than the function's
+//   Z2    ruleRows: `hostsLoaded` read replaced with        section 1's dangling-literal,
+//           the literal `false` - the badge off for good       hosts-known and hosts-read-
+//                                                              empty checks (3). The
+//                                                              pre-load check stayed green,
+//                                                              which is the control: a
+//                                                              forced `false` satisfies it
+//                                                              for the wrong reason, so it
+//                                                              is the OTHER direction that
+//                                                              has to be watched too
+//   Z3    ruleRows: the OLD PROXY restored verbatim -       section 1's hosts-read-empty
+//           `hosts.size > 0 && host === undefined`             check ONLY. The isolating
+//                                                              mutation for the parameter:
+//                                                              the two frames `hosts.size`
+//                                                              could already answer stay
+//                                                              green and only the third
+//                                                              reddens, so the new check
+//                                                              tests exactly the case the
+//                                                              proxy was unable to express

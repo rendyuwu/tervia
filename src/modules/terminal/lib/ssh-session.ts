@@ -30,6 +30,7 @@ import {
   classifySshConnectFailure,
   decideSshConnectFailure,
   decideSshEnding,
+  endingFromExitReason,
   hostKeyRefused,
   SshLocalConnectError,
   type SshEnding,
@@ -399,19 +400,7 @@ export async function openSshForSession(
           );
         },
         onData,
-        onExit: (code, reason) => {
-          switch (reason.kind) {
-            case "exit":
-              finishSsh({ kind: "clean", code });
-              break;
-            case "signal":
-              finishSsh({ kind: "signal", name: reason.name, coreDumped: reason.coreDumped });
-              break;
-            case "disconnected":
-              finishSsh({ kind: "ambiguous", reason: "remote closed" });
-              break;
-          }
-        },
+        onExit: (code, reason) => finishSsh(endingFromExitReason(reason, code)),
         onError: (msg) => {
           writeSshBanner(s, `\r\n\x1b[31m[tervia] ssh error: ${msg}\x1b[0m\r\n`);
           finishSsh({ kind: "ambiguous", reason: msg });
@@ -558,13 +547,18 @@ export async function forwardDetectedUrl(
   if (pending === undefined) {
     // Always 127.0.0.1 as the tunnel's target: the url's host is whatever the
     // server calls itself, and a server bound to 0.0.0.0 is on loopback too.
+    // The bound port alone, out of the pair the open resolves with: nothing here
+    // ever closes one of these forwards on its own - they die with the session,
+    // which is what `cache`'s own lifetime rests on - so the handle's
+    // `generation`, which exists only to name a listener to a close, has no
+    // consumer on this path.
     pending = openSshForward(sessionId, 0, "127.0.0.1", remotePort).then(
-      (bound) => {
+      ({ boundPort }) => {
         writeSshBanner(
           s,
-          `\x1b[2m[tervia] forwarding localhost:${bound} -> remote localhost:${remotePort}\x1b[0m\r\n`,
+          `\x1b[2m[tervia] forwarding localhost:${boundPort} -> remote localhost:${remotePort}\x1b[0m\r\n`,
         );
-        return bound;
+        return boundPort;
       },
       (e) => {
         cache.delete(remotePort);

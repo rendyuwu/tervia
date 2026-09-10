@@ -76,6 +76,17 @@ export type RuleEditorDialogProps = {
    * not follow the page's search box.
    */
   hosts: readonly Host[];
+  /**
+   * Whether `hosts` is the answer to a settled read, rather than the empty
+   * array that stands in before the first one lands.
+   *
+   * Required for the same reason `ruleRows` takes it: an empty `hosts` means
+   * either "not read yet" or "read, none saved", the store cannot tell them
+   * apart, and the zero-hosts branch below gives a WRONG and dismissive answer
+   * for the first. A rule editor opened inside the load window would otherwise
+   * tell a user with saved SSH hosts that they have none.
+   */
+  hostsLoaded: boolean;
 };
 
 /** A token for "the row the form is showing right now" - see
@@ -86,7 +97,12 @@ function tokenFor(target: RuleEditorTarget | null): string | null {
   return "create";
 }
 
-export function RuleEditorDialog({ target, onClose, hosts }: RuleEditorDialogProps): ReactNode {
+export function RuleEditorDialog({
+  target,
+  onClose,
+  hosts,
+  hostsLoaded,
+}: RuleEditorDialogProps): ReactNode {
   const [mode, setMode] = useState<"create" | "edit">("create");
   const [draft, setDraft] = useState<RuleDraft>(EMPTY_RULE_DRAFT);
   /** The stored rule being edited, or null in create mode. */
@@ -279,13 +295,46 @@ export function RuleEditorDialog({ target, onClose, hosts }: RuleEditorDialogPro
               </Field>
 
               <Field label="SSH host">
-                <Combobox
-                  options={hostOptions}
-                  value={draft.hostId}
-                  onChange={(hostId) => patch({ hostId })}
-                  searchPlaceholder="Search hosts…"
-                  emptyLabel="No host found."
-                />
+                {/* THE COMBOBOX IS REPLACED, not merely left empty. Over zero
+                    saved SSH hosts `savedHostOptions` returns exactly one
+                    option, the none-option, so the picker opens onto a list
+                    whose only entry is "Select an SSH host…" and its
+                    `emptyLabel` never fires - the user is shown a control that
+                    cannot be satisfied and no reason why. The branch is on
+                    `sshHosts.length` and not on `hostOptions.length`, because
+                    the none-option is what makes the option count off by one
+                    and a `<= 1` test would encode that arithmetic instead of
+                    the fact.
+
+                    `hostsLoaded` is the other term because an empty `hosts` is
+                    two different facts - not read yet, or read and none saved -
+                    and this sentence is only true of the second. Without it a
+                    dialog opened inside the load window tells a user who HAS
+                    saved SSH hosts that they have none, which is the same wrong
+                    answer `ruleRows` takes the flag to avoid, one file over.
+                    Before the read lands neither arm is right, so the picker
+                    renders and its options fill in when the hosts arrive.
+
+                    Worded to match `IdentityEditorDialog.tsx`'s zero-keys
+                    branch, which is the same situation one dialog over, so the
+                    two sound like one app. It names the Hosts page where that
+                    one does not, and only because New key is in the identity
+                    editor's own view while New host is not in this one. */}
+                {hostsLoaded && sshHosts.length === 0 ? (
+                  <span className="text-muted-foreground text-[10.5px]">
+                    No SSH hosts saved yet. Close this and use New host on the Hosts page first - a
+                    forward rule tunnels over an SSH session, so it has to name a host, and the save
+                    is refused without it.
+                  </span>
+                ) : (
+                  <Combobox
+                    options={hostOptions}
+                    value={draft.hostId}
+                    onChange={(hostId) => patch({ hostId })}
+                    searchPlaceholder="Search hosts…"
+                    emptyLabel="No host found."
+                  />
+                )}
                 {hostError ? (
                   <span className="text-destructive text-[10.5px]">{hostError}</span>
                 ) : null}

@@ -301,6 +301,12 @@ fn min_size_correction(current: (f64, f64), min: (f64, f64)) -> Option<(f64, f64
 /// restated here, so `tauri.conf.json` and the two platform files that must
 /// echo it (enforced by `scripts/tauri-config-parity-verify.ts`) stay the only
 /// place the number is written.
+///
+/// The early return below leaves one case uncorrected, and that case is an
+/// accepted state recorded in `KNOWN-LIMITS.md` under window sizing: a profile
+/// that quit maximized comes back maximized carrying a below-floor size, and
+/// the first un-maximize of every session shows it. Whoever removes or reworks
+/// that early return should retire the entry with it.
 fn enforce_configured_min_size(config: &tauri::Config, window: &tauri::WebviewWindow) {
     let Some(window_config) = config
         .app

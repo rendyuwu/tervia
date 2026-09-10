@@ -176,6 +176,6 @@ export async function runRdpProbe(args: RdpProbeArgs): Promise<RdpProbeResult> {
     // The probe is over either way, so the tunnel goes with it: a Test that left a
     // bastion session open would hold one for as long as the app runs, since
     // nothing else has a handle on it.
-    dial?.release();
+    await dial?.release();
   }
 }

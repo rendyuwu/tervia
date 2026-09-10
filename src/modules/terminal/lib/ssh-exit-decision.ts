@@ -7,14 +7,16 @@
 // `getCurrentWebviewWindow()` at module scope, which throws under plain Node/tsx
 // with no `window` - the same reason `status.ts` next door is its own
 // dependency-free file. Everything here must stay import-free for that reason,
-// which is why the credential shape below is spelled structurally rather than
-// imported from the vault module.
+// which is why the credential shape and the wire ending shape below are both
+// spelled structurally rather than imported from the vault module and the ssh
+// bridge.
 //
 // Two different questions live here, and they are genuinely different:
 //
-//   `decideSshEnding`: a channel EXISTED and then ended. See the
-//   `SshEvent`/`SshExitReason` doc comments in session.rs / bridge.ts for the
-//   reasoning behind the three ending shapes it switches on.
+//   `endingFromExitReason` and `decideSshEnding`, in that order: a channel
+//   EXISTED and then ended. See the `SshEvent`/`SshExitReason` doc comments in
+//   session.rs / bridge.ts for the reasoning behind the three ending shapes
+//   they switch on.
 //
 //   `classifySshConnectFailure`/`decideSshConnectFailure`: the connect failed
 //   before any channel existed, so none of the ending shapes apply and
@@ -36,6 +38,48 @@ export type SshEndingAction =
   | { action: "closePane"; code: number }
   | { action: "parkKilled"; signalName: string; coreDumped: boolean }
   | { action: "reconnect"; reason: string };
+
+/**
+ * How the wire spelled the ending. This is `SshExitReason` from
+ * src/modules/ssh/bridge.ts, named here rather than imported because that file
+ * reaches a Tauri API and this one must stay loadable under plain Node (see the
+ * header). The two are held together by the compiler at the one call site that
+ * has both - `onExit` in ssh-session.ts - so a kind added on the bridge side
+ * arrives as a type error there rather than as a silently unmapped ending.
+ */
+export type SshWireExitReason =
+  | { kind: "exit"; code: number }
+  | { kind: "signal"; name: string; coreDumped: boolean }
+  | { kind: "disconnected" };
+
+/**
+ * The wire's ending -> the shape `finishSsh` decides on, and the second half of
+ * the translation `decideSshEnding` is never handed.
+ *
+ * This is the seam where the collapse that motivated the three-way split could
+ * come back one layer up: "disconnected" rewritten to reuse "exit"'s `clean`
+ * shape would report a dropped connection as a deliberate exit, and
+ * `decideSshEnding` would never see the mis-map - only its already-wrong
+ * result. Which is why this is a function that can be called rather than a
+ * switch inlined at the handler.
+ *
+ * `code` is `onExit`'s first argument rather than `reason.code`: it is what the
+ * caller has in hand, the two agree for "exit", and "exit" is the only arm that
+ * reads one at all.
+ */
+export function endingFromExitReason(reason: SshWireExitReason, code: number): SshEnding {
+  switch (reason.kind) {
+    case "exit":
+      return { kind: "clean", code };
+    case "signal":
+      return { kind: "signal", name: reason.name, coreDumped: reason.coreDumped };
+    case "disconnected":
+      // The only reconnect-eligible ending, and there is nothing more specific
+      // to say about it: Eof/Close reported no status and no signal, so the
+      // banner gets the one generic sentence rather than a fabricated cause.
+      return { kind: "ambiguous", reason: "remote closed" };
+  }
+}
 
 export function decideSshEnding(ending: SshEnding, sshUserClose: boolean): SshEndingAction {
   // A user-initiated disconnect wins the display regardless of how the

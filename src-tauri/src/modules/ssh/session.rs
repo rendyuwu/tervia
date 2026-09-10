@@ -394,9 +394,22 @@ pub struct SshSession {
     /// not pay the channel-open + handshake roundtrip each time.
     sftp: Mutex<Option<Arc<SftpSession>>>,
     /// Live `ssh -L` local forwards, keyed by the bound loopback port. Each
-    /// value is the accept loop; aborting it drops the listener and frees the
-    /// port. Torn down with the session in `close` / `Drop`.
-    forwards: Mutex<HashMap<u16, JoinHandle<()>>>,
+    /// value is that forward's generation paired with its accept loop; aborting
+    /// the loop drops the listener and frees the port. Torn down with the
+    /// session in `close` / `Drop`.
+    ///
+    /// The port is the KEY but not the identity, which is why the generation
+    /// rides beside the handle. A port freed by one Stop is immediately
+    /// rebindable, so a later `open_forward` on a pinned port lands under the
+    /// same key as the forward that has gone - and a close still in flight from
+    /// the first one would otherwise abort the second. `abort_forward` compares
+    /// the generation for exactly that reason.
+    forwards: Mutex<HashMap<u16, (u64, JoinHandle<()>)>>,
+    /// Source of the generations in `forwards`. Per session rather than
+    /// process-wide because a close already names its session, so uniqueness
+    /// within one is all the identity a port needs; `mint_forward_generation`
+    /// is the only reader.
+    forward_seq: AtomicU64,
     /// One-shot signal that fires when the pump task exits. The sender lives
     /// inside the pump's tokio task; `send()` runs at normal exit (Eof/Close,
     /// peer hang-up, wait() returning None) and the Sender simply drops on
@@ -420,6 +433,17 @@ pub struct SshSession {
     alive: Arc<AtomicBool>,
 }
 
+/// Mint the next generation for a forward on one session. Monotonic, and never
+/// reused within a session, so a generation a close names either matches the
+/// listener currently on that port or matches nothing.
+///
+/// A free function over the counter for the same reason `abort_forward` is one
+/// over the map: `open_forward` needs a live `SshSession` and cannot be reached
+/// from a test, while what it does with the counter can be.
+fn mint_forward_generation(seq: &AtomicU64) -> u64 {
+    seq.fetch_add(1, Ordering::Relaxed)
+}
+
 /// Abort ONE forward's accept loop, freeing its local port, and report whether
 /// there was one to abort.
 ///
@@ -429,15 +453,35 @@ pub struct SshSession {
 /// is the whole decision `ssh_forward_close` makes, so this is where it is
 /// pinned.
 ///
-/// `false` is not an error: the forward may have gone with a reconnect, or a
-/// teardown may be firing twice. Idempotent on purpose - a caller must be able
-/// to Stop without tracking whether Start finished.
-async fn abort_forward(forwards: &Mutex<HashMap<u16, JoinHandle<()>>>, bound_port: u16) -> bool {
-    match forwards.lock().await.remove(&bound_port) {
-        Some(task) => {
+/// `generation` is what makes the decision an identity check rather than a port
+/// lookup: a forward is aborted ONLY when the generation stored beside it
+/// matches. A close naming a generation the map has moved past is refused, so a
+/// close that was still in flight when its listener went away cannot take down
+/// the successor a later open bound on the same port.
+///
+/// `false` is not an error: the forward may have gone with a reconnect, a
+/// teardown may be firing twice, or this may be the stale close above.
+/// Idempotent on purpose - a caller must be able to Stop without tracking
+/// whether Start finished.
+async fn abort_forward(
+    forwards: &Mutex<HashMap<u16, (u64, JoinHandle<()>)>>,
+    bound_port: u16,
+    generation: u64,
+) -> bool {
+    let mut live = forwards.lock().await;
+    // Compared BEFORE the remove, so a mismatch leaves the entry - and its
+    // listener - exactly as it was. Removing first and putting it back would be
+    // the same outcome under this lock, but it would mean a future early return
+    // between the two could drop a live forward out of the map.
+    if live.get(&bound_port).map(|(stored, _)| *stored) != Some(generation) {
+        return false;
+    }
+    match live.remove(&bound_port) {
+        Some((_, task)) => {
             task.abort();
             true
         }
+        // Unreachable: the entry was just read under this same guard.
         None => false,
     }
 }
@@ -502,7 +546,7 @@ impl SshSession {
         let _ = self.write_half.close().await;
         // Drop the forward listeners first so their ports are free again the
         // moment the tab closes, rather than whenever the last Arc goes.
-        for (_, t) in self.forwards.lock().await.drain() {
+        for (_, (_, t)) in self.forwards.lock().await.drain() {
             t.abort();
         }
         // Drop the SFTP session first so its background reader shuts down
@@ -540,7 +584,9 @@ impl SshSession {
     /// `remote_host:remote_port`, resolved from the SERVER's point of view - so
     /// a ProxyJump chain and the remote's own private network apply for free.
     /// `local_port` 0 binds an ephemeral port; the port actually bound is
-    /// returned.
+    /// returned, paired with the generation that names THIS listener on it.
+    /// Both halves have to reach `close_forward` - see `abort_forward` for what
+    /// the port alone cannot say.
     ///
     /// Loopback only, deliberately: a forwarded port re-exports whatever the
     /// remote endpoint trusts (a database, an admin UI) with no auth step of its
@@ -551,7 +597,7 @@ impl SshSession {
         local_port: u16,
         remote_host: String,
         remote_port: u16,
-    ) -> Result<u16, String> {
+    ) -> Result<(u16, u64), String> {
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", local_port))
             .await
             .map_err(|e| format!("ssh: bind 127.0.0.1:{local_port} failed: {e}"))?;
@@ -606,15 +652,22 @@ impl SshSession {
                 }
             }
         });
-        self.forwards.lock().await.insert(bound, task);
+        // Minted here and not at the top: a bind that failed registered nothing,
+        // so it must not consume a generation either - the numbers are only ever
+        // compared for equality, but a gap would read as a forward that had
+        // existed.
+        let generation = mint_forward_generation(&self.forward_seq);
+        self.forwards.lock().await.insert(bound, (generation, task));
         log::info!("ssh -L {label}");
-        Ok(bound)
+        Ok((bound, generation))
     }
 
-    /// Stop the one `ssh -L` listener bound to `bound_port`, leaving the session
-    /// and every other forward up. `false` means there was no such forward.
-    pub async fn close_forward(&self, bound_port: u16) -> bool {
-        abort_forward(&self.forwards, bound_port).await
+    /// Stop the one `ssh -L` listener bound to `bound_port` AND carrying
+    /// `generation`, leaving the session and every other forward up. `false`
+    /// means there was no such forward - including a port that is bound by a
+    /// later forward than the one this close names. See `abort_forward`.
+    pub async fn close_forward(&self, bound_port: u16, generation: u64) -> bool {
+        abort_forward(&self.forwards, bound_port, generation).await
     }
 
     /// Return the cached SFTP session, opening a fresh subsystem channel on
@@ -750,7 +803,7 @@ impl Drop for SshSession {
         // Same for the -L listeners, so a session evicted by the janitor (remote
         // hangup, never an explicit close) releases its local ports.
         if let Ok(mut f) = self.forwards.try_lock() {
-            for (_, t) in f.drain() {
+            for (_, (_, t)) in f.drain() {
                 t.abort();
             }
         }
@@ -1474,6 +1527,7 @@ pub async fn connect(
             jump_handles: Mutex::new(jump_handles),
             sftp: Mutex::new(None),
             forwards: Mutex::new(HashMap::new()),
+            forward_seq: AtomicU64::new(1),
             exit_signal: std::sync::Mutex::new(None),
             host: input.host.clone(),
             user: input.user.clone(),
@@ -1614,6 +1668,7 @@ pub async fn connect(
         jump_handles: Mutex::new(jump_handles),
         sftp: Mutex::new(None),
         forwards: Mutex::new(HashMap::new()),
+        forward_seq: AtomicU64::new(1),
         exit_signal: std::sync::Mutex::new(Some(exit_rx)),
         host: input.host.clone(),
         user: input.user.clone(),
@@ -1915,14 +1970,23 @@ mod credential_guard_tests {
 }
 
 /// `abort_forward` is the whole decision `ssh_forward_close` makes: which entry
-/// leaves the map, whether its accept loop is actually aborted, and what a
-/// second Stop on the same port reports. Tested here over a bare map because an
-/// `SshSession` cannot be built without a live handshake - a test that needed
-/// one would have to be `#[ignore]`d like `forwards_a_local_port` below, and
-/// would give CI nothing.
+/// leaves the map, whether its accept loop is actually aborted, whether a
+/// generation the port has moved past is refused, and what a second Stop on the
+/// same port reports. Tested here over a bare map because an `SshSession`
+/// cannot be built without a live handshake - a test that needed one would have
+/// to be `#[ignore]`d like `forwards_a_local_port` below, and would give CI
+/// nothing. `mint_forward_generation` is here for the same reason and covers
+/// the other half of the pair, the minting `open_forward` does.
 #[cfg(test)]
 mod forward_abort_tests {
     use super::*;
+
+    /// The generation a fixture's registered forward carries. Any value would
+    /// do - the decision is equality and nothing else - but a named one keeps
+    /// `abort_forward_frees_the_port` and
+    /// `abort_forward_refuses_a_superseded_generation` reading as one pair that
+    /// differs in exactly that argument and in nothing else.
+    const REGISTERED: u64 = 7;
 
     /// Spawn an accept loop that OWNS the listener, the way `open_forward`'s
     /// task does: the local port stays bound for exactly as long as the task
@@ -1965,14 +2029,17 @@ mod forward_abort_tests {
     /// removing the handle from the map without aborting the task ALSO returns
     /// `true`: Stop would report success while the port stayed unusable for the
     /// rest of the session and no reconnect could re-open the forward.
+    ///
+    /// Also the CONTROL for `abort_forward_refuses_a_superseded_generation`
+    /// below: same fixture, same call, and a generation that matches.
     #[tokio::test]
     async fn abort_forward_frees_the_port() {
         let (port, task) = bound_accept_loop().await;
-        let forwards = Mutex::new(HashMap::from([(port, task)]));
+        let forwards = Mutex::new(HashMap::from([(port, (REGISTERED, task))]));
 
         assert!(
-            abort_forward(&forwards, port).await,
-            "a registered forward must report that there was one to abort"
+            abort_forward(&forwards, port, REGISTERED).await,
+            "a registered forward closed at its own generation must report that there was one to abort"
         );
         assert!(
             port_rebinds_within_a_second(port).await,
@@ -1984,25 +2051,72 @@ mod forward_abort_tests {
         );
     }
 
+    /// A stale close cannot name a listener it did not open.
+    ///
+    /// The case: a Stop is issued, its forward goes, the port is immediately
+    /// rebindable, a Start binds it again - and only then does the first close
+    /// reach the map. Keyed by port alone that close finds the NEW forward and
+    /// aborts it, which from the page reads as a Start that silently did
+    /// nothing. Here the map holds a LATER generation than the close names,
+    /// which is exactly that state.
+    ///
+    /// The port is asserted STILL BOUND rather than merely still in the map,
+    /// because a caller can only observe the defect as a port that stopped
+    /// listening; and the stored generation is asserted unchanged, because a
+    /// refusal that rewrote it would leave the real owner unable to close its
+    /// own forward.
+    ///
+    /// Its control is `abort_forward_frees_the_port` above, which differs in
+    /// the generation argument and nothing else: a mutation that broke the
+    /// abort itself reddens both, and one that dropped the generation
+    /// comparison reddens only this test.
+    #[tokio::test]
+    async fn abort_forward_refuses_a_superseded_generation() {
+        let (port, task) = bound_accept_loop().await;
+        let forwards = Mutex::new(HashMap::from([(port, (REGISTERED + 1, task))]));
+
+        assert!(
+            !abort_forward(&forwards, port, REGISTERED).await,
+            "a close naming a generation the port has moved past must report false"
+        );
+        assert!(
+            !port_rebinds_within_a_second(port).await,
+            "port {port} was freed by a close that named an older generation than the live forward"
+        );
+        let guard = forwards.lock().await;
+        let (stored, survivor) = guard
+            .get(&port)
+            .expect("a refused close must leave the live forward in the map");
+        assert_eq!(
+            *stored,
+            REGISTERED + 1,
+            "a refused close must not rewrite the live forward's generation"
+        );
+        assert!(
+            !survivor.is_finished(),
+            "a refused close must not abort the live forward's accept loop"
+        );
+    }
+
     /// Stop is idempotent on purpose: the frontend can fire it for a forward a
     /// reconnect already took away, or twice on a double-click, and neither is
     /// an error - `false` is the state the caller asked for, already reached.
     #[tokio::test]
     async fn abort_forward_reports_an_unknown_port() {
-        let empty: Mutex<HashMap<u16, JoinHandle<()>>> = Mutex::new(HashMap::new());
+        let empty: Mutex<HashMap<u16, (u64, JoinHandle<()>)>> = Mutex::new(HashMap::new());
         assert!(
-            !abort_forward(&empty, 4242).await,
+            !abort_forward(&empty, 4242, REGISTERED).await,
             "an unknown port must report that there was nothing to abort"
         );
 
         let (port, task) = bound_accept_loop().await;
-        let forwards = Mutex::new(HashMap::from([(port, task)]));
+        let forwards = Mutex::new(HashMap::from([(port, (REGISTERED, task))]));
         assert!(
-            abort_forward(&forwards, port).await,
+            abort_forward(&forwards, port, REGISTERED).await,
             "the first close of a live forward reports true"
         );
         assert!(
-            !abort_forward(&forwards, port).await,
+            !abort_forward(&forwards, port, REGISTERED).await,
             "the second close of the same port must report false, not repeat true"
         );
     }
@@ -2015,20 +2129,54 @@ mod forward_abort_tests {
     async fn abort_forward_leaves_the_other_forwards_alone() {
         let (closed_port, closed_task) = bound_accept_loop().await;
         let (kept_port, kept_task) = bound_accept_loop().await;
+        // The two forwards carry DIFFERENT generations, the way two opens on one
+        // session do, so this test cannot pass by the closed port's generation
+        // happening to match the kept port's entry.
         let forwards = Mutex::new(HashMap::from([
-            (closed_port, closed_task),
-            (kept_port, kept_task),
+            (closed_port, (REGISTERED, closed_task)),
+            (kept_port, (REGISTERED + 1, kept_task)),
         ]));
 
-        assert!(abort_forward(&forwards, closed_port).await);
+        assert!(abort_forward(&forwards, closed_port, REGISTERED).await);
 
         let guard = forwards.lock().await;
-        let survivor = guard
+        let (_, survivor) = guard
             .get(&kept_port)
             .expect("the forward that was not closed must still be in the map");
         assert!(
             !survivor.is_finished(),
             "closing one forward must not abort another forward's accept loop"
+        );
+    }
+
+    /// Two successive opens must not share a generation, or `abort_forward`'s
+    /// comparison compares two values that are always equal and refuses
+    /// nothing - which is the unfixed behaviour wearing the fix's shape.
+    ///
+    /// Over the counter rather than over `open_forward`, for the reason
+    /// `mint_forward_generation` exists as a function at all. No port appears
+    /// here, and that is the property: the generation is minted per OPEN and
+    /// never per port, so two opens differ even when they bind the same number.
+    #[test]
+    fn successive_opens_mint_different_generations() {
+        let seq = AtomicU64::new(1);
+        let first = mint_forward_generation(&seq);
+        let second = mint_forward_generation(&seq);
+        let third = mint_forward_generation(&seq);
+
+        assert_ne!(
+            first, second,
+            "two opens on one session must not be handed the same generation"
+        );
+        assert_ne!(second, third, "nor may the second and third");
+        // Monotonic, not merely distinct. Equality is the whole of what
+        // `abort_forward` asks, so distinctness is what the comparison needs -
+        // but a counter that could go backwards would eventually revisit a
+        // spent value, and "never reused" is what makes a refused close
+        // certainly stale rather than probably stale.
+        assert!(
+            first < second && second < third,
+            "generations must increase, or a spent one comes round again"
         );
     }
 }
@@ -2168,7 +2316,7 @@ mod chain_tests {
             let session = connect(input, channel).await.expect("connect failed");
             // 0 = ephemeral, so a busy dev machine can't fail the test on a
             // port collision that has nothing to do with forwarding.
-            let local = session
+            let (local, generation) = session
                 .open_forward(0, "127.0.0.1".into(), remote_port)
                 .await
                 .expect("open_forward failed");
@@ -2188,7 +2336,7 @@ mod chain_tests {
             // this point would also hold if `close_forward` had closed the
             // session, so the re-open below is what separates the two.
             assert!(
-                session.close_forward(local).await,
+                session.close_forward(local, generation).await,
                 "closing a live forward must report there was one to close"
             );
             assert!(
@@ -2196,17 +2344,22 @@ mod chain_tests {
                 "close_forward left port {local} bound"
             );
             assert!(
-                !session.close_forward(local).await,
+                !session.close_forward(local, generation).await,
                 "a second close of port {local} must report false, not repeat true"
             );
 
             // The session survived, so it can still open forwards - and the
             // teardown check below now has a listener of its own to free
             // instead of passing on a port close_forward already released.
-            let second = session
+            let (second, second_generation) = session
                 .open_forward(0, "127.0.0.1".into(), remote_port)
                 .await
                 .expect("re-open after close_forward failed - it closed the session");
+            assert_ne!(
+                generation, second_generation,
+                "a second open must mint its own generation, or the first one's \
+                 close could name this listener"
+            );
 
             session.close().await;
             // close() must free the port, or every reconnect would fail to bind.

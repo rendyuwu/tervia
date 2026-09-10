@@ -551,10 +551,32 @@ pub async fn ssh_close(state: tauri::State<'_, SshState>, id: u32) -> Result<(),
     Ok(())
 }
 
+/// What names ONE live `ssh -L` listener, and the whole of what
+/// `ssh_forward_close` accepts.
+///
+/// A struct rather than a tuple because a tuple crosses the IPC as a positional
+/// array: the frontend would read `[port, generation]`, and a half that
+/// reordered or dropped one of them would be a silent re-interpretation instead
+/// of a field name that stopped resolving.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SshForwardHandle {
+    /// The port actually bound, which for a request of 0 is not the number that
+    /// was sent.
+    pub bound_port: u16,
+    /// Unique within this session, so it names THIS listener on `bound_port`
+    /// rather than whichever one holds that port later. The port alone cannot:
+    /// a Stop frees it immediately and the next Start rebinds the same number.
+    /// `abort_forward` in `session.rs` is where the comparison is made and
+    /// where the consequence of dropping it is written out.
+    pub generation: u64,
+}
+
 /// `ssh -L`: bind `127.0.0.1:local_port` on this machine and tunnel every
 /// connection to `remote_host:remote_port` as resolved from the SERVER, over
 /// the live session `id` (so a ProxyJump chain applies for free). `local_port`
-/// 0 picks a free port; the bound port is returned for the caller to report.
+/// 0 picks a free port; the `SshForwardHandle` naming the listener is returned,
+/// and BOTH of its halves have to come back to `ssh_forward_close`.
 ///
 /// One forward at a time: `ssh_forward_close` below stops a single listener
 /// without touching the session, and the session's own teardown drops whatever
@@ -566,7 +588,7 @@ pub async fn ssh_forward_open(
     local_port: u16,
     remote_host: String,
     remote_port: u16,
-) -> Result<u16, String> {
+) -> Result<SshForwardHandle, String> {
     let remote_host = remote_host.trim().to_string();
     if remote_host.is_empty() {
         return Err("ssh: port forward needs a remote host".into());
@@ -586,14 +608,18 @@ pub async fn ssh_forward_open(
         })?;
     // Bind and accept on the SSH runtime, not tauri's: the listener and the
     // russh channels it feeds must be driven by the same reactor.
-    ssh_runtime()
+    let (bound_port, generation) = ssh_runtime()
         .spawn(async move {
             session
                 .open_forward(local_port, remote_host, remote_port)
                 .await
         })
         .await
-        .map_err(|e| format!("ssh forward task join failed: {e}"))?
+        .map_err(|e| format!("ssh forward task join failed: {e}"))??;
+    Ok(SshForwardHandle {
+        bound_port,
+        generation,
+    })
 }
 
 /// Close ONE `ssh -L` listener without touching the session.
@@ -604,11 +630,20 @@ pub async fn ssh_forward_open(
 /// Stop button needs one listener to go away while the session and its other
 /// forwards stay up.
 ///
-/// Returns `false` for an unknown session or an unknown port, rather than
-/// `Err`. That is the opposite of `ssh_forward_open`, which errors on an
-/// unknown id, and the asymmetry is the point: an open that cannot find its
-/// session has failed at the thing it was asked to do, while a close that
-/// cannot find its forward has arrived at the state it was asked for.
+/// Returns `false` for an unknown session, an unknown port, or a `generation`
+/// the port has moved past, rather than `Err`. That is the opposite of
+/// `ssh_forward_open`, which errors on an unknown id, and the asymmetry is the
+/// point: an open that cannot find its session has failed at the thing it was
+/// asked to do, while a close that cannot find its forward has arrived at the
+/// state it was asked for.
+///
+/// `generation` is what makes the third of those cases exist, and it is why a
+/// port is not enough to name a forward: aborting a listener frees its port
+/// immediately, so a Stop followed by a Start on the same pinned port has two
+/// listeners under one key in sequence, and a close still in flight from the
+/// first would abort the second. `abort_forward` in `session.rs` makes the
+/// comparison; the frontend keeps the pair together in `SshForwardHandle`
+/// (`src/modules/ssh/bridge.ts`).
 ///
 /// What this does NOT do, and the UI has to say so: aborting the accept task
 /// drops the listener, so the local port is immediately rebindable and no new
@@ -621,12 +656,13 @@ pub async fn ssh_forward_close(
     state: tauri::State<'_, SshState>,
     id: u32,
     bound_port: u16,
+    generation: u64,
 ) -> Result<bool, String> {
     let Some(session) = state.sessions.read().await.get(&id).cloned() else {
         log::debug!("ssh_forward_close: unknown id={id}");
         return Ok(false);
     };
-    Ok(session.close_forward(bound_port).await)
+    Ok(session.close_forward(bound_port, generation).await)
 }
 
 /// Answer a first-connect `HostKeyPrompt`. `accept = true` lets the paused

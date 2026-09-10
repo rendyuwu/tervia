@@ -61,8 +61,10 @@ Six invariants (rationale in
 1. **Two processes.** Frontend (`src/`, React webview) owns UI; backend
    (`src-tauri/`, Rust) owns every OS resource. The webview reaches the OS only
    via `invoke("cmd", args)`; streaming output returns over a Tauri `Channel`.
-   Every command is registered in `src-tauri/src/lib.rs` (`invoke_handler`, 91
-   commands) which is the whole backend API index.
+   Every command is registered in `src-tauri/src/lib.rs` (`invoke_handler`, 92
+   commands) which is the whole backend API index;
+   `scripts/command-registry-verify.ts` holds that list to the `invoke` call
+   sites in both directions, so the index cannot drift from the callers.
 2. **Three webviews.** The main window, a separate Settings window
    (`src/settings/`), and per-pane float windows (`src/float/`). They share
    state via `tauri-plugin-store` and Tauri events, not React.
@@ -90,7 +92,7 @@ Six invariants (rationale in
 
 ```
 src-tauri/                      Backend (Rust)
-  src/lib.rs                    invoke_handler (all 91 commands) + boot + CLI dispatch
+  src/lib.rs                    invoke_handler (all 92 commands) + boot + CLI dispatch
   src/main.rs                   thin shim
   src/modules/
     ssh/{mod,session,sftp}.rs             russh sessions, ProxyJump, -L forwards, SFTP,
@@ -773,12 +775,16 @@ never blocks persistence. Not supported in builtin mode:
 ## Gotchas worth knowing
 
 - `tauri.conf.json` sets `"removeUnusedCommands": true`. A command with no
-  frontend `invoke` call site can be stripped from a release build. Today
-  `http_stream`, `http_abort`, `shell_bg_spawn_direct`, `ssh_list_sessions` and
-  `ssh_attach` have no caller in `src/`. `secrets_get_all` does now, through
-  `vault/adapters.ts`: it is the one-round-trip batch read a host's three SSH
-  accounts go through. Note it is `(service, accounts[])`, one service per call,
-  so a batch spanning host-owned and vault-owned secrets is two calls.
+  frontend `invoke` call site can be stripped from a release build. **The list
+  of those lives in `UNINVOKED` in `scripts/command-registry-verify.ts`, not
+  here**, because that check keeps it honest in both directions: it fails if a
+  registered command loses its last caller without being added to the ledger,
+  and it fails if a ledger entry has since gained one. An enumeration in this
+  file could only go stale, and did - it named five when the tree had twenty.
+  `secrets_get_all` is the one worth knowing about by name: it has a caller,
+  through `vault/adapters.ts`, and it is the one-round-trip batch read a host's
+  three SSH accounts go through. Note it is `(service, accounts[])`, one service
+  per call, so a batch spanning host-owned and vault-owned secrets is two calls.
 - The plugin store writes non-atomically, so `shell_init.rs` retries its
   `tervia-settings.json` read a couple of times before giving up; a spawn can
   otherwise land between the truncate and the rewrite.

@@ -56,11 +56,17 @@ function TabsTrigger({ className, ...props }: React.ComponentProps<typeof TabsPr
       className={cn(
         "text-foreground/60 hover:text-foreground focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:outline-ring dark:text-muted-foreground dark:hover:text-foreground relative inline-flex h-[calc(100%-1px)] flex-1 cursor-pointer items-center justify-center gap-2 border border-transparent! px-3 py-1 text-sm font-medium whitespace-nowrap transition-all group-data-vertical/tabs:w-full group-data-vertical/tabs:justify-start group-data-vertical/tabs:px-3 group-data-vertical/tabs:py-1.5 focus-visible:ring-[3px] focus-visible:outline-1 disabled:pointer-events-none disabled:opacity-50 has-data-[icon=inline-end]:pr-2 has-data-[icon=inline-start]:pl-2 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
         "group-data-[variant=line]/tabs-list:bg-transparent group-data-[variant=line]/tabs-list:data-active:bg-transparent dark:group-data-[variant=line]/tabs-list:data-active:border-transparent dark:group-data-[variant=line]/tabs-list:data-active:bg-transparent",
-        // Selected tab is the brand --accent surface, the same treatment the
-        // workspace tab bar already gives its active entry (renderEntryBody).
-        // The old dark state was bg-input/30 on a bg-muted/40 track: two greys a
-        // step apart, so in the Settings window you had to hunt for which tab
-        // you were on.
+        // Selected tab is the brand --accent surface. The old dark state was
+        // bg-input/30 on a bg-muted/40 track: two greys a step apart, so in the
+        // Settings window you had to hunt for which tab you were on.
+        //
+        // This is NOT the workspace tab bar's treatment, and the two are not
+        // kept in step. `renderEntryBody` marks its active entry with a
+        // JS-computed stripe instead, because its chip is wrapped by a context
+        // menu trigger whose own `data-state` wins the merge - so a
+        // `data-active:` variant there never applies. These primitives are
+        // driven by the real Radix state and the variant works, which is why
+        // one surface can use it and the other cannot.
         "data-active:bg-accent data-active:text-accent-foreground dark:data-active:bg-accent dark:data-active:text-accent-foreground data-active:font-semibold",
         "after:bg-foreground after:absolute after:opacity-0 after:transition-opacity group-data-horizontal/tabs:after:inset-x-0 group-data-horizontal/tabs:after:bottom-[-5px] group-data-horizontal/tabs:after:h-0.5 group-data-vertical/tabs:after:inset-y-0 group-data-vertical/tabs:after:-right-1 group-data-vertical/tabs:after:w-0.5 group-data-[variant=line]/tabs-list:data-active:after:opacity-100",
         className,

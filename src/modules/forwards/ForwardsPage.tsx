@@ -38,7 +38,7 @@ import { Button } from "@/components/ui/button";
 import { InputGroup, InputGroupAddon, InputGroupInput } from "@/components/ui/input-group";
 import { toast } from "@/components/ui/toast";
 import { paneCaret } from "@/lib/paneCaret";
-import { useHosts } from "@/modules/hosts/useHosts";
+import { useHostsSnapshot } from "@/modules/hosts/useHosts";
 import { Plus, Search, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
@@ -91,7 +91,10 @@ type PendingDelete = { rule: ForwardRule; pageStops: boolean; hostOwned: boolean
 
 export function ForwardsPage(): ReactNode {
   const forwardsById = useForwards();
-  const hostsById = useHosts();
+  // `useHostsSnapshot()` and not `useHosts()`: `ruleRows` needs the LOADED
+  // fact, and an empty map cannot carry it (see `hostDangling` in
+  // `page/derive.ts`).
+  const { hosts: hostsById, loaded: hostsLoaded } = useHostsSnapshot();
 
   const [query, setQuery] = useState("");
   const [pendingDelete, setPendingDelete] = useState<PendingDelete | null>(null);
@@ -130,9 +133,9 @@ export function ForwardsPage(): ReactNode {
   // the row-builder memo comment in `VaultPage.tsx`, above its
   // `hosts`/`identities`/`keys` memos, for the full reasoning (zustand v5 matches
   // `Object.is`, and a selector returning a fresh array re-subscribes
-  // forever). `useForwards()` and `useHosts()` hand back references that are
-  // stable BETWEEN renders, which is what stops the loop; `hostsById` is
-  // handed to `ruleRows` directly (it looks hosts up by id, so it wants the
+  // forever). `useForwards()` and `useHostsSnapshot()` hand back references
+  // that are stable BETWEEN renders, which is what stops the loop; `hostsById`
+  // is handed to `ruleRows` directly (it looks hosts up by id, so it wants the
   // Map itself, unlike `identityRows`, which wants an array).
   const rules = useMemo(() => Array.from(forwardsById.values()), [forwardsById]);
   // Unfiltered, on purpose - the editor's SSH host picker must not follow
@@ -140,7 +143,10 @@ export function ForwardsPage(): ReactNode {
   // prop is unfiltered for the identity editor's key picker.
   const hosts = useMemo(() => Array.from(hostsById.values()), [hostsById]);
 
-  const ruleRowList = useMemo(() => ruleRows(rules, hostsById), [rules, hostsById]);
+  const ruleRowList = useMemo(
+    () => ruleRows(rules, hostsById, hostsLoaded),
+    [rules, hostsById, hostsLoaded],
+  );
   const visibleRules = useMemo(() => rankRules(ruleRowList, query), [ruleRowList, query]);
 
   const confirmDelete = useCallback((target: PendingDelete) => {
@@ -312,7 +318,12 @@ export function ForwardsPage(): ReactNode {
         )}
       </div>
 
-      <RuleEditorDialog target={editorTarget} onClose={() => setEditorTarget(null)} hosts={hosts} />
+      <RuleEditorDialog
+        target={editorTarget}
+        onClose={() => setEditorTarget(null)}
+        hosts={hosts}
+        hostsLoaded={hostsLoaded}
+      />
 
       <AlertDialog
         open={pendingDelete !== null}

@@ -54,13 +54,15 @@ console.log("1. the invoked command is the one Rust exposes");
   );
 }
 
-console.log("2. the command is registered and the read does not block the UI thread");
+console.log("2. the read does not block the UI thread");
 {
-  const libRs = read("src-tauri/src/lib.rs");
-  assert(
-    libRs.includes(`clipboard::${READ_TEXT_CMD},`),
-    "lib.rs lists the command in generate_handler!",
-  );
+  // Registration is NOT asserted here any more. `command-registry-verify.ts`
+  // pins it for all 92 commands in both directions - invoked implies
+  // registered, and registered implies invoked or on a named ledger - so a
+  // second assertion over this one command's `generate_handler!` line would be
+  // the same question asked a weaker way, and a reader who found them
+  // disagreeing would not know which one was authoritative.
+  //
   // A clipboard read is a synchronous round trip to whichever process owns the
   // selection; on the webview's UI thread a slow owner freezes the window.
   assert(

@@ -533,3 +533,32 @@ group in `scripts/workspace-store-verify.ts`, which pin both halves.
 file is the only plausible candidate, since it holds a tab tree per workspace -
 or `fs_read_file` gaining a distinct not-found result, which would retire the
 string match.
+
+## Window sizing
+
+### A profile that quits maximized keeps a below-floor size, once per session
+
+**Accepted state.** The configured size floor is re-applied after the
+window-state plugin has restored a saved size, but deliberately not while the
+window is maximized or fullscreen: a programmatic resize would drag it out of
+that state, so the clamp returns early and leaves the floor to the next time
+the window is sized normally. A profile that quit maximized therefore comes
+back maximized carrying a restored size below the floor, and the first
+un-maximize of the session shows a window under it. This does not settle on the
+next launch. The restore is maximized again, the clamp declines again, and the
+symptom recurs once per session until the user resizes past the floor by hand,
+which is the only thing that writes a compliant size back for the plugin to
+save. The cost is one under-floor window per session, against an
+unmaximize/clamp/re-maximize dance at startup, which is exactly the fighting
+with the plugin that the early return exists to avoid.
+
+**Carried by.** `enforce_configured_min_size` in `src-tauri/src/lib.rs`, whose
+early return on a maximized or fullscreen window is this accepted behaviour and
+whose doc comment states the mechanism, and `min_size_correction` in the same
+file, which is the decision the clamp delegates to and the half that has tests
+in front of it.
+
+**Trigger.** A report of a window that cannot be resized back up, or
+`tauri-plugin-window-state` gaining a saved-size update while maximized - which
+would keep the below-floor size from being saved in the first place, and retire
+the clamp's need to correct one.

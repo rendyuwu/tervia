@@ -411,6 +411,83 @@ function walkSrcFiles(dir: string): string[] {
   );
 }
 
+// AND THE SAME CLAIM ON THE OTHER SIDE OF THE BOUNDARY: `describeError` is
+// declared ONCE across `src/` AND `scripts/` together.
+//
+// FOUR byte-identical bodies were live, not three: the one
+// `session-helpers.ts` exported, a private one each in `autostart.ts` and
+// `controller.ts`, and a fourth as a local `const` inside a section of
+// `ssh-retry-verify.ts`. Each of the three in `src/` carried a comment naming
+// the reason (`session-helpers.ts` cannot be loaded under `tsx`) and naming the
+// remedy (a module with no Tauri and no DOM imports); the fourth cited one of
+// those three as its own precedent. The remedy is `src/lib/describeError.ts`,
+// and the property worth holding is not "the copies agree" but that NOBODY
+// REINTRODUCES A SECOND DECLARATION: identical copies drift the moment one arm
+// is tightened, and this function's string arm is load-bearing rather than
+// boilerplate, so a copy "simplified" to `e instanceof Error` would silently
+// stop rendering the raw string the forward commands reject with.
+//
+// BOTH TREES, and the fourth copy is exactly why. A scan of `src/` alone goes
+// GREEN over a twin living in `scripts/` - and a twin there is the worse of the
+// two, because a check holding its own private copy of the function under test
+// can pass while the shipped one disagrees with it. So each root is walked and
+// each is asserted non-empty separately: one combined file count would not
+// notice `scripts/` dropping out, since `src/` alone clears any threshold a
+// combined count could sensibly use. `.ts`/`.tsx` only, which leaves the four
+// `.mjs` build helpers unscanned - stated rather than accidental: this symbol
+// belongs to the typed behaviour checks, and none of those four is one.
+//
+// Structural and at ANY depth, not top-level only: a copy declared inside a
+// function body is the same defect - which is the shape the fourth copy had -
+// and `const describeError = (e) => …` is as much a declaration as
+// `function describeError`. Re-exports do not count and must not:
+// `session-helpers.ts` re-exports the symbol on purpose, so its terminal-side
+// importers keep one spelling.
+{
+  const scanRoots = ["src", "scripts"] as const;
+  const scanned: string[] = [];
+  for (const root of scanRoots) {
+    const files = walkSrcFiles(join(repoRoot, root));
+    // A root that yielded nothing answers "one declaration" for no reason at
+    // all, and it has to be asserted PER ROOT - see the paragraph above.
+    check(`the describeError scan found ${root}/ to scan`, files.length > 20, {
+      root,
+      files: files.length,
+    });
+    scanned.push(...files);
+  }
+
+  const declaredIn: string[] = [];
+  for (const abs of scanned) {
+    const rel = abs.slice(repoRoot.length + 1);
+    const sf = ts.createSourceFile(
+      rel,
+      readFileSync(abs, "utf8"),
+      ts.ScriptTarget.ESNext,
+      true,
+      rel.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
+    );
+    const visit = (n: ts.Node): void => {
+      if (ts.isFunctionDeclaration(n) && n.name?.text === "describeError") declaredIn.push(rel);
+      else if (
+        (ts.isVariableDeclaration(n) || ts.isFunctionExpression(n) || ts.isMethodDeclaration(n)) &&
+        n.name !== undefined &&
+        ts.isIdentifier(n.name) &&
+        n.name.text === "describeError"
+      ) {
+        declaredIn.push(rel);
+      }
+      ts.forEachChild(n, visit);
+    };
+    visit(sf);
+  }
+  check(
+    "`describeError` is declared exactly once across src/ and scripts/, in src/lib/describeError.ts",
+    declaredIn.length === 1 && declaredIn[0] === "src/lib/describeError.ts",
+    declaredIn,
+  );
+}
+
 // The allow-list's own self-test, over SYNTHETIC selectors, so its verdicts are
 // pinned here rather than only by whatever `runtime.ts` happens to contain
 // today - without it the helper is only ever exercised on four inputs that all
@@ -747,6 +824,76 @@ console.log(
       "NEGATIVE: error's reader is not inside the SSH host Field",
       !containsIdentifierInJsxExpression(sshHostField, "error"),
     );
+
+    // AND OVER ZERO SAVED SSH HOSTS THE FIELD SAYS SO INSTEAD OF OFFERING THE
+    // PICKER.
+    //
+    // `savedHostOptions` returns exactly one option over zero hosts - the
+    // none-option - so an unguarded picker opens onto a list holding only
+    // "Select an SSH host…", its `emptyLabel` never fires, and the user is
+    // handed a control that cannot be satisfied with no reason given. Same
+    // situation and same answer as `IdentityEditorDialog.tsx`'s zero-keys
+    // branch, which is where the wording comes from.
+    //
+    // FOUR ASSERTIONS AND NOT ONE, because "the sentence renders and the
+    // combobox does not" is two claims and the second needs the file-wide
+    // count: a branch whose false arm holds the picker proves nothing if the
+    // picker is ALSO rendered somewhere outside the conditional. The needles
+    // are whitespace-normalised on both sides, so a prettier reflow of the JSX
+    // text cannot redden this the way a raw-substring pin would (see
+    // `KNOWN-LIMITS.md`'s reformat entry).
+    // BOTH TERMS ARE PINNED, and the loaded term is the one worth pinning. An
+    // empty `sshHosts` is either "not read yet" or "read, none saved", so the
+    // sentence is only true of the second - a guard that drops `hostsLoaded`
+    // still renders, still passes a one-term equality, and tells a user with
+    // saved SSH hosts that they have none. That is the same conflation
+    // `ruleRows` takes its third argument to avoid, and nothing else here would
+    // catch losing it.
+    const GUARD = "hostsLoaded&&sshHosts.length===0";
+    const guards: ts.ConditionalExpression[] = [];
+    const findGuard = (n: ts.Node): void => {
+      if (ts.isConditionalExpression(n) && norm(n.condition.getText(sf)) === GUARD) {
+        guards.push(n);
+      }
+      ts.forEachChild(n, findGuard);
+    };
+    findGuard(sshHostField);
+    check(
+      "the SSH host Field branches on `hostsLoaded && sshHosts.length === 0` - exactly one such guard",
+      guards.length === 1,
+      guards.length,
+    );
+    if (guards.length === 1) {
+      const [guard] = guards;
+      check(
+        "the zero-hosts arm renders the sentence, not a picker",
+        norm(guard.whenTrue.getText(sf)).includes(norm("No SSH hosts saved yet.")),
+        norm(guard.whenTrue.getText(sf)).slice(0, 80),
+      );
+      const hasCombobox = (n: ts.Node): boolean => {
+        if (
+          (ts.isJsxSelfClosingElement(n) || ts.isJsxOpeningElement(n)) &&
+          n.tagName.getText(sf) === "Combobox"
+        ) {
+          return true;
+        }
+        return ts.forEachChild(n, hasCombobox) === true;
+      };
+      check("the OTHER arm is the Combobox", hasCombobox(guard.whenFalse));
+      check(
+        "NEGATIVE: the zero-hosts arm holds no Combobox",
+        !hasCombobox(guard.whenTrue),
+        guard.whenTrue.getText(sf).slice(0, 80),
+      );
+    }
+    // The file-wide half. One `<Combobox` in RuleEditorDialog.tsx, so the arm
+    // above is the ONLY place the picker is rendered and guarding it guards
+    // every route to it.
+    check(
+      "RuleEditorDialog.tsx renders <Combobox exactly once, so the guard covers every route to it",
+      (src.ruleEditorDialog.match(/<Combobox[\s/>]/g) ?? []).length === 1,
+      (src.ruleEditorDialog.match(/<Combobox[\s/>]/g) ?? []).length,
+    );
   }
 }
 
@@ -902,6 +1049,76 @@ console.log(
   );
   const body = findFunctionBody(sf, "ForwardsPage");
   check("found ForwardsPage's function body to check", body !== null);
+
+  // THE FLAG IS PASSED, NOT A LITERAL - and this is the only check that says so.
+  // `forwards-page-verify.ts` drives `ruleRows` and `RuleEditorDialog`'s guard
+  // behaviourally, per value of the flag, which pins what each DOES with a
+  // `true` or a `false`. It cannot see which one the caller chooses, because it
+  // never goes through the caller. So `ruleRows(rules, hostsById, true)` here
+  // would restore the pre-load flicker with the whole suite green - the exact
+  // hole the flag was added to close. Both consumers are pinned, because a fix
+  // that threaded the flag into one and left the other on a literal is the
+  // half-land this shape invites.
+  //
+  // Asserted as "an identifier, and that identifier is bound from
+  // `useHostsSnapshot()`" rather than as an exact expression: the binding may be
+  // renamed or destructured differently without weakening the property, but a
+  // literal or a fresh `hosts.size > 0` cannot satisfy it.
+  if (body) {
+    const LOADED_SOURCE = "useHostsSnapshot";
+    const bindsLoaded = new Set<string>();
+    const collectBindings = (n: ts.Node): void => {
+      if (
+        ts.isVariableDeclaration(n) &&
+        n.initializer &&
+        n.initializer.getText(sf).includes(LOADED_SOURCE) &&
+        ts.isObjectBindingPattern(n.name)
+      ) {
+        for (const el of n.name.elements) {
+          const from = (el.propertyName ?? el.name).getText(sf);
+          if (from === "loaded") bindsLoaded.add(el.name.getText(sf));
+        }
+      }
+      ts.forEachChild(n, collectBindings);
+    };
+    collectBindings(body);
+    check(
+      `ForwardsPage binds the loaded flag from ${LOADED_SOURCE}() - exactly one binding`,
+      bindsLoaded.size === 1,
+      [...bindsLoaded],
+    );
+
+    // `ruleRows(rules, hosts, hostsLoaded)` and `<RuleEditorDialog
+    // hostsLoaded={...} />` are the two consumers; each must read the binding.
+    const ruleRowsArgs: string[] = [];
+    const dialogFlag: string[] = [];
+    const findConsumers = (n: ts.Node): void => {
+      if (ts.isCallExpression(n) && n.expression.getText(sf) === "ruleRows") {
+        ruleRowsArgs.push(n.arguments[2] ? n.arguments[2].getText(sf) : "(absent)");
+      }
+      if (ts.isJsxAttribute(n) && n.name.getText(sf) === "hostsLoaded") {
+        const init = n.initializer;
+        dialogFlag.push(
+          init && ts.isJsxExpression(init) && init.expression
+            ? init.expression.getText(sf)
+            : "(not an expression)",
+        );
+      }
+      ts.forEachChild(n, findConsumers);
+    };
+    findConsumers(body);
+
+    check(
+      "ruleRows is called once, and its third argument is the bound loaded flag",
+      ruleRowsArgs.length === 1 && bindsLoaded.has(ruleRowsArgs[0]),
+      ruleRowsArgs,
+    );
+    check(
+      "RuleEditorDialog is handed hostsLoaded once, as the bound loaded flag",
+      dialogFlag.length === 1 && bindsLoaded.has(dialogFlag[0]),
+      dialogFlag,
+    );
+  }
 
   let effectCall: ts.CallExpression | null = null;
   if (body) {
@@ -1983,7 +2200,23 @@ async function settle(): Promise<void> {
   for (let i = 0; i < 8; i++) await new Promise((r) => setTimeout(r, 0));
 }
 
-type FakeForward = { sessionId: number; localPort: number; claim: number };
+type FakeForward = {
+  sessionId: number;
+  localPort: number;
+  generation: number;
+  claim: number;
+};
+/**
+ * The generation every fake bind reports, and always the same one.
+ *
+ * Here because `SshForward` requires it and for no other reason: nothing on the
+ * page's side of this seam reads it. `controller.ts` hands the whole forward
+ * back to `closeForwardForConnection`, which takes the generation off the entry
+ * itself, so a distinct value per fixture would advertise a discriminator these
+ * checks do not have. The generation IS driven, behaviourally and across the
+ * IPC boundary, in `rdp-tunnel-verify.ts`'s `[wire]` section.
+ */
+const FAKE_GENERATION = 1;
 type OpenCall = {
   connectionId: string;
   remoteHost: string;
@@ -2061,6 +2294,7 @@ const FAKE_RUNTIME = {
       const settleNow = () =>
         resolve({
           sessionId: nextFakeSessionId++,
+          generation: FAKE_GENERATION,
           localPort: opts.localPort || nextFakeAutoPort++,
           claim: nextFakeClaim++,
         });
@@ -2222,6 +2456,7 @@ console.log(
   const landedClaim = nextFakeClaim;
   parkedFakeOpens[0].resolve({
     sessionId: nextFakeSessionId++,
+    generation: FAKE_GENERATION,
     localPort: rule.localPort,
     claim: landedClaim,
   });
@@ -2291,6 +2526,7 @@ console.log(
   const landedClaim = nextFakeClaim;
   parkedFakeOpens[0].resolve({
     sessionId: nextFakeSessionId++,
+    generation: FAKE_GENERATION,
     localPort: rule.localPort,
     claim: landedClaim,
   });
@@ -2339,6 +2575,7 @@ console.log(
   const firstClaim = nextFakeClaim;
   parkedFakeOpens[0].resolve({
     sessionId: nextFakeSessionId++,
+    generation: FAKE_GENERATION,
     localPort: rule.localPort,
     claim: firstClaim,
   });
@@ -2359,6 +2596,7 @@ console.log(
   const secondClaim = nextFakeClaim;
   parkedFakeOpens[1].resolve({
     sessionId: nextFakeSessionId++,
+    generation: FAKE_GENERATION,
     localPort: rule.localPort,
     claim: secondClaim,
   });
@@ -2521,6 +2759,7 @@ console.log(
   const landedClaim = nextFakeClaim;
   parkedFakeOpens[0].resolve({
     sessionId: nextFakeSessionId++,
+    generation: FAKE_GENERATION,
     localPort: 30000,
     claim: landedClaim,
   });
@@ -2581,6 +2820,7 @@ console.log(
   const landedClaim = nextFakeClaim;
   parkedFakeOpens[0].resolve({
     sessionId: nextFakeSessionId++,
+    generation: FAKE_GENERATION,
     localPort: 30000,
     claim: landedClaim,
   });
@@ -2728,6 +2968,7 @@ console.log(
   const landedClaim = nextFakeClaim;
   parkedFakeOpens[0].resolve({
     sessionId: nextFakeSessionId++,
+    generation: FAKE_GENERATION,
     localPort: rule.localPort,
     claim: landedClaim,
   });
@@ -2780,6 +3021,7 @@ console.log(
   const landedClaim = nextFakeClaim;
   parkedFakeOpens[0].resolve({
     sessionId: nextFakeSessionId++,
+    generation: FAKE_GENERATION,
     localPort: rule.localPort,
     claim: landedClaim,
   });
@@ -2835,6 +3077,7 @@ console.log(
       const asked = opts.localPort ?? 0;
       const forward = {
         sessionId: nextFakeSessionId++,
+        generation: FAKE_GENERATION,
         localPort: asked || nextFakeAutoPort++,
         claim: nextFakeClaim++,
       };
@@ -2972,6 +3215,7 @@ console.log(
   const landedClaim = nextFakeClaim;
   parkedFakeOpens[0].resolve({
     sessionId: nextFakeSessionId++,
+    generation: FAKE_GENERATION,
     localPort: rule.localPort,
     claim: landedClaim,
   });
@@ -3016,6 +3260,7 @@ console.log(
   const landedClaim = nextFakeClaim;
   parkedFakeOpens[0].resolve({
     sessionId: nextFakeSessionId++,
+    generation: FAKE_GENERATION,
     localPort: rule.localPort,
     claim: landedClaim,
   });
@@ -3073,6 +3318,7 @@ console.log(
         landParkedOpen.push(() => {
           const forward = {
             sessionId: nextFakeSessionId++,
+            generation: FAKE_GENERATION,
             localPort: asked || nextFakeAutoPort++,
             claim: nextFakeClaim++,
           };
@@ -3161,6 +3407,7 @@ console.log(
         landParkedOpen.push(() => {
           const forward = {
             sessionId: nextFakeSessionId++,
+            generation: FAKE_GENERATION,
             localPort: asked || nextFakeAutoPort++,
             claim: nextFakeClaim++,
           };

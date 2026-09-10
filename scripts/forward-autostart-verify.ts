@@ -40,10 +40,12 @@
  *    chooses: a count taken after awaiting an ALREADY-settled promise proves
  *    nothing about who waited.
  *
- * 5. THE BANNER NAMES THE PORT THAT IS LISTENING. `openForward` resolves with
- *    the port actually bound - an auto rule asked for 0, and a pinned rule can
- *    be handed a different one. Naming the requested port instead is the
- *    defect, and on an auto rule it prints "localhost:0".
+ * 5. THE BANNER NAMES THE PORT THAT IS LISTENING. `openForward` resolves with a
+ *    handle whose `boundPort` is the port actually bound - an auto rule asked
+ *    for 0, and a pinned rule can be handed a different one. Naming the
+ *    requested port instead is the defect, and on an auto rule it prints
+ *    "localhost:0". The handle's other half, `generation`, is what the two
+ *    yields in section 12 and 14 must hand back to their closes.
  *
  * 6. A TERMINAL OWNS WHAT IT OPENED, AND THE ENDING IS THE SESSION'S.
  *    `releaseSession(a)` drops exactly session a's entries; session b's
@@ -234,7 +236,7 @@ const rule = (over: Partial<ForwardRule> = {}): ForwardRule => ({
 });
 
 type OpenCall = { id: number; localPort: number; remoteHost: string; remotePort: number };
-type CloseCall = { id: number; boundPort: number };
+type CloseCall = { id: number; boundPort: number; generation: number };
 
 let nextAutoPort = 45000;
 
@@ -249,6 +251,14 @@ let nextAutoPort = 45000;
  * mock-fidelity defect the `"fs_read_file"` case in `handleInvoke`
  * (`scripts/rdp-tunnel-verify.ts`) names and which would
  * turn section 5 into a tautology.
+ *
+ * The `open` OVERRIDE is a PORT and not the whole handle, and the generation is
+ * minted here instead - from 1, monotonic, per session, the way
+ * `SshSession::forward_seq` does. A fixture in this file cares which port came
+ * back and none of them needs to choose a generation, so putting it behind the
+ * override would have every `open: async () => 54321` spell out a number
+ * nothing reads. Minted AFTER the override resolves, matching the backend,
+ * which mints only once a bind has succeeded.
  *
  * `claimHostOwned` writes to the REAL store as well as recording, and
  * `hostOwnedBy` READS the real store by default - the same pair
@@ -276,15 +286,20 @@ function world(over: {
   const closeCalls: CloseCall[] = [];
   const statusCalls: string[] = [];
   const claims: Array<{ ruleId: string; entry: HostOwnedEntry }> = [];
+  /** Generations handed out by this world's binds, per session id. */
+  const generations = new Map<number, number>();
   const deps: AutostartDeps = {
     listRules: over.listRules ?? (async () => over.rules ?? []),
     openForward: async (id, localPort, remoteHost, remotePort) => {
       const call = { id, localPort, remoteHost, remotePort };
       openCalls.push(call);
-      return over.open ? await over.open(call) : localPort || nextAutoPort++;
+      const boundPort = over.open ? await over.open(call) : localPort || nextAutoPort++;
+      const generation = generations.get(id) ?? 1;
+      generations.set(id, generation + 1);
+      return { boundPort, generation };
     },
-    closeForward: async (id, boundPort) => {
-      const call = { id, boundPort };
+    closeForward: async (id, boundPort, generation) => {
+      const call = { id, boundPort, generation };
       closeCalls.push(call);
       return over.close ? await over.close(call) : true;
     },
@@ -1871,7 +1886,9 @@ console.log(
   check(
     "B's post-bind re-read finds A's claim and B CLOSES THE LISTENER IT JUST BOUND",
     b.closeCalls,
-    [{ id: 42, boundPort: 54322 }],
+    // Generation 1: B's own session's first and only bind. The close naming B's
+    // generation and not A's is what makes it B's listener that goes.
+    [{ id: 42, boundPort: 54322, generation: 1 }],
   );
   check("B claimed nothing", b.claims.length, 0);
   check("A closed nothing - the winner keeps its listener", a.closeCalls, []);
@@ -2171,9 +2188,11 @@ console.log(
     "f-yield",
     "f-yield",
   ]);
-  check("the just-bound listener was closed, by session and BOUND port", w.closeCalls, [
-    { id: 41, boundPort: 54321 },
-  ]);
+  check(
+    "the just-bound listener was closed, by session, BOUND port and that bind's generation",
+    w.closeCalls,
+    [{ id: 41, boundPort: 54321, generation: 1 }],
+  );
   check("no claim was written - the page's forward is genuinely up", w.claims.length, 0);
   check("and the terminal's map is untouched", useHostOwnedForwards.getState().byRule, {});
   check("the banner names the rule", w.banners, [yieldedBanner("yielded")]);
