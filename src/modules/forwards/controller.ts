@@ -31,6 +31,7 @@
  */
 
 import { toast } from "@/components/ui/toast";
+import { describeError } from "@/lib/describeError";
 import { useHostKeyPrompt } from "@/modules/ssh/hostKeyPrompt";
 import { closeForwardForConnection, openForwardForConnection } from "@/modules/ssh/tunnel";
 
@@ -89,28 +90,6 @@ const startAttempts = new Map<string, Set<string>>();
  *  it and no later Start has replaced it. */
 function isCurrentAttempt(ruleId: string, prompts: Set<string>): boolean {
   return startAttempts.get(ruleId) === prompts;
-}
-
-/**
- * `terminal/lib/session-helpers.ts`'s `describeError`, copied rather than
- * imported. That file also holds `wallpaperActive()`, which reads `document`,
- * and putting a DOM-reading module into this one's import graph would cost this
- * file the "exercisable under plain node" property it exists for. Six lines is
- * the cheaper of the two prices.
- *
- * The string branch is the load-bearing one and not boilerplate: a Tauri
- * `invoke` rejects with a RAW STRING, so that is how the backend's own
- * `ssh: bind 127.0.0.1:<port> failed: <io error>` reaches `bindFailureText` at
- * all.
- */
-function describeError(e: unknown): string {
-  if (typeof e === "string") return e;
-  if (e instanceof Error) return e.message;
-  try {
-    return JSON.stringify(e);
-  } catch {
-    return String(e);
-  }
 }
 
 /** What a Start refused because a terminal already holds the rule says. Not the
@@ -288,7 +267,8 @@ export async function startRule(
  * INCLUDING `"starting"` IS SAFE AND NOT MERELY DIFFERENT, which is the half
  * worth writing down: `stopRule` deletes the attempt Set and abandons the
  * host-key questions, so the dial that resolves next finds itself superseded
- * (`:182-196`) and hands the reference it just took straight back. One close,
+ * (see `isCurrentAttempt`) and hands the reference it just took straight
+ * back. One close,
  * the row `stopped`, no claim retained - the same release path a Stop clicked
  * mid-dial has always taken.
  *

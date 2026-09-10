@@ -500,7 +500,7 @@ check("port at the high boundary", parseAdHocTarget("host:65535"), {
   port: 65535,
 });
 
-// `search.ts:159` builds the result with `user` and `port` always assigned so
+// `parseAdHocTarget` in `src/modules/hosts/search.ts` builds the result with `user` and `port` always assigned so
 // that the key order is fixed "for a caller that JSON-compares the result". This
 // script is that caller, and it is the only one - so if the property is not
 // asserted here it is asserted nowhere. `canonical` sorts keys on purpose, which

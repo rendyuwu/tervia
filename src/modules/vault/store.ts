@@ -349,11 +349,15 @@ export function createVaultStore(io: VaultIo): VaultStore {
       const idx = next.findIndex((k) => k.id === key.id);
       if (idx >= 0) next[idx] = record;
       else next.push(record);
-      // A `persist` that throws is deliberately NOT rolled back. `LazyStore` runs
-      // with `autoSave`, so the record is already in the plugin's cache with a
-      // debounced retry behind it - deleting the secrets here would race that into
-      // a record whose flags name material that is gone, permanently, since the
-      // flags are never read back. Orphaned on a failure that never clears, and
+      // A `persist` that throws is deliberately NOT rolled back. There is no
+      // retry behind it any more - the store writes the whole file on `commit`
+      // and nothing re-attempts a write that failed - and the decision is
+      // unchanged, for the reason underneath the old one: `persist` sets the
+      // record into the store's cache BEFORE the write, so this session goes on
+      // reading a list that names these accounts and the next commit that
+      // succeeds puts it on disk. Deleting the secrets here would leave that
+      // live record naming material that is gone, permanently, since the flags
+      // are never read back. Orphaned on a failure that never clears, and
       // unreachable afterwards: nothing enumerates keychain accounts.
       await persist(VAULT_KEYS_KEY, next);
       return warning ? { record, warning } : { record };

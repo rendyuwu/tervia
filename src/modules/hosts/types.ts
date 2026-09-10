@@ -59,9 +59,9 @@ export const HOST_RDP_SECRET_FIELDS = [HOST_RDP_PASSWORD_FIELD] as const;
  * How the remote desktop's resolution is chosen.
  *
  * `"preset"` is the only mode today: the desktop is negotiated at a fixed size
- * and the pane letterboxes it. It is persisted from day one anyway, so adding
- * `"fit"` (RDP-08) is a new union member and a new branch in the pane - not a
- * store migration over everyone's saved rows.
+ * and the pane letterboxes it. It is persisted from day one anyway, so a later
+ * `"fit"` mode is a new union member and a new branch in the pane - not a store
+ * migration over everyone's saved rows.
  */
 export type RdpSizeMode = "preset";
 

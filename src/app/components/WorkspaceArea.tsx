@@ -86,7 +86,7 @@ export function WorkspaceArea({
   //
   // NOT about a second WINDOW, which is the tempting second example and is not
   // one: each Tauri window is its own document with its own root
-  // (`main.tsx:42`, `settings/main.tsx:20`, `float/main.tsx:30` are three
+  // (`src/main.tsx`, `src/settings/main.tsx`, `src/float/main.tsx` are three
   // separate `createRoot` calls), so ids cannot collide across them at all.
   // And the case that IS left - two roots inside ONE document - `useId()` does
   // not solve either: React numbers ids per ROOT, so two roots rendering the
@@ -170,7 +170,8 @@ export function WorkspaceArea({
             >
               {/* The page says its own name. Hosts already did - not by anyone's
                   design, but because a Hosts TAB is a page leaf, so it inherits
-                  the per-pane header every leaf gets (`PaneTreeView.tsx:703`).
+                  the per-pane header every leaf gets (`headerBar` in
+                  `src/modules/panes/PaneTreeView.tsx`).
                   A rail view is deliberately not a leaf, so it inherited
                   nothing and Vault / Port Forwarding arrived nameless.
 
@@ -185,7 +186,8 @@ export function WorkspaceArea({
 
                   Its `@container` is the one token of that bar NOT copied:
                   the pane header carries it so the per-file cluster inside it
-                  can shed itself on a narrow pane (`PaneTreeView.tsx:705-706`),
+                  can shed itself on a narrow pane (`headerBar` in
+                  `src/modules/panes/PaneTreeView.tsx`),
                   and this bar has no `@[…]` descendant to shed - an icon and a
                   truncating heading, both of which already fit at any width. A
                   container query with nothing querying it is dead weight that

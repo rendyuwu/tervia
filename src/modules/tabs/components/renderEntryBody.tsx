@@ -152,17 +152,36 @@ export function renderEntryBody(args: RenderEntryArgs): ReactNode {
       // eslint-disable-next-line react/forbid-dom-props
       style={dragStyle}
       className={cn(
-        // Active state uses the brand --accent surface. `h-full!` overrides
-        // the primitive's calc so trigger height stays an even integer.
+        // The active entry is marked by the accent stripe below and by nothing
+        // here. The stripe is gated on `activeKey`, a value this render is
+        // handed; a `data-[state=active]:` variant would depend on a
+        // `data-state` this chip does not reliably carry, because
+        // `ContextMenuTrigger asChild` wraps the trigger whenever
+        // `hasContextActions` holds and passes its own `data-state` down, and
+        // radix-ui 1.6.2's `Tabs.Trigger` spreads incoming props AFTER the
+        // attribute it computes - so a wrapped chip reads `data-state="closed"`
+        // however the strip's value moves.
+        //
+        // "WHENEVER" AND NOT "ALWAYS", deliberately. `hasContextActions` is
+        // true for every chip the app currently renders, which is why deleting
+        // the variants changed nothing visible - but that rests on three facts
+        // none of which is pinned: `canRename` needs both rename callbacks and
+        // a `pane-leaf` entry, every entry `buildEntries` produces is
+        // `pane-leaf`, and the one call site always passes them. Break any one
+        // and an unwrapped chip reports Radix's own `data-state="active"`. The
+        // stripe is the marker regardless, so this stays correct either way -
+        // what would be wrong is reading the conclusion as unconditional.
+        //
+        // `h-full!` overrides the primitive's calc so trigger height stays an
+        // even integer.
         "group bg-muted/30 text-muted-foreground/80 hover:bg-muted/60 hover:text-foreground/80 relative h-full! shrink-0 justify-between gap-1.5 text-xs transition-[background-color,color] duration-150",
-        "data-[state=active]:bg-accent data-[state=active]:text-accent-foreground data-[state=active]:font-semibold",
         // Inside a split cluster, entries are flat; outside they keep the pill look.
         isSplit ? "rounded-none" : "rounded-md",
         compact ? "px-2!" : totalEntries === 1 ? "px-2.5!" : "ps-2.5! pe-1.5!",
         // Divider on every entry except the first in a split group.
         isSplit &&
           idx > 0 &&
-          "before:bg-border/70 before:absolute before:top-1 before:bottom-1 before:left-0 before:w-px before:content-[''] data-[state=active]:before:opacity-0",
+          "before:bg-border/70 before:absolute before:top-1 before:bottom-1 before:left-0 before:w-px before:content-['']",
         // Fade the dragged entry so the overlay chip reads as the real thing.
         selfDragging && "opacity-30",
         // Grab cursor on leaves in a split group; non-split tabs inherit it from the wrapper.

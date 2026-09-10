@@ -9,7 +9,7 @@ import {
 import { type SshStatus } from "@/modules/ssh/status";
 import { type Tab } from "@/modules/tabs";
 import { WorkspacesPanel } from "@/modules/workspaces";
-import { Suspense, type ReactNode, type RefObject } from "react";
+import { Suspense, useState, type ReactNode, type RefObject } from "react";
 import type { PanelImperativeHandle } from "react-resizable-panels";
 import { type TabsApi } from "../hooks/tabsApi";
 import { SshFileExplorer } from "./lazyPanels";
@@ -109,6 +109,19 @@ export function AppSidebar({
   openBoardTab,
 }: Props) {
   const sshVisible = hasAnySshLeaf && !sshInRightPanel;
+  /**
+   * Whether the whole sidebar PANEL is shut, which is a different question from
+   * the per-section `collapsed` flag `renderBuiltin` takes: that one collapses
+   * one section to its own header, this one is the entire column being gone.
+   *
+   * It has to be tracked because a collapsed panel keeps its children MOUNTED -
+   * `collapsedSize` is a size, not an unmount - so every focusable node inside
+   * a zero-width sidebar would otherwise stay in sequential focus order.
+   * Derived from the panel's own reported size, the way `toggleSidebar` in
+   * `App.tsx` decides the same question, rather than from `isCollapsed()`, so
+   * the attribute below is set exactly when that toggle would reopen it.
+   */
+  const [panelCollapsed, setPanelCollapsed] = useState(false);
   // A section moved to the right column (placement === "right") leaves the left
   // sidebar; it's reachable from a status-bar icon instead.
   const placement = useSidebarPlacementStore((s) => s.placement);
@@ -216,13 +229,21 @@ export function AppSidebar({
       maxSize="450px"
       collapsible
       collapsedSize={0}
+      onResize={(size) => setPanelCollapsed(size.asPercentage <= 0)}
     >
       {/* Transparent to the bento tray: each section renders as its own
           1px-bordered `bg-sidebar` card, stacked with a gap, so the tray shows
           between them like the reference layout. */}
       {/* `data-section-column` is the drop target the OTHER stack tests against
           when a drag ends outside its own column. */}
-      <div data-section-column="left" className="flex h-full flex-col">
+      {/* `inert` while the panel is shut, rather than an unmount: it takes the
+          whole subtree out of sequential focus order and out of hit-testing in
+          one attribute, so Tab cannot walk into a sidebar that is not on
+          screen, and reopening does not pay to re-virtualize the file tree.
+          The drag drop-target lookup is unaffected - `overOther` in
+          `SectionStack.tsx` reads geometry and already refuses a zero-width
+          column. */}
+      <div data-section-column="left" inert={panelCollapsed} className="flex h-full flex-col">
         <SectionStack
           sections={sections}
           orderStorageKey={ORDER_LS_KEY}

@@ -578,9 +578,15 @@ export function RdpPane({ leafId, connectionId, visible, focused = true }: Props
      */
     const sshPromptIds = new Set<string>();
     /** Idempotent, and safe on a path that cannot know whether the tunnel ever
-     *  opened - which is every teardown that beats the `await` below. */
+     *  opened - which is every teardown that beats the `await` below.
+     *
+     *  The release's promise is DROPPED, because this function is called from an
+     *  effect cleanup and a cleanup cannot await. Nothing is lost by that: what
+     *  waiting would have bought - a close that cannot land on a listener a
+     *  later open bound on the same port - is carried by the forward's own
+     *  generation (`SshForward.generation` in `ssh/tunnel.ts`). */
     const releaseDial = () => {
-      dial?.release();
+      void dial?.release();
       dial = null;
     };
     // An `error` event while connected is not necessarily fatal (the backend
@@ -637,7 +643,7 @@ export function RdpPane({ leafId, connectionId, visible, focused = true }: Props
         // Teardown can win this race, and a tunnel nobody claims is a bastion
         // session held open with no consumer left to release it.
         if (!alive) {
-          target.release();
+          await target.release();
           return;
         }
         dial = target;

@@ -33,11 +33,12 @@ export type ForwardRuleRow = {
   /** The SSH host's display name, or {@link UNKNOWN_HOST_LABEL}. */
   hostName: string;
   /** `hostId` names a host the store does not have, AND the host list has been
-   *  loaded at all. A separate field from the label, for the reason
-   *  `IdentityRow.keyDangling` (`vault/page/derive.ts:69`) is separate from
-   *  `keyName`: a host genuinely named "Unknown host" would render identically
-   *  to a dangling reference, and only a structural flag can tell the two
-   *  apart. See {@link ruleRows} for why the empty host map is excluded. */
+   *  READ at least once - never merely "the map handed in was empty". A separate
+   *  field from the label, for the reason `IdentityRow.keyDangling` in
+   *  `src/modules/vault/page/derive.ts` is separate from `keyName`: a host
+   *  genuinely named "Unknown host" would render identically to a dangling
+   *  reference, and only a structural flag can tell the two apart. See
+   *  {@link ruleRows} for why the read has to be reported rather than guessed at. */
   hostDangling: boolean;
   /** The route, ready to render: `localhost:18080 → bastion → 10.0.0.9:5432`. */
   route: string;
@@ -47,14 +48,14 @@ export type ForwardRuleRow = {
  * One row per rule, everything the page shows precomputed.
  *
  * THE row builder, for every mount point that will ever list rules - mirrors
- * `identityRows` (`vault/page/derive.ts:122`) in contract and for the same
+ * `identityRows` in `src/modules/vault/page/derive.ts` in contract and for the same
  * reason: a shared pure function guarantees nothing about callers that
  * assemble its arguments separately, so the assembly itself has to be the
  * shared thing.
  *
  * Returns a FRESH array on every call, the same as any function ending in
  * `.map` does - this is a plain function, not a memoized selector. A caller
- * MUST wrap the call in `useMemo` keyed on its two arguments, and must never
+ * MUST wrap the call in `useMemo` keyed on all three arguments, and must never
  * call it directly inside a zustand selector: a fresh array read as "changed"
  * on every store broadcast re-renders forever (v5 throws "Maximum update
  * depth exceeded" outright).
@@ -67,37 +68,52 @@ export type ForwardRuleRow = {
  *
  * AN EMPTY HOST MAP IS NOT N DANGLING ROWS. `hostDangling` has to mean "the
  * hosts are known AND this one is not among them", never "the hosts are not
- * known yet" - its one caller today (`ForwardsPage.tsx`'s `ruleRows(rules,
- * hostsById)` memo, and the paragraph above says why the contract is written
- * for every future one) feeds it from `useForwards()` and `useHosts()`, which
- * are two INDEPENDENT async loads both starting from an empty `Map`
- * (`useForwards.ts:26-38`, `hosts/useHosts.ts:15-27`), so there is a render on
- * every single mount where the rules have arrived and the hosts have not. Reporting `hostDangling` there made every row flicker a red "Host
- * missing" badge with Start and Stop disabled and a tooltip telling the user to
- * edit the rule - all four of them false, and all four on the first frame.
+ * known yet" - its one caller today (`ForwardsPage.tsx`'s memo, and the
+ * paragraph above says why the contract is written for every future one) feeds
+ * it from `useForwards()` and `useHostsSnapshot()`, which are two INDEPENDENT
+ * async loads both starting from an empty `Map` (`useForwards` in
+ * `src/modules/forwards/useForwards.ts`, `useHostsSnapshot` in
+ * `src/modules/hosts/useHosts.ts`), so there is a render on every single mount
+ * where the rules have arrived and the hosts have not. Reporting `hostDangling`
+ * there made every row flicker a red "Host missing" badge with Start and Stop
+ * disabled and a tooltip telling the user to edit the rule - all four of them
+ * false, and all four on the first frame.
  *
- * NEITHER HOOK EXPOSES A LOADED FLAG, so `hosts.size` is what stands in for
- * one, and the case it gets wrong is worth naming rather than hiding: a store
- * with rules and genuinely ZERO hosts shows no badge and an enabled Start,
- * which then fails at the dial with a toast. That state needs every host to
- * have gone while a rule naming one survived - `deleteHost` drops a host's
- * rules through `dropRulesForHost` and `upsertRule` refuses a rule whose host
- * is not saved, so it takes a torn store or a cross-window delete to reach at
- * all, and its cost is one failed Start rather than four wrong answers per
- * mount.
+ * SO THE LOADED FACT IS AN ARGUMENT AND NOT AN INFERENCE. `hostsLoaded` comes
+ * from `useHostsSnapshot()`, which records whether the first `listHosts()` has
+ * settled. `hosts.size > 0` used to stand in for it and got one case wrong: a
+ * store with rules and genuinely ZERO hosts showed no badge and an enabled
+ * Start, which then failed at the dial with a toast. `hosts.size` cannot
+ * separate "not read yet" from "read, nothing saved" - both are an empty map -
+ * so no expression over `hosts` alone could have closed that case, which is why
+ * the caller has to say. The state is reachable: it needs every host to have
+ * gone while a rule naming one survived, and `deleteHost` drops a host's rules
+ * through `dropRulesForHost` while `upsertRule` refuses a rule whose host is
+ * not saved, so it takes a torn store or a cross-window delete - but "hard to
+ * reach" is not "unreachable", and the row now answers it correctly instead of
+ * pricing it.
+ *
+ * A CALLER THAT PASSES `true` UNCONDITIONALLY REINTRODUCES THE FLICKER, and one
+ * that passes `false` unconditionally switches the badge off for good.
+ * `scripts/forwards-page-verify.ts` pins THIS FUNCTION'S answer for each value
+ * of the flag, in both directions, because a fixture holding one frame only is
+ * satisfied by either - and `scripts/forwards-shell-verify.ts` pins that the
+ * one caller passes the flag rather than a literal. Two different claims: the
+ * first is behavioural over `ruleRows`, the second is structural over
+ * `ForwardsPage.tsx`, and neither implies the other.
  */
 export function ruleRows(
   rules: readonly ForwardRule[],
   hosts: ReadonlyMap<string, Host>,
+  hostsLoaded: boolean,
 ): ForwardRuleRow[] {
-  const hostsKnown = hosts.size > 0;
   return rules.map((rule) => {
     const host = hosts.get(rule.hostId);
     const hostName = host ? host.name : UNKNOWN_HOST_LABEL;
     return {
       rule,
       hostName,
-      hostDangling: hostsKnown && host === undefined,
+      hostDangling: hostsLoaded && host === undefined,
       route: `${localPortLabel(rule, undefined)} → ${hostName} → ${rule.remoteHost}:${rule.remotePort}`,
     };
   });
@@ -105,7 +121,7 @@ export function ruleRows(
 
 /**
  * `name` case-insensitively, then `id` - the shared tail of the ordering, on
- * the same terms as `byNameThenId` (`vault/page/derive.ts:168`). The `id`
+ * the same terms as `byNameThenId` in `src/modules/vault/page/derive.ts`. The `id`
  * tie-break is what makes the order TOTAL: without it, two rows equal on name
  * would keep whatever relative order the input happened to have, so two
  * surfaces fed the same rules in different iteration order could disagree
@@ -121,7 +137,7 @@ function compareRuleRows(a: ForwardRuleRow, b: ForwardRuleRow): number {
  * The strongest tier `row` qualifies for against a lowercased, non-empty
  * `query`, or `null` when it matches none. Checked strongest-first and
  * returns on the first hit, mirroring `identityMatchTier`'s shape
- * (`vault/page/derive.ts:192`).
+ * (in `src/modules/vault/page/derive.ts`).
  *
  * `localPort` and `remotePort` are matched as STRINGS, in the substring tier
  * ONLY - never as a prefix. A port is a short, dense numeric string, so a
@@ -215,7 +231,8 @@ function needsAdminRightsSentence(port: number): string {
 export function bindFailureText(error: string, localPort: number): string {
   // Lower-cased ONCE and matched against lower-case needles, because what the
   // backend actually sends is `std::io::Error`'s Display and that is prose with
-  // a capital letter: `session.rs:443` is
+  // a capital letter: `SshSession::open_forward` in
+  // `src-tauri/src/modules/ssh/session.rs` is
   // `format!("ssh: bind 127.0.0.1:{local_port} failed: {e}")`, so a real
   // EADDRINUSE arrives as "Address already in use (os error 98)" on Linux, "…
   // (os error 48)" on macOS, and "Only one usage of each socket address
@@ -305,7 +322,7 @@ export function stopNote(): string {
  * because stopping a page-running rule before deleting it needs its host and
  * both endpoints), but this type only takes what decides which sentence is
  * TRUE. A structural subset on purpose, for the same reason `DeleteNoteSubject`
- * (`vault/page/derive.ts:368`) is one: this file is store-free by design (see
+ * in `src/modules/vault/page/derive.ts` is one: this file is store-free by design (see
  * the header above), so it has no way to ask a `ForwardRuleRow` whether the
  * rule is currently running, or whether a terminal owns it - both answers live
  * in the runtime layer, not in anything persisted.
@@ -349,7 +366,7 @@ export type DeleteNoteSubject = {
  * what actually happens to THIS rule rather than a blanket sentence for every
  * rule alike.
  *
- * Modelled on `deleteNote` (`vault/page/derive.ts:401`), and needed for the
+ * Modelled on `deleteNote` in `src/modules/vault/page/derive.ts`, and needed for the
  * same reason: a single sentence would be one thing for every rule, but a
  * running rule and a rule that starts with its host each have something
  * specific and true to say, and neither fact implies the other.

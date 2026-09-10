@@ -1,11 +1,9 @@
-import { LazyStore } from "@tauri-apps/plugin-store";
+import type { StoreRecovery } from "@/lib/storeRecovery";
 import type { AiCliKind } from "@/modules/terminal/lib/aiCliStatus";
 import type { PageKind } from "@/modules/terminal/lib/panes";
 import { create } from "zustand";
 
-const STORE_PATH = "tervia-workspaces.json";
-const KEY_LIST = "workspaces";
-const KEY_ACTIVE = "activeId";
+import { createTauriWorkspacesStoreIo, KEY_ACTIVE, KEY_LIST } from "./adapters";
 
 // Saved on-disk shape. Persists only what's needed to reconstruct tabs on
 // next launch. Terminals respawn at their saved cwd; editors reopen the path.
@@ -212,13 +210,86 @@ type Actions = {
   reorderWorkspaces: (activeId: string, overId: string) => void;
 };
 
-export const useWorkspacesStore = create<State & Actions>((set, get) => {
-  const store = new LazyStore(STORE_PATH, { defaults: {}, autoSave: 200 });
+/**
+ * The workspace file, with crash recovery in front of it.
+ *
+ * Module scope rather than inside the `create` closure so the recovery notice
+ * this store produces has a caller: `app/hooks/useStoreRecoveryNotices.ts` asks
+ * for it at launch, the way it does for hosts, vault and forwards.
+ */
+const io = createTauriWorkspacesStoreIo();
 
-  const persist = async () => {
-    const { workspaces, activeId } = get();
-    await Promise.all([store.set(KEY_LIST, workspaces), store.set(KEY_ACTIVE, activeId)]);
-    await store.save();
+/** Run the recovery pass and hand back what the user should be told, once. */
+export function ensureLoaded(): Promise<StoreRecovery | null> {
+  return io.ensureLoaded();
+}
+/** Drain the notice slot again, for a note that lands after startup. */
+export function takeRecoveryNotice(): StoreRecovery | null {
+  return io.takeRecoveryNotice();
+}
+/** Another window committed the workspace file. */
+export function onWorkspacesChanged(cb: () => void): Promise<() => void> {
+  return io.onChanged(cb);
+}
+
+export const useWorkspacesStore = create<State & Actions>((set, get) => {
+  /**
+   * A persist that is queued and has not started yet, so callers can join it.
+   *
+   * Every persist writes the CURRENT state rather than a state its caller
+   * captured, so several requested before any of them runs would each write the
+   * same thing. Collapsing them is not only about the redundant writes: `flush`
+   * below is the pre-quit snapshot and it races a hard timeout in
+   * `app/hooks/useQuitGuard.ts`, so anything queued ahead of it is spending that
+   * budget. The tab snapshot is not debounced anywhere, so a burst is ordinary.
+   *
+   * Safe here for a reason that does NOT transfer: this `persist` takes no
+   * arguments and always writes the whole state. `persist` in
+   * `modules/terminal/lib/cliAgents.ts` takes the key to write, so collapsing
+   * two of its calls would drop one key's value entirely - do not copy this
+   * there.
+   */
+  let waiting: Promise<void> | null = null;
+
+  /**
+   * Write both keys and commit them together.
+   *
+   * The state is read INSIDE the queued operation, so a persist that joins a
+   * queued one still ends up written: whatever runs reads the latest state.
+   */
+  const persist = (): Promise<void> => {
+    if (waiting) return waiting;
+    const run = io.enqueueWrite(async () => {
+      // Cleared as this op STARTS, not when it finishes. A change made while the
+      // write is in flight is newer than the state being written and has to get
+      // its own pass; one made while this was merely queued does not.
+      waiting = null;
+      const { workspaces, activeId } = get();
+      await io.set(KEY_LIST, workspaces);
+      await io.set(KEY_ACTIVE, activeId);
+      await io.commit();
+    });
+    // Safe after the call: `enqueueWrite` defers the operation to a microtask,
+    // so nothing has cleared this yet.
+    waiting = run;
+    return run;
+  };
+
+  /**
+   * Persist, and report a failure rather than letting it out as an unhandled
+   * rejection.
+   *
+   * Every mutation below fires and forgets, and `save()` now genuinely rejects
+   * for a file the app could not read - a locked or unreadable workspace file
+   * refuses rather than writing over itself. Without this that is one unhandled
+   * rejection per user action and nothing said anywhere. It is still not a
+   * toast: this store has no notice channel of its own, and the recovery notice
+   * at launch is what covers the case a user can act on.
+   */
+  const persistQuietly = (): void => {
+    void persist().catch((err: unknown) => {
+      console.error("workspaces: failed to persist", err);
+    });
   };
 
   return {
@@ -232,26 +303,40 @@ export const useWorkspacesStore = create<State & Actions>((set, get) => {
       let list: Workspace[] = [];
       let active: string | null = null;
       let readFailed = false;
-      // Retry a few times with a short backoff: a read can transiently fail on a
-      // file lock during an auto-update handoff (the old instance hasn't
-      // released the store yet). Letting it clear avoids falling through to a
-      // default that then overwrites recoverable saved workspaces. A genuinely
-      // corrupt/parse failure just exhausts the retries. `hydrated` MUST still
-      // flip true regardless - the `tervia .` CLI drain and other consumers gate
-      // on it, so a read failure that left it false would strand them, not just
-      // lose the saved workspaces.
-      for (let attempt = 0; attempt < 3; attempt++) {
-        try {
-          list = (await store.get<Workspace[]>(KEY_LIST)) ?? [];
-          active = (await store.get<string | null>(KEY_ACTIVE)) ?? null;
-          readFailed = false;
-          break;
-        } catch {
-          readFailed = true;
-          list = [];
-          active = null;
-          if (attempt < 2) await new Promise((r) => setTimeout(r, 150));
-        }
+
+      // The anti-blank guard, asked of the layer that can actually answer it.
+      //
+      // This used to be three attempts with a backoff around a `get` that THREW
+      // on a bad read; the recovered-store port never throws for a file it could
+      // not use - `StoreFileIo.read` reports `missing` instead - so a loop
+      // catching a throw would be dead code and the guard under it would be
+      // permanently off. The recovery pass has already looked at the primary and
+      // the snapshot by the time `fileState` resolves, so its verdict is the
+      // question: anything but a good file, a first run, or a file the snapshot
+      // put back means DO NOT write a default over what is there.
+      //
+      // `fileState` and not `ensureLoaded`, deliberately: `ensureLoaded` DRAINS
+      // the notice, and the launch toast is the thing entitled to drain it. A
+      // guard that competed for it would silence a recovery toast about half the
+      // time, depending on which effect ran first.
+      //
+      // `hydrated` MUST still flip true in every branch below - the `tervia .`
+      // CLI drain and other consumers gate on it, so a read failure that left it
+      // false would strand them rather than merely lose the saved workspaces.
+      const state = await io
+        .fileState()
+        .catch(() => ({ found: "unreachable" as const, recovered: false }));
+      if (state.found !== "ok" && state.found !== "missing" && !state.recovered) readFailed = true;
+
+      try {
+        list = (await io.get<Workspace[]>(KEY_LIST)) ?? [];
+        active = (await io.get<string | null>(KEY_ACTIVE)) ?? null;
+      } catch {
+        // The data directory itself is unreachable. Nothing was read, so nothing
+        // may be written over.
+        readFailed = true;
+        list = [];
+        active = null;
       }
       // Seed a default workspace on first run (or after a read failure).
       if (list.length === 0) {
@@ -262,13 +347,14 @@ export const useWorkspacesStore = create<State & Actions>((set, get) => {
           activeTabIndex: 0,
         };
         set({ workspaces: [ws], activeId: ws.id, hydrated: true });
-        // Only overwrite the on-disk store on a GENUINE first run (the read
-        // succeeded and returned nothing). If the read THREW - a transient file
-        // lock (an in-progress update handoff), a partial write, momentary
-        // corruption - do NOT persist the empty default over it: that would
-        // permanently blank a user's saved workspaces on a single bad read.
-        // Leaving the file untouched lets the next healthy launch recover it;
-        // the first real change re-persists.
+        // Only overwrite the on-disk file on a GENUINE first run - one where
+        // there was no usable file and no usable snapshot, and the empty list is
+        // the truth. When the recovery pass reported anything else (a torn
+        // primary its snapshot could not replace, a data directory that will not
+        // resolve) do NOT persist the empty default over it: that would blank a
+        // user's saved workspaces permanently, on one bad read. Leaving the file
+        // untouched lets the next healthy launch recover it; the first real
+        // change re-persists.
         if (!readFailed) {
           try {
             await persist();
@@ -287,12 +373,12 @@ export const useWorkspacesStore = create<State & Actions>((set, get) => {
 
     setWorkspaces(workspaces) {
       set({ workspaces });
-      void persist();
+      persistQuietly();
     },
 
     setActiveId(activeId) {
       set({ activeId });
-      void persist();
+      persistQuietly();
     },
 
     createWorkspace(name) {
@@ -303,7 +389,7 @@ export const useWorkspacesStore = create<State & Actions>((set, get) => {
         activeTabIndex: 0,
       };
       set({ workspaces: [...get().workspaces, ws] });
-      void persist();
+      persistQuietly();
       return ws;
     },
 
@@ -311,7 +397,7 @@ export const useWorkspacesStore = create<State & Actions>((set, get) => {
       set({
         workspaces: get().workspaces.map((w) => (w.id === id ? { ...w, name } : w)),
       });
-      void persist();
+      persistQuietly();
     },
 
     removeWorkspace(id) {
@@ -333,7 +419,7 @@ export const useWorkspacesStore = create<State & Actions>((set, get) => {
         const newActive = before.activeId === id ? next[neighborIdx].id : before.activeId;
         set({ workspaces: next, activeId: newActive });
       }
-      void persist();
+      persistQuietly();
     },
 
     saveWorkspaceTabs(id, tabs, activeTabIndex, liveTabCount) {
@@ -354,7 +440,7 @@ export const useWorkspacesStore = create<State & Actions>((set, get) => {
           return { ...w, tabs, activeTabIndex };
         }),
       });
-      if (changed) void persist();
+      if (changed) persistQuietly();
     },
 
     reorderWorkspaces(activeId, overId) {
@@ -368,7 +454,7 @@ export const useWorkspacesStore = create<State & Actions>((set, get) => {
       const [moved] = next.splice(from, 1);
       next.splice(to, 0, moved);
       set({ workspaces: next });
-      void persist();
+      persistQuietly();
     },
   };
 });

@@ -1,17 +1,19 @@
-//! Passphrase-encrypted blobs for the connection backup (SSH menu -> Export
-//! connections).
+//! Passphrase-encrypted blobs for the connection backup, reached from the
+//! Hosts page's Export button.
 //!
-//! An exported backup carries the credentials that live in the OS keychain -
-//! SSH passwords and private keys, RDP passwords - so it can never be written
-//! as plaintext: the file ends up on a USB stick, in Downloads, or in a synced
-//! folder. This module is the whole crypto surface; everything above it in JS
-//! handles only the already-sealed blob.
+//! An exported backup carries every credential that lives in the OS keychain -
+//! SSH passwords, private keys and key passphrases; RDP passwords; vault
+//! identity passwords; and vault key bodies and their passphrases - so it can
+//! never be written as plaintext: the file ends up on a USB stick, in
+//! Downloads, or in a synced folder. This module is the whole crypto surface;
+//! everything above it in JS handles only the already-sealed blob.
 //!
 //! One format lives here (`tervia-connections`), and it seals the WHOLE
-//! payload - both connection inventories and every credential - so the
-//! plaintext never leaves this process. On export, JS passes keychain
-//! REFERENCES and [`backup_seal_payload`] reads the values itself. On import,
-//! [`backup_open_payload`] returns only the connection metadata and parks the
+//! payload - five collections (hosts, groups, identities, keys, forward
+//! rules) and every credential - so the plaintext never leaves this process.
+//! On export, JS passes keychain REFERENCES and [`backup_seal_payload`] reads
+//! the values itself. On import, [`backup_open_payload`] returns only the
+//! metadata - the five collections with no credential in them - and parks the
 //! credentials here behind a handle; JS validates the metadata, says which
 //! ids survived, and [`backup_apply_secrets`] writes those straight to the
 //! keychain. That is the same property `rdp_open`'s keychain reference exists
@@ -21,13 +23,11 @@
 //!
 //! Not solved here: the decrypted plaintext is ordinary `String`/`serde_json`
 //! data and is dropped unscrubbed, same as every other secret in the process
-//! (tracked as RDP-20, the `SecretsState` cache, which is the larger link in
-//! that chain).
+//! (the `SecretsState` cache is the larger link in that chain).
 //!
 //! This lives in the host process rather than the webview because
 //! `crypto.subtle` is gated to secure contexts and the app origin is plain
-//! http (same reason `crypto.randomUUID` is unavailable - see
-//! `modules/ai/lib/httpProxy.ts`).
+//! http (the same reason `crypto.randomUUID` is unavailable).
 //!
 //! Construction: PBKDF2-HMAC-SHA256 over the passphrase with a random 16-byte
 //! salt, then AES-256-GCM with a random 12-byte nonce. Salt and nonce are
@@ -101,7 +101,7 @@ fn derive_key(passphrase: &str, salt: &[u8], iterations: u32) -> Result<[u8; 32]
 /// export file. An empty passphrase is refused here rather than in the UI so
 /// the guarantee holds no matter which caller reaches this.
 ///
-/// Not a command: v2 exports go through [`backup_seal_payload`], which is the
+/// Not a command: exports go through [`backup_seal_payload`], which is the
 /// only caller, so there is no reason to expose a general-purpose encrypt-this
 /// entry point to the webview.
 fn seal_blob(plaintext: String, passphrase: &str) -> Result<SealedBlob, String> {
@@ -178,12 +178,13 @@ fn open_blob(blob: SealedBlob, passphrase: &str) -> Result<String, String> {
 /// The same shape on the way out and the way back in. `group`, `id` and `field`
 /// are the three levels of the path inside the payload JSON and are supplied by
 /// the caller verbatim, so this module holds no knowledge of either protocol's
-/// field names - `password` versus `privateKey`, `secrets` versus `rdpSecrets`
-/// are all decided in `src/modules/backup/file.ts`.
+/// field names - `password` versus `privateKey`, or which of `hostSecrets`,
+/// `identitySecrets` and `keySecrets` a credential belongs to - all decided in
+/// `src/modules/backup/file.ts`.
 #[derive(Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct SecretRef {
-    /// Top-level key of the payload object, e.g. `secrets` or `rdpSecrets`.
+    /// Top-level key of the payload object, e.g. `hostSecrets` or `keySecrets`.
     group: String,
     /// Connection id: the second level.
     id: String,
@@ -196,9 +197,11 @@ pub struct SecretRef {
 /// Insert `values` into `payload` at each ref's `group`/`id`/`field` path.
 ///
 /// Refuses to write into a group the payload already carries. That guard is not
-/// theoretical bookkeeping: the caller sends `{"connections": [...]}` and names
-/// its own group strings, so a typo of `connections` would otherwise replace the
-/// entire inventory with a credential map and the export would look successful.
+/// theoretical bookkeeping: the caller sends five inventory collections - hosts,
+/// groups, identities, keys, rules - and a secret group is meant to never match
+/// one of those names. This is the guard against exactly that: without it, a
+/// `group` that collided with `hosts` would replace the whole host inventory
+/// with a credential map, and the export would still report success.
 fn merge_secrets(payload: &str, values: &[(SecretRef, String)]) -> Result<String, String> {
     let mut root: Map<String, Value> = serde_json::from_str(payload)
         .map_err(|_| "backup: the payload is not a JSON object".to_string())?;
@@ -227,10 +230,15 @@ fn merge_secrets(payload: &str, values: &[(SecretRef, String)]) -> Result<String
     serde_json::to_string(&Value::Object(root)).map_err(|e| e.to_string())
 }
 
-/// Seal a v2 payload, reading every credential out of the keychain here rather
+/// Seal a payload, reading every credential out of the keychain here rather
 /// than taking it from the caller.
 ///
-/// `payload` is the connection inventory as JSON; `refs` say which keychain
+/// `payload` is the caller's inventory as JSON - today the five collections
+/// (hosts, groups, identities, keys, forward rules). That parenthesis describes
+/// the one caller there is, not this parameter's contract: nothing here reads a
+/// collection name, for the same reason [`SecretRef`] takes its `group` from the
+/// caller verbatim, so a sixth collection or a different inventory sealed
+/// through this command needs no change on this side. `refs` say which keychain
 /// entries to fold into it. A reference that resolves to nothing is skipped, not
 /// an error - a connection whose password was never saved is ordinary.
 #[tauri::command]
@@ -259,7 +267,7 @@ pub async fn backup_seal_payload(
     seal_blob(plaintext, &passphrase)
 }
 
-/// Credentials decrypted out of a v2 backup, waiting for the importer to say
+/// Credentials decrypted out of a backup, waiting for the importer to say
 /// which connection ids survived validation.
 struct Held {
     groups: Map<String, Value>,
@@ -267,7 +275,7 @@ struct Held {
 
 /// Parked payloads, oldest first.
 ///
-/// Process-global rather than Tauri-managed state so the whole v2 import path
+/// Process-global rather than Tauri-managed state so the whole import path
 /// stays inside this module. The cap is what bounds the damage if a caller ever
 /// fails to release: an abandoned import holds its credentials until four more
 /// imports have run, not until the app exits.
@@ -324,12 +332,14 @@ fn split_groups(plain: &str, groups: &[String]) -> Result<(String, Map<String, V
 pub struct OpenedPayload {
     /// Pass to [`backup_apply_secrets`], then to [`backup_release`].
     handle: u32,
-    /// The payload with every requested group removed: connection metadata
-    /// only, safe to hand to the webview's validator.
+    /// The payload with every requested group removed: the caller's inventory
+    /// metadata with no credential left in it, safe to hand to the webview's
+    /// validator. Today that inventory is the five collections; what this side
+    /// guarantees is only that the named groups are gone.
     payload: String,
 }
 
-/// Open a v2 payload: return the metadata, park the credentials.
+/// Open a payload: return the metadata, park the credentials.
 ///
 /// The two-step shape exists so validation can stay on the JS side, where the
 /// trust-boundary rules for an imported connection already live, without the
@@ -462,7 +472,7 @@ mod tests {
         assert_eq!(open(seal(pt, "pw"), "pw").unwrap(), pt);
     }
 
-    // --- v2 payload assembly ---------------------------------------------
+    // --- payload assembly: group names are arbitrary, the caller's own ----
 
     #[test]
     fn merge_places_each_secret_at_its_path() {
@@ -509,13 +519,13 @@ mod tests {
     #[test]
     fn merge_with_no_refs_is_a_passthrough() {
         // The shape of an export with no credentials saved anywhere: still a
-        // valid v2 payload, just with no secret groups in it.
+        // valid payload, just with no secret groups in it.
         let out = merge_secrets(r#"{"connections":[],"rdpConnections":[]}"#, &[]).unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
         assert!(v.get("secrets").is_none());
     }
 
-    // --- v2 import: split, pick, park ------------------------------------
+    // --- import: split, pick, park - group names are arbitrary here too ---
 
     #[test]
     fn split_withholds_only_the_named_groups() {
@@ -662,11 +672,20 @@ mod tests {
         // export; the envelope wrapped around it is TypeScript's concern. The
         // username sits inside the host's `credential` object rather than on
         // the row itself, which is where the SSH inline-credentials type puts
-        // it. 54321 stands in for the port rather than the real default 22: a
-        // two-digit run turns up in base64 output by chance often enough to
-        // make that assertion flaky instead of strict.
+        // it.
+        //
+        // Every needle is a run of five or more characters drawn ENTIRELY from
+        // the base64 alphabet, and that is what makes each one discriminating.
+        // The ciphertext is base64, so a needle carrying a `.` - the dotted
+        // host, say - can only fire if the encoding itself breaks, which reads
+        // as coverage without being any; and a short run turns up in base64
+        // output by chance, which makes an assertion flaky rather than strict.
+        // Hence a distinctive label inside the host rather than the whole
+        // dotted name, a distinctive username rather than a four-character one,
+        // and 54321 for the port rather than the real default 22.
+        let needles = ["vpsalpha", "svcdeploy", "hunter2", "54321"];
         let plain = merge_secrets(
-            r#"{"hosts":[{"id":"h-1","name":"vps","protocol":"ssh","host":"vps.example.com","port":54321,"credential":{"kind":"inline","hostId":"h-1","user":"root","authMode":"password","hasPassword":true,"hasPrivateKey":false,"hasKeyPassphrase":false}}],"groups":[],"identities":[],"keys":[],"rules":[]}"#,
+            r#"{"hosts":[{"id":"h-1","name":"vps","protocol":"ssh","host":"vpsalpha.example.com","port":54321,"credential":{"kind":"inline","hostId":"h-1","user":"svcdeploy","authMode":"password","hasPassword":true,"hasPrivateKey":false,"hasKeyPassphrase":false}}],"groups":[],"identities":[],"keys":[],"rules":[]}"#,
             &[(secret_ref("hostSecrets", "h-1", "password"), "hunter2".into())],
         )
         .unwrap();
@@ -674,19 +693,20 @@ mod tests {
         // absent from the fixture, so a dropped field would read as coverage
         // instead of a hole. This confirms every needle is actually present
         // before the sealing loop gets to claim it hid them.
-        for needle in ["vps.example.com", "root", "hunter2", "54321"] {
+        for needle in needles {
             assert!(
                 plain.contains(needle),
                 "{needle} is missing from the fixture"
             );
         }
         let blob = seal(&plain, "pw");
-        for needle in ["vps.example.com", "root", "hunter2", "54321"] {
-            assert!(
-                !blob.ciphertext.contains(needle),
-                "{needle} is readable in the sealed blob"
-            );
-        }
+        // Collected rather than asserted one at a time so a leak names every
+        // needle it exposed, instead of stopping at whichever comes first.
+        let leaked: Vec<&str> = needles
+            .into_iter()
+            .filter(|n| blob.ciphertext.contains(n))
+            .collect();
+        assert!(leaked.is_empty(), "readable in the sealed blob: {leaked:?}");
         assert_eq!(open(blob, "pw").unwrap(), plain);
     }
 }

@@ -30,6 +30,7 @@ import {
   classifySshConnectFailure,
   decideSshConnectFailure,
   decideSshEnding,
+  endingFromExitReason,
   hostKeyRefused,
   SshLocalConnectError,
   type SshEnding,
@@ -253,8 +254,8 @@ export async function openSshForSession(
         // Also deliberate, not a transport failure, so no auto-reconnect -
         // but unlike a plain exit this is unusual enough to flag rather
         // than silently close under: park the pane with a banner naming
-        // the signal and let the user decide (Enter or the Retry button),
-        // the same manual path used once auto-reconnect below gives up.
+        // the signal and let the user decide (Enter), the same manual path
+        // used once auto-reconnect below gives up.
         s.pty = null;
         s.ptySpawnedAt = null;
         s.sshReconnectAttempts = 0;
@@ -267,7 +268,7 @@ export async function openSshForSession(
           s,
           `\r\n\x1b[33m[tervia] remote process killed by signal ${decision.signalName}${
             decision.coreDumped ? " (core dumped)" : ""
-          }. Press Enter or click Retry to reconnect.\x1b[0m\r\n`,
+          }. Press Enter to reconnect.\x1b[0m\r\n`,
         );
         return;
       case "reconnect":
@@ -399,19 +400,7 @@ export async function openSshForSession(
           );
         },
         onData,
-        onExit: (code, reason) => {
-          switch (reason.kind) {
-            case "exit":
-              finishSsh({ kind: "clean", code });
-              break;
-            case "signal":
-              finishSsh({ kind: "signal", name: reason.name, coreDumped: reason.coreDumped });
-              break;
-            case "disconnected":
-              finishSsh({ kind: "ambiguous", reason: "remote closed" });
-              break;
-          }
-        },
+        onExit: (code, reason) => finishSsh(endingFromExitReason(reason, code)),
         onError: (msg) => {
           writeSshBanner(s, `\r\n\x1b[31m[tervia] ssh error: ${msg}\x1b[0m\r\n`);
           finishSsh({ kind: "ambiguous", reason: msg });
@@ -440,17 +429,26 @@ export async function openSshForSession(
     // Refused, not "unanswered". A prompt still sitting in the queue when the
     // connect died says nothing about who ended it: the link dropping under the
     // dialog leaves exactly that state, and it is the blip the ladder is FOR.
-    // The backend's own 120s confirm window lapsing lands in the same bucket for
-    // the same reason - it is the backend's decision, made where this side
-    // cannot see it, and telling it apart from a drop needs the connect failure
-    // to carry a phase, which the wire does not do today. Left transport, so
-    // the reconnect re-raises the question for whoever comes back to it, rather
-    // than parking a pane whose link merely blinked.
     //
-    // Everything else here (a credential the server refused, an unparseable key,
-    // a host that would not resolve) is left transport for the same reason: the
-    // backend reports it as one more string and the frontend has nothing
-    // structural to tell those apart with.
+    // Kept as a BELT, not because it is the only thing that knows. The backend
+    // now reports a user-refused key as `config` and `openSsh` rethrows that as
+    // an `SshLocalConnectError`, so the park below would happen without this
+    // line for the refusals that reach Rust. What it still covers on its own is
+    // the app's own `abandon` path - the pane that asked went away, the queue
+    // answers `false` on its behalf - and it costs one predicate over a list
+    // this scope already has. Removing a working guard in the same change that
+    // moves the classification is how a regression gets blamed on the wrong
+    // half.
+    //
+    // Everything else the backend reports now carries a kind of its own, and
+    // `openSsh` has already turned it into the right wrapper by the time it
+    // arrives here: a credential the server refused parks as `rejected`, an
+    // unparseable key and a wrong passphrase park as `config`, a host that would
+    // not resolve stays transport and ladders. The backend's own 120s confirm
+    // window lapsing is `config` and parks too - `check_server_key` records
+    // that lapse the same way it records a refusal - while a link that died
+    // under the dialog records nothing and stays transport, which is the split
+    // this block always wanted and could not make on its own.
     if (hostKeyRefused(hostKeyAnswers)) {
       throw new SshLocalConnectError(describeError(e), { cause: e });
     }
@@ -469,9 +467,10 @@ export async function openSshForSession(
   // rejects: a rule that cannot bind writes a banner and the connect carries
   // on. Awaiting it would hold the pane's first prompt behind N binds, and
   // letting it throw would turn a busy local port into a failed SSH connect.
-  // `.catch(() => {})` regardless, matching this file's own idiom at `:336`,
-  // `:346` and `:384`: "never rejects" is now structural in that function, and
-  // this is the belt that does not depend on reading it.
+  // `.catch(() => {})` regardless, matching this file's own idiom in
+  // `onJumpConnected`, `onConnected` and `onHostKeyPrompt`: "never rejects" is
+  // now structural in that function, and this is the belt that does not
+  // depend on reading it.
   //
   // The deps object exists for ONE key. `stillLive` is the only dep whose
   // answer lives in this scope - autostart's loop has to be able to ask whether
@@ -548,13 +547,18 @@ export async function forwardDetectedUrl(
   if (pending === undefined) {
     // Always 127.0.0.1 as the tunnel's target: the url's host is whatever the
     // server calls itself, and a server bound to 0.0.0.0 is on loopback too.
+    // The bound port alone, out of the pair the open resolves with: nothing here
+    // ever closes one of these forwards on its own - they die with the session,
+    // which is what `cache`'s own lifetime rests on - so the handle's
+    // `generation`, which exists only to name a listener to a close, has no
+    // consumer on this path.
     pending = openSshForward(sessionId, 0, "127.0.0.1", remotePort).then(
-      (bound) => {
+      ({ boundPort }) => {
         writeSshBanner(
           s,
-          `\x1b[2m[tervia] forwarding localhost:${bound} -> remote localhost:${remotePort}\x1b[0m\r\n`,
+          `\x1b[2m[tervia] forwarding localhost:${boundPort} -> remote localhost:${remotePort}\x1b[0m\r\n`,
         );
-        return bound;
+        return boundPort;
       },
       (e) => {
         cache.delete(remotePort);
@@ -575,10 +579,12 @@ export async function forwardDetectedUrl(
  * and for the same reason: nothing about the attempt changes until the user
  * changes something. NOT the state the ladder gives up in; that one is
  * `disconnected` with `canRetry`, which reads as "the link went away", and this
- * failure never had a link. Both satisfy `canRetrySsh`, so Enter and the status
- * pill's Retry behave identically either way - the difference is what the pill
- * says. What differs from the ladder is only how long the user waited to get
- * here: immediately, instead of 11 seconds and three identical failures.
+ * failure never had a link. Both satisfy `canRetrySsh`, which is what the
+ * Enter-to-retry path in session-lifecycle reads, so the key behaves identically
+ * either way - the difference is only what the status text says. A terminal pane
+ * has no clickable retry control, so Enter is the whole manual path and the
+ * banners say so. What differs from the ladder is only how long the user waited
+ * to get here: immediately, instead of 11 seconds and three identical failures.
  *
  * `sshReconnectAttempts` is reset so a later manual retry starts a fresh
  * three-attempt window if it fails for a transport reason instead.
@@ -588,7 +594,7 @@ export function parkSshConnectFailure(s: Session, message: string): void {
   writeSshBanner(
     s,
     `\r\n\x1b[31m[tervia] ssh connect failed: ${message}\x1b[0m\r\n` +
-      `\x1b[33m[tervia] Press Enter or click Retry to reconnect.\x1b[0m\r\n`,
+      `\x1b[33m[tervia] Press Enter to reconnect.\x1b[0m\r\n`,
   );
   emitSshStatus(s, { kind: "error", message, canRetry: true });
 }
@@ -610,7 +616,7 @@ export function scheduleSshReconnect(s: Session, reason: string): void {
     });
     writeSshBanner(
       s,
-      `\r\n\x1b[33m[tervia] disconnected (${reason}). Press Enter or click Retry to reconnect.\x1b[0m\r\n`,
+      `\r\n\x1b[33m[tervia] disconnected (${reason}). Press Enter to reconnect.\x1b[0m\r\n`,
     );
     return;
   }
@@ -715,13 +721,16 @@ export async function disconnectSsh(leafId: number): Promise<void> {
     reason: "closed by user",
     canRetry: true,
   });
-  writeSshBanner(
-    s,
-    `\r\n\x1b[33m[tervia] disconnected. Press Enter or click Reconnect to come back.\x1b[0m\r\n`,
-  );
+  writeSshBanner(s, `\r\n\x1b[33m[tervia] disconnected. Press Enter to come back.\x1b[0m\r\n`);
 }
 
-/** Status pill "Reconnect" handle. */
+/**
+ * Manual reconnect by leaf id, for a caller outside the terminal that holds one.
+ * Nothing in the tree calls it today - the status text is rendered as plain text
+ * in WorkspacesPanel and renderEntryBody, neither of which is clickable - so the
+ * banners promise Enter and nothing else. Kept because `disconnectSsh` next to
+ * it is the same shape and the pair is what a pane control would bind to.
+ */
 export async function reconnectSsh(leafId: number): Promise<void> {
   const s = sessions.get(leafId);
   if (!s) return;

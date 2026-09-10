@@ -16,10 +16,21 @@ import type { SshCredentialDraft, SshSecretTouched } from "./types";
  * is nothing stored" or "the read has not landed yet" - and only the first of
  * those makes emptying it an instruction to delete anything.
  *
- * Set once, when the seed resolves, from what the seed actually applied: a field
- * the seed YIELDED to (because the user was already typing in it) is not seeded,
- * whatever the keychain returned, because the stored value never reached the
- * screen.
+ * Set by `seedSshSecrets` in `HostEditorDialog.tsx`, every time a keychain read
+ * resolves for the row still on screen. There are two such reads, not one: the
+ * editor's load for an inline row, and again once a detach has copied an
+ * identity's secrets onto this host's own accounts - so a sitting that binds or
+ * converts and then detaches sets this twice. A read that throws sets nothing,
+ * and neither does one whose row has moved on.
+ *
+ * REPLACED rather than merged on that second read, which is the safe direction:
+ * all three are re-derived from the touched record as it stands then, so a field
+ * the user typed into after the first read comes back NOT seeded - and a touched,
+ * blank, unseeded field is omitted from the save rather than clearing anything.
+ *
+ * Always from what that read actually applied: a field the seed YIELDED to
+ * (because the user was already typing in it) is not seeded, whatever the
+ * keychain returned, because the stored value never reached the screen.
  */
 export type SshSecretSeeded = {
   password: boolean;
@@ -86,16 +97,56 @@ export function clearsSecret(value: string): boolean {
  * auth mode, so the store still releases them when the credential moves to the
  * vault and still deletes them with the host. What it buys is that switching to
  * password auth and back does not cost the user the key they had.
+ *
+ * `forgetKey` IS THE ONE OVERRIDE OF ALL OF THE ABOVE, and it exists because the
+ * route the rules describe DISAPPEARS at exactly the moment it is wanted. Clearing
+ * the key textarea and saving works: the field is touched and was seeded, so `""`
+ * goes down and the account is deleted. But the textarea is rendered only under
+ * key auth, so a host that has moved to a password can no longer reach it - the
+ * key stays in the secret store for good and travels in every export. Under this
+ * flag both key fields are forced to `""` whatever `touched` and `seeded` say,
+ * which is the whole point: the field cannot be touched when it is not on screen.
+ *
+ * AN EXPLICIT PARAMETER, not a caller that marks the two fields touched and
+ * seeded and blanks the draft. Those two records carry a stated meaning - what the
+ * user typed, and what the store actually put on screen - and the rule above is
+ * the only thing standing between an ordinary save and a deleted password. A
+ * caller that lies to them to reach this branch breaks the invariant that
+ * licenses every OTHER clear.
+ *
+ * BOTH KEY FIELDS GO DOWN TOGETHER. A key passphrase with no key body opens
+ * nothing and cannot be reached by any field in this editor, so leaving one
+ * behind would leave an account no screen names and nothing removes - the same
+ * argument the vault's own `keySecretsForSave` makes for the same pair, where a
+ * replaced body takes its passphrase with it.
+ *
+ * THAT RULE IS THE OVERRIDE'S, NOT THIS FUNCTION'S, and the difference is
+ * recorded rather than hidden: on the ordinary textarea route a cleared body
+ * goes down as `""` while an untouched passphrase is omitted, so the passphrase
+ * account survives its key. `KNOWN-LIMITS.md` carries that as an accepted state.
+ * Making the two fields travel together HERE, outside `forgetKey`, resolves it -
+ * retire the entry in the same change rather than leaving it describing a state
+ * the code no longer reaches.
+ *
+ * IT DOES NOT TOUCH THE PASSWORD. That is the credential the host has moved TO,
+ * and it is still decided by `touched`/`seeded` above: a password typed in the
+ * same sitting is still sent, and an untouched one is still left alone.
  */
 export function sshSecretsForSave(
   cred: SshCredentialDraft,
   touched: SshSecretTouched,
   seeded: SshSecretSeeded,
+  forgetKey: boolean,
 ): HostSecretInput {
   const send = (field: keyof SshSecretSeeded): boolean =>
     touched[field] && (!clearsSecret(cred[field]) || seeded[field]);
   const out: HostSecretInput = {};
   if (send("password")) out.password = cred.password;
+  if (forgetKey) {
+    out.privateKey = "";
+    out.keyPassphrase = "";
+    return out;
+  }
   if (send("privateKey")) out.privateKey = cred.privateKey;
   if (send("keyPassphrase")) out.keyPassphrase = cred.keyPassphrase;
   return out;

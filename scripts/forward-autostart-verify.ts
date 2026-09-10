@@ -40,10 +40,12 @@
  *    chooses: a count taken after awaiting an ALREADY-settled promise proves
  *    nothing about who waited.
  *
- * 5. THE BANNER NAMES THE PORT THAT IS LISTENING. `openForward` resolves with
- *    the port actually bound - an auto rule asked for 0, and a pinned rule can
- *    be handed a different one. Naming the requested port instead is the
- *    defect, and on an auto rule it prints "localhost:0".
+ * 5. THE BANNER NAMES THE PORT THAT IS LISTENING. `openForward` resolves with a
+ *    handle whose `boundPort` is the port actually bound - an auto rule asked
+ *    for 0, and a pinned rule can be handed a different one. Naming the
+ *    requested port instead is the defect, and on an auto rule it prints
+ *    "localhost:0". The handle's other half, `generation`, is what the two
+ *    yields in section 12 and 14 must hand back to their closes.
  *
  * 6. A TERMINAL OWNS WHAT IT OPENED, AND THE ENDING IS THE SESSION'S.
  *    `releaseSession(a)` drops exactly session a's entries; session b's
@@ -140,6 +142,9 @@ import type { AutostartDeps } from "../src/modules/forwards/autostart";
 import type { HostOwnedEntry } from "../src/modules/forwards/hostOwned";
 import type { ForwardStatus } from "../src/modules/forwards/runtime";
 import type { ForwardRule } from "../src/modules/forwards/types";
+import { stripComments, stripperSelfTest } from "./lib/source";
+import { isDirectlyInFunctionBody } from "./lib/ast";
+import { norm, primitiveSelectorBody, selectorParamName } from "./lib/ast";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const read = (rel: string) => readFileSync(join(repoRoot, rel), "utf8");
@@ -154,8 +159,8 @@ let failed = 0;
  *
  * Not rewritten, because THREE different `check()` signatures exist across this
  * verify suite - `check(label, got, want)` here and in `rdp-tunnel-verify.ts`,
- * `check(name, ok, detail?)` in `vault-shell-verify.ts:32`, `check(label, cond)`
- * in `hosts-header-narrow-verify.ts:47` - and changing one is a cross-script
+ * `check(name, ok, detail?)` in `scripts/vault-shell-verify.ts`, `check(label, cond)`
+ * in `scripts/hosts-header-narrow-verify.ts` - and changing one is a cross-script
  * change with no relation to this step. The rule instead: an assertion whose
  * `want` could be `undefined` uses `assert(... === undefined, ...)`, which
  * compares the value rather than its serialisation. The `[wiring]` block's
@@ -180,7 +185,8 @@ function assert(cond: boolean, msg: string, detail?: unknown): void {
 // ---------------------------------------------------------------------------
 // Stand-in for the Tauri IPC bridge, installed BEFORE the modules under test
 // are imported - the same idiom and the same reason as
-// `scripts/rdp-tunnel-verify.ts:169-179`. `autostart.ts` reaches
+// the `"plugin:event|listen"` case in `handleInvoke` (`scripts/rdp-tunnel-verify.ts`).
+// `autostart.ts` reaches
 // `modules/forwards/store` and `modules/ssh/bridge` for its DEFAULT deps, and
 // both of those touch `@tauri-apps/*` at module scope. Every section below
 // injects its own deps, so nothing here should ever be called: an unexpected
@@ -230,7 +236,7 @@ const rule = (over: Partial<ForwardRule> = {}): ForwardRule => ({
 });
 
 type OpenCall = { id: number; localPort: number; remoteHost: string; remotePort: number };
-type CloseCall = { id: number; boundPort: number };
+type CloseCall = { id: number; boundPort: number; generation: number };
 
 let nextAutoPort = 45000;
 
@@ -242,8 +248,17 @@ let nextAutoPort = 45000;
  * is bound literally and comes back as itself, `0` means "the OS picks" and
  * comes back as whatever it chose. Returning a fresh number either way would
  * make the port ASKED FOR and the port BOUND indistinguishable, which is the
- * mock-fidelity defect `rdp-tunnel-verify.ts:151-155` names and which would
+ * mock-fidelity defect the `"fs_read_file"` case in `handleInvoke`
+ * (`scripts/rdp-tunnel-verify.ts`) names and which would
  * turn section 5 into a tautology.
+ *
+ * The `open` OVERRIDE is a PORT and not the whole handle, and the generation is
+ * minted here instead - from 1, monotonic, per session, the way
+ * `SshSession::forward_seq` does. A fixture in this file cares which port came
+ * back and none of them needs to choose a generation, so putting it behind the
+ * override would have every `open: async () => 54321` spell out a number
+ * nothing reads. Minted AFTER the override resolves, matching the backend,
+ * which mints only once a bind has succeeded.
  *
  * `claimHostOwned` writes to the REAL store as well as recording, and
  * `hostOwnedBy` READS the real store by default - the same pair
@@ -271,15 +286,20 @@ function world(over: {
   const closeCalls: CloseCall[] = [];
   const statusCalls: string[] = [];
   const claims: Array<{ ruleId: string; entry: HostOwnedEntry }> = [];
+  /** Generations handed out by this world's binds, per session id. */
+  const generations = new Map<number, number>();
   const deps: AutostartDeps = {
     listRules: over.listRules ?? (async () => over.rules ?? []),
     openForward: async (id, localPort, remoteHost, remotePort) => {
       const call = { id, localPort, remoteHost, remotePort };
       openCalls.push(call);
-      return over.open ? await over.open(call) : localPort || nextAutoPort++;
+      const boundPort = over.open ? await over.open(call) : localPort || nextAutoPort++;
+      const generation = generations.get(id) ?? 1;
+      generations.set(id, generation + 1);
+      return { boundPort, generation };
     },
-    closeForward: async (id, boundPort) => {
-      const call = { id, boundPort };
+    closeForward: async (id, boundPort, generation) => {
+      const call = { id, boundPort, generation };
       closeCalls.push(call);
       return over.close ? await over.close(call) : true;
     },
@@ -325,7 +345,8 @@ async function tick(): Promise<void> {
 /** The banners, written out by value rather than imported: a check that
  *  reached for the module's own template would pass with the template
  *  rewritten. `->` is ASCII deliberately - see `autostart.ts`'s note, and
- *  `ssh-session.ts:498-501`'s existing forward banner. */
+ *  `forwardDetectedUrl`'s existing forward banner in
+ *  `src/modules/terminal/lib/ssh-session.ts`. */
 const forwardingBanner = (bound: number, target: string, name: string) =>
   `\x1b[2m[tervia] forwarding localhost:${bound} -> ${target} (${name})\x1b[0m\r\n`;
 const failedBanner = (name: string, message: string) =>
@@ -762,68 +783,11 @@ console.log("\n[wiring] defaultAutostartDeps is complete");
 // Source-pin helpers for sections 8-10.
 // ===========================================================================
 
-/** A line with its trailing `//` comment removed, string literals respected -
- *  quote-aware rather than a regex because a `//` inside a string is not a
- *  comment. Copied from `scripts/host-editor-verify.ts`. */
-function stripLineComment(line: string): string {
-  let quote = "";
-  for (let i = 0; i < line.length; i++) {
-    const c = line[i];
-    if (quote) {
-      if (c === "\\") i++;
-      else if (c === quote) quote = "";
-      continue;
-    }
-    if (c === '"' || c === "'" || c === "`") {
-      quote = c;
-      continue;
-    }
-    if (c === "/" && line[i + 1] === "/") return line.slice(0, i);
-  }
-  return line;
-}
-
-/**
- * Comments removed, so a POSITIVE assertion runs over text a comment cannot
- * satisfy. Copied from `scripts/host-editor-verify.ts:191`, JSX branch in the
- * NEGATIVE-LOOKAHEAD form: the lazy form `\{\s*\/\*[\s\S]*?\*\/\s*\}` reads as
- * equivalent and is not - it is allowed to cross an intervening close-comment
- * marker while searching for one followed by `}`, and on a real file it
- * swallowed 50752 characters in another script, silencing a negative that then
- * ran blind over deleted text.
- */
-function stripComments(src: string): string {
-  const withoutJsxComments = src.replace(/\{\s*\/\*(?:(?!\*\/)[\s\S])*\*\/\s*\}/g, "");
-  return withoutJsxComments
-    .split("\n")
-    .filter((line) => {
-      const t = line.trim();
-      return !(t.startsWith("//") || t.startsWith("/*") || t.startsWith("*"));
-    })
-    .map(stripLineComment)
-    .join("\n");
-}
-
-// The mandatory two-assertion self-test for a script that strips a `.tsx`.
-{
-  const probe = stripComments(
-    "type P = { /** c */ x: X };\nconst KEEP = 1;\nconst j = <div>{/* c */}</div>;",
-  );
-  assert(probe.includes("KEEP"), "stripComments self-test: KEEP survives");
-  assert(
-    !/\{\s*\/\*\s*c\s*\*\/\s*\}/.test(probe),
-    "stripComments self-test: the JSX comment {/* c */} does not",
-  );
-}
-
-/**
- * Whitespace AND a comma before a closing bracket are PRETTIER'S; everything
- * else is the claim. Both halves are needed: a legal multi-line reformat under
- * this repo's config (`trailingComma: "all"`) adds a comma that plain
- * whitespace-collapsing does not remove, which reddens a pin over a change
- * that means nothing - the M9 control below is what measures it.
- */
-const norm = (s: string): string => s.replace(/\s+/g, "").replace(/,+([)\]}])/g, "$1");
+// The mandatory two-assertion self-test for a script that strips a `.tsx`. The
+// probe and the verdicts live with the shared stripper; the assertions are run
+// here, because `assert` is this file's own and a call at the library's scope
+// would be counted by nobody.
+for (const t of stripperSelfTest()) assert(t.ok, t.label);
 
 function parse(rel: string, src: string): ts.SourceFile {
   return ts.createSourceFile(
@@ -883,26 +847,6 @@ function findFunctionBody(sf: ts.SourceFile, name: string): ts.Node | null {
   };
   visit(sf);
   return out;
-}
-
-/** Walking up from `node`, is every ancestor up to `fnBody` free of a NESTED
- *  function? Tells a direct statement of a function's own body from a call
- *  buried in a decoy arrow declared in the same scope - the count alone cannot
- *  bite that deletion. */
-function isDirectlyInFunctionBody(node: ts.Node, fnBody: ts.Node): boolean {
-  let cur: ts.Node | undefined = node.parent;
-  while (cur && cur !== fnBody) {
-    if (
-      ts.isFunctionDeclaration(cur) ||
-      ts.isFunctionExpression(cur) ||
-      ts.isArrowFunction(cur) ||
-      ts.isMethodDeclaration(cur)
-    ) {
-      return false;
-    }
-    cur = cur.parent;
-  }
-  return cur === fnBody;
 }
 
 /**
@@ -993,8 +937,8 @@ function findPropertyValue(
 }
 
 /** Every `.ts`/`.tsx` file under `dir`, recursively. Copied from
- *  `scripts/forwards-shell-verify.ts:322-332`, for the repo-wide selector
- *  sweep section 10 needs. */
+ *  `walkSrcFiles` in `scripts/forwards-shell-verify.ts`, for the repo-wide
+ *  selector sweep section 10 needs. */
 function walkSrcFiles(dir: string): string[] {
   const out: string[] = [];
   for (const entry of readdirSync(dir)) {
@@ -1003,188 +947,6 @@ function walkSrcFiles(dir: string): string[] {
     else if (/\.(ts|tsx)$/.test(entry)) out.push(full);
   }
   return out;
-}
-
-/** The selector arrow's own parameter name, whitespace-normalised, or `""` when
- *  it has none. What {@link primitiveSelectorBody}'s access-chain arm has to be
- *  ROOTED ON: the letter `s` is this codebase's habit and not the claim, and a
- *  check that reddens when somebody writes `(state) => state.byRule[id]?.status`
- *  is a check the next reader weakens rather than reads. Taken off the AST so
- *  the name the arm tests and the name the arrow declares cannot disagree. */
-function selectorParamName(arrow: ts.ArrowFunction, sf: ts.SourceFile): string {
-  const p = arrow.parameters[0];
-  return p ? norm(p.name.getText(sf)) : "";
-}
-
-/**
- * Can this selector body only ever yield a PRIMITIVE?
- *
- * AN ALLOW-LIST, AND THE POLARITY IS THE CLAIM. The failure mode is "the
- * selector returns a FRESH REFERENCE", and the set of ways to produce one is
- * OPEN - an object literal, an array literal, `Object.keys(...)`,
- * `Object.values(...).map(...)`, `Object.entries(...)`, `new Set(...)`,
- * `structuredClone(...)`, `[...x]`, any helper written next year. The set of
- * shapes that can only produce a primitive is small and CLOSED. So anything not
- * named below is guilty until argued, INCLUDING EVERY CALL EXPRESSION: a fresh
- * collection is exactly what a call returns.
- *
- * What this replaced, and why the polarity had to flip rather than the list
- * grow. The deny-list here named four forms and TWO OF THEM COULD NEVER FIRE:
- * an object-literal arrow body must be parenthesised, so the node in this
- * position is a `ParenthesizedExpression` and never an
- * `ObjectLiteralExpression`; and `(s) => ...x` is a syntax error, so a
- * `SpreadElement` can never occupy this position at all. That left
- * `useHostOwnedForwards((s) => ({ a, b }))` - the exact case this section exists
- * to forbid - PASSING, alongside `Object.keys(s.byRule)`, `Object.entries(...)`,
- * `new Set(...)`, `structuredClone(s.byRule)` and bare `s.byRule`, every one of
- * them the same "Maximum update depth exceeded" failure under zustand v5
- * Measured, not argued.
- *
- * Returns the REASON as well as the verdict, so a failure names the shape it
- * refused instead of only echoing the text.
- */
-function primitiveSelectorBody(
-  expr: ts.Expression,
-  sf: ts.SourceFile,
-  param: string,
-): { ok: true } | { ok: false; why: string } {
-  // Parentheses FIRST and to a fixed point, because parenthesising is how an
-  // object-literal arrow body has to be written at all - unwrapping later would
-  // leave the headline case looking like a shape nobody named.
-  let cur: ts.Expression = expr;
-  while (ts.isParenthesizedExpression(cur)) cur = cur.expression;
-
-  // `!x`, `-x`, `+x`, `~x`, `typeof x`: a primitive whatever the operand is.
-  if (ts.isPrefixUnaryExpression(cur) || ts.isTypeOfExpression(cur)) return { ok: true };
-
-  if (ts.isBinaryExpression(cur)) {
-    const kind = cur.operatorToken.kind;
-    // `??`, `||` and `&&` PASS AN OPERAND THROUGH, so each side has to qualify
-    // on its own: `s.byRule[id] ?? {}` is a fresh object on every miss.
-    if (
-      kind === ts.SyntaxKind.QuestionQuestionToken ||
-      kind === ts.SyntaxKind.BarBarToken ||
-      kind === ts.SyntaxKind.AmpersandAmpersandToken
-    ) {
-      const left = primitiveSelectorBody(cur.left, sf, param);
-      if (!left.ok) return left;
-      return primitiveSelectorBody(cur.right, sf, param);
-    }
-    // THE COMMA OPERATOR PASSES ITS RIGHT OPERAND THROUGH, exactly like `??`
-    // three lines above, and it was the hole the "every other binary operator
-    // yields a primitive" line below used to leave open. Measured with a real
-    // new hook in `hostOwned.ts`:
-    // `useHostOwnedForwards((s) => (s.byRule[ruleId]?.boundPort ?? 0, Object.keys(s.byRule)))`
-    // came back GREEN, with this section printing three fresh PASSING
-    // assertions calling it "returns a primitive" - a fresh array per store
-    // read, which is the "Maximum update depth exceeded" loop the whole section
-    // exists to forbid. `(0, X)` on its own is caught by TS2695; any
-    // non-trivial left operand dodges that, and a return annotation cannot see
-    // it either because the comma form satisfies any declared return type while
-    // still handing back a fresh reference.
-    //
-    // The LEFT operand is evaluated and thrown away, so it cannot be what the
-    // selector returns and does not need to qualify.
-    if (kind === ts.SyntaxKind.CommaToken) return primitiveSelectorBody(cur.right, sf, param);
-    // THE ASSIGNMENTS - `=`, `+=`, `??=`, `||=`, `&&=` and the rest - the other
-    // operator class whose value is an operand: `(lastIds = Object.keys(s.byRule))`
-    // measured GREEN the same way. `FirstAssignment`..`LastAssignment` is the
-    // whole closed range, so no member of the family is left out by name.
-    //
-    // BOTH operands have to qualify, because `??=`/`||=`/`&&=` yield EITHER
-    // side. In practice that refuses every assignment, since an assignment
-    // TARGET is an identifier or an access chain that does not reach a
-    // primitive field - and refusing is the right answer: nothing legitimate
-    // assigns inside a zustand selector, and the allow-list's polarity is
-    // "guilty until argued".
-    if (kind >= ts.SyntaxKind.FirstAssignment && kind <= ts.SyntaxKind.LastAssignment) {
-      const left = primitiveSelectorBody(cur.left, sf, param);
-      if (!left.ok) return left;
-      return primitiveSelectorBody(cur.right, sf, param);
-    }
-    // Every other binary operator - the comparisons, the arithmetic, the
-    // bitwise ones - produces a primitive from any pair of operands. TRUE OF
-    // WHAT IS LEFT, which is what the two arms above are for: the general
-    // sentence was false for exactly the two classes whose value is an operand
-    // rather than the operator's own result.
-    return { ok: true };
-  }
-
-  // A ternary is its two arms, for the same reason `??` is.
-  if (ts.isConditionalExpression(cur)) {
-    const whenTrue = primitiveSelectorBody(cur.whenTrue, sf, param);
-    if (!whenTrue.ok) return whenTrue;
-    return primitiveSelectorBody(cur.whenFalse, sf, param);
-  }
-
-  if (
-    ts.isNumericLiteral(cur) ||
-    ts.isStringLiteral(cur) ||
-    ts.isNoSubstitutionTemplateLiteral(cur) ||
-    ts.isTemplateExpression(cur) ||
-    cur.kind === ts.SyntaxKind.TrueKeyword ||
-    cur.kind === ts.SyntaxKind.FalseKeyword ||
-    cur.kind === ts.SyntaxKind.NullKeyword ||
-    (ts.isIdentifier(cur) && cur.text === "undefined")
-  ) {
-    return { ok: true };
-  }
-
-  if (ts.isPropertyAccessExpression(cur) || ts.isElementAccessExpression(cur)) {
-    // `.length` / `.size` is a number however the thing it counts was reached -
-    // an array, a string, a `Map`, a `Set`, or the result of any call in front
-    // of it.
-    //
-    // AND THIS ARM PASSES UNCONDITIONALLY ON THE NAME, which is the honest
-    // description: it is a LEXICAL guess, not a typed one. `x.length` where
-    // `length` is a user-defined field holding an object would be accepted, and
-    // this script builds no `ts.Program`, so there is no checker here that could
-    // tell the two apart. What makes the guess sound for the two stores it is
-    // applied to is that neither entry type HAS such a field: `ForwardRuntimeEntry`
-    // (`runtime.ts:38-48`) and `HostOwnedEntry` (`hostOwned.ts:47`) are a status
-    // string plus numbers, `byRule` is a plain `Record`, and a `.length` or
-    // `.size` written against any of them is a TS error rather than a selector
-    // this arm would wave through. Kept as a comment rather than tightened: the
-    // tightening that would actually close it is a type lookup, and refusing
-    // `.length`/`.size` outright would refuse `useRunningCount`, the one real
-    // selector in either store that builds a collection inside itself.
-    if (
-      ts.isPropertyAccessExpression(cur) &&
-      (cur.name.text === "length" || cur.name.text === "size")
-    ) {
-      return { ok: true };
-    }
-    // Otherwise the chain has to reach PAST the entry, to one of its own
-    // fields. `<param>.byRule` is the whole map and `<param>.byRule[id]` is the
-    // whole entry; both are objects `claim` and `releaseSession` rebuild, so
-    // neither is ever `Object.is` its own last return. Both entry types hold
-    // only `number`/string-literal fields, which is what makes one field off
-    // one entry primitive.
-    //
-    // ROOTED ON THE SELECTOR'S OWN PARAMETER NAME rather than on the letter
-    // `s`: `(state) => state.byRule[id]?.boundPort` is the same claim spelled
-    // differently, and it was REFUSED before this - a check that reddens on a
-    // rename is a check the next reader weakens. The name arrives from
-    // {@link selectorParamName}, off the arrow itself.
-    const text = norm(cur.getText(sf));
-    if (!/^[A-Za-z_$][\w$]*$/.test(param)) {
-      return {
-        ok: false,
-        why: `the selector's parameter \`${param}\` is not a plain identifier, so no access chain can be rooted on it`,
-      };
-    }
-    const entryField = new RegExp(`^${param}\\.byRule\\[[^\\]]+\\]\\??\\.[A-Za-z_$][\\w$]*$`);
-    if (entryField.test(text)) return { ok: true };
-    return {
-      ok: false,
-      why: `access chain \`${text}\` does not reach a primitive field off \`${param}.byRule[…]\``,
-    };
-  }
-
-  return {
-    ok: false,
-    why: `${ts.SyntaxKind[cur.kind]} \`${norm(cur.getText(sf)).slice(0, 60)}\` is not a shape that can only yield a primitive`,
-  };
 }
 
 // The allow-list's own self-test, over SYNTHETIC selectors, so its verdicts are
@@ -1199,6 +961,15 @@ function primitiveSelectorBody(
     ["s.byRule[ruleId]?.boundPort", true],
     ["s.byRule[ruleId]?.boundPort ?? 0", true],
     ["Object.keys(s.byRule).length", true],
+    // The prefix-unary and `typeof` arm, which no probe in either script
+    // reached: deleting `ts.isPrefixUnaryExpression(cur) ||` from the shared
+    // classifier left both tables green, so the arm was unmeasured on both
+    // sides at once. `!x` and `typeof x` are primitives whatever the operand
+    // is - including operands every other arm refuses, which is what makes the
+    // arm worth having and worth pinning.
+    ["!s.byRule[ruleId]", true],
+    ["typeof s.byRule[ruleId]", true],
+    ["-Object.keys(s.byRule).length", true],
     // The refusals. The first is the case the old deny-list could not see.
     ["({ a: 1, b: 2 })", false],
     ["Object.keys(s.byRule)", false],
@@ -1287,8 +1058,11 @@ console.log("\n[8. ssh-session.ts] the call site, and the two releases");
         "{...defaultAutostartDeps,stillLive:()=>!sessionEnded}",
       ],
     );
-    // R1's second half: the file's own idiom at `:336`, `:346` and `:384`.
-    // There is no `unhandledrejection` handler anywhere in `src/`, so a bare
+    // R1's second half: `ssh-session.ts`'s own idiom - the fire-and-forget
+    // `void <call>.catch(() => {})` around `markConnected` in
+    // `onJumpConnected`, `markConnected` in `onConnected`, and `pinFingerprint`
+    // in the host-key-trust callback. There is no `unhandledrejection` handler
+    // anywhere in `src/`, so a bare
     // `void` here rests entirely on reading another function's body.
     assert(
       call.parent !== undefined &&
@@ -1357,7 +1131,8 @@ console.log("\n[8. ssh-session.ts] the call site, and the two releases");
       //       stillLive: () => !sessionEnded,
       //     }).catch(() => {});
       //
-      // `sessionEnded` is `false` at `:206`, so terminal autostart was inert
+      // `sessionEnded` (`ssh-session.ts`'s `openSshForSession`, initialised
+      // `false`) is still `false` at that point, so terminal autostart was inert
       // for every rule with 57/57 scripts, this file 219/219 ok, and `tsc` and
       // `prettier --check` both green. `&&`, `||`, `?:` and `??` are all this
       // shape, and each is one more member of an open set - so this compares
@@ -1737,7 +1512,7 @@ console.log("\n[9. RuleCard.tsx] the read-only row a terminal-owned forward gets
   // THAT COMBINATION IS CURRENTLY UNCONSTRUCTIBLE, and this section is pinning
   // defence in depth rather than a live defect - said plainly, because the
   // previous version of this comment claimed it was reachable and nobody could
-  // build it. `controller.ts:155-161` runs the terminal-owned refusal and
+  // build it. `startRule` (`controller.ts`) runs the terminal-owned refusal and
   // `markStarting` with no `await` between them, so no claim lands in the gap,
   // and a terminal that reads `"starting"` after its own bind now CLAIMS rather
   // than yielding. The precedence is pinned anyway because the ROW's own
@@ -1913,10 +1688,11 @@ console.log("\n[10. the second store] every useHostOwnedForwards( selector is pr
   }
 
   // The negative, over COMMENT-STRIPPED source. Stripped because this file's
-  // own note at `hostOwned.ts:85-89` explains IN PROSE why `useShallow` is
+  // own note above `useIsHostOwned` explains IN PROSE why `useShallow` is
   // avoided, so a sentence there naming the module path would falsely redden a
-  // raw-source regex - the same exception `forwards-shell-verify.ts:417-420`
-  // already carves out for its own copy of this claim. Inconsistent with
+  // raw-source regex - the same exception the `useForwardRuntime(` selector
+  // rule section of `scripts/forwards-shell-verify.ts` already carves out for
+  // its own copy of this claim. Inconsistent with
   // sections 8 and 9, which strip, until now.
   assert(
     !/from ["']zustand\/react\/shallow["']/.test(stripComments(hostOwnedSrc)),
@@ -1938,7 +1714,8 @@ console.log("\n[10. the second store] every useHostOwnedForwards( selector is pr
   // REPO-WIDE, and this is the half that was missing entirely: the section only
   // ever read `hostOwned.ts`, so a bad selector written in a `.tsx` sat outside
   // its parse and outside every other script's. Same shape as
-  // `scripts/forwards-shell-verify.ts:431-438` uses for `useForwardRuntime(`.
+  // the allow-list's own self-test for `primitiveSelectorBody` in
+  // `scripts/forwards-shell-verify.ts` uses for `useForwardRuntime(`.
   // Currently clean - the only two calls are the two above - and keeping it
   // that way is what keeps the two checks above total. Comment-stripped, so a
   // note discussing the hook is not an offender; `useHostOwnedForwards.getState()`
@@ -1969,7 +1746,8 @@ console.log(
 {
   resetHostOwned();
   // LOCAL PORT BLANK, which is the DEFAULT rule shape: `EMPTY_RULE_DRAFT` has
-  // `localPort: ""` (`editor/draft.ts:46-54`), which saves as 0 and renders
+  // `localPort: ""` (`EMPTY_RULE_DRAFT` in `src/modules/forwards/editor/draft.ts`),
+  // which saves as 0 and renders
   // "Auto". That is what makes this reachable with no timing whatsoever - the
   // second bind SUCCEEDS on a different port, so nothing fails and nothing
   // warns. A pinned port would have failed EADDRINUSE and left tab A's entry
@@ -2010,8 +1788,9 @@ console.log(
   // PRESENCE ALONE, and this fixture is the one that changed direction. It used
   // to pin `owner !== sessionId` - "a rule THIS session already owns is not
   // refused" - as correct behaviour. That case is UNREACHABLE in production
-  // (`next_id` is a monotonic `AtomicU32` from 1,
-  // `src-tauri/src/modules/ssh/mod.rs:52,59,476`), so what the fixture was
+  // (`SshState::next_id` is a monotonic `AtomicU32` defaulted to 1 and only
+  // ever advanced by `fetch_add` in `ssh_open`,
+  // `src-tauri/src/modules/ssh/mod.rs`), so what the fixture was
   // really pinning was the UNSAFE half of an unreachable branch: if the
   // comparison ever did fire, the same session would bind a SECOND listener and
   // overwrite its own entry, orphaning the first port for the app's lifetime.
@@ -2107,7 +1886,9 @@ console.log(
   check(
     "B's post-bind re-read finds A's claim and B CLOSES THE LISTENER IT JUST BOUND",
     b.closeCalls,
-    [{ id: 42, boundPort: 54322 }],
+    // Generation 1: B's own session's first and only bind. The close naming B's
+    // generation and not A's is what makes it B's listener that goes.
+    [{ id: 42, boundPort: 54322, generation: 1 }],
   );
   check("B claimed nothing", b.claims.length, 0);
   check("A closed nothing - the winner keeps its listener", a.closeCalls, []);
@@ -2219,7 +2000,8 @@ console.log(
   // ALREADY DEAD BEFORE THE FIRST BIND, which the fixture above cannot reach:
   // it kills the session between bind 1 and bind 2, so it only ever exercises
   // the post-bind check. `finishSsh` sets `sessionEnded` UNCONDITIONALLY
-  // (`ssh-session.ts:218`) - before `openSsh` has resolved an id - so a session
+  // (`src/modules/terminal/lib/ssh-session.ts`) - before `openSsh` has resolved
+  // an id - so a session
   // that ended while this run was still awaiting `listRules` is a real state,
   // and with the loop shaped bind-then-check it issued ONE bind on a dead
   // session and orphaned that listener before breaking.
@@ -2406,17 +2188,20 @@ console.log(
     "f-yield",
     "f-yield",
   ]);
-  check("the just-bound listener was closed, by session and BOUND port", w.closeCalls, [
-    { id: 41, boundPort: 54321 },
-  ]);
+  check(
+    "the just-bound listener was closed, by session, BOUND port and that bind's generation",
+    w.closeCalls,
+    [{ id: 41, boundPort: 54321, generation: 1 }],
+  );
   check("no claim was written - the page's forward is genuinely up", w.claims.length, 0);
   check("and the terminal's map is untouched", useHostOwnedForwards.getState().byRule, {});
   check("the banner names the rule", w.banners, [yieldedBanner("yielded")]);
 }
 {
   // `"starting"` IS THE INVERSE, and this fixture is written against the new
-  // behaviour: the terminal CLAIMS rather than yielding. `autostart.ts:141-145`
-  // already reasoned this way about the very same status for the PRE-bind
+  // behaviour: the terminal CLAIMS rather than yielding. `skippedBanner`'s
+  // header (`autostart.ts`) already reasoned this way about the very same
+  // status for the PRE-bind
   // banner - "a page Start still dialling, which can then FAIL" - and the
   // post-bind path had not absorbed it.
   //
@@ -2533,8 +2318,9 @@ console.log(
 );
 // ===========================================================================
 // A CONSISTENCY CHECK AND NOTHING MORE, said plainly because the finding it
-// came from claimed nothing more either. `controller.ts:188-194` and `:219-225`
-// argue that a release must be awaited - "a close that landed later could land
+// came from claimed nothing more either. `startRule` (`controller.ts`), both its
+// pre-dial refusal and its post-dial superseded-attempt release, argues that a
+// release must be awaited - "a close that landed later could land
 // on a listener a subsequent Start has since bound on that port" - while
 // `autostart.ts`'s two yield releases fired UN-awaited on the identical hazard.
 // Nothing here was measured against the Rust side, so the claim is that the two
@@ -2690,8 +2476,9 @@ console.log("\nforward-autostart-verify: OK\n");
 //                                                          returned it and the wrapper
 //                                                          check passed while the whole
 //                                                          feature was inert for every
-//                                                          rule (`sessionEnded` is
-//                                                          false at `:206`).
+//                                                          rule (`sessionEnded`
+//                                                          is still false in
+//                                                          `openSshForSession`).
 //   Z7    ssh-session.ts: `close: async () => {` with    RED, fa 236/238 - both new
 //           `await Promise.resolve();` above the           assertions, the not-async
 //           release                                        one and the no-await-above

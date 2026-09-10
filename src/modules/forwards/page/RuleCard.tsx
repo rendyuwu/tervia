@@ -25,7 +25,7 @@
  * DEFENCE IN DEPTH AGAINST A COMBINATION THE CODE CURRENTLY MAKES
  * UNCONSTRUCTIBLE, which is the honest description and not an admission. Every
  * `hostOwned && <page status>` pair is presently unreachable:
- * `controller.ts:155-161` runs the terminal-owned refusal and `markStarting`
+ * `startRule` (`../controller`) runs the terminal-owned refusal and `markStarting`
  * with no `await` between them, so no claim can land in that gap, and a
  * terminal that reads `"starting"` after its own bind now CLAIMS rather than
  * yielding (`autostart.ts`'s note on that branch). The precedence is written
@@ -103,7 +103,7 @@ const HOST_OWNED_NOTE = "Started with its terminal. Close that terminal tab to s
 export type RuleCardProps = {
   row: ForwardRuleRow;
   /** Open the editor for this rule. Required, the same reason
-   *  `IdentityCardProps.onEdit` (`vault/page/IdentityCard.tsx:47-50`) is: no
+   *  `IdentityCardProps.onEdit` (`vault/page/IdentityCard.tsx`) is: no
    *  surface lists these rows without being able to edit one. */
   onEdit: () => void;
   /**

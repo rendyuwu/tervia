@@ -18,6 +18,12 @@
  *   A group count that disagrees with its own chip. A host naming a group that
  *   no longer exists has to land somewhere, and `total` has to keep counting it.
  */
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+import ts from "typescript";
+
 import {
   filterAndRank,
   groupCounts,
@@ -36,6 +42,9 @@ import type {
   VaultIdentity,
   VaultKey,
 } from "../src/modules/vault/types";
+import { importSpecifiersOf } from "./lib/ast";
+
+const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 let failed = 0;
 
@@ -758,6 +767,43 @@ console.log("\n[filterAndRank] all three filters run, and ranking orders what su
     "db-prod",
     "adbox",
   ]);
+}
+
+// --- purity: derive.ts reaches nothing it is not allowed to reach --------
+//
+// THIS FILE'S OWN HEADER ASSERTS THE PURITY AND NOTHING ENFORCED IT. "no
+// React, no store, no Tauri - which is the only reason this file can exist" is
+// the argument for every behavioural check above being callable at all, and it
+// was carried by prose alone: an import of the hosts store added to
+// `page/derive.ts` broke nothing here, and the checks would have gone on
+// passing against a module that had stopped being pure.
+//
+// A SET, not a list of forbidden spellings. The set of ways to reach the store
+// is open - `../store`, `../../hosts/store`, `../../../hosts/store` from a file
+// one directory deeper, `@/modules/hosts/store`, and `await import(...)`, which
+// has no `from` clause and still resolves and executes. Pinning the exact set
+// of specifiers the file IS allowed inverts that: a new import is a new member
+// whatever it is spelled.
+//
+// The absence needles beside it are for what has no `from` clause at all: a
+// Tauri command name or a React hook reached some other way. They read RAW
+// source, so prose naming one turns them red - fail-closed, and the direction
+// that costs a round rather than a defect.
+
+console.log("\n[purity] page/derive.ts imports exactly its four pure modules, and nothing else");
+{
+  const deriveSrc = readFileSync(join(root, "src/modules/hosts/page/derive.ts"), "utf8");
+  const pinned = ["../search", "../types", "@/modules/vault/refs", "@/modules/vault/types"];
+  const found = importSpecifiersOf(
+    ts.createSourceFile("derive.ts", deriveSrc, ts.ScriptTarget.ESNext, true, ts.ScriptKind.TS),
+  );
+  ok(
+    `derive.ts's import specifiers are exactly ${JSON.stringify(pinned)} - found ${JSON.stringify(found)}`,
+    JSON.stringify(found) === JSON.stringify(pinned),
+  );
+  for (const needle of ["@tauri-apps", 'from "react"', "secrets_get", "useState"]) {
+    ok(`derive.ts does not contain ${JSON.stringify(needle)}`, !deriveSrc.includes(needle));
+  }
 }
 
 // --- the one shared fixture is still what its name says -----------------

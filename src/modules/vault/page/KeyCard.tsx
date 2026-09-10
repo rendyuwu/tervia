@@ -11,6 +11,14 @@
  * is, and giving it one for no caller would be a dead affordance of the kind
  * this app has shipped before (a header drag that silently does nothing under a
  * rail view).
+ *
+ * ONE EXCEPTION to "the row builder resolves every value", and it is called out
+ * rather than left to be noticed: the needs-a-passphrase line below is derived
+ * HERE, by calling `keyNeedsPassphrase` on the record this card already holds,
+ * instead of arriving as a prop like `missingPrivateKey` does. It is the same
+ * shape of question, off the same record, through the same shared predicate
+ * module - so the two cannot disagree - and it costs no new prop on a row
+ * builder that would only be forwarding a pure function of `vaultKey`.
  */
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -20,6 +28,7 @@ import { cn } from "@/lib/utils";
 import { CircleAlert, Pencil, Trash2 } from "lucide-react";
 import type { ReactNode } from "react";
 
+import { keyNeedsPassphrase } from "../refs";
 import type { VaultKey } from "../types";
 
 export type KeyCardProps = {
@@ -48,6 +57,7 @@ export function KeyCard({
   onEdit,
   onDelete,
 }: KeyCardProps): ReactNode {
+  const needsPassphrase = keyNeedsPassphrase(vaultKey);
   return (
     <div
       role="group"
@@ -78,6 +88,24 @@ export function KeyCard({
       <div className="text-muted-foreground truncate font-mono text-[11px]">
         {vaultKey.fingerprint ?? "No fingerprint recorded"}
       </div>
+
+      {/* The one state the badge above cannot carry, because the badge holds the
+          key type and there is exactly one of it. Said in full rather than as a
+          second chip: "encrypted" alone is not the problem - an encrypted key
+          with its passphrase stored is the ordinary, better case - so the line
+          has to name what is MISSING, and there is no shorter true version of
+          that. Not wrapped in the truncating classes the fingerprint uses: a
+          sentence clipped mid-clause is worse than a taller row, and this row
+          is rare. */}
+      {needsPassphrase && (
+        <div className="text-destructive flex items-start gap-1.5 text-xs">
+          <CircleAlert size={12} strokeWidth={2} className="mt-px shrink-0" />
+          <span className="min-w-0">
+            Recorded as passphrase-encrypted with no passphrase stored, so it fails every connect
+            until its passphrase is entered in the editor.
+          </span>
+        </div>
+      )}
 
       <div className="flex min-h-6 flex-wrap items-center justify-between gap-x-2 gap-y-1">
         <span className="text-muted-foreground min-w-0 truncate text-xs">

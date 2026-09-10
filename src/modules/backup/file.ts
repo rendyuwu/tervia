@@ -31,8 +31,10 @@
  *   A KEY is the record a private key hangs off. `upsertKey` throws on a blank
  *   name, for the same reason `sanitizeGroup` refuses one - it is picked by name
  *   from a dropdown. Its two presence flags are claims about the other machine
- *   and are forced to `false` for the same reason an identity's is. See
- *   {@link sanitizeKey}.
+ *   and are forced to `false` for the same reason an identity's is. Its
+ *   `encrypted` is NOT one of those claims and is carried through - it describes
+ *   the key material, and it is the only thing a saved record has to say that an
+ *   arriving key needs a passphrase nobody here holds. See {@link sanitizeKey}.
  *
  *   A RULE is a saved port-forward riding an SSH host. `upsertRule` refuses a
  *   blank name or remote host, a local port outside `0` or `1-65535`, a remote
@@ -101,7 +103,6 @@ import type {
   SshCredentialBinding,
   VaultAuthMode,
   VaultIdentity,
-  VaultIdentityBinding,
   VaultKey,
   VaultKeyType,
 } from "@/modules/vault/types";
@@ -424,10 +425,9 @@ function rdpArm(base: HostBase, raw: Record<string, unknown>): RdpHost {
     protocol: "rdp",
     credential: rdpBinding(raw.credential, base.id),
     // Unlike every other field, a bad desktop size does NOT drop the row. It is
-    // the one field a later build could legitimately widen (RDP-08 adds
-    // `"fit"`), and a host is still perfectly dialable at a different
-    // resolution - so an unusable size falls back instead of costing the user
-    // the connection.
+    // the one field a later build could legitimately widen by adding a `"fit"`
+    // mode, and a host is still perfectly dialable at a different resolution -
+    // so an unusable size falls back instead of costing the user the connection.
     desktopWidth: dimension(raw.desktopWidth) ?? RDP_DEFAULT_PRESET.width,
     desktopHeight: dimension(raw.desktopHeight) ?? RDP_DEFAULT_PRESET.height,
     sizeMode,
@@ -532,6 +532,28 @@ export function sanitizeIdentity(raw: unknown): VaultIdentity | null {
  * Both are display-only on this side, so an unrecognised `SHA256:` shape says
  * nothing about whether the private half is usable - and a stricter parse here
  * would drop a good key over a cosmetic field the user cannot even edit.
+ *
+ * `encrypted` IS CARRIED and is deliberately NOT forced false alongside the two
+ * presence flags, which is the one place this function departs from
+ * {@link sanitizeIdentity}'s treatment of `hasPassword`. The flags describe the
+ * EXPORTING MACHINE'S keychain and only this machine's can answer them;
+ * `encrypted` describes the key MATERIAL, like `fingerprint` and `publicKey`,
+ * and the material is the same material wherever it is read. Forcing it false
+ * would be worse than dropping it: `false` is the claim that something looked
+ * and the body is not encrypted, so an encrypted key whose passphrase did not
+ * travel would arrive asserting an inspection that never happened, and this
+ * function performs none.
+ *
+ * Read as THREE-STATE, the way {@link sanitizeRule} reads `startWithHost`, and
+ * for the same reason - only a value the file literally states is honoured:
+ * `true` when the file says `true`, `false` when it says `false`, ABSENT for a
+ * row that does not mention it or that carries a non-boolean. Absent is what
+ * every pre-field export produces and what `VaultKey.encrypted` defines as "no
+ * inspection has answered this", so an old backup imports honestly rather than
+ * gaining a fact it never carried. This line is also what makes the field
+ * survive an export/import round trip: `buildBackup` seals the records
+ * themselves, so the field travels out unaided, and this is the only gate on
+ * the way back in.
  */
 export function sanitizeKey(raw: unknown): VaultKey | null {
   if (!isRecord(raw)) return null;
@@ -550,6 +572,11 @@ export function sanitizeKey(raw: unknown): VaultKey | null {
     ...(type ? { keyType: type } : {}),
     ...(fingerprint ? { fingerprint } : {}),
     ...(publicKey ? { publicKey } : {}),
+    // Carried, not forced - it describes the key material rather than the
+    // exporting machine's keychain. A `typeof` test rather than the truthiness
+    // spread the fields above use, because `false` here is a real answer and
+    // has to arrive as one; absent is reserved for "the file did not say".
+    ...(typeof raw.encrypted === "boolean" ? { encrypted: raw.encrypted } : {}),
     // Both forced, like an identity's `hasPassword`: the material they claim
     // lives in the exporting machine's keychain, and whether any of it arrives
     // here is decided by what the sealed payload actually carried.
@@ -865,13 +892,29 @@ export function normaliseIdentityKeys(
   return { identities: out, withoutKeys, keysDropped };
 }
 
-/** Whether the binding already saved here IS the one the file asked for, so
- *  keeping it costs the user nothing and there is nothing to report. */
+/**
+ * Whether the binding already saved here IS the one the file asked for, so
+ * keeping it costs the user nothing and there is nothing to report.
+ *
+ * `wanted` takes either binding union rather than `VaultIdentityBinding` alone,
+ * because the row asking is not always the identity side: an incoming INLINE
+ * row asking to unbind a saved identity is the mirror case
+ * {@link resolveIdentityBindings} now handles, and this is the one comparison
+ * that tells "nothing changed" apart from both directions without a second
+ * counting rule. `true` only when BOTH sides are identity references naming the
+ * same identity - an inline `wanted` can never match, since it carries no
+ * `identityId` to compare, which is exactly right: an inline row can never be
+ * "the same" as a saved identity binding.
+ */
 function isSameIdentity(
   saved: SshCredentialBinding | RdpCredentialBinding,
-  wanted: VaultIdentityBinding,
+  wanted: SshCredentialBinding | RdpCredentialBinding,
 ): boolean {
-  return saved.kind === "identity" && saved.identityId === wanted.identityId;
+  return (
+    saved.kind === "identity" &&
+    wanted.kind === "identity" &&
+    saved.identityId === wanted.identityId
+  );
 }
 
 /**
@@ -945,6 +988,18 @@ function isSameIdentity(
  * group label - which the group pass declines for the same reason. It is counted
  * in `dropped` and one edit changes it.
  *
+ * THE MIRROR DIRECTION IS THE SECOND REASON READ THE OTHER WAY, and it is why an
+ * incoming INLINE row is not a fourth outcome: a host moved into the vault on
+ * purpose and re-imported from a file made before the move arrives with an inline
+ * row over a SAVED IDENTITY binding, and that saved binding is still this
+ * machine's own current answer - the file's copy has no better claim on unbinding
+ * it than the identity-to-identity case above has on repointing it. Nothing is
+ * released either: the row is written with the saved identity binding still in
+ * place, so it owns no accounts of its own and neither `hostRefs` nor
+ * `storedFields` in `apply.ts` ever sees an inline row to build a reference for.
+ * Kept and counted in `dropped`, the same as every other row this outcome
+ * catches.
+ *
  * `dropped` counts only the rows where the file's binding was NOT honoured, so a
  * round trip of one machine's own backup reports zero on both counters.
  *
@@ -972,15 +1027,33 @@ export function resolveIdentityBindings(
     // Read off `h` once: narrowing `h.protocol` below re-widens `h.credential`,
     // so the identity arm has to be captured before the protocol guard.
     const wanted = h.credential;
-    if (wanted.kind !== "identity") return h;
     const saved = byId.get(h.id);
-    // Outcome 2, and it needs BOTH halves. The row already carries the binding
-    // `sanitizeHost` preserved, so applying it is returning the row untouched -
-    // which also keeps it out of the protocol guard below and its narrowing.
-    if (!saved && identityIds.has(wanted.identityId)) {
-      applied++;
+    if (wanted.kind === "identity") {
+      // Outcome 2, and it needs BOTH halves. The row already carries the binding
+      // `sanitizeHost` preserved, so applying it is returning the row untouched -
+      // which also keeps it out of the protocol guard below and its narrowing.
+      if (!saved && identityIds.has(wanted.identityId)) {
+        applied++;
+        return h;
+      }
+    } else if (saved?.credential.kind !== "identity") {
+      // The mirror of outcome 2's own guard, for the other direction: an
+      // incoming INLINE row with nothing saved under its id, or a saved record
+      // that is itself inline, has no saved identity binding to unbind, so the
+      // file's row is honoured as it stands - the same "nothing to report" outcome
+      // 1 already gives its own mirror case, counted in neither direction.
       return h;
     }
+    // Outcome 3, now reached from both directions. `wanted` may be an identity
+    // asking to bind to a DIFFERENT identity than the one saved (the case this
+    // always caught), or - the case that used to return before reaching here at
+    // all - an inline row asking to UNBIND a saved identity outright. Neither is
+    // honoured, for the reason argued above: the saved binding is this machine's
+    // own current answer, and a file has no better claim on it than on the host's
+    // group label. `isSameIdentity` is what tells "nothing changed" apart from
+    // both without a second counting rule - it answers false for an inline
+    // `wanted` unconditionally, since only an identity reference can name the
+    // identity being kept.
     if (h.protocol === "ssh") {
       // `undefined` rather than a raw object: `sshBinding` owns the blank
       // fallback, so there is one spelling of "an inline binding with nothing in

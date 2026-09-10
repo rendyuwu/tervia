@@ -4,11 +4,12 @@
  *
  * `purgeLegacySecrets` is the only thing that can ever name the keychain accounts
  * the two OLD connection stores left behind. The IPC surface is `secrets_get`,
- * `secrets_get_all`, `secrets_set` and `secrets_delete` with no `secrets_list`,
- * so the moment `modules/ssh/connections.ts` and `modules/rdp/connections.ts`
- * were deleted, `tervia-ssh :: <id>::privateKey` became unreachable from inside
- * the app. A pass that SKIPS is therefore not a cheap mistake, it is a private
- * key nobody can delete again.
+ * `secrets_get_all`, `secrets_set`, `secrets_delete` and `secrets_copy` - each
+ * named against the specific accounts it acts on - with no `secrets_list`, so the moment
+ * `modules/ssh/connections.ts` and `modules/rdp/connections.ts` were deleted,
+ * `tervia-ssh :: <id>::privateKey` became unreachable from inside the app. A
+ * pass that SKIPS is therefore not a cheap mistake, it is a private key nobody
+ * can delete again.
  *
  * Which is why the happy path is not what this file is for. The whole suite in
  * `hosts-store-verify.ts` drives the purge through the real store, and it covers
@@ -76,6 +77,10 @@ function harness(opts: { getThrows?: boolean; setThrows?: boolean } = {}): Harne
     onChanged: async (): Promise<() => void> => () => {},
     ensureLoaded: async (): Promise<StoreRecovery | null> => notice,
     takeRecoveryNotice: (): StoreRecovery | null => notice,
+    // Nothing here drives the anti-blank guard in `modules/workspaces/store.ts`,
+    // which is the only caller: a good file is the honest answer for a fixture
+    // with no file behind it at all.
+    fileState: async () => ({ found: "ok" as const, recovered: false }),
   };
 
   const files: StoreFileIo = {

@@ -12,6 +12,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { forgetKeyNote, forgetKeyRowLabel } from "./credentialChoice";
 import { Field, ToggleButton } from "./FormControls";
 import type { SshCredentialDraft } from "./types";
 
@@ -56,6 +57,27 @@ export type SshCredentialSectionProps = {
    */
   hasStoredPassword: boolean;
   /**
+   * Whether the STORED record holds a private key BODY, which is what a blank
+   * textarea means the opposite of. Same prop, same shape and same reason as
+   * `hasStoredPassword` above, with one difference that is the whole of why this
+   * one is worth its own doc: under key auth this textarea is also the ROUTE
+   * that deletes a stored key, so what it decides is copy on a delete path. See
+   * {@link keyBodyHelp}.
+   *
+   * `hasPrivateKey` ALONE, deliberately not `hasPrivateKey || hasKeyPassphrase`.
+   * This line is about the field under it, and that field is seeded from,
+   * cleared into and deleted through the key body account and no other. A record
+   * holding a key passphrase and no body is a real state - `forgetKeyNote` is a
+   * function of the flags precisely because of it - and on that record the
+   * stored arm would be wrong twice: there is no key body to keep, and the
+   * removal route it names never fires, because a field the seed never filled is
+   * not `seeded` and clearing it sends nothing. That orphan is
+   * `hostKeySecretNames`'s subject rather than this one's: it unions the two
+   * accounts because the row it feeds offers to delete both, and it is gated on
+   * things this line is not.
+   */
+  hasStoredPrivateKey: boolean;
+  /**
    * The dialog's save-time refusal for the key body, or null.
    *
    * A prop rather than state of this component's own because the inspection it
@@ -67,6 +89,25 @@ export type SshCredentialSectionProps = {
    * The same split, for the same reason, as the vault key editor's.
    */
   keyRefusal: string | null;
+  /**
+   * The key material the STORED record still holds and this row may offer to
+   * delete, by name - `hostKeySecretNames` in `credentialChoice.ts`, already
+   * gated by the dialog on this row being the only surface promising anything
+   * about those two accounts.
+   *
+   * An empty list means no row, and it is the ONE gate on that: the dialog
+   * answers `[]` for a create-mode form, for a vault-bound row (which owns no
+   * accounts of its own) and while a credential change is pending (which already
+   * deletes or moves the same accounts). Passed in rather than derived here
+   * because this component never sees the stored record - it holds the draft,
+   * whose key body is an open-time snapshot that says nothing about what is
+   * stored.
+   */
+  forgettableKeySecrets: readonly string[];
+  /** Whether Forget has been pressed in this sitting. The dialog's state,
+   *  applied by Save and discarded by Cancel - see `forgetSshKey` there. */
+  forgetKey: boolean;
+  onForgetKey: () => void;
 };
 
 /**
@@ -149,13 +190,52 @@ function passwordHelp(hasStoredPassword: boolean): string {
   return "Leave blank to save the host without one. It is listed with a missing-secret warning until a password is entered, and a connect is then refused before it dials - the host process reports that it has no credentials rather than failing a login.";
 }
 
+/**
+ * What leaving the KEY BODY blank actually does, which is the OPPOSITE thing on
+ * the two sides of `hasStoredPrivateKey`.
+ *
+ * The same split as {@link passwordHelp}, and it carries more here: this
+ * textarea is not only a field whose blank saves nothing, it is the ONE route
+ * that removes a stored private key. `sshSecretsForSave` turns a cleared field
+ * that was seeded into the store's delete instruction, so this is copy on a
+ * delete path rather than copy about a value, and the wrong half of it shown at
+ * the wrong moment describes a destruction and invites the user to try it.
+ *
+ * THE RULE HAS THREE STATES AND THIS FUNCTION HAS TWO ARMS, which is a split
+ * rather than a simplification. `sshSecretsForSave` decides per field on
+ * (touched, seeded): a blank body that WAS seeded deletes the stored key, a
+ * blank body that was not is omitted - the keychain read had not landed, so
+ * there was never a value on screen to delete - and an untouched field is
+ * omitted too. The two arms split on what is STORED, which is the question this
+ * component cannot answer from the draft, and the third state is exactly what
+ * the stored arm's precondition clause is for: the field is blank for the whole
+ * of that read, deliberately, and "wait for the stored key to load into this
+ * field" is what tells a user who has a key and is looking at an empty box which
+ * of the two blanks they are looking at.
+ *
+ * The Forget button is not named here on purpose, and its absence is not an
+ * omission: that row renders only in the auth modes with no key field at all, so
+ * naming it from under the textarea would be the second surface promising one
+ * deletion that its placement rule exists to prevent.
+ */
+function keyBodyHelp(hasStoredPrivateKey: boolean): string {
+  if (hasStoredPrivateKey) {
+    return "A private key is already stored for this host, and blank does not remove it: blank means leave it exactly as it is. To remove it, wait for the stored key to load into this field, clear it, and save.";
+  }
+  return "Leave blank to save the host without a private key. It is listed with a missing-secret warning until a key is entered, and a connect is then refused before it dials - the host process reports that it has no credentials rather than failing a login.";
+}
+
 export function SshCredentialSection({
   boundIdentity,
   identityName,
   value,
   onChange,
   hasStoredPassword,
+  hasStoredPrivateKey,
   keyRefusal,
+  forgettableKeySecrets,
+  forgetKey,
+  onForgetKey,
 }: SshCredentialSectionProps) {
   const [agent, setAgent] = useState<AgentState>({ kind: "checking" });
   const [imported, setImported] = useState<ImportState>({ kind: "idle" });
@@ -414,6 +494,23 @@ export function SshCredentialSection({
               </div>
               <KeyInspectPanel state={inspected} />
             </div>
+            {/* Saving with this blank is allowed - see `validateSshCredential` -
+                and unlike the password field, blank here is also how a stored key
+                is REMOVED, so what blank does is the one thing this field has to
+                say out loud. Which of the two things it does depends on the
+                stored record and not on this draft: see `keyBodyHelp`.
+
+                A direct child of the `Field` rather than of the control cluster
+                above, so it reads as being about the field rather than about the
+                inspect panel it would otherwise hang off, and ABOVE the refusal,
+                which stays last for the reason its own comment gives. The status
+                span in the button row is deliberately left alone: it is the
+                import slot, truncated and replaced by a path or an error, so a
+                sentence about what Save does would vanish at the moment a file is
+                imported. */}
+            <span className="text-muted-foreground text-[10.5px]">
+              {keyBodyHelp(hasStoredPrivateKey)}
+            </span>
             {/* The save-time refusal, and the LAST child of this field on
                 purpose: its sentence says to enter the passphrase below, and
                 the passphrase input is the next field down. It is not the
@@ -441,7 +538,86 @@ export function SshCredentialSection({
           </Field>
         </>
       )}
+
+      {/* AFTER the auth-mode ternary and gated on the mode itself, rather than
+          added to the two non-key arms above: one render site, one gate, and
+          the gate is the claim - the key textarea IS the route to clearing a
+          stored key, so this row exists only where that textarea does not.
+          Under key auth it must not appear at all: the field the user is
+          looking at is the thing that removes the key, and a second surface
+          promising the same deletion is how the two come to say different
+          things.
+
+          WHAT THE GATE COSTS is in `KNOWN-LIMITS.md`, and it is this row's
+          placement that carries it: the textarea route can strand a key
+          passphrase behind a deleted body, and this is the only surface that
+          offers to remove one - so the user has to leave key auth before
+          anything does. Accepted, not overlooked; widening the gate retires
+          that entry. */}
+      {value.authMode !== "key" && forgettableKeySecrets.length > 0 ? (
+        <ForgetKeyRow
+          keySecrets={forgettableKeySecrets}
+          forgetting={forgetKey}
+          onForget={onForgetKey}
+        />
+      ) : null}
     </>
+  );
+}
+
+/**
+ * The key material a host still stores under an auth mode that cannot use it,
+ * with its Forget action.
+ *
+ * The shape is `PinnedKeyRow`'s in `HostEditorDialog.tsx` - a `Field`, a bordered
+ * row naming what is held, a small outline button, a footnote saying when it
+ * applies - and deliberately a SIBLING of it rather than the two sharing a shell.
+ * They hold different content (a fingerprint against a list of accounts) and have
+ * different empty states, and a shared card shell was priced and declined.
+ * `KNOWN-LIMITS.md` carries that as an accepted duplication, and records that
+ * only this copy of the shape is pinned by a verify script; a THIRD card wanting
+ * it is what re-runs the calculus, and retires the entry either way.
+ *
+ * Forget records an INTENT, which is the whole design and not an ordering
+ * preference: the same button wrote its deletion straight to the store for the
+ * pinned key, and Cancel then reverted the visible field while nothing reverted
+ * the deletion. So the button disappears once pressed and the note says what Save
+ * will do - the press is visible, and nothing has happened yet.
+ *
+ * Every string here comes from `credentialChoice.ts`, where it can be exercised by
+ * value: the note has to read correctly for a stored passphrase with no stored
+ * body, which is a case no fixed sentence covers.
+ */
+function ForgetKeyRow({
+  keySecrets,
+  forgetting,
+  onForget,
+}: {
+  keySecrets: readonly string[];
+  forgetting: boolean;
+  onForget: () => void;
+}) {
+  return (
+    <Field label="Stored key material">
+      {/* Same box as the read-only status blocks in this editor. */}
+      <div className="border-border/60 bg-muted/30 flex items-center justify-between gap-2 rounded-md border px-2 py-1">
+        <span className="truncate text-[10.5px]">{forgetKeyRowLabel(keySecrets)}</span>
+        {forgetting ? null : (
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="h-6 shrink-0 px-2 text-[10.5px]"
+            onClick={onForget}
+          >
+            Forget
+          </Button>
+        )}
+      </div>
+      <span className="text-muted-foreground text-[10.5px]">
+        {forgetKeyNote(keySecrets, forgetting)}
+      </span>
+    </Field>
   );
 }
 

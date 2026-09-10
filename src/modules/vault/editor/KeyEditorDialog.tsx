@@ -6,8 +6,8 @@
  * same per-target load effect, the same inline error line, the same footer.
  * What it deliberately does NOT copy is that editor's keychain seed and its
  * `touched`/`seeded` pair: the vault store exposes no secret read at all
- * (`../store.ts:39-71`), and `SecretsIo` has no single-value read by design
- * (`../adapters.ts:52-61`), so a secret field here is only ever filled by the
+ * (`VaultStore` in `src/modules/vault/store.ts`), and `SecretsIo` has no single-value read by design
+ * (`SecretsIo.copy` in `src/modules/vault/adapters.ts`), so a secret field here is only ever filled by the
  * user. Blank therefore means "leave the stored value alone", unambiguously,
  * and `./draft.ts` is where that rule is decided and checked.
  *
@@ -77,15 +77,15 @@ export type KeyEditorDialogProps = {
   onClose: () => void;
 };
 
-/** Local to this file, and the same shape `SshCredentialSection.tsx:37-38`
- *  declares: the picked file's path, or why it could not be used. */
+/** Local to this file, and the same shape `ImportState` in
+ *  `src/modules/hosts/editor/SshCredentialSection.tsx` declares: the picked file's path, or why it could not be used. */
 type ImportState =
   { kind: "idle" } | { kind: "loaded"; path: string } | { kind: "error"; message: string };
 
 /**
  * A token for "the row this form is showing RIGHT NOW", stable across
- * re-renders and different for every distinct target - the same job it does at
- * `HostEditorDialog.tsx:122-126`, so a parent that builds `target` inline does
+ * re-renders and different for every distinct target - the same job `tokenFor`
+ * in `src/modules/hosts/HostEditorDialog.tsx` does, so a parent that builds `target` inline does
  * not restart the load on every one of its own renders.
  */
 function tokenFor(target: KeyEditorTarget | null): string | null {
@@ -98,7 +98,7 @@ export function KeyEditorDialog({ target, onClose }: KeyEditorDialogProps): Reac
   // Taken from the target when one is applied rather than read off `target` on
   // every render, because `target` goes null the moment the dialog starts
   // closing and the title would flip to "New key" behind the fade - the same
-  // reason `HostEditorDialog.tsx:134` holds its own copy.
+  // reason `mode` in `src/modules/hosts/HostEditorDialog.tsx` holds its own copy.
   const [mode, setMode] = useState<"create" | "edit">("create");
   const [existing, setExisting] = useState<VaultKey | null>(null);
   const [ready, setReady] = useState(false);
@@ -172,8 +172,8 @@ export function KeyEditorDialog({ target, onClose }: KeyEditorDialogProps): Reac
   /**
    * Ask the backend what this key text is, without dialing anything.
    *
-   * Explicit rather than on every keystroke, for the reason
-   * `SshCredentialSection.tsx:162-175` gives: this is an IPC round trip that
+   * Explicit rather than on every keystroke, for the reason `checkKey` in
+   * `src/modules/hosts/editor/SshCredentialSection.tsx` gives: this is an IPC round trip that
    * runs bcrypt-pbkdf for an encrypted key, at a round count the key file's own
    * header chooses.
    */
@@ -224,8 +224,8 @@ export function KeyEditorDialog({ target, onClose }: KeyEditorDialogProps): Reac
         directory: false,
         title: "Pick SSH private key",
         filters: [
-          // `.pub` is absent for the reason `SshCredentialSection.tsx:220-227`
-          // gives: russh has no branch that reads a public key as a private
+          // `.pub` is absent for the reason `pickKeyFile` in
+          // `src/modules/hosts/editor/SshCredentialSection.tsx` gives: russh has no branch that reads a public key as a private
           // one, so offering it invites a single unhelpful failure. `.ppk`
           // stays - the fork's `ppk` feature is on unconditionally.
           { name: "Private key (.pem, .key, .ppk)", extensions: ["pem", "key", "ppk"] },
@@ -308,8 +308,8 @@ export function KeyEditorDialog({ target, onClose }: KeyEditorDialogProps): Reac
         keySecretsForSave(draft),
         vaultKeyStamp(existing),
       );
-      // A duplicate NAME is warned about, not refused - the store's own call
-      // (`../store.ts:252-256`), because the name is not an identifier and it is
+      // A duplicate NAME is warned about, not refused - `upsertKey`'s own call
+      // (`src/modules/vault/store.ts`), because the name is not an identifier and it is
       // the user's file. It goes to `toast()` rather than into this form,
       // because the form is about to close and an inline warning would vanish
       // with it.
@@ -332,7 +332,7 @@ export function KeyEditorDialog({ target, onClose }: KeyEditorDialogProps): Reac
         return;
       }
       // `describeKeyError` strips a leading `ssh: ` and leaves everything else
-      // alone (`../keyInspect.ts:73-77`), which is right for both sources here:
+      // alone (`src/modules/vault/keyInspect.ts`), which is right for both sources here:
       // an inspection failure carries that prefix and a store refusal
       // ("vault: ...") does not. Its return type is the full `KeyInspectState`
       // union rather than just the error arm, so the `kind` check below is a
@@ -366,7 +366,7 @@ export function KeyEditorDialog({ target, onClose }: KeyEditorDialogProps): Reac
         {/* DialogContent caps at calc(100dvh-2rem); min-h-0 lets this stack
             shrink so the form scrolls inside the dialog instead of the top
             fields sliding off screen. -mr-2/pr-2 keeps the scrollbar off the
-            content edge. Copied from `HostEditorDialog.tsx:858-862`. */}
+            content edge. Copied from `HostEditorDialog` in `src/modules/hosts/HostEditorDialog.tsx`. */}
         <div className="-mr-2 flex min-h-0 flex-col gap-3 overflow-y-auto pr-2">
           {!ready && !error ? <p className="text-muted-foreground text-[11px]">Loading…</p> : null}
           {ready ? (
@@ -481,7 +481,7 @@ export function KeyEditorDialog({ target, onClose }: KeyEditorDialogProps): Reac
         </div>
 
         {/* Override DialogFooter's flex-col-reverse so Cancel stays on the left
-            at any width - the same override `HostEditorDialog.tsx:1019` uses. */}
+            at any width - the same override `HostEditorDialog` in `src/modules/hosts/HostEditorDialog.tsx` uses. */}
         <DialogFooter className="flex-row items-center justify-end gap-2 sm:justify-end sm:[&>button]:flex-none">
           <DialogClose asChild>
             <Button variant="outline" size="sm">
@@ -503,7 +503,7 @@ export function KeyEditorDialog({ target, onClose }: KeyEditorDialogProps): Reac
  * Read-only, and separate from the panel above on purpose: the panel describes
  * whatever is in the textarea right now, and this describes what is stored. The
  * public half is here rather than hidden because it is not a secret and is
- * meant to be copied straight into `authorized_keys` (`../types.ts:126-127`) -
+ * meant to be copied straight into `authorized_keys` (`VaultKey.publicKey` in `src/modules/vault/types.ts`) -
  * it is rendered whole, in a selectable box, because a value someone pastes
  * elsewhere has to be pasteable.
  */
@@ -532,8 +532,8 @@ function StoredKeyRow({ vaultKey }: { vaultKey: VaultKey }): ReactNode {
 /**
  * What `checkKey` found, rendered under the textarea.
  *
- * Reports what the key IS and nothing more. A near-copy of
- * `SshCredentialSection.tsx:502-548`, and deliberately a copy: that one is a
+ * Reports what the key IS and nothing more. A near-copy of `KeyInspectPanel` in
+ * `src/modules/hosts/editor/SshCredentialSection.tsx`, and deliberately a copy: that one is a
  * private function inside a file `scripts/key-inspect-verify.ts` section 5
  * anchors on, including a wording rule scoped to its own body, so lifting it
  * out is a change to a checked host-editor file for a vault feature. The

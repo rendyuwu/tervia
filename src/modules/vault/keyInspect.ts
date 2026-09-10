@@ -93,21 +93,27 @@ export function vaultKeyTypeFrom(algorithm: string | null | undefined): VaultKey
 }
 
 /**
- * The three things a saved {@link VaultKey} records about the key it holds.
+ * The four things a saved {@link VaultKey} records about the key it holds.
  *
  * A DIFFERENT question from {@link KeyInspectState}, over the same answer, and
- * that is why this is a second type rather than three more fields on the
+ * that is why this is a second type rather than four more fields on the
  * display union: the panel renders what the user is looking at right now, and
  * this is what is written to the store. A display union that grows a field only
  * the store reads has stopped being a display union.
  *
  * Every field is optional because every one of them can be genuinely unknown -
  * see {@link vaultKeyFactsFrom}.
+ *
+ * `encrypted` is the one of the four that survives a sealed container, and the
+ * reason it is recorded at all is {@link VaultKey.encrypted}: without it a saved
+ * record cannot tell a key that has no passphrase from an encrypted key whose
+ * passphrase nobody holds.
  */
 export type VaultKeyFacts = {
   keyType?: VaultKeyType;
   fingerprint?: string;
   publicKey?: string;
+  encrypted?: boolean;
 };
 
 /**
@@ -116,36 +122,47 @@ export type VaultKeyFacts = {
  * Two rules, and both are the difference between "we looked and the answer is
  * X" and "we could not look".
  *
- * A SEALED CONTAINER yields nothing at all. `parsed === false` is a PuTTY or
- * PKCS#8 key inspected without its passphrase - normal, not a failure, as
- * {@link describeKeyInfo} says - and it must not become `keyType: "unknown"`.
- * `"unknown"` claims the algorithm was read and is none of the three this app
- * names; absent is the truth here, which is that nothing was read. The two
- * render differently on purpose: `page/KeyCard.tsx:53-57` shows the record's
- * own `keyType.toUpperCase()` for the first and the literal "Unknown type" for
- * the second.
+ * A SEALED CONTAINER yields the one fact it can answer, and nothing else.
+ * `parsed === false` is a PuTTY or PKCS#8 key inspected without its passphrase
+ * - normal, not a failure, as {@link describeKeyInfo} says - so it says nothing
+ * about the algorithm, the fingerprint or the public half, and it must not
+ * become `keyType: "unknown"`. `"unknown"` claims the algorithm was read and is
+ * none of the three this app names; absent is the truth here, which is that
+ * nothing was read. The two render differently on purpose: `page/KeyCard.tsx`
+ * shows the record's own `keyType.toUpperCase()` for the first and the literal
+ * "Unknown type" for the second.
+ *
+ * But a sealed container DOES answer the encryption question, and answers it
+ * definitively: `parsed === false` is reached only from `needs_passphrase` in
+ * `src-tauri/src/modules/ssh/mod.rs`, i.e. a container that cannot be opened
+ * without a passphrase, which is what "encrypted" means. So the sealed branch
+ * carries `encrypted: true` - stated rather than copied off the input, because
+ * the fact belongs to the sealed STATE and not to whatever a hand-built
+ * `KeyInspectResult` put in the field beside it. `encryptedKeyRefusal` in
+ * `editor/draft.ts` already relies on that pairing.
  *
  * A BLANK STRING becomes `undefined` rather than travelling as `""`.
- * `VaultKey.fingerprint` and `VaultKey.publicKey` are both optional
- * (`./types.ts:124`, `:127`) and every reader uses `??` - `KeyCard.tsx:68`
- * renders `vaultKey.fingerprint ?? "No fingerprint recorded"`, and `"" ?? x` is
- * `""`, so an empty string stored here renders a blank line exactly where the
- * honest sentence belongs, and nothing fails anywhere.
+ * `VaultKey.fingerprint` and `VaultKey.publicKey` are both optional and every
+ * reader uses `??` - `page/KeyCard.tsx` renders
+ * `vaultKey.fingerprint ?? "No fingerprint recorded"`, and `"" ?? x` is `""`,
+ * so an empty string stored here renders a blank line exactly where the honest
+ * sentence belongs, and nothing fails anywhere.
  *
  * `keyType` goes through {@link vaultKeyTypeFrom} and is never mapped here:
  * that function is the single mapping from the wire algorithm name to the
  * vault's four-member union, and a second one is how two surfaces come to
  * disagree about what an `sk-ecdsa-` key is.
  *
- * The parsed branch returns all three keys PRESENT, undefined included. That is
- * load-bearing for {@link keyRecordFrom}'s wholesale replace, which spreads
- * this over a record.
+ * The parsed branch returns all four keys PRESENT, undefined included -
+ * `encrypted` present even when it is `false`. That is load-bearing for
+ * {@link keyRecordFrom}'s wholesale replace, which spreads this over a record.
  */
 export function vaultKeyFactsFrom(info: KeyInspectResult): VaultKeyFacts {
-  if (!info.parsed) return {};
+  if (!info.parsed) return { encrypted: true };
   return {
     keyType: vaultKeyTypeFrom(info.keyType),
     fingerprint: info.fingerprint || undefined,
     publicKey: info.publicKey || undefined,
+    encrypted: info.encrypted,
   };
 }

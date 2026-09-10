@@ -7,14 +7,16 @@
 // `getCurrentWebviewWindow()` at module scope, which throws under plain Node/tsx
 // with no `window` - the same reason `status.ts` next door is its own
 // dependency-free file. Everything here must stay import-free for that reason,
-// which is why the credential shape below is spelled structurally rather than
-// imported from the vault module.
+// which is why the credential shape and the wire ending shape below are both
+// spelled structurally rather than imported from the vault module and the ssh
+// bridge.
 //
 // Two different questions live here, and they are genuinely different:
 //
-//   `decideSshEnding`: a channel EXISTED and then ended. See the
-//   `SshEvent`/`SshExitReason` doc comments in session.rs / bridge.ts for the
-//   reasoning behind the three ending shapes it switches on.
+//   `endingFromExitReason` and `decideSshEnding`, in that order: a channel
+//   EXISTED and then ended. See the `SshEvent`/`SshExitReason` doc comments in
+//   session.rs / bridge.ts for the reasoning behind the three ending shapes
+//   they switch on.
 //
 //   `classifySshConnectFailure`/`decideSshConnectFailure`: the connect failed
 //   before any channel existed, so none of the ending shapes apply and
@@ -36,6 +38,48 @@ export type SshEndingAction =
   | { action: "closePane"; code: number }
   | { action: "parkKilled"; signalName: string; coreDumped: boolean }
   | { action: "reconnect"; reason: string };
+
+/**
+ * How the wire spelled the ending. This is `SshExitReason` from
+ * src/modules/ssh/bridge.ts, named here rather than imported because that file
+ * reaches a Tauri API and this one must stay loadable under plain Node (see the
+ * header). The two are held together by the compiler at the one call site that
+ * has both - `onExit` in ssh-session.ts - so a kind added on the bridge side
+ * arrives as a type error there rather than as a silently unmapped ending.
+ */
+export type SshWireExitReason =
+  | { kind: "exit"; code: number }
+  | { kind: "signal"; name: string; coreDumped: boolean }
+  | { kind: "disconnected" };
+
+/**
+ * The wire's ending -> the shape `finishSsh` decides on, and the second half of
+ * the translation `decideSshEnding` is never handed.
+ *
+ * This is the seam where the collapse that motivated the three-way split could
+ * come back one layer up: "disconnected" rewritten to reuse "exit"'s `clean`
+ * shape would report a dropped connection as a deliberate exit, and
+ * `decideSshEnding` would never see the mis-map - only its already-wrong
+ * result. Which is why this is a function that can be called rather than a
+ * switch inlined at the handler.
+ *
+ * `code` is `onExit`'s first argument rather than `reason.code`: it is what the
+ * caller has in hand, the two agree for "exit", and "exit" is the only arm that
+ * reads one at all.
+ */
+export function endingFromExitReason(reason: SshWireExitReason, code: number): SshEnding {
+  switch (reason.kind) {
+    case "exit":
+      return { kind: "clean", code };
+    case "signal":
+      return { kind: "signal", name: reason.name, coreDumped: reason.coreDumped };
+    case "disconnected":
+      // The only reconnect-eligible ending, and there is nothing more specific
+      // to say about it: Eof/Close reported no status and no signal, so the
+      // banner gets the one generic sentence rather than a fabricated cause.
+      return { kind: "ambiguous", reason: "remote closed" };
+  }
+}
 
 export function decideSshEnding(ending: SshEnding, sshUserClose: boolean): SshEndingAction {
   // A user-initiated disconnect wins the display regardless of how the
@@ -63,25 +107,45 @@ export function decideSshEnding(ending: SshEnding, sshUserClose: boolean): SshEn
  * catch blocks around `openPtyForSession` need to decide whether the reconnect
  * ladder applies at all.
  *
- * "local" is the fourth category, alongside `SshEnding`'s three: the attempt
- * failed for a reason that lives on THIS side of the wire - either the inputs it
- * would have dialled with could not be assembled here, or the local user
- * declined to trust the server's key. Nothing the remote said decided it, so a
- * retry with the same inputs reproduces it byte for byte; the 1s + 3s + 7s
- * ladder is pure waiting, and for a rejected key it re-asks a question the user
- * has already answered.
+ * Three arms, and the split between the first two is WHOSE fact ended the
+ * attempt - the discriminant this whole type turns on:
+ *
+ * "local" is the fourth category alongside `SshEnding`'s three: the attempt
+ * failed for a reason that lives on THIS side of the wire - the inputs it would
+ * have dialled with could not be assembled here, a fingerprint recorded on this
+ * machine refuses the server's key, or the local user declined to trust it.
+ * Nothing the remote said decided it.
+ *
+ * "rejected" is the remote's own answer: it was asked for a credential and said
+ * no. Not local - the server decided it - but just as fixed.
+ *
+ * It is its own arm rather than a member of "local" because filing it there
+ * would make the paragraph above false at the moment the category gained its
+ * most common member. That is the whole payoff today, and it is a payoff in the
+ * type rather than in the UI: both arms currently produce the same `park`
+ * action and the same banner, because the sentence the user reads comes from
+ * the backend's own message either way ("ssh: authentication rejected" already
+ * says which of the two happened). Keeping them separate here is what lets a
+ * later change give the two different wording, or count them differently,
+ * without first having to work out which "local" failures were never local.
+ *
+ * Both park, and for the same reason: a retry with the same inputs reproduces
+ * them byte for byte, so the 1s + 3s + 7s ladder is pure waiting - and for a
+ * rejected key it re-asks a question the user has already answered.
  *
  * Note what is deliberately NOT the test: "the connect never reached
- * authentication". That is true of the whole category but is not sufficient -
+ * authentication". That is true of the local category but is not sufficient -
  * a refused TCP connect and a DNS failure also never reach authentication, and
- * those are exactly the blips the ladder exists for. The discriminant is WHOSE
- * fact ended the attempt, not how far it got.
+ * those are exactly the blips the ladder exists for.
  */
 export type SshConnectFailure =
-  { kind: "local"; message: string } | { kind: "transport"; message: string };
+  | { kind: "local"; message: string }
+  | { kind: "rejected"; message: string }
+  | { kind: "transport"; message: string };
 
 /** What a connect failure should do. The mirror of `SshEndingAction`: only the
- *  transport category enters the ladder. */
+ *  transport category enters the ladder. Two of the three park, so the action
+ *  stays a two-way answer even though the classification is a three-way one. */
 export type SshConnectFailureAction =
   { action: "park"; message: string } | { action: "reconnect"; message: string };
 
@@ -105,20 +169,38 @@ export class SshLocalConnectError extends Error {
   }
 }
 
+/**
+ * The same carrier for the remote's own refusal.
+ *
+ * Thrown from exactly one place - `sshConnectErrorFrom` in
+ * src/modules/ssh/bridge.ts, where the backend's `{kind:"auth"}` is read back
+ * off the rejected `ssh_open` - because that is the one place on this side that
+ * knows the server was asked and answered. The fact is established in Rust, at
+ * the site that has it; this class is only how it survives the wire.
+ */
+export class SshAuthRejectedError extends Error {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = "SshAuthRejectedError";
+  }
+}
+
 export function classifySshConnectFailure(e: unknown, message: string): SshConnectFailure {
   // Not `e instanceof Error && ...`: the wrapper is the whole signal, and
-  // anything else - a string rejection, a russh failure relayed by the backend,
-  // a rejected promise from a Tauri command - is by definition a fact we did not
-  // establish here, so it stays transport and stays reconnect-eligible.
+  // anything else - a string rejection, a bare `Error`, a rejected promise from
+  // a Tauri command that carried no kind - is a fact nobody attributed, so it
+  // stays transport and stays reconnect-eligible.
   //
-  // That makes "relayed by the backend" mean `transport` BY CONSTRUCTION, and
-  // the consequence is visible in the pane: a wrong key passphrase is refused
-  // on the backend and arrives here as a string, so it runs the full 1/3
-  // reconnect ladder instead of parking on the first attempt. That is accepted,
-  // not an oversight - see the catch block in `ssh-session.ts` for why a
-  // server-refused credential has nothing structural to tell it apart from a
-  // link that merely blinked.
+  // What decides a BACKEND failure is no longer "it came from the backend". The
+  // connect path in session.rs returns `{kind, message}` and the compiler makes
+  // every failure site on it name a kind; `sshConnectErrorFrom` turns that kind
+  // into one of these two wrappers before the error ever reaches here. So a
+  // wrong key passphrase and a refused password park on the first attempt
+  // instead of running the full 1/3 ladder, and adding a failure site in Rust
+  // cannot quietly rejoin the ladder - there is no default to fall into that
+  // does not go through a kind.
   if (e instanceof SshLocalConnectError) return { kind: "local", message };
+  if (e instanceof SshAuthRejectedError) return { kind: "rejected", message };
   return { kind: "transport", message };
 }
 
@@ -128,6 +210,11 @@ export function decideSshConnectFailure(failure: SshConnectFailure): SshConnectF
       // Park, do not ladder. The user has to change something (edit the host,
       // answer the key prompt differently) before any retry can behave
       // differently, so the pane offers a manual retry and waits.
+      return { action: "park", message: failure.message };
+    case "rejected":
+      // Park for the mirror reason: the server already answered, and it will
+      // answer the same way until the credential changes. Retrying it also
+      // spends the server's MaxAuthTries budget on a known refusal.
       return { action: "park", message: failure.message };
     case "transport":
       // The network, the server being down, a mid-handshake drop: the next
@@ -176,13 +263,15 @@ export type SshAuthAttempt = {
  * including its `is_none()` rather than emptiness test, so the two can never
  * disagree about a given input.
  *
- * The frontend checks it too, rather than leaving it to the backend, because
- * this is the one fact about the attempt that only the frontend can attribute:
- * `ssh_open` reports the failure as a string like every other failure, and by
- * then "your host has no password saved" is indistinguishable from "the server
- * hung up". Asking before dialling keeps the answer categorised. The backend
- * guard stays as the backstop for its other callers (the forward tunnel and the
- * host editor's Test probe), which do not come through here.
+ * The frontend checks it too, rather than leaving it to the backend. It is no
+ * longer the only thing that can attribute this: the backend guard reports
+ * `config` and `openSsh` rewraps that as an `SshLocalConnectError`, so the pane
+ * would park on a credential-less host without this check at all. What asking
+ * first still buys is that the answer never leaves this machine - no dial, no
+ * round trip, no server contacted about a host that could not have
+ * authenticated. The backend guard also stays as the backstop for its other
+ * callers (the forward tunnel and the host editor's Test probe), which do not
+ * come through here.
  */
 export function canAuthenticate(attempt: SshAuthAttempt): boolean {
   return (

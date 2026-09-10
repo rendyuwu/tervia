@@ -5,11 +5,12 @@
  * the grid literal itself - see that file's header for the fuller reasoning
  * behind the first two, and the grid's own comment below for the third).
  *
- * A RAIL VIEW, not a pane leaf. `app/components/WorkspaceArea.tsx:160-238`'s
- * `railView !== null` branch mounts this only while the rail's Port Forwarding
- * button is pressed and unmounts it on the way out - there is no `onScreen`
- * prop to take (mount IS the transition), and the caret claim's effect below
- * is keyed on `[]`, as `VaultPage.tsx:120-135` is and for the same reason.
+ * A RAIL VIEW, not a pane leaf. `WorkspaceArea`'s `railView !== null` branch
+ * (`app/components/WorkspaceArea.tsx`) mounts this only while the rail's Port
+ * Forwarding button is pressed and unmounts it on the way out - there is no
+ * `onScreen` prop to take (mount IS the transition), and the caret claim's
+ * effect below is keyed on `[]`, as `VaultPage`'s caret-claim effect is and
+ * for the same reason.
  *
  * Everything it draws lives somewhere else: `RuleCard` is its own component
  * and reads its own live status (`../runtime`), and every derived value that
@@ -37,7 +38,7 @@ import { Button } from "@/components/ui/button";
 import { InputGroup, InputGroupAddon, InputGroupInput } from "@/components/ui/input-group";
 import { toast } from "@/components/ui/toast";
 import { paneCaret } from "@/lib/paneCaret";
-import { useHosts } from "@/modules/hosts/useHosts";
+import { useHostsSnapshot } from "@/modules/hosts/useHosts";
 import { Plus, Search, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
@@ -90,7 +91,10 @@ type PendingDelete = { rule: ForwardRule; pageStops: boolean; hostOwned: boolean
 
 export function ForwardsPage(): ReactNode {
   const forwardsById = useForwards();
-  const hostsById = useHosts();
+  // `useHostsSnapshot()` and not `useHosts()`: `ruleRows` needs the LOADED
+  // fact, and an empty map cannot carry it (see `hostDangling` in
+  // `page/derive.ts`).
+  const { hosts: hostsById, loaded: hostsLoaded } = useHostsSnapshot();
 
   const [query, setQuery] = useState("");
   const [pendingDelete, setPendingDelete] = useState<PendingDelete | null>(null);
@@ -99,13 +103,14 @@ export function ForwardsPage(): ReactNode {
   const searchRef = useRef<HTMLInputElement>(null);
   const pageRef = useRef<HTMLDivElement>(null);
 
-  // See `VaultPage.tsx:93-101` for why this is written at RENDER scope and
-  // falsified only in the effect cleanup below.
+  // See `onScreenRef` in `VaultPage.tsx` for why this is written at RENDER
+  // scope and falsified only in the effect cleanup below.
   const onScreenRef = useRef(true);
   onScreenRef.current = true;
 
-  // Caret claim, keyed on `[]` - see `VaultPage.tsx:103-135` for the full
-  // reasoning this is adapted from: a rail view is unmounted, not hidden,
+  // Caret claim, keyed on `[]` - see `VaultPage`'s caret-claim effect
+  // (`VaultPage.tsx`) for the full reasoning this is adapted from: a rail
+  // view is unmounted, not hidden,
   // whenever it is not shown, so mount is the only on-screen transition
   // there is, and `pane: () => pageRef.current` (NOT
   // `closest("[data-pane-leaf]")`) is what that makes correct - a rail view
@@ -125,11 +130,12 @@ export function ForwardsPage(): ReactNode {
 
   // `ruleRows` and `rankRules` both return a FRESH array per call, so both
   // live in a memo and neither is ever called inside a store selector - see
-  // `VaultPage.tsx:137-155` for the full reasoning (zustand v5 matches
+  // the row-builder memo comment in `VaultPage.tsx`, above its
+  // `hosts`/`identities`/`keys` memos, for the full reasoning (zustand v5 matches
   // `Object.is`, and a selector returning a fresh array re-subscribes
-  // forever). `useForwards()` and `useHosts()` hand back references that are
-  // stable BETWEEN renders, which is what stops the loop; `hostsById` is
-  // handed to `ruleRows` directly (it looks hosts up by id, so it wants the
+  // forever). `useForwards()` and `useHostsSnapshot()` hand back references
+  // that are stable BETWEEN renders, which is what stops the loop; `hostsById`
+  // is handed to `ruleRows` directly (it looks hosts up by id, so it wants the
   // Map itself, unlike `identityRows`, which wants an array).
   const rules = useMemo(() => Array.from(forwardsById.values()), [forwardsById]);
   // Unfiltered, on purpose - the editor's SSH host picker must not follow
@@ -137,7 +143,10 @@ export function ForwardsPage(): ReactNode {
   // prop is unfiltered for the identity editor's key picker.
   const hosts = useMemo(() => Array.from(hostsById.values()), [hostsById]);
 
-  const ruleRowList = useMemo(() => ruleRows(rules, hostsById), [rules, hostsById]);
+  const ruleRowList = useMemo(
+    () => ruleRows(rules, hostsById, hostsLoaded),
+    [rules, hostsById, hostsLoaded],
+  );
   const visibleRules = useMemo(() => rankRules(ruleRowList, query), [ruleRowList, query]);
 
   const confirmDelete = useCallback((target: PendingDelete) => {
@@ -207,8 +216,8 @@ export function ForwardsPage(): ReactNode {
   const filtering = query.trim().length > 0;
 
   // Radix keeps `AlertDialogContent` mounted for its exit animation - see
-  // `VaultPage.tsx:197-216` for the full reasoning this `lastDeleteRef` /
-  // `shownDelete` pair is adapted from.
+  // `VaultPage.tsx`'s own `lastDeleteRef` / `shownDelete` pair for the full
+  // reasoning this one is adapted from.
   const lastDeleteRef = useRef<PendingDelete | null>(null);
   if (pendingDelete) lastDeleteRef.current = pendingDelete;
   const shownDelete = pendingDelete ?? lastDeleteRef.current;
@@ -226,8 +235,9 @@ export function ForwardsPage(): ReactNode {
             <Plus size={13} strokeWidth={2} />
             <span className="@max-[420px]:hidden">New rule</span>
           </Button>
-          {/* Byte-identical to `VaultPage.tsx:269` / `HostsPage.tsx:401` -
-              `hosts-header-narrow-verify.ts` asserts the equality. */}
+          {/* Byte-identical to the search `InputGroup` in `VaultPage.tsx` /
+              `HostsPage.tsx` - `hosts-header-narrow-verify.ts` asserts the
+              equality. */}
           <InputGroup className="min-w-0 flex-1 @max-[420px]:min-w-40 @max-[420px]:basis-full @[480px]:min-w-40">
             <InputGroupAddon>
               <Search />
@@ -273,9 +283,10 @@ export function ForwardsPage(): ReactNode {
             noMatch="No rules match."
           />
         ) : (
-          // THE SAME GRID LITERAL `HostsPage.tsx:490` and `VaultPage.tsx`'s two
-          // sections carry, byte for byte - see HostsPage's own comment there
-          // for why the thresholds are `@[…]` container widths and not
+          // THE SAME GRID LITERAL the grid `div` in `HostsPage.tsx` carries,
+          // and `VaultPage.tsx`'s two sections carry it too, byte for byte -
+          // see HostsPage's own comment there for why the thresholds are
+          // `@[…]` container widths and not
           // `sm:`/`xl:` viewport ones, and why `@container` sits on the page
           // root above rather than here. This page listed one full-width row
           // per rule until now: three sibling surfaces showing records as a
@@ -307,7 +318,12 @@ export function ForwardsPage(): ReactNode {
         )}
       </div>
 
-      <RuleEditorDialog target={editorTarget} onClose={() => setEditorTarget(null)} hosts={hosts} />
+      <RuleEditorDialog
+        target={editorTarget}
+        onClose={() => setEditorTarget(null)}
+        hosts={hosts}
+        hostsLoaded={hostsLoaded}
+      />
 
       <AlertDialog
         open={pendingDelete !== null}
@@ -351,7 +367,7 @@ export function ForwardsPage(): ReactNode {
 }
 
 /** Nothing to show, said in whichever of the two ways is true - adapted from
- *  `VaultPage.tsx:458-483`; see that file for the full reasoning
+ *  `SectionEmpty` in `VaultPage.tsx`; see that file for the full reasoning
  *  (`matching = hasAny && filtering`: `hasAny` is fed from the
  *  UNFILTERED row list, which is what makes a query against an empty store
  *  still say "No saved forward rules yet." rather than the lie "No rules

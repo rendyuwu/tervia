@@ -10,6 +10,7 @@
  * `check`/`ok` pair, fixtures, numbered sections, and a mutation table at the
  * tail recording every mutation actually run against this file.
  */
+import ts from "typescript";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -28,6 +29,7 @@ import {
 } from "../src/modules/forwards/page/derive";
 import type { ForwardRule } from "../src/modules/forwards/types";
 import type { Host, SshHost } from "../src/modules/hosts/types";
+import { importSpecifiersOf } from "./lib/ast";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -140,7 +142,7 @@ console.log("[1] ruleRows: hostName and hostDangling resolve independently, rout
   const danglingRule = rule("r-2", { hostId: "h-gone" });
   const namedUnknownRule = rule("r-3", { hostId: "h-named-unknown" });
 
-  const rows = ruleRows([boundRule, danglingRule, namedUnknownRule], hosts);
+  const rows = ruleRows([boundRule, danglingRule, namedUnknownRule], hosts, true);
 
   check(
     "hostName: live host's name, UNKNOWN_HOST_LABEL for a dangling hostId",
@@ -174,6 +176,7 @@ console.log("[1] ruleRows: hostName and hostDangling resolve independently, rout
         }),
       ],
       hosts,
+      true,
     )[0].route,
     "Auto → bastion → 10.0.0.9:5432",
   );
@@ -190,11 +193,17 @@ console.log("[1] ruleRows: hostName and hostDangling resolve independently, rout
   // Pre-existing rather than a regression from the hostOwned work - the flag
   // itself was always `host === undefined` - but on the hand-test path, which
   // is why it is fixed here.
+  //
+  // THREE FRAMES AND NOT TWO, since `hostsLoaded` became an argument. An empty
+  // map is no longer the whole of the pre-load state: it is now whichever of
+  // the two the CALLER says it is, and both of those have to be a fixture.
+  // `hosts.size > 0` used to answer for both and could only ever be right about
+  // one, which is the case the third fixture below closes.
   {
     const orphan = rule("r-preload", { hostId: "h-not-loaded-yet" });
     check(
-      "an EMPTY host map is the pre-load state, not a dangling row",
-      ruleRows([orphan], new Map<string, Host>()).map((r) => r.hostDangling),
+      "an unread host map is the pre-load state, not a dangling row",
+      ruleRows([orphan], new Map<string, Host>(), false).map((r) => r.hostDangling),
       [false],
     );
     // The paired positive, and it is what stops the fix from being an
@@ -202,20 +211,34 @@ console.log("[1] ruleRows: hostName and hostDangling resolve independently, rout
     // them is dangling exactly as before.
     check(
       "with the hosts known, a rule naming a missing one is still dangling",
-      ruleRows([orphan], hosts).map((r) => r.hostDangling),
+      ruleRows([orphan], hosts, true).map((r) => r.hostDangling),
       [true],
     );
-    // And the label is unchanged either way: `hostName` has always been
+    // THE CASE THE `hosts.size > 0` PROXY GOT WRONG, and the whole reason
+    // `hostsLoaded` is a parameter: the hosts were READ and the user has saved
+    // none, so a rule naming one IS dangling - the badge shows and Start is
+    // disabled (`startDisabled` reads `row.hostDangling`, pinned by its own
+    // expression text in `forward-autostart-verify.ts`). Under the old proxy
+    // this row came back `false`, so the page offered an enabled Start that
+    // could only fail at the dial. Byte-identical inputs to the first fixture
+    // apart from the flag, which is what makes this pair the whole property.
+    check(
+      "hosts READ and genuinely empty: the rule IS dangling, so the badge shows and Start is disabled",
+      ruleRows([orphan], new Map<string, Host>(), true).map((r) => r.hostDangling),
+      [true],
+    );
+    // And the label is unchanged across all three: `hostName` has always been
     // "Unknown host" for a host this map does not hold, and during the pre-load
     // frame that is the only honest thing it can say. What the fix removes is
     // the destructive badge and the disabled buttons, not the label.
     check(
-      "the label is UNKNOWN_HOST_LABEL in both cases - only the structural flag changed",
+      "the label is UNKNOWN_HOST_LABEL in all three cases - only the structural flag changed",
       [
-        ruleRows([orphan], new Map<string, Host>())[0].hostName,
-        ruleRows([orphan], hosts)[0].hostName,
+        ruleRows([orphan], new Map<string, Host>(), false)[0].hostName,
+        ruleRows([orphan], hosts, true)[0].hostName,
+        ruleRows([orphan], new Map<string, Host>(), true)[0].hostName,
       ],
-      [UNKNOWN_HOST_LABEL, UNKNOWN_HOST_LABEL],
+      [UNKNOWN_HOST_LABEL, UNKNOWN_HOST_LABEL, UNKNOWN_HOST_LABEL],
     );
   }
 }
@@ -534,7 +557,7 @@ console.log(
   );
   // The REAL messages, which the needle spellings above do not carry. What
   // the backend sends is `std::io::Error`'s Display, not an errno name:
-  // `src-tauri/src/modules/ssh/session.rs:443` is
+  // `SshSession::open_forward` (`src-tauri/src/modules/ssh/session.rs`) is
   // `format!("ssh: bind 127.0.0.1:{local_port} failed: {e}")`. So every needle
   // above is a spelling nothing in the pipeline emits today, and these five
   // fixtures are the ones that decide whether a user ever sees the sentence.
@@ -812,9 +835,14 @@ console.log(
   // of module specifiers the file imports from does, because a local
   // `hasWordBoundaryMatch` would simply not need the `@/lib/searchTiers`
   // specifier to appear at all.
-  const importSpecifiers = [...deriveSrc.matchAll(/from\s*["']([^"']+)["']/g)]
-    .map((m) => m[1])
-    .sort();
+  //
+  // Off the AST rather than off a `from "…"` regex: the regex saw no
+  // `await import("…")`, which resolves and executes, and it DID see the text
+  // `from "…"` inside a comment, so prose quoting an import broke the set
+  // equality over source that had not changed.
+  const importSpecifiers = importSpecifiersOf(
+    ts.createSourceFile("derive.ts", deriveSrc, ts.ScriptTarget.ESNext, true, ts.ScriptKind.TS),
+  );
   const want = ["../types", "@/lib/searchTiers", "@/modules/hosts/types"].sort();
   ok(
     `derive.ts's import specifiers are exactly ${JSON.stringify(want)} - found ${JSON.stringify(importSpecifiers)}`,
@@ -897,6 +925,9 @@ process.exit(failed === 0 ? 0 : 1);
 //                                                                (5 checks)
 //   Y12   ruleRows: hostDangling back to                    section 1's empty-host-map
 //           `host === undefined`, `hostsKnown` dropped          pre-load check ONLY -
+//           [`hostsKnown` was the local `hosts.size > 0`
+//           proxy, gone since the loaded fact became the
+//           `hostsLoaded` parameter - see Z1 to Z3]
 //                                                                the paired positive and
 //                                                                the label check stayed
 //                                                                green, which is exactly
@@ -917,3 +948,26 @@ process.exit(failed === 0 ? 0 : 1);
 //                                                                forwards-shell-verify.ts's
 //                                                                section 11, which reddens
 //                                                                at 227/228.
+//   Z1    ruleRows: `hostsLoaded` read replaced with        section 1's pre-load check
+//           the literal `true` - the flicker back              ONLY. Both positives stayed
+//                                                              green, which is what makes
+//                                                              this the flag's direction
+//                                                              rather than the function's
+//   Z2    ruleRows: `hostsLoaded` read replaced with        section 1's dangling-literal,
+//           the literal `false` - the badge off for good       hosts-known and hosts-read-
+//                                                              empty checks (3). The
+//                                                              pre-load check stayed green,
+//                                                              which is the control: a
+//                                                              forced `false` satisfies it
+//                                                              for the wrong reason, so it
+//                                                              is the OTHER direction that
+//                                                              has to be watched too
+//   Z3    ruleRows: the OLD PROXY restored verbatim -       section 1's hosts-read-empty
+//           `hosts.size > 0 && host === undefined`             check ONLY. The isolating
+//                                                              mutation for the parameter:
+//                                                              the two frames `hosts.size`
+//                                                              could already answer stay
+//                                                              green and only the third
+//                                                              reddens, so the new check
+//                                                              tests exactly the case the
+//                                                              proxy was unable to express

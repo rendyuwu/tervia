@@ -3,15 +3,12 @@ import { appDataDir } from "@tauri-apps/api/path";
 
 import type { FsReadResult } from "./ipc";
 
-// Crash recovery for a tauri-plugin-store JSON file.
+// Crash recovery for a JSON store file.
 //
-// The plugin (2.4.4) saves with `fs::create_dir_all` + `fs::write` - an in-place
-// truncate, no temp file, no rename, no fsync - and `StoreBuilder::build`
-// SWALLOWS the load error of a file it cannot parse (`let _ = store_inner.load()`).
-// Those two together are what makes the failure silent: a store file left
-// zero-length or nul-filled by a power cut (plugins-workspace#3085) comes back as
-// an EMPTY store, and the next autosave writes that emptiness over whatever was
-// left of it.
+// The failure this exists for: a store file left zero-length or nul-filled by a
+// power cut (plugins-workspace#3085) comes back as an EMPTY store, because a
+// store layer that cannot parse the file has nothing else to report, and the
+// next save writes that emptiness over whatever was left of it.
 //
 // Survivable for a saved layout or a theme. Not survivable for credentials: the
 // secret store writes atomically, so a lost store file leaves the private key in
@@ -23,6 +20,17 @@ import type { FsReadResult } from "./ipc";
 // CREATES the file with no snapshot at all, since at first load there is nothing
 // to copy. It needs no new Rust: `fs_read_file` and `fs_write_file` already exist,
 // and the latter goes through the app's own atomic temp-plus-rename path.
+//
+// WHICH FILES. Five of the app's six store files go through `createRecoveredStore`
+// and therefore through here: hosts, vault, forwards, workspaces and the CLI
+// agents. `tervia-settings.json` is the sixth and does NOT - it is still read and
+// written by `tauri-plugin-store` (2.4.3, per `src-tauri/Cargo.lock` and
+// `pnpm-lock.yaml`; a comment here long said 2.4.4, which was never a version this
+// repository pinned), whose `StoreBuilder::build` swallows the load
+// error of a file it cannot parse (`let _ = store_inner.load()`) and whose save is
+// `fs::create_dir_all` + `fs::write`, an in-place truncate with no temp file, no
+// rename and no fsync. `KNOWN-LIMITS.md` records why that one stayed, and what
+// would change the answer.
 //
 // EVERY function here is total: it reports a filesystem it could not work with
 // instead of rejecting. A caller that caches the promise of this work - which is
@@ -44,13 +52,14 @@ export const SNAPSHOT_SUFFIX = ".bak";
  * How a store file looks on disk.
  *
  * `"ok"` is the only trustworthy answer. `"missing"`, `"empty"`, `"nul"` and
- * `"unparseable"` all mean the snapshot should be preferred. The last two mean
- * nothing can be decided: `"toolarge"` is a file `fs_read_file` refuses to read
- * but the plugin has no trouble with, and `"unreachable"` is the data directory
- * itself failing.
+ * `"unparseable"` all mean the snapshot should be preferred. The last THREE mean
+ * nothing can be decided, so nothing may be written over the primary either:
+ * `"toolarge"` is a file `fs_read_file` will not return for its size,
+ * `"unreadable"` is one it would not open at all, and `"unreachable"` is the
+ * data directory itself failing.
  */
 export type StoreFileState =
-  "ok" | "missing" | "empty" | "nul" | "unparseable" | "toolarge" | "unreachable";
+  "ok" | "missing" | "empty" | "nul" | "unparseable" | "toolarge" | "unreadable" | "unreachable";
 
 /**
  * One file as the host process can see it.
@@ -64,11 +73,22 @@ export type StoreFileState =
  * `toolarge` is deliberately NOT folded in with it. A 10 MB store file is real
  * data the plugin reads fine; calling it corruption would restore a snapshot
  * over it.
+ *
+ * `unreadable` is the same distinction one step further out, and it exists
+ * because folding it into `missing` is a data-loss bug rather than a rounding
+ * error: a file that is THERE and would not open (a lock during an update
+ * handoff, a sharing violation, EACCES, a descriptor limit) must not be treated
+ * as a first run. Everything downstream writes over a first run - the recovery
+ * pass would restore a snapshot, the store layer would come up empty and save
+ * that emptiness, and `modules/workspaces/store.ts` would persist a seeded
+ * default. `missing` therefore means "the OS said there is no such file", never
+ * "the read did not work out".
  */
 export type StoreFileRead =
   | { kind: "text"; content: string }
   | { kind: "binary" }
   | { kind: "toolarge" }
+  | { kind: "unreadable"; reason: string }
   | { kind: "missing" };
 
 /**
@@ -86,18 +106,26 @@ export type StoreFileIo = {
    * Write `content` over `path`, creating or replacing it.
    *
    * A write rather than a copy, on purpose. `fs_copy` refuses an existing target
-   * (`fs/mutate.rs:85`), so copying meant unlinking first - and a delete that
-   * fails (an antivirus or indexer holding the handle on Windows, a read-only
-   * data directory) turned "the good snapshot is sitting right there" into an
-   * `already exists` error. Both callers here have already READ and validated the
-   * bytes they want in place, so `fs_write_file` does the whole job in one
-   * command, through the app's atomic temp-plus-rename path.
+   * (in `src-tauri/src/modules/fs/mutate.rs`), so copying meant unlinking
+   * first - and a delete that fails (an antivirus or indexer holding the
+   * handle on Windows, a read-only data directory) turned "the good snapshot
+   * is sitting right there" into an `already exists` error. Both callers here
+   * have already READ and validated the bytes they want in place, so
+   * `fs_write_file` does the whole job in one command, through the app's
+   * atomic temp-plus-rename path.
    */
   write(path: string, content: string): Promise<void>;
 };
 
 export type StoreRecovery = {
-  /** What the primary looked like before anything was done to it. */
+  /**
+   * What the primary looked like before anything was done to it, with ONE
+   * deliberate exception: an absent primary beside a snapshot that could not be
+   * read reports `"unreadable"` rather than `"missing"`, because the pair's
+   * verdict is what a caller acts on and "there is nothing here" was not
+   * established. See the branch in `recover` for what acting on the wrong one
+   * costs.
+   */
   found: StoreFileState;
   /** True when the snapshot was copied over the primary. */
   recovered: boolean;
@@ -123,8 +151,18 @@ function reason(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
-/** Where a store file and its snapshot live. */
-function paths(dir: string, fileName: string): { primary: string; snapshot: string } {
+/**
+ * Where a store file and its snapshot live.
+ *
+ * Exported because `lib/fileKeyValueStore.ts` resolves the SAME primary path to
+ * read and write it. Two derivations of `${dir}/${fileName}` would be two
+ * conventions, and the day they disagreed the recovery pass would be checking a
+ * different file from the one the store reads.
+ */
+export function storeFilePaths(
+  dir: string,
+  fileName: string,
+): { primary: string; snapshot: string } {
   // `appDataDir()` carries no trailing separator today; normalise anyway so a
   // future change cannot produce a double slash. Forward slashes are fine on
   // Windows - Rust's `PathBuf` accepts either.
@@ -136,6 +174,7 @@ function inspect(read: StoreFileRead): StoreFileState {
   if (read.kind === "missing") return "missing";
   if (read.kind === "binary") return "nul";
   if (read.kind === "toolarge") return "toolarge";
+  if (read.kind === "unreadable") return "unreadable";
   // `trim` does not strip U+0000, so an all-nul buffer falls through to the
   // check below rather than reading as merely empty.
   if (read.content.trim() === "") return "empty";
@@ -155,9 +194,10 @@ function inspect(read: StoreFileRead): StoreFileState {
 /**
  * Put a usable store file in place, or report why there isn't one.
  *
- * MUST run before the store is first touched. `LazyStore` caches the promise of
- * its load, so by the time a read comes back empty the plugin has already
- * decided the file was worthless and the next autosave will overwrite it.
+ * MUST run before the store is first touched. Every store layer over this one
+ * caches what its first read found, so by the time a read comes back empty the
+ * store has already decided the file was worthless and the next save writes
+ * that emptiness over it.
  *
  * Never rejects - see the module header.
  */
@@ -177,9 +217,21 @@ export async function recoverStoreFile(
 }
 
 async function recover(fileName: string, io: StoreFileIo): Promise<StoreRecovery> {
-  const { primary, snapshot } = paths(await io.dir(), fileName);
-  const found = inspect(await io.read(primary));
+  const { primary, snapshot } = storeFilePaths(await io.dir(), fileName);
+  const primaryRead = await io.read(primary);
+  const found = inspect(primaryRead);
   if (found === "ok") return { found, recovered: false };
+  if (primaryRead.kind === "unreadable") {
+    // The file is THERE and would not open. Its bytes are unknown, so they may
+    // be perfectly good - which makes restoring a snapshot over them the same
+    // destruction as restoring over a too-large file, for the same reason: a
+    // read this app could not make is not evidence about the contents.
+    return {
+      found,
+      recovered: false,
+      note: `${fileName} could not be read, so it was left as it is: ${primaryRead.reason}`,
+    };
+  }
   if (found === "toolarge") {
     // Not corruption: the plugin has no size limit and reads this fine. Say so
     // and stop - restoring a snapshot over it would destroy real data.
@@ -195,6 +247,20 @@ async function recover(fileName: string, io: StoreFileIo): Promise<StoreRecovery
   if (backup.kind !== "text" || fallback !== "ok") {
     // Both absent is a first run, not a loss: say nothing.
     if (found === "missing" && fallback === "missing") return { found, recovered: false };
+    // An absent primary beside a snapshot that could not be READ is NOT a first
+    // run, and reporting it as one is a data-loss path rather than a wording
+    // choice: a caller that seeds a default on "missing" persists it, and the
+    // snapshot taken after that commit copies the default over the very `.bak`
+    // whose contents nothing here ever saw. So the pair's verdict is the
+    // snapshot's, which is the only honest thing to say - nothing was
+    // established about what is here.
+    if (found === "missing" && (fallback === "unreadable" || fallback === "toolarge")) {
+      return {
+        found: "unreadable",
+        recovered: false,
+        note: `${fileName} is missing and its snapshot is ${fallback}, so nothing here could be checked`,
+      };
+    }
     return {
       found,
       recovered: false,
@@ -227,12 +293,28 @@ async function recover(fileName: string, io: StoreFileIo): Promise<StoreRecovery
 }
 
 /**
- * Snapshot a store file that is currently good.
+ * Snapshot a store file that is currently good, over a snapshot worth replacing.
  *
- * The one thing this must never do is copy a torn primary over the last good
- * copy, which would turn a recoverable crash into a total loss - hence the
- * inspect before the write, and hence a caller may fire this after any save
- * without checking anything first.
+ * TWO guards, and they refuse in opposite directions. The primary must be good,
+ * or a torn file would be copied over the last good copy and a recoverable crash
+ * would become a total loss. And the EXISTING snapshot must be one this process
+ * could read: bytes nobody managed to look at may be perfectly good ones, and
+ * they are the only copy left whenever the primary is absent or torn. That is
+ * the same rule `recover` applies to a primary it could not read, applied to the
+ * other file.
+ *
+ * The second guard costs one extra read PER COMMIT. `snapshotAfterSave` looks
+ * like it would fold a burst into one pass, and it does not: it coalesces only
+ * callers that overlap, and every store layer commits inside `enqueueWrite`, so
+ * they never do. Measured rather than reasoned about, because the first version
+ * of this comment claimed the cheaper number.
+ *
+ * Worth it anyway, and the trade is not close: one read against replacing the
+ * only surviving copy of a store file. It is also the ONLY thing that can notice
+ * a snapshot going unreadable mid-session - `recover` runs once, at startup, and
+ * does not even look at the snapshot when the primary is good.
+ *
+ * A caller may still fire this after any save without checking anything first.
  *
  * Never rejects - see the module header.
  */
@@ -241,9 +323,20 @@ export async function snapshotStoreFile(
   io: StoreFileIo = tauriStoreFileIo,
 ): Promise<StoreSnapshot> {
   try {
-    const { primary, snapshot } = paths(await io.dir(), fileName);
+    const { primary, snapshot } = storeFilePaths(await io.dir(), fileName);
     const read = await io.read(primary);
     if (read.kind !== "text" || inspect(read) !== "ok") return { taken: false };
+
+    // `missing` is the ordinary case - a first snapshot has nothing to protect -
+    // and every other unreadable answer is a file whose contents are unknown.
+    const existing = await io.read(snapshot);
+    if (existing.kind === "unreadable" || existing.kind === "toolarge") {
+      return {
+        taken: false,
+        note: `${fileName}${SNAPSHOT_SUFFIX} could not be read, so it was left as it is rather than replaced`,
+      };
+    }
+
     await io.write(snapshot, read.content);
     return { taken: true };
   } catch (e) {
@@ -252,6 +345,42 @@ export async function snapshotStoreFile(
       note: `${fileName}${SNAPSHOT_SUFFIX} could not be written: ${reason(e)}`,
     };
   }
+}
+
+/**
+ * Turn a rejected `fs_read_file` into "there is no such file" or "there is a
+ * file and it would not open".
+ *
+ * The command rejects for BOTH, so the two are told apart here or not at all -
+ * and telling them apart is the whole of what stops a file that merely would not
+ * open being written over as though it were a first run.
+ *
+ * The message is the entire contract: `fs_read_file` returns
+ * `Result<_, String>`, so nothing structured survives the boundary. Rust's
+ * `io::Error` Display always appends `(os error N)` for an OS error, on every
+ * platform, whatever the localised text before it says - 2 is ENOENT and
+ * Windows' ERROR_FILE_NOT_FOUND, 3 is Windows' ERROR_PATH_NOT_FOUND, and a
+ * missing parent directory on a first run gives one of those. Anything else -
+ * EACCES, a sharing violation, a descriptor limit, the command's own join error
+ * - is a file this process did not get to see.
+ * `missing_file_error_carries_the_os_error_suffix` in
+ * `src-tauri/src/modules/fs/file.rs` is what holds the other end of it.
+ *
+ * ANCHORED to the end, which `to_string()` always is. Unanchored would match the
+ * suffix appearing anywhere in a wrapped or chained message, and that is the
+ * direction that turns an unreadable file back into a first run.
+ *
+ * Exported so the rule itself is checkable: `tauriStoreFileIo` cannot run under
+ * node, and a verify script re-implementing this regex would be a copy free to
+ * drift from the one that ships.
+ */
+export function classifyReadFailure(message: string): StoreFileRead {
+  // The unrecognised case falls to `unreadable`, which is the safe direction:
+  // the cost of calling a first run unreadable is a default that waits for the
+  // first real change, and the cost of the reverse is the file.
+  return /\(os error (?:2|3)\)$/.test(message.trim())
+    ? { kind: "missing" }
+    : { kind: "unreadable", reason: message };
 }
 
 export const tauriStoreFileIo: StoreFileIo = {
@@ -267,10 +396,8 @@ export const tauriStoreFileIo: StoreFileIo = {
         default:
           return { kind: "binary" };
       }
-    } catch {
-      // Absent, or unreadable for a reason we cannot act on. Either way there is
-      // nothing here to trust.
-      return { kind: "missing" };
+    } catch (e) {
+      return classifyReadFailure(reason(e));
     }
   },
   write: (path, content) => invoke<void>("fs_write_file", { path, content }),

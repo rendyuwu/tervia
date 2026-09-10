@@ -3,6 +3,7 @@
  * `HostGroup`, plus create, rename and delete. Pure presentation over the
  * counts and callbacks the page hands it - no store access of its own.
  */
+import { IconActionButton } from "@/components/IconActionButton";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -17,7 +18,6 @@ import { Button } from "@/components/ui/button";
 import { toast } from "@/components/ui/toast";
 import { cn } from "@/lib/utils";
 import { InlineInput } from "@/modules/explorer/InlineInput";
-import { TrailingIconButton } from "@/modules/tabs/components/TrailingIconButton";
 import { Pencil, Plus, Trash2 } from "lucide-react";
 import { useMemo, useState, type ReactNode } from "react";
 import type { HostGroup } from "../types";
@@ -256,9 +256,14 @@ function GroupChip({
   onDelete: () => void;
 }) {
   return (
-    // Plain "group" (not a named group) so TrailingIconButton's own
-    // `group-hover:opacity-60` - written for a single level of nesting - keys
-    // off this element without needing a matching named variant here.
+    // Plain "group" (not a named group) so IconActionButton's own
+    // `group-hover:` and `group-focus-within:` reveals - written for a single
+    // level of nesting - key off this element without needing a matching named
+    // variant here. Both, not just hover: focus the label button or either icon
+    // and the pair appears, which is what makes a control that is ALREADY
+    // keyboard-reachable visible to a keyboard user. Reachable is the element's
+    // job - these are real `<button>`s, so they are in the tab order natively -
+    // and the reveal only decides whether you can see what you have focused.
     <div
       className={cn(
         "group inline-flex items-center gap-0.5 rounded-full border py-1 pr-1 pl-2.5 text-xs font-medium transition-colors",
@@ -278,8 +283,8 @@ function GroupChip({
           {count}
         </span>
       </button>
-      <TrailingIconButton icon={Pencil} label="Rename group" onClick={onRename} />
-      <TrailingIconButton icon={Trash2} label="Delete group" onClick={onDelete} variant="danger" />
+      <IconActionButton icon={Pencil} label="Rename group" onClick={onRename} />
+      <IconActionButton icon={Trash2} label="Delete group" onClick={onDelete} variant="danger" />
     </div>
   );
 }

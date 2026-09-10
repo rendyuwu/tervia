@@ -14,7 +14,8 @@ import type { ForwardRule } from "../types";
 //
 // `validateRuleDraft` catches only what a draft can decide ALONE: it takes no
 // host list and cannot ask whether `hostId` names a saved SSH host, so it does
-// not try - `forwards/store.ts:93-122`'s host and protocol refusals stay the
+// not try - `upsertRule`'s host and protocol refusals, in
+// `src/modules/forwards/store.ts`, stay the
 // store's alone, and `RuleEditorDialog` classifies whichever one comes back
 // from the round trip rather than this file guessing at it first. Ports are
 // the one thing worth a shared conversion: {@link parseLocalPort} is reused by
@@ -71,8 +72,9 @@ export function ruleDraftFrom(rule: ForwardRule): RuleDraft {
 /**
  * The one place a typed local-port string becomes the number the rest of the
  * app works in. Blank and `"0"` both parse to `0` ("let the OS pick" -
- * `types.ts:20-21`); anything else is a plain `Number.parseInt`, the same
- * idiom `HostEditorDialog.tsx:635` uses for its own port field.
+ * `ForwardRule.localPort` in `src/modules/forwards/types.ts`); anything else
+ * is a plain `Number.parseInt`, the same idiom `validate` in
+ * `src/modules/hosts/HostEditorDialog.tsx` uses for its own port field.
  *
  * Exported so `RuleEditorDialog`'s live `privilegedPortWarning` preview reads
  * a typed port exactly the way {@link ruleRecordFrom} will write it - a second
@@ -110,8 +112,8 @@ function isValidRemotePort(port: number): boolean {
  * ever called, and a `hostId` that names a deleted or now-RDP host is left for
  * `upsertRule` to refuse - see the file header. This function's job is
  * everything else the store also checks that a draft can decide with no
- * lookup: name, both ports and the remote host - four of `forwards/store.ts`'s
- * six refusals (`:95-122`) that need nothing but the draft itself.
+ * lookup: name, both ports and the remote host - four of `upsertRule`'s
+ * (`src/modules/forwards/store.ts`) six refusals that need nothing but the draft itself.
  */
 export function validateRuleDraft(draft: RuleDraft): string | null {
   if (!draft.name.trim()) return "Name is required";

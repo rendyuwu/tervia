@@ -38,9 +38,10 @@ type Props = {
  * it), while the ranked list lives in a portaled `PopoverContent`. React
  * context crosses that portal boundary fine - only the DOM does not - which is
  * why the nesting is `Command > Popover > (Anchor, Content)` and not the other
- * way around. See the mousedown-drag guard comment at `Header.tsx:83`: because
- * the list is portaled, it is never a real DOM descendant of the header's drag
- * row, so that guard already leaves clicks on it alone.
+ * way around. See the mousedown-drag guard in `onHeaderMouseDown`
+ * (`src/modules/header/Header.tsx`): because the list is portaled, it is
+ * never a real DOM descendant of the header's drag row, so that guard already
+ * leaves clicks on it alone.
  *
  * Enter fires `cmdk`'s own selection: the arrow-key-highlighted row's
  * `onSelect`, or the top-ranked row when nothing has been arrowed to, since

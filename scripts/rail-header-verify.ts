@@ -4,7 +4,7 @@
  *
  * Hosts named itself and Vault / Port Forwarding did not, and the asymmetry was
  * never a decision: a Hosts TAB is a page leaf, so it inherits the per-pane
- * header every leaf gets (`PaneTreeView.tsx:703`), while a rail view is
+ * header every leaf gets (`headerBar` in `src/modules/panes/PaneTreeView.tsx`), while a rail view is
  * deliberately NOT a leaf (`RailViewArea.tsx`) and so inherited nothing. The
  * header therefore had to be written, and this pins the four things about it
  * that a later edit can quietly undo.
@@ -23,7 +23,8 @@
  *  2. THE NAME IS SAID ONCE, IN ONE PLACE, AND COMES FROM `PAGE_LABELS`. The
  *     region is labelled with `aria-labelledby` pointing AT the heading rather
  *     than with an `aria-label` repeating the string, and the heading's text is
- *     `PAGE_LABELS[railView]` rather than a literal - `panes.ts:179` exists so
+ *     `PAGE_LABELS[railView]` rather than a literal - `PAGE_LABELS` in
+ *     `src/modules/terminal/lib/panes.ts` exists so
  *     the rail button, the tab strip and the page cannot drift into calling one
  *     page two things, and a literal here would be the fourth name.
  *  3. THE PANE HEADER'S TYPOGRAPHY, NONE OF ITS CONTROLS. A rail view cannot be
@@ -40,6 +41,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { stripComments, stripperSelfTest } from "./lib/source";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const read = (p: string) => readFileSync(join(root, p), "utf8");
@@ -52,64 +54,6 @@ function check(name: string, ok: boolean, detail?: unknown): void {
   }
   console.error(`  FAIL: ${name}`, detail === undefined ? "" : JSON.stringify(detail));
   failed++;
-}
-
-/**
- * A line with its trailing `//` comment removed, string literals respected.
- *
- * The third copy of this pair in the suite; the canonical copy lives in
- * `scripts/host-editor-verify.ts`, duplicated rather than shared because these
- * scripts have no common module. Quote-aware and a character scan rather than a
- * regex: a `//` inside a string is not a comment, and an apostrophe in unquoted
- * JSX text opens a quote state that never closes - which loses the strip for
- * that one line, i.e. fails towards KEEPING text rather than towards deleting
- * code.
- */
-function stripLineComment(line: string): string {
-  let quote = "";
-  for (let i = 0; i < line.length; i++) {
-    const c = line[i];
-    if (quote) {
-      if (c === "\\") i++;
-      else if (c === quote) quote = "";
-      continue;
-    }
-    if (c === '"' || c === "'" || c === "`") {
-      quote = c;
-      continue;
-    }
-    if (c === "/" && line[i + 1] === "/") return line.slice(0, i);
-  }
-  return line;
-}
-
-/**
- * The same source with comments removed - the form every check below reads.
- *
- * The JSX branch is not optional here. `{/* … *\/}` is the only comment
- * syntax legal inside JSX children, the line filter underneath recognises none
- * of it, and every check in this file is a positive: comment the header out and
- * the positives would still match the header inside the comment. The prose in
- * `WorkspaceArea.tsx` also names `PAGE_LABELS[railView]` and `PAGE_ICONS` while
- * explaining them, which is a sentence that satisfies two of the checks below on
- * its own.
- *
- * The regex is the FIXED, non-lazy form from `host-editor-verify.ts:216`, not
- * the lazy `\{\s*\/\*[\s\S]*?\*\/\s*\}` it replaced: lazy still ALLOWS the inner
- * run to cross an intervening `*\/` while hunting for one followed by `}`, which
- * measurably ate 50KB of a file. The negative lookahead forbids that crossing,
- * so the first `*\/` found is final.
- */
-function stripComments(src: string): string {
-  const withoutJsxComments = src.replace(/\{\s*\/\*(?:(?!\*\/)[\s\S])*\*\/\s*\}/g, "");
-  return withoutJsxComments
-    .split("\n")
-    .filter((line) => {
-      const t = line.trim();
-      return !(t.startsWith("//") || t.startsWith("/*") || t.startsWith("*"));
-    })
-    .map(stripLineComment)
-    .join("\n");
 }
 
 /**
@@ -132,6 +76,13 @@ function countOf(src: string, needle: string): number {
   return src.split(needle).length - 1;
 }
 
+// The mandatory two-assertion self-test for a script that strips a `.tsx`. This
+// file had none: every positive check below anchors on regions cut out of a
+// stripped `.tsx`, so an over-stripping regression empties those regions and a
+// negative check reads it as a pass. The probe lives with the shared stripper;
+// the `ok:` lines are counted here, after `check` and `failed` are initialised.
+for (const t of stripperSelfTest()) check(t.label, t.ok);
+
 const src = stripComments(read("src/app/components/WorkspaceArea.tsx"));
 
 // The rail-view block: the container, its header, and the page body. Bounded at
@@ -149,9 +100,9 @@ const header = between(railBlock, "railView !== null && (", "<RailViewArea");
 const containerTag = between(header, "<div", ">");
 
 console.log("[found] the rail-view container, its header and its opening tag parsed");
-check("the rail-view block was located", railBlock.length > 0);
-check("the header region above RailViewArea was located", header.length > 0);
-check("and the container's opening tag", containerTag.length > 0, containerTag.slice(0, 80));
+check("the rail-view block was located", railBlock.length > 22);
+check("the header region above RailViewArea was located", header.length > 22);
+check("and the container's opening tag", containerTag.length > 4, containerTag.slice(0, 80));
 check(
   // Non-vacuity of the cut above: if `<RailViewArea` moved above the container
   // the header region would be a few characters of nothing and sections [2] and
@@ -166,12 +117,14 @@ console.log("\n[once] the header is written once, in the container, not once per
 check("exactly one heading in the file", countOf(src, "<h2") === 1, countOf(src, "<h2"));
 const HEADER_BAR = "border-border/60 bg-card flex h-7";
 check(
-  // The bar's own vocabulary, taken from `PaneTreeView.tsx:707`. Two of these is
+  // The bar's own vocabulary, taken from `headerBar` in
+  // `src/modules/panes/PaneTreeView.tsx`. Two of these is
   // a second copy of the same chrome arriving by copy-paste.
   //
   // The pane header's `@container` is deliberately NOT in this literal, because
   // it is deliberately not on the bar: it is there so the pane header's per-file
-  // cluster can shed itself on a narrow pane (`PaneTreeView.tsx:705-706`) and
+  // cluster can shed itself on a narrow pane (`headerBar` in
+  // `src/modules/panes/PaneTreeView.tsx`) and
   // this bar has no `@[…]` descendant to shed. Pinning it here would have made a
   // dead class unremovable without a red check - a pin's job is to hold what is
   // load-bearing, so this one stops at the border, the card background and the
@@ -238,7 +191,7 @@ console.log("\n[chrome] the header borrows the pane header's look and none of it
 const iconBinding = /const (\w+) = PAGE_ICONS\[railView\];/.exec(header);
 check(
   // The same glyph the rail button the user just pressed shows - `PAGE_ICONS` is
-  // the single source `LeafIcon.tsx:42` documents, and three copies of a glyph
+  // the single source `src/components/LeafIcon.tsx` documents, and three copies of a glyph
   // map is the drift it was written to end.
   "the icon comes from PAGE_ICONS[railView]",
   iconBinding !== null,
@@ -300,7 +253,7 @@ check("and it is still the absolute, bordered card it was", /absolute inset-0/.t
 const bodyWrapper = between(railBlock, "</h2>", "<RailViewArea");
 check(
   "the page body is wrapped in a min-h-0 flex-1 box of its own",
-  bodyWrapper.length > 0 && /min-h-0 flex-1/.test(bodyWrapper),
+  bodyWrapper.length > 5 && /min-h-0 flex-1/.test(bodyWrapper),
   bodyWrapper,
 );
 check(

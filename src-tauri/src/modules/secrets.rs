@@ -34,6 +34,8 @@ use std::fs;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 use std::path::PathBuf;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
+use std::sync::MutexGuard;
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 use tauri::Manager;
 
 #[derive(Default)]
@@ -184,12 +186,41 @@ fn write_store(app: &AppHandle, map: &HashMap<String, String>) -> Result<(), Str
     crate::modules::fs::atomic::atomic_write(&path, &cipher).map_err(|e| e.to_string())
 }
 
+/// Take the cache lock, DISCARDING the cache when the lock was poisoned.
+///
+/// `lock_or_recover` recovers a guard and then trusts what is behind it, which
+/// is right for a buffer and wrong here: this lock DOES guard an invariant, the
+/// cache and the file moving together, which is what [`commit_cached`]'s
+/// rollback exists to keep. A panic inside the caller's mutation unwinds PAST
+/// that rollback and takes the pre-mutation clone with it, so a recovered guard
+/// can hold a change the file never took. Rolling back afterwards is not
+/// available - the clone went with the frame that held it - so the cache is
+/// dropped instead, and both callers reload it from the file, which is the copy
+/// that survived the panic.
+///
+/// Failing every later acquisition instead would cost the rest of the
+/// session's secrets, READS included: [`with_store`] takes this same lock, so
+/// one panic in a write would make every later `secrets_get` answer with an
+/// opaque poison string. The flag is cleared once it has been handled, or
+/// every call for the life of the process would keep reloading the file.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+fn lock_cache(
+    cache: &Mutex<Option<HashMap<String, String>>>,
+) -> MutexGuard<'_, Option<HashMap<String, String>>> {
+    cache.lock().unwrap_or_else(|poisoned| {
+        cache.clear_poison();
+        let mut guard = poisoned.into_inner();
+        *guard = None;
+        guard
+    })
+}
+
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 fn with_store<F, R>(app: &AppHandle, state: &SecretsState, f: F) -> Result<R, String>
 where
     F: FnOnce(&mut HashMap<String, String>) -> R,
 {
-    let mut guard = state.cache.lock().map_err(|e| e.to_string())?;
+    let mut guard = lock_cache(&state.cache);
     if guard.is_none() {
         *guard = Some(read_store(app)?);
     }
@@ -258,7 +289,7 @@ where
     W: FnOnce(&HashMap<String, String>) -> Result<(), String>,
     F: FnOnce(&mut HashMap<String, String>) -> R,
 {
-    let mut guard = cache.lock().map_err(|e| e.to_string())?;
+    let mut guard = lock_cache(cache);
     if guard.is_none() {
         *guard = Some(load()?);
     }
@@ -495,6 +526,38 @@ fn same_entry(from: (&str, &str), to: (&str, &str)) -> bool {
     from == to
 }
 
+/// What a copy does with whatever the source turned out to hold.
+enum CopyPlan<'a> {
+    /// Nothing to give, so nothing to write.
+    Nothing,
+    /// The source has a value and the destination already IS the source.
+    AlreadyThere,
+    /// Write this value to the destination.
+    Write(&'a str),
+}
+
+/// Decide a copy from what the source holds. No I/O in it, so every one of the
+/// four decisions is reachable from a test.
+///
+/// Split out for the reason [`same_entry`] was split out of the same body:
+/// [`secrets_copy`] itself cannot be driven from a test at all, because its
+/// first act is a keychain read and CI has no keychain, while every decision
+/// it makes is here.
+///
+/// An empty string counts as nothing to give, and that one is an invariant
+/// rather than a preference: the JS layer never persists one (it trims and
+/// deletes on blank - see `writeSecret` in `hosts/store.ts` and
+/// `vault/store.ts`), so writing `""` here would manufacture a
+/// `hasPassword: true` over an account that holds nothing.
+fn plan_copy<'a>(value: Option<&'a str>, from: (&str, &str), to: (&str, &str)) -> CopyPlan<'a> {
+    match value {
+        None => CopyPlan::Nothing,
+        Some("") => CopyPlan::Nothing,
+        Some(_) if same_entry(from, to) => CopyPlan::AlreadyThere,
+        Some(v) => CopyPlan::Write(v),
+    }
+}
+
 /// Copy one secret from one account to another WITHOUT its plaintext entering
 /// the webview.
 ///
@@ -503,9 +566,9 @@ fn same_entry(from: (&str, &str), to: (&str, &str)) -> bool {
 /// `tervia-hosts :: <src>::password` to `tervia-hosts :: <copy>::password`;
 /// converting an inline credential to a vault identity moves
 /// `tervia-hosts :: <host>::password` to `tervia-vault :: <identity>::password`.
-/// Neither may read the value back first, and for an RDP password that is a
-/// Phase 5 invariant rather than a preference - it is the reason a duplicated
-/// RDP host used to get no password at all.
+/// Neither may read the value back first, and for an RDP password that is an
+/// invariant rather than a preference - it is the reason a duplicated RDP host
+/// used to get no password at all.
 ///
 /// `Ok(false)` means there was nothing at the source (absent, or an empty
 /// string, which is treated as absent) and NOTHING was written. `Ok(true)`
@@ -535,20 +598,19 @@ pub async fn secrets_copy(
     to_service: String,
     to_account: String,
 ) -> Result<bool, String> {
-    let Some(value) = read_secret(&app, &state, &from_service, &from_account)? else {
-        return Ok(false);
-    };
-    // An empty string is treated the same as no entry at all: the JS layer
-    // never persists one (it trims and deletes on blank - see `writeSecret`
-    // in `hosts/store.ts` and `vault/store.ts`), so writing "" here would only
-    // manufacture a `hasPassword: true` over an account that holds nothing.
-    if value.is_empty() {
-        return Ok(false);
+    let value = read_secret(&app, &state, &from_service, &from_account)?;
+    match plan_copy(
+        value.as_deref(),
+        (&from_service, &from_account),
+        (&to_service, &to_account),
+    ) {
+        CopyPlan::Nothing => Ok(false),
+        CopyPlan::AlreadyThere => Ok(true),
+        CopyPlan::Write(v) => {
+            write_secret(&app, &state, &to_service, &to_account, v)?;
+            Ok(true)
+        }
     }
-    if !same_entry((&from_service, &from_account), (&to_service, &to_account)) {
-        write_secret(&app, &state, &to_service, &to_account, &value)?;
-    }
-    Ok(true)
 }
 
 /// What `commit_cached` guarantees, exercised without an `AppHandle`.
@@ -700,6 +762,58 @@ mod commit_tests {
         );
     }
 
+    /// A panic in the mutation poisons the lock, and it is a WRITE that holds
+    /// it - so what a poison nobody handles costs is the rest of the session's
+    /// secrets, reads included: `with_store` takes this same lock.
+    #[test]
+    fn a_panic_in_the_mutation_leaves_the_store_usable_and_reloaded() {
+        let cache = Mutex::new(Some(seeded()));
+        let died = std::panic::catch_unwind(|| {
+            commit_cached(
+                &cache,
+                || panic!("the cache is already loaded"),
+                |_| Ok(()),
+                |m| {
+                    m.remove("tervia-hosts::h-1::password");
+                    panic!("the mutation panicked");
+                },
+            )
+        });
+        assert!(died.is_err(), "the mutation was supposed to panic");
+
+        // The rollback that would have undone that removal went with the frame
+        // the panic unwound, so the cache is not trustworthy any more: it has
+        // to be read again from the file, which the dead commit never wrote.
+        let loads = AtomicUsize::new(0);
+        let seen = Mutex::new(HashMap::new());
+        commit_cached(
+            &cache,
+            || {
+                loads.fetch_add(1, Ordering::SeqCst);
+                Ok(seeded())
+            },
+            |m| {
+                *seen.lock().expect("seen") = m.clone();
+                Ok(())
+            },
+            |_| {},
+        )
+        .expect("a commit after the panic");
+        assert_eq!(
+            loads.load(Ordering::SeqCst),
+            1,
+            "the cache the panic left half-mutated was reused"
+        );
+        assert_eq!(
+            seen.lock()
+                .expect("seen")
+                .get("tervia-hosts::h-1::password")
+                .map(String::as_str),
+            Some("secret-password"),
+            "the next write carried a removal the panic never committed",
+        );
+    }
+
     #[test]
     fn the_file_is_read_once_and_then_served_from_the_cache() {
         let cache = Mutex::new(None);
@@ -717,7 +831,7 @@ mod commit_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::same_entry;
+    use super::{plan_copy, same_entry, CopyPlan};
 
     // The only part of `secrets_copy` reachable without an `AppHandle`, and the
     // part with a wrong version that compiles: comparing accounts alone. Under
@@ -730,5 +844,35 @@ mod tests {
         assert!(!same_entry(src, ("tervia-vault", "h-1::password")));
         assert!(!same_entry(src, ("tervia-hosts", "h-2::password")));
         assert!(!same_entry(src, ("tervia-hosts", "h-1::privateKey")));
+    }
+
+    /// The plan a copy takes, as one word per decision so all four can be
+    /// asserted together: a mutation then shows which decision moved and, just
+    /// as importantly, that the other three did not.
+    fn planned<'a>(value: Option<&'a str>, from: (&str, &str), to: (&str, &str)) -> &'a str {
+        match plan_copy(value, from, to) {
+            CopyPlan::Nothing => "nothing",
+            CopyPlan::AlreadyThere => "already there",
+            CopyPlan::Write(v) => v,
+        }
+    }
+
+    #[test]
+    fn a_copy_is_planned_from_what_the_source_holds() {
+        // Converting an inline host credential to a vault identity: same
+        // account name, different service.
+        let from = ("tervia-hosts", "h-1::password");
+        let to = ("tervia-vault", "h-1::password");
+        assert_eq!(
+            [
+                planned(None, from, to),
+                // Nothing to give, not a password of length zero: writing it
+                // would claim a stored secret over an empty account.
+                planned(Some(""), from, to),
+                planned(Some("hunter2"), from, from),
+                planned(Some("hunter2"), from, to),
+            ],
+            ["nothing", "nothing", "already there", "hunter2"],
+        );
     }
 }

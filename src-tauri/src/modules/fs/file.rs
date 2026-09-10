@@ -313,3 +313,41 @@ fn fs_write_file_inner(path: String, content: String) -> Result<(), String> {
         e.to_string()
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The frontend tells "there is no such file" apart from "there is a file
+    /// and it would not open" by matching the `(os error N)` suffix Rust appends
+    /// to an OS error's `Display` - see `tauriStoreFileIo.read` in
+    /// `src/lib/storeRecovery.ts`. It has nothing else to go on: this command
+    /// returns `Result<_, String>`, so the message IS the contract.
+    ///
+    /// That distinction is load-bearing rather than cosmetic. An absent file is
+    /// a first run, and the store layer above will write a default over it; a
+    /// file that would not open must be left alone. Replacing `e.to_string()`
+    /// here with a friendlier message would flip every first run to "unreadable"
+    /// and leave every store inert, with nothing else in the suite noticing.
+    #[test]
+    fn missing_file_error_carries_the_os_error_suffix() {
+        let dir = std::env::temp_dir().join("tervia-fs-read-missing-test");
+        let missing = dir.join("no-such-file.json");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // Matched rather than `expect_err`: `ReadResult` is not `Debug`, and
+        // giving it one only so a test can unwrap would be the test shaping the
+        // type.
+        let err = match fs_read_file_inner(missing.to_string_lossy().into_owned()) {
+            Err(e) => e,
+            Ok(_) => panic!("reading an absent file must fail"),
+        };
+
+        // 2 is ENOENT and Windows' ERROR_FILE_NOT_FOUND; 3 is Windows'
+        // ERROR_PATH_NOT_FOUND, which is what a missing parent gives.
+        assert!(
+            err.trim_end().ends_with("(os error 2)") || err.trim_end().ends_with("(os error 3)"),
+            "the frontend matches on this suffix; got {err:?}"
+        );
+    }
+}
