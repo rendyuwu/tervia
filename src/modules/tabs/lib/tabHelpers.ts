@@ -130,7 +130,7 @@ export function activeLeafKind(tab: Tab): "terminal" | "editor" | "rdp" | null {
   //
   // RDP is still reported rather than folded into that null, but no caller
   // branches on it today: the one that did was App's shortcut `isDisabled`
-  // gate, and 54832a7 repointed that at `ownsRawKeyboard`, which asks the DOM
+  // gate, and that was repointed at `ownsRawKeyboard`, which asks the DOM
   // where the caret is instead of asking which leaf is active in the tab. What
   // is left is a truthful report of the active leaf's kind - `=== "terminal"`
   // and `=== "editor"` callers read it exactly as they would a null - so

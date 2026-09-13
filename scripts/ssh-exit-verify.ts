@@ -14,22 +14,35 @@
  * Only (3) is a real candidate for "maybe the transport died, try again".
  * (1) and (2) are the remote saying, in-band, that it is done on purpose.
  *
- * `decideSshEnding` (ssh-exit-decision.ts) is the pure decision that keeps
- * these apart once ssh-session.ts's `finishSsh` receives the distinguished
- * event (see `SshExitReason` in bridge.ts, and
- * `SshEvent::Exit`/`Signal`/`Disconnected` in session.rs for the Rust side
- * of the same split). It takes no live Session/Terminal, so the ONE
- * property this bug is actually about - a reported ending never reconnects,
- * only the ambiguous one does - is checked directly here, without standing
- * up xterm/tauri/the SSH bridge (importing ssh-session.ts itself would pull
- * those in transitively and fail under plain Node - see the top of
- * ssh-exit-decision.ts).
+ * Keeping them apart is a pipe of three pure functions, and all three are
+ * checked here by CALLING them - the wire event arrives distinguished from
+ * `SshEvent::Exit`/`Signal`/`Disconnected` in session.rs, and then:
+ *   `exitReasonFromSshEvent` (bridge.ts)          wire event -> SshExitReason
+ *   `endingFromExitReason`   (ssh-exit-decision)  SshExitReason -> SshEnding
+ *   `decideSshEnding`        (ssh-exit-decision)  SshEnding -> what to do
+ * None of them takes a live Session or Terminal, so the property this bug is
+ * about - a reported ending never reconnects, only the ambiguous one does -
+ * is checked at every seam it could break at, without standing up
+ * xterm/tauri (importing ssh-session.ts itself would pull those in
+ * transitively and fail under plain Node - see the top of
+ * ssh-exit-decision.ts, which is why the middle function lives there rather
+ * than beside its own call site).
+ *
+ * What is left to source text is only that the two production call sites
+ * route through those functions instead of keeping a second copy of the
+ * mapping inline; see the last section.
  */
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { decideSshEnding, type SshEnding } from "../src/modules/terminal/lib/ssh-exit-decision";
+import { exitReasonFromSshEvent } from "../src/modules/ssh/bridge";
+import {
+  decideSshEnding,
+  endingFromExitReason,
+  type SshEnding,
+} from "../src/modules/terminal/lib/ssh-exit-decision";
+import { stripCommentsNoJsx } from "./lib/source";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const read = (rel: string) => readFileSync(join(repoRoot, rel), "utf8");
@@ -86,198 +99,161 @@ for (const ending of [
 }
 
 // ============================================================================
-// SOURCE-TEXT: the translation `decideSshEnding` above is never handed -
-// bridge.ts's SshEvent -> SshExitReason, and ssh-session.ts's SshExitReason
-// -> SshEnding.
+// The two translations `decideSshEnding` above is never handed, each now an
+// exported pure function and so checked by CALLING it: bridge.ts's
+// `exitReasonFromSshEvent` (wire `SshEvent` -> `SshExitReason`) and
+// ssh-exit-decision.ts's `endingFromExitReason` (`SshExitReason` ->
+// `SshEnding`).
 //
-// Rust's `build_exit_event` covers the FIRST half of that pipe on its own
-// side; `decideSshEnding` above covers what happens once an `SshEnding`
-// exists. NOTHING exercises the two JS mappings in between - a regression
-// that re-collapses the three variants back together at either seam (the
-// original bug, one layer up) reddens nothing today. Example: rewriting
-// ssh-session.ts's `disconnected` case to
-// `finishSsh({ kind: "clean", code: 0 })` would make a dropped connection
-// report as a deliberate exit and reconnect-eligibility silently vanish -
-// `decideSshEnding`'s own tests above never see it, because by the time its
-// input is constructed it has already been mis-mapped.
+// Why both halves need their own section rather than one end-to-end check: a
+// regression that re-collapses the three variants can land at EITHER seam, and
+// a single check cannot say which. Rewriting the `disconnected` case to produce
+// `{ kind: "clean", code: 0 }` at either layer makes a dropped connection report
+// as a deliberate exit and reconnect-eligibility silently vanish, and
+// `decideSshEnding`'s own checks above never see it - by the time its input is
+// constructed it has already been mis-mapped.
 //
-// Neither file exports a pure function for this - bridge.ts's mapping lives
-// inline in `channel.onmessage`, and ssh-session.ts's inline in `onExit`.
-// ssh-session.ts additionally cannot be
-// IMPORTED under plain node at all (it transitively touches `window` - see
-// the file header above), so even with an export a same-process behavioural
-// test could only ever cover bridge.ts's half. The fix that unblocks a real
-// behavioural test for both - extracting each mapping into an exported pure
-// function, `bridge.ts`'s reachable directly and `ssh-session.ts`'s living in
-// the dependency-free `ssh-exit-decision.ts` next to `decideSshEnding` - has
-// not been applied.
-//
-// Until that lands, this is what's checkable without editing either file:
-// read the source, and confirm each of the three wire/reason cases maps to
-// the kind this bug requires it to, AND that the three cases remain
-// pairwise DISTINCT - which is exactly what a re-collapse breaks. Honest
-// about its strength: this is source text, not execution, and weaker than
-// importing a real function - see the `decideSshEnding` checks above for
-// what a behavioural version of this looks like once the export exists.
+// Rust's `build_exit_event` covers the wire event's own construction on its own
+// side; these cover the two JS mappings between it and `decideSshEnding`.
 
-/** Comment-stripped, quote-aware (matches the convention in
- *  host-editor-verify.ts / rdp-lifetime-verify.ts) so a case's own prose
- *  can't be mistaken for the code it's read alongside. */
-function stripLineComment(line: string): string {
-  let quote = "";
-  for (let i = 0; i < line.length; i++) {
-    const c = line[i];
-    if (quote) {
-      if (c === "\\") i++;
-      else if (c === quote) quote = "";
-      continue;
-    }
-    if (c === '"' || c === "'" || c === "`") {
-      quote = c;
-      continue;
-    }
-    if (c === "/" && line[i + 1] === "/") return line.slice(0, i);
-  }
-  return line;
-}
-// No JSX-comment branch here, deliberately. Every input this file
-// strips is a `.ts` file - `bridge.ts` and `ssh-session.ts` - and a `{/* ...
-// */}` is only meaningful inside JSX children, so a `.ts` source can never
-// contain one that would hide code from a positive check the way it did in
-// `host-editor-verify.ts` (fixed in that file's own `stripComments` - copy the
-// branch from there, and not the lazy form `\{\s*\/\*[\s\S]*?\*\/\s*\}`,
-// which is not a substitute: it can still cross an intervening `*/` while
-// hunting for one followed by `}`) and in `vault-editor-verify.ts`'s
-// `stripComments`. If this file is ever pointed at a `.tsx` file, that branch
-// has to be added first.
-function stripComments(src: string): string {
-  return src
-    .split("\n")
-    .filter((line) => {
-      const t = line.trim();
-      return !(t.startsWith("//") || t.startsWith("/*") || t.startsWith("*"));
-    })
-    .map(stripLineComment)
-    .join("\n");
-}
-
-/** Index of the `}` matching the `{` at `openIdx`, or -1. */
-function matchingBrace(src: string, openIdx: number): number {
-  let depth = 0;
-  for (let i = openIdx; i < src.length; i++) {
-    if (src[i] === "{") depth++;
-    else if (src[i] === "}") {
-      depth--;
-      if (depth === 0) return i;
-    }
-  }
-  return -1;
-}
-
-console.log("\n[source-text] bridge.ts: SshEvent -> SshExitReason, per wire case");
+console.log("\n[exitReasonFromSshEvent] bridge.ts: SshEvent -> SshExitReason, per wire case");
 {
-  const src = stripComments(read("src/modules/ssh/bridge.ts"));
-  const anchor = src.indexOf("channel.onmessage = (event) => {");
-  assert(anchor !== -1, "found channel.onmessage's switch");
-  const braceIdx = src.indexOf("{", anchor);
-  const endIdx = anchor !== -1 ? matchingBrace(src, braceIdx) : -1;
-  assert(endIdx !== -1, "channel.onmessage's braces balance");
-  const body = endIdx !== -1 ? src.slice(braceIdx, endIdx) : "";
-
-  const caseArgs = (wireType: string): string | null => {
-    const re = new RegExp(
-      `case\\s*"${wireType}":\\s*handlers\\.onExit\\?\\.\\(([\\s\\S]*?)\\)\\s*;\\s*break\\s*;`,
-    );
-    return re.exec(body)?.[1] ?? null;
-  };
-  const exitArgs = caseArgs("exit");
-  const signalArgs = caseArgs("signal");
-  const disconnectedArgs = caseArgs("disconnected");
-  assert(exitArgs !== null, "found the 'exit' case");
-  assert(signalArgs !== null, "found the 'signal' case");
-  assert(disconnectedArgs !== null, "found the 'disconnected' case");
-
+  const fromExit = exitReasonFromSshEvent({ type: "exit", code: 17 });
   assert(
-    !!exitArgs && /^event\.code\s*,/.test(exitArgs.trim()) && /kind:\s*"exit"/.test(exitArgs),
-    "'exit' threads event.code through (not hardcoded) and maps to SshExitReason.kind 'exit'",
+    fromExit.reason.kind === "exit" && fromExit.reason.code === 17,
+    "wire 'exit' -> SshExitReason.kind 'exit', the remote's code threaded through (not hardcoded)",
   );
   assert(
-    !!signalArgs &&
-      /kind:\s*"signal"/.test(signalArgs) &&
-      /name:\s*event\.name/.test(signalArgs) &&
-      /coreDumped:\s*event\.coreDumped/.test(signalArgs),
-    "'signal' maps to SshExitReason.kind 'signal', name/coreDumped threaded through",
-  );
-  assert(
-    !!disconnectedArgs && /kind:\s*"disconnected"/.test(disconnectedArgs),
-    "'disconnected' maps to SshExitReason.kind 'disconnected' - the only ambiguous one",
+    fromExit.code === 17,
+    "and onExit's own `code` argument is that same code, not a 0 the caller would then report as a clean exit",
   );
 
-  const kinds = [exitArgs, signalArgs, disconnectedArgs].map(
-    (a) => /kind:\s*"([a-z]+)"/.exec(a ?? "")?.[1] ?? null,
+  const fromSignal = exitReasonFromSshEvent({ type: "signal", name: "KILL", coreDumped: true });
+  assert(
+    fromSignal.reason.kind === "signal" &&
+      fromSignal.reason.name === "KILL" &&
+      fromSignal.reason.coreDumped === true,
+    "wire 'signal' -> SshExitReason.kind 'signal', name/coreDumped threaded through",
   );
   assert(
-    kinds.every((k) => k !== null) && new Set(kinds).size === 3,
+    fromSignal.code === 0,
+    "a signal death reports code 0 - the remote never gave an exit status, so there is none to pass on",
+  );
+
+  const fromDisconnected = exitReasonFromSshEvent({ type: "disconnected" });
+  assert(
+    fromDisconnected.reason.kind === "disconnected",
+    "wire 'disconnected' -> SshExitReason.kind 'disconnected' - the only ambiguous one",
+  );
+  assert(fromDisconnected.code === 0, "and it too reports code 0, for the same reason");
+
+  // THE regression this section exists for, at this seam.
+  const kinds = [fromExit, fromSignal, fromDisconnected].map((r) => r.reason.kind);
+  assert(
+    new Set(kinds).size === 3,
     `the three wire events map to three DISTINCT SshExitReason kinds, got [${kinds.join(", ")}]`,
   );
 }
 
-console.log("\n[source-text] ssh-session.ts: SshExitReason -> SshEnding, per reason case");
+console.log(
+  "\n[endingFromExitReason] ssh-exit-decision.ts: SshExitReason -> SshEnding, per reason case",
+);
 {
-  const src = stripComments(read("src/modules/terminal/lib/ssh-session.ts"));
-  const anchor = src.indexOf("onExit: (code, reason) => {");
-  assert(anchor !== -1, "found the onExit: (code, reason) => {...} handler");
-  const braceIdx = src.indexOf("{", anchor);
-  const endIdx = anchor !== -1 ? matchingBrace(src, braceIdx) : -1;
-  assert(endIdx !== -1, "onExit handler braces balance");
-  const body = endIdx !== -1 ? src.slice(braceIdx, endIdx) : "";
-
-  const caseArgs = (reasonKind: string): string | null => {
-    const re = new RegExp(
-      `case\\s*"${reasonKind}":\\s*finishSsh\\(([\\s\\S]*?)\\)\\s*;\\s*break\\s*;`,
-    );
-    return re.exec(body)?.[1] ?? null;
-  };
-  const exitCase = caseArgs("exit");
-  const signalCase = caseArgs("signal");
-  const disconnectedCase = caseArgs("disconnected");
-  assert(exitCase !== null, "found the 'exit' case");
-  assert(signalCase !== null, "found the 'signal' case");
-  assert(disconnectedCase !== null, "found the 'disconnected' case");
-
+  // The `code` argument is onExit's own, not `reason.code`. Both are 17 here,
+  // and a 17 that comes out as 0 is the hardcode this asserts against.
+  const exitEnding = endingFromExitReason({ kind: "exit", code: 17 }, 17);
   assert(
-    !!exitCase &&
-      /kind:\s*"clean"/.test(exitCase) &&
-      !/code\s*:\s*0\b/.test(exitCase) &&
-      /\bcode\b/.test(exitCase),
-    "reason.kind 'exit' -> SshEnding.kind 'clean', code threaded through (not hardcoded to 0)",
-  );
-  assert(
-    !!signalCase &&
-      /kind:\s*"signal"/.test(signalCase) &&
-      /name:\s*reason\.name/.test(signalCase) &&
-      /coreDumped:\s*reason\.coreDumped/.test(signalCase),
-    "reason.kind 'signal' -> SshEnding.kind 'signal', name/coreDumped threaded through",
-  );
-  assert(
-    !!disconnectedCase && /kind:\s*"ambiguous"/.test(disconnectedCase),
-    "reason.kind 'disconnected' -> SshEnding.kind 'ambiguous' - the only reconnect-eligible one",
+    exitEnding.kind === "clean" && exitEnding.code === 17,
+    "reason 'exit' -> SshEnding.kind 'clean', code threaded through (not hardcoded to 0)",
   );
 
-  // THE regression this whole section exists for: two different reason.kinds
-  // collapsed onto the same SshEnding.kind (e.g. "disconnected" quietly
-  // rewritten to reuse "exit"'s "clean" shape) reddens nothing anywhere else
-  // - decideSshEnding never sees the mis-map, only its already-wrong result.
-  const kinds = [exitCase, signalCase, disconnectedCase].map(
-    (a) => /kind:\s*"([a-z]+)"/.exec(a ?? "")?.[1] ?? null,
-  );
+  const signalEnding = endingFromExitReason({ kind: "signal", name: "TERM", coreDumped: true }, 0);
   assert(
-    kinds.every((k) => k !== null) && new Set(kinds).size === 3,
-    `the three reason.kinds map to three DISTINCT SshEnding kinds, got [${kinds.join(", ")}]`,
+    signalEnding.kind === "signal" &&
+      signalEnding.name === "TERM" &&
+      signalEnding.coreDumped === true,
+    "reason 'signal' -> SshEnding.kind 'signal', name/coreDumped threaded through",
+  );
+
+  const disconnectedEnding = endingFromExitReason({ kind: "disconnected" }, 0);
+  assert(
+    disconnectedEnding.kind === "ambiguous" && disconnectedEnding.reason.length > 0,
+    "reason 'disconnected' -> SshEnding.kind 'ambiguous' with a non-empty reason for the banner - the only reconnect-eligible one",
+  );
+
+  const kinds = [exitEnding, signalEnding, disconnectedEnding].map((e) => e.kind);
+  assert(
+    new Set(kinds).size === 3,
+    `the three reason kinds map to three DISTINCT SshEnding kinds, got [${kinds.join(", ")}]`,
   );
   assert(
     kinds[0] === "clean" && kinds[1] === "signal" && kinds[2] === "ambiguous",
     `specifically: exit->clean, signal->signal, disconnected->ambiguous, got [${kinds.join(", ")}]`,
+  );
+}
+
+console.log("\n[end to end] wire event -> reason -> ending -> action, the whole pipe at once");
+{
+  // What the bug was, stated in one line per wire case. Redundant against the
+  // two sections above by construction, and kept anyway because it is the only
+  // check whose subject is the property the user reported rather than a seam:
+  // typing `exit` must not produce a reconnect.
+  const cases = [
+    { event: { type: "exit", code: 0 } as const, action: "closePane" },
+    { event: { type: "signal", name: "KILL", coreDumped: false } as const, action: "parkKilled" },
+    { event: { type: "disconnected" } as const, action: "reconnect" },
+  ];
+  for (const { event, action } of cases) {
+    const { code, reason } = exitReasonFromSshEvent(event);
+    const decision = decideSshEnding(endingFromExitReason(reason, code), false);
+    assert(
+      decision.action === action,
+      `wire '${event.type}' survives both mappings and decides '${action}' (got '${decision.action}')`,
+    );
+  }
+}
+
+// ============================================================================
+// SOURCE-TEXT: only the WIRING is left here, and it is a much weaker claim than
+// the sections above - that the two production call sites route through the two
+// functions rather than keeping a second copy of the mapping inline. Neither
+// call site can be reached from here: bridge.ts's lives inside `openSsh`, which
+// invokes a Tauri command, and ssh-session.ts cannot be IMPORTED under plain
+// node at all (it transitively touches `window` - see the header of
+// ssh-exit-decision.ts). So an extraction that left the original switch in place
+// beside it would pass every behavioural check above, and this is what notices.
+//
+// The shared stripper this reads through is `stripCommentsNoJsx` rather than
+// `stripComments`: both inputs are `.ts` files, where a brace wrapping a block
+// comment is an object or type literal, and the JSX branch would delete it along
+// with the code inside.
+
+/** Whitespace removed, so a legal Prettier reformat of a pinned expression is
+ *  invisible to the pin. Safe on both inputs below: neither contains a string
+ *  literal whose spacing matters. */
+const squash = (src: string) => src.replace(/\s+/g, "");
+
+console.log("\n[source-text] the two call sites route through the two functions");
+{
+  const bridge = stripCommentsNoJsx(read("src/modules/ssh/bridge.ts"));
+  const calls = bridge.split("exitReasonFromSshEvent(").length - 1;
+  assert(
+    calls === 2,
+    `exitReasonFromSshEvent appears exactly twice in bridge.ts - its declaration and this one call (found ${calls})`,
+  );
+  // Counting `onExit?.(` as well, because the three arms sharing one call is
+  // the property: a fourth arm added with its own inline object literal would
+  // satisfy the count above and still hand `onExit` an unmapped reason.
+  const handoffs = bridge.split("handlers.onExit?.(").length - 1;
+  assert(
+    handoffs === 1 && squash(bridge).includes("handlers.onExit?.(ending.code,ending.reason)"),
+    `channel.onmessage hands onExit the pure function's own result and nothing else (${handoffs} call site(s))`,
+  );
+
+  const sshSession = squash(stripCommentsNoJsx(read("src/modules/terminal/lib/ssh-session.ts")));
+  assert(
+    sshSession.includes("onExit:(code,reason)=>finishSsh(endingFromExitReason(reason,code))"),
+    "ssh-session.ts's onExit is exactly one call - no switch of its own left in front of finishSsh",
   );
 }
 

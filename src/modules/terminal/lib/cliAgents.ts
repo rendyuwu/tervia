@@ -13,8 +13,8 @@
  * the pane explicitly instead of relying on `TOOL_PATTERNS` matching whatever
  * the user typed here.
  */
-import { emit, listen } from "@tauri-apps/api/event";
-import { LazyStore } from "@tauri-apps/plugin-store";
+import { createRecoveredStore } from "@/lib/recoveredStore";
+import type { StoreRecovery } from "@/lib/storeRecovery";
 import { create } from "zustand";
 import { matchTool } from "./aiCliDetector";
 import type { AiCliKind } from "./aiCliStatus";
@@ -74,20 +74,43 @@ const KEY_CUSTOM = "customCliAgents";
 const KEY_OVERRIDES = "builtinCliAgentOverrides";
 const CHANGED_EVENT = "tervia://cli-agents-changed";
 
-const store = new LazyStore(STORE_PATH, { defaults: {}, autoSave: 200 });
+/**
+ * The agent file, with crash recovery in front of it.
+ *
+ * In the recovered-store family for what `commit` gives it rather than for
+ * corruption alone: a custom agent's row and a built-in's override are two keys,
+ * and the file is written whole, so neither edit can land half way.
+ */
+const io = createRecoveredStore({
+  path: STORE_PATH,
+  loadKey: KEY_CUSTOM,
+  changedEvent: CHANGED_EVENT,
+});
+
+/** Run the recovery pass and hand back what the user should be told, once. */
+export function ensureLoaded(): Promise<StoreRecovery | null> {
+  return io.ensureLoaded();
+}
+/** Drain the notice slot again, for a note that lands after startup. */
+export function takeRecoveryNotice(): StoreRecovery | null {
+  return io.takeRecoveryNotice();
+}
+/** Another window committed the agent file. */
+export function onCliAgentsChanged(cb: () => void): Promise<() => void> {
+  return io.onChanged(cb);
+}
 
 /** Per-built-in user edits. Only the editable fields are stored. */
 export type CliAgentOverrides = Record<string, { command?: string; pinned?: boolean }>;
 
 async function load(): Promise<{ custom: CliAgent[]; overrides: CliAgentOverrides }> {
-  // One IPC roundtrip via entries() instead of two sequential get()s.
-  const entries = await store.entries();
-  let custom: CliAgent[] | undefined;
-  let overrides: CliAgentOverrides | undefined;
-  for (const [k, v] of entries) {
-    if (k === KEY_CUSTOM) custom = v as CliAgent[];
-    else if (k === KEY_OVERRIDES) overrides = v as CliAgentOverrides;
-  }
+  // Two gets, one file read: the store reads the whole file and answers both
+  // from its cache. This used to be `entries()` to spend one IPC roundtrip
+  // instead of two, which is no longer the trade being made.
+  const [custom, overrides] = await Promise.all([
+    io.get<CliAgent[]>(KEY_CUSTOM),
+    io.get<CliAgentOverrides>(KEY_OVERRIDES),
+  ]);
   return { custom: custom ?? [], overrides: overrides ?? {} };
 }
 
@@ -133,15 +156,16 @@ let initialized = false;
  * next edit retries the whole key.
  */
 function persist(key: string, value: unknown): void {
-  void (async () => {
-    try {
-      await store.set(key, value);
-      await store.save();
-      await emit(CHANGED_EVENT);
-    } catch (err) {
+  void io
+    .enqueueWrite(async () => {
+      await io.set(key, value);
+      // Flushes, snapshots and emits `CHANGED_EVENT` - the three used to be
+      // written out here and one of them is easy to forget.
+      await io.commit();
+    })
+    .catch((err: unknown) => {
       console.error(`cliAgents: failed to persist ${key}`, err);
-    }
-  })();
+    });
 }
 
 function isBuiltinId(id: string): boolean {
@@ -166,13 +190,18 @@ export const useCliAgentsStore = create<CliAgentsState>((set, get) => ({
       console.error("cliAgents: failed to load saved agents; using defaults", err);
     }
     set({ hydrated: true });
-    void listen(CHANGED_EVENT, async () => {
-      try {
-        const fresh = await load();
-        set({ customAgents: fresh.custom, overrides: fresh.overrides });
-      } catch (err) {
-        console.error("cliAgents: failed to re-read after a change", err);
-      }
+    // `onChanged` rather than a bare `listen`: it drops the store's cache before
+    // handing the event on, so this re-read sees the file the other window wrote
+    // instead of the one this window last read.
+    void io.onChanged(() => {
+      void (async () => {
+        try {
+          const fresh = await load();
+          set({ customAgents: fresh.custom, overrides: fresh.overrides });
+        } catch (err) {
+          console.error("cliAgents: failed to re-read after a change", err);
+        }
+      })();
     });
   },
   upsert: (agent) => {

@@ -287,7 +287,8 @@ fn min_size_correction(current: (f64, f64), min: (f64, f64)) -> Option<(f64, f64
 /// `min_inner_size`, and the OS enforces that for *user* resizing (on Windows
 /// through `WM_GETMINMAXINFO`). A programmatic resize is not user resizing:
 /// the window-state plugin restores a saved size with a bare
-/// `set_size(PhysicalSize { .. })` (plugin 2.4.1, `src/lib.rs:212-217`) which lands
+/// `set_size(PhysicalSize { .. })`
+/// (`tauri-plugin-window-state` 2.4.1, `WindowExt::restore_state`) which lands
 /// as a plain `SetWindowPos`, and that is not clamped against the tracking
 /// size. So any profile carrying a window saved smaller than the floor comes
 /// back below it, and raising the floor never reaches an existing user. The
@@ -300,6 +301,12 @@ fn min_size_correction(current: (f64, f64), min: (f64, f64)) -> Option<(f64, f64
 /// restated here, so `tauri.conf.json` and the two platform files that must
 /// echo it (enforced by `scripts/tauri-config-parity-verify.ts`) stay the only
 /// place the number is written.
+///
+/// The early return below leaves one case uncorrected, and that case is an
+/// accepted state recorded in `KNOWN-LIMITS.md` under window sizing: a profile
+/// that quit maximized comes back maximized carrying a below-floor size, and
+/// the first un-maximize of every session shows it. Whoever removes or reworks
+/// that early return should retire the entry with it.
 fn enforce_configured_min_size(config: &tauri::Config, window: &tauri::WebviewWindow) {
     let Some(window_config) = config
         .app
@@ -432,7 +439,7 @@ fn open_or_reveal_child(
         .visible(false);
 
     // Owner-window relationship: keeps the child z-ordered above main without
-    // pinning it above other apps (#33). On Windows the OS auto-hides owned
+    // pinning it above other apps. On Windows the OS auto-hides owned
     // windows when the owner minimizes, so the child follows main into the
     // taskbar instead of floating on the desktop.
     if let Some(main) = app.get_webview_window("main") {
@@ -467,7 +474,7 @@ fn open_or_reveal_child(
 }
 
 // WebKitGTK's DMA-BUF renderer fails to create an EGL display on wlroots
-// compositors (#105), NVIDIA's proprietary driver, and minimal sessions (#126).
+// compositors, NVIDIA's proprietary driver, and minimal sessions.
 // It works on Mesa-backed GNOME/KDE/COSMIC, so only fall back where trouble is
 // likely. Override with WEBKIT_DISABLE_DMABUF_RENDERER=1 (safe) or =0 (hardware).
 #[cfg(target_os = "linux")]

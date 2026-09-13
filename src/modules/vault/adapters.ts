@@ -10,7 +10,7 @@ import { VAULT_IDENTITIES_KEY, VAULT_STORE_PATH } from "./types";
 // Not indirection for its own sake: `scripts/*-verify.ts` runs under plain node
 // with no Tauri runtime, and everything worth pinning down in this module -
 // reference integrity, the presence flags, resolution - is logic rather than IPC.
-// A `LazyStore` reached directly would make all of it untestable and none of it
+// A store file reached directly would make all of it untestable and none of it
 // clearer.
 
 const VAULT_CHANGED_EVENT = "tervia://vault-changed";

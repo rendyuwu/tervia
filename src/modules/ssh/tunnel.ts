@@ -53,8 +53,20 @@ export type SshForward = {
   sessionId: number;
   /** Loopback port the caller should connect to. The port the backend BOUND,
    *  which is the requested one when a caller pinned it and an OS-chosen one
-   *  when it asked for 0 - and the only form `ssh_forward_close` accepts. */
+   *  when it asked for 0. */
   localPort: number;
+  /**
+   * The backend's own name for the listener on {@link localPort}, carried so a
+   * release can say WHICH listener it means. The port alone cannot: the backend
+   * keys a session's forwards by port, so a listener that has gone and its
+   * successor on the same pinned port share one key. See `SshForwardHandle` in
+   * `./bridge` for what that bought.
+   *
+   * Distinct from {@link claim}, and the two are not interchangeable: this one
+   * names a LISTENER to the backend and is minted by it, while `claim` names an
+   * ENTRY in this module's own map and is minted here.
+   */
+  generation: number;
   /**
    * Opaque token naming the forward ENTRY this call took its reference from.
    * Hand it back to {@link closeForwardForConnection}; it is what makes a
@@ -67,8 +79,8 @@ export type SshForward = {
    * whose `disconnected` lagged behind a dead bastion - a parked TCP connection
    * only fails on a keepalive - would spend the reference of whoever re-opened
    * the target and close a session that pane is still using. Tokens are
-   * monotonic and never reused, so a release against a spent generation is a
-   * no-op rather than someone else's teardown.
+   * monotonic and never reused, so a release against a spent token is a no-op
+   * rather than someone else's teardown.
    */
   claim: number;
 };
@@ -219,10 +231,12 @@ const sessions = new Map<
  * give its port back: kept, the next Start asks for a port this map is still
  * holding and the bind fails.
  *
- * Each entry also carries a `claim`, the generation a consumer must hand back to
+ * Each entry also carries a `claim`, the token a consumer must hand back to
  * release: an entry can be DELETED and re-created under the same key when the
  * bastion dies mid-life, and a key-bearing release cannot tell the two apart.
- * See {@link SshForward.claim}.
+ * See {@link SshForward.claim}, and note it is a different thing from
+ * {@link SshForward.generation}, which names a backend listener rather than an
+ * entry here.
  */
 const forwards = new Map<string, { forward: Promise<SshForward>; refs: number; claim: number }>();
 
@@ -436,7 +450,7 @@ export function openForwardForConnection(
     // no prompt ids at all.
     watchPrompts(liveSession.prompts, opts.onHostKeyPrompt);
     // The SAME claim both consumers see, because it names the entry rather than
-    // the caller: the resolved forward is shared, and so is the generation it
+    // the caller: the resolved forward is shared, and so is the token it
     // carries.
     return claimed(existing.forward);
   }
@@ -454,10 +468,10 @@ export function openForwardForConnection(
     const live = await session;
     // `boundPort` and not `localPort`: what comes back is the port the backend
     // actually bound, which for a request of 0 is not the number that was sent.
-    // That answer is the only one `closeSshForward` accepts, so it - and not the
-    // request - is what {@link SshForward} carries.
-    const boundPort = await openSshForward(live.id, localPort, host, remotePort);
-    return { sessionId: live.id, localPort: boundPort, claim };
+    // The pair is what `closeSshForward` accepts, so both halves - and not the
+    // request - are what {@link SshForward} carries.
+    const { boundPort, generation } = await openSshForward(live.id, localPort, host, remotePort);
+    return { sessionId: live.id, localPort: boundPort, generation, claim };
   })();
   forwards.set(key, { forward: pending, refs: 1, claim });
   return claimed(pending);
@@ -519,7 +533,7 @@ export async function closeForwardForConnection(
   const key = forwardKey(connectionId, remoteHost.trim(), remotePort, localPort);
   const entry = forwards.get(key);
   if (!entry) return;
-  // A different generation under the same key means this caller's entry was
+  // A different claim under the same key means this caller's entry was
   // deleted (the bastion dropped, `dropSession` cleared it) and somebody else
   // re-opened the target since. Its reference belongs to them; spending it here
   // would tear down a session they are still using, which is the whole reason
@@ -545,21 +559,26 @@ export async function closeForwardForConnection(
     // re-created by another caller in the meantime is theirs.
     if (forwards.get(key) === entry) forwards.delete(key);
     // AWAITED, so this call resolves only once the backend has actually been
-    // told. `ssh_forward_close` is keyed by BOUND PORT with no generation of its
-    // own, so a close still in flight names whatever is listening on that port -
-    // including a listener a re-open has bound in the meantime. Firing and
-    // forgetting made that window reachable from one caller: a Stop that
-    // returned before the backend heard it, followed by a Start on the same
-    // pinned port, has the stale close tear down the NEW listener, which from
-    // the page looks like "Start silently does nothing every other time".
-    // Awaiting serialises Stop-then-Start for callers that await (the page's
-    // `stopRule` does); two concurrent callers that do not still need the
-    // backend to carry a generation, which it does not, so that window is
-    // still open for them.
+    // told. That is this function's contract to its callers and nothing else:
+    // the page's `stopRule` waits on it before it lets the row offer Start
+    // again, and a Stop that returned early would re-enable Start against a
+    // port still bound.
+    //
+    // WHAT THE AWAIT DOES NOT DO, and used to be asked to. A close still in
+    // flight from a listener that has gone could name whatever is listening on
+    // that port by the time it lands - a Stop, then a Start on the same pinned
+    // port, and the stale close tears down the NEW listener, which from the page
+    // reads as "Start silently does nothing every other time". Awaiting
+    // serialises only callers that await, so it never covered two concurrent
+    // ones. The GENERATION does: `f.generation` names the listener this entry
+    // opened, and `ssh_forward_close` refuses one a later open on that port has
+    // superseded, so a stale close cannot name a listener it did not open.
     //
     // The `.catch` stays: a dial that died has no listener to close, and that is
     // not a failure for whoever is letting go of it.
-    await entry.forward.then((f) => closeSshForward(f.sessionId, f.localPort)).catch(() => {});
+    await entry.forward
+      .then((f) => closeSshForward(f.sessionId, f.localPort, f.generation))
+      .catch(() => {});
   }
   releaseSession(connectionId);
 }

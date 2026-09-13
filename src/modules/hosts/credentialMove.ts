@@ -29,8 +29,9 @@ import { CREDENTIAL_STAMP_INLINE, credentialStamp, type Host } from "./types";
 // Where a host's credentials move into the vault and back, and the one
 // module that spans both stores for that reason - see `TERVIA.md`'s "The
 // vault" section. `modules/hosts` may import `modules/vault` (it already
-// does, `./store.ts:2-21`); `modules/vault` must never import `modules/hosts`
-// as a value (`vault/refs.ts:19-21`), so this file lives here, not there.
+// does, via the `@/modules/vault` imports atop `./store.ts`); `modules/vault`
+// must never import `modules/hosts` as a value (the type-only `Host` import
+// in `src/modules/vault/refs.ts`), so this file lives here, not there.
 //
 // Every account it touches is built from `HOST_SSH_FIELDS` / `VAULT_SSH_FIELDS`
 // (`vault/resolve.ts`), never from a field name spelled out again - the one
@@ -103,7 +104,7 @@ export function convertMoves(host: Host, identityId: string, keyId: string | nul
  * The reverse: every account the identity and its key own, mapped onto the
  * accounts this host will own - gated by the HOST's protocol, because an
  * inline RDP arm has one account and `nextRdpCredential` throws if key
- * material is handed to it (`./store.ts:677-679`).
+ * material is handed to it (in `./store.ts`).
  */
 export function detachMoves(
   host: Host,
@@ -133,7 +134,7 @@ export function detachMoves(
 
 /** Every move, sequentially - one keychain write is a read-modify-write of the
  *  whole secrets file on Linux and Windows, the same reason
- *  `deleteAccounts` (`./store.ts:547-551`) is not a `Promise.all`. Keyed by
+ *  `deleteAccounts` (in `./store.ts`) is not a `Promise.all`. Keyed by
  *  `field`, so a caller reads "did this field copy" without re-deriving the
  *  account string. */
 async function copyMoves(
@@ -177,7 +178,7 @@ export type CredentialMoveDeps = {
   secrets: SecretsIo;
 };
 
-/** Modelled on `ResolveDeps` / `defaultResolveDeps` (`vault/resolve.ts:141-143`),
+/** Modelled on `ResolveDeps` / `defaultResolveDeps` (in `vault/resolve.ts`),
  *  which is what makes this whole module exercisable under plain node against
  *  in-memory ports. */
 export const defaultCredentialMoveDeps: CredentialMoveDeps = {
@@ -248,10 +249,11 @@ function inlineAuthMode(host: Host): VaultAuthMode {
  * left.
  *
  * BOTH CONDITIONS ARE RE-ASSERTED AT THE WRITE, on the record that actually
- * resolves there - see {@link convertHostToVault}'s pre-check 4. This function
- * being the only producer of a `reuseKeyId` today is a fact about today, and the
- * release the reuse path performs is destructive, so the write does not take the
- * offer's word for it.
+ * resolves there - see {@link convertHostToVault}'s pre-check 4, which also
+ * compares the fingerprint the caller matched on against the one that record
+ * records now. This function being the only producer of a `reuseKeyId` today is
+ * a fact about today, and the release the reuse path performs is destructive, so
+ * the write does not take the offer's word for it.
  *
  * A BLANK OR ABSENT FINGERPRINT MATCHES NOTHING, on either side. `""` is what a
  * container this app could not open reports (`keyInspect.ts`'s sealed-container
@@ -263,6 +265,13 @@ function inlineAuthMode(host: Host): VaultAuthMode {
  * reachable - importing one key file twice is all it takes - and there is no
  * honest way to pick between them here, so the caller names the record it is
  * offering and the choice is visible rather than silent.
+ *
+ * WHAT NEITHER CONDITION CAN SEE is the host's own stored key moving under the
+ * `facts` they are matched against. `facts` describes the body that was on
+ * screen when the caller inspected it, and nothing on this path reads an
+ * account, so a key rotated in place between the editor opening and the convert
+ * matches honestly on the key that is gone. `KNOWN-LIMITS.md` carries what that
+ * costs on each arm and names the read that would retire it.
  */
 export function reusableVaultKey(keys: readonly VaultKey[], facts: VaultKeyFacts): VaultKey | null {
   const fingerprint = facts.fingerprint?.trim();
@@ -293,22 +302,23 @@ export function reusableVaultKey(keys: readonly VaultKey[], facts: VaultKeyFacts
  * the refusal that would have stopped it is the one it has just removed.
  *
  * IDENTITY FIRST. `deleteKey` refuses while any identity still names the key
- * (`vault/store.ts:337-347`), and the identity minted above names it, so the
+ * (in `vault/store.ts`), and the identity minted above names it, so the
  * reverse order refuses its own cleanup and leaves both records behind.
  *
  * THE ACCOUNTS GO WITH THE RECORDS. Both deletes clear the record's vault
- * accounts as part of removing it (`vault/store.ts:323-327` and `:348-352`),
- * which is the half that matters: step 4 put a SECOND copy of the host's secret
- * at those accounts, and a cleanup that dropped only the records would leave
- * exactly the extra copy this whole feature exists to avoid.
+ * accounts as part of removing it (`deleteIdentity` and `deleteKey` in
+ * `vault/store.ts`), which is the half that matters: step 4 put a SECOND copy
+ * of the host's secret at those accounts, and a cleanup that dropped only the
+ * records would leave exactly the extra copy this whole feature exists to
+ * avoid.
  *
  * `identityHostRefs` is the real lookup, passed by name, rather than a
  * `() => []` shortcut. It finds no holders on the path this runs on - nothing
  * binds the new identity - and it is the store's own guard over the one case
  * the provenance argument does not cover: `upsertHost` throwing at its
- * `persist` (`./store.ts:798-802`), where the record is already in the plugin's
- * cache with a debounced retry behind it, so a host DOES name this identity and
- * the delete is refused rather than stranding that host.
+ * `persist` (`./store.ts`), where the record is already in the store's own
+ * pending map and is what this session goes on reading, so a host DOES name
+ * this identity and the delete is refused rather than stranding that host.
  *
  * EVERY FAILURE IN HERE IS SWALLOWED - the same swallow, for the same reason,
  * as `vault/store.ts`'s key-secret rollback. The caller is already rethrowing
@@ -347,8 +357,9 @@ async function undoConvertRecords(
  * 1. Refuse unless the host is inline.
  * 2. Refuse when the host stores key material but no key was given.
  * 3. Refuse when the record authenticates BY key and stores none.
- * 3b. Refuse when the key to reuse is gone, stores no private key, or records no
- *     fingerprint.
+ * 3b. Refuse when the key to reuse is gone, stores no private key, records no
+ *     fingerprint, or records one other than the fingerprint the caller matched
+ *     it on.
  * 4. Mint the new ids.
  * 5. Copy every account, sequentially.
  * 6. Write the key WHEN ONE IS BEING MINTED, through `keyRecordFrom` - not a
@@ -380,11 +391,13 @@ async function undoConvertRecords(
  * class unreachable rather than merely guarded: no caller can get it wrong.
  *
  * THE KEY, ON THE OTHER HAND, IS A DECISION AND SO IT IS A PARAMETER. `{name,
- * facts}` mints a new record; `{reuseKeyId}` points the new identity at one the
- * vault already holds ({@link reusableVaultKey} is what finds a candidate). No
- * lookup and no question happen here: reuse hands the new identity a record
- * whose name, description and passphrase belong to an earlier import, so the
- * user is the one who picks, and the caller passes the answer.
+ * facts}` mints a new record; `{reuseKeyId, fingerprint}` points the new
+ * identity at one the vault already holds ({@link reusableVaultKey} is what
+ * finds a candidate). No lookup and no question happen here: reuse hands the new
+ * identity a record whose name, description and passphrase belong to an earlier
+ * import, so the user is the one who picks, and the caller passes the answer -
+ * along with the fingerprint it matched that record on, which pre-check 4
+ * compares against the record it resolves.
  */
 export async function convertHostToVault(
   args: {
@@ -405,12 +418,17 @@ export async function convertHostToVault(
      * identity that names no key, whichever arm is passed.
      *
      * `{name, facts}` mints a new `VaultKey` from this host's own material.
-     * `{reuseKeyId}` names one the vault already holds, found by
+     * `{reuseKeyId, fingerprint}` names one the vault already holds, found by
      * {@link reusableVaultKey} and CHOSEN BY THE USER; see the split at
      * `mintedKeyId` / `namedKeyId` below for what that changes, which is more
      * than which id ends up on the identity.
+     *
+     * `fingerprint` is THE ONE THE OFFER MATCHED ON, read off the body the
+     * caller inspected - not off the record, which would make pre-check 4's
+     * comparison a record against itself and assert nothing at all.
      */
-    key: { name: string; facts: VaultKeyFacts } | { reuseKeyId: string } | null;
+    key:
+      { name: string; facts: VaultKeyFacts } | { reuseKeyId: string; fingerprint: string } | null;
   },
   deps: CredentialMoveDeps = defaultCredentialMoveDeps,
 ): Promise<{ host: Host; identity: VaultIdentity; key: VaultKey | null }> {
@@ -441,9 +459,13 @@ export async function convertHostToVault(
 
   // Which arm the caller picked, resolved once. `newKey` is null on the reuse
   // path and on the no-key path, which is what makes step 6 below a single
-  // condition instead of a second reading of `args.key`.
-  const reuseKeyId = args.key && "reuseKeyId" in args.key ? args.key.reuseKeyId : null;
+  // condition instead of a second reading of `args.key`. `reuse` is the whole
+  // arm rather than its id alone, because pre-check 4 needs the fingerprint that
+  // travelled with it and a second reading of `args.key` to fetch it is the
+  // drift this one narrowing exists to prevent.
+  const reuse = args.key && "reuseKeyId" in args.key ? args.key : null;
   const newKey = args.key && !("reuseKeyId" in args.key) ? args.key : null;
+  const reuseKeyId = reuse?.reuseKeyId ?? null;
 
   // PRE-CHECK 4, beside the other three and before a byte moves, for the reason
   // the key-auth-with-no-body one gives: `upsertIdentity` refuses a `keyId` that
@@ -470,17 +492,34 @@ export async function convertHostToVault(
   // fact about today; a second producer of a mis-described record is refused here
   // whether or not anyone has written one yet.
   //
+  // THE THIRD CONDITION IS THE ONE THE RECORD CANNOT ANSWER ON ITS OWN. A body
+  // and a fingerprint say the record is COMPLETE; neither says it is the record
+  // the offer was about. So the caller passes the fingerprint IT matched on and
+  // the comparison happens here, against the record that actually resolves -
+  // which is what catches an id that never came from an offer at all, and a
+  // record replaced or re-imported at that id between the offer and this call.
+  // Both sides are trimmed, exactly as {@link reusableVaultKey} trims them when
+  // it makes the match: one value compared two ways is how two places that must
+  // agree come apart.
+  //
   // REFUSED, never quietly downgraded to minting a new key. A silent fallback
   // would leave the two paths indistinguishable afterwards - the identity would
   // name a fresh record and nothing would say the reuse the user asked for did
   // not happen - and callers already handle a refusal from the three pre-checks
   // above.
+  //
+  // WHAT IT STILL CANNOT ASSERT is the other side of the comparison. The
+  // fingerprint handed in describes the key body the caller inspected, not
+  // whatever this host's account holds now, and this path takes no keychain read
+  // to find out - so a key rotated in place under an open editor passes every
+  // condition here. `KNOWN-LIMITS.md` carries that as accepted, on both arms,
+  // and states the trigger that would retire it.
   let reusedKey: VaultKey | null = null;
-  if (needsKey && reuseKeyId !== null) {
-    reusedKey = (await deps.vault.findKey(reuseKeyId)) ?? null;
+  if (needsKey && reuse !== null) {
+    reusedKey = (await deps.vault.findKey(reuse.reuseKeyId)) ?? null;
     if (!reusedKey) {
       throw new Error(
-        `hosts: "${args.host.name}" cannot reuse vault key ${reuseKeyId}, which no longer exists`,
+        `hosts: "${args.host.name}" cannot reuse vault key ${reuse.reuseKeyId}, which no longer exists`,
       );
     }
     if (!reusedKey.hasPrivateKey) {
@@ -491,6 +530,11 @@ export async function convertHostToVault(
     if (!reusedKey.fingerprint?.trim()) {
       throw new Error(
         `hosts: "${args.host.name}" cannot reuse vault key "${reusedKey.name}", which records no fingerprint, so nothing says it holds this host's private key`,
+      );
+    }
+    if (reusedKey.fingerprint.trim() !== reuse.fingerprint.trim()) {
+      throw new Error(
+        `hosts: "${args.host.name}" cannot reuse vault key "${reusedKey.name}", which records a different fingerprint from the one this host's key was matched against, so its own private key would be released against a record holding other material`,
       );
     }
   }
@@ -632,10 +676,36 @@ function isRdpInlineArgs(inline: SshInlineArgs | RdpInlineArgs): inline is RdpIn
   return "username" in inline;
 }
 
+/**
+ * The inline shape a detach writes: the HOST's protocol says WHICH shape,
+ * the identity being detached says the non-secret VALUES inside it -
+ * {@link detachHostFromVault}'s own doc has the reasoning for why neither
+ * comes from a caller any more.
+ *
+ * `identity` is `null` for exactly one caller: the dangling-identity arm,
+ * which has nothing to derive from. It gets the empty user/username its own
+ * warning already promises, never a fallback parameter - the whole point of
+ * removing `inline` from the signature was that no caller, including this
+ * one, can hand it a value that disagrees with the identity.
+ */
+function detachInlineFields(
+  host: Host,
+  identity: VaultIdentity | null,
+): SshInlineArgs | RdpInlineArgs {
+  if (host.protocol === "rdp") {
+    return { username: identity?.username ?? "", domain: identity?.domain ?? "" };
+  }
+  return { user: identity?.username ?? "", authMode: identity?.authMode ?? "password" };
+}
+
 /** The inline arm the store overwrites `has*` flags on once it knows what it
- *  actually wrote - the same placeholder pattern `HostEditorDialog.tsx:737-741`
- *  hands over. Refuses rather than guessing when `inline`'s shape does not
- *  match the host's own protocol, which no caller should be able to reach. */
+ *  actually wrote - the same placeholder pattern `hasStoredSshPrivateKey` in
+ *  `src/modules/hosts/HostEditorDialog.tsx` hands over. Refuses rather than
+ *  guessing when `inline`'s shape does not match the host's own protocol - a
+ *  contract this function alone enforces:
+ *  its two call sites, both in {@link detachHostFromVault}, derive `inline`
+ *  from `host.protocol` itself via {@link detachInlineFields}, so neither can
+ *  construct the mismatch this throw guards against. */
 function buildInlineRecord(host: Host, inline: SshInlineArgs | RdpInlineArgs): Host {
   if (host.protocol === "rdp" && isRdpInlineArgs(inline)) {
     return {
@@ -672,7 +742,7 @@ function buildInlineRecord(host: Host, inline: SshInlineArgs | RdpInlineArgs): H
  *
  * WHY THESE ACCOUNTS ARE NOT ANYONE'S TO KEEP. The write refused, so the STORED
  * record is still `kind: "identity"` - and `secretFieldsFor` returns `[]` for a
- * non-inline credential (`./store.ts:203-207`), so the stored host names none of
+ * non-inline credential (in `./store.ts`), so the stored host names none of
  * these accounts. They hold bytes only because `copyMoves` put them there a few
  * statements earlier, in this call. The adjacent case lands the same way: if an
  * earlier `releaseStaleAccounts` failure had left an orphan at one of these
@@ -688,9 +758,10 @@ function buildInlineRecord(host: Host, inline: SshInlineArgs | RdpInlineArgs): H
  *
  * THE RE-READ, which is a guard and not a formality. Two paths end with the
  * stored record already INLINE and naming these very accounts: `upsertHost`
- * throwing at its `persist` (`./store.ts:798-802`), where the record is in the
- * plugin's cache with a debounced retry behind it, and a concurrent writer that
- * detached this host first - which is exactly what a stamp refusal reports.
+ * throwing at its `persist` (`./store.ts`), where the record is in the store's
+ * own pending map and is what this session goes on reading, and a concurrent
+ * writer that detached this host first - which is exactly what a stamp refusal
+ * reports.
  * Deleting there would not strand bytes, it would destroy the host's only copy
  * of a credential the vault may no longer hold. So the stored record is read
  * back and the cleanup runs only while it is still bound. A record that is GONE
@@ -733,7 +804,7 @@ async function undoDetachCopies(
  * A missing identity does NOT refuse: the host is already unable to connect,
  * and refusing would leave it that way permanently. Copy nothing and return a
  * `warning` naming the missing identity - the `VaultUpsert.warning` shape
- * (`vault/store.ts:28-33`) is the precedent. The same treatment applies, one
+ * (in `vault/store.ts`) is the precedent. The same treatment applies, one
  * level down, to a dangling `keyId` on an identity that IS found: the
  * password still copies and the host still detaches, and only the key
  * material is reported missing.
@@ -745,12 +816,27 @@ async function undoDetachCopies(
  * because there is no `secrets_list`. {@link undoDetachCopies} takes them back.
  * The missing-identity arm below needs none of that: it copies nothing, so a
  * refusal there leaves nothing behind, and it must stay that way.
+ *
+ * THE NON-SECRET INLINE FIELDS (`user`/`authMode` for SSH, `username`/`domain`
+ * for RDP) ARE NOT A PARAMETER, on the grounds {@link convertHostToVault}'s
+ * doc gives for `authMode` and {@link inlineAuthMode} describes in full: a
+ * caller able to pass them was able to disagree with the identity this
+ * function re-reads two statements below, for the secrets - and that
+ * disagreement WAS the defect. The caller used to pass the editor's open-time
+ * snapshot of the vault, which could go stale while the identity's username
+ * or `authMode` changed in another window; the FRESH identity's `keyId` still
+ * gated whether a key body copied ({@link detachMoves} reads it, not the
+ * snapshot), so a host could land inline holding a freshly-copied private key
+ * under a stale "password" `authMode` - the orphan state a Forget button was
+ * added for, arrived at silently. {@link detachInlineFields} derives both
+ * fields from the SAME identity this function reads for the secrets, so the
+ * two cannot disagree, structurally rather than by discipline. The
+ * dangling-identity arm passes `null` and gets the empty user/username its
+ * own warning already promises - not a fallback parameter, which would put
+ * the disagreement back for the one caller that cannot check it.
  */
 export async function detachHostFromVault(
-  args: {
-    host: Host;
-    inline: { user: string; authMode: VaultAuthMode } | { username: string; domain: string };
-  },
+  args: { host: Host },
   deps: CredentialMoveDeps = defaultCredentialMoveDeps,
 ): Promise<{ host: Host; warning?: string }> {
   if (args.host.credential.kind !== "identity") {
@@ -760,7 +846,7 @@ export async function detachHostFromVault(
   const identity = await deps.vault.findIdentity(identityId);
 
   if (!identity) {
-    const record = buildInlineRecord(args.host, args.inline);
+    const record = buildInlineRecord(args.host, detachInlineFields(args.host, null));
     const host = await deps.hosts.upsertHost(record, {}, credentialStamp(args.host));
     return {
       host,
@@ -771,15 +857,18 @@ export async function detachHostFromVault(
   const key = identity.keyId ? await deps.vault.findKey(identity.keyId) : undefined;
   const moves = detachMoves(args.host, identity, key ? key.id : null);
   // BEFORE the copies, not between them and the write. `buildInlineRecord`
-  // throws when `inline`'s shape does not match the host's protocol, and that
-  // throw sat one statement past `copyMoves` - outside the `try` below, so
-  // `undoDetachCopies` never ran over it. That is the exact orphan class the
-  // rethrow arm exists to prevent, reachable one statement earlier. It is not
-  // reachable from the shipped dialog today (the protocol toggle is create-mode
-  // only, and this path is edit-only), but any future caller that detaches with
-  // the other protocol's inline shape would arm it, and building the record
-  // first costs nothing: it reads no store and no keychain.
-  const record = buildInlineRecord(args.host, args.inline);
+  // throws when its `inline` argument's shape does not match the host's
+  // protocol, and that throw sat one statement past `copyMoves` - outside the
+  // `try` below, so `undoDetachCopies` never ran over it. That is the exact
+  // orphan class the rethrow arm exists to prevent, reachable one statement
+  // earlier. `inline` is now {@link detachInlineFields}'s output, derived from
+  // `args.host.protocol` itself, so the mismatch this ordering used to merely
+  // risk is unreachable BY CONSTRUCTION rather than by discipline - no caller
+  // passes a shape at all any more, let alone the wrong one. The order stays
+  // anyway: it costs nothing (it reads no store and no keychain), and the
+  // orphan class it guards against is real for every other throw in the `try`
+  // below.
+  const record = buildInlineRecord(args.host, detachInlineFields(args.host, identity));
   const copied = await copyMoves(deps.secrets, moves);
   const secrets = hostSecretsFromCopies(copied);
   let host: Host;

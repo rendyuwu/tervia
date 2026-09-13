@@ -12,13 +12,21 @@
 //   • PC restart      → daemon dies with kernel, sessions lost (intended)
 //   • Daemon crash    → sessions lost, GUI falls back to fresh spawn
 //
-// File map (built up across phases):
-//   protocol.rs   — wire messages (ClientMsg / DaemonMsg)              [Phase 1]
-//   transport.rs  — length-prefixed JSON framing over local sockets    [Phase 1]
-//   paths.rs      — per-user socket path / pipe name                   [Phase 1]
-//   server.rs     — daemon-side accept loop, session store, scrollback [Phase 2]
-//   client.rs     — GUI-side connect_or_spawn + event proxy            [Phase 3]
-//   spawn.rs      — detached child spawn (POSIX setsid / Win DETACHED) [Phase 3]
+// File map, grouped by the layer each module belongs to. The three groups are
+// also the three that landed together, in this order — the wire first, then
+// the end that serves it, then the end that dials it:
+//
+//   the wire, spoken by both ends:
+//     protocol.rs   — wire messages (ClientMsg / DaemonMsg)
+//     transport.rs  — length-prefixed JSON framing over local sockets
+//     paths.rs      — per-user socket path / pipe name
+//
+//   daemon side:
+//     server.rs     — daemon-side accept loop, session store, scrollback
+//
+//   GUI side:
+//     client.rs     — GUI-side connect_or_spawn + event proxy
+//     spawn.rs      — detached child spawn (POSIX setsid / Win DETACHED)
 
 pub mod client;
 pub mod paths;

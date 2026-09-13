@@ -6,7 +6,7 @@
 /// with `clipboard: true`, and Tauri defaults that to false with no
 /// tauri.conf.json knob to raise it for a config-declared window like `main`. So
 /// every read rejected with NotAllowedError while writes kept working off the
-/// keystroke's user gesture: copy fine, paste dead (#10). Writes stay on the
+/// keystroke's user gesture: copy fine, paste dead. Writes stay on the
 /// webview API; only reads come through here, on all three platforms so there is
 /// one path to reason about.
 ///

@@ -9,11 +9,12 @@
  * and the pane's own `close()` both call {@link HostOwnedState.releaseSession},
  * and a reconnect comes back with a new session id and claims afresh.
  *
- * THE OTHER SIDE OF `runtime.ts:12-20`. That store is the PAGE's and is keyed
- * by `ruleId` alone; this one is the TERMINAL's, and it is keyed by `ruleId`
- * alone too - which is exactly why it CANNOT REPRESENT TWO OWNERS, and why the
- * answer to a second owner is to refuse it rather than to record it: a forward
- * rule runs under one owner at a time.
+ * THE OTHER SIDE OF `runtime.ts`'s "KEYED BY `ruleId` ALONE" paragraph. That
+ * store is the PAGE's and is keyed by `ruleId` alone; this one is the
+ * TERMINAL's, and it is keyed by `ruleId` alone too - which is exactly why it
+ * CANNOT REPRESENT TWO OWNERS, and why the answer to a second owner is to
+ * refuse it rather than to record it: a forward rule runs under one owner at a
+ * time.
  *
  * TWO EXCLUSIONS, EACH WITH ITS OWN CHECK, and neither is "by construction":
  *
@@ -27,7 +28,8 @@
  *   neither side can take the other's listener down and leave the rule down on
  *   both.
  * - **This map against ITSELF.** Two panes on one host are two sessions and two
- *   autostart runs (`ssh/tunnel.ts:31-35`), with nothing serialising them, so
+ *   autostart runs (see `ssh/tunnel.ts`'s header, on what is NOT shared), with
+ *   nothing serialising them, so
  *   `autostart.ts` reads `hostOwnedBy` TWICE as well - before the bind and again
  *   immediately before the claim. The pre-bind read alone is a read two
  *   concurrent runs both pass.
@@ -94,8 +96,9 @@ export const useHostOwnedForwards = create<HostOwnedState>((set) => ({
     })),
 }));
 
-// Every selector below returns a PRIMITIVE, for the reason `runtime.ts:79-85`
-// spells out and against the same failure: a selector building a fresh object
+// Every selector below returns a PRIMITIVE, for the reason the comment above
+// `useForwardStatus` in `runtime.ts` spells out and against the same failure:
+// a selector building a fresh object
 // or array literal is never `Object.is` its own last return, and under zustand
 // v5 that loops with "Maximum update depth exceeded". `useShallow` is imported
 // nowhere in `src/` and stays that way.
@@ -115,4 +118,5 @@ export function useHostOwnedPort(ruleId: string): number | undefined {
 // `claim` and `releaseSession` are read through `getState()`, never a selector:
 // both callers are event handlers (a session coming up, a session ending) and
 // not renders - the same idiom `runtime.ts`'s note on `claim` describes, and
-// the one `tunnel.ts:183` already uses for `useHostKeyPrompt.getState()`.
+// the one `watchPrompts` in `tunnel.ts` already uses for
+// `useHostKeyPrompt.getState()`.

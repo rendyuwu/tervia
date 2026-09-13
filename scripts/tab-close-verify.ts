@@ -49,62 +49,7 @@ import {
 import { buildEntries, countTabEntries } from "../src/modules/tabs/lib/entries";
 import type { Tab } from "../src/modules/tabs/lib/tabTypes";
 import type { PaneNode } from "../src/modules/terminal/lib/panes";
-
-/**
- * A line with its trailing `//` comment removed, string literals respected.
- *
- * This is the fourth copy of this pair in the suite - duplicated
- * on purpose, because these scripts share no module and `scripts/lib` is not a
- * thing we want. The canonical copy is in `scripts/host-editor-verify.ts`; keep
- * them the same shape.
- *
- * A character scan rather than a regex, because a `//` inside a string is not a
- * comment and a regex alternation desyncs on the first unbalanced quote. An
- * apostrophe in unquoted JSX text opens a quote state that never closes, which
- * loses the strip for that one line - it fails towards KEEPING text, never
- * towards deleting code, which is the direction that matters: a positive check
- * must never be satisfied by a comment, and must never be reddened by prose it
- * accidentally ate.
- */
-function stripLineComment(line: string): string {
-  let quote = "";
-  for (let i = 0; i < line.length; i++) {
-    const c = line[i];
-    if (quote) {
-      if (c === "\\") i++;
-      else if (c === quote) quote = "";
-      continue;
-    }
-    if (c === '"' || c === "'" || c === "`") {
-      quote = c;
-      continue;
-    }
-    if (c === "/" && line[i + 1] === "/") return line.slice(0, i);
-  }
-  return line;
-}
-
-// No JSX-comment branch here, deliberately. Every file this stripper
-// runs over is a `.ts` module - `shortcutHandlers.ts`, `shortcuts.ts`,
-// `useTabActions.ts` - and a `{/* ... */}` is only meaningful inside JSX
-// children, so a `.ts` source can never contain one that would hide code from
-// a positive check the way it did in `host-editor-verify.ts` (fixed in that
-// file's own `stripComments` - copy the branch from there, and not the lazy
-// form `\{\s*\/\*[\s\S]*?\*\/\s*\}`, which is not a substitute: it can still
-// cross an intervening `*/` while hunting for one followed by `}`) and in
-// `vault-editor-verify.ts`'s. If this file is ever pointed at a `.tsx`
-// file, that branch has to be added first.
-/** The same source with whole-line and trailing comments removed. */
-function stripComments(src: string): string {
-  return src
-    .split("\n")
-    .filter((line) => {
-      const t = line.trim();
-      return !(t.startsWith("//") || t.startsWith("/*") || t.startsWith("*"));
-    })
-    .map(stripLineComment)
-    .join("\n");
-}
+import { stripCommentsNoJsx } from "./lib/source";
 
 let failed = 0;
 function check(name: string, ok: boolean, detail?: unknown): void {
@@ -373,7 +318,9 @@ console.log("\n[v] Ctrl+Shift+X and Ctrl+W ask the arbiter rather than a leaf ki
   // expression is present" - and a positive check is exactly the kind a comment
   // satisfies. Deleting the guard and leaving `// if (coveredByRailView())
   // return;` behind must fail, and stripping is what makes it fail.
-  const src = stripComments(readFileSync(join(root, "src/app/lib/shortcutHandlers.ts"), "utf8"));
+  const src = stripCommentsNoJsx(
+    readFileSync(join(root, "src/app/lib/shortcutHandlers.ts"), "utf8"),
+  );
   /** The body of the `"<id>": () => { ... }` handler, or null. */
   const handlerBody = (id: string): string | null => {
     const at = src.indexOf(`"${id}": `);
@@ -423,7 +370,7 @@ console.log("\n[v] Ctrl+Shift+X and Ctrl+W ask the arbiter rather than a leaf ki
   // Command Palette do not still say "terminal" for a chord that closes any
   // pane. The id is deliberately unchanged: a user's rebinding is stored under
   // it.
-  const catalogue = stripComments(
+  const catalogue = stripCommentsNoJsx(
     readFileSync(join(root, "src/modules/shortcuts/shortcuts.ts"), "utf8"),
   );
   const entry = /id: "terminal\.close",\s*label: "([^"]+)",\s*group: "([^"]+)",/.exec(catalogue);
@@ -534,7 +481,9 @@ check(
 console.log("\n[vii] handleClose and requestCloseLeaf both route through closable.ts");
 {
   const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-  const src = stripComments(readFileSync(join(root, "src/app/hooks/useTabActions.ts"), "utf8"));
+  const src = stripCommentsNoJsx(
+    readFileSync(join(root, "src/app/hooks/useTabActions.ts"), "utf8"),
+  );
   /**
    * Each hook-level `const NAME = useCallback(...)` body, keyed by name. The
    * chunk runs to the next hook-level declaration; the two-space indent is what

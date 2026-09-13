@@ -117,18 +117,20 @@ impl Default for RdpState {
 /// straight into the CredSSP exchange. The password is never returned to, nor
 /// passed in from, the webview.
 ///
-/// This deliberately does NOT mirror the SSH module. There, `connections.ts`
-/// calls `secrets_get`, which hands the plaintext back to JS, and `bridge.ts`
-/// passes it down to `ssh_open` - so for SSH the secret does transit the
-/// webview. The Phase 5 exit gate forbids that for RDP.
+/// This deliberately does NOT mirror the SSH module. There, `resolveSshAuth`
+/// (`src/modules/vault/resolve.ts`) reads the secret and hands the plaintext
+/// back to JS, and `src/modules/ssh/bridge.ts` passes it down to `ssh_open` -
+/// so for SSH the secret does transit the webview. For RDP the plaintext must
+/// never reach the webview at all.
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum RdpCredential {
     /// Read the password out of the OS keychain in the host process.
     /// `service` / `account` are the same pair `secrets_get` takes, so there is
     /// one keychain key format and not two: `service` is `tervia-rdp` and
-    /// `account` is whatever the frontend composes (`<connectionId>::password`,
-    /// matching `keyringAccount` in `connections.ts`). The backend stays
+    /// `account` is whatever the frontend composes (`<hostId>::password` or
+    /// `<identityId>::password`, matching `vaultAccount` in
+    /// `src/modules/vault/types.ts`). The backend stays
     /// agnostic about how the account string is built, exactly as
     /// `secrets_get` does.
     Keychain { service: String, account: String },
@@ -428,13 +430,14 @@ pub async fn rdp_attach(
 /// Returned as a raw `Response`, which is the one path in this module where
 /// pixels genuinely never touch JSON. The channel path is not so clean: Tauri
 /// only avoids JSON for raw payloads of 1024 bytes or more
-/// (`MAX_RAW_DIRECT_EXECUTE_THRESHOLD`, `tauri-2.11.5/src/ipc/channel.rs:39`).
+/// (`tauri` 2.11.5, `MAX_RAW_DIRECT_EXECUTE_THRESHOLD`).
 /// Below that it serialises the bytes as a JSON number array and `eval`s
-/// `new Uint8Array([...]).buffer` (channel.rs:163-167) - and a small delta like
+/// `new Uint8Array([...]).buffer`
+/// (`tauri` 2.11.5, `JavaScriptChannelId::channel_on`) - and a small delta like
 /// a blinking text caret (~2x16 px = 128 bytes) is exactly that case, so on an
 /// idle desktop most batches do go through JSON. At or above the threshold the
 /// body is parked in `ChannelDataIpcQueue` and pulled back by a JS `invoke`
-/// (channel.rs:169-181).
+/// (`tauri` 2.11.5, `JavaScriptChannelId::channel_on`).
 #[tauri::command]
 pub async fn rdp_snapshot(state: tauri::State<'_, RdpState>, id: u32) -> Result<Response, String> {
     let session = lookup(&state, id, "rdp_snapshot").await?;
@@ -602,8 +605,9 @@ mod tests {
             panic!("expected a keychain reference");
         };
         assert_eq!(service, "tervia-rdp");
-        // Same `<id>::<field>` shape `keyringAccount` builds in connections.ts,
-        // so there is one keychain key format across SSH and RDP.
+        // Same `<id>::<field>` shape `vaultAccount` builds in
+        // `src/modules/vault/types.ts`, so there is one keychain key format
+        // across SSH and RDP.
         assert_eq!(account, "c1::password");
     }
 

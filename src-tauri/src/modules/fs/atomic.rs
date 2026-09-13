@@ -56,7 +56,9 @@ pub fn atomic_write_mode(path: &Path, bytes: &[u8], mode: u32) -> io::Result<()>
     })
 }
 
-/// One lock per TARGET PATH, held across the whole stage-fsync-rename sequence.
+/// One lock per TARGET FILE, held across the whole stage-fsync-rename sequence.
+/// Filed under [`lock_key`] rather than the path as written, because two
+/// spellings of one file must not take two locks.
 ///
 /// Two concurrent writes to the same target share one staging temp, because the
 /// temp name is derived from the target. The first `rename` consumes it and the
@@ -84,8 +86,47 @@ pub fn atomic_write_mode(path: &Path, bytes: &[u8], mode: u32) -> io::Result<()>
 static TARGET_LOCKS: LazyLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+/// The key one target's lock is filed under: the file name under its CANONICAL
+/// parent directory.
+///
+/// A key that is the path as written hands two spellings of one target two
+/// different locks - while the temp name [`write_staged`] derives from each
+/// resolves to the one file. That is precisely the state the lock exists to
+/// prevent, reached through the key instead.
+///
+/// `Path` compares by COMPONENTS, not bytes, so a `.` segment, a doubled
+/// separator and a trailing slash already agree and never reached this. What
+/// does not agree is a `..` segment, a path routed through a symlinked
+/// directory, and on Windows a difference of case - and resolving the
+/// directory is what collapses all three.
+///
+/// The PARENT is canonicalized, never the target: `canonicalize` requires the
+/// path to exist and the first write to a target is what creates it, so keying
+/// on the resolved target would fall back on exactly the common case. The
+/// parent is where the temp is staged, so it exists whenever a write is about
+/// to SUCCEED - and when it does not exist, `write_staged` fails at `open_tmp`
+/// anyway, so the weaker key costs nothing on that path. When the parent cannot
+/// be resolved the path as written is the key: two spellings then take two locks
+/// again, which is the hazard above rather than a new one.
+fn lock_key(path: &Path) -> PathBuf {
+    match (path.parent(), path.file_name()) {
+        (Some(parent), Some(file_name)) => parent
+            .canonicalize()
+            .map(|dir| dir.join(file_name))
+            .unwrap_or_else(|_| path.to_path_buf()),
+        _ => path.to_path_buf(),
+    }
+}
+
 /// The lock for one target, creating it on first use.
 fn target_lock(path: &Path) -> Arc<Mutex<()>> {
+    // Resolved BEFORE the map is locked, and that order is the point rather than
+    // a style choice. `lock_key` performs a `canonicalize`, so computing it
+    // inside the guard would put a filesystem syscall in a process-wide critical
+    // section - on a cold dentry cache or a network mount that is not free, and
+    // it would serialize every writer in the app behind it. That is the property
+    // this map's per-target keying exists to provide, given up at the door.
+    let key = lock_key(path);
     // Poison carries no meaning for either lock: nothing is guarded except the
     // ORDER of the writes, so there is no invariant a panicking writer could have
     // left half-applied. Recovering beats making every later write to that path
@@ -93,7 +134,7 @@ fn target_lock(path: &Path) -> Arc<Mutex<()>> {
     let mut map = TARGET_LOCKS
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let lock = Arc::clone(map.entry(path.to_path_buf()).or_default());
+    let lock = Arc::clone(map.entry(key).or_default());
     // Forget the locks nobody holds. An `Arc` the map alone owns has no waiter, so
     // a later writer building a fresh one is equivalent - and this keeps the map
     // bounded by the writes IN FLIGHT rather than by every path ever written,
@@ -230,6 +271,36 @@ mod tests {
         // Named after the target, so a leftover would be picked up - and shared -
         // by the next write to the same path.
         assert!(!dir.0.join(".hosts.json.tervia.tmp").exists());
+    }
+
+    #[test]
+    fn two_spellings_of_one_target_take_the_same_lock() {
+        // Two locks for one file is the state the lock exists to prevent: both
+        // writers stage into the single temp name the OS resolves both
+        // spellings to, and the loser of the rename race gets `os error 2`.
+        // A decision over the key, so the target itself need not exist - only
+        // the parent, which is where a write would stage.
+        //
+        // A `..` segment rather than a `.` one: `Path` compares by components,
+        // so a `.` is already equal and would pass against the raw key too.
+        let dir = TempDir::new("lockkey");
+        let sub = dir.0.join("sub");
+        std::fs::create_dir_all(&sub).expect("create the detour directory");
+        let plain = dir.0.join("secrets.json");
+        let detoured = sub.join("..").join("secrets.json");
+        assert!(
+            Arc::ptr_eq(&super::target_lock(&plain), &super::target_lock(&detoured)),
+            "two spellings of one target took two different locks"
+        );
+        // The control: per file rather than one lock for the whole directory,
+        // which would satisfy the assertion above just as well.
+        assert!(
+            !Arc::ptr_eq(
+                &super::target_lock(&plain),
+                &super::target_lock(&dir.0.join("hosts.json")),
+            ),
+            "two different targets shared one lock"
+        );
     }
 
     /// Wait, with a deadline, for `expected` threads to reach this point.

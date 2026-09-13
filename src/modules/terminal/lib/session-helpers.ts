@@ -3,6 +3,12 @@ import { TERMINAL_FONT_SIZE_MAX, TERMINAL_FONT_SIZE_MIN } from "@/modules/settin
 import { version as osVersion } from "@tauri-apps/plugin-os";
 import { Terminal, type IWindowsPty } from "@xterm/xterm";
 
+// Re-exported, not declared here. This module is unloadable outside the app
+// (the two imports above), and `describeError` has callers that must stay
+// loadable under plain node - see `@/lib/describeError`'s own header. The
+// re-export is so this file's terminal-side importers keep one spelling.
+export { describeError } from "@/lib/describeError";
+
 export const BACKWARD_KILL_WORD = "\x17";
 export const SHIFT_ENTER = "\x1b\r";
 
@@ -161,16 +167,6 @@ export function effectiveTerminalFontSize(base: number, zoom: number): number {
 export function wallpaperActive(): boolean {
   if (typeof document === "undefined") return false;
   return document.documentElement.dataset.terviaGlass === "on";
-}
-
-export function describeError(e: unknown): string {
-  if (typeof e === "string") return e;
-  if (e instanceof Error) return e.message;
-  try {
-    return JSON.stringify(e);
-  } catch {
-    return String(e);
-  }
 }
 
 export function isCtrlBackspace(event: KeyboardEvent): boolean {

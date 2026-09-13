@@ -32,8 +32,8 @@ const IDENTITY_CHOICE_PREFIX = "identity:";
 
 /**
  * The picker's value for one identity. Prefixed so it cannot collide with the
- * two sentinels above - an identity id is opaque (`../../vault/store.ts:74-76`)
- * and nothing stops one being the string "new".
+ * two sentinels above - an identity id is opaque (`newId` in
+ * `src/modules/vault/store.ts`) and nothing stops one being the string "new".
  */
 export function identityChoice(identityId: string): string {
   return `${IDENTITY_CHOICE_PREFIX}${identityId}`;
@@ -146,6 +146,36 @@ export function hostOwnedSecretNames(host: Host): string[] {
   return HOST_SSH_SECRET_FIELDS.filter((f) => sshOwnedFlag(credential, f)).map(secretFieldWord);
 }
 
+/**
+ * The KEY MATERIAL a stored record still holds, by name, in the order
+ * {@link HOST_SSH_SECRET_FIELDS} enumerates it.
+ *
+ * Read off the STORED record's own flags, which is what the row this feeds must
+ * be a function of: the editor's draft holds a key body seeded at open time, and
+ * a draft that is blank because the read has not landed says nothing at all about
+ * whether an account exists.
+ *
+ * Empty for every record that must not be offered a Forget, and each arm is one
+ * of those cases rather than a belt: a vault-bound host owns no accounts of its
+ * own (`bind` deleted them and said so), and an RDP host owns one password field
+ * and never held key material. An SSH host with neither flag set has nothing to
+ * forget, so the same empty list covers it.
+ *
+ * The two fields are named POSITIVELY and then ordered through
+ * {@link HOST_SSH_SECRET_FIELDS}, rather than filtering the password out of that
+ * list: a fourth SSH secret added later is not key material by default, and
+ * having it appear in a row that offers to delete it would be the wrong
+ * direction to fail in.
+ */
+export function hostKeySecretNames(host: Host): string[] {
+  if (host.protocol !== "ssh" || host.credential.kind !== "inline") return [];
+  const credential = host.credential;
+  const keyFields: readonly string[] = [HOST_SSH_PRIVATE_KEY_FIELD, HOST_SSH_KEY_PASSPHRASE_FIELD];
+  return HOST_SSH_SECRET_FIELDS.filter(
+    (f) => keyFields.includes(f) && sshOwnedFlag(credential, f),
+  ).map(secretFieldWord);
+}
+
 export function credentialChangeTitle(change: CredentialChange): string {
   switch (change.kind) {
     case "convert":
@@ -182,6 +212,13 @@ function identityLabel(identityName: string | undefined, identityId: string): st
  * The confirmation body. One string per outcome, each naming exactly what
  * happens and what does not, because the three outcomes differ in what is
  * destroyed and a shared sentence would be wrong for two of them.
+ *
+ * CONVERT SAYS THE DRAFT IS NOT INVOLVED, out loud and in its own sentence. What
+ * travels is the host's stored keychain accounts, so a private key typed into
+ * the editor and not yet saved goes nowhere - and the editor cannot show it
+ * going nowhere either, because a converted row is bound and renders no key
+ * field at all. The word "stores" carried that on its own before, which is one
+ * word doing the work of a promise.
  */
 export function credentialChangeNote(
   change: CredentialChange,
@@ -190,7 +227,7 @@ export function credentialChangeNote(
 ): string {
   switch (change.kind) {
     case "convert":
-      return "The credentials this host stores move into a new shared identity, and the host stops owning them. Nothing here is deleted until the move has succeeded. This happens as soon as you confirm - cancelling the editor afterwards does not undo it, and what it buys is fewer copies of one credential, nothing else.";
+      return "The credentials this host stores move into a new shared identity, and the host stops owning them. What moves is what is saved for this host, so a key body typed into the form and not yet saved is not moved, and is discarded. Nothing here is deleted until the move has succeeded. This happens as soon as you confirm - cancelling the editor afterwards does not undo it, and what it buys is fewer copies of one credential, nothing else.";
     case "bind": {
       const identity = identityLabel(identityName, change.identityId);
       const { list, verb } = joinWithVerb(ownedSecrets);
@@ -203,4 +240,40 @@ export function credentialChangeNote(
     case "none":
       return "";
   }
+}
+
+/**
+ * What the forget-key row holds, as its own one-line label - the counterpart of
+ * the fingerprint the recorded-key row shows.
+ *
+ * Through {@link joinWithVerb} rather than a comma-join of its own, because a
+ * list of one and a list of two are the two cases this row actually has and a
+ * shared join reads as correct for one of them and silently wrong for the other.
+ */
+export function forgetKeyRowLabel(keySecrets: readonly string[]): string {
+  return `Stored ${joinWithVerb(keySecrets).list}`;
+}
+
+/**
+ * What the forget-key row says, on both sides of the button having been pressed.
+ *
+ * A function of the FLAGS rather than one fixed sentence, for the reason the row
+ * exists at all: a stored key passphrase with no stored key body is the same
+ * orphan and gets the same row, and a sentence naming a private key would be
+ * describing something that is not there.
+ *
+ * Three things, in both arms. WHAT IS STORED, because this row is the only place
+ * it is said. That this host does not authenticate with it - true by PLACEMENT
+ * rather than by anything passed in here: the row renders only in the auth modes
+ * that have no key field at all, which is what `scripts/host-editor-verify.ts`
+ * pins structurally. And that SAVE is what deletes it, which is the whole
+ * difference between this and a button that writes as it is pressed: the press
+ * records an intent in the editor, and cancelling the editor discards it.
+ */
+export function forgetKeyNote(keySecrets: readonly string[], forgetting: boolean): string {
+  const { list, verb } = joinWithVerb(keySecrets);
+  if (forgetting) {
+    return `The stored ${list} ${verb} deleted when you save, and nothing in Tervia undoes that deletion. Cancelling this editor instead leaves the stored ${list} alone.`;
+  }
+  return `This host does not authenticate with a key, so the stored ${list} ${verb} never read. Forget deletes the stored ${list} when you save, and nothing in Tervia undoes that deletion.`;
 }

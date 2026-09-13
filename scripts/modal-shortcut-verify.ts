@@ -34,63 +34,10 @@
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join, relative } from "node:path";
+import { stripComments, stripperSelfTest } from "./lib/source";
+import { namedImportsFrom } from "./lib/ast";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-
-/**
- * A line with its trailing `//` comment removed, string literals respected.
- *
- * The canonical copy is in `scripts/host-editor-verify.ts`, duplicated here on
- * purpose (no shared module between these scripts, and no `scripts/lib`). A
- * character scan rather than a regex: a `//` inside a string is not a comment,
- * and a regex alternation over string literals desyncs on the first unbalanced
- * quote and then eats real code. This loses the strip for that one line -
- * failing towards KEEPING text.
- */
-function stripLineComment(line: string): string {
-  let quote = "";
-  for (let i = 0; i < line.length; i++) {
-    const c = line[i];
-    if (quote) {
-      if (c === "\\") i++;
-      else if (c === quote) quote = "";
-      continue;
-    }
-    if (c === '"' || c === "'" || c === "`") {
-      quote = c;
-      continue;
-    }
-    if (c === "/" && line[i + 1] === "/") return line.slice(0, i);
-  }
-  return line;
-}
-
-function stripComments(src: string): string {
-  // JSX comment expressions - `{/* ... */}` - are the only comment syntax
-  // legal INSIDE JSX children, and the line-based filter below only ever
-  // recognised `//`, `/*` and `*` starting a trimmed line, none of which match
-  // a line starting `{`. `read()` above strips `dialog.tsx` and
-  // `CommandPalette.tsx` (both `.tsx`), so this file is exposed to it: a
-  // deleted call left behind as `{/* ... */}` would pass every positive check
-  // that reads through `read()`.
-  //
-  // The inner group must NOT be allowed to cross a `*/` while hunting
-  // for one followed by `}` - a lazy `[\s\S]*?` is still permitted to do that,
-  // and a type literal opening `{ /** ... */ x: T }` then swallows everything
-  // up to some later, unrelated `*/}`. The negative lookahead below forbids
-  // that: the first `*/` is final, either a real `{/* ... */}` or the match
-  // fails right there. Copied from `host-editor-verify.ts`'s `stripComments`;
-  // see that file's comment for the measured damage the lazy form did.
-  const withoutJsxComments = src.replace(/\{\s*\/\*(?:(?!\*\/)[\s\S])*\*\/\s*\}/g, "");
-  return withoutJsxComments
-    .split("\n")
-    .filter((line) => {
-      const t = line.trim();
-      return !(t.startsWith("//") || t.startsWith("/*") || t.startsWith("*"));
-    })
-    .map(stripLineComment)
-    .join("\n");
-}
 
 /**
  * Every source-text check in this file is POSITIVE - "this expression is
@@ -116,21 +63,12 @@ function check(name: string, ok: boolean, detail?: unknown): void {
   failed++;
 }
 
-// Self-test: both directions of stripComments' JSX-comment branch, run
-// once so a regression here cannot hide behind every other check in this
-// file. Placed after check()/failed are initialised rather than immediately
-// under the stripComments declaration - failed is a `let`, and calling
-// check() before its initialiser runs would throw instead of reporting FAIL.
-const STRIPPER_PROBE =
-  "type P = { /** c */ x: X };\nconst KEEP = 1;\nconst j = <div>{/* c */}</div>;";
-check(
-  "stripComments does not over-strip past a type literal's doc comment (the lazy-regex trap)",
-  stripComments(STRIPPER_PROBE).includes("KEEP"),
-);
-check(
-  "stripComments does remove a JSX comment expression's own body",
-  !stripComments(STRIPPER_PROBE).includes("{/*"),
-);
+// Self-test: both directions of the shared stripper's JSX-comment branch, run
+// once so a regression there cannot hide behind every other check in this file.
+// Placed after check()/failed are initialised rather than beside the import -
+// failed is a `let`, and calling check() before its initialiser runs would
+// throw instead of reporting FAIL.
+for (const t of stripperSelfTest()) check(t.label, t.ok);
 
 /** Index of the `)` matching the `(` at `openIdx`, or -1. Counts nesting so a
  *  paren inside the call's own arguments (an arrow function, a condition)
@@ -296,11 +234,23 @@ console.log("[behavioural] which modal is on TOP (the palette exemption)");
 // ============================================================================
 console.log("[source-text] useGlobalShortcuts gates on isModalOpen() before dispatch");
 const useGlobalShortcuts = read("src/modules/shortcuts/lib/useGlobalShortcuts.ts");
-check(
-  "imports isModalOpen and isTopModal from the registry",
-  /import\s*\{[^}]*\bisModalOpen\b[^}]*\}\s*from\s*"\.\/modalRegistry"/.test(useGlobalShortcuts) &&
-    /import\s*\{[^}]*\bisTopModal\b[^}]*\}\s*from\s*"\.\/modalRegistry"/.test(useGlobalShortcuts),
-);
+// Read as an import DECLARATION, not as a regex over the raw file: this was a
+// POSITIVE check over raw source, and a comment naming either import satisfies
+// a regex while the import itself is gone.
+{
+  const registryImport = namedImportsFrom(
+    "useGlobalShortcuts.ts",
+    useGlobalShortcuts,
+    "./modalRegistry",
+  );
+  check(
+    "imports isModalOpen and isTopModal from the registry",
+    registryImport !== null &&
+      registryImport.names.includes("isModalOpen") &&
+      registryImport.names.includes("isTopModal"),
+    registryImport?.names,
+  );
+}
 {
   // Item 1 (palette toggle chord): the gate is scoped to the MATCHED
   // shortcut rather than a blanket pre-loop return, because it now needs to
@@ -398,9 +348,11 @@ console.log("[source-text] the palette registers under the name the gate asks fo
     "the palette passes modalName={COMMAND_PALETTE_MODAL}",
     /modalName=\{COMMAND_PALETTE_MODAL\}/.test(palette),
   );
+  const shortcutsImport = namedImportsFrom("CommandPalette.tsx", palette, "@/modules/shortcuts");
   check(
     "imported from the shortcuts module, not spelled out again",
-    /COMMAND_PALETTE_MODAL[\s\S]*?from "@\/modules\/shortcuts"/.test(palette),
+    shortcutsImport !== null && shortcutsImport.names.includes("COMMAND_PALETTE_MODAL"),
+    shortcutsImport?.names,
   );
   const registry = read("src/modules/shortcuts/lib/modalRegistry.ts");
   check(
@@ -420,7 +372,12 @@ for (const [file, comp, arg, deps] of [
   ["src/components/ui/alert-dialog.tsx", "AlertDialog", "", "open"],
 ] as const) {
   const text = read(file);
-  check(`${comp}: imports openModal`, /import\s*\{\s*openModal\s*\}/.test(text));
+  const registryImport = namedImportsFrom(file, text, "@/modules/shortcuts/lib/modalRegistry");
+  check(
+    `${comp}: imports openModal`,
+    registryImport !== null && registryImport.names.includes("openModal"),
+    registryImport?.names,
+  );
   // Must be a useEffect keyed on `open` that RETURNS the release (so React
   // runs it as the cleanup on close AND on unmount - the leak-safety path).
   //

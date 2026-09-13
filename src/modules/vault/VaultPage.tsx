@@ -2,14 +2,15 @@
  * The Vault page: a header with its own search box, then two sections -
  * Identities and Keys.
  *
- * A RAIL VIEW, not a pane leaf. `app/components/WorkspaceArea.tsx:160-238`'s
- * `railView !== null` branch mounts this only while the rail's Vault button is
- * pressed and unmounts it on the way out, which is the opposite of a page
- * leaf: `PaneStack` keeps a background tab's leaves mounted behind
- * `visibility:hidden`. Two consequences run through this file, both marked
- * where they land - there is no `onScreen` prop to take (mount IS the
- * transition), and the caret claim's effect is therefore keyed on `[]`, which
- * is exactly what `HostsPage.tsx:170-175` warns against for a leaf.
+ * A RAIL VIEW, not a pane leaf. `WorkspaceArea`'s `railView !== null` branch
+ * (`src/app/components/WorkspaceArea.tsx`) mounts this only while the rail's
+ * Vault button is pressed and unmounts it on the way out, which is the
+ * opposite of a page leaf: `PaneStack` keeps a background tab's leaves
+ * mounted behind `visibility:hidden`. Two consequences run through this
+ * file, both marked where they land - there is no `onScreen` prop to take
+ * (mount IS the transition), and the caret claim's effect is therefore keyed
+ * on `[]`, which is exactly what the `paneCaret.claim` effect's `[onScreen]`
+ * in `src/modules/hosts/HostsPage.tsx` warns against for a leaf.
  *
  * Everything it draws lives somewhere else: the two cards are their own
  * components, and every derived value comes from `page/derive.ts` as a pure
@@ -111,8 +112,9 @@ export function VaultPage(): ReactNode {
   // frame later, once that is done - and it stands down if an overlay holds the
   // caret, or if the caret is already inside this view.
   //
-  // Keyed on `[]`, and that is the OPPOSITE of `HostsPage.tsx:198`'s
-  // `[onScreen]` for a reason that is worth reading twice before "fixing" it: a
+  // Keyed on `[]`, and that is the OPPOSITE of the `paneCaret.claim` effect's
+  // `[onScreen]` in `src/modules/hosts/HostsPage.tsx`, for a reason that is
+  // worth reading twice before "fixing" it: a
   // page LEAF stays mounted while its tab is in the background, so a mount-only
   // effect there fires once while invisible and never again. This is a rail
   // view - it is not mounted at all when it is not shown, so mount is the only
@@ -142,7 +144,8 @@ export function VaultPage(): ReactNode {
   // back references that are stable BETWEEN RENDERS - straight out of
   // `useState`, not rebuilt by a render this component did not cause - and
   // that is what stops the loop. They are NOT stable across a BROADCAST:
-  // `useHosts.ts:19` and `useVault.ts:38,54` each build a fresh `Map` on every
+  // `useHosts` in `src/modules/hosts/useHosts.ts` and `useVaultIdentities`/
+  // `useVaultKeys` in `src/modules/vault/useVault.ts` each build a fresh `Map` on every
   // `onHostsChanged`/`onVaultChanged`, identical data or not, so this page
   // re-derives every row on every store change, not only a change that
   // actually touches what it shows - free at this scale, worth knowing the
@@ -196,7 +199,7 @@ export function VaultPage(): ReactNode {
 
   // Radix keeps `AlertDialogContent`/`AlertDialogOverlay` MOUNTED for their
   // `data-closed:animate-out … duration-100` exit animation
-  // (`components/ui/alert-dialog.tsx:39,64`), so the dialog re-renders with
+  // (`src/components/ui/alert-dialog.tsx`), so the dialog re-renders with
   // `pendingDelete === null` for ~100ms on every close path - Cancel, Esc,
   // outside-click, the X, and the Delete button itself, which nulls it as its
   // OWN first statement in `confirmDelete` above. Reading `pendingDelete`
@@ -219,8 +222,11 @@ export function VaultPage(): ReactNode {
     // `@container`, not viewport breakpoints: this page renders inside the
     // workspace column, whose width comes from the sidebar drag and the right
     // slot, not from the window. Every size floor between here and the window
-    // edge is a PERCENTAGE (`WorkspaceArea.tsx:97` 25%, `AppSidebar.tsx:215`
-    // 8%, `AppRightSlot.tsx:178` 18%), and a percentage floor shrinks with the
+    // edge is a PERCENTAGE (`WorkspaceArea` in
+    // `src/app/components/WorkspaceArea.tsx` 25%, `AppSidebar` in
+    // `src/app/components/AppSidebar.tsx` 8%, `AppRightSlot` in
+    // `src/app/components/AppRightSlot.tsx` 18%), and a percentage floor
+    // shrinks with the
     // window - so the narrow rules below are reachable only by shrinking the
     // window itself toward `tauri.conf.json`'s `minWidth: 640`, and
     // `scripts/hosts-header-narrow-verify.ts` forces the width directly
@@ -238,12 +244,15 @@ export function VaultPage(): ReactNode {
         <div className="flex flex-wrap items-center gap-2">
           {/* Both labels collapse at the same `@container` threshold the Hosts
               page's New host button and the two backup buttons use
-              (`HostsPage.tsx:337`, `page/HostsBackupActions.tsx:134,144`), so
+              (`HostsPage` in `src/modules/hosts/HostsPage.tsx`,
+              `HostsBackupActions` in
+              `src/modules/hosts/page/HostsBackupActions.tsx`), so
               each button floors at icon + padding instead of icon-plus-text -
               and the search box's `@max-[420px]:basis-full` rule, anticipatory
               until now, becomes the thing that keeps it off their row.
               `aria-label` is SEPARATE from the span for the reason
-              `HostsBackupActions.tsx:107-113` gives: a hidden span still has an
+              `HostsBackupActions` in
+              `src/modules/hosts/page/HostsBackupActions.tsx` gives: a hidden span still has an
               accessible name via the DOM, but relying on that makes the
               collapsed button's name track whatever text the span happens to
               hold. */}

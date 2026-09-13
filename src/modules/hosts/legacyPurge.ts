@@ -11,11 +11,11 @@ import { LEGACY_PURGE_KEY } from "./types";
 // hosts get re-entered once. Nobody accepted leaving the SECRETS.
 // The moment those modules are deleted, `tervia-ssh :: <id>::{password,
 // privateKey, keyPassphrase}` and `tervia-rdp :: <id>::password` become
-// UNENUMERABLE: the IPC surface is `secrets_get`, `secrets_get_all`, `secrets_set`
-// and `secrets_delete`, with no `secrets_list`, so nothing left in the
-// macOS keychain, the Windows `secrets.bin` or the Linux mode-0600 JSON could ever
-// be named from inside the app again. Private keys, permanently, with no delete
-// button anywhere.
+// UNENUMERABLE: the IPC surface is `secrets_get`, `secrets_get_all`, `secrets_set`,
+// `secrets_delete` and `secrets_copy` - each named against the specific accounts it
+// acts on - with no `secrets_list`, so nothing left in the macOS keychain, the Windows
+// `secrets.bin` or the Linux mode-0600 JSON could ever be named from inside the app
+// again. Private keys, permanently, with no delete button anywhere.
 //
 // So this module must OUTLIVE what it cleans up. It reads the two old store files
 // DIRECTLY, through `storeRecovery`'s existing file port, and imports nothing from

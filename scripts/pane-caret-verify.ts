@@ -164,7 +164,7 @@ console.log("[the fix] a claim is not honoured until after the gesture that caus
 console.log("\n[stale claims] the world is re-read at flush time, never at claim time");
 {
   // A slow attach: the leaf was on screen when it claimed and is not by the
-  // time the frame runs. This is the property the previous fix (2dc40b5) added
+  // time the frame runs. This is the property the previous fix added
   // and it is kept, now as a consequence of the contract rather than a
   // special case at two call sites.
   let onScreen = true;

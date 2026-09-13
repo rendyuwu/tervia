@@ -11,8 +11,9 @@ import {
 import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
 import { toast } from "@/components/ui/toast";
-import { applyBackup, buildBackup, type ImportResult } from "./apply";
+import { applyBackup, buildBackup } from "./apply";
 import { BACKUP_EXTENSION } from "./file";
+import { describeExport, summarize, type ImportSummary } from "./summary";
 import { invoke } from "@tauri-apps/api/core";
 import { save as saveFileDialog } from "@tauri-apps/plugin-dialog";
 import { useEffect, useState } from "react";
@@ -36,7 +37,10 @@ export function BackupDialog({ open, onOpenChange, mode }: Props) {
   const [confirm, setConfirm] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [done, setDone] = useState<string | null>(null);
+  // The result line AND the refusals under it, held together because they are
+  // one report - see `summary.ts`. An export has no refusals to carry and says
+  // so with an empty list rather than with a second piece of state.
+  const [done, setDone] = useState<ImportSummary | null>(null);
 
   // Reset per opening. The passphrase must never survive a closed dialog, and
   // a stale result line would otherwise read as if it applied to this run.
@@ -72,7 +76,7 @@ export function BackupDialog({ open, onOpenChange, mode }: Props) {
           return;
         }
         await invoke<void>("fs_write_file", { path: target, content: text });
-        setDone(`Exported ${describeExport(counts)} to ${target}`);
+        setDone({ line: `Exported ${describeExport(counts)} to ${target}`, problems: [] });
       } else {
         const result = await applyBackup(mode.text, passphrase);
         setDone(summarize(result));
@@ -100,8 +104,33 @@ export function BackupDialog({ open, onOpenChange, mode }: Props) {
   };
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-md">
+    <Dialog
+      open={open}
+      // A CLOSE REQUEST IS REFUSED WHILE THE WRITE IS RUNNING, and it is refused
+      // HERE rather than on the content's own `onEscapeKeyDown` and
+      // `onPointerDownOutside` because those two reach only half the routes.
+      // `DialogContent` renders a Radix `Close` for the `X`, and the footer's
+      // Cancel is another one; a `Close` calls the Root's `onOpenChange`
+      // directly and passes through neither content handler. All four routes -
+      // Escape, a pointer down outside, the `X` and Cancel - funnel through
+      // this one callback, which is what makes it the only place that can
+      // answer for all of them.
+      //
+      // THE DISMISSAL IS WHAT STOPS; THE WORK NEVER DOES. Nothing aborts
+      // `applyBackup`, deliberately: a partial import that stops halfway is
+      // worse than one that finishes and reports, and `applyV3`'s whole
+      // ordering argument - records before secrets, containment per record -
+      // depends on it running to the end. What this prevents is the summary
+      // landing on a dialog that is already gone.
+      onOpenChange={(next) => {
+        if (!next && busy) return;
+        onOpenChange(next);
+      }}
+    >
+      {/* The `X` goes with the gate rather than sitting there inert: a control
+          that is visible and silently does nothing is the same dead end the
+          refused Escape would be if it were the only half that shipped. */}
+      <DialogContent className="sm:max-w-md" showCloseButton={!busy}>
         <DialogHeader>
           <DialogTitle>{isExport ? "Export backup" : "Import backup"}</DialogTitle>
           <DialogDescription>
@@ -165,12 +194,32 @@ export function BackupDialog({ open, onOpenChange, mode }: Props) {
           ) : null}
 
           {error ? <span className="text-destructive text-[10.5px]">{error}</span> : null}
-          {done ? <span className="text-muted-foreground text-[10.5px]">{done}</span> : null}
+          {done ? (
+            <div className="flex flex-col gap-1.5">
+              <span className="text-muted-foreground text-[10.5px]">{done.line}</span>
+              {/* A LIST, not a clause. The summary line is one sentence and a
+                  forty-host import can carry several refusals; folding them in
+                  would produce a paragraph nobody reads to the end of. Indexed
+                  keys because the text is not one: two records with the same
+                  name refused the same way give the same string, and this list
+                  is written once from one state update and never reordered. */}
+              {done.problems.length > 0 ? (
+                <ul className="text-destructive flex flex-col gap-1 text-[10.5px]">
+                  {done.problems.map((problem, i) => (
+                    <li key={i}>{problem}</li>
+                  ))}
+                </ul>
+              ) : null}
+            </div>
+          ) : null}
         </div>
 
         <DialogFooter>
           <DialogClose asChild>
-            <Button variant="outline" size="sm">
+            {/* Disabled with the gate above, for the same reason the `X` is
+                hidden: the Root refuses this close, so an enabled button would
+                be one the user can press and watch do nothing. */}
+            <Button variant="outline" size="sm" disabled={busy}>
               {done ? "Close" : "Cancel"}
             </Button>
           </DialogClose>
@@ -182,80 +231,4 @@ export function BackupDialog({ open, onOpenChange, mode }: Props) {
       </DialogContent>
     </Dialog>
   );
-}
-
-function plural(n: number, noun: string, pluralNoun?: string): string {
-  return `${n} ${n === 1 ? noun : (pluralNoun ?? `${noun}s`)}`;
-}
-
-/**
- * The export result line's five-collection summary. Same rule as
- * summarize()'s per-protocol split below: a collection earns its own clause
- * only when it is non-zero, or a vault-only export would read "0 hosts, 0
- * host groups" and a host-only one, symmetrically, "0 identities, 0 keys, 0
- * rules" - both look broken.
- */
-function describeExport(counts: {
-  hosts: number;
-  groups: number;
-  identities: number;
-  keys: number;
-  rules: number;
-}): string {
-  const parts: string[] = [];
-  if (counts.hosts > 0) parts.push(plural(counts.hosts, "host"));
-  if (counts.groups > 0) parts.push(plural(counts.groups, "host group"));
-  if (counts.identities > 0) parts.push(plural(counts.identities, "identity", "identities"));
-  if (counts.keys > 0) parts.push(plural(counts.keys, "vault key"));
-  if (counts.rules > 0) parts.push(plural(counts.rules, "forward rule"));
-  return parts.join(", ");
-}
-
-function summarize(r: ImportResult): string {
-  const added = r.ssh.added + r.rdp.added;
-  const replaced = r.ssh.replaced + r.rdp.replaced;
-  const withoutSecrets = r.ssh.withoutSecrets + r.rdp.withoutSecrets;
-  // The per-protocol split only earns its space when both are present; a
-  // v1 file or an SSH-only export would otherwise report "0 RDP".
-  //
-  // It rides on the HOST count rather than the end of the sentence, because
-  // the clauses after it are about other collections: trailing it would put
-  // "(3 SSH hosts, 2 RDP hosts)" after a sentence about group names, where it
-  // reads as qualifying that instead.
-  const split =
-    r.rdp.added + r.rdp.replaced > 0 && r.ssh.added + r.ssh.replaced > 0
-      ? ` (${plural(r.ssh.added + r.ssh.replaced, "SSH host")}, ${plural(
-          r.rdp.added + r.rdp.replaced,
-          "RDP host",
-        )})`
-      : "";
-  const parts = [`${added} added`, `${replaced} updated${split}`];
-  if (r.skipped > 0) parts.push(`${r.skipped} skipped as unreadable`);
-  if (withoutSecrets > 0) parts.push(`${withoutSecrets} without stored credentials`);
-  // Same rule as the split above: a collection earns its own clause only
-  // when it actually landed something, or a host-only import would read "0
-  // identities, 0 keys, 0 rules" and look broken.
-  const groupCount = r.groups.added + r.groups.replaced;
-  const identityCount = r.identities.added + r.identities.replaced;
-  const keyCount = r.keys.added + r.keys.replaced;
-  const ruleCount = r.rules.added + r.rules.replaced;
-  if (groupCount > 0) parts.push(plural(groupCount, "host group"));
-  if (identityCount > 0) parts.push(plural(identityCount, "identity", "identities"));
-  if (keyCount > 0) parts.push(plural(keyCount, "vault key"));
-  if (ruleCount > 0) parts.push(plural(ruleCount, "forward rule"));
-  // Not failures - `problems[]` is for what could not be done - but not
-  // silent either: each is a case where the file's hosts landed in a group
-  // other than the one the file named, and the file's own record of that is
-  // gone the moment this import finishes.
-  if (r.groups.merged > 0) {
-    const noun = r.groups.merged === 1 ? "group's" : "groups'";
-    parts.push(`${r.groups.merged} ${noun} hosts merged into an existing group of the same name`);
-  }
-  if (r.groups.keptNames > 0) {
-    const noun = r.groups.keptNames === 1 ? "group's" : "groups'";
-    parts.push(
-      `${r.groups.keptNames} ${noun} hosts kept this machine's group name instead of the file's`,
-    );
-  }
-  return `Imported: ${parts.join(", ")}.`;
 }

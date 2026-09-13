@@ -31,21 +31,34 @@ export type RecoveryToast = {
 export type Say = (t: RecoveryToast) => void;
 
 /**
+ * The divergence a restore leaves behind, in the app's own words.
+ *
+ * Said only on the branch where a file actually WAS rolled back, because that is
+ * the only branch where it is true. It states what was not done and stops: the
+ * app did not reconcile anything, cannot enumerate the keychain to find out
+ * (there is no `secrets_list`), and must not imply either.
+ */
+const KEYCHAIN_DIVERGENCE =
+  "Stored passwords and keys were not rolled back with it, so a restored record " +
+  "can describe material that is no longer there.";
+
+/**
  * What to say for one notice, or null when there is nothing to say.
  *
  * Deliberately reports only what happened to the FILE. A recovered store is not
  * a safer store and must not be described as one: the snapshot is metadata from
  * the last process start while the keychain is current, so the two can come back
- * disagreeing (see the note in `lib/storeRecovery.ts`). The notice's own `note`
- * is passed through rather than paraphrased - it names the file and the snapshot,
- * which is what anyone digging further needs, and paraphrasing it here would be
- * a second copy of wording that lives in `lib/storeRecovery.ts`.
+ * disagreeing (see the note in `lib/storeRecovery.ts`, and the entry in
+ * `KNOWN-LIMITS.md` that accepts it). The notice's own `note` is passed through
+ * rather than paraphrased - it names the file and the snapshot, which is what
+ * anyone digging further needs, and paraphrasing it here would be a second copy
+ * of wording that lives in `lib/storeRecovery.ts`.
  */
 export function recoveryToast(label: string, notice: StoreRecovery): RecoveryToast | null {
   if (!notice.note) return null;
   if (notice.recovered) {
     return {
-      message: `${label}: recovered from a backup copy. ${notice.note}`,
+      message: `${label}: recovered from a backup copy. ${notice.note}. ${KEYCHAIN_DIVERGENCE}`,
       variant: "warning",
     };
   }

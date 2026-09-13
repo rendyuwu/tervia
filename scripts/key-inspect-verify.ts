@@ -1,5 +1,5 @@
 /**
- * Self-check for the key-import diagnostics (issue #3 / Track C).
+ * Self-check for the key-import diagnostics.
  * Run: `pnpm verify key-inspect`.
  *
  * `src-tauri/src/modules/ssh/mod.rs` already classifies a pasted or picked key
@@ -50,6 +50,8 @@ import {
   type KeyInspectResult,
   type VaultKeyFacts,
 } from "../src/modules/vault/keyInspect";
+import { stripComments, stripperSelfTest } from "./lib/source";
+import { namedImportsFrom } from "./lib/ast";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const read = (p: string) => readFileSync(join(root, p), "utf8");
@@ -96,66 +98,6 @@ function count(src: string, re: RegExp): number {
  */
 function tight(src: string): string {
   return src.replace(/\s+/g, "").replace(/,(?=[)\]}])/g, "");
-}
-
-/**
- * A single line with any `//` that starts OUTSIDE a string literal, and
- * everything after it, cut off. Quote-aware so a URL or a literal `//` inside a
- * string survives - same convention as `host-editor-verify.ts` and
- * `rdp-lifetime-verify.ts`'s own `stripLineComment`, duplicated here rather than
- * imported because this file owns no shared module to import it from.
- */
-function stripLineComment(line: string): string {
-  let quote = "";
-  for (let i = 0; i < line.length; i++) {
-    const c = line[i];
-    if (quote) {
-      if (c === "\\") i++;
-      else if (c === quote) quote = "";
-      continue;
-    }
-    if (c === '"' || c === "'" || c === "`") {
-      quote = c;
-      continue;
-    }
-    if (c === "/" && line[i + 1] === "/") return line.slice(0, i);
-  }
-  return line;
-}
-
-/**
- * The same source with comments removed: a whole line is dropped if its
- * trimmed text opens a `//`, `/*` or `*` comment (which is every continuation
- * line of a prettier-formatted block or doc comment), and a trailing `//` is
- * stripped from what is left. Used by section [5]'s whole-file safe/verified
- * check so that check runs over what this file RENDERS rather than over a doc
- * comment that states the rule by quoting the words it forbids.
- */
-function stripComments(src: string): string {
-  // JSX comment expressions - `{/* ... */}` - are the only comment syntax
-  // legal INSIDE JSX children, and the line-based filter below only ever
-  // recognised `//`, `/*` and `*` starting a trimmed line, none of which match
-  // a line starting `{`. Section [5]'s `sectionRaw` strips
-  // `SshCredentialSection.tsx` (`.tsx`), so this file is exposed to it: a
-  // deleted call left behind as `{/* ... */}` would pass every positive check
-  // run over the stripped source.
-  //
-  // The inner group must NOT be allowed to cross a `*/` while hunting
-  // for one followed by `}` - a lazy `[\s\S]*?` is still permitted to do that,
-  // and a type literal opening `{ /** ... */ x: T }` then swallows everything
-  // up to some later, unrelated `*/}`. The negative lookahead below forbids
-  // that: the first `*/` is final, either a real `{/* ... */}` or the match
-  // fails right there. Copied from `host-editor-verify.ts`'s `stripComments`;
-  // see that file's comment for the measured damage the lazy form did.
-  const withoutJsxComments = src.replace(/\{\s*\/\*(?:(?!\*\/)[\s\S])*\*\/\s*\}/g, "");
-  return withoutJsxComments
-    .split("\n")
-    .filter((line) => {
-      const t = line.trim();
-      return !(t.startsWith("//") || t.startsWith("/*") || t.startsWith("*"));
-    })
-    .map(stripLineComment)
-    .join("\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -310,18 +252,47 @@ console.log("\n[3b] vaultKeyFactsFrom - what the STORE records, which is not wha
       ...info,
     });
 
-  // A sealed container yields NOTHING - not `keyType: "unknown"`, which would
-  // claim the algorithm was read. `KeyCard.tsx:53-57` renders the two
-  // differently, so this is a visible difference and not a nicety.
+  // A sealed container records no ALGORITHM - not `keyType: "unknown"`, which
+  // would claim the algorithm was read. `page/KeyCard.tsx` renders the two
+  // differently (the record's own `keyType.toUpperCase()` against a literal
+  // "Unknown type"), so this is a visible difference and not a nicety.
   check(
     "a sealed container records no keyType at all",
     facts({ parsed: false, encrypted: true, keyType: "ssh-rsa" }).keyType === undefined,
     facts({ parsed: false, encrypted: true, keyType: "ssh-rsa" }),
   );
+  // It records the ONE fact it can answer, and only that one. A container that
+  // cannot be opened without a passphrase IS encrypted, which is what
+  // `needs_passphrase` in `src-tauri/src/modules/ssh/mod.rs` means by
+  // `parsed: false` - and that fact is the difference between a saved key with
+  // no passphrase and a saved key whose passphrase nobody holds. The key SET is
+  // asserted, not just the absence of three: an implementation that carried the
+  // fingerprint through the sealed branch would pass a per-field check that only
+  // asked about `keyType`.
   check(
-    "...and no fingerprint or public half either",
-    Object.keys(facts({ parsed: false })).length === 0,
+    "...and exactly one key, the encryption fact - no fingerprint and no public half",
+    JSON.stringify(Object.keys(facts({ parsed: false })).sort()) === JSON.stringify(["encrypted"]),
     facts({ parsed: false }),
+  );
+  check(
+    "and that fact is TRUE, stated by the sealed state rather than copied off the input beside it",
+    facts({ parsed: false, encrypted: false }).encrypted === true,
+    facts({ parsed: false, encrypted: false }),
+  );
+
+  // The parsed branch carries the inspection's own answer, both ways, and
+  // `false` must be PRESENT: absent means "nobody looked", which is a different
+  // claim and the one `VaultKey.encrypted` exists to keep separate.
+  check(
+    "a parsed ENCRYPTED answer records encrypted: true",
+    facts({ keyType: "ssh-ed25519", encrypted: true }).encrypted === true,
+    facts({ keyType: "ssh-ed25519", encrypted: true }),
+  );
+  const plainFacts = facts({ keyType: "ssh-ed25519", encrypted: false });
+  check(
+    "a parsed UNENCRYPTED answer records encrypted: false, present rather than absent",
+    plainFacts.encrypted === false && "encrypted" in plainFacts,
+    { value: plainFacts.encrypted, present: "encrypted" in plainFacts },
   );
 
   // A PARSED key with no algorithm reported is the opposite case: it WAS read,
@@ -345,7 +316,7 @@ console.log("\n[3b] vaultKeyFactsFrom - what the STORE records, which is not wha
     ed,
   );
 
-  // The `??` trap: `KeyCard.tsx:68` renders
+  // The `??` trap: `page/KeyCard.tsx` renders
   // `vaultKey.fingerprint ?? "No fingerprint recorded"`, and `"" ?? x` is `""`,
   // so a blank stored here is a blank LINE on screen where the sentence
   // belongs. Same for the public half.
@@ -368,8 +339,8 @@ console.log("\n[3b] vaultKeyFactsFrom - what the STORE records, which is not wha
   // Comment-stripped before the positive below - a raw
   // `.includes("vaultKeyTypeFrom(")` is satisfied by moving the real call
   // into a comment and deleting it. Sanity-checked first, the same model as
-  // this file's own section [5] at :576-580: an empty string would pass the
-  // next check for free.
+  // this file's own section [5] check that "stripping comments left real code
+  // behind": an empty string would pass the next check for free.
   const strippedFacts = stripComments(factsSrc);
   check(
     "stripping comments left real code behind (vaultKeyFactsFrom's body)",
@@ -412,17 +383,9 @@ console.log("\n[4] stripComments - the helper this section's whole-file check de
     stripComments("// safe\nwriteIt();").includes("writeIt();"),
   );
 
-  // The JSX-comment branch, both directions.
-  const STRIPPER_PROBE =
-    "type P = { /** c */ x: X };\nconst KEEP = 1;\nconst j = <div>{/* c */}</div>;";
-  check(
-    "does not over-strip past a type literal's doc comment (the lazy-regex trap)",
-    stripComments(STRIPPER_PROBE).includes("KEEP"),
-  );
-  check(
-    "does remove a JSX comment expression's own body",
-    !stripComments(STRIPPER_PROBE).includes("{/*"),
-  );
+  // The JSX-comment branch, both directions. The probe lives with the shared
+  // stripper; the `ok:` lines are counted here.
+  for (const t of stripperSelfTest()) check(t.label, t.ok);
 }
 
 // ---------------------------------------------------------------------------
@@ -447,7 +410,7 @@ console.log("\n[5] SshCredentialSection.tsx - the wiring, over the raw source");
     "const checkKey = async (pem: string, passphrase: string) => {",
     "const invalidateInspection = () => {",
   );
-  check("checkKey's region was located", checkKeyRegion.length > 50, checkKeyRegion.length);
+  check("checkKey's region was located", checkKeyRegion.length > 111, checkKeyRegion.length);
 
   check(
     "checkKey calls the real bridge function, not a stand-in",
@@ -499,7 +462,7 @@ console.log("\n[5] SshCredentialSection.tsx - the wiring, over the raw source");
   );
   check(
     "invalidateInspection's region was located",
-    invalidateRegion.length > 20,
+    invalidateRegion.length > 56,
     invalidateRegion.length,
   );
   check(
@@ -532,7 +495,7 @@ console.log("\n[5] SshCredentialSection.tsx - the wiring, over the raw source");
   );
   check(
     "the key-passphrase field's region was located",
-    passphraseFieldRegion.length > 20,
+    passphraseFieldRegion.length > 61,
     passphraseFieldRegion.length,
   );
   check(
@@ -598,7 +561,7 @@ console.log("\n[5] SshCredentialSection.tsx - the wiring, over the raw source");
   );
   check(
     "the empty-file guard's own region was located",
-    emptyGuardRegion.length > 20,
+    emptyGuardRegion.length > 47,
     emptyGuardRegion.length,
   );
   check(
@@ -703,15 +666,25 @@ console.log(
   const dialogSrc = stripComments(dialogRaw);
   const sectionRaw = read("src/modules/hosts/editor/SshCredentialSection.tsx");
 
+  // Read as import DECLARATIONS, not as text over `dialogRaw`. Both were
+  // positive regexes over the raw file, and this dialog's own prose names both
+  // of these imports while explaining what they are for - so a deletion that
+  // left the sentence behind passed the check that exists to catch it.
+  const bridgeImport = namedImportsFrom("HostEditorDialog.tsx", dialogRaw, "@/modules/ssh/bridge");
+  const keyInspectImport = namedImportsFrom(
+    "HostEditorDialog.tsx",
+    dialogRaw,
+    "@/modules/vault/keyInspect",
+  );
   check(
     "the dialog inspects through the same bridge function the panel uses, not a second command",
-    /import \{[^}]*\binspectSshKey\b[^}]*\}\s*from\s*"@\/modules\/ssh\/bridge";/.test(dialogRaw),
+    bridgeImport !== null && bridgeImport.names.includes("inspectSshKey"),
+    bridgeImport?.names,
   );
   check(
     "and it imports describeKeyError from this module rather than trimming the prefix itself",
-    /import \{[^}]*\bdescribeKeyError\b[^}]*\}\s*from\s*"@\/modules\/vault\/keyInspect";/.test(
-      dialogRaw,
-    ),
+    keyInspectImport !== null && keyInspectImport.names.includes("describeKeyError"),
+    keyInspectImport?.names,
   );
 
   // Over the COMMENT-STRIPPED source for the positives: the comment written
@@ -725,7 +698,7 @@ console.log(
     "if (!(e instanceof HostBindingChangedError)) {",
     "} else if (e.actual",
   );
-  check("its generic error arm was located", genericArm.length > 40, genericArm.length);
+  check("its generic error arm was located", genericArm.length > 86, genericArm.length);
   // Through `tight` on both sides, needle included: a NEGATIVE that goes
   // vacuous on a reformat is a false pass, which is the worse direction of the
   // two, and the positive beside it would be a landmine.
@@ -814,9 +787,30 @@ if (failed > 0) console.error(`${failed} check(s) FAILED.`);
 //   V3: `fingerprint: info.fingerprint || undefined`      section [3b]'s "a blank
 //     changed to `fingerprint: info.fingerprint ?? undefined`  fingerprint becomes
 //                                                       undefined, never \"\"" check
-//   V4: `if (!info.parsed) return {};` changed to         section [3b]'s first two
-//     `if (!info.parsed) return { keyType:                 checks (sealed container
-//     vaultKeyTypeFrom(info.keyType) };`                    records no keyType/facts)
+//   V4: the sealed branch changed to return a keyType    all THREE of section
+//     - `return { keyType:                                 [3b]'s sealed-container
+//     vaultKeyTypeFrom(info.keyType) };`                    checks: "records no
+//                                                       keyType at all", "exactly
+//                                                       one key, the encryption
+//                                                       fact", and "that fact is
+//                                                       TRUE"
+//   W1: keyInspect.ts - the sealed branch reverted to     section [3b]'s "exactly
+//     `return {};`, i.e. the shape before it carried        one key, the encryption
+//     the encryption fact                                   fact" and "that fact is
+//                                                       TRUE" (2 failed). ALSO
+//                                                       reddens vault-draft-verify
+//                                                       section 5's two
+//                                                       sealed-container rows,
+//                                                       which is the cross-file
+//                                                       half of the same claim.
+//   W2: keyInspect.ts - `encrypted: info.encrypted`       section [3b]'s "a parsed
+//     deleted from the parsed branch                        ENCRYPTED answer" and
+//                                                       "a parsed UNENCRYPTED
+//                                                       answer ... present rather
+//                                                       than absent" (2 failed).
+//                                                       ALSO reddens five rows in
+//                                                       vault-draft-verify
+//                                                       sections 1 and 5.
 //   V8: vaultKeyTypeFrom's body changed to                section [3]'s eight
 //     `return "unknown";` unconditionally                  non-"unknown" rows AND
 //                                                       section [3b]'s mapping row
@@ -869,16 +863,40 @@ if (failed > 0) console.error(`${failed} check(s) FAILED.`);
 //                                                       copy brings the sentence
 //                                                       with it. `tsc` stayed at 0.
 //   E5: `pnpm exec prettier --print-width 60 --write`      NOTHING in section [7],
-//     over HostEditorDialog.tsx - the paired reformat        which is the point of
-//     that an exact-text pin owes                            the pair. It DID redden
-//                                                       the narrowing pin before
-//                                                       `tight()` existed: Prettier
-//                                                       broke the call across lines
-//                                                       AND added a trailing comma,
-//                                                       which whitespace-stripping
-//                                                       alone does not remove.
-//                                                       Section [5]'s own anchors
-//                                                       do not survive that
-//                                                       reformat - pre-existing,
-//                                                       untouched here.
+//     over HostEditorDialog.tsx - the paired reformat        nor anywhere else in
+//     that an exact-text pin owes                            this file, which is the
+//                                                       point of the pair. It DID
+//                                                       redden the narrowing pin
+//                                                       before `tight()` existed:
+//                                                       Prettier broke the call
+//                                                       across lines AND added a
+//                                                       trailing comma, which
+//                                                       whitespace-stripping alone
+//                                                       does not remove.
+//
+// WHAT E5's ZERO DOES NOT COVER: it reformats ONE file, and this file's checks
+// read five. Run the same `--print-width 60` over all of `src/` instead and ten
+// checks here redden, in two sections the row above does not touch - measured per
+// file rather than carried forward, so each number says which reformat produced
+// it:
+//
+//   - SEVEN in [5], from reformatting `editor/SshCredentialSection.tsx`. FOUR
+//     follow the `between()` start anchor `const checkKey = async (pem: string,
+//     passphrase: string) => {`: Prettier splits that declaration one parameter
+//     per line, the anchor stops matching, the region collapses to length 0, and
+//     the three checks that read the region fail behind it. The other THREE are
+//     pickKeyFile's `onChange({ privateKey: ..., keyPassphrase: "" })` broken
+//     across lines, which is exactly the shape E5 describes above.
+//   - THREE in [3b], from reformatting `vault/keyInspect.ts`, all one cause: the
+//     regex locating `vaultKeyFactsFrom`'s body spells that signature as a single
+//     line, and Prettier splits it the same way. Same class as [5]'s first four -
+//     a whole declaration pinned as one line - through a different instrument, a
+//     regex literal rather than a `between()` anchor.
+//
+// The two are disjoint and additive: seven plus three is the ten a whole-`src/`
+// reformat costs, so neither reformat reddens anything the other does. An earlier
+// version of this note named [5] alone and called it a casualty of "that
+// reformat" - true of a reformat over a file this control does not touch, and
+// silent about [3b]. `KNOWN-LIMITS.md` carries the repository-wide figure these
+// ten are part of, and the measurement the number came from.
 process.exit(failed === 0 ? 0 : 1);

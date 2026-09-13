@@ -10,16 +10,16 @@ import type { VaultAuthMode, VaultIdentity, VaultKey } from "../types";
 // gets written lives here, where it can be checked without a DOM.
 //
 // THE RULE THE WHOLE FILE IS BUILT ON: a blank secret field means "leave
-// whatever is stored alone", never "delete it". `writeSecret` (`../store.ts:118-133`)
+// whatever is stored alone", never "delete it". `writeSecret` (`src/modules/vault/store.ts`)
 // reads `undefined` as leave-alone and a blank string as DELETE, so the
 // distance between the two is one `if` - and getting it wrong costs a private
 // key nobody can put back, because no layer above the keychain ever reads a
 // secret and so none of them holds a previous value.
 //
 // Unlike the host editor there is no keychain SEED here and therefore no
-// `touched`/`seeded` pair (`../../hosts/editor/sshSecrets.ts:81-93`): the vault
-// store exposes no secret read at all (`../store.ts:39-71`) and `SecretsIo` has
-// no single-value read by design (`../adapters.ts:52-61`), so a secret field is
+// `touched`/`seeded` pair (`sshSecretsForSave` in `src/modules/hosts/editor/sshSecrets.ts`): the vault
+// store exposes no secret read at all (`VaultStore` in `src/modules/vault/store.ts`) and `SecretsIo` has
+// no single-value read by design (`SecretsIo.copy` in `src/modules/vault/adapters.ts`), so a secret field is
 // only ever filled by the user. Blank is unambiguous here in a way it is not
 // there.
 //
@@ -46,7 +46,7 @@ export type IdentityDraft = {
 };
 
 /** Always replaced, never mutated in place - the same discipline
- *  `NO_SSH_SECRETS_TOUCHED` (`../../hosts/editor/types.ts:60-64`) is held to. */
+ *  `NO_SSH_SECRETS_TOUCHED` (`src/modules/hosts/editor/types.ts`) is held to. */
 export const EMPTY_IDENTITY_DRAFT: IdentityDraft = {
   name: "",
   username: "",
@@ -77,19 +77,19 @@ export function identityDraftFrom(identity: VaultIdentity): IdentityDraft {
  * The identity form's validation, or `null` when it passes.
  *
  * `name` and `username` are required and the password is not, which is the same
- * split the host editor settled at `SshCredentialSection.tsx:60-99`: a row
+ * split the host editor settled at `validateSshCredential` in `src/modules/hosts/editor/SshCredentialSection.tsx`: a row
  * without a username is MALFORMED - it has no presence flag, no indicator and
  * no path that fills it later - while a row without a password is merely
  * incomplete, is a state the store persists, and is exactly what the Vault
- * page's "Missing secret" badge exists to show (`page/IdentityCard.tsx:92-95`).
+ * page's "Missing secret" badge exists to show (`IdentityCardProps.missingSecret` in `src/modules/vault/page/IdentityCard.tsx`).
  * Refusing it would make that badge unreachable from the UI, which is the
  * present-correct-and-dead shape.
  *
- * `name` is required here and NOT at the store (`../store.ts:197-236` requires
+ * `name` is required here and NOT at the store (`upsertIdentity` in `src/modules/vault/store.ts` requires
  * only that key auth names a key), so this function is the only guard on it.
  * That asymmetry is admitted rather than hidden: a blank name renders an empty
  * card title and makes the delete refusal fall back to an opaque id
- * (`page/derive.ts:352`).
+ * (`deleteRefusalText` in `src/modules/vault/page/derive.ts`).
  */
 export function validateIdentityDraft(draft: IdentityDraft): string | null {
   if (!draft.name.trim()) return "Name is required";
@@ -137,19 +137,19 @@ function identityKeyId(draft: IdentityDraft, rule: IdentityKeyIdRule): string | 
  * The record `upsertIdentity` is handed.
  *
  * `keyId` IS THE POINT OF THIS FUNCTION. `VaultIdentity.keyId`'s doc
- * says "Set when `authMode === 'key'`" (`../types.ts:107-108`) and nothing
+ * says "Set when `authMode === 'key'`" (`src/modules/vault/types.ts`) and nothing
  * enforced it: the store refuses key auth with no key and refuses a `keyId`
- * naming a key that does not exist (`../store.ts:208-213`), but it accepts a
+ * naming a key that does not exist (`upsertIdentity` in `src/modules/vault/store.ts`), but it accepts a
  * RESOLVABLE `keyId` on a password identity - which then renders a grey key
  * chip on a row that authenticates with a password
- * (`page/derive.ts:130-134` sets `keyName` from `keyId` alone;
- * `page/IdentityCard.tsx:103` renders the chip from `keyName`). It reads as
+ * (`identityRows` in `src/modules/vault/page/derive.ts` sets `keyName` from `keyId` alone;
+ * `IdentityCard` in `src/modules/vault/page/IdentityCard.tsx` renders the chip from `keyName`). It reads as
  * "this identity signs with that key". It does not.
  *
  * So the mode decides, here, at the write. Nothing is destroyed by it: the
- * `VaultKey` is a separate record (`../types.ts:116`), which is what
+ * `VaultKey` is a separate record (`src/modules/vault/types.ts`), which is what
  * `deleteNote` already tells the user about a key-auth identity
- * (`page/derive.ts:409-411`). The DRAFT keeps the selection so a toggle inside
+ * (`src/modules/vault/page/derive.ts`). The DRAFT keeps the selection so a toggle inside
  * one sitting costs nothing.
  *
  * `keyIdRule` is the one documented opt-out from that, defaulted so a caller
@@ -157,8 +157,8 @@ function identityKeyId(draft: IdentityDraft, rule: IdentityKeyIdRule): string | 
  * does and the credential it would otherwise leave deletable.
  *
  * `hasPassword` is a placeholder, not a claim: `upsertIdentity` overwrites it
- * with what it actually stored (`../store.ts:218-227`), the same way
- * `HostEditorDialog.tsx:739-741` hands the host store three `false`s.
+ * with what it actually stored (`src/modules/vault/store.ts`), the same way
+ * `save` in `src/modules/hosts/HostEditorDialog.tsx` hands the host store three `false`s.
  */
 export function identityRecordFrom(
   id: string,
@@ -187,7 +187,7 @@ export function identityRecordFrom(
  * never filled deletes a credential and reports success.
  *
  * Untrimmed on the way out. `writeSecret` trims before it decides
- * (`../store.ts:126`), so trimming again here would only move the decision.
+ * (`src/modules/vault/store.ts`), so trimming again here would only move the decision.
  */
 export function identitySecretsForSave(draft: IdentityDraft): { password?: string } {
   return draft.password.trim() === "" ? {} : { password: draft.password };
@@ -228,7 +228,7 @@ export function keyDraftFrom(key: VaultKey): KeyDraft {
 /**
  * The key form's validation, or `null` when it passes.
  *
- * A NAME is required at the store too (`../store.ts:247`) and is repeated here
+ * A NAME is required at the store too (`upsertKey` in `src/modules/vault/store.ts`) and is repeated here
  * so the message arrives in the form instead of as a rejected promise.
  *
  * A BODY is required only when CREATING, and the asymmetry is the whole rule.
@@ -254,19 +254,23 @@ export function validateKeyDraft(draft: KeyDraft, mode: "create" | "edit"): stri
  * The record `upsertKey` is handed.
  *
  * `facts` is `null` when the body was left blank - nothing about the stored key
- * is being replaced, so the three things recorded about it are still true and
- * are carried across unchanged.
+ * is being replaced, so the four things recorded about it are still true and
+ * are carried across unchanged. `encrypted` follows the same rule as the other
+ * three, and has to: a rename that dropped it would turn "an inspection found
+ * this body encrypted" back into "nobody has ever looked", which is the record
+ * silently forgetting the one fact that says a stored key needs a passphrase it
+ * does not have.
  *
- * When `facts` is present the three are replaced WHOLESALE, and that includes
- * being replaced with nothing: `vaultKeyFactsFrom` returns `{}` for a sealed
- * container, and the base record below names none of the three, so they end up
- * absent. Merging the old values under the new ones is the failure this shape
- * exists to prevent - a fingerprint that outlives the key body it described
- * names a key the record no longer holds, and the Vault page would show it next
- * to the new key's name without anything looking wrong.
+ * When `facts` is present the four are replaced WHOLESALE, and that includes
+ * being replaced with nothing: `vaultKeyFactsFrom` returns only `encrypted` for
+ * a sealed container, and the base record below names none of the four, so the
+ * other three end up absent. Merging the old values under the new ones is the
+ * failure this shape exists to prevent - a fingerprint that outlives the key
+ * body it described names a key the record no longer holds, and the Vault page
+ * would show it next to the new key's name without anything looking wrong.
  *
  * `hasPrivateKey` and `hasPassphrase` are placeholders: `upsertKey` overwrites
- * both with what it actually stored (`../store.ts:158-180`).
+ * both with what it actually stored (`writeKeySecrets` in `src/modules/vault/store.ts`).
  */
 export function keyRecordFrom(
   id: string,
@@ -287,6 +291,7 @@ export function keyRecordFrom(
       keyType: existing?.keyType,
       fingerprint: existing?.fingerprint,
       publicKey: existing?.publicKey,
+      encrypted: existing?.encrypted,
     };
   }
   return { ...base, ...facts };
@@ -301,7 +306,7 @@ export function keyRecordFrom(
  * key the record no longer holds - the same stale-projection failure
  * {@link keyRecordFrom} refuses for the fingerprint, and worse, because
  * `deleteNote` would then promise to delete a passphrase this key never had
- * (`page/derive.ts:402-406`). So: when the body is replaced, the passphrase
+ * (`src/modules/vault/page/derive.ts`). So: when the body is replaced, the passphrase
  * field goes down with it, blank included, and blank is the store's clear.
  *
  * When the body is NOT replaced, neither secret is: a blank passphrase leaves
@@ -324,7 +329,7 @@ export function keySecretsForSave(draft: KeyDraft): {
  * thing on the two sides of `hasStoredPassword`.
  *
  * The same split, for the same reason, as `passwordHelp` in
- * `../../hosts/editor/SshCredentialSection.tsx:117-122`: on an identity that
+ * `src/modules/hosts/editor/SshCredentialSection.tsx`: on an identity that
  * has no password, blank saves an identity without one and saying so is the
  * point; on one that HAS a password, blank means the stored value is left
  * exactly as it is, and telling the user "leave blank to save without one"
@@ -362,16 +367,64 @@ export function passphraseHelp(replacingBody: boolean): string {
  * `encrypted` comes from the inspection, not from the draft: an
  * `openssh-key-v1` container answers `parsed: true` with a real type,
  * fingerprint and public half WITHOUT its passphrase
- * (`../../../../src-tauri/src/modules/ssh/mod.rs:302-313`), so nothing about the
+ * (`ssh_key_inspect_inner` in `src-tauri/src/modules/ssh/mod.rs`), so nothing about the
  * record that would be written says the passphrase is missing. A sealed
  * container - `.ppk`, PKCS#8 - answers `parsed: false, encrypted: true`, and is
  * the same trap with fewer facts.
  *
- * Refused rather than warned, because the state has no way out. There is no way
- * to add a passphrase to a stored key without replacing the body
- * ({@link keySecretsForSave}), so a key saved this way is permanently unusable,
- * and `keyMissingSecret` (`../refs.ts:67-69`) reads only `hasPrivateKey`, so
- * nothing on the Vault page says a word about it.
+ * Refused rather than warned, because every connect with that key fails until
+ * the passphrase is supplied, and this is the moment the user has the key in
+ * front of them. NOT because the state is unrecoverable - it is recoverable, and
+ * saying otherwise here would be the same overclaim this function's own message
+ * used to make: {@link keySecretsForSave}'s keep-branch forwards a LONE
+ * passphrase, so typing one into this editor over a blank body adds it to the
+ * stored key without replacing the body. What has no way out is REMOVING a
+ * passphrase, which is the asymmetry {@link keySecretsForSave} documents.
+ *
+ * This refusal is a gate on the two EDITOR doors, and the reason it is not a
+ * gate on every route into the state differs by route. An IMPORT cannot carry
+ * one: `sanitizeKey` in `modules/backup/file.ts` reads a file and inspects
+ * nothing, so it has no answer to refuse over. A HOST-TO-VAULT CONVERSION does
+ * inspect, on ONE of its arms - `applyCredentialChange` in
+ * `../../hosts/HostEditorDialog.tsx` calls `inspectSshKey` for the facts it
+ * mints onto the new key, but only while the key field still holds the stored
+ * body it was seeded with, and the host's own stored passphrase is seeded in the
+ * field beside it, so on that arm both operands this function takes are already
+ * in hand at that site. It deliberately does not refuse, and that is the right
+ * answer: the host already holds an encrypted key with no passphrase, so the
+ * convert MOVES that state rather than creating one, and refusing would strand
+ * the credential in a host record the user is trying to empty.
+ *
+ * What answers for that route is the saved record, ON THE ARM WHERE THE FACTS
+ * WERE READ: `VaultKey.encrypted` carries the inspection's answer, so a key
+ * minted from an unedited stored body carries `encrypted: true` with
+ * `hasPassphrase: false`, and `keyNeedsPassphrase` in `../refs.ts` is what the
+ * key card asks - and only for a row that HOLDS a private key, because a record
+ * carrying the flag with no stored body has no passphrase question to answer.
+ * `keyMissingSecret` next to it reads only `hasPrivateKey` and deliberately
+ * still does; it is what speaks for that row.
+ *
+ * ON THE CONVERT ARMS WHERE THE INSPECTION DOES NOT RUN, NOTHING REPORTS THE
+ * STATE, and that is a gap in what is reported rather than a lie in the record.
+ * The gate above skips the inspection whenever the key field is no longer the
+ * seeded stored body - one keystroke in the textarea marks it touched, which is
+ * ordinary interaction - and an inspection that throws degrades to the same
+ * place, so `facts` is `{}` and the minted record names none of the four,
+ * `encrypted` included. Absent is the honest answer there, exactly as it is for
+ * `keyType`, `fingerprint` and `publicKey`: nobody inspected the material that
+ * travelled. So `keyNeedsPassphrase` answers `false` for that key and the card
+ * is silent about it, while the body that travelled by account move may well be
+ * encrypted with no passphrase. Both arms' record shapes are held side by side
+ * in `scripts/vault-draft-verify.ts` section 10.
+ *
+ * THE MESSAGE MAY NOT DESCRIBE THE SAVED RECORD, and that constraint is what its
+ * last clause turns on. Two editors render this one string, and their records are
+ * not the same shape: a `VaultKey` carries `encrypted` and the key card reads it,
+ * while a host's `SshInlineCredentials` has no such field and nothing on the
+ * Hosts page says a word about the state. So any sentence about what the record
+ * or the page can report is true on one surface and false on the other. The
+ * message stays with what holds for both - the connect fails, and the passphrase
+ * is what changes that.
  *
  * The host editor's inline key field had the same hole and now imports this
  * rather than carrying a second copy of it, so the two editors refuse the same
@@ -381,5 +434,5 @@ export function passphraseHelp(replacingBody: boolean): string {
  */
 export function encryptedKeyRefusal(encrypted: boolean, passphrase: string): string | null {
   if (!encrypted || passphrase.trim() !== "") return null;
-  return "This key file is encrypted and needs its passphrase. Enter it below and save again - a key stored without it cannot be used, and nothing on the saved record can tell that apart from a key that has none.";
+  return "This key file is encrypted and needs its passphrase. Enter it below and save again - a key stored without it fails every connect, and the passphrase is the only thing that changes that.";
 }

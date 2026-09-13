@@ -20,6 +20,7 @@
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join, relative } from "node:path";
+import { stripBlockComments } from "./lib/source";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const read = (p: string) => readFileSync(p, "utf8");
@@ -62,15 +63,16 @@ function walk(dir: string, match: RegExp, out: string[] = []): string[] {
 const files = walk(join(root, "src"), /\.(css|tsx?)$/);
 check("found stylesheets to scan", files.length > 20, files.length);
 
-/** Prose is not a rule. Stylesheets carry `/* … *\/` comments that talk ABOUT
- *  these properties - including the warning in globals.css this check exists to
- *  enforce. */
-const stripComments = (text: string) => text.replace(/\/\*[\s\S]*?\*\//g, "");
-
 // `scrollbar-width` / `scrollbar-color` are only ever allowed to hide.
 const offenders: string[] = [];
 for (const file of files) {
-  const text = stripComments(read(file));
+  // Prose is not a rule. Stylesheets carry block comments that talk ABOUT
+  // these properties - including the warning in globals.css this check exists
+  // to enforce. `stripBlockComments` rather than the full `stripComments`
+  // because this walk includes `.css` files, where a `url(http://...)` carries
+  // a `//` that is not a comment: the quote-aware line stripper would truncate
+  // the declaration at it and hide an offender from a negative check.
+  const text = stripBlockComments(read(file));
   for (const m of text.matchAll(/scrollbar-(?:width|color)\s*:\s*([^;!}\n]+)/g)) {
     const value = m[1].trim();
     if (value === "none" || value === "initial" || value === "auto") continue;

@@ -97,6 +97,8 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { stripComments, stripperSelfTest } from "./lib/source";
+import { scopeOf } from "./lib/scope";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const read = (p: string) => readFileSync(join(root, p), "utf8");
@@ -125,140 +127,6 @@ function between(src: string, from: string, to: string): string {
   const end = src.indexOf(to, start + from.length);
   if (end < 0) return "";
   return src.slice(start, end);
-}
-
-/**
- * A line with its trailing `//` comment removed, string literals respected.
- *
- * Quote-aware rather than a regex because a `//` inside a string is not a
- * comment. An apostrophe in unquoted JSX text opens a quote state that never
- * closes, which loses the strip for that one line - it fails towards keeping
- * text, never towards deleting code.
- */
-function stripLineComment(line: string): string {
-  let quote = "";
-  for (let i = 0; i < line.length; i++) {
-    const c = line[i];
-    if (quote) {
-      if (c === "\\") i++;
-      else if (c === quote) quote = "";
-      continue;
-    }
-    if (c === '"' || c === "'" || c === "`") {
-      quote = c;
-      continue;
-    }
-    if (c === "/" && line[i + 1] === "/") return line.slice(0, i);
-  }
-  return line;
-}
-
-/**
- * The same source with comments removed. The docblock's first "load-bearing"
- * note is the why; the shape is `host-editor-verify.ts`'s, deliberately, so the
- * two files cannot drift into disagreeing about what counts as code.
- */
-function stripComments(src: string): string {
-  // JSX comment expressions - `{/* ... */}` - are the only comment syntax
-  // legal INSIDE JSX children, and the line-based filter below only ever
-  // recognised `//`, `/*` and `*` starting a trimmed line, none of which match
-  // a line starting `{`. `paneSrc`/`editorSrc`/`promptDialogSrc` below all
-  // strip `.tsx` files, so this file is exposed to it - and demonstrated live:
-  // deleting `HostEditorDialog.tsx`'s `applied.current = token;` write and
-  // leaving it in exactly this shape passed section [3]'s row guard entirely,
-  // 81 ok / 0 FAIL, with the guard removed.
-  //
-  // The inner group must NOT be allowed to cross a `*/` while hunting
-  // for one followed by `}` - a lazy `[\s\S]*?` is still permitted to do that,
-  // and a type literal opening `{ /** ... */ x: T }` then swallows everything
-  // up to some later, unrelated `*/}`. The negative lookahead below forbids
-  // that: the first `*/` is final, either a real `{/* ... */}` or the match
-  // fails right there. Copied from `host-editor-verify.ts`'s `stripComments`;
-  // see that file's comment for the measured damage the lazy form did.
-  const withoutJsxComments = src.replace(/\{\s*\/\*(?:(?!\*\/)[\s\S])*\*\/\s*\}/g, "");
-  return withoutJsxComments
-    .split("\n")
-    .filter((line) => {
-      const t = line.trim();
-      return !(t.startsWith("//") || t.startsWith("/*") || t.startsWith("*"));
-    })
-    .map(stripLineComment)
-    .join("\n");
-}
-
-/**
- * Does the `{` at `brace` open a statement list, or an object literal?
- *
- * `) {` is an `if`/`for`/`while`/function, `> {` is an arrow body, and
- * `;`/`{`/`}` mean the brace follows a statement. `(`, `,`, `:`, `=`, `[` and `$`
- * all introduce a VALUE, so the brace opens a literal and anything inside it is
- * an argument rather than a statement. The distinction is what lets a check name
- * a field of an argument object (`kind: "keyDown"`) and still be told which
- * BLOCK the call it belongs to sits in.
- */
-function opensABlock(src: string, brace: number): boolean {
-  let i = brace - 1;
-  while (i >= 0 && /\s/.test(src[i])) i--;
-  if (i < 0) return true;
-  const prev = src[i];
-  if (")>;{}".includes(prev)) return true;
-  const word = /(\w+)$/.exec(src.slice(0, i + 1))?.[1] ?? "";
-  return word === "else" || word === "try" || word === "do" || word === "finally";
-}
-
-/**
- * Does the `}` at `brace` close a statement list?
- *
- * Its partner is found first, because right-to-left a closing brace says nothing
- * about what it closes: `focus({ ok: true });` and `if (a) { other(); }` end the
- * same way, and only one of them ends a STATEMENT. Called only at depth 0, where
- * the answer changes an outcome.
- */
-function closesABlock(src: string, brace: number): boolean {
-  let depth = 0;
-  for (let i = brace; i >= 0; i--) {
-    if (src[i] === "}") depth++;
-    else if (src[i] === "{") {
-      depth--;
-      if (depth === 0) return opensABlock(src, i);
-    }
-  }
-  return false;
-}
-
-/**
- * The innermost statement list containing `at`: where its block opens, and the
- * text of the list up to `at` with nested groups elided.
- *
- * Walking out over object-literal braces is what makes a needle inside an
- * ARGUMENT (`kind: "mouseDown"`) report the block its call sits in. Eliding
- * nested groups, and standing a `;` where a nested BLOCK closed, is what stops
- * `if (a) { record(); }\nsend(…)` from reading as though `send` were inside that
- * guard or as though `record()` were a statement of its own list. Both are
- * merely text that precedes it - which is all a slice could ever report, and is
- * exactly how a fixed lookback lies.
- */
-function scopeOf(src: string, at: number): { block: number; before: string } {
-  let before = "";
-  let depth = 0;
-  for (let i = at - 1; i >= 0; i--) {
-    const c = src[i];
-    if (c === "}") {
-      if (depth === 0 && closesABlock(src, i)) before = ";" + before;
-      depth++;
-      continue;
-    }
-    if (c === "{") {
-      if (depth > 0) {
-        depth--;
-        continue;
-      }
-      if (opensABlock(src, i)) return { block: i, before };
-      continue;
-    }
-    if (depth === 0) before = c + before;
-  }
-  return { block: -1, before };
 }
 
 /** The statements of that list, with the partial one `at` itself sits in dropped. */
@@ -476,17 +344,9 @@ console.log("[0] the helpers the checks below depend on");
   );
   check("and keeps the code around it", stripComments("// x\nwriteIt();").includes("writeIt();"));
 
-  // The JSX-comment branch, both directions.
-  const STRIPPER_PROBE =
-    "type P = { /** c */ x: X };\nconst KEEP = 1;\nconst j = <div>{/* c */}</div>;";
-  check(
-    "stripComments does not over-strip past a type literal's doc comment (the lazy-regex trap)",
-    stripComments(STRIPPER_PROBE).includes("KEEP"),
-  );
-  check(
-    "stripComments does remove a JSX comment expression's own body",
-    !stripComments(STRIPPER_PROBE).includes("{/*"),
-  );
+  // The JSX-comment branch, both directions. The probe lives with the shared
+  // stripper; the `ok:` lines are counted here.
+  for (const t of stripperSelfTest()) check(t.label, t.ok);
 
   for (const [path, raw, stripped] of [
     ["RdpPane.tsx", paneRaw, paneSrc],

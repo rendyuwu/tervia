@@ -40,8 +40,20 @@ export type RdpDialTarget = {
    * connect got far enough to use it, or whether an error path released it
    * already. Calling it twice must NOT release twice - a second release spends
    * another consumer's reference and closes a session still in use.
+   *
+   * AWAITABLE, and resolves only once the backend has actually been told when
+   * this release is the entry's last - `closeForwardForConnection`'s own
+   * contract. Awaiting is what lets a caller know the local port is free again
+   * before it dials something else through it.
+   *
+   * A caller that CANNOT await still exists and is not being written out: a
+   * React effect cleanup is synchronous, so the pane's teardown drops the
+   * promise. What that used to cost - a close landing on a listener a later
+   * open bound on the same port - is held by the forward's generation now (see
+   * `SshForward.generation` in `ssh/tunnel.ts`) rather than by the ordering, so
+   * the two callers differ in what they can observe and not in what is safe.
    */
-  release: () => void;
+  release: () => Promise<void>;
 };
 
 /**
@@ -63,7 +75,7 @@ export async function openRdpDialTarget(
 ): Promise<RdpDialTarget> {
   const sshHostId = conn.tunnel?.sshHostId;
   if (!sshHostId) {
-    return { host: conn.host, port: conn.port, viaTunnel: false, release: () => {} };
+    return { host: conn.host, port: conn.port, viaTunnel: false, release: async () => {} };
   }
   const forward = await openForwardForConnection(sshHostId, conn.host, conn.port, {
     // The RDP connect flow has a dialog on screen anyway, so an unverified
@@ -81,7 +93,7 @@ export async function openRdpDialTarget(
     host: LOOPBACK,
     port: forward.localPort,
     viaTunnel: true,
-    release: () => {
+    release: async () => {
       if (released) return;
       released = true;
       // `forward.claim` names the entry this dial took its reference from, so a
@@ -91,7 +103,11 @@ export async function openRdpDialTarget(
       // `0` because the RDP path never pins a local port and lets the OS pick -
       // the same fact `LOOPBACK` above establishes for the address - so 0 is
       // what named the entry on the way in.
-      void closeForwardForConnection(sshHostId, conn.host, conn.port, 0, forward.claim).catch(
+      //
+      // AWAITED rather than fired off, so this function's promise means what it
+      // says. The `.catch` is what keeps it from rejecting into a teardown that
+      // has nowhere to report: a dial that died has no listener to close.
+      await closeForwardForConnection(sshHostId, conn.host, conn.port, 0, forward.claim).catch(
         () => {},
       );
     },

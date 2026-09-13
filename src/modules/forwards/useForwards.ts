@@ -15,8 +15,8 @@ import type { ForwardRule } from "./types";
 /**
  * Every saved forward rule, as one stable value.
  *
- * The `useMemo` is load-bearing rather than an optimisation, per
- * `useVault.ts:65-74`'s doc on the same shape: a consumer that lists this in a
+ * The `useMemo` is load-bearing rather than an optimisation, per `useVault`'s
+ * (`vault/useVault.ts`) doc on the same shape: a consumer that lists this in a
  * `useMemo` dependency array would otherwise re-derive on every render, because
  * a Map handed back through a fresh wrapper is never `Object.is` the last one.
  * Wrapping the state value here rather than returning it directly is what keeps

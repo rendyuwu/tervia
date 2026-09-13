@@ -17,7 +17,8 @@
  * with no Tauri and no DOM.
  */
 
-import { closeSshForward, openSshForward } from "@/modules/ssh/bridge";
+import { describeError } from "@/lib/describeError";
+import { closeSshForward, openSshForward, type SshForwardHandle } from "@/modules/ssh/bridge";
 
 import { useHostOwnedForwards, type HostOwnedEntry } from "./hostOwned";
 import { useForwardRuntime, type ForwardStatus } from "./runtime";
@@ -40,21 +41,30 @@ import type { ForwardRule } from "./types";
 export type AutostartDeps = {
   listRules: () => Promise<ForwardRule[]>;
   /** `ssh/bridge.ts`'s `openSshForward`: binds one `ssh -L` listener on a LIVE
-   *  session and resolves with the port it actually bound. */
+   *  session and resolves with the port it actually bound and the generation
+   *  that names that listener - see `SshForwardHandle` in `ssh/bridge.ts`. */
   openForward: (
     id: number,
     localPort: number,
     remoteHost: string,
     remotePort: number,
-  ) => Promise<number>;
+  ) => Promise<SshForwardHandle>;
   /** `ssh/bridge.ts`'s `closeSshForward`. Needed for the two cases where a bind
    *  RESOLVED into a rule somebody else had meanwhile taken - the PAGE (its
    *  `markStarting` is synchronous) or ANOTHER PANE's own autostart run, which
    *  is not staggered by anything and so passes its own pre-bind read before
    *  either side claims. First claim wins, so the loser closes the
    *  listener it just bound rather than leaving a second one standing that
-   *  nothing on either side names. */
-  closeForward: (id: number, boundPort: number) => Promise<boolean>;
+   *  nothing on either side names.
+   *
+   *  Takes the `generation` its own open handed back, so the close names the
+   *  listener THAT bind opened rather than whatever holds the port when it
+   *  lands. Nothing in this loop reaches that case today - the two binds racing
+   *  for one rule cannot both hold a pinned port, and the loop issues one close
+   *  per bind with no await between the bind and it - so the pair is threaded
+   *  here because it is what the command takes, not to close a window that is
+   *  open on this side. */
+  closeForward: (id: number, boundPort: number, generation: number) => Promise<boolean>;
   /** The page's status for this rule. READ TWICE per rule - once before the
    *  bind and once immediately before the claim - because the user can click
    *  Start at any point during a bind. */
@@ -76,9 +86,10 @@ export type AutostartDeps = {
    * it - `ssh-session.ts` closes over a flag it sets at both of its release
    * sites, and module scope here has nothing to close over.
    *
-   * Same idiom as `controller.ts:88`'s `isCurrentAttempt` and
-   * `pty-lifecycle.ts:75`'s epoch check: an `await` in a lifetime-scoped loop
-   * needs a way to ask whether the lifetime is still the one it started in.
+   * Same idiom as `controller.ts`'s `isCurrentAttempt` and the epoch check
+   * inside `openPtyForSession` (`pty-lifecycle.ts`): an `await` in a
+   * lifetime-scoped loop needs a way to ask whether the lifetime is still the
+   * one it started in.
    */
   stillLive?: () => boolean;
 };
@@ -90,7 +101,7 @@ export const defaultAutostartDeps: AutostartDeps = {
   // Both stores are read at CALL time, not captured at module load: an action
   // identity read once here would be a second reference to a store this file
   // does not own, and `getState()` is what every other event-handler caller in
-  // this codebase does (`controller.ts`, `tunnel.ts:183`).
+  // this codebase does (`controller.ts`, `watchPrompts` in `tunnel.ts`).
   runtimeStatus: (ruleId) => useForwardRuntime.getState().byRule[ruleId]?.status ?? "stopped",
   hostOwnedBy: (ruleId) => useHostOwnedForwards.getState().byRule[ruleId]?.sessionId,
   claimHostOwned: (ruleId, entry) => useHostOwnedForwards.getState().claim(ruleId, entry),
@@ -100,40 +111,15 @@ export const defaultAutostartDeps: AutostartDeps = {
   stillLive: () => true,
 };
 
-/**
- * `terminal/lib/session-helpers.ts`'s `describeError`, copied rather than
- * imported - the third copy, and the same trade `controller.ts`'s own
- * `describeError` already made one file over. That module cannot even be
- * LOADED outside the app: it
- * imports `@xterm/xterm` and `@tauri-apps/plugin-os`, and importing it under
- * `tsx` throws `Cannot read properties of undefined (reading 'currentWindow')`
- * before a single line of this file would run. Six lines is the cheaper of the
- * two prices; lifting `describeError` into a module with no Tauri and no DOM
- * imports is the real remedy.
- *
- * The string branch is the load-bearing one and not boilerplate: a Tauri
- * `invoke` rejects with a RAW STRING, so that is how the backend's own
- * `ssh: bind 127.0.0.1:<port> failed: <io error>` reaches the banner at all.
- */
-function describeError(e: unknown): string {
-  if (typeof e === "string") return e;
-  if (e instanceof Error) return e.message;
-  try {
-    return JSON.stringify(e);
-  } catch {
-    return String(e);
-  }
-}
-
-// The banners. `->` in ASCII and not `→`, matching
-// `ssh-session.ts:498-501`'s existing forward banner: a terminal under a
-// non-UTF-8 font renders the arrow as garbage. The PAGE's route uses `→` - two
+// The banners. `->` in ASCII and not `→`, matching `forwardDetectedUrl`'s
+// existing forward banner (`ssh-session.ts`): a terminal under a non-UTF-8
+// font renders the arrow as garbage. The PAGE's route uses `→` - two
 // surfaces, two correct answers.
 //
-// The success line names `bound`, the port the open RESOLVED WITH, and never
-// `rule.localPort`: an auto rule asked for 0 and a pinned rule can be handed a
-// different port, so naming the requested one prints a port the forward is not
-// actually listening on.
+// The success line names `boundPort`, the port the open RESOLVED WITH, and
+// never `rule.localPort`: an auto rule asked for 0 and a pinned rule can be
+// handed a different port, so naming the requested one prints a port the
+// forward is not actually listening on.
 
 function forwardingBanner(rule: ForwardRule, bound: number): string {
   return `\x1b[2m[tervia] forwarding localhost:${bound} -> ${rule.remoteHost}:${rule.remotePort} (${rule.name})\x1b[0m\r\n`;
@@ -165,8 +151,9 @@ function skippedBanner(rule: ForwardRule, status: "running" | "starting"): strin
 
 /** The other half of the exclusion: another PANE's session already has this
  *  rule open on this host. The terminal deliberately dials its own session per
- *  pane (`ssh/tunnel.ts:31-35`), so two tabs to one host are two autostart
- *  runs. Deliberately does NOT say the page owns it - it does not.
+ *  pane (see `ssh/tunnel.ts`'s header, on what is NOT shared), so two tabs to
+ *  one host are two autostart runs. Deliberately does NOT say the page owns
+ *  it - it does not.
  *
  *  ONE SENTENCE FOR BOTH ARMS of that half - the pre-bind refusal and the
  *  post-bind yield, which also closes the listener it just bound. The outcome
@@ -213,9 +200,9 @@ export async function startHostForwards(
   // from INSIDE the per-rule catch, where there is no handler left. Today none
   // of those throws in production, but only because `writeSshBanner` guards
   // `s.disposed` and `s.term.dispose()` runs after that flag is set
-  // (`ssh-session.ts:76-84`, `session-lifecycle.ts:732,744`) - a claim about
-  // another file's ordering, which is not what a doc comment saying NEVER
-  // REJECTS should rest on.
+  // (`writeSshBanner` in `ssh-session.ts`; `disposeSession` in
+  // `session-lifecycle.ts`) - a claim about another file's ordering, which is
+  // not what a doc comment saying NEVER REJECTS should rest on.
   try {
     let rules: ForwardRule[];
     try {
@@ -233,7 +220,7 @@ export async function startHostForwards(
     for (const rule of mine) {
       // THE SESSION MAY ALREADY BE GONE BEFORE THE FIRST BIND, not only during
       // a later one. `finishSsh` sets `sessionEnded` UNCONDITIONALLY
-      // (`ssh-session.ts:218`), before `openSsh` has resolved an id - so a
+      // (`ssh-session.ts`), before `openSsh` has resolved an id - so a
       // session that ended while this run was still reading the store would
       // otherwise issue one bind on a dead session and orphan that listener
       // before the post-bind check below breaks the loop. Same `break` and same
@@ -247,8 +234,9 @@ export async function startHostForwards(
       //
       // PRESENCE ALONE, and not `owner !== sessionId`. A rule THIS session
       // already owns is the reconnect-with-the-same-id case, and it cannot
-      // happen - `next_id` is a monotonic `AtomicU32` from 1
-      // (`src-tauri/src/modules/ssh/mod.rs:52,59,476`). The difference is what
+      // happen - `next_id` is a monotonic `AtomicU32` from 1 (`SshState.next_id`
+      // in `src-tauri/src/modules/ssh/mod.rs`, declared and initialized there
+      // and incremented in its `ssh_open` command). The difference is what
       // each version does IF IT EVER DID: presence refuses, which loses nothing
       // (the entry already names a live listener for this rule); the comparison
       // binds a SECOND listener and overwrites its own entry, orphaning the
@@ -265,7 +253,7 @@ export async function startHostForwards(
         continue;
       }
       try {
-        const bound = await deps.openForward(
+        const { boundPort, generation } = await deps.openForward(
           sessionId,
           rule.localPort,
           rule.remoteHost,
@@ -286,9 +274,9 @@ export async function startHostForwards(
         // BREAK, not `continue`: there is nothing to bind further forwards on,
         // and no banner is worth writing because the pane is gone. Not claiming
         // is sufficient - the backend reaps the orphaned listener when the last
-        // `Arc<Session>` drops (`src-tauri/src/modules/ssh/session.rs:386-393`
-        // and the `Drop` at `:627-643`), so what leaks here is only frontend
-        // state.
+        // `Arc<Session>` drops (`SshSession` holds `handle`/`jump_handles` in
+        // `src-tauri/src/modules/ssh/session.rs`, and its `Drop` impl aborts
+        // the forward tasks), so what leaks here is only frontend state.
         if (!(deps.stillLive?.() ?? true)) break;
         // RE-READ BOTH MAPS, in the same order as the pre-bind pair above, and
         // for the same reason each of them exists. The pre-bind reads happened
@@ -303,8 +291,9 @@ export async function startHostForwards(
         // makes a re-read immediately before the claim unraceable in turn.
         const laterOwner = deps.hostOwnedBy(rule.id);
         if (laterOwner !== undefined) {
-          // AWAITED, and `controller.ts:188-194` and `:219-225` carry the
-          // argument for the identical hazard on the page's side of this same
+          // AWAITED, and `controller.ts`'s `startRule` - its pre-dial refusal
+          // and its post-dial yield check - carries the argument for the
+          // identical hazard on the page's side of this same
           // yield: "a close that landed later could land on a listener a
           // subsequent Start has since bound on that port". Two files, one
           // rule, and they now agree. A CONSISTENCY change - nothing here was
@@ -326,13 +315,14 @@ export async function startHostForwards(
           // Bounded because the whole run is fire-and-forget from
           // `openSshForSession`, so the pane's first prompt is not held either
           // way; a per-close timeout would be the remedy if it is ever seen.
-          await deps.closeForward(sessionId, bound).catch(() => {});
+          await deps.closeForward(sessionId, boundPort, generation).catch(() => {});
           writeBanner(otherTerminalBanner(rule));
           continue;
         }
         // `"running"` ONLY, and NOT `"starting"` - this is the one place the
-        // post-bind rule differs from the pre-bind one, and `:141-145`'s
-        // argument about the very same status is why. A page Start that is still
+        // post-bind rule differs from the pre-bind one, and `skippedBanner`'s
+        // SPLIT BY STATUS argument about the very same status is why. A page
+        // Start that is still
         // DIALLING can fail, and a rule that is down on both sides because each
         // one yielded to the other is a wrong answer rather than a louder one:
         // the terminal's bind has already succeeded here, so it CLAIMS, and the
@@ -348,15 +338,15 @@ export async function startHostForwards(
         if (taken === "running") {
           // Awaited and `.catch`-ed for exactly the reasons the
           // other-terminal arm above gives - one rule, one spelling.
-          await deps.closeForward(sessionId, bound).catch(() => {});
+          await deps.closeForward(sessionId, boundPort, generation).catch(() => {});
           writeBanner(yieldedBanner(rule));
           continue;
         }
         // CLAIMED BEFORE THE BANNER. The banner is what the user sees; the claim
         // is what the page reads. Reversed, anything that threw in between would
         // leave the user told about a forward the page cannot see.
-        deps.claimHostOwned(rule.id, { sessionId, boundPort: bound });
-        writeBanner(forwardingBanner(rule, bound));
+        deps.claimHostOwned(rule.id, { sessionId, boundPort });
+        writeBanner(forwardingBanner(rule, boundPort));
       } catch (e) {
         // Per-rule and non-fatal: this rule says why, and the loop CONTINUES to
         // the next one.

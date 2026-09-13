@@ -9,7 +9,7 @@ import { FORWARDS_KEY, type ForwardRule } from "./types";
 //
 // `hosts` arrives on `upsertRule` as a REQUIRED INJECTED LOOKUP, never an
 // import. `modules/hosts/store.ts`'s own comment on `ForwardRuleCleanup`
-// (:112-114) explains the direction: `modules/forwards` will always want to
+// explains the direction: `modules/forwards` will always want to
 // import `Host` from `modules/hosts` (a type-only import, and the only one this
 // file makes across modules), so a `modules/hosts` -> `modules/forwards` import
 // closes the cycle. `ForwardRuleCleanup` is the wiring in the other direction -
@@ -17,7 +17,7 @@ import { FORWARDS_KEY, type ForwardRule } from "./types";
 //
 // `dropRulesForHost` is the callee behind that wiring, and it deliberately does
 // NOT consult the host lookup at all: it runs from inside `deleteHost`'s own
-// write queue (`hosts/store.ts`:954-961), awaited before that queue touches the
+// write queue (`deleteHost` in `hosts/store.ts`), awaited before that queue touches the
 // keychain or the host list, and a rule may legitimately name a host id that is
 // already gone - deleted in another window, or lost with a torn store file. A
 // lookup here would either re-enter a queue that is already mid-entry (a
@@ -73,9 +73,9 @@ function isValidRemotePort(port: number): boolean {
 }
 
 export function createForwardStore(io: ForwardsIo): ForwardsStore {
-  // Serialized by the store port, not here - see `vault/store.ts:111`'s
-  // identical one-liner for why the queue belongs beside the file rather than
-  // in this layer.
+  // Serialized by the store port, not here - see `enqueueWrite` in
+  // `vault/store.ts`'s identical one-liner for why the queue belongs beside
+  // the file rather than in this layer.
   const enqueueWrite = <T>(op: () => Promise<T>): Promise<T> => io.store.enqueueWrite(op);
 
   async function listRules(): Promise<ForwardRule[]> {

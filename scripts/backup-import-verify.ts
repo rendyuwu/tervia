@@ -14,12 +14,22 @@
  * sections; this file reuses `parseBackupFile` only to establish WHAT the
  * pre-check decides at the point it runs.
  *
- * Three concerns:
+ * Four concerns:
  *
  *   `BackupDialog.tsx` - Import's run() failure must toast(), not setError()
  *   into the dialog's own inline line (this one surface was left out of the
  *   toast consolidation: "three surfaces become one" is still deferred, so
  *   Export's inline line is checked to be UNCHANGED, not merged away).
+ *
+ *   `backup/summary.ts` - the two result lines' guard EXPRESSIONS, which used to
+ *   be scanned out of `BackupDialog.tsx` because `summarize` and `describeExport`
+ *   lived there. They are pure functions in their own module now, so
+ *   `backup-verify.ts` calls them and asserts each clause's whole sentence: a
+ *   strictly stronger claim about what they DO. It is not a stronger claim about
+ *   how they are WRITTEN, which is what these pins are left here for - a fixture
+ *   cannot tell `counts.hosts > 0` from `counts.hosts !== 0`, because no count a
+ *   real import produces is negative. See Part 1b for which of the two halves
+ *   catches what.
  *
  *   `HostsBackupActions.tsx` - openImport() must establish the envelope shape
  *   (kind/version/payload presence) BEFORE opening the dialog that asks for a
@@ -45,6 +55,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 import { BACKUP_KIND, BACKUP_KIND_V1, parseBackupFile } from "../src/modules/backup/file";
+import { stripComments, stripperSelfTest } from "./lib/source";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const read = (p: string) => readFileSync(join(root, p), "utf8");
@@ -58,90 +69,22 @@ function check(label: string, cond: boolean): void {
   }
 }
 
-/**
- * A line with its trailing `//` comment removed, string literals respected.
- *
- * Quote-aware rather than a regex because a `//` inside a string is not a
- * comment, and this editor's help text is exactly the sort of string that would
- * one day contain one. An apostrophe in unquoted JSX text opens a quote state
- * that never closes, which loses the strip for that one line - it fails towards
- * keeping text, never towards deleting code.
- *
- * Copied verbatim from `host-editor-verify.ts` (also duplicated in
- * `rdp-lifetime-verify.ts`) rather than reimplemented. Extracting this and
- * `stripComments` into a shared `scripts/lib` is out of scope here; this is
- * now the THIRD copy of the same two functions, not the second.
- */
-function stripLineComment(line: string): string {
-  let quote = "";
-  for (let i = 0; i < line.length; i++) {
-    const c = line[i];
-    if (quote) {
-      if (c === "\\") i++;
-      else if (c === quote) quote = "";
-      continue;
-    }
-    if (c === '"' || c === "'" || c === "`") {
-      quote = c;
-      continue;
-    }
-    if (c === "/" && line[i + 1] === "/") return line.slice(0, i);
-  }
-  return line;
-}
-
-/**
- * The same source with comments removed.
- *
- * Every check below runs on this rather than on the raw file, for the reason
- * `host-editor-verify.ts` and `rdp-lifetime-verify.ts` both give: the prose in
- * this file's own docblock names the guarded calls it checks for by their
- * literal text, so a regex over raw source could be satisfied by a comment
- * alone. Deleting (or commenting out) a guarded call and leaving a trailing
- * `// was: ...` behind it must fail, and stripping first is what makes it
- * fail. Confirmed by breaking `parseBackupFile(raw);` exactly that way.
- */
-function stripComments(src: string): string {
-  // JSX comment expressions - `{/* ... */}` - are the only comment syntax
-  // legal INSIDE JSX children, and the line-based filter below only ever
-  // recognised `//`, `/*` and `*` starting a trimmed line, none of which match
-  // a line starting `{`. Both `dialogSrc` and `actionsSrc` below strip a
-  // `.tsx` file, so this file is exposed to it: a deleted guarded call left
-  // behind as `{/* ... */}` would pass every positive check run over the
-  // stripped source.
-  //
-  // The inner group must NOT be allowed to cross a `*/` while hunting
-  // for one followed by `}` - a lazy `[\s\S]*?` is still permitted to do that,
-  // and a type literal opening `{ /** ... */ x: T }` then swallows everything
-  // up to some later, unrelated `*/}`. The negative lookahead below forbids
-  // that: the first `*/` is final, either a real `{/* ... */}` or the match
-  // fails right there. Copied from `host-editor-verify.ts`'s `stripComments`;
-  // see that file's comment for the measured damage the lazy form did.
-  const withoutJsxComments = src.replace(/\{\s*\/\*(?:(?!\*\/)[\s\S])*\*\/\s*\}/g, "");
-  return withoutJsxComments
-    .split("\n")
-    .filter((line) => {
-      const t = line.trim();
-      return !(t.startsWith("//") || t.startsWith("/*") || t.startsWith("*"));
-    })
-    .map(stripLineComment)
-    .join("\n");
-}
-
-// Self-test: both directions of the JSX-comment branch above.
-const STRIPPER_PROBE =
-  "type P = { /** c */ x: X };\nconst KEEP = 1;\nconst j = <div>{/* c */}</div>;";
-check(
-  "stripComments does not over-strip past a type literal's doc comment (the lazy-regex trap)",
-  stripComments(STRIPPER_PROBE).includes("KEEP"),
-);
-check(
-  "stripComments does remove a JSX comment expression's own body",
-  !stripComments(STRIPPER_PROBE).includes("{/*"),
-);
+// `stripComments` and its self-test are shared, in `lib/source`; the reason
+// this file strips at all is its own docblock, which names the guarded calls
+// the pins below search for by their literal text. A regex over raw source
+// would be satisfied by that prose alone. Both directions of the shared
+// stripper's JSX-comment branch are asserted here rather than in the library,
+// because `check` is per script and a `check` at library scope would be counted
+// by nobody.
+for (const t of stripperSelfTest()) check(t.label, t.ok);
 
 const dialogSrc = stripComments(read("src/modules/backup/BackupDialog.tsx"));
 const actionsSrc = stripComments(read("src/modules/hosts/page/HostsBackupActions.tsx"));
+// Stripped for a sharper reason than the other two: `summary.ts`'s own header
+// states the `r.<collection>.<field>` rule that two of the pins below check, and
+// `IMPORT_FIELDS_LEFT_UNSAID`'s per-entry comments name field paths. Prose that
+// describes a guard is not the guard.
+const summarySrc = stripComments(read("src/modules/backup/summary.ts"));
 
 // --- Part 1: BackupDialog.tsx --------------------------------------------
 
@@ -214,17 +157,43 @@ for (const noun of ["host", "host group", "vault identities", "vault key", "forw
   check(`import description names "${noun}"`, importDesc.includes(noun));
 }
 
-console.log(
-  "\n[dialog] the export result line hides a zero-valued collection, not just identities/keys/rules",
-);
+// --- Part 1b: summary.ts, where the two result lines went -------------------
+//
+// THE SAME TEN PROPERTIES, POINTED AT THE MODULE THAT NOW OWNS THEM. Every one
+// of them used to be scanned out of `BackupDialog.tsx`; not one is retired.
+//
+// WHAT CHANGED IS WHAT ELSE HOLDS THEM, and the honest answer differs per pin
+// rather than being one sentence about all ten. `summarize` and `describeExport`
+// are callable now, so `backup-verify.ts` asserts every clause's whole sentence
+// by value, and for the eight guard pins that is strictly stronger about
+// BEHAVIOUR - narrowing a guard to `>= 0` reddens a sentence fixture where it
+// only reddened a substring here. It is not stronger about SPELLING: widening
+// `counts.hosts > 0` to `counts.hosts !== 0` behaves identically for every count
+// a real import can produce, so no fixture anywhere sees it and these eight are
+// the only thing that does. Measured in both directions, one guard at a time.
+//
+// THE TWO `r.groups.*` PINS GAINED A SECOND JOB IN THE MOVE. `backup-verify.ts`
+// derives which `ImportResult` fields `summarize` reads off those very
+// expressions, and partitions the type's leaves against the result - so the `r.`
+// spelling is load-bearing, and a field reached through a local alias reddens
+// there as well as here.
+console.log("\n[summary] the export result line hides a zero-valued collection");
 // Pin the guard EXPRESSIONS, not just the field names: `counts.identities`
 // appearing somewhere in the function is also true of a version that always
 // pushes it. `describeExport`'s parameter is a multi-line object type, so the
 // non-greedy `[^)]*` (which, being a negated class, matches newlines too)
 // walks past it to the first real `)` before the body starts.
 const describeExportBody =
-  dialogSrc.match(/function describeExport\([^)]*\)[^{]*\{([\s\S]*?)\n\}/)?.[1] ?? "";
-check("describeExport() was found", describeExportBody.length > 0);
+  summarySrc.match(/function describeExport\([^)]*\)[^{]*\{([\s\S]*?)\n\}/)?.[1] ?? "";
+// The block's own vacuity guard, and it does one thing the import in
+// `backup-verify.ts` cannot: that file names `describeExport` in an import
+// clause, so a rename or a deletion kills it outright - but a rewrite into
+// `export const describeExport = (...) => ...` imports perfectly well and would
+// leave the five checks below reading an empty string and passing.
+check(
+  "describeExport() was found, as a function declaration in summary.ts",
+  describeExportBody.length > 0,
+);
 for (const field of ["hosts", "groups", "identities", "keys", "rules"]) {
   check(
     `describeExport() only includes "${field}" when it is non-zero (counts.${field} > 0)`,
@@ -233,14 +202,31 @@ for (const field of ["hosts", "groups", "identities", "keys", "rules"]) {
 }
 
 console.log(
-  "\n[dialog] summarize() reports groups too - counts, and the two silent-conflict cases",
+  "\n[summary] summarize() reports groups too - counts, and the two silent-conflict cases",
 );
 // Pin the guard EXPRESSIONS for the same reason describeExport's are pinned
 // above: the field name appearing somewhere in the function is also true of
 // a version that always reports it.
+//
+// THE SIGNATURE IN THIS PATTERN IS PART OF THE PIN, and it is the one thing here
+// that changed rather than moved. `summarize` returned a bare `string` while the
+// reasons a partial import could give were fetched by nobody; it returns
+// `ImportSummary` now - the sentence AND the one line per refusal underneath it.
+//
+// TWO THINGS CATCH A REVERT, AND NOT THE SAME TWO. Reverting the ANNOTATION is
+// caught by `tsc` twice - TS2322 in `summary.ts` and TS2345 at the dialog's
+// `setDone` - and by this pin, while `backup-verify.ts` stays green over it:
+// measured, because both its fixtures and its partition read what the function
+// DOES, and an annotation changes neither. Dropping `problems` from the returned
+// object is the other way round - five checks redden there, the partition among
+// them, and this pin does not notice at all. Neither half is the other's backup.
 const summarizeBody =
-  dialogSrc.match(/function summarize\(r: ImportResult\): string \{([\s\S]*?)\n\}/)?.[1] ?? "";
-check("summarize() was found", summarizeBody.length > 0);
+  summarySrc.match(/function summarize\(r: ImportResult\): ImportSummary \{([\s\S]*?)\n\}/)?.[1] ??
+  "";
+check(
+  "summarize() was found, and still returns the reasons alongside the line",
+  summarizeBody.length > 0,
+);
 check(
   "summarize() only reports host groups when added+replaced is non-zero (groupCount > 0)",
   summarizeBody.includes("groupCount > 0"),

@@ -14,6 +14,9 @@
  * tail recording every mutation actually run against this file.
  */
 import { readFileSync } from "node:fs";
+
+import ts from "typescript";
+
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -36,6 +39,7 @@ import {
 import type { RdpHost, SshHost } from "../src/modules/hosts/types";
 import { VaultInUseError } from "../src/modules/vault/types";
 import type { VaultIdentity, VaultKey } from "../src/modules/vault/types";
+import { callsFunction, importSpecifiersOf, namedImportsFrom } from "./lib/ast";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -693,21 +697,61 @@ console.log(
     ok(`derive.ts does not contain ${JSON.stringify(needle)}`, !deriveSrc.includes(needle));
     ok(`refs.ts does not contain ${JSON.stringify(needle)}`, !refsSrc.includes(needle));
   }
+
+  // AND THE SET, which is what actually closes the class. Every needle above
+  // enumerates a forbidden SPELLING, and the set of spellings that reach the
+  // store is infinite: `../store`, `../../vault/store`, `../../../vault/store`
+  // from a file one directory deeper, `@/modules/vault/store`, and
+  // `await import("../../vault/store")`, which has no `from` clause at all and
+  // still resolves and executes. `import { findKey } from "../../vault/store"`
+  // is not hypothetical - the same evasion went green against an enumeration
+  // in a sibling script and is what put a set pin there.
+  //
+  // Asserting the EXACT set the file is allowed to depend on inverts the
+  // problem: a new import is a new member whatever it is spelled, and the
+  // needles above are kept beside it as belt and braces rather than as the
+  // claim.
+  const specifiersOf = (rel: string, src: string): string[] =>
+    importSpecifiersOf(
+      ts.createSourceFile(rel, src, ts.ScriptTarget.ESNext, true, ts.ScriptKind.TS),
+    );
+  const derivePinned = ["../refs", "../types", "@/lib/searchTiers", "@/modules/hosts/types"];
+  const refsPinned = ["./types", "@/modules/hosts/types"];
+  const deriveFound = specifiersOf("derive.ts", deriveSrc);
+  const refsFound = specifiersOf("refs.ts", refsSrc);
+  ok(
+    `derive.ts's import specifiers are exactly ${JSON.stringify(derivePinned)} - found ${JSON.stringify(deriveFound)}`,
+    JSON.stringify(deriveFound) === JSON.stringify(derivePinned),
+  );
+  ok(
+    `refs.ts's import specifiers are exactly ${JSON.stringify(refsPinned)} - found ${JSON.stringify(refsFound)}`,
+    JSON.stringify(refsFound) === JSON.stringify(refsPinned),
+  );
 }
+
+// --- the shared-import reader ----------------------------------------------
+//
+// Sections 10 to 14 are POSITIVE checks over RAW source, which is the shape a
+// comment can satisfy: `/from "@\/lib\/searchTiers"/.test(searchSrc)` is true
+// of a file whose only mention of that module is a sentence explaining why it
+// used to import it. The negatives beside them are safe raw - an absence check
+// reddens on prose, which costs a round and not a defect - so only the
+// positives move onto the AST here.
+//
+// An import declaration read AS a declaration cannot be spelled in a comment,
+// and neither can a call expression read as a call.
 
 // --- 10. The Host import in refs.ts stays type-only -------------------------
 
 console.log("\n[10] refs.ts imports Host as a TYPE, never as a value");
 {
   const refsSrc = readFileSync(join(root, "src/modules/vault/refs.ts"), "utf8");
+  const hostImport = namedImportsFrom("refs.ts", refsSrc, "@/modules/hosts/types");
   ok(
-    "matches the type-only import form",
-    /import type \{[^}]*Host[^}]*\} from "@\/modules\/hosts\/types"/.test(refsSrc),
+    "imports Host from @/modules/hosts/types",
+    hostImport !== null && hostImport.names.includes("Host"),
   );
-  ok(
-    "does not match a value-import form of the same specifier",
-    !/^import \{[^}]*\} from "@\/modules\/hosts\/types"/m.test(refsSrc),
-  );
+  ok("and the import is type-only, never a value import", hostImport?.typeOnly === true);
 }
 
 // --- 11. hosts/search.ts shares the word-boundary primitive -----------------
@@ -715,9 +759,10 @@ console.log("\n[10] refs.ts imports Host as a TYPE, never as a value");
 console.log("\n[11] hosts/search.ts imports the shared word-boundary check, no local copy");
 {
   const searchSrc = readFileSync(join(root, "src/modules/hosts/search.ts"), "utf8");
+  const shared = namedImportsFrom("search.ts", searchSrc, "@/lib/searchTiers");
   ok(
     "imports hasWordBoundaryMatch from the shared module",
-    /from "@\/lib\/searchTiers"/.test(searchSrc),
+    shared !== null && shared.names.includes("hasWordBoundaryMatch"),
   );
   ok("does not redefine WORD_BOUNDARY locally", !searchSrc.includes("const WORD_BOUNDARY"));
 }
@@ -727,9 +772,10 @@ console.log("\n[11] hosts/search.ts imports the shared word-boundary check, no l
 console.log("\n[12] hosts/page/derive.ts imports the shared missing-secret check, no local copy");
 {
   const deriveSrc = readFileSync(join(root, "src/modules/hosts/page/derive.ts"), "utf8");
+  const shared = namedImportsFrom("derive.ts", deriveSrc, "@/modules/vault/refs");
   ok(
     "imports identityMissingSecret from the shared module",
-    /from "@\/modules\/vault\/refs"/.test(deriveSrc),
+    shared !== null && shared.names.includes("identityMissingSecret"),
   );
   ok(
     "does not redefine sshIdentityMissing locally",
@@ -742,7 +788,7 @@ console.log("\n[12] hosts/page/derive.ts imports the shared missing-secret check
 console.log("\n[13] hosts/store.ts's identityHostRefs delegates to the shared lookup");
 {
   const storeSrc = readFileSync(join(root, "src/modules/hosts/store.ts"), "utf8");
-  ok("calls hostsUsingIdentity(", storeSrc.includes("hostsUsingIdentity("));
+  ok("calls hostsUsingIdentity(", callsFunction("store.ts", storeSrc, "hostsUsingIdentity"));
   ok(
     "does not re-derive the predicate inline",
     !storeSrc.includes("credential.identityId === identityId"),
@@ -754,7 +800,10 @@ console.log("\n[13] hosts/store.ts's identityHostRefs delegates to the shared lo
 console.log("\n[14] vault/store.ts's deleteKey holder lookup delegates to the shared lookup");
 {
   const vaultStoreSrc = readFileSync(join(root, "src/modules/vault/store.ts"), "utf8");
-  ok("calls identitiesUsingKey(", vaultStoreSrc.includes("identitiesUsingKey("));
+  ok(
+    "calls identitiesUsingKey(",
+    callsFunction("vault-store.ts", vaultStoreSrc, "identitiesUsingKey"),
+  );
   ok("does not re-derive the predicate inline", !vaultStoreSrc.includes("i.keyId === id"));
 }
 
@@ -902,23 +951,80 @@ console.log("\n[18] refs.ts and derive.ts do not duplicate keyMissingSecret's pr
   const refsSrc = readFileSync(join(root, "src/modules/vault/refs.ts"), "utf8");
   const deriveSrc = readFileSync(join(root, "src/modules/vault/page/derive.ts"), "utf8");
 
+  // COMMENTS OUT FIRST, so what follows counts the file's CODE. The invariant
+  // is ONE DEFINITION of "this key has no private half" - the convention
+  // refs.ts's own top-of-file doc states - and not the absence of a word. A doc
+  // comment that names the flag in prose is how a reader is told why some
+  // function does NOT read it, which is honest and is the opposite of a
+  // duplicate. The section's other half was scoped for exactly this reason
+  // (`keyRows`, below), and this half was not: unscoped, it banned the prose
+  // outright, and `keyNeedsPassphrase`'s doc had to reach for "the presence
+  // flag" and "both presence flags false" to stay under the count - the
+  // instrument shaping the writing instead of measuring it.
+  //
+  // A TEXT STRIP AND NOT A PARSE, which is what the rest of this file uses to
+  // read source and is enough here for a reason worth writing down rather than
+  // assuming: refs.ts holds no string literal containing `//` or `*/`, and if
+  // one ever appears the strip errs by eating the rest of that line - taking
+  // the real read with it and driving the count to 0, which reddens. The `[^:]`
+  // is what keeps a `//` inside a URL from being read as a comment in the first
+  // place. Only refs.ts is stripped; derive.ts is read raw below, where the
+  // assertion is about one function's body rather than a count.
+  const codeOnly = (src: string): string =>
+    src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
+  const refsCode = codeOnly(refsSrc);
+
+  // THE STRIP IS ITSELF AN INSTRUMENT, exercised on constructed text rather
+  // than trusted. UNDER-stripping is the dangerous direction: it silently
+  // restores the whole-file ban, and the count below stays at 1 and stays green
+  // right up until someone writes the honest sentence. OVER-stripping is the
+  // safe one - it takes the real read away too and the count falls to 0, which
+  // reddens. The real file cannot be mutated to show either, because it is the
+  // module under test, so both cases are written out here: one definition with
+  // the flag named in prose twice beside it, and the same text with the
+  // delegation replaced by a second genuine read.
+  const oneDefinition = [
+    "/** Names `hasPrivateKey` in prose to say why this does not read it. */",
+    "export function keyNeedsPassphrase(key: VaultKey): boolean {",
+    "  return !keyMissingSecret(key); // and not the hasPrivateKey flag itself",
+    "}",
+    "export function keyMissingSecret(key: VaultKey): boolean {",
+    "  return !key.hasPrivateKey;",
+    "}",
+  ].join("\n");
+  const twoReads = oneDefinition.replace("!keyMissingSecret(key)", "!key.hasPrivateKey");
+  check(
+    "the strip keeps prose out of the count: one definition, flag named in two comments",
+    (codeOnly(oneDefinition).match(/hasPrivateKey/g) ?? []).length,
+    1,
+  );
+  check(
+    "and a second genuine read in code still counts as two",
+    (codeOnly(twoReads).match(/hasPrivateKey/g) ?? []).length,
+    2,
+  );
+
   // Locate keyMissingSecret's own body FIRST, as ITS OWN check: a rename here
   // must fail loudly rather than the two checks below silently running over
   // `null`. The anchor is the function's signature line, which mentions
   // neither "hasPrivateKey" nor "keyMissingSecret(key)" - the two substrings
   // checked against the captured body below - so neither of those checks can
-  // be satisfied by the anchor alone.
+  // be satisfied by the anchor alone. Over `refsCode` and not `refsSrc`, so the
+  // located body and the count below are answering about the same text.
   const keyMissingSecretMatch =
-    /function keyMissingSecret\(key: VaultKey\): boolean \{([\s\S]*?)\n\}/.exec(refsSrc);
+    /function keyMissingSecret\(key: VaultKey\): boolean \{([\s\S]*?)\n\}/.exec(refsCode);
   ok("keyMissingSecret's body is located in refs.ts", keyMissingSecretMatch !== null);
   const keyMissingSecretBody = keyMissingSecretMatch?.[1] ?? "";
 
-  // `hasPrivateKey` names the flag exactly once in the whole file. Two means
-  // the `key` arm of `identityMissingSecret` asked the question itself again
-  // instead of delegating - duplication rather than the one shared leaf the
-  // module's own top-of-file doc requires.
-  const hasPrivateKeyCount = (refsSrc.match(/hasPrivateKey/g) ?? []).length;
-  check("refs.ts names hasPrivateKey exactly once", hasPrivateKeyCount, 1);
+  // The flag is READ in exactly one place in refs.ts. Two means some other
+  // predicate in the module answered the private-half question itself instead
+  // of routing through `keyMissingSecret`, and there are two ways to get there:
+  // the `key` arm of `identityMissingSecret`, and - the one that actually
+  // arose - `keyNeedsPassphrase`, whose private-half conjunct is a second read
+  // of the same flag unless it delegates. This check is what requires that
+  // delegation; nothing else in the tree does.
+  const hasPrivateKeyCount = (refsCode.match(/hasPrivateKey/g) ?? []).length;
+  check("refs.ts's CODE reads hasPrivateKey exactly once", hasPrivateKeyCount, 1);
   ok(
     "and that one occurrence sits inside keyMissingSecret's own body",
     keyMissingSecretBody.includes("hasPrivateKey"),
@@ -978,7 +1084,8 @@ console.log(
     hasPassword: false,
   };
   // Not a minimum case, but the honest consequence of
-  // `hasPassword` being independent of `authMode` (`../types.ts:106`): agent
+  // `hasPassword` being independent of `authMode` (`VaultIdentity.hasPassword` in
+  // `src/modules/vault/types.ts`): agent
   // auth never NEEDS a password, but nothing stops the flag being true anyway,
   // and `deleteNote` reads the flag, not the mode, for that half of its answer.
   const agentAuthWithPassword: DeleteNoteSubject = {
@@ -1149,17 +1256,37 @@ process.exit(failed === 0 ? 0 : 1);
 // confirm this table is still honest.
 //
 //   Y3 (measured): refs.ts's `key` arm duplicates          section 18's
-//     `!key.hasPrivateKey` AND derive.ts's `keyRows`          "hasPrivateKey
-//     reads `!key.hasPrivateKey` directly, BOTH at once -     exactly once" AND
-//     before the fix, all of vault-page (91), hosts-page       "derive.ts names
-//     (58) and vault-shell (76) stayed EXIT=0 and              hasPrivateKey
-//     `keyMissingSecret` became a dead export unnoticed         nowhere at all"
+//     `!key.hasPrivateKey` AND derive.ts's `keyRows`          "refs.ts's CODE
+//     reads `!key.hasPrivateKey` directly, BOTH at once -     reads hasPrivateKey
+//     before the fix, all of vault-page (91), hosts-page      exactly once" AND
+//     (58) and vault-shell (76) stayed EXIT=0 and             "keyRows's body
+//     `keyMissingSecret` became a dead export unnoticed       does not read
+//                                                              .hasPrivateKey
+//                                                              directly"
 //   Y3a: refs.ts half of Y3 alone                           section 18's
-//                                                              "hasPrivateKey
+//                                                              "refs.ts's CODE
+//                                                              reads
+//                                                              hasPrivateKey
 //                                                              exactly once"
 //   Y3b: derive.ts half of Y3 alone                         section 18's
-//                                                              "hasPrivateKey
-//                                                              nowhere at all"
-//                                                              AND "keyRows
+//                                                              "keyRows's body
+//                                                              does not read
+//                                                              .hasPrivateKey
+//                                                              directly" AND
+//                                                              "keyRows
 //                                                              computes... by
 //                                                              CALLING"
+//
+// Both refs.ts checks in section 18 are now scoped to that file's CODE, with
+// comments stripped, so a doc comment may name the flag in prose. That strip is
+// the instrument, and it is exercised on constructed text rather than by
+// editing refs.ts, which is the module under test:
+//
+//   Y3c (measured): section 18's `codeOnly` replaced by     section 18's "the
+//     the identity function, i.e. no strip at all - the       strip keeps prose
+//     under-stripping direction, which silently restores      out of the count"
+//     the whole-file ban on honest prose. Counted 3 and 4     AND "a second
+//     against the two constructed cases. The real-file        genuine read in
+//     count check did NOT redden and cannot: refs.ts holds    code still counts
+//     no comment naming the flag today, so it reads 1         as two"
+//     either way. That is what these two are for.

@@ -10,7 +10,7 @@ import { invoke } from "@tauri-apps/api/core";
  * webview is built with `clipboard: true`, and Tauri defaults that to false with
  * no tauri.conf.json knob to raise it for a config-declared window. So on Linux
  * every `readText()` rejected with NotAllowedError while `writeText()` kept
- * working off the keystroke's user gesture: copy fine, paste dead (#10).
+ * working off the keystroke's user gesture: copy fine, paste dead.
  *
  * Callers get "" rather than a rejection - an empty or image-only clipboard is
  * not an error, it just means "nothing to paste" - so paste sites stay a single

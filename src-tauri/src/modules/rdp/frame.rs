@@ -109,18 +109,21 @@ pub struct Rect {
 ///
 /// When a bitmap update falls outside the framebuffer, `DecodedImage` logs it
 /// and returns `InclusiveRectangle::empty()` - all zeros - instead of reporting
-/// nothing (`ironrdp-session` image.rs:556-561). Because the bounds are
-/// *inclusive*, `{0,0,0,0}` reports `width() == 1` and `height() == 1`, so
-/// [`Rect::from_inclusive`] would turn it into a spurious 1x1 update at the
-/// origin rather than a zero-area one. Filtering it here is what prevents that.
+/// nothing (`ironrdp-session` 0.10.0, `DecodedImage::apply_rgb16_bitmap`).
+/// Because the bounds are *inclusive*, `{0,0,0,0}` reports `width() == 1` and
+/// `height() == 1`, so [`Rect::from_inclusive`] would turn it into a spurious
+/// 1x1 update at the origin rather than a zero-area one. Filtering it here is
+/// what prevents that.
 ///
 /// **What this does not fix.** `fast_path::Processor` unions the sentinel into
-/// the region accumulated from the same PDU (fast_path.rs:297-300), and
-/// `Rectangle::union` takes the `min` of left/top (`ironrdp-pdu`
-/// geometry.rs:73-85), so when the sentinel arrives alongside a real rect the
-/// region's origin has already been dragged to (0,0) *before* we see it - and
-/// the result is not all-zero, so this returns `false` for it. The filter
-/// therefore catches only the case where the sentinel is the sole contributor.
+/// the region accumulated from the same PDU
+/// (`ironrdp-session` 0.10.0, `Processor::process_bitmap_update`), and
+/// `Rectangle::union` takes the `min` of left/top
+/// (`ironrdp-pdu` 0.8.0, `Rectangle::union`), so when the sentinel arrives
+/// alongside a real rect the region's origin has already been dragged to (0,0)
+/// *before* we see it - and the result is not all-zero, so this returns
+/// `false` for it. The filter therefore catches only the case where the
+/// sentinel is the sole contributor.
 /// The inflated-region case is harmless: the framebuffer is authoritative, so an
 /// over-large rect over-ships pixels that happen to be correct, and the only
 /// cost is bandwidth.
@@ -257,7 +260,7 @@ impl Batch {
 /// updates landed in the window. The push transport has no way to learn that
 /// the webview is behind, so a consumer that cannot keep up still falls
 /// further behind - one framebuffer at a time instead of unboundedly. Swapping
-/// push for a pull / credit-based model is tracked as **RDP-01** and is a local
+/// push for a pull / credit-based model is deferred, and would be a local
 /// change: a second [`FrameTransport`] impl plus a different flush trigger in
 /// `session.rs`.
 #[derive(Debug)]
@@ -407,23 +410,29 @@ pub struct FrameBuffer<'a> {
 /// not guarantee it.
 ///
 /// **The reason is unpainted pixels, not decoded ones.** `DecodedImage::new`
-/// zero-fills (`ironrdp-session` image.rs:146-151), so every pixel the server
-/// has not painted yet has alpha 0 and would be fully transparent in a canvas.
-/// That is exactly what `rdp_snapshot` and a fresh `rdp_attach` return in the
-/// window between reaching the active stage and the first full repaint, and
-/// again after every reactivation, which rebuilds the framebuffer blank.
+/// zero-fills (`ironrdp-session` 0.10.0, `DecodedImage::new`), so every pixel
+/// the server has not painted yet has alpha 0 and would be fully transparent
+/// in a canvas. That is exactly what `rdp_snapshot` and a fresh `rdp_attach`
+/// return in the window between reaching the active stage and the first full
+/// repaint, and again after every reactivation, which rebuilds the framebuffer
+/// blank.
 ///
 /// An earlier version of this comment blamed `apply_rgb32_bitmap`'s memcpy
 /// branch copying the wire's padding byte. That is **not** reachable in this
 /// configuration: the framebuffer is `RgbA32` and that function is always
-/// called with `BgrX32` (`fast_path.rs:273,290`), so `format ==
+/// called with `BgrX32`
+/// (`ironrdp-session` 0.10.0, `Processor::process_bitmap_update`), so `format ==
 /// self.pixel_format` is never true, and the conversion branch it takes instead
 /// already writes opaque alpha because `BgrX32::has_alpha()` is false. The
 /// citation was wrong; the fixup is still load-bearing for the reason above.
 ///
-/// Possibly also relevant, unverified as to pixel format: the RemoteFX
-/// `apply_tile` -> `copy_to` path has an `else` branch that memcpys a full row
-/// including the alpha byte (`image.rs:138-141`).
+/// Not the RemoteFX path either, though an earlier version of this comment said
+/// so. The `else` branch that memcpys a full row including the alpha byte is in
+/// a free function whose only callers are the cursor path
+/// (`ironrdp-session` 0.10.0, `copy_cursor_data`), and `apply_tile` reaches
+/// `copy_to` without ever entering it. The cursor path itself is unexamined as
+/// to pixel format rather than cleared. Kept here because the alpha fixup above
+/// does not depend on which path was to blame.
 ///
 /// An RDP desktop is opaque by definition, so there is nothing to lose, and
 /// doing it here means the frontend can hand a rect to `ImageData` as-is.
@@ -491,8 +500,8 @@ pub fn encode_batch(fb: FrameBuffer<'_>, batch: &Batch) -> Vec<u8> {
 ///
 /// Today there is a single push implementation: the session task encodes a
 /// batch and hands the bytes to the IPC channel immediately. A pull / credit
-/// model (**RDP-01**) slots in as a second impl plus a different flush trigger
-/// in `session.rs`; nothing else in the module knows how frames get out.
+/// model would slot in as a second impl plus a different flush trigger in
+/// `session.rs`; nothing else in the module knows how frames get out.
 pub trait FrameTransport: Send {
     /// Deliver one encoded batch. `Err` means this sink is gone for good and
     /// the caller should stop using it.

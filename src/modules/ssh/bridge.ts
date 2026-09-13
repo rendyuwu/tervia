@@ -1,4 +1,12 @@
 import { invoke, Channel } from "@tauri-apps/api/core";
+// The two carriers, imported rather than declared here, because
+// `classifySshConnectFailure` reads them back with `instanceof` and that file
+// must stay import-free (it is loaded by scripts that cannot touch a webview
+// API). It imports nothing, so pulling it in costs this file nothing either.
+import {
+  SshAuthRejectedError,
+  SshLocalConnectError,
+} from "@/modules/terminal/lib/ssh-exit-decision";
 
 /** First-connect host-key confirmation request from the backend. */
 export type SshHostKeyPrompt = { promptId: string; fingerprint: string; host: string };
@@ -37,6 +45,37 @@ export type SshEvent =
   | { type: "signal"; name: string; coreDumped: boolean }
   | { type: "disconnected" }
   | { type: "error"; message: string };
+
+/**
+ * A wire event that ends the channel -> the two arguments `onExit` is called
+ * with. Extracted from `channel.onmessage` and exported so it can be CALLED by
+ * a check rather than read as source text: `openSsh` invokes a Tauri command
+ * and is unreachable from a node script, so a pure function is the only part of
+ * this seam that can be covered behaviourally - the same reason
+ * `sshConnectErrorFrom` below is its own function.
+ *
+ * The returned `code` is `onExit`'s first argument and nothing more: the
+ * remote's own status for "exit", and 0 for the two kinds that never reported
+ * one (see `SshExitReason`). Returning both halves together is what lets a
+ * check pin that the duplicate is the event's own code rather than a hardcoded
+ * 0, which is one of the two ways the collapse this split exists to prevent
+ * could come back.
+ */
+export function exitReasonFromSshEvent(
+  event: Extract<SshEvent, { type: "exit" | "signal" | "disconnected" }>,
+): { code: number; reason: SshExitReason } {
+  switch (event.type) {
+    case "exit":
+      return { code: event.code, reason: { kind: "exit", code: event.code } };
+    case "signal":
+      return {
+        code: 0,
+        reason: { kind: "signal", name: event.name, coreDumped: event.coreDumped },
+      };
+    case "disconnected":
+      return { code: 0, reason: { kind: "disconnected" } };
+  }
+}
 
 export type SshHandlers = {
   onConnected?: (fingerprint: string) => void;
@@ -141,11 +180,30 @@ export function confirmHostKey(promptId: string, accept: boolean): Promise<void>
 }
 
 /**
+ * What names ONE `ssh -L` listener once it is up, and the whole of what
+ * {@link closeSshForward} accepts.
+ *
+ * The bound port alone is not an identity, which is why this is a pair. The
+ * backend keys a session's live forwards by port (`SshSession::open_forward`),
+ * so a listener that has gone and its successor on the same pinned port share
+ * one key - and a close still in flight from the first would abort the second.
+ * `generation` is minted per open and never reused within a session, so a close
+ * naming a spent one is refused instead of landing on whatever is listening now.
+ *
+ * `boundPort` is what the backend actually bound, which for a request of 0 is
+ * not the number that was sent - so a caller that asked for 0 must keep this
+ * answer rather than the request.
+ */
+export type SshForwardHandle = {
+  boundPort: number;
+  generation: number;
+};
+
+/**
  * Start an `ssh -L` local forward on a live session: bind `127.0.0.1:localPort`
  * and tunnel it to `remoteHost:remotePort` as resolved from the server.
- * `localPort` 0 picks a free port. Resolves with the port actually bound, which
- * is the only thing {@link closeSshForward} accepts - so a caller that asked for
- * 0 must keep the answer rather than the request.
+ * `localPort` 0 picks a free port. Resolves with the {@link SshForwardHandle}
+ * that names the listener it started.
  *
  * A forward still dies with its session, but that is no longer the only way one
  * ends: {@link closeSshForward} drops a single listener while the session and
@@ -156,15 +214,21 @@ export function openSshForward(
   localPort: number,
   remoteHost: string,
   remotePort: number,
-): Promise<number> {
-  return invoke<number>("ssh_forward_open", { id, localPort, remoteHost, remotePort });
+): Promise<SshForwardHandle> {
+  return invoke<SshForwardHandle>("ssh_forward_open", { id, localPort, remoteHost, remotePort });
 }
 
-/** Close ONE `ssh -L` listener on a live session. `false` means there was no
- *  such forward - an unknown session, or a port already closed. Not an error:
- *  a teardown fires this without knowing whether the open finished. */
-export function closeSshForward(id: number, boundPort: number): Promise<boolean> {
-  return invoke<boolean>("ssh_forward_close", { id, boundPort });
+/** Close ONE `ssh -L` listener on a live session, naming it with both halves of
+ *  the {@link SshForwardHandle} the open handed back. `false` means there was no
+ *  such forward - an unknown session, a port already closed, or a generation a
+ *  later open on that port has superseded. Not an error: a teardown fires this
+ *  without knowing whether the open finished. */
+export function closeSshForward(
+  id: number,
+  boundPort: number,
+  generation: number,
+): Promise<boolean> {
+  return invoke<boolean>("ssh_forward_close", { id, boundPort, generation });
 }
 
 export type SshSession = {
@@ -173,6 +237,61 @@ export type SshSession = {
   resize: (cols: number, rows: number) => Promise<void>;
   close: () => Promise<void>;
 };
+
+/** Which side's fact ended a connect attempt, as `ssh_open` reports it.
+ *  Mirrors `SshConnectErrorKind` in src-tauri/src/modules/ssh/session.rs, whose
+ *  doc comment defines what each one means and how to place a new failure site.
+ *  The two sets are checked against each other rather than trusted - a kind
+ *  added on one side only would arrive here unrecognised and fall back to the
+ *  ladder. */
+export type SshConnectErrorKind = "config" | "auth" | "transport";
+
+/** The rejected value of `ssh_open`, and the only Tauri command in this app
+ *  that rejects with an object rather than a string. */
+export type SshConnectErrorPayload = { kind: SshConnectErrorKind; message: string };
+
+function isSshConnectErrorPayload(raw: unknown): raw is SshConnectErrorPayload {
+  if (typeof raw !== "object" || raw === null) return false;
+  const { kind, message } = raw as { kind?: unknown; message?: unknown };
+  if (typeof message !== "string") return false;
+  return kind === "config" || kind === "auth" || kind === "transport";
+}
+
+/**
+ * THE boundary. Turn `ssh_open`'s rejected value into the typed `Error` the rest
+ * of the frontend already knows how to classify, and make sure nothing
+ * downstream ever sees the raw object.
+ *
+ * Extracted from `openSsh` and exported so it can be CALLED by a check.
+ * `openSsh` itself invokes a Tauri command and is unreachable from a node
+ * script, which is exactly why the decision has to live out here: a pure
+ * function is the only part of this path that can be covered behaviourally
+ * rather than by reading source text.
+ *
+ * Anything that is not a recognised `{kind, message}` object is returned
+ * UNCHANGED - a raw string, a bare `Error`, `null`, a Tauri framework rejection,
+ * a kind this build does not know. That pass-through is not politeness. It is
+ * what keeps this side correct against a backend that is older, newer, or rolled
+ * back: an unrecognised rejection reaches `classifySshConnectFailure` as
+ * something it did not raise, is filed transport, and ladders - the behaviour
+ * this app had before the kind existed, rather than a crash or a wrong park.
+ *
+ * `cause` carries the original so a console trace still shows what arrived.
+ */
+export function sshConnectErrorFrom(raw: unknown): unknown {
+  if (!isSshConnectErrorPayload(raw)) return raw;
+  switch (raw.kind) {
+    case "config":
+      return new SshLocalConnectError(raw.message, { cause: raw });
+    case "auth":
+      return new SshAuthRejectedError(raw.message, { cause: raw });
+    case "transport":
+      // A plain `Error`, deliberately: neither wrapper means "reconnect-
+      // eligible", and transport is what an unwrapped error already classifies
+      // as. Wrapping it in a third class would add a type with no reader.
+      return new Error(raw.message, { cause: raw });
+  }
+}
 
 function decodeBase64(b64: string): Uint8Array {
   const bin = atob(b64);
@@ -206,20 +325,24 @@ export async function openSsh(input: SshOpenInput, handlers: SshHandlers): Promi
         handlers.onData(decodeBase64(event.data));
         break;
       case "exit":
-        handlers.onExit?.(event.code, { kind: "exit", code: event.code });
-        break;
       case "signal":
-        handlers.onExit?.(0, { kind: "signal", name: event.name, coreDumped: event.coreDumped });
+      case "disconnected": {
+        // One call for all three, so the mapping itself is the pure function's
+        // and cannot drift per arm.
+        const ending = exitReasonFromSshEvent(event);
+        handlers.onExit?.(ending.code, ending.reason);
         break;
-      case "disconnected":
-        handlers.onExit?.(0, { kind: "disconnected" });
-        break;
+      }
       case "error":
         handlers.onError?.(event.message);
         break;
     }
   };
 
+  // The one place the connect error's kind is read. Everything downstream -
+  // the reconnect ladder, the host editor's Test button, the forward tunnel -
+  // receives an `Error` and behaves exactly as it did when this command
+  // rejected with a string.
   const id = await invoke<number>("ssh_open", {
     input: {
       host: input.host,
@@ -245,6 +368,8 @@ export async function openSsh(input: SshOpenInput, handlers: SshHandlers): Promi
       rows: input.rows,
     },
     onEvent: channel,
+  }).catch((e: unknown) => {
+    throw sshConnectErrorFrom(e);
   });
 
   return {

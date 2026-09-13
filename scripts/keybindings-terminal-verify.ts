@@ -24,6 +24,7 @@ import {
   ownsRawKeyboard,
   type FocusTarget,
 } from "../src/modules/shortcuts/lib/keyboardOwner";
+import { stripComments, stripperSelfTest } from "./lib/source";
 
 type Ev = {
   code: string;
@@ -97,74 +98,11 @@ expect("plain D (no modifier)", { code: "KeyD" }, false);
 // The other half of the gate: who is holding the keys.
 // ---------------------------------------------------------------------------
 
-/**
- * A line with its trailing `//` comment removed, string literals respected, and
- * the same source with whole-line comments dropped.
- *
- * The canonical copy is in `scripts/host-editor-verify.ts` and this is
- * a deliberate duplicate (these scripts share no module). A character scan
- * rather than a regex, because a `//` inside a string is not a comment and a
- * regex alternation desyncs on the first unbalanced quote, after which it eats
- * real code. This loses the strip for such a line instead - failing towards
- * KEEPING text, which is the safe direction for a positive check.
- */
-function stripLineComment(line: string): string {
-  let quote = "";
-  for (let i = 0; i < line.length; i++) {
-    const c = line[i];
-    if (quote) {
-      if (c === "\\") i++;
-      else if (c === quote) quote = "";
-      continue;
-    }
-    if (c === '"' || c === "'" || c === "`") {
-      quote = c;
-      continue;
-    }
-    if (c === "/" && line[i + 1] === "/") return line.slice(0, i);
-  }
-  return line;
-}
-
-function stripComments(src: string): string {
-  // JSX comment expressions - `{/* ... */}` - are the only comment syntax
-  // legal INSIDE JSX children, and the line-based filter below only ever
-  // recognised `//`, `/*` and `*` starting a trimmed line, none of which match
-  // a line starting `{`. This file strips both pane files and `App.tsx`
-  // (`stripComments(read(...))` further down), all `.tsx`, so it is exposed to
-  // it: a deleted call left behind as `{/* ... */}` would pass every positive
-  // check run over the stripped source.
-  //
-  // The inner group must NOT be allowed to cross a `*/` while hunting
-  // for one followed by `}` - a lazy `[\s\S]*?` is still permitted to do that,
-  // and a type literal opening `{ /** ... */ x: T }` then swallows everything
-  // up to some later, unrelated `*/}`. The negative lookahead below forbids
-  // that: the first `*/` is final, either a real `{/* ... */}` or the match
-  // fails right there. Copied from `host-editor-verify.ts`'s `stripComments`;
-  // see that file's comment for the measured damage the lazy form did.
-  const withoutJsxComments = src.replace(/\{\s*\/\*(?:(?!\*\/)[\s\S])*\*\/\s*\}/g, "");
-  return withoutJsxComments
-    .split("\n")
-    .filter((line) => {
-      const t = line.trim();
-      return !(t.startsWith("//") || t.startsWith("/*") || t.startsWith("*"));
-    })
-    .map(stripLineComment)
-    .join("\n");
-}
-
-// Self-test: both directions of the JSX-comment branch above. `failed`
-// was initialised above (line 48), so check() is safe to call here.
-const STRIPPER_PROBE =
-  "type P = { /** c */ x: X };\nconst KEEP = 1;\nconst j = <div>{/* c */}</div>;";
-check(
-  "stripComments does not over-strip past a type literal's doc comment (the lazy-regex trap)",
-  stripComments(STRIPPER_PROBE).includes("KEEP"),
-);
-check(
-  "stripComments does remove a JSX comment expression's own body",
-  !stripComments(STRIPPER_PROBE).includes("{/*"),
-);
+// Self-test: both directions of the shared stripper's JSX-comment branch.
+// Placed here rather than beside the import because `failed` is a `let` that
+// `check` increments, and calling `check` before its initialiser runs would
+// throw instead of reporting FAIL.
+for (const t of stripperSelfTest()) check(t.label, t.ok);
 
 function check(name: string, ok: boolean, detail?: unknown): void {
   if (ok) {

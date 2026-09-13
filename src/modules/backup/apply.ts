@@ -497,14 +497,28 @@ function tally(
 }
 
 /**
- * One incoming key's record, with the three fields that DESCRIBE a private key
+ * One incoming key's record, with the four fields that DESCRIBE a private key
  * resolved against what this machine already holds.
  *
  * A key id ALREADY IN THE VAULT whose `privateKey` did not land in this import
- * keeps the STORED `keyType`, `fingerprint` and `publicKey`, and the file's are
- * discarded. Otherwise the file's fingerprint sits over this machine's private
- * key and the record names a key nobody holds: the duplicate check at import and
- * the copyable public key would both answer for material that is not there.
+ * keeps the STORED `keyType`, `fingerprint`, `publicKey` and `encrypted`, and
+ * the file's are discarded. Otherwise the file's fingerprint sits over this
+ * machine's private key and the record names a key nobody holds: the duplicate
+ * check at import and the copyable public key would both answer for material
+ * that is not there.
+ *
+ * `encrypted` IS ONE OF THE FOUR, and it is in this list for exactly the reason
+ * the two presence flags are not. A passphrase-encryption answer describes the
+ * key MATERIAL - which is why `sanitizeKey` carries it through the trust
+ * boundary at all, rather than forcing it the way it forces `hasPrivateKey` and
+ * `hasPassphrase`, which describe the exporting machine's keychain. Material
+ * facts belong to whichever body is actually stored here, so a file's
+ * `encrypted: true` left standing over a stored body nobody replaced would make
+ * `keyNeedsPassphrase` (`@/modules/vault/refs`) report a key as unusable
+ * because of a passphrase on a DIFFERENT machine's key, and the Vault page
+ * would say so on a row that is fine. It fails the other way round too: the
+ * file's `false` over a stored encrypted body silences the one warning that row
+ * needs.
  *
  * Called TWICE per key, and the record write passes `false` deliberately. Nothing
  * has landed at that point, so the conservative arm is the true one; the flag pass
@@ -519,6 +533,10 @@ function tally(
  * `undefined` rather than a rebuild without the field, the same spelling
  * `normaliseIdentityKeys` uses to clear a `keyId`: the store persists as JSON, so
  * an absent field and an `undefined` one do not survive the write differently.
+ * That covers `encrypted` twice over - a stored record written before that field
+ * existed carries no answer, and "no inspection has answered this" is what
+ * absent means on it, so copying the absence across is the honest result rather
+ * than a gap.
  */
 function keyRecord(key: VaultKey, stored: VaultKey | undefined, landedBody: boolean): VaultKey {
   if (!stored || landedBody) return key;
@@ -527,6 +545,7 @@ function keyRecord(key: VaultKey, stored: VaultKey | undefined, landedBody: bool
     keyType: stored.keyType,
     fingerprint: stored.fingerprint,
     publicKey: stored.publicKey,
+    encrypted: stored.encrypted,
   };
 }
 
@@ -592,7 +611,24 @@ function keyRecord(key: VaultKey, stored: VaultKey | undefined, landedBody: bool
  * Every write is contained to its own record. A refusal is counted and reported,
  * never allowed to abandon the records behind it: a 40-host file whose host 12 the
  * store will not take must still import the other 39, and `problems` carries one
- * line per refusal, naming the record.
+ * line per refusal caught, from the nine push sites below.
+ *
+ * EIGHT OF THE NINE NAME THE RECORD THEY REFUSED; the ninth is WRITE 6, and the
+ * quantifier is worth being exact about because that arm is the one a reader
+ * checks first. WRITE 6 is a single `backup_apply_secrets` call carrying every
+ * account this import is going to write, so a throw there is ONE line covering
+ * all of them and naming none - the same single line whether the file carried one
+ * account or four hundred. A refusal SHORT of a throw pushes no line at all: a
+ * `written[i]` that came back false is carried by the `withoutSecrets` counters
+ * instead, where each collection decides for itself which field makes a record
+ * incomplete. So the line count counts caught throws, never records and never
+ * accounts.
+ *
+ * NO RECORD CAN PRODUCE TWO LINES, which is what lets the list be read as one
+ * refusal per line. A record whose own write throws never reaches the collection
+ * it would be reported from again - the `saved*` push sits after the await - and
+ * a WRITE 6 throw leaves `landed` empty, which sends every record in WRITE 7 down
+ * its `continue` before it can push a second time.
  */
 async function applyV3(payload: SealedBlob, passphrase: string): Promise<ImportResult> {
   const opened = await invoke<{ handle: number; payload: string }>("backup_open_payload", {

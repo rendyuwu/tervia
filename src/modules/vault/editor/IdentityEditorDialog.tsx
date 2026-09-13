@@ -61,7 +61,7 @@ export type IdentityEditorDialogProps = {
    * builders every surface that lists vault records must call, because the
    * Hosts page and the header quick-connect once disagreed about which hosts a
    * query matched while both calling one shared ranking function - each built
-   * its own rows in its own loop (`../page/derive.ts:91-121`). A picker that
+   * its own rows in its own loop (`src/modules/vault/page/derive.ts`). A picker that
    * mapped `vault.keys` itself would be that mistake again, one wave later.
    * The page hands over its UNFILTERED `keyRowList`: this list must not follow
    * the page's search box.
@@ -145,7 +145,7 @@ export function IdentityEditorDialog({
   const keyOptions: ComboboxOption[] = useMemo(
     () => [
       // "" is a legitimate Combobox value meaning "none" and is an option like
-      // any other (`Combobox.tsx:21-23`). It is offered so the trigger has a
+      // any other (`ComboboxOption.value` in `src/modules/hosts/editor/Combobox.tsx`). It is offered so the trigger has a
       // label before a key is chosen rather than rendering an empty button;
       // choosing it back is refused by `validateIdentityDraft` with a message
       // that says what to do about it.
@@ -154,7 +154,8 @@ export function IdentityEditorDialog({
         value: row.key.id,
         label: row.key.name,
         hint: row.key.fingerprint,
-        // The id is in `search` for the reason `Combobox.tsx:27-29` gives: two
+        // The id is in `search` for the reason `ComboboxOption.search` in
+        // `src/modules/hosts/editor/Combobox.tsx` gives: two
         // like-named keys must never collapse into one entry.
         search: `${row.key.name} ${row.key.id} ${row.key.fingerprint ?? ""} ${row.key.keyType ?? ""}`,
       })),
@@ -299,8 +300,8 @@ export function IdentityEditorDialog({
 
               {/* Rendered in EVERY auth mode, not only "password" - this is not a
                   bug. `VaultIdentity.hasPassword` is independent of `authMode` by
-                  design (`../types.ts:99-106`) and `resolveRdpAuth` deliberately
-                  never consults the mode (`../resolve.ts:284-288`): hiding this
+                  design (`src/modules/vault/types.ts`) and `resolveRdpAuth` deliberately
+                  never consults the mode (`src/modules/vault/resolve.ts`): hiding this
                   field under key or agent auth would make the RDP half of a
                   shared identity unreachable, which is the state that split
                   exists to permit. */}
