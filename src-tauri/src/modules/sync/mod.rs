@@ -1,22 +1,28 @@
-//! Cross-device sync: the wire format, the merge, and the crypto that wraps
-//! both.
+//! Cross-device sync: the wire format, the merge, the crypto that wraps both,
+//! and the port to whatever storage the user chose.
 //!
-//! WHAT IS NOT HERE, and is not an oversight. No provider and no network: the
-//! remote is somebody else's storage and nothing in this module has ever
-//! opened a socket. No `#[tauri::command]`: a command with no frontend caller
-//! fails the repository's command-registry check, and the commands arrive with
-//! the path that calls them. No frontend, no store writes, no keychain. This
-//! module is reachable only from its own tests today, and that is deliberate -
-//! the parts that are expensive to get wrong once a wire format version is
-//! minted are the parts that landed first.
+//! WHAT IS NOT HERE, and is not an oversight. No `#[tauri::command]`: a command
+//! with no frontend caller fails the repository's command-registry check, and
+//! the commands arrive with the path that calls them. No frontend, no store
+//! writes, no keychain, no scheduler, and nothing that composes an object key.
+//! This module is reachable only from its own tests today, and that is
+//! deliberate - the parts that are expensive to get wrong once a wire format
+//! version is minted are the parts that landed first.
 //!
 //! `src-tauri/src/modules/sync/model.rs` and
-//! `src-tauri/src/modules/sync/crypto.rs` are pure. The device id below is the
-//! module's ONLY I/O at this stage, and it lives here because this file is the
-//! impure layer of the module.
+//! `src-tauri/src/modules/sync/crypto.rs` are pure, and so is every decision in
+//! `src-tauri/src/modules/sync/providers/sigv4.rs`. A provider is the one thing
+//! here that opens a socket, and even there the split is deliberate: what to
+//! send and what a response means are plain functions, and the async bodies
+//! only call them.
+//!
+//! The device id below is this FILE's only I/O, and it lives here because this
+//! file is the impure layer of the module proper.
 
 pub mod crypto;
 pub mod model;
+pub mod provider;
+pub mod providers;
 
 use std::fs;
 use std::io::{ErrorKind, Write};
