@@ -83,7 +83,18 @@ fn create_or_read(dir: &Path) -> Result<Option<String>, String> {
         Err(e) if e.kind() == ErrorKind::AlreadyExists => {
             // Whatever is on disk WINS, including over the id this call would
             // have generated. That is the entire content of the race arm.
-            let found = fs::read_to_string(&path).unwrap_or_default();
+            //
+            // A read that FAILS is propagated rather than treated as unusable
+            // content. The difference is destructive: an EACCES or EIO on a
+            // perfectly good file would otherwise fall through to the clearing
+            // below and DELETE it over a transient fault. `NotFound` is the
+            // one exception, because it means another process cleared the file
+            // between the failed create and this read, which is a retry.
+            let found = match fs::read_to_string(&path) {
+                Ok(found) => found,
+                Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
+                Err(e) => return Err(format!("sync: could not read the device id: {e}")),
+            };
             let found = found.trim();
             if Uuid::parse_str(found).is_ok() {
                 return Ok(Some(found.to_string()));
@@ -180,9 +191,30 @@ mod tests {
 
         let id = device_id_at(&dir).unwrap();
         assert!(Uuid::parse_str(&id).is_ok(), "not a uuid: {id}");
-        // The recovery is bounded at one retry: `create_or_read` returning
-        // `None` twice is an error, not another attempt.
         assert_eq!(fs::read_to_string(dir.join(DEVICE_ID_FILE)).unwrap(), id);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_recovery_is_one_retry_and_not_a_loop() {
+        // Asserted on `create_or_read` directly, because the bound is not
+        // visible from `device_id_at`'s return value: a loop and a single
+        // retry both succeed here. What makes it bounded is that ONE call
+        // clears the unusable file and reports `None` exactly once, and the
+        // next call then takes the ordinary create path.
+        let dir = scratch();
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(DEVICE_ID_FILE), "not a uuid at all").unwrap();
+
+        assert_eq!(create_or_read(&dir).unwrap(), None, "the first call clears");
+        assert!(
+            !dir.join(DEVICE_ID_FILE).exists(),
+            "the unusable file was left behind"
+        );
+        let id = create_or_read(&dir)
+            .unwrap()
+            .expect("the second call creates");
+        assert!(Uuid::parse_str(&id).is_ok(), "not a uuid: {id}");
         fs::remove_dir_all(&dir).ok();
     }
 }

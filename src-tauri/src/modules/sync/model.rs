@@ -129,8 +129,24 @@ pub enum Side {
     Remote,
 }
 
-/// The resolved record, and which side it came from. The side is what lets a
-/// caller skip a write when nothing moved.
+/// The resolved record, and which side it came from.
+///
+/// `winner` IS NOT A DIRTY FLAG, in either direction, and a caller that treats
+/// it as one loses data:
+///
+/// - `Side::Local` does not mean the result equals `local`. The two vault
+///   exceptions in [`merge`] run AFTER the side is decided and mutate the
+///   winner, so a local win can still strip a `fingerprint` or gain an
+///   `encrypted`. Skipping the local write on `Side::Local` silently drops
+///   that.
+/// - `Side::Remote` does not mean the result differs from `local` either. Once
+///   an `encrypted` backfill has landed locally, the bare remote copy still
+///   sorts above it - `canonical` puts `encrypted` before `hasPrivateKey` -
+///   so it wins every subsequent pull and is re-backfilled to the same
+///   content each time. The content is a fixed point; the side is not.
+///
+/// Compare the envelope with what is already stored. The side is provenance,
+/// good for a log line or for deciding which way to push, and nothing more.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Merged {
     pub winner: Side,
@@ -388,17 +404,46 @@ mod tests {
         }
     }
 
-    /// Both argument orders of one pair must resolve to the same envelope.
-    /// This is the property that makes the merge safe to run independently on
-    /// two devices, so nearly every ordering test below asserts it.
+    /// Both argument orders of one pair must resolve to the same record. This
+    /// is the property that makes the merge safe to run independently on two
+    /// devices, so nearly every ordering test below asserts it.
+    ///
+    /// THE TWO SIDES ARE STAMPED WITH DIFFERENT DEVICE IDS HERE, rather than
+    /// taken as the fixtures left them. In production the one field that
+    /// always differs between two copies of a record is `device`, and a helper
+    /// that compared whole envelopes would pass only because every fixture in
+    /// this file happened to share one id - which is the shape of an assertion
+    /// that cannot fail.
+    ///
+    /// So `device` is excluded from the comparison, and that exclusion is the
+    /// property rather than a weakening of it: `device` is deliberately
+    /// outside the ordering key, so on a tie each side keeps its own and the
+    /// two orders CANNOT agree on it. If `device` ever crept into the key,
+    /// these differing ids would make the winner flip with the argument order
+    /// and every caller below would fail on the fields that are compared.
     fn agrees_both_ways(a: &Envelope, b: &Envelope) -> Envelope {
-        let one = merge(a, b).expect("merge a,b");
-        let two = merge(b, a).expect("merge b,a");
+        let a = Envelope {
+            device: "dev-a".into(),
+            ..a.clone()
+        };
+        let b = Envelope {
+            device: "dev-b".into(),
+            ..b.clone()
+        };
+        let one = merge(&a, &b).expect("merge a,b").envelope;
+        let two = merge(&b, &a).expect("merge b,a").envelope;
         assert_eq!(
-            one.envelope, two.envelope,
+            Envelope {
+                device: String::new(),
+                ..one.clone()
+            },
+            Envelope {
+                device: String::new(),
+                ..two
+            },
             "the two argument orders disagreed"
         );
-        one.envelope
+        one
     }
 
     // --- refusals ---------------------------------------------------------
@@ -702,14 +747,37 @@ mod tests {
             "lastFingerprint": "SHA256:aaa",
             "certFingerprint": "SHA256:bbb"
         });
+        // SPELLED OUT, not read back out of `DEVICE_LOCAL_FIELDS`. Iterating
+        // the same constant the implementation iterates is an assertion that
+        // cannot fail: a typo in the constant would remove nothing, the
+        // mistyped name would drop out of the skip-list below, and the test
+        // would confirm that the field it no longer strips is still present.
+        // These four literals are what a rename in
+        // `src/modules/hosts/types.ts` has to break.
+        let expected_gone = [
+            "pins",
+            "lastConnectedAt",
+            "lastFingerprint",
+            "certFingerprint",
+        ];
+        assert_eq!(
+            expected_gone.len(),
+            DEVICE_LOCAL_FIELDS.len(),
+            "the strip list grew or shrank without this test noticing"
+        );
+
         let before = record.clone();
         strip_device_local(&mut record);
 
-        for gone in DEVICE_LOCAL_FIELDS {
+        for gone in expected_gone {
+            assert!(
+                before.get(gone).is_some(),
+                "{gone} is missing from the fixture"
+            );
             assert!(record.get(gone).is_none(), "{gone} survived the strip");
         }
         for (field, value) in before.as_object().unwrap() {
-            if DEVICE_LOCAL_FIELDS.contains(&field.as_str()) {
+            if expected_gone.contains(&field.as_str()) {
                 continue;
             }
             assert_eq!(record.get(field), Some(value), "{field} was disturbed");

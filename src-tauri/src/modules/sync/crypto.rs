@@ -42,13 +42,34 @@ use serde::{Deserialize, Serialize};
 use std::num::NonZeroU32;
 
 use crate::modules::aesgcm::{open_with_key, seal_with_key};
-use crate::modules::sync::model::WIRE_VERSION;
+
+/// The keyfile's own version, DELIBERATELY SEPARATE from `WIRE_VERSION` in
+/// `src-tauri/src/modules/sync/model.rs` even though both are 1 today.
+///
+/// Welding them together is a data-loss trapdoor. The root key exists in
+/// exactly one place - [`Keyfile::wrapped`] - so the day the ENVELOPE shape
+/// changes for an envelope reason and `WIRE_VERSION` goes to 2, a shared
+/// constant would have [`open_keyfile`] refuse every keyfile already written
+/// and every object on every remote would become permanently undecryptable.
+/// The two version the two things, and they move independently.
+const KEYFILE_VERSION: u32 = 1;
 
 /// Deliberately high, on the same grounds as the backup's: the passphrase is
 /// user-chosen and the keyfile sits on storage an attacker may hold, so they
 /// get unlimited offline guesses. Stored in the keyfile rather than hardcoded
 /// on the read path, so raising it later still opens older keyfiles.
 const PBKDF2_ITERATIONS: u32 = 600_000;
+
+/// What [`open_keyfile`] will actually run, because `iterations` arrives from
+/// the remote and nothing up to here has authenticated it.
+///
+/// The wrapped root cannot be forged without the passphrase, but the iteration
+/// count can be REWRITTEN by anyone who can write to the storage, and a pull
+/// runs the KDF before it can tell. `u32::MAX` is hours of PBKDF2 per pull.
+/// The ceiling is far above the current cost so raising [`PBKDF2_ITERATIONS`]
+/// stays a one-line change, and far below "the app stopped responding".
+const MAX_ITERATIONS: u32 = 10_000_000;
+
 const SALT_LEN: usize = 16;
 const KDF_NAME: &str = "pbkdf2-hmac-sha256";
 
@@ -68,6 +89,7 @@ const NAME_LABEL: &[u8] = b"tervia-sync-object-name-key";
 /// [`a_wrong_passphrase_and_a_corrupt_keyfile_are_indistinguishable`] is what
 /// notices when they stop.
 const OPAQUE_FAILURE: &str = "sync: wrong passphrase, or the file is corrupt";
+
 const PREFIX: &str = "sync";
 
 /// The two working keys, held only in memory and never serialized.
@@ -130,9 +152,15 @@ fn expand_root(root: &[u8; 32]) -> Result<SyncKeys, String> {
     })
 }
 
+/// Both bounds are part of this function rather than of its callers, so no
+/// future caller can reach PBKDF2 with an unchecked count. Both failures are
+/// the OPAQUE message: an out-of-range count is a malformed keyfile, and
+/// saying so in detail would only tell whoever wrote it what the ceiling is.
 fn derive_kek(passphrase: &str, salt: &[u8], iterations: u32) -> Result<[u8; 32], String> {
-    let iters =
-        NonZeroU32::new(iterations).ok_or_else(|| "sync: iteration count is zero".to_string())?;
+    if iterations > MAX_ITERATIONS {
+        return Err(OPAQUE_FAILURE.into());
+    }
+    let iters = NonZeroU32::new(iterations).ok_or(OPAQUE_FAILURE)?;
     let mut key = [0u8; 32];
     pbkdf2::derive(
         pbkdf2::PBKDF2_HMAC_SHA256,
@@ -170,7 +198,7 @@ pub fn new_keyfile(passphrase: &str) -> Result<(Keyfile, SyncKeys), String> {
 
     Ok((
         Keyfile {
-            v: WIRE_VERSION,
+            v: KEYFILE_VERSION,
             kdf: KDF_NAME.into(),
             iterations: PBKDF2_ITERATIONS,
             salt: B64.encode(salt),
@@ -183,14 +211,16 @@ pub fn new_keyfile(passphrase: &str) -> Result<(Keyfile, SyncKeys), String> {
 
 /// Unwrap the root key out of a keyfile and expand it.
 ///
-/// `v` and `kdf` are checked BEFORE anything is derived, and those two
-/// failures are the only ones here that name what went wrong: an unreadable
-/// keyfile version is a "this device runs an older build" message, not a
-/// guessing oracle.
+/// `v` and `kdf` are checked BEFORE anything is derived, and those two are the
+/// only failures here that name what went wrong: an unreadable keyfile version
+/// is a "this device runs an older build" message, and neither depends on the
+/// passphrase, so neither is a guessing oracle. Every other failure below -
+/// wrong passphrase, tampered `wrapped`, malformed base64, an iteration count
+/// outside the accepted range - is [`OPAQUE_FAILURE`].
 pub fn open_keyfile(kf: &Keyfile, passphrase: &str) -> Result<SyncKeys, String> {
-    if kf.v != WIRE_VERSION {
+    if kf.v != KEYFILE_VERSION {
         return Err(format!(
-            "sync: unsupported keyfile version {}, expected {WIRE_VERSION}",
+            "sync: unsupported keyfile version {}, expected {KEYFILE_VERSION}",
             kf.v
         ));
     }
@@ -246,6 +276,10 @@ pub fn open_record(keys: &SyncKeys, sealed: SealedRecord) -> Result<String, Stri
 ///
 /// Hex rather than base64 because the result is a path segment, and base64's
 /// alphabet includes `/`. The encoding is one fold, not a dependency.
+///
+/// The `:` is a real separator only because NO `kind` CONTAINS ONE - the five
+/// in use are `host`, `group`, `identity`, `key` and `rule`. Without that,
+/// `("a:b", "c")` and `("a", "b:c")` would name one object.
 pub fn object_name(keys: &SyncKeys, kind: &str, id: &str) -> String {
     let key = hmac::Key::new(hmac::HMAC_SHA256, &keys.name);
     let tag = hmac::sign(&key, format!("{kind}:{id}").as_bytes());
@@ -364,12 +398,50 @@ mod tests {
         let (kf, _) = fresh();
 
         let mut newer = kf.clone();
-        newer.v = WIRE_VERSION + 1;
+        newer.v = KEYFILE_VERSION + 1;
         assert!(open_keyfile(&newer, "correct horse").is_err());
 
         let mut other_kdf = kf;
         other_kdf.kdf = "argon2id".into();
         assert!(open_keyfile(&other_kdf, "correct horse").is_err());
+    }
+
+    #[test]
+    fn the_keyfile_version_is_not_welded_to_the_envelope_version() {
+        // They are both 1 today, which is exactly why this is worth an
+        // assertion: a `use` of the envelope constant here compiles, passes
+        // every other test, and only fails the day the ENVELOPE shape changes
+        // - at which point every keyfile already on a remote is refused and
+        // the root key inside it is gone for good.
+        let (kf, _) = fresh();
+        assert_eq!(kf.v, KEYFILE_VERSION);
+        // Not `assert_ne!`: the claim is that the keyfile reads its OWN
+        // constant, so bumping the envelope one must not move this.
+        let mut envelope_bumped = kf.clone();
+        envelope_bumped.v = crate::modules::sync::model::WIRE_VERSION + 1;
+        assert!(open_keyfile(&envelope_bumped, "correct horse").is_err());
+        assert!(open_keyfile(&kf, "correct horse").is_ok());
+    }
+
+    #[test]
+    fn an_iteration_count_outside_the_accepted_range_is_refused_opaquely() {
+        // `iterations` arrives from storage and nothing has authenticated it
+        // by the time the KDF runs, so an unbounded count is hours of PBKDF2
+        // per pull for whoever can write to the remote.
+        let (kf, _) = fresh();
+        for count in [0, MAX_ITERATIONS + 1, u32::MAX] {
+            let mut tampered = kf.clone();
+            tampered.iterations = count;
+            let err = open_keyfile(&tampered, "correct horse")
+                .err()
+                .unwrap_or_else(|| panic!("{count} iterations must be refused"));
+            // Opaque, or the refusal tells whoever rewrote the field where the
+            // ceiling sits.
+            assert_eq!(err, OPAQUE_FAILURE);
+        }
+        // And the real count still opens, so the bound is not simply refusing
+        // everything.
+        assert!(open_keyfile(&kf, "correct horse").is_ok());
     }
 
     #[test]
@@ -408,15 +480,29 @@ mod tests {
 
     #[test]
     fn an_object_name_hides_what_it_was_built_from() {
+        // NEEDLE DISCIPLINE, and here it cuts the other way from the sealed
+        // record's. An object name is HEX, so a needle carrying any character
+        // outside `[0-9a-f]` cannot appear in one no matter what the function
+        // does - `!name.contains("identity")` is true of every hex string ever
+        // printed, and asserting it reads as coverage without being any. So
+        // the fixture's kind and id are drawn entirely from the hex alphabet
+        // and are long enough not to turn up by chance.
         let (_, keys) = fresh();
-        let name = object_name(&keys, "identity", "i-deadbeef");
-        assert!(!name.contains("identity"), "the kind leaked into {name}");
-        assert!(!name.contains("i-deadbeef"), "the id leaked into {name}");
+        let (kind, id) = ("decaf", "deadbeefcafe");
+        let name = object_name(&keys, kind, id);
+        assert!(!name.contains(kind), "the kind leaked into {name}");
+        assert!(!name.contains(id), "the id leaked into {name}");
+
         // Deterministic, or two devices would file one record twice.
-        assert_eq!(name, object_name(&keys, "identity", "i-deadbeef"));
+        assert_eq!(name, object_name(&keys, kind, id));
+        // Both halves are bound in, or two records would share one name. The
+        // separator is what makes that true for every pair, since no `kind` in
+        // use carries a colon.
+        assert_ne!(name, object_name(&keys, kind, "deadbeefcaf"));
+        assert_ne!(name, object_name(&keys, "decafe", id));
         // And keyed, or the storage's listing would be the same for everybody.
         let (_, other) = fresh();
-        assert_ne!(name, object_name(&other, "identity", "i-deadbeef"));
+        assert_ne!(name, object_name(&other, kind, id));
     }
 
     #[test]
