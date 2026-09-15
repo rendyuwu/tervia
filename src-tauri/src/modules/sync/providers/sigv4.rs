@@ -121,8 +121,10 @@ pub fn signed_headers(headers: &[(&str, &str)]) -> String {
 /// The canonical query string: every key and value percent encoded, then the
 /// pairs sorted BY THEIR ENCODED FORM and joined.
 ///
-/// Sorting after encoding rather than before is the part the suite pins: the
-/// ordering is over the bytes that actually travel.
+/// Encoding before sorting because the ordering is defined over the bytes that
+/// travel. Nothing here pins that, and it is worth saying so rather than
+/// implying otherwise: the two orders differ only for keys that straddle a
+/// percent escape, and nothing this provider sends is one.
 pub fn canonical_query(params: &[(&str, &str)]) -> String {
     let mut pairs: Vec<(String, String)> = params
         .iter()

@@ -21,8 +21,11 @@
 //!   falls into.
 //! - the body decode. `reqwest` is built here without its `charset` feature, so
 //!   `Response::text` takes its lossy branch and a non-UTF-8 body silently
-//!   becomes replacement characters instead of failing. Bodies are read as
-//!   bytes and decoded inside [`parse_list`].
+//!   becomes replacement characters instead of failing. Every body is read as
+//!   bytes and stays bytes; [`parse_list`] decodes strictly, and [`classify`]
+//!   decodes lossily only in the one arm that reads an error code - so a
+//!   successful fetch of a sealed envelope never allocates a mangled second
+//!   copy of it.
 //!
 //! REDIRECTS ARE REFUSED, NOT RE-GUARDED. `ssrf_redirect_policy` in
 //! `src-tauri/src/modules/net.rs` exists because `reqwest` follows 3xx by
@@ -96,13 +99,41 @@ pub struct S3Config {
 }
 
 /// A request the shell only has to send: nothing left to decide.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct SignedRequest {
     pub method: &'static str,
     pub url: String,
     /// In a fixed order: the three signed headers, the authorization, then any
     /// unsigned extras. Fixed so a test can assert the whole map.
     pub headers: Vec<(String, String)>,
+}
+
+/// HAND-WRITTEN AND REDACTING, for the same reason [`S3Config`] derives none.
+/// The `Authorization` value carries the access key id and the request's
+/// signature, and a derived formatter would put both into whatever log line or
+/// assertion message ever formats a request. Written rather than omitted
+/// because `assert_eq!` needs one, and an assertion that cannot print its two
+/// sides is worse than a redacted one.
+impl std::fmt::Debug for SignedRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let headers: Vec<(&str, &str)> = self
+            .headers
+            .iter()
+            .map(|(n, v)| {
+                let shown = if n == "authorization" {
+                    "<redacted>"
+                } else {
+                    v.as_str()
+                };
+                (n.as_str(), shown)
+            })
+            .collect();
+        f.debug_struct("SignedRequest")
+            .field("method", &self.method)
+            .field("url", &self.url)
+            .field("headers", &headers)
+            .finish()
+    }
 }
 
 /// The endpoint, taken apart once.
@@ -141,11 +172,49 @@ fn endpoint(cfg: &S3Config) -> Result<Endpoint, ProviderError> {
         Some(port) => format!("{host}:{port}"),
         None => host.to_string(),
     };
+    let prefix = parsed.path().trim_end_matches('/').to_string();
+    // A base path the url parser already had to escape would be escaped a
+    // SECOND time on the way into the signed path, since the percent itself is
+    // not an unreserved character. Signed and sent would still agree, so there
+    // is no rejected signature to notice - the request would simply address a
+    // path nobody has. Refused rather than repaired, because the repair is a
+    // guess at what the user meant.
+    if prefix.contains('%') {
+        return Err(bad(format!(
+            "the sync endpoint's path must be plain, and \"{prefix}\" is escaped"
+        )));
+    }
     Ok(Endpoint {
         base: format!("{}://{host}", parsed.scheme()),
         host,
-        prefix: parsed.path().trim_end_matches('/').to_string(),
+        prefix,
     })
+}
+
+/// Every path this provider signs, refusing the one shape that cannot survive
+/// the trip.
+///
+/// THE SIGNED PATH AND THE SENT PATH HAVE TO BE THE SAME STRING. The canonical
+/// request takes the path verbatim - the signer deliberately does not
+/// normalize, because the service does not either - but the URL is reparsed by
+/// the http client under the WHATWG rules, and those REMOVE a `.` or `..`
+/// segment. A key carrying one would therefore be signed as written and sent
+/// collapsed, and the answer is a rejected signature: the one failure that
+/// reads exactly like a wrong secret key.
+///
+/// Refusing is the only option that leaves no gap. Encoding does not help - the
+/// same rules decode a percent-escaped dot before collapsing it - and
+/// normalizing here would sign a path the caller did not ask for.
+fn checked_path(path: String) -> Result<String, ProviderError> {
+    if path
+        .split('/')
+        .any(|segment| segment == "." || segment == "..")
+    {
+        return Err(ProviderError::Config(format!(
+            "a sync path may not carry a \".\" or \"..\" segment, and \"{path}\" does"
+        )));
+    }
+    Ok(path)
 }
 
 /// One request's worth of signing context.
@@ -170,13 +239,16 @@ impl<'a> Signing<'a> {
 
     /// The path of one object, unencoded. Exactly one separator between each
     /// part, whatever trailing slashes the endpoint carried.
-    fn path(&self, key: &str) -> String {
-        format!("{}/{}/{key}", self.endpoint.prefix, self.cfg.bucket)
+    fn path(&self, key: &str) -> Result<String, ProviderError> {
+        checked_path(format!(
+            "{}/{}/{key}",
+            self.endpoint.prefix, self.cfg.bucket
+        ))
     }
 
     /// The path of the bucket itself, which is what a listing addresses.
-    fn bucket_path(&self) -> String {
-        format!("{}/{}", self.endpoint.prefix, self.cfg.bucket)
+    fn bucket_path(&self) -> Result<String, ProviderError> {
+        checked_path(format!("{}/{}", self.endpoint.prefix, self.cfg.bucket))
     }
 
     /// Sign one request.
@@ -252,7 +324,7 @@ pub fn object_url(cfg: &S3Config, key: &str) -> Result<String, ProviderError> {
     Ok(format!(
         "{}{}",
         signing.endpoint.base,
-        sigv4::uri_encode(&signing.path(key), false)
+        sigv4::uri_encode(&signing.path(key)?, false)
     ))
 }
 
@@ -264,7 +336,7 @@ pub fn build_get(
     let signing = Signing::new(cfg, now)?;
     Ok(signing.sign(
         "GET",
-        &signing.path(key),
+        &signing.path(key)?,
         &[],
         sigv4::EMPTY_PAYLOAD_SHA256,
         &[],
@@ -279,11 +351,21 @@ pub fn build_delete(
     let signing = Signing::new(cfg, now)?;
     Ok(signing.sign(
         "DELETE",
-        &signing.path(key),
+        &signing.path(key)?,
         &[],
         sigv4::EMPTY_PAYLOAD_SHA256,
         &[],
     ))
+}
+
+/// Which etag, if any, actually rides as a condition.
+///
+/// ONE DEFINITION, TWO READERS: the builder that attaches the header and the
+/// shell that has to tell the response mapper what was sent. Two spellings of
+/// the same predicate would have to stay in step, and the symptom of their
+/// drifting is a 404 read as the wrong disposition.
+fn condition<'a>(cfg: &S3Config, if_match: Option<&'a str>) -> Option<&'a str> {
+    if_match.filter(|_| cfg.cas)
 }
 
 /// A put, conditional only when the user said this endpoint can do it.
@@ -301,12 +383,11 @@ pub fn build_put(
 ) -> Result<SignedRequest, ProviderError> {
     let signing = Signing::new(cfg, now)?;
     let payload_hash = sigv4::sha256_hex(bytes);
-    let condition = if_match.filter(|_| cfg.cas);
-    let extra: Vec<(&str, &str)> = match condition {
+    let extra: Vec<(&str, &str)> = match condition(cfg, if_match) {
         Some(etag) => vec![("if-match", etag)],
         None => Vec::new(),
     };
-    Ok(signing.sign("PUT", &signing.path(key), &[], &payload_hash, &extra))
+    Ok(signing.sign("PUT", &signing.path(key)?, &[], &payload_hash, &extra))
 }
 
 pub fn build_list(
@@ -322,7 +403,7 @@ pub fn build_list(
     }
     Ok(signing.sign(
         "GET",
-        &signing.bucket_path(),
+        &signing.bucket_path()?,
         &query,
         sigv4::EMPTY_PAYLOAD_SHA256,
         &[],
@@ -340,22 +421,26 @@ pub fn build_list(
 /// redirect is refused rather than followed, so the 3xx that a region mismatch
 /// produces is surfaced as a refusal rather than chased into a signature
 /// rejection.
-pub fn classify(status: u16, body: &str) -> ProviderError {
+///
+/// TAKES BYTES AND DECODES ONLY WHERE IT HAS TO, which is the last arm. A
+/// sealed envelope is not text, and a lossy decode of one allocates a second
+/// full copy of the object on a path that never reads it.
+pub fn classify(status: u16, body: &[u8]) -> ProviderError {
     match status {
         412 => ProviderError::PreconditionFailed,
         409 => ProviderError::Conflict,
         300..=399 => ProviderError::Blocked(format!(
-            "blocked: the remote answered {status}, a redirect this client does not follow"
+            "blocked: the remote answered {status}, which this client neither follows nor reads"
         )),
         _ => ProviderError::Remote {
             status,
-            code: error_code(body),
+            code: error_code(&String::from_utf8_lossy(body)),
         },
     }
 }
 
 /// A get's outcome. `Ok(None)` means the key is simply not there.
-pub fn classify_get(status: u16, body: &str) -> Result<Option<()>, ProviderError> {
+pub fn classify_get(status: u16, body: &[u8]) -> Result<Option<()>, ProviderError> {
     match status {
         200..=299 => Ok(Some(())),
         404 => Ok(None),
@@ -369,7 +454,7 @@ pub fn classify_get(status: u16, body: &str) -> Result<Option<()>, ProviderError
 /// from an unconditional one, and a missing key means something different in
 /// each: under a condition it is a key that was deleted from under the caller,
 /// and without one it is an ordinary remote failure.
-pub fn classify_put(status: u16, body: &str, conditional: bool) -> Result<(), ProviderError> {
+pub fn classify_put(status: u16, body: &[u8], conditional: bool) -> Result<(), ProviderError> {
     match status {
         200..=299 => Ok(()),
         404 if conditional => Err(ProviderError::NotFound),
@@ -483,11 +568,19 @@ pub fn parse_list(bytes: &[u8]) -> Result<(Vec<Entry>, Option<String>), Provider
         let key = tag_text(row, "Key").ok_or_else(|| {
             ProviderError::Malformed("a listing row carried no Key element".to_string())
         })?;
+        // AN ABSENT ETAG IS REFUSED RATHER THAN DEFAULTED, because the empty
+        // string is not an etag and would be handed straight back as a
+        // condition on the next write - where it fails every conditional put,
+        // silently and permanently. Same rule the object read applies.
+        let etag = tag_text(row, "ETag")
+            .map(|e| normalize_etag(&e))
+            .filter(|e| !e.is_empty())
+            .ok_or_else(|| {
+                ProviderError::Malformed(format!("the listing row for \"{key}\" carried no etag"))
+            })?;
         entries.push(Entry {
             key,
-            etag: tag_text(row, "ETag")
-                .map(|e| normalize_etag(&e))
-                .unwrap_or_default(),
+            etag,
             modified_at: tag_text(row, "LastModified")
                 .as_deref()
                 .and_then(sigv4::parse_iso8601_utc),
@@ -497,9 +590,25 @@ pub fn parse_list(bytes: &[u8]) -> Result<(Vec<Entry>, Option<String>), Provider
     let truncated = tag_text(body, "IsTruncated")
         .map(|v| v.trim().eq_ignore_ascii_case("true"))
         .unwrap_or(false);
-    let next = truncated
-        .then(|| tag_text(body, "NextContinuationToken"))
-        .flatten();
+    // A PAGE THAT SAYS IT IS TRUNCATED AND THEN NAMES NO TOKEN IS A PROTOCOL
+    // FAILURE, not the end of the listing. Reading it as the end is the
+    // silent-loss shape the root-element check guards the empty case against:
+    // a partial inventory returned as a complete one, which the merge above
+    // reads as every absent record having been deleted.
+    let next = if truncated {
+        Some(
+            tag_text(body, "NextContinuationToken")
+                .filter(|t| !t.is_empty())
+                .ok_or_else(|| {
+                    ProviderError::Protocol(
+                        "the listing said it was truncated and then named no continuation token"
+                            .to_string(),
+                    )
+                })?,
+        )
+    } else {
+        None
+    };
     Ok((entries, next))
 }
 
@@ -539,12 +648,33 @@ struct RawResponse {
 pub struct S3Provider {
     cfg: S3Config,
     client: reqwest::Client,
-    /// The SSRF verdict for this endpoint, resolved on the first call and kept.
+    /// Set once the endpoint has PASSED the SSRF guard, and never otherwise.
     ///
-    /// `reject_metadata_ssrf` resolves the host, so re-running it per object
-    /// would put a DNS lookup in front of every request in an inventory-sized
-    /// listing. The endpoint cannot change without a new provider.
-    endpoint_allowed: tokio::sync::OnceCell<Result<(), String>>,
+    /// The guard resolves the host, so re-running it per object would put a DNS
+    /// lookup in front of every request in an inventory-sized listing, and the
+    /// endpoint cannot change without a new provider.
+    ///
+    /// ONLY THE PASS IS CACHED. The guard answers with the same error type for
+    /// a link-local address and for a name that simply did not resolve, so
+    /// caching a failure would let one attempt made on a dropped network
+    /// poison the provider for the life of the process - and report it as a
+    /// security refusal, which sends the user looking for a policy that does
+    /// not exist. A refusal is not cached, so the next call asks again.
+    endpoint_allowed: tokio::sync::OnceCell<()>,
+}
+
+/// Which disposition a refusal from the SSRF guard is.
+///
+/// Keyed on the guard's OWN vocabulary: it prefixes a refusal with `blocked:`
+/// and says so in plain words for a resolution that did not answer. A dropped
+/// network is a transport failure, not a policy decision, and the two want
+/// opposite things from the caller - one is worth retrying, the other never is.
+fn guard_failure(why: String) -> ProviderError {
+    if why.starts_with("blocked:") {
+        ProviderError::Blocked(why)
+    } else {
+        ProviderError::Transport(why)
+    }
 }
 
 impl S3Provider {
@@ -567,11 +697,17 @@ impl S3Provider {
     }
 
     async fn allowed(&self) -> Result<(), ProviderError> {
-        self.endpoint_allowed
-            .get_or_init(|| crate::modules::net::reject_metadata_ssrf(&self.cfg.endpoint))
+        if self.endpoint_allowed.initialized() {
+            return Ok(());
+        }
+        crate::modules::net::reject_metadata_ssrf(&self.cfg.endpoint)
             .await
-            .clone()
-            .map_err(ProviderError::Blocked)
+            .map_err(guard_failure)?;
+        // Two first calls racing here both run the guard and both set this.
+        // That costs one extra resolution and cannot disagree, which is
+        // cheaper than the lock that would prevent it.
+        let _ = self.endpoint_allowed.set(());
+        Ok(())
     }
 
     async fn send(
@@ -634,11 +770,18 @@ impl SyncProvider for S3Provider {
             self.allowed().await?;
             let req = build_get(&self.cfg, key, SystemTime::now())?;
             let raw = self.send(req, None).await?;
-            if classify_get(raw.status, &String::from_utf8_lossy(&raw.body))?.is_none() {
+            if classify_get(raw.status, &raw.body)?.is_none() {
                 return Ok(None);
             }
+            // SYMMETRIC WITH `put`, which refuses the same absence. An empty
+            // string is not an etag, and handing one back would have the
+            // caller send `If-Match:` with nothing after it - a condition that
+            // fails every conditional write, silently and forever.
+            let etag = raw.etag.ok_or_else(|| {
+                ProviderError::Malformed("the remote returned an object with no etag".to_string())
+            })?;
             Ok(Some(Object {
-                etag: raw.etag.unwrap_or_default(),
+                etag,
                 bytes: raw.body,
             }))
         })
@@ -652,12 +795,13 @@ impl SyncProvider for S3Provider {
     ) -> Pin<Box<dyn Future<Output = Result<String, ProviderError>> + Send + 'a>> {
         Box::pin(async move {
             self.allowed().await?;
-            // The same gate `build_put` applies, so the mapper is told what was
-            // actually sent rather than what was asked for.
-            let conditional = if_match.is_some() && self.cfg.cas;
+            // The same predicate `build_put` applies, through the same
+            // function, so the mapper is told what was actually sent rather
+            // than what was asked for.
+            let conditional = condition(&self.cfg, if_match).is_some();
             let req = build_put(&self.cfg, key, &bytes, if_match, SystemTime::now())?;
             let raw = self.send(req, Some(bytes)).await?;
-            classify_put(raw.status, &String::from_utf8_lossy(&raw.body), conditional)?;
+            classify_put(raw.status, &raw.body, conditional)?;
             raw.etag.ok_or_else(|| {
                 ProviderError::Malformed(
                     "the remote stored the object but returned no etag".to_string(),
@@ -680,7 +824,7 @@ impl SyncProvider for S3Provider {
                 if !(200..300).contains(&raw.status) {
                     // Not `classify_get`: a missing BUCKET is a real failure,
                     // where a missing object is the ordinary answer.
-                    return Err(classify(raw.status, &String::from_utf8_lossy(&raw.body)));
+                    return Err(classify(raw.status, &raw.body));
                 }
                 let page = parse_list(&raw.body)?;
                 match accumulate(&mut entries, token.as_deref(), page)? {
@@ -699,13 +843,21 @@ impl SyncProvider for S3Provider {
             self.allowed().await?;
             let req = build_delete(&self.cfg, key, SystemTime::now())?;
             let raw = self.send(req, None).await?;
-            // A delete answers with no content whether or not the key was
-            // there, and a server that reports the absence instead means the
-            // same thing: gone.
-            if raw.status == 404 || (200..300).contains(&raw.status) {
+            if (200..300).contains(&raw.status) {
                 return Ok(());
             }
-            Err(classify(raw.status, &String::from_utf8_lossy(&raw.body)))
+            // A delete answers with no content whether or not the key was
+            // there, and a server that reports the absence instead means the
+            // same thing: gone. A missing BUCKET does not - that is a
+            // configuration error, and swallowing it would have every delete
+            // against a mistyped bucket report success. `list` distinguishes
+            // exactly the same pair.
+            let missing_bucket = error_code(&String::from_utf8_lossy(&raw.body))
+                .is_some_and(|code| code == "NoSuchBucket");
+            if raw.status == 404 && !missing_bucket {
+                return Ok(());
+            }
+            Err(classify(raw.status, &raw.body))
         })
     }
 }
@@ -827,6 +979,112 @@ mod tests {
         );
     }
 
+    /// The `Authorization` value each builder produces, for the fixture above
+    /// at the fixed instant above.
+    ///
+    /// A REGRESSION PIN, AND AN INDEPENDENT ONE. These were not read back out
+    /// of this implementation: they were computed from the protocol definition
+    /// by a separate program, so a defect shared between the signer and its own
+    /// output cannot hide in them. That matters because the published vectors
+    /// sign a GENERIC service over two headers with a literal date, and every
+    /// other test here asserts on header NAMES and substrings. Change the path
+    /// fed to the canonical request without changing the URL - double-encode
+    /// it, normalize it, prepend something - and every one of those still
+    /// passes while every real request comes back rejected. This is what
+    /// notices.
+    const PINNED: [(&str, &str); 4] = [
+        (
+            "GET",
+            "AWS4-HMAC-SHA256 Credential=test-access-key/20150830/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=dadd4c9692aa157d45a5dd808edb9b3e9c439c891c0489c08dca8214bc7ee296",
+        ),
+        (
+            "PUT",
+            "AWS4-HMAC-SHA256 Credential=test-access-key/20150830/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=7fb6b37b8d723dede555c98b5769e39b962c130d8885b26fade1a8007f34c47f",
+        ),
+        (
+            "DELETE",
+            "AWS4-HMAC-SHA256 Credential=test-access-key/20150830/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=eb54ad3eee6d519a7dcb507945e6b9a1df769b2b747fc5e81a9d4e86b0376fdd",
+        ),
+        (
+            "LIST",
+            "AWS4-HMAC-SHA256 Credential=test-access-key/20150830/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=e9c6e0d3b200cf024261a2b32de44fffcfafb444899a3884a621f876814b3d79",
+        ),
+    ];
+
+    #[test]
+    fn every_builder_still_produces_the_signature_it_was_pinned_at() {
+        for (req, (label, expected)) in all(&cfg()).into_iter().zip(PINNED) {
+            assert_eq!(
+                header(&req, "authorization"),
+                Some(expected),
+                "{label} no longer signs what it was pinned at"
+            );
+        }
+    }
+
+    #[test]
+    fn the_url_that_is_sent_carries_the_path_that_was_signed() {
+        // THE SEAM THE PURE HALF CANNOT SEE ON ITS OWN. The canonical request
+        // takes the path verbatim, but the http client reparses this URL, and
+        // that parse has rules of its own. Asserting on the signer's output
+        // alone would pass while the two disagree, and the symptom is a
+        // rejected signature rather than anything about paths.
+        let cfg = cfg();
+        for key in ["v1/obj/abc", "v1/obj/aa%bb", "caf\u{e9}/obj", "a//b", ""] {
+            let req = build_get(&cfg, key, at(NOW)).unwrap();
+            let parsed = url::Url::parse(&req.url).expect("the builder produced a url");
+            assert_eq!(
+                parsed.path(),
+                sigv4::uri_encode(&format!("/tervia/{key}"), false),
+                "\"{key}\" survived signing but not the parse"
+            );
+        }
+    }
+
+    #[test]
+    fn a_dot_segment_is_refused_rather_than_signed_and_then_collapsed() {
+        // The parse above REMOVES a `.` or `..` segment, and decodes a
+        // percent-escaped one first, so neither passing it through nor
+        // encoding it keeps the two halves equal. Refusing is the only answer
+        // that leaves no gap, and the key arrives here composed from a
+        // user-typed prefix.
+        let cfg = cfg();
+        for key in ["v1/../obj/abc", "v1/./obj", "..", ".", "v1/obj/.."] {
+            for built in [
+                build_get(&cfg, key, at(NOW)),
+                build_delete(&cfg, key, at(NOW)),
+                build_put(&cfg, key, b"x", None, at(NOW)),
+            ] {
+                let err = built
+                    .err()
+                    .unwrap_or_else(|| panic!("\"{key}\" must be refused"));
+                assert!(
+                    matches!(err, ProviderError::Config(_)),
+                    "\"{key}\" gave {err:?}"
+                );
+            }
+            assert!(object_url(&cfg, key).is_err(), "\"{key}\" built a url");
+        }
+        // And an ordinary key still builds, so the guard is not simply
+        // refusing everything.
+        assert!(build_get(&cfg, "v1/obj/abc", at(NOW)).is_ok());
+        // Nor is a dot INSIDE a segment a dot segment.
+        assert!(build_get(&cfg, "v1/obj/a.b", at(NOW)).is_ok());
+    }
+
+    #[test]
+    fn an_endpoint_whose_path_is_already_escaped_is_refused() {
+        // It would be escaped a second time on the way into the signed path,
+        // and because signed and sent would still AGREE there is no rejected
+        // signature to notice - the request would quietly address a path
+        // nobody has.
+        let mut spaced = cfg();
+        spaced.endpoint = "https://storage.example/my path/".to_string();
+        let err =
+            build_get(&spaced, "k", at(NOW)).expect_err("an escaped endpoint path must be refused");
+        assert!(matches!(err, ProviderError::Config(_)), "{err:?}");
+    }
+
     #[test]
     fn a_non_default_port_rides_into_the_host_header_and_a_default_one_does_not() {
         // The canonical request must carry the port exactly when the URL does,
@@ -893,15 +1151,15 @@ mod tests {
 
     #[test]
     fn a_stale_etag_and_a_mid_upload_conflict_are_different_dispositions() {
-        assert_eq!(classify(412, ""), ProviderError::PreconditionFailed);
+        assert_eq!(classify(412, b""), ProviderError::PreconditionFailed);
         assert_eq!(
             classify(
                 409,
-                "<Error><Code>ConditionalRequestConflict</Code></Error>"
+                b"<Error><Code>ConditionalRequestConflict</Code></Error>"
             ),
             ProviderError::Conflict
         );
-        assert_ne!(classify(412, ""), classify(409, ""));
+        assert_ne!(classify(412, b""), classify(409, b""));
     }
 
     #[test]
@@ -910,7 +1168,7 @@ mod tests {
         // written a little too wide and a caller then retrying a merge it never
         // needed to do.
         for status in 100u16..=599 {
-            let err = classify(status, "");
+            let err = classify(status, b"");
             if status == 412 {
                 assert_eq!(err, ProviderError::PreconditionFailed);
             } else {
@@ -926,7 +1184,7 @@ mod tests {
         // the request is going nowhere.
         for status in [301u16, 302, 307, 308] {
             assert!(
-                matches!(classify(status, ""), ProviderError::Blocked(_)),
+                matches!(classify(status, b""), ProviderError::Blocked(_)),
                 "{status}"
             );
         }
@@ -935,14 +1193,14 @@ mod tests {
     #[test]
     fn an_error_body_contributes_its_code_and_a_bodyless_one_does_not() {
         assert_eq!(
-            classify(403, "<Error><Code>SignatureDoesNotMatch</Code></Error>"),
+            classify(403, b"<Error><Code>SignatureDoesNotMatch</Code></Error>"),
             ProviderError::Remote {
                 status: 403,
                 code: Some("SignatureDoesNotMatch".to_string()),
             }
         );
         assert_eq!(
-            classify(500, ""),
+            classify(500, b""),
             ProviderError::Remote {
                 status: 500,
                 code: None,
@@ -970,13 +1228,22 @@ mod tests {
 
     #[test]
     fn a_missing_key_reads_as_absent_when_getting_and_as_a_failure_when_writing_conditionally() {
-        assert_eq!(classify_get(404, ""), Ok(None));
-        assert_eq!(classify_get(200, ""), Ok(Some(())));
-        assert_eq!(classify_put(404, "", true), Err(ProviderError::NotFound));
+        assert_eq!(classify_get(404, b""), Ok(None));
+        assert_eq!(classify_get(200, b""), Ok(Some(())));
+        assert_eq!(classify_put(404, b"", true), Err(ProviderError::NotFound));
         // Without a condition a 404 is an ordinary remote failure, because
         // nothing was raced.
-        assert_ne!(classify_put(404, "", false), Err(ProviderError::NotFound));
-        assert_eq!(classify_put(204, "", false), Ok(()));
+        assert_ne!(classify_put(404, b"", false), Err(ProviderError::NotFound));
+        assert_eq!(classify_put(204, b"", false), Ok(()));
+        // A body that is not text at all reaches these on the failure path, so
+        // nothing here may assume a decode succeeded.
+        assert_eq!(
+            classify_get(500, &[0xff, 0xfe]),
+            Err(ProviderError::Remote {
+                status: 500,
+                code: None
+            })
+        );
     }
 
     #[test]
@@ -1074,12 +1341,43 @@ mod tests {
     }
 
     #[test]
-    fn a_row_with_no_key_is_refused() {
-        let rows = "<Contents><ETag>&quot;abc&quot;</ETag></Contents>";
-        assert!(matches!(
-            parse_list(listing(rows, false, "").as_bytes()),
-            Err(ProviderError::Malformed(_))
-        ));
+    fn a_row_missing_its_key_or_its_etag_is_refused() {
+        // An absent etag defaulted to the empty string is worse than a refusal:
+        // it is handed back as a condition on the next write, where it fails
+        // every conditional put and says nothing about why.
+        for rows in [
+            "<Contents><ETag>&quot;abc&quot;</ETag></Contents>",
+            "<Contents><Key>v1/obj/abc</Key></Contents>",
+            "<Contents><Key>v1/obj/abc</Key><ETag></ETag></Contents>",
+            "<Contents><Key>v1/obj/abc</Key><ETag>&quot;&quot;</ETag></Contents>",
+        ] {
+            assert!(
+                matches!(
+                    parse_list(listing(rows, false, "").as_bytes()),
+                    Err(ProviderError::Malformed(_))
+                ),
+                "{rows}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_page_that_claims_truncation_and_names_no_token_is_refused() {
+        // THE PARTIAL-LOSS SHAPE, which the root-element check does not reach
+        // because these bodies carry the root element perfectly well. Read as
+        // the end of the listing, a truncated first page becomes a complete
+        // inventory, and the merge above reads every record it omits as a
+        // delete. `Protocol` and not `Malformed`: the body parsed fine, the
+        // server is what is broken.
+        for tail in [
+            "<IsTruncated>true</IsTruncated>",
+            "<IsTruncated>true</IsTruncated><NextContinuationToken></NextContinuationToken>",
+        ] {
+            let body =
+                format!("<ListBucketResult><Name>tervia</Name>{ROWS}{tail}</ListBucketResult>");
+            let got = parse_list(body.as_bytes());
+            assert!(matches!(got, Err(ProviderError::Protocol(_))), "{got:?}");
+        }
     }
 
     fn entry(key: &str) -> Entry {
@@ -1139,6 +1437,35 @@ mod tests {
     }
 
     #[test]
+    fn a_name_that_did_not_resolve_is_a_transport_failure_and_not_a_refusal() {
+        // The guard answers a link-local address and an unreachable DNS server
+        // with the same error TYPE, and only one of them is a policy decision.
+        // Reporting a dropped network as "blocked" sends the user looking for
+        // a setting that does not exist - and, because only a PASS is cached,
+        // the same call has to be able to succeed later.
+        assert!(matches!(
+            guard_failure("blocked: link-local / cloud-metadata address".to_string()),
+            ProviderError::Blocked(_)
+        ));
+        assert!(matches!(
+            guard_failure("blocked: cloud metadata endpoint".to_string()),
+            ProviderError::Blocked(_)
+        ));
+        for transient in [
+            "dns resolve failed: failed to lookup address information",
+            "dns task failed: task panicked",
+        ] {
+            assert!(
+                matches!(
+                    guard_failure(transient.to_string()),
+                    ProviderError::Transport(_)
+                ),
+                "{transient}"
+            );
+        }
+    }
+
+    #[test]
     fn an_object_url_joins_its_parts_with_exactly_one_separator() {
         let bare = cfg();
         let mut trailing = cfg();
@@ -1177,11 +1504,21 @@ mod tests {
         // is that `S3Config` has no `Default` impl, which makes a defaulted
         // endpoint unrepresentable rather than merely absent today.
         //
-        // Two assumptions it makes, stated because they are silent otherwise:
-        // the test module is this file's last item, so splitting at the first
-        // configuration attribute leaves exactly the shipped half; and reading
-        // one's own source is a new pattern in this tree - the existing uses
-        // embed shell scripts.
+        // One assumption, stated because it would otherwise be silent AND
+        // checked because stating it is not enough: the test module is this
+        // file's last item, so splitting at the first configuration attribute
+        // leaves exactly the shipped half. A test-only helper marked anywhere
+        // above it would shrink the scanned region and every needle below would
+        // pass over almost nothing.
+        //
+        // Checked by NAMING THE LAST SHIPPED ITEM rather than by a byte floor.
+        // A floor is a guess that has to be revised whenever either half grows,
+        // and it answers "is this big enough" when the question is "does this
+        // reach the end". The trait implementation is the last thing before the
+        // test module, so a split that lands before it loses that name.
+        //
+        // Reading one's own source is a new pattern in this tree - the existing
+        // uses embed shell scripts.
         //
         // Deliberately NOT checking the names of particular self-hosted servers
         // or a loopback address: both appear in truthful prose about what this
@@ -1192,8 +1529,10 @@ mod tests {
             .expect("the test module is still marked")
             .0;
         assert!(
-            shipped.len() > 1000,
-            "the split landed somewhere unexpected"
+            shipped.contains("impl SyncProvider for S3Provider"),
+            "the split landed before the last shipped item, so {} of {} bytes went unscanned",
+            source.len() - shipped.len(),
+            source.len()
         );
         for needle in ["amazonaws.com", "AKIA", "ASIA"] {
             assert!(
