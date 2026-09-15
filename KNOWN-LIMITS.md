@@ -562,3 +562,75 @@ in front of it.
 `tauri-plugin-window-state` gaining a saved-size update while maximized - which
 would keep the below-floor size from being saved in the first place, and retire
 the clamp's need to correct one.
+
+## Tombstones and record stamps
+
+### A device offline longer than 90 days can resurrect a record deleted while it was away
+
+**Accepted state.** A delete leaves a tombstone, and a tombstone is dropped once
+it is 90 days old. A device that has not synced for longer than that has never
+seen the tombstone and still holds the record, so its next push re-creates
+something the user deleted. The window is a guess about how long a device can
+plausibly be away, and it is a guess in both directions: shorter reclaims space
+sooner and resurrects more, longer resurrects less and keeps a growing list of
+deletes nobody will ever consult again. Against that, the alternative is keeping
+every tombstone forever, which makes the file grow without bound for a store
+whose whole content is a few dozen rows.
+
+**Carried by.** `TOMBSTONE_TTL_MS` in `src/lib/tombstones.ts`, which is the
+window, and `livingTombstones` in the same file, which applies it.
+
+**Trigger.** A device registry that can say when each device last pulled. The
+window can then be derived from the oldest live device rather than guessed, and
+this entry retires rather than being re-tuned.
+
+### Expired tombstone bytes are never reclaimed in a store that sees no further deletes
+
+**Accepted state.** Pruning is filter-on-read plus prune-on-write: a read never
+returns an expired tombstone, and every write of the tombstones key persists the
+already-filtered list. Nothing prunes at load time, so a store whose last delete
+was a year ago still holds that row on disk - invisible to every reader, and
+reclaimed only by the next delete or the next upsert that clears a tombstone. The
+alternative considered was a load-time pass, which `RecoveredStoreIo` has no hook
+for and which would cost a store write, a `.bak` snapshot and a cross-window
+changed event on every launch where anything happened to expire. What is given up
+is bytes in a file nobody writes to again, which is where it matters least.
+
+**Carried by.** `livingTombstones` in `src/lib/tombstones.ts`, which filters on
+read, and `withTombstone` and `withoutTombstone` in the same file, which are the
+only things that compact the stored list. All three name this file back.
+
+**Trigger.** Any store gaining a load-time maintenance pass for some other
+reason. The pruning can ride it at no extra cost, and this entry retires.
+
+### The stores stamp every timestamp from their own clock, so no caller can land a record or a tombstone at a time it did not just produce
+
+**Accepted state.** Every mutator overwrites whatever `updatedAt` its caller
+supplied and stamps the store's own clock, and every delete stamps `deletedAt`
+the same way. That is correct for every caller that exists: an editor
+round-trips the record it loaded, so honouring a caller-supplied value would
+mean a save never bumps the stamp, and a restored backup genuinely is a local
+write. It is not sufficient for a sync pull, which has to land a remote record
+at its REMOTE `updatedAt` and a remote tombstone at its remote `deletedAt` - a
+locally-stamped `deletedAt` restarts the 90-day window on every device that
+receives it, and can outrank a resurrection the remote already published. Safe to
+defer because the field is optional and no wire format is minted yet.
+
+The shortcut that is NOT available: reaching past this layer with a direct
+`io.store.set`. `hosts/store.ts`'s header states the rule - every integrity rule
+lives in the store layer, because a dialog is never the only writer - and nothing
+outside the three `store.ts` files names a record key today. So the pull has to
+go through the layer, and widening ten signatures one at a time is the wrong
+shape for it: a single `applyRemote`-style entry point on each store, which
+takes an already-merged record or tombstone together with its remote timestamp,
+is the surface to add.
+
+**Carried by.** `upsertHost`, `upsertGroup`, `deleteHost` and `deleteGroup` in
+`src/modules/hosts/store.ts`; `upsertIdentity`, `upsertKey`, `deleteIdentity`
+and `deleteKey` in `src/modules/vault/store.ts`; `upsertRule`, `deleteRule` and
+`dropRulesForHost` in `src/modules/forwards/store.ts`. Each of the three files
+reads its clock through a single `now`, which is where the decision is stated.
+
+**Trigger.** The sync pull path needing to land a remote record or a remote
+tombstone at its remote timestamp - the first writer in this codebase that did
+not originate what it is writing.

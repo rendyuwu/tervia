@@ -35,7 +35,23 @@ export type HostsStoreIo = RecoveredStoreIo;
  * take their ports - omitting it means "the real filesystem", never "skip a
  * guard", so there is nothing here for a caller to silently opt out of.
  */
-export type HostsIo = { store: HostsStoreIo; secrets: SecretsIo; files?: StoreFileIo };
+export type HostsIo = {
+  store: HostsStoreIo;
+  secrets: SecretsIo;
+  files?: StoreFileIo;
+  /**
+   * The clock every `updatedAt` and every `deletedAt` in this store is stamped
+   * from. Optional with the real default, on the same terms as `files` above -
+   * omitting it means the real clock, never "skip a stamp".
+   *
+   * It exists because the property it carries is otherwise uncheckable: two
+   * awaited writes against in-memory ports routinely land in the same
+   * millisecond, so "a second write produces a later stamp" would be a check
+   * that fails at random rather than one that fails when the stamp is wrong. The
+   * tombstone window's boundary needs the same control.
+   */
+  now?: () => number;
+};
 
 /** The file port every caller gets unless a test hands one in. */
 export const defaultHostFiles: StoreFileIo = tauriStoreFileIo;

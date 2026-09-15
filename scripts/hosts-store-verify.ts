@@ -1678,11 +1678,21 @@ console.log("\n[groups] deleting a group clears the label and keeps the rows");
   // Against a LITERAL, not against what `upsertGroup` returned - that is the very
   // object the store persisted, so comparing the two proves persistence happened
   // and could not notice a mangled field.
-  check("a group round-trips field for field", await h.hosts.findGroup("g-1"), {
+  // `updatedAt` is the one field the literal cannot state in advance, because the
+  // store stamps it from the real clock. That it is stamped at all, that it moves,
+  // and that a caller's value is overridden are `scripts/sync-prereq-verify.ts`'s
+  // subject; here it is only removed so the remaining fields can be named.
+  const found: Partial<HostGroup> = { ...(await h.hosts.findGroup("g-1")) };
+  const stamp = found.updatedAt;
+  // Deleted rather than overwritten with `undefined`, so what is compared still
+  // has EXACTLY the remaining keys and an extra field would still redden this.
+  delete found.updatedAt;
+  check("a group round-trips field for field, apart from the store's stamp", found, {
     id: "g-1",
     name: "Production",
     order: 0,
   });
+  check("and it carries that stamp", typeof stamp, "number");
   await rejects("a group needs a name", () => h.hosts.upsertGroup({ id: "g-3", name: "  " }), [
     "needs a name",
   ]);

@@ -34,7 +34,15 @@ export type ForwardRule = {
    */
   startWithHost: boolean;
   description?: string;
+  /** Unix ms of the last change, stamped by the store on every write. Absent is
+   *  not zero and is never backfilled on read - the read-time adoption the note
+   *  below describes, and `HostBase.updatedAt` in `modules/hosts/types.ts`
+   *  carries the full reasoning. */
+  updatedAt?: number;
 };
+
+/** What a rule is called in a tombstone's `kind`. */
+export const RULE_TOMBSTONE_KIND = "rule";
 
 // No `type: "local"` field: only a local-to-remote forward is modelled today.
 // A remote or dynamic variant would arrive by read-time adoption rather than a

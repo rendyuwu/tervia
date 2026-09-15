@@ -107,6 +107,11 @@ export type VaultIdentity = {
   /** Set when `authMode === "key"`. Names a {@link VaultKey}. */
   keyId?: string;
   description?: string;
+  /** Unix ms of the last change, stamped by the store on every write. Absent is
+   *  not zero and is never backfilled on read - `HostBase.updatedAt` in
+   *  `modules/hosts/types.ts` carries the full reasoning, and this field means
+   *  exactly the same thing. */
+  updatedAt?: number;
 };
 
 /** What `ssh_key_inspect` reports. Display only. */
@@ -160,7 +165,19 @@ export type VaultKey = {
    */
   encrypted?: boolean;
   description?: string;
+  /** Unix ms of the last change, on the same terms as
+   *  {@link VaultIdentity.updatedAt}. */
+  updatedAt?: number;
 };
+
+/**
+ * What an identity and a key are called in a tombstone's `kind`.
+ *
+ * Both kinds share ONE tombstone list, because both live in one file and `kind`
+ * is what tells them apart.
+ */
+export const IDENTITY_TOMBSTONE_KIND = "identity";
+export const KEY_TOMBSTONE_KIND = "key";
 
 /** A reference to a shared vault identity. */
 export type VaultIdentityBinding = { kind: "identity"; identityId: string };

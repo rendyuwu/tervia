@@ -1,4 +1,11 @@
 import type { StoreRecovery } from "@/lib/storeRecovery";
+import {
+  livingTombstones,
+  TOMBSTONES_KEY,
+  withoutTombstone,
+  withTombstone,
+  type Tombstone,
+} from "@/lib/tombstones";
 import { tauriSecretsIo } from "@/modules/vault/adapters";
 import { hostsUsingIdentity } from "@/modules/vault/refs";
 import type { SshSecretValues } from "@/modules/vault/resolve";
@@ -25,10 +32,12 @@ import { jumpChain } from "./jumps";
 import { purgeLegacySecrets as runLegacyPurge, type LegacyPurgeResult } from "./legacyPurge";
 import {
   credentialStamp,
+  GROUP_TOMBSTONE_KIND,
   HOSTS_KEY,
   HOST_GROUPS_KEY,
   HOST_RDP_SECRET_FIELDS,
   HOST_SSH_SECRET_FIELDS,
+  HOST_TOMBSTONE_KIND,
   HostBindingChangedError,
   hostFingerprint,
   hostPins,
@@ -175,6 +184,14 @@ export type HostsStore = {
    * here because this is the only module that knows how a host names an identity.
    */
   identityHostRefs: IdentityHostRefs;
+  /**
+   * What this store's deletes have left behind, already pruned to the window.
+   *
+   * Filter-on-read is the whole pruning mechanism on this side, so an expired
+   * row still sitting in the file is never observable here - see
+   * `livingTombstones` in `src/lib/tombstones.ts`.
+   */
+  listTombstones(): Promise<Tombstone[]>;
   onHostsChanged(cb: () => void): Promise<() => void>;
   /** Run the crash-recovery pass and first load, then hand back whatever the
    *  user should be told - once. The startup entry point. */
@@ -396,6 +413,19 @@ export function createHostsStore(io: HostsIo): HostsStore {
   // concurrent read-modify-writes are the ordinary case, not the exotic one.
   const enqueueWrite = <T>(op: () => Promise<T>): Promise<T> => io.store.enqueueWrite(op);
 
+  // Read ONCE per mutator and reused, never called twice inside one. `deleteGroup`
+  // has two stamp sites - the group's `deletedAt` and its members' `updatedAt` -
+  // and those stamps describe one operation, so one read is the honest statement.
+  // It is also the only version a check can see: against an injected constant
+  // clock two reads are indistinguishable from one, so a production drift between
+  // stamps meant to be the same instant would be invisible.
+  //
+  // THE STORE'S OWN CLOCK, always, overwriting whatever a caller supplied. That
+  // leaves no way to land a record or a tombstone at a timestamp this layer did
+  // not just produce, which a sync pull will eventually need - accepted and
+  // deferred, with the entry and the shape of the fix in `KNOWN-LIMITS.md`.
+  const now = io.now ?? Date.now;
+
   async function listHosts(): Promise<Host[]> {
     const raw = await io.store.get<Host[]>(HOSTS_KEY);
     return Array.isArray(raw) ? raw : [];
@@ -404,6 +434,13 @@ export function createHostsStore(io: HostsIo): HostsStore {
   async function listGroups(): Promise<HostGroup[]> {
     const raw = await io.store.get<HostGroup[]>(HOST_GROUPS_KEY);
     return Array.isArray(raw) ? raw : [];
+  }
+
+  /** Both the public read and every write's baseline, so no caller can reason
+   *  about an expired row: it is filtered out before either sees it. `at` is the
+   *  mutator's own single clock read. */
+  async function readTombstones(at = now()): Promise<Tombstone[]> {
+    return livingTombstones(await io.store.get(TOMBSTONES_KEY), at);
   }
 
   /**
@@ -791,7 +828,15 @@ export function createHostsStore(io: HostsIo): HostsStore {
     // longer names must not have that pin projected onto the new address, and this
     // is what makes that structural instead of remembered by each writer. Nothing
     // is discarded: the pin stays in the map under the address it belongs to.
-    const record: Host = withPins(credentialed, nextPins(credentialed, existing));
+    // `updatedAt` is resolved HERE for the reason the pins are, and overwrites
+    // whatever the caller supplied: an editor round-trips the record it loaded,
+    // so honouring that value would mean a save never bumps the stamp. This also
+    // covers `duplicateHost`, which routes through this function.
+    const at = now();
+    const record: Host = {
+      ...withPins(credentialed, nextPins(credentialed, existing)),
+      updatedAt: at,
+    };
 
     const next = [...hosts];
     const idx = next.findIndex((h) => h.id === host.id);
@@ -805,7 +850,17 @@ export function createHostsStore(io: HostsIo): HostsStore {
     // reading a list that names these accounts, and the next commit that
     // succeeds puts it on disk. Clearing the secrets here would leave that live
     // record naming material that is gone.
-    await persist([[HOSTS_KEY, next]]);
+    //
+    // A backup import re-creates a record under its ORIGINAL id, so a restore of
+    // something deleted earlier lands on top of a live tombstone and the first
+    // sync pull would delete it again. Clearing the tombstone here rather than on
+    // a special import path is what makes that structural. The key is carried
+    // only when something actually changed - see `withoutTombstone`, and the
+    // clobber surface it exists to keep narrow.
+    const entries: [string, unknown][] = [[HOSTS_KEY, next]];
+    const graves = withoutTombstone(await readTombstones(at), [host.id], at);
+    if (graves) entries.push([TOMBSTONES_KEY, graves]);
+    await persist(entries);
 
     // AFTER the rewrite, never before: every step up to the rewrite is additive,
     // so a `persist` that throws leaves the old record still naming secrets that
@@ -827,12 +882,19 @@ export function createHostsStore(io: HostsIo): HostsStore {
       if (groups.some((g) => g.id !== group.id && sameName(g.name, group.name))) {
         throw new Error(`hosts: a group is already named "${group.name.trim()}"`);
       }
+      // Stamped and tombstone-cleared exactly as `writeHost` does, and for the
+      // same two reasons.
+      const at = now();
+      const record: HostGroup = { ...group, updatedAt: at };
       const next = [...groups];
       const idx = next.findIndex((g) => g.id === group.id);
-      if (idx >= 0) next[idx] = group;
-      else next.push(group);
-      await persist([[HOST_GROUPS_KEY, next]]);
-      return group;
+      if (idx >= 0) next[idx] = record;
+      else next.push(record);
+      const entries: [string, unknown][] = [[HOST_GROUPS_KEY, next]];
+      const graves = withoutTombstone(await readTombstones(at), [group.id], at);
+      if (graves) entries.push([TOMBSTONES_KEY, graves]);
+      await persist(entries);
+      return record;
     });
   }
 
@@ -971,11 +1033,25 @@ export function createHostsStore(io: HostsIo): HostsStore {
       // on screen after a confirmed delete. See `deleteAccounts`.
       await deleteAccounts(id, secretFieldsFor(host));
 
-      // Drop the row and nothing else. No surviving row can be naming `id`: both
-      // kinds of reference were refused above, so there is nothing left here to
-      // rewrite. Anything that rewrote a neighbour at this point would be
-      // reintroducing the cascade the refusal replaced.
-      await persist([[HOSTS_KEY, hosts.filter((h) => h.id !== id)]]);
+      // Drop the row and leave a tombstone, in ONE commit. No surviving row can
+      // be naming `id`: both kinds of reference were refused above, so there is
+      // nothing left here to rewrite. Anything that rewrote a neighbour at this
+      // point would be reintroducing the cascade the refusal replaced.
+      //
+      // The pair is atomic for the reason `persist` takes entries at all: split
+      // into two commits there is a window where the record is gone and nothing
+      // records that it was deleted, and a device that pulls into that window
+      // pushes the record straight back. The `if (!host) return` above is what
+      // keeps a missing id from minting a tombstone for a record that never was.
+      const at = now();
+      const graves = await readTombstones(at);
+      await persist([
+        [HOSTS_KEY, hosts.filter((h) => h.id !== id)],
+        [
+          TOMBSTONES_KEY,
+          withTombstone(graves, [{ id, kind: HOST_TOMBSTONE_KIND, deletedAt: at }], at),
+        ],
+      ]);
     });
   }
 
@@ -983,11 +1059,26 @@ export function createHostsStore(io: HostsIo): HostsStore {
     return enqueueWrite(async () => {
       const [groups, hosts] = await Promise.all([listGroups(), listHosts()]);
       if (!groups.some((g) => g.id === id)) return;
+      const at = now();
+      const graves = await readTombstones(at);
       // The one place a cascade is right: a group is a label, not an owner, so its
       // members lose the label and go on existing.
+      //
+      // A member's `updatedAt` MOVES with the clear, and only a member's: the map
+      // already hands back the original object for a non-member. Clearing
+      // `groupId` is a real content change, so without a fresh stamp a merge on
+      // another device would restore the old `groupId` while the group delete
+      // itself propagated - half an update, silently.
       await persist([
         [HOST_GROUPS_KEY, groups.filter((g) => g.id !== id)],
-        [HOSTS_KEY, hosts.map((h) => (h.groupId === id ? { ...h, groupId: undefined } : h))],
+        [
+          HOSTS_KEY,
+          hosts.map((h) => (h.groupId === id ? { ...h, groupId: undefined, updatedAt: at } : h)),
+        ],
+        [
+          TOMBSTONES_KEY,
+          withTombstone(graves, [{ id, kind: GROUP_TOMBSTONE_KIND, deletedAt: at }], at),
+        ],
       ]);
     });
   }
@@ -1027,6 +1118,13 @@ export function createHostsStore(io: HostsIo): HostsStore {
    * `assertBindingOwner` on what `patch` returns makes the credential half of that
    * enforced rather than remembered, and costs nothing: every pin path hands back a
    * byte-identical credential.
+   *
+   * DELIBERATELY DOES NOT STAMP `updatedAt`, and that omission is what this
+   * paragraph protects. The three callbacks move `lastConnectedAt` and the pins,
+   * which are per-machine history and a per-machine trust decision - neither is
+   * record content, and neither syncs. Stamping here would put every connect and
+   * every first-connect prompt onto the push path, so a machine that merely
+   * reconnects would outrank a real edit made elsewhere.
    */
   async function patchHost(id: string, patch: (current: Host) => Host | null): Promise<void> {
     return enqueueWrite(async () => {
@@ -1106,6 +1204,7 @@ export function createHostsStore(io: HostsIo): HostsStore {
     markConnected,
     pinFingerprint,
     identityHostRefs,
+    listTombstones: () => readTombstones(),
     onHostsChanged: (cb) => io.store.onChanged(cb),
     ensureLoaded: () => io.store.ensureLoaded(),
     takeRecoveryNotice: () => io.store.takeRecoveryNotice(),
@@ -1140,6 +1239,7 @@ export const {
   markConnected,
   pinFingerprint,
   identityHostRefs,
+  listTombstones,
   onHostsChanged,
   ensureLoaded,
   takeRecoveryNotice,

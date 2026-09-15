@@ -1,10 +1,19 @@
 import type { StoreRecovery } from "@/lib/storeRecovery";
+import {
+  livingTombstones,
+  TOMBSTONES_KEY,
+  withoutTombstone,
+  withTombstone,
+  type Tombstone,
+} from "@/lib/tombstones";
 
 import { createTauriVaultStoreIo, tauriSecretsIo, type SecretsIo, type VaultIo } from "./adapters";
 import { identitiesUsingKey } from "./refs";
 import {
   IDENTITY_PASSWORD_FIELD,
+  IDENTITY_TOMBSTONE_KIND,
   KEY_PASSPHRASE_FIELD,
+  KEY_TOMBSTONE_KIND,
   KEY_PRIVATE_KEY_FIELD,
   VAULT_IDENTITIES_KEY,
   VAULT_IDENTITY_SECRET_FIELDS,
@@ -94,6 +103,14 @@ export type VaultStore = {
   ): Promise<VaultUpsert<VaultKey>>;
   deleteIdentity(id: string, hostRefs: IdentityHostRefs): Promise<void>;
   deleteKey(id: string): Promise<void>;
+  /**
+   * What this store's deletes have left behind, already pruned to the window.
+   *
+   * ONE list for both record kinds, because both live in one file and `kind` is
+   * what tells them apart. See `livingTombstones` in `src/lib/tombstones.ts` for
+   * why an expired row in the file is never observable here.
+   */
+  listTombstones(): Promise<Tombstone[]>;
   onVaultChanged(cb: () => void): Promise<() => void>;
   /**
    * Run the store's crash-recovery pass and first load, then hand back whatever
@@ -127,6 +144,13 @@ export function createVaultStore(io: VaultIo): VaultStore {
   // anything if there is one of it per store FILE, so it belongs beside the file.
   const enqueueWrite = <T>(op: () => Promise<T>): Promise<T> => io.store.enqueueWrite(op);
 
+  // Read ONCE per mutator and reused - see the same line in `hosts/store.ts` for
+  // why separate reads of an injected constant clock are indistinguishable from
+  // one, and what that hides. Always this store's own clock, never a caller's
+  // value: accepted and deferred in `KNOWN-LIMITS.md`, which also names the
+  // shape the sync pull should add rather than widening ten signatures.
+  const now = io.now ?? Date.now;
+
   async function listIdentities(): Promise<VaultIdentity[]> {
     const raw = await io.store.get<VaultIdentity[]>(VAULT_IDENTITIES_KEY);
     return Array.isArray(raw) ? raw : [];
@@ -137,13 +161,29 @@ export function createVaultStore(io: VaultIo): VaultStore {
     return Array.isArray(raw) ? raw : [];
   }
 
-  /** Every mutation lands through here. The commit is also what takes the `.bak`
-   *  snapshot, which is why the session that CREATES the vault has one: at first
-   *  load there is no file to snapshot yet, so the first successful write is the
-   *  earliest moment a private key can be protected at all. */
-  async function persist(storeKey: string, list: unknown[]): Promise<void> {
-    await io.store.set(storeKey, list);
+  /**
+   * Every mutation lands through here. The commit is also what takes the `.bak`
+   * snapshot, which is why the session that CREATES the vault has one: at first
+   * load there is no file to snapshot yet, so the first successful write is the
+   * earliest moment a private key can be protected at all.
+   *
+   * ENTRIES rather than one key, the shape `hosts/store.ts`'s copy already has,
+   * because a delete now writes two: the record list and the tombstone. Split
+   * into two commits there would be a window where the record is gone and
+   * nothing records that it was deleted, and a device pulling into that window
+   * pushes the record straight back. A `set` reaches the store's cache only and
+   * the `commit` writes the whole file in one `atomic_write`, so either both keys
+   * land or neither does.
+   */
+  async function persist(entries: [string, unknown][]): Promise<void> {
+    for (const [key, value] of entries) await io.store.set(key, value);
     await io.store.commit();
+  }
+
+  /** Both the public read and every write's baseline, so no caller can reason
+   *  about an expired row. `at` is the mutator's own single clock read. */
+  async function readTombstones(at = now()): Promise<Tombstone[]> {
+    return livingTombstones(await io.store.get(TOMBSTONES_KEY), at);
   }
 
   /**
@@ -287,6 +327,11 @@ export function createVaultStore(io: VaultIo): VaultStore {
 
       // No rollback here, and none needed: an identity owns ONE secret, so a write
       // that throws wrote nothing. The multi-write hole is `upsertKey`'s alone.
+      //
+      // `updatedAt` is stamped from this layer's clock and overwrites whatever
+      // the caller supplied - an editor round-trips the record it loaded, so
+      // honouring that value would mean a save never bumps the stamp.
+      const at = now();
       const record: VaultIdentity = {
         ...identity,
         hasPassword: await writeSecret(
@@ -296,13 +341,20 @@ export function createVaultStore(io: VaultIo): VaultStore {
           secrets.password,
           existing?.hasPassword ?? false,
         ),
+        updatedAt: at,
       };
 
       const next = [...identities];
       const idx = next.findIndex((i) => i.id === identity.id);
       if (idx >= 0) next[idx] = record;
       else next.push(record);
-      await persist(VAULT_IDENTITIES_KEY, next);
+      // Any tombstone naming this id goes in the same commit, so a backup restore
+      // of a record deleted earlier is not deleted again by the first sync pull.
+      // The key is carried only when something changed - see `withoutTombstone`.
+      const entries: [string, unknown][] = [[VAULT_IDENTITIES_KEY, next]];
+      const graves = withoutTombstone(await readTombstones(at), [identity.id], at);
+      if (graves) entries.push([TOMBSTONES_KEY, graves]);
+      await persist(entries);
       return { record };
     });
   }
@@ -343,7 +395,13 @@ export function createVaultStore(io: VaultIo): VaultStore {
       const clash = keys.find((k) => k.id !== key.id && sameName(k.name, key.name));
       const warning = clash ? `another key is already named "${clash.name}"` : undefined;
 
-      const record = await writeKeySecrets(key, secrets, existing);
+      // Stamped onto what `writeKeySecrets` returns, not onto `key`, so the flags
+      // it just computed are not discarded. Same clock rule as `upsertIdentity`.
+      const at = now();
+      const record: VaultKey = {
+        ...(await writeKeySecrets(key, secrets, existing)),
+        updatedAt: at,
+      };
 
       const next = [...keys];
       const idx = next.findIndex((k) => k.id === key.id);
@@ -359,7 +417,10 @@ export function createVaultStore(io: VaultIo): VaultStore {
       // live record naming material that is gone, permanently, since the flags
       // are never read back. Orphaned on a failure that never clears, and
       // unreachable afterwards: nothing enumerates keychain accounts.
-      await persist(VAULT_KEYS_KEY, next);
+      const entries: [string, unknown][] = [[VAULT_KEYS_KEY, next]];
+      const graves = withoutTombstone(await readTombstones(at), [key.id], at);
+      if (graves) entries.push([TOMBSTONES_KEY, graves]);
+      await persist(entries);
       return warning ? { record, warning } : { record };
     });
   }
@@ -382,10 +443,20 @@ export function createVaultStore(io: VaultIo): VaultStore {
           io.secrets.delete(VAULT_KEYRING_SERVICE, vaultAccount(id, field)),
         ),
       );
-      await persist(
-        VAULT_IDENTITIES_KEY,
-        identities.filter((i) => i.id !== id),
-      );
+      // The record drop and its tombstone in ONE commit, after the accounts are
+      // cleared - the ordering is unchanged, only the second key is new. The
+      // `if (!identity) return` above keeps a missing id from minting a tombstone
+      // for a record that never existed, which another device could not tell from
+      // a real delete.
+      const at = now();
+      const graves = await readTombstones(at);
+      await persist([
+        [VAULT_IDENTITIES_KEY, identities.filter((i) => i.id !== id)],
+        [
+          TOMBSTONES_KEY,
+          withTombstone(graves, [{ id, kind: IDENTITY_TOMBSTONE_KIND, deletedAt: at }], at),
+        ],
+      ]);
     });
   }
 
@@ -407,10 +478,16 @@ export function createVaultStore(io: VaultIo): VaultStore {
           io.secrets.delete(VAULT_KEYRING_SERVICE, vaultAccount(id, field)),
         ),
       );
-      await persist(
-        VAULT_KEYS_KEY,
-        keys.filter((k) => k.id !== id),
-      );
+      // One commit, after the accounts are cleared - see `deleteIdentity`.
+      const at = now();
+      const graves = await readTombstones(at);
+      await persist([
+        [VAULT_KEYS_KEY, keys.filter((k) => k.id !== id)],
+        [
+          TOMBSTONES_KEY,
+          withTombstone(graves, [{ id, kind: KEY_TOMBSTONE_KIND, deletedAt: at }], at),
+        ],
+      ]);
     });
   }
 
@@ -425,6 +502,7 @@ export function createVaultStore(io: VaultIo): VaultStore {
     upsertKey,
     deleteIdentity,
     deleteKey,
+    listTombstones: () => readTombstones(),
     onVaultChanged: (cb) => io.store.onChanged(cb),
     ensureLoaded: () => io.store.ensureLoaded(),
     takeRecoveryNotice: () => io.store.takeRecoveryNotice(),
@@ -448,6 +526,7 @@ export const {
   upsertKey,
   deleteIdentity,
   deleteKey,
+  listTombstones,
   onVaultChanged,
   ensureLoaded,
   takeRecoveryNotice,
