@@ -1,3 +1,4 @@
+pub mod aesgcm;
 pub mod appimage;
 pub mod backup;
 pub mod cli;
@@ -16,3 +17,4 @@ pub mod rdp;
 pub mod secrets;
 pub mod shell;
 pub mod ssh;
+pub mod sync;

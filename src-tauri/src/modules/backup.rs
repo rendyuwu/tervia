@@ -5,8 +5,9 @@
 //! SSH passwords, private keys and key passphrases; RDP passwords; vault
 //! identity passwords; and vault key bodies and their passphrases - so it can
 //! never be written as plaintext: the file ends up on a USB stick, in
-//! Downloads, or in a synced folder. This module is the whole crypto surface;
-//! everything above it in JS handles only the already-sealed blob.
+//! Downloads, or in a synced folder. This module plus
+//! `src-tauri/src/modules/aesgcm.rs` is the whole crypto surface; everything
+//! above it in JS handles only the already-sealed blob.
 //!
 //! One format lives here (`tervia-connections`), and it seals the WHOLE
 //! payload - five collections (hosts, groups, identities, keys, forward
@@ -30,16 +31,17 @@
 //! http (the same reason `crypto.randomUUID` is unavailable).
 //!
 //! Construction: PBKDF2-HMAC-SHA256 over the passphrase with a random 16-byte
-//! salt, then AES-256-GCM with a random 12-byte nonce. Salt and nonce are
-//! generated per seal and stored beside the ciphertext; neither is secret.
+//! salt, then AES-256-GCM with a random 12-byte nonce - the second half in
+//! `src-tauri/src/modules/aesgcm.rs`, shared with the sync module. Salt and
+//! nonce are generated per seal and stored beside the ciphertext; neither is
+//! secret.
 //! GCM's authentication tag is what makes a wrong passphrase, a truncated
 //! file, or a flipped byte all fail closed as "wrong passphrase or corrupt
 //! file" rather than yielding garbage that the importer would try to parse.
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use ring::{
-    aead::{self, BoundKey, Nonce, NonceSequence, UnboundKey, AES_256_GCM, NONCE_LEN},
-    error::Unspecified,
+    aead::NONCE_LEN,
     pbkdf2,
     rand::{SecureRandom, SystemRandom},
 };
@@ -50,6 +52,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{LazyLock, Mutex};
 use tauri::AppHandle;
 
+use crate::modules::aesgcm::{open_with_key, seal_with_key};
 use crate::modules::secrets::{read_secret, write_secret, SecretsState};
 
 /// Deliberately high: the passphrase is user-chosen and the file is offline,
@@ -67,20 +70,6 @@ pub struct SealedBlob {
     pub salt: String,
     pub nonce: String,
     pub ciphertext: String,
-}
-
-/// `ring`'s sealing API consumes a nonce sequence; we seal exactly one message
-/// per key, so the sequence yields our single random nonce and then refuses.
-/// Refusing matters: reusing a nonce under the same key breaks GCM completely.
-struct OneNonce(Option<[u8; NONCE_LEN]>);
-
-impl NonceSequence for OneNonce {
-    fn advance(&mut self) -> Result<Nonce, Unspecified> {
-        self.0
-            .take()
-            .map(Nonce::assume_unique_for_key)
-            .ok_or(Unspecified)
-    }
 }
 
 fn derive_key(passphrase: &str, salt: &[u8], iterations: u32) -> Result<[u8; 32], String> {
@@ -108,24 +97,13 @@ fn seal_blob(plaintext: String, passphrase: &str) -> Result<SealedBlob, String> 
     if passphrase.is_empty() {
         return Err("backup: a passphrase is required".into());
     }
-    let rng = SystemRandom::new();
     let mut salt = [0u8; SALT_LEN];
-    rng.fill(&mut salt)
+    SystemRandom::new()
+        .fill(&mut salt)
         .map_err(|_| "backup: random salt failed".to_string())?;
-    let mut nonce = [0u8; NONCE_LEN];
-    rng.fill(&mut nonce)
-        .map_err(|_| "backup: random nonce failed".to_string())?;
 
     let key = derive_key(passphrase, &salt, PBKDF2_ITERATIONS)?;
-    let unbound = UnboundKey::new(&AES_256_GCM, &key).map_err(|_| "backup: bad key".to_string())?;
-    let mut sealing = aead::SealingKey::new(unbound, OneNonce(Some(nonce)));
-
-    // seal_in_place_append_tag appends the 16-byte auth tag, so `buf` ends up
-    // as ciphertext||tag - which is exactly what open_in_place expects back.
-    let mut buf = plaintext.into_bytes();
-    sealing
-        .seal_in_place_append_tag(aead::Aad::empty(), &mut buf)
-        .map_err(|_| "backup: encryption failed".to_string())?;
+    let (nonce, buf) = seal_with_key(&key, plaintext.as_bytes())?;
 
     Ok(SealedBlob {
         kdf: "pbkdf2-hmac-sha256".into(),
@@ -153,7 +131,7 @@ fn open_blob(blob: SealedBlob, passphrase: &str) -> Result<String, String> {
     let nonce_bytes = B64
         .decode(&blob.nonce)
         .map_err(|_| "backup: malformed nonce".to_string())?;
-    let mut buf = B64
+    let buf = B64
         .decode(&blob.ciphertext)
         .map_err(|_| "backup: malformed ciphertext".to_string())?;
     let nonce: [u8; NONCE_LEN] = nonce_bytes
@@ -162,14 +140,8 @@ fn open_blob(blob: SealedBlob, passphrase: &str) -> Result<String, String> {
         .map_err(|_| "backup: malformed nonce".to_string())?;
 
     let key = derive_key(passphrase, &salt, blob.iterations)?;
-    let unbound = UnboundKey::new(&AES_256_GCM, &key).map_err(|_| "backup: bad key".to_string())?;
-    let mut opening = aead::OpeningKey::new(unbound, OneNonce(Some(nonce)));
-
-    let plain = opening
-        .open_in_place(aead::Aad::empty(), &mut buf)
-        .map_err(|_| "backup: wrong passphrase, or the file is corrupt".to_string())?;
-    String::from_utf8(plain.to_vec())
-        .map_err(|_| "backup: decrypted data is not valid UTF-8".into())
+    let plain = open_with_key(&key, &nonce, buf, "backup")?;
+    String::from_utf8(plain).map_err(|_| "backup: decrypted data is not valid UTF-8".into())
 }
 
 /// Where one secret lives in the keychain, and where it belongs inside the
@@ -423,6 +395,36 @@ mod tests {
             service: "tervia-ssh".into(),
             account: format!("{id}::{field}"),
         }
+    }
+
+    /// A blob sealed by the build that came BEFORE the AES-GCM pair moved out
+    /// of this module into its own leaf, pasted in as a literal.
+    ///
+    /// The provenance is the whole value. A vector generated after that move
+    /// is a round-trip test with extra steps: it proves the code agrees with
+    /// itself, which [`round_trips`] already says. Only a literal that predates
+    /// the move catches a SYMMETRIC mistake - argument order swapped on both
+    /// halves, AAD introduced on both halves, the nonce and the salt exchanged
+    /// on both halves - each of which round-trips green while breaking every
+    /// backup file a user has already exported.
+    ///
+    /// So this must never be regenerated to make it pass. If it fails, the
+    /// on-disk format changed and every existing export stopped opening.
+    #[test]
+    fn a_blob_sealed_before_the_extraction_still_opens() {
+        let blob = SealedBlob {
+            kdf: "pbkdf2-hmac-sha256".into(),
+            iterations: 600_000,
+            salt: "7aw3WpydpuX8SM5xXQ8kCg==".into(),
+            nonce: "viAKCz2DY1lxIN92".into(),
+            ciphertext: "XjlFeALKXGhGJFEBfWTJmpwxQwtSElMhsA7JDvoqzhMKghZl2krRlOOFamog\
+                         MDg7rNcKDRof4972JfpM2uBn4GeCcogMNBA="
+                .into(),
+        };
+        assert_eq!(
+            open(blob, "golden").unwrap(),
+            "golden — ✓ 日本語 {\"c-1\":{\"password\":\"hunter2\"}}"
+        );
     }
 
     #[test]
