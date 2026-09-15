@@ -72,7 +72,10 @@ export type SecretsIo = {
   copy(from: SecretEntry, to: SecretEntry): Promise<boolean>;
 };
 
-export type VaultIo = { store: VaultStoreIo; secrets: SecretsIo };
+/** `now` is the clock every `updatedAt` and `deletedAt` here is stamped from -
+ *  optional with the real default, and see `HostsIo` in `modules/hosts/adapters.ts`
+ *  for why a port rather than an inline `Date.now()`. */
+export type VaultIo = { store: VaultStoreIo; secrets: SecretsIo; now?: () => number };
 
 /** The real vault store, with crash recovery in front of it. */
 export function createTauriVaultStoreIo(): VaultStoreIo {

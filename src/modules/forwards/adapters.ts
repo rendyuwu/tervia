@@ -31,4 +31,7 @@ export function createTauriForwardsStoreIo(): ForwardsStoreIo {
   });
 }
 
-export type ForwardsIo = { store: ForwardsStoreIo };
+/** `now` is the clock every `updatedAt` and `deletedAt` here is stamped from -
+ *  optional with the real default, and see `HostsIo` in `modules/hosts/adapters.ts`
+ *  for why a port rather than an inline `Date.now()`. */
+export type ForwardsIo = { store: ForwardsStoreIo; now?: () => number };

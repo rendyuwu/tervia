@@ -30,8 +30,23 @@ export const HOST_GROUPS_KEY = "groups";
  * because this store OUTLIVES the two connection modules whose secrets that purge
  * clears, and it is listed beside the others so this stays the one place that says
  * what is in the file. See `legacyPurge.ts`.
+ *
+ * A FOURTH key lives in this file too, and is not spelled here because all three
+ * stores share one name for it: `TOMBSTONES_KEY` in `src/lib/tombstones.ts`,
+ * holding what `deleteHost` and `deleteGroup` leave behind.
  */
 export const LEGACY_PURGE_KEY = "legacySecretsPurged";
+
+/**
+ * What a host and a group are called in a tombstone's `kind`.
+ *
+ * Both kinds share ONE tombstone list, because both live in one file and `kind`
+ * is what tells them apart. The ids never collide - one is `h-` prefixed and the
+ * other `g-` - but a merge has to know which list a resurrection belongs in, and
+ * the id prefix is a convention this layer does not want to re-derive.
+ */
+export const HOST_TOMBSTONE_KIND = "host";
+export const GROUP_TOMBSTONE_KIND = "group";
 
 /** Seeds for a new row. A stored row always carries a real port. */
 export const SSH_DEFAULT_PORT = 22;
@@ -150,6 +165,33 @@ export type HostBase = {
    * `nextPins`, which is the one place that inference lives.
    */
   pins?: HostPins;
+  /**
+   * Unix ms of the last change to this record's own content, stamped by the
+   * store on every write.
+   *
+   * ABSENT IS NOT ZERO, AND MUST NOT BE BACKFILLED ON READ. A record with no
+   * stamp has simply never been written by a build that stamps, and reading
+   * that as "changed just now" would have every legacy record win every merge
+   * it takes part in. A read never rewrites the file to add one; the next
+   * ordinary save does.
+   *
+   * NEVER TRUSTED FROM THE CALLER - the store overwrites whatever arrives here,
+   * for the reason `withPins` in `store.ts` gives about pins: an editor
+   * round-trips the record it loaded, so honouring a caller's value would mean
+   * a save never bumps the stamp. A restored backup is therefore stamped as a
+   * local write, which it genuinely is: every sanitizer in `modules/backup` is
+   * a whitelist, so an exported stamp is dropped at import rather than carried
+   * through. Landing a record at a timestamp the store did not just produce is
+   * a merge decision and is deferred - see `KNOWN-LIMITS.md`.
+   *
+   * On {@link HostBase} rather than per arm, on the same grounds as `pins`: the
+   * shape does not depend on `protocol`, so nothing needs narrowing.
+   *
+   * NOT moved by a connect or by pinning a key. Those write `lastConnectedAt`
+   * and the pins, which are per-machine history and trust rather than record
+   * content - see `patchHost` in `store.ts`.
+   */
+  updatedAt?: number;
 };
 
 /**
@@ -228,8 +270,9 @@ export type RdpHost = HostBase & {
 export type Host = SshHost | RdpHost;
 
 /** A label, not an owner - which is why deleting one clears `groupId` on its
- *  members instead of deleting them. */
-export type HostGroup = { id: string; name: string; order?: number };
+ *  members instead of deleting them. `updatedAt` reads exactly as
+ *  {@link HostBase.updatedAt} does, absent included. */
+export type HostGroup = { id: string; name: string; order?: number; updatedAt?: number };
 
 export function isSshHost(host: Host): host is SshHost {
   return host.protocol === "ssh";

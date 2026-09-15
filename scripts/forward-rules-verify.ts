@@ -139,6 +139,10 @@ function findCalls(root: ts.Node, sf: ts.SourceFile, calleeNames: string[]): ts.
 // gives for doing the same with `enqueueWrite`.
 // ---------------------------------------------------------------------------
 
+/** What the frozen clock below answers, and so what every stored rule's
+ *  `updatedAt` is in this file. */
+const STAMP = 1_700_000_000_000;
+
 function harness(seed: { rules?: ForwardRule[] } = {}) {
   const data: Record<string, unknown> = { rules: seed.rules ?? [] };
   const listeners = new Set<() => void>();
@@ -168,7 +172,11 @@ function harness(seed: { rules?: ForwardRule[] } = {}) {
     fileState: async () => ({ found: "ok" as const, recovered: false }),
   };
 
-  const forwards = createForwardStore({ store });
+  // A frozen clock, so the `updatedAt` the store stamps is a value the round-trip
+  // checks below can name. That the stamp MOVES, and that it overrides whatever
+  // the caller sent, is `scripts/sync-prereq-verify.ts`'s subject, not this
+  // file's.
+  const forwards = createForwardStore({ store, now: () => STAMP });
   return { forwards, data, commits: () => commits };
 }
 
@@ -218,10 +226,18 @@ console.log("\n[round-trip] upsert, list, find, and a repeat upsert replaces");
   const h = harness();
   const hosts = hostsOf([sshHost()]);
 
+  // `stored` rather than `rule()`: the store stamps `updatedAt` on every write,
+  // so the stored record is the fixture plus that field and nothing else - which
+  // is exactly what a field-for-field round-trip should say.
+  const stored = (over: Partial<ForwardRule> = {}): ForwardRule => ({
+    ...rule(over),
+    updatedAt: STAMP,
+  });
+
   const created = await h.forwards.upsertRule(rule(), hosts);
-  check("upsert returns the rule as written", created, rule());
-  check("listRules sees exactly it", await h.forwards.listRules(), [rule()]);
-  check("findRule finds it by id", await h.forwards.findRule("f-1"), rule());
+  check("upsert returns the rule as written", created, stored());
+  check("listRules sees exactly it", await h.forwards.listRules(), [stored()]);
+  check("findRule finds it by id", await h.forwards.findRule("f-1"), stored());
   check("finding an unknown id is undefined", await h.forwards.findRule("f-gone"), undefined);
 
   const replaced = rule({ name: "renamed", localPort: 9090 });
@@ -231,7 +247,11 @@ console.log("\n[round-trip] upsert, list, find, and a repeat upsert replaces");
     (await h.forwards.listRules()).length,
     1,
   );
-  check("and the replacement is what is stored", await h.forwards.findRule("f-1"), replaced);
+  check(
+    "and the replacement is what is stored",
+    await h.forwards.findRule("f-1"),
+    stored({ name: "renamed", localPort: 9090 }),
+  );
 }
 
 // ---------------------------------------------------------------------------

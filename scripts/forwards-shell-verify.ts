@@ -1744,10 +1744,13 @@ console.log(
     "deleteRule",
     "dropRulesForHost",
     "upsertRule",
-    // The reads and the plumbing.
+    // The reads and the plumbing. `listTombstones` is a READ: it reports what
+    // the three write routes above left behind, and adding it changed no rule
+    // record, so the release claim's surface is still those three.
     "ensureLoaded",
     "findRule",
     "listRules",
+    "listTombstones",
     "newRuleId",
     "onForwardsChanged",
     "takeRecoveryNotice",

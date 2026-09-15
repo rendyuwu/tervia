@@ -1,8 +1,15 @@
 import type { StoreRecovery } from "@/lib/storeRecovery";
+import {
+  livingTombstones,
+  TOMBSTONES_KEY,
+  withoutTombstone,
+  withTombstone,
+  type Tombstone,
+} from "@/lib/tombstones";
 import type { Host } from "@/modules/hosts/types";
 
 import { createTauriForwardsStoreIo, type ForwardsIo } from "./adapters";
-import { FORWARDS_KEY, type ForwardRule } from "./types";
+import { FORWARDS_KEY, RULE_TOMBSTONE_KIND, type ForwardRule } from "./types";
 
 // The forwards store: one record per saved rule, modelled on `vault/store.ts`'s
 // shape and its `enqueueWrite` one-liner.
@@ -41,18 +48,22 @@ export type ForwardsStore = {
    * value it is refusing.
    */
   upsertRule(rule: ForwardRule, hosts: HostLookup): Promise<ForwardRule>;
-  /** Refuses nothing. A rule references a host; nothing references a rule, so
-   *  there is no holder to check - unlike every other delete in this codebase,
-   *  which is exactly why this comment exists: the next reader will go looking
-   *  for the guard here and should stop instead. */
+  /** Refuses nothing, in the sense every other delete in this codebase refuses:
+   *  a rule references a host; nothing references a rule, so there is no holder
+   *  to check. It does check that the rule EXISTS, which is a different question
+   *  - see the guard inside `deleteRule` for why a delete of an id that is not
+   *  there must stay a no-op. */
   deleteRule(id: string): Promise<void>;
   /**
-   * Drop every rule naming `hostId`. Unconditional and idempotent: a no-op for a
-   * host with no rules and for a host id that was never saved, and it does NOT
-   * consult a host lookup - see the header above for why that omission is load
-   * bearing rather than a shortcut.
+   * Drop every rule naming `hostId`. Idempotent, and a no-op for a host with no
+   * rules or a host id that was never saved. It does NOT consult a host lookup -
+   * see the header above for why that omission is load bearing rather than a
+   * shortcut, which is the only sense in which it is unconditional.
    */
   dropRulesForHost(hostId: string): Promise<void>;
+  /** What this store's deletes have left behind, already pruned to the window -
+   *  see `livingTombstones` in `src/lib/tombstones.ts`. */
+  listTombstones(): Promise<Tombstone[]>;
   onForwardsChanged(cb: () => void): Promise<() => void>;
   ensureLoaded(): Promise<StoreRecovery | null>;
   takeRecoveryNotice(): StoreRecovery | null;
@@ -78,16 +89,35 @@ export function createForwardStore(io: ForwardsIo): ForwardsStore {
   // the file rather than in this layer.
   const enqueueWrite = <T>(op: () => Promise<T>): Promise<T> => io.store.enqueueWrite(op);
 
+  // Read ONCE per mutator and reused - `dropRulesForHost` stamps one `deletedAt`
+  // per rule it drops, and those stamps describe one operation. See the same line
+  // in `hosts/store.ts`. Always this store's own clock, never a caller's value:
+  // accepted and deferred in `KNOWN-LIMITS.md`.
+  const now = io.now ?? Date.now;
+
   async function listRules(): Promise<ForwardRule[]> {
     const raw = await io.store.get<ForwardRule[]>(FORWARDS_KEY);
     return Array.isArray(raw) ? raw : [];
   }
 
-  /** Every mutation lands through here, same shape as `vault/store.ts`'s
-   *  `persist`: the commit is also what takes the `.bak` snapshot. */
-  async function persist(list: ForwardRule[]): Promise<void> {
-    await io.store.set(FORWARDS_KEY, list);
+  /**
+   * Every mutation lands through here, same shape as `vault/store.ts`'s
+   * `persist`: the commit is also what takes the `.bak` snapshot.
+   *
+   * ENTRIES rather than one key, because a delete now writes the rule list and
+   * the tombstone together. Split into two commits there would be a window where
+   * the rule is gone and nothing records that it was deleted, and a device
+   * pulling into that window pushes the rule straight back.
+   */
+  async function persist(entries: [string, unknown][]): Promise<void> {
+    for (const [key, value] of entries) await io.store.set(key, value);
     await io.store.commit();
+  }
+
+  /** Both the public read and every write's baseline, so no caller can reason
+   *  about an expired row. `at` is the mutator's own single clock read. */
+  async function readTombstones(at = now()): Promise<Tombstone[]> {
+    return livingTombstones(await io.store.get(TOMBSTONES_KEY), at);
   }
 
   async function upsertRule(rule: ForwardRule, hosts: HostLookup): Promise<ForwardRule> {
@@ -122,26 +152,76 @@ export function createForwardStore(io: ForwardsIo): ForwardsStore {
       }
 
       const rules = await listRules();
+      // Stamped from this layer's clock, overwriting whatever the caller
+      // supplied: an editor round-trips the record it loaded, so honouring that
+      // value would mean a save never bumps the stamp.
+      const at = now();
+      const record: ForwardRule = { ...rule, updatedAt: at };
       const next = [...rules];
       const idx = next.findIndex((r) => r.id === rule.id);
-      if (idx >= 0) next[idx] = rule;
-      else next.push(rule);
-      await persist(next);
-      return rule;
+      if (idx >= 0) next[idx] = record;
+      else next.push(record);
+      // Any tombstone naming this id goes in the same commit, so a backup restore
+      // is not deleted again by the first sync pull. The key is carried only when
+      // something changed - see `withoutTombstone`.
+      const entries: [string, unknown][] = [[FORWARDS_KEY, next]];
+      const graves = withoutTombstone(await readTombstones(at), [rule.id], at);
+      if (graves) entries.push([TOMBSTONES_KEY, graves]);
+      await persist(entries);
+      return record;
     });
   }
 
   async function deleteRule(id: string): Promise<void> {
     return enqueueWrite(async () => {
       const rules = await listRules();
-      await persist(rules.filter((r) => r.id !== id));
+      // An existence guard, which this function did not have and did not need
+      // while the write was a filter over a list: rewriting the same rules was a
+      // harmless no-op. It is not harmless now. `deleteRule` on an id that was
+      // never saved would publish a tombstone for a record that never existed,
+      // and on another device that tombstone is indistinguishable from a real
+      // delete - so it would delete a rule someone else had just created under a
+      // colliding id, or simply resurrect nothing forever. The other deletes in
+      // this codebase all return early on a missing id already.
+      if (!rules.some((r) => r.id === id)) return;
+      const at = now();
+      const graves = await readTombstones(at);
+      await persist([
+        [FORWARDS_KEY, rules.filter((r) => r.id !== id)],
+        [
+          TOMBSTONES_KEY,
+          withTombstone(graves, [{ id, kind: RULE_TOMBSTONE_KIND, deletedAt: at }], at),
+        ],
+      ]);
     });
   }
 
   async function dropRulesForHost(hostId: string): Promise<void> {
     return enqueueWrite(async () => {
       const rules = await listRules();
-      await persist(rules.filter((r) => r.hostId !== hostId));
+      // ONE TOMBSTONE PER RULE DROPPED, never one for the host: what this call
+      // deletes is rules, and the host's own tombstone is the hosts store's
+      // business.
+      //
+      // Computed first so a host with no rules stays the no-op it has always
+      // been - the same guard `deleteRule` gained and for the same reason. A
+      // `hostId` with no rules is not the "id not in the store" case either: a
+      // rules store holds no host ids at all, so nothing else here covers it.
+      const dropped = rules.filter((r) => r.hostId === hostId);
+      if (dropped.length === 0) return;
+      const at = now();
+      const graves = await readTombstones(at);
+      await persist([
+        [FORWARDS_KEY, rules.filter((r) => r.hostId !== hostId)],
+        [
+          TOMBSTONES_KEY,
+          withTombstone(
+            graves,
+            dropped.map((r) => ({ id: r.id, kind: RULE_TOMBSTONE_KIND, deletedAt: at })),
+            at,
+          ),
+        ],
+      ]);
     });
   }
 
@@ -152,6 +232,7 @@ export function createForwardStore(io: ForwardsIo): ForwardsStore {
     upsertRule,
     deleteRule,
     dropRulesForHost,
+    listTombstones: () => readTombstones(),
     onForwardsChanged: (cb) => io.store.onChanged(cb),
     ensureLoaded: () => io.store.ensureLoaded(),
     takeRecoveryNotice: () => io.store.takeRecoveryNotice(),
@@ -168,6 +249,7 @@ export const {
   upsertRule,
   deleteRule,
   dropRulesForHost,
+  listTombstones,
   onForwardsChanged,
   ensureLoaded,
   takeRecoveryNotice,
