@@ -1,10 +1,15 @@
 name: CI
 
 on:
+  # BOTH long-lived branches, and `dev` is not optional here. Feature work is
+  # merged into `dev` and only `dev` is merged into `main`, so a list naming
+  # `main` alone leaves every feature PR with no CI run at all - and the six
+  # checks are required, so those PRs do not fail, they hang unreported and can
+  # never be merged.
   pull_request:
-    branches: [main]
+    branches: [main, dev]
   push:
-    branches: [main]
+    branches: [main, dev]
   # Lets a bundle be built on demand from any branch, without opening a PR.
   workflow_dispatch:
 
