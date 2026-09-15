@@ -17,3 +17,4 @@ pub mod rdp;
 pub mod secrets;
 pub mod shell;
 pub mod ssh;
+pub mod sync;
