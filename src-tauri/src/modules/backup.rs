@@ -425,6 +425,36 @@ mod tests {
         }
     }
 
+    /// A blob sealed by the build that came BEFORE the AES-GCM pair moved out
+    /// of this module into its own leaf, pasted in as a literal.
+    ///
+    /// The provenance is the whole value. A vector generated after that move
+    /// is a round-trip test with extra steps: it proves the code agrees with
+    /// itself, which [`round_trips`] already says. Only a literal that predates
+    /// the move catches a SYMMETRIC mistake - argument order swapped on both
+    /// halves, AAD introduced on both halves, the nonce and the salt exchanged
+    /// on both halves - each of which round-trips green while breaking every
+    /// backup file a user has already exported.
+    ///
+    /// So this must never be regenerated to make it pass. If it fails, the
+    /// on-disk format changed and every existing export stopped opening.
+    #[test]
+    fn a_blob_sealed_before_the_extraction_still_opens() {
+        let blob = SealedBlob {
+            kdf: "pbkdf2-hmac-sha256".into(),
+            iterations: 600_000,
+            salt: "7aw3WpydpuX8SM5xXQ8kCg==".into(),
+            nonce: "viAKCz2DY1lxIN92".into(),
+            ciphertext: "XjlFeALKXGhGJFEBfWTJmpwxQwtSElMhsA7JDvoqzhMKghZl2krRlOOFamog\
+                         MDg7rNcKDRof4972JfpM2uBn4GeCcogMNBA="
+                .into(),
+        };
+        assert_eq!(
+            open(blob, "golden").unwrap(),
+            "golden — ✓ 日本語 {\"c-1\":{\"password\":\"hunter2\"}}"
+        );
+    }
+
     #[test]
     fn round_trips() {
         let pt = r#"{"c-1":{"password":"hunter2"}}"#;
