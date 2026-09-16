@@ -1,13 +1,18 @@
 //! Cross-device sync: the wire format, the merge, the crypto that wraps both,
 //! and the port to whatever storage the user chose.
 //!
-//! WHAT IS NOT HERE, and is not an oversight. No `#[tauri::command]`: a command
-//! with no frontend caller fails the repository's command-registry check, and
-//! the commands arrive with the path that calls them. No frontend, no store
-//! writes, no keychain, no scheduler, and nothing that composes an object key.
-//! This module is reachable only from its own tests today, and that is
-//! deliberate - the parts that are expensive to get wrong once a wire format
-//! version is minted are the parts that landed first.
+//! WHAT IS NOT HERE, and is not an oversight. No store write and no keychain
+//! write: `KNOWN-LIMITS.md` records that every integrity rule lives in the
+//! store layer and that a pull has to go through it, and the stores are
+//! TypeScript - so this module decides and `src/modules/sync/` applies. No
+//! settings surface either, and therefore nothing that OPENS a configuration:
+//! `SyncState` in `src-tauri/src/modules/sync/engine.rs` is empty on every
+//! launch, so the two commands it registers answer "no configuration" until
+//! the command that fills it arrives with the settings section that lets a
+//! user supply one.
+//!
+//! `engine.rs` is where an object key is composed, which `crypto.rs` and
+//! `provider.rs` both decline for their own reasons.
 //!
 //! `src-tauri/src/modules/sync/model.rs` and
 //! `src-tauri/src/modules/sync/crypto.rs` are pure, and so is every decision in
@@ -20,6 +25,7 @@
 //! file is the impure layer of the module proper.
 
 pub mod crypto;
+pub mod engine;
 pub mod model;
 pub mod provider;
 pub mod providers;

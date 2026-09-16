@@ -1,0 +1,770 @@
+/**
+ * Self-check for the sync scheduler: when a pull and a push happen, what they
+ * carry, and what the etag map is allowed to record afterwards.
+ * Run: `npx tsx scripts/sync-scheduler-verify.ts`.
+ *
+ * SPLIT BY THE LANGUAGE THE BEHAVIOUR IS IN. The merge, the prune and the etag
+ * skip are in `src-tauri/src/modules/sync/engine.rs` and are checked by
+ * `cargo test` against a fake provider; a copy of them here would be a fake
+ * asserting against a fake. What is here is what only TypeScript decides: the
+ * triggers, which store a landing goes to, and the map write.
+ *
+ * REAL STORES, NOT FAKES. Every check below that involves a dirty mark drives
+ * `createHostsStore` and friends with in-memory ports and the scheduler wired in
+ * as their live `markDirty`. That is the whole reason B5 can fail here and could
+ * not in `sync-apply-verify.ts`: there, "`applyRemote` marks nothing" is true by
+ * construction because nothing consumes marks; here there is a consumer and a
+ * regression would push a record this device merely received.
+ *
+ * What fails silently without these:
+ *
+ * 1. A SCHEDULER THAT RUNS WITH SYNC OFF. "Off means no network" is the whole
+ *    opt-in, and it is asserted as a MEASURED ZERO on a counting command port -
+ *    not as a consequence of nothing calling, which would pass in a tree where
+ *    the call was simply deleted.
+ *
+ * 2. A PUSH PER EDIT, OR A PUSH OF THE WHOLE INVENTORY. Both are invisible
+ *    locally: the store is right either way, and the cost lands on the user's
+ *    storage bill and on every other device's next pull.
+ *
+ * 3. A CONNECT THAT PUSHES. `markConnected` and `pinFingerprint` write
+ *    device-local fields that never travel. A mark there means a machine that
+ *    merely reconnected republishes its copy over a real edit made elsewhere.
+ *
+ * 4. AN APPLY THAT PUSHES BACK. A landed record is what the remote already
+ *    holds; marking it dirty is a loop between two devices, neither of them
+ *    wrong.
+ *
+ * 5. AN ETAG MAP THAT RECORDS A LANDING THAT NEVER HAPPENED. A refused record
+ *    whose etag advanced is skipped by every later pull - so the refusal is
+ *    permanent and silent. The mirror failure is freezing the whole map on any
+ *    refusal, which degrades every pull to a full inventory download forever.
+ *
+ * 6. A FOCUS TRIGGER WITH NO FLOOR. Event-driven in name and a poll loop in
+ *    substance: one LIST against the user's storage per alt-tab.
+ *
+ * 7. TWO WINDOWS APPLYING AT ONCE. `fileKeyValueStore.ts` gives up after a few
+ *    contended attempts and writes over a stale baseline, losing the other
+ *    window's update.
+ *
+ * 8. TWO SPELLINGS OF ONE CONSTANT DRIFTING. The device-local field list and the
+ *    tombstone window each exist in Rust and in TypeScript, and each pair has to
+ *    agree or the symptom is a store rewritten on every pull, or remote objects
+ *    removed while devices still compare against them. Both are read out of the
+ *    Rust source as text, because `tsc` cannot see across that boundary.
+ */
+/// <reference types="node" />
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
+import {
+  createWriteQueue,
+  type KeyValueStore,
+  type RecoveredStoreIo,
+} from "../src/lib/recoveredStore";
+import { TOMBSTONE_TTL_MS, TOMBSTONES_KEY, type Tombstone } from "../src/lib/tombstones";
+import { createForwardStore } from "../src/modules/forwards/store";
+import { FORWARDS_KEY, RULE_TOMBSTONE_KIND, type ForwardRule } from "../src/modules/forwards/types";
+import { createHostsStore } from "../src/modules/hosts/store";
+import {
+  HOSTS_KEY,
+  HOST_GROUPS_KEY,
+  HOST_TOMBSTONE_KIND,
+  type Host,
+  type HostGroup,
+  type SshHost,
+} from "../src/modules/hosts/types";
+import { DEVICE_LOCAL_FIELDS } from "../src/modules/sync/envelope";
+import { createScheduler } from "../src/modules/sync/scheduler";
+import { createSyncSettingsStore } from "../src/modules/sync/store";
+import {
+  DEFAULT_SYNC_CONFIG,
+  SYNC_CONFIG_KEY,
+  SYNC_ETAGS_KEY,
+  WIRE_VERSION,
+  type Envelope,
+  type PullReport,
+  type PushReport,
+  type Reconciled,
+  type SyncCommands,
+  type SyncStatus,
+} from "../src/modules/sync/types";
+import type { SecretsIo } from "../src/modules/vault/adapters";
+import { createVaultStore } from "../src/modules/vault/store";
+import {
+  IDENTITY_TOMBSTONE_KIND,
+  KEY_TOMBSTONE_KIND,
+  VAULT_IDENTITIES_KEY,
+  VAULT_KEYS_KEY,
+  type VaultIdentity,
+  type VaultKey,
+} from "../src/modules/vault/types";
+
+const ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
+
+let failed = 0;
+function check(label: string, got: unknown, want: unknown): void {
+  const found = JSON.stringify(got) ?? String(got);
+  const wanted = JSON.stringify(want) ?? String(want);
+  if (found === wanted) {
+    console.log(`  ok: ${label}`);
+  } else {
+    console.error(`  FAIL: ${label} = ${found}, want ${wanted}`);
+    failed++;
+  }
+}
+
+/** Far enough from the epoch that a stamp a hundred days earlier is positive. */
+const START = 1_800_000_000_000;
+
+/**
+ * Drain the microtask queue.
+ *
+ * Every await in the scheduler and in the three stores resolves on a microtask -
+ * the write queue included - so nothing here needs a real timer, which is also
+ * why the debounce is fired by hand rather than waited out.
+ */
+async function settle(): Promise<void> {
+  for (let i = 0; i < 50; i++) await Promise.resolve();
+}
+
+// ---------------------------------------------------------------------------
+// Ports
+// ---------------------------------------------------------------------------
+
+/** A shared step counter, so "the map was written AFTER the apply resolved" is
+ *  an ordering question a check can actually ask. */
+let step = 0;
+const trace: string[] = [];
+function mark(what: string): void {
+  step++;
+  trace.push(`${step} ${what}`);
+}
+
+function port(seed: Record<string, unknown>, label: string): RecoveredStoreIo {
+  const data: Record<string, unknown> = { ...seed };
+  let pending: Record<string, unknown> = {};
+  return {
+    async get<T>(key: string): Promise<T | null> {
+      return ((key in pending ? pending[key] : data[key]) as T | undefined) ?? null;
+    },
+    async set(key: string, value: unknown): Promise<void> {
+      pending[key] = value;
+    },
+    async commit(): Promise<void> {
+      mark(`commit:${label}`);
+      Object.assign(data, pending);
+      pending = {};
+    },
+    enqueueWrite: createWriteQueue(),
+    async onChanged(): Promise<() => void> {
+      return () => {};
+    },
+    ensureLoaded: async () => null,
+    takeRecoveryNotice: () => null,
+    fileState: async () => ({ found: "ok" as const, recovered: false }),
+  };
+}
+
+/** The sync settings file, in memory, saving straight through. */
+function settingsPort(seed: Record<string, unknown>): KeyValueStore {
+  const data: Record<string, unknown> = { ...seed };
+  let pending: Record<string, unknown> = {};
+  return {
+    async get<T>(key: string): Promise<T | null> {
+      return ((key in pending ? pending[key] : data[key]) as T | undefined) ?? null;
+    },
+    async set(key: string, value: unknown): Promise<void> {
+      pending[key] = value;
+    },
+    async save(): Promise<void> {
+      if (SYNC_ETAGS_KEY in pending) mark("writeEtags");
+      Object.assign(data, pending);
+      pending = {};
+    },
+  };
+}
+
+const noSecrets: SecretsIo = {
+  async getAll(_service, accounts) {
+    return accounts.map(() => null);
+  },
+  async set() {},
+  async delete() {},
+  async copy() {
+    return false;
+  },
+};
+
+function harness(
+  seed: {
+    enabled?: boolean;
+    label?: string;
+    hosts?: Host[];
+    groups?: HostGroup[];
+    hostGraves?: Tombstone[];
+    identities?: VaultIdentity[];
+    vaultKeys?: VaultKey[];
+    rules?: ForwardRule[];
+    etags?: Record<string, string>;
+    pull?: PullReport;
+    push?: PushReport;
+    releaseThrows?: boolean;
+  } = {},
+) {
+  const now = () => START;
+  const hostsData = port(
+    {
+      [HOSTS_KEY]: seed.hosts ?? [],
+      [HOST_GROUPS_KEY]: seed.groups ?? [],
+      ...(seed.hostGraves ? { [TOMBSTONES_KEY]: seed.hostGraves } : {}),
+    },
+    "hosts",
+  );
+  const vaultData = port(
+    { [VAULT_IDENTITIES_KEY]: seed.identities ?? [], [VAULT_KEYS_KEY]: seed.vaultKeys ?? [] },
+    "vault",
+  );
+  const forwardsData = port({ [FORWARDS_KEY]: seed.rules ?? [] }, "forwards");
+
+  const settingsData = settingsPort({
+    [SYNC_CONFIG_KEY]: { ...DEFAULT_SYNC_CONFIG, enabled: seed.enabled ?? true },
+    [SYNC_ETAGS_KEY]: seed.etags ?? {},
+  });
+  const settings = createSyncSettingsStore(settingsData);
+
+  const calls = { pull: 0, push: 0 };
+  const pulled: { envelopes: Envelope[]; etags: Record<string, string> }[] = [];
+  const pushed: { envelopes: Envelope[]; etags: Record<string, string> }[] = [];
+  const commands: SyncCommands = {
+    async pull(envelopes, etags) {
+      calls.pull++;
+      pulled.push({ envelopes, etags });
+      return seed.pull ?? { records: [], etags: {}, quarantined: [], pruned: 0, pending: 0 };
+    },
+    async push(envelopes, etags) {
+      calls.push++;
+      pushed.push({ envelopes, etags });
+      return seed.push ?? { etags: {}, failed: [] };
+    },
+  };
+
+  const timers: (() => void)[] = [];
+
+  const hosts = createHostsStore({
+    store: hostsData,
+    secrets: noSecrets,
+    now,
+    markDirty: (d) => scheduler.markDirty(d),
+  });
+  const vault = createVaultStore({
+    store: vaultData,
+    secrets: noSecrets,
+    now,
+    markDirty: (d) => scheduler.markDirty(d),
+  });
+  const forwards = createForwardStore({
+    store: forwardsData,
+    now,
+    markDirty: (d) => scheduler.markDirty(d),
+  });
+
+  const released: string[] = [];
+  const scheduler = createScheduler({
+    label: seed.label ?? "main",
+    commands,
+    settings,
+    stores: { hosts, vault, forwards },
+    async releaseRule(rule) {
+      mark(`release:${rule.id}`);
+      released.push(rule.id);
+      if (seed.releaseThrows) throw new Error("forwards: the close reported");
+    },
+    now,
+    setTimer: (fn) => {
+      timers.push(fn);
+      return timers.length;
+    },
+    clearTimer: () => {},
+  });
+
+  return {
+    scheduler,
+    hosts,
+    vault,
+    forwards,
+    released,
+    settings,
+    settingsData,
+    calls,
+    pulled,
+    pushed,
+    timers,
+    async fire(): Promise<void> {
+      const due = timers.splice(0, timers.length);
+      for (const fn of due) fn();
+      await settle();
+    },
+    status: async (): Promise<SyncStatus> => settings.readStatus(),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Fixtures
+// ---------------------------------------------------------------------------
+
+/** An SSH host that references nothing, so `upsertHost` accepts it without a
+ *  vault identity or a jump host having to exist. */
+const host = (id: string, over: Partial<SshHost> = {}): SshHost => ({
+  id,
+  name: `host ${id}`,
+  host: "10.0.0.1",
+  port: 22,
+  protocol: "ssh",
+  credential: {
+    kind: "inline",
+    hostId: id,
+    user: "root",
+    authMode: "password",
+    hasPassword: false,
+    hasPrivateKey: false,
+    hasKeyPassphrase: false,
+  },
+  updatedAt: START - 5000,
+  ...over,
+});
+
+/** A landing straight off the wire: stamped OLDER than the harness clock, so a
+ *  store that stamped its own would answer `START` instead. */
+const REMOTE = START - 9000;
+
+function merged(
+  kind: string,
+  id: string,
+  record: unknown,
+  over: { changed?: boolean; republish?: boolean } = {},
+): Reconciled {
+  return {
+    kind,
+    id,
+    outcome: "merged",
+    envelope: {
+      v: WIRE_VERSION,
+      kind,
+      id,
+      updatedAt: REMOTE,
+      device: "dev-b",
+      deleted: false,
+      record,
+    },
+    changed: over.changed ?? true,
+    secretsChanged: false,
+    republish: over.republish ?? false,
+  };
+}
+
+function remoteOnly(kind: string, id: string, record: unknown): Reconciled {
+  return {
+    kind,
+    id,
+    outcome: "remoteOnly",
+    envelope: {
+      v: WIRE_VERSION,
+      kind,
+      id,
+      updatedAt: REMOTE,
+      device: "dev-b",
+      deleted: false,
+      record,
+    },
+  };
+}
+
+const localOnly = (kind: string, id: string, stale: boolean): Reconciled => ({
+  kind,
+  id,
+  outcome: "localOnly",
+  stale,
+});
+
+// ---------------------------------------------------------------------------
+// The checks
+// ---------------------------------------------------------------------------
+
+async function b1(): Promise<void> {
+  console.log("\nB1 - with sync off, nothing is invoked");
+  const h = harness({ enabled: false, hosts: [host("h-1")] });
+  await h.scheduler.pullNow();
+  await h.hosts.upsertGroup({ id: "g-1", name: "prod" });
+  await h.fire();
+  h.scheduler.onFocus();
+  await settle();
+  // A MEASURED ZERO on the port itself, not an absence of call sites.
+  check("off: no pull and no push", h.calls, { pull: 0, push: 0 });
+}
+
+async function b2b3b4(): Promise<void> {
+  console.log("\nB2, B3, B4 - the debounce, and what one edit carries");
+
+  const one = harness({ hosts: [host("h-1"), host("h-2"), host("h-3")] });
+  await one.hosts.upsertGroup({ id: "g-1", name: "prod" });
+  check("B2: one mutation arms exactly one timer", one.timers.length, 1);
+  await one.fire();
+  check("B2: one push after the debounce", one.calls.push, 1);
+
+  const five = harness({ hosts: [host("h-1")] });
+  for (const id of ["g-1", "g-2", "g-3", "g-4", "g-5"]) {
+    await five.hosts.upsertGroup({ id, name: id });
+  }
+  check("B3: five mutations inside the window arm one timer", five.timers.length, 1);
+  await five.fire();
+  check("B3: and produce one push, not five", five.calls.push, 1);
+  check("B3: carrying all five records", five.pushed[0]?.envelopes.map((e) => e.id).sort(), [
+    "g-1",
+    "g-2",
+    "g-3",
+    "g-4",
+    "g-5",
+  ]);
+
+  const edit = harness({ hosts: [host("h-1"), host("h-2"), host("h-3")] });
+  await edit.hosts.upsertHost(host("h-2", { name: "renamed" }));
+  await edit.fire();
+  // The property `persist(entries, dirty)` exists for: a hook that could only
+  // say "this store changed" would publish all three.
+  check(
+    "B4: one host edit pushes one object",
+    edit.pushed[0]?.envelopes.map((e) => `${e.kind}:${e.id}`),
+    ["host:h-2"],
+  );
+  check(
+    "B4: and no device-local field rides with it",
+    DEVICE_LOCAL_FIELDS.filter(
+      (f) => (edit.pushed[0]?.envelopes[0]?.record as Record<string, unknown>)[f] !== undefined,
+    ),
+    [],
+  );
+  check("B4: and this side names no device", edit.pushed[0]?.envelopes[0]?.device ?? null, null);
+}
+
+async function b5(): Promise<void> {
+  console.log("\nB5 - what must NOT schedule a push");
+
+  const h = harness({ hosts: [host("h-1")] });
+  await h.hosts.markConnected("h-1", "SHA256:aaa");
+  await h.hosts.pinFingerprint("h-1", "SHA256:aaa");
+  check("markConnected and pinFingerprint arm no timer", h.timers.length, 0);
+
+  // The one a live consumer can fail and a construction-only argument cannot:
+  // a landed record is what the remote already holds, so marking it dirty is a
+  // push loop between two devices.
+  const applied = harness({ hosts: [host("h-1")] });
+  await applied.hosts.applyRemote(
+    [{ deleted: false, id: "h-9", record: host("h-9"), updatedAt: REMOTE }],
+    [],
+  );
+  check("applyRemote arms no timer", applied.timers.length, 0);
+  await applied.fire();
+  check("applyRemote pushes nothing", applied.calls.push, 0);
+}
+
+async function b6(): Promise<void> {
+  console.log("\nB6 - the focus rate limit");
+  const h = harness();
+  h.scheduler.onFocus();
+  h.scheduler.onFocus();
+  await settle();
+  // One clock value for both events, which is the shape of an alt-tab burst.
+  check("two focus events inside the window produce one pull", h.calls.pull, 1);
+}
+
+async function b7(): Promise<void> {
+  console.log("\nB7 - a merge only writes when it changed something");
+
+  const unchanged = harness({
+    hosts: [host("h-1")],
+    pull: {
+      records: [merged(HOST_TOMBSTONE_KIND, "h-1", host("h-1"), { changed: false })],
+      etags: { "host:h-1": "e1" },
+      quarantined: [],
+      pruned: 0,
+      pending: 0,
+    },
+  });
+  const before = trace.length;
+  await unchanged.scheduler.pullNow();
+  await settle();
+  check(
+    "changed: false commits nothing to the hosts store",
+    trace.slice(before).filter((t) => t.endsWith("commit:hosts")).length,
+    0,
+  );
+
+  const changed = harness({
+    hosts: [host("h-1")],
+    pull: {
+      records: [merged(HOST_TOMBSTONE_KIND, "h-1", host("h-1", { name: "from the remote" }))],
+      etags: { "host:h-1": "e1" },
+      quarantined: [],
+      pruned: 0,
+      pending: 0,
+    },
+  });
+  await changed.scheduler.pullNow();
+  await settle();
+  check(
+    "changed: true lands the record at the REMOTE stamp",
+    (await changed.hosts.listHosts()).map((h) => [h.name, h.updatedAt]),
+    [["from the remote", REMOTE]],
+  );
+}
+
+async function b8(): Promise<void> {
+  console.log("\nB8 - the three dispositions");
+  const h = harness({
+    hosts: [host("h-1"), host("h-2")],
+    pull: {
+      records: [
+        remoteOnly(HOST_TOMBSTONE_KIND, "h-9", host("h-9", { name: "landed" })),
+        localOnly(HOST_TOMBSTONE_KIND, "h-1", false),
+        localOnly(HOST_TOMBSTONE_KIND, "h-2", true),
+      ],
+      etags: {},
+      quarantined: [],
+      pruned: 1,
+      pending: 1,
+    },
+  });
+  await h.scheduler.pullNow();
+  await settle();
+
+  check("RemoteOnly lands", (await h.hosts.listHosts()).map((x) => x.id).sort(), [
+    "h-1",
+    "h-2",
+    "h-9",
+  ]);
+  check(
+    "recent LocalOnly is pushed and stale LocalOnly is not",
+    h.pushed[0]?.envelopes.map((e) => e.id),
+    ["h-1"],
+  );
+  // The whole reason the stale arm is not a delete: a listing gap is an
+  // inference, and a truncated page presents exactly the same way.
+  check("stale LocalOnly is still in the store", (await h.hosts.findHost("h-2"))?.id, "h-2");
+  const status = await h.status();
+  check("stale LocalOnly is reported", status.stale, [{ kind: "host", id: "h-2" }]);
+  check("the pending count reaches the store file", status.pending, 1);
+}
+
+async function b9(): Promise<void> {
+  console.log("\nB9 - no scheduler outside the main webview");
+  for (const label of ["settings", "float"]) {
+    const h = harness({ label, hosts: [host("h-1")] });
+    h.scheduler.markDirty([{ kind: HOST_TOMBSTONE_KIND, id: "h-1" }]);
+    await h.scheduler.pullNow();
+    await h.scheduler.pushNow();
+    h.scheduler.onFocus();
+    await settle();
+    check(
+      `${label}: nothing is invoked and nothing is armed`,
+      {
+        ...h.calls,
+        timers: h.timers.length,
+      },
+      { pull: 0, push: 0, timers: 0 },
+    );
+  }
+}
+
+async function b10(): Promise<void> {
+  console.log("\nB10 - the etag map advances minus the refused");
+  // The refusal is the id disagreement, which is one of the five conditions
+  // `landingRefusal` owns - and NOT a reference guard, which this path skips.
+  const h = harness({
+    hosts: [host("h-1")],
+    pull: {
+      records: [
+        {
+          ...merged(HOST_TOMBSTONE_KIND, "h-bad", host("h-other")),
+        },
+        merged(HOST_TOMBSTONE_KIND, "h-good", host("h-good")),
+      ],
+      etags: { "host:h-bad": "e1", "host:h-good": "e2" },
+      quarantined: [],
+      pruned: 0,
+      pending: 0,
+    },
+  });
+  const before = trace.length;
+  await h.scheduler.pullNow();
+  await settle();
+
+  check("the refused id is dropped and the applied one is kept", await h.settings.readEtags(), {
+    "host:h-good": "e2",
+  });
+  // Order, not just content: writing the map first costs the landing on a
+  // crash, and writing it after costs one idempotent re-apply.
+  const after = trace.slice(before);
+  const commit = after.findIndex((t) => t.endsWith("commit:hosts"));
+  const write = after.findIndex((t) => t.endsWith("writeEtags"));
+  check("the map is written after the apply resolved", commit >= 0 && write > commit, true);
+  // And the good landing still landed, in the same pass that refused the bad
+  // one - a refusal must not cost the rest of the inventory.
+  check("the good landing applied anyway", (await h.hosts.findHost("h-good"))?.id, "h-good");
+}
+
+async function b11(): Promise<void> {
+  console.log("\nB11 - the two constants that exist in both languages");
+
+  const model = readFileSync(resolve(ROOT, "src-tauri/src/modules/sync/model.rs"), "utf8");
+  const listed = /const DEVICE_LOCAL_FIELDS: \[&str; \d+\] = \[([\s\S]*?)\];/.exec(model);
+  const rustFields = [...(listed?.[1] ?? "").matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+  check(
+    "the device-local field list agrees with the Rust one",
+    [...DEVICE_LOCAL_FIELDS],
+    rustFields,
+  );
+  // A negative assertion passes for free against an empty list, so the list
+  // being non-empty is part of the claim.
+  check("and it is not empty", rustFields.length > 0, true);
+
+  const engine = readFileSync(resolve(ROOT, "src-tauri/src/modules/sync/engine.rs"), "utf8");
+  const ttl = /const TOMBSTONE_TTL_MS: u64 = ([0-9 *_]+);/.exec(engine);
+  const factors = (ttl?.[1] ?? "").split("*").map((part) => Number(part.replace(/[\s_]/g, "")));
+  const rustTtl = factors.every((n) => Number.isFinite(n) && n > 0)
+    ? factors.reduce((a, b) => a * b, 1)
+    : NaN;
+  // The prune window and the local expiry window are the same window seen from
+  // two sides: a drift either strands objects nobody reads or removes objects
+  // devices still compare against.
+  check("the tombstone window agrees with the Rust one", rustTtl, TOMBSTONE_TTL_MS);
+}
+
+async function b12(): Promise<void> {
+  console.log("\nB12 - the local set is records plus living tombstones");
+  const h = harness({
+    hosts: [host("h-1")],
+    hostGraves: [{ id: "h-7", kind: HOST_TOMBSTONE_KIND, deletedAt: START - 1000 }],
+    identities: [{ id: "i-1", name: "root", updatedAt: START - 1000 } as VaultIdentity],
+    vaultKeys: [{ id: "k-1", name: "id_ed25519", updatedAt: START - 1000 } as VaultKey],
+    rules: [
+      {
+        id: "f-1",
+        name: "web",
+        hostId: "h-1",
+        localPort: 8080,
+        remoteHost: "127.0.0.1",
+        remotePort: 80,
+        startWithHost: false,
+        updatedAt: START - 1000,
+      },
+    ],
+  });
+  await h.scheduler.pullNow();
+  await settle();
+  // Without the tombstone the delete reads as remote-only and lands again on
+  // the device that made it.
+  check(
+    "every kind, and the tombstone, reach the pull",
+    h.pulled[0]?.envelopes.map((e) => `${e.kind}:${e.id}${e.deleted ? " (deleted)" : ""}`).sort(),
+    [
+      `${HOST_TOMBSTONE_KIND}:h-1`,
+      `${HOST_TOMBSTONE_KIND}:h-7 (deleted)`,
+      `${IDENTITY_TOMBSTONE_KIND}:i-1`,
+      `${KEY_TOMBSTONE_KIND}:k-1`,
+      `${RULE_TOMBSTONE_KIND}:f-1`,
+    ],
+  );
+  check(
+    "a tombstone travels at its own deletedAt",
+    h.pulled[0]?.envelopes.find((e) => e.deleted)?.updatedAt,
+    START - 1000,
+  );
+}
+
+/** One rule, running, that another device deletes. */
+function runningRule(): ForwardRule {
+  return {
+    id: "f-1",
+    name: "web",
+    hostId: "h-1",
+    localPort: 8080,
+    remoteHost: "127.0.0.1",
+    remotePort: 80,
+    startWithHost: false,
+    updatedAt: START - 5000,
+  };
+}
+
+/** A landed delete for the rule above, as the pull hands it over. */
+const droppedRule: Reconciled = {
+  kind: RULE_TOMBSTONE_KIND,
+  id: "f-1",
+  outcome: "remoteOnly",
+  envelope: {
+    v: WIRE_VERSION,
+    kind: RULE_TOMBSTONE_KIND,
+    id: "f-1",
+    updatedAt: REMOTE,
+    device: "dev-b",
+    deleted: true,
+    record: null,
+  },
+};
+
+async function b13(): Promise<void> {
+  console.log("\nB13 - a landed delete releases the forward before dropping the rule");
+  const pull: PullReport = {
+    records: [droppedRule],
+    etags: { "rule:f-1": "e1" },
+    quarantined: [],
+    pruned: 0,
+    pending: 0,
+  };
+
+  const h = harness({ rules: [runningRule()], pull });
+  const before = trace.length;
+  await h.scheduler.pullNow();
+  await settle();
+  check("the running forward is released", h.released, ["f-1"]);
+  // ORDER IS THE PROPERTY. Dropping the record first releases nothing: the
+  // record carries the host and both endpoints a stop needs to NAME the entry,
+  // and once it is gone nothing can name it.
+  const after = trace.slice(before);
+  const releasedAt = after.findIndex((t) => t.endsWith("release:f-1"));
+  const droppedAt = after.findIndex((t) => t.endsWith("commit:forwards"));
+  check("released before the record is dropped", releasedAt >= 0 && droppedAt > releasedAt, true);
+  check("and the rule is gone", (await h.forwards.listRules()).length, 0);
+
+  // A REJECTING CLOSE DOES NOT ABORT THE PASS. The apply is one queued write
+  // over every landing in the pull, so a throw would lose all of them.
+  const noisy = harness({ rules: [runningRule()], pull, releaseThrows: true });
+  await noisy.scheduler.pullNow();
+  await settle();
+  check("a rejecting close still lands the delete", (await noisy.forwards.listRules()).length, 0);
+  check(
+    "and is reported rather than swallowed",
+    (await noisy.status()).lastError,
+    "forwards: the close reported",
+  );
+}
+
+async function main(): Promise<void> {
+  await b1();
+  await b2b3b4();
+  await b5();
+  await b6();
+  await b7();
+  await b8();
+  await b9();
+  await b10();
+  await b11();
+  await b12();
+  await b13();
+
+  if (failed > 0) throw new Error(`sync-scheduler-verify: ${failed} FAILED`);
+  console.log("\nsync-scheduler-verify: OK\n");
+}
+
+await main();

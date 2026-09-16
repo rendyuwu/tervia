@@ -1,4 +1,5 @@
 import { describeError } from "@/lib/describeError";
+import { markDirty } from "@/lib/dirtySink";
 import type { StoreRecovery } from "@/lib/storeRecovery";
 import {
   landedTombstones,
@@ -1471,6 +1472,10 @@ export function createHostsStore(io: HostsIo): HostsStore {
 export const hostsStore = createHostsStore({
   store: createTauriHostsStoreIo(),
   secrets: tauriSecretsIo,
+  // Through a sink rather than straight to the scheduler, so this file gains no
+  // import edge on a network module - see `src/lib/dirtySink.ts`. Nothing is
+  // registered until `main` starts sync, and `markDirty` is a no-op until then.
+  markDirty,
 });
 
 export const {

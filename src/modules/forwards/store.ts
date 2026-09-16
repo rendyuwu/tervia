@@ -1,3 +1,4 @@
+import { markDirty } from "@/lib/dirtySink";
 import type { StoreRecovery } from "@/lib/storeRecovery";
 import {
   landedTombstones,
@@ -360,7 +361,12 @@ export function createForwardStore(io: ForwardsIo): ForwardsStore {
 }
 
 /** The app's forward rules. One instance, so one write queue. */
-export const forwardsStore = createForwardStore({ store: createTauriForwardsStoreIo() });
+export const forwardsStore = createForwardStore({
+  store: createTauriForwardsStoreIo(),
+  // See the same line in `modules/hosts/store.ts`, and `src/lib/dirtySink.ts`
+  // for why the marks travel through a sink rather than a direct call.
+  markDirty,
+});
 
 export const {
   listRules,

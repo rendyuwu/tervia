@@ -1,4 +1,5 @@
 import { describeError } from "@/lib/describeError";
+import { markDirty } from "@/lib/dirtySink";
 import type { StoreRecovery } from "@/lib/storeRecovery";
 import {
   landedTombstones,
@@ -701,6 +702,9 @@ export function createVaultStore(io: VaultIo): VaultStore {
 export const vaultStore = createVaultStore({
   store: createTauriVaultStoreIo(),
   secrets: tauriSecretsIo,
+  // See the same line in `modules/hosts/store.ts`, and `src/lib/dirtySink.ts`
+  // for why the marks travel through a sink rather than a direct call.
+  markDirty,
 });
 
 export const {

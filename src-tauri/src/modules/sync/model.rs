@@ -74,8 +74,15 @@ pub struct Envelope {
     /// outrank a real one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<u64>,
-    /// Which device published this. PROVENANCE ONLY - nothing reads it, and in
-    /// particular [`merge`] does not. See [`ordering_key`] for why.
+    /// Which device published this. PROVENANCE ONLY - the merge does not read
+    /// it, and [`ordering_key`] says why not. The one reader is the prune, and
+    /// there the question being asked IS provenance.
+    ///
+    /// `default` so a frontend that assembles an envelope may leave it out.
+    /// That is not leniency: the push STAMPS this field over whatever arrived,
+    /// because the prune deletes remote objects on the strength of it and a
+    /// value a webview could choose is a value a webview could get wrong.
+    #[serde(default)]
     pub device: String,
     /// A tombstone. `record` is `Null` and `updated_at` is the `deletedAt`.
     #[serde(default)]
@@ -147,10 +154,38 @@ pub enum Side {
 ///
 /// Compare the envelope with what is already stored. The side is provenance,
 /// good for a log line or for deciding which way to push, and nothing more.
+///
+/// [`Merged::changed`] and [`Merged::secrets_changed`] are that comparison,
+/// done here because this is the layer that still holds `local`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Merged {
     pub winner: Side,
     pub envelope: Envelope,
+    /// Whether the winner differs from `local` in what the STORE holds.
+    ///
+    /// TWO FLAGS AND NOT ONE, because there are two destinations and each
+    /// compares against exactly what it stores. A single flag over the whole
+    /// envelope is wrong twice over:
+    ///
+    /// - whole-envelope equality reads `device`, the one field that always
+    ///   differs between two devices, so it would be `true` on every remote
+    ///   win and the store would be rewritten on every pull;
+    /// - [`ordering_key`] reads `secrets`, and [`merge`]'s own doc calls the
+    ///   configuration where two sides differ only in `secrets` the steady
+    ///   state - so that would rewrite the store on every pull too, for a
+    ///   difference that belongs to the keychain.
+    ///
+    /// Computed AFTER the two vault exceptions run, against the normalized
+    /// local, so a stripped `fingerprint` or a backfilled `encrypted` is
+    /// inside it.
+    pub changed: bool,
+    /// Whether the winner differs from `local` in what the KEYCHAIN holds.
+    ///
+    /// Drives the body write, which is the expensive one: on Linux and Windows
+    /// a single keychain write is a read-modify-write of the whole secrets
+    /// file, so a flag that fired on every pull would rewrite every stored
+    /// secret every time the window regained focus.
+    pub secrets_changed: bool,
 }
 
 /// The compact JSON for a value, which is what the ordering key compares.
@@ -247,6 +282,31 @@ fn ordering_key(e: &Envelope) -> (Option<u64>, bool, String, Option<String>) {
     )
 }
 
+/// The part of an envelope a STORE holds: the stamp, the delete, the record.
+///
+/// [`ordering_key`] minus `secrets`, which is the keychain's half and is
+/// compared separately - see [`Merged::changed`] for why the two cannot be one
+/// flag.
+fn store_key(e: &Envelope) -> (Option<u64>, bool, String) {
+    (e.updated_at, e.deleted, canonical(&e.record))
+}
+
+/// Whether two envelopes say anything different at all, `device` excluded.
+///
+/// The question a PUSH has to answer - "does the remote object already hold
+/// this?" - and the reason it is not [`Merged::winner`]: a REMOTE win can still
+/// differ from the remote copy, because the two vault exceptions in [`merge`]
+/// mutate the winner after the side is decided. A caller reading the side
+/// instead would leave an `encrypted` backfill on this device and never
+/// publish it.
+///
+/// `device` is excluded for the reason it is outside [`ordering_key`]: it
+/// always differs between two devices, so including it would make this `true`
+/// for every pair and every pull would republish the whole inventory.
+pub fn content_differs(a: &Envelope, b: &Envelope) -> bool {
+    ordering_key(a) != ordering_key(b)
+}
+
 /// Is this record's own claim that it has a private key body?
 fn claims_private_key(record: &Value) -> bool {
     record.get("hasPrivateKey") == Some(&Value::Bool(true))
@@ -295,6 +355,12 @@ pub fn merge(local: &Envelope, remote: &Envelope) -> Result<Merged, MergeError> 
     let mut r = remote.clone();
     normalize(&mut l);
     normalize(&mut r);
+
+    // Taken BEFORE the winner is chosen, because `l` is moved into it on a
+    // local win and the two flags below have to compare against the local copy
+    // as it arrived, not against the copy the vault exceptions then mutated.
+    let local_store = store_key(&l);
+    let local_secrets = l.secrets.clone();
 
     let (winner_side, mut winner, loser) = if ordering_key(&r) > ordering_key(&l) {
         (Side::Remote, r, l)
@@ -350,9 +416,14 @@ pub fn merge(local: &Envelope, remote: &Envelope) -> Result<Merged, MergeError> 
         }
     }
 
+    let changed = store_key(&winner) != local_store;
+    let secrets_changed = winner.secrets != local_secrets;
+
     Ok(Merged {
         winner: winner_side,
         envelope: winner,
+        changed,
+        secrets_changed,
     })
 }
 
@@ -667,6 +738,104 @@ mod tests {
         );
         let merged = merge(&winner, &loser).unwrap();
         assert!(merged.envelope.record.get("fingerprint").is_none());
+    }
+
+    // --- the two dirty flags ----------------------------------------------
+
+    /// One pair, stamped with the two device ids production always differs on.
+    ///
+    /// EVERY case below goes through here rather than through the fixtures as
+    /// they are written. `device` is the one field two copies of a record
+    /// always disagree about, so a `changed` built on whole-envelope equality
+    /// passes every test whose fixtures happen to share one id, and fails on
+    /// the first real pull.
+    fn two_devices(local: &Envelope, remote: &Envelope) -> Merged {
+        let local = Envelope {
+            device: "dev-a".into(),
+            ..local.clone()
+        };
+        let remote = Envelope {
+            device: "dev-b".into(),
+            ..remote.clone()
+        };
+        merge(&local, &remote).expect("merge")
+    }
+
+    #[test]
+    fn a_local_win_that_stripped_a_fingerprint_is_still_changed() {
+        // The case `Merged`'s doc names first: the vault exceptions run AFTER
+        // the side is decided, so a LOCAL win can still differ from what is
+        // stored. A caller skipping the write on `Side::Local` drops this.
+        let local = key_env(
+            2,
+            json!({"id": "k-1", "hasPrivateKey": false, "fingerprint": "SHA256:aaa"}),
+        );
+        let remote = key_env(1, json!({"id": "k-1", "hasPrivateKey": true}));
+        let merged = two_devices(&local, &remote);
+        assert_eq!(merged.winner, Side::Local);
+        assert!(merged.envelope.record.get("fingerprint").is_none());
+        assert!(merged.changed, "the stripped fingerprint was not noticed");
+        assert!(!merged.secrets_changed);
+    }
+
+    #[test]
+    fn a_remote_win_that_matches_after_the_backfill_is_not_changed() {
+        // The fixed point the same doc names second: the bare remote copy sorts
+        // above the backfilled local one on an exact stamp tie, wins every
+        // pull, and is re-backfilled to the content already stored. The side is
+        // `Remote` forever; the content never moves. A caller writing on
+        // `Side::Remote` rewrites the vault file on every focus.
+        let local = key_env(
+            2,
+            json!({"id": "k-1", "hasPrivateKey": true, "encrypted": true}),
+        );
+        let remote = key_env(2, json!({"id": "k-1", "hasPrivateKey": true}));
+        let merged = two_devices(&local, &remote);
+        assert_eq!(merged.winner, Side::Remote);
+        assert_eq!(merged.envelope.record, local.record);
+        assert!(!merged.changed, "a fixed point reported as a change");
+    }
+
+    #[test]
+    fn two_sides_differing_only_in_secrets_change_the_keychain_and_not_the_store() {
+        // The steady state of one device opting into carrying, and the
+        // regression case for a `changed` built on `ordering_key`: that one
+        // reads `secrets`, so this pair would rewrite the whole store on every
+        // pull for a difference that belongs entirely to the keychain.
+        let plain = json!({"id": "k-1", "hasPrivateKey": true});
+        let local = key_env(2, plain.clone());
+        let mut remote = key_env(2, plain);
+        remote.secrets = Some(json!({"privateKey": "BODY"}));
+
+        let merged = two_devices(&local, &remote);
+        assert!(
+            !merged.changed,
+            "a secrets-only difference touched the store"
+        );
+        assert!(merged.secrets_changed, "the carried body was not noticed");
+        assert_eq!(merged.envelope.secrets, remote.secrets);
+    }
+
+    #[test]
+    fn content_differs_reads_everything_except_the_device() {
+        // What a push asks before it re-uploads. The `device` clause is the
+        // load-bearing one: without it every pair differs and every pull
+        // republishes the whole inventory.
+        let a = host(Some(5), "same");
+        let b = Envelope {
+            device: "dev-b".into(),
+            ..a.clone()
+        };
+        assert!(!content_differs(&a, &b), "the device id was compared");
+        assert!(content_differs(&a, &host(Some(6), "same")));
+        assert!(content_differs(&a, &host(Some(5), "other")));
+
+        // And `secrets` IS compared here, unlike in `changed`: the remote
+        // object holds the body, so a winner that gained one has to be
+        // re-uploaded.
+        let mut carrying = a.clone();
+        carrying.secrets = Some(json!({"privateKey": "BODY"}));
+        assert!(content_differs(&a, &carrying));
     }
 
     // --- shape ------------------------------------------------------------

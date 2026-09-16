@@ -1,0 +1,403 @@
+// When sync runs, and what it does with what comes back.
+//
+// ONE WEBVIEW, AND IT IS `main`. `vite.config.ts` builds three, and
+// `fileKeyValueStore.ts` records that a contended write eventually gives up and
+// writes over a stale baseline, "LOSING another window's update". An apply lands
+// N records at once, on every focus - so two windows doing it would make that
+// loss routine rather than rare. Outside `main` every entry point below is a
+// no-op, and it is a no-op by CONSTRUCTION: the constructor returns a different
+// object, so there is no branch inside a hot path for a later edit to forget.
+//
+// THE TWO TRIGGERS. A local edit marks records dirty and a debounce collects the
+// burst; the window regaining focus pulls, behind a rate limit. Neither is a
+// poll - `CONTRIBUTING.md` rejects that shape, and the rate limit is what keeps
+// the focus trigger from becoming one under alt-tabbing.
+//
+// WHAT RUNS WHERE. Every decision - the merge, the prune, the etag skip - is in
+// `src-tauri/src/modules/sync/engine.rs`. Everything this file does with the
+// answer goes through a store's `applyRemote`, because `KNOWN-LIMITS.md` records
+// that every integrity rule lives in the store layer and a pull has to go
+// through it.
+
+import { type DirtyId, type RemoteLanding, type RemoteLandingRefusal } from "@/lib/tombstones";
+import type { ForwardRule } from "@/modules/forwards/types";
+import type { Host, HostGroup } from "@/modules/hosts/types";
+import type { VaultIdentity, VaultKey } from "@/modules/vault/types";
+import { GROUP_TOMBSTONE_KIND, HOST_TOMBSTONE_KIND } from "@/modules/hosts/types";
+import { RULE_TOMBSTONE_KIND } from "@/modules/forwards/types";
+import { IDENTITY_TOMBSTONE_KIND, KEY_TOMBSTONE_KIND } from "@/modules/vault/types";
+
+import { landingOf, recordEnvelope, tombstoneEnvelope } from "./envelope";
+import type { SyncSettingsStore } from "./store";
+import {
+  etagSlot,
+  EMPTY_SYNC_STATUS,
+  FOCUS_INTERVAL_MS,
+  PUSH_DEBOUNCE_MS,
+  type Envelope,
+  type Reconciled,
+  type SyncCommands,
+  type SyncStatus,
+} from "./types";
+
+/**
+ * The three record stores, as this module needs them.
+ *
+ * STRUCTURAL rather than the exported store types, so the verify script builds
+ * a fake by writing the four methods it uses instead of a whole store - and so
+ * this file gains no import edge on three store MODULES, only on their types.
+ */
+export type SyncStores = {
+  hosts: {
+    listHosts(): Promise<Host[]>;
+    listGroups(): Promise<HostGroup[]>;
+    listTombstones(): Promise<{ id: string; kind: string; deletedAt: number }[]>;
+    applyRemote(
+      hosts: RemoteLanding<Host>[],
+      groups: RemoteLanding<HostGroup>[],
+    ): Promise<RemoteLandingRefusal[]>;
+  };
+  vault: {
+    listIdentities(): Promise<VaultIdentity[]>;
+    listKeys(): Promise<VaultKey[]>;
+    listTombstones(): Promise<{ id: string; kind: string; deletedAt: number }[]>;
+    applyRemote(
+      identities: RemoteLanding<VaultIdentity>[],
+      keys: RemoteLanding<VaultKey>[],
+    ): Promise<RemoteLandingRefusal[]>;
+  };
+  forwards: {
+    listRules(): Promise<ForwardRule[]>;
+    listTombstones(): Promise<{ id: string; kind: string; deletedAt: number }[]>;
+    applyRemote(rules: RemoteLanding<ForwardRule>[]): Promise<RemoteLandingRefusal[]>;
+  };
+};
+
+export type SchedulerIo = {
+  /** This webview's label. Everything is a no-op unless it is `main`. */
+  label: string;
+  commands: SyncCommands;
+  settings: SyncSettingsStore;
+  /**
+   * Stop a running forward before its rule record is landed away.
+   *
+   * INJECTED, not imported: `modules/forwards/controller.ts` is the runtime and
+   * it imports the forwards store, so a direct import here would pull a Tauri
+   * surface into a module the verify script loads under plain node.
+   *
+   * Sequenced AHEAD of the apply for the reason `releaseRulesForHost`'s own doc
+   * gives: dropping the record releases nothing, and once the record is gone
+   * nothing can name the entry - the SSH session stays at one reference and the
+   * local port stays bound for the rest of the app's life. `KNOWN-LIMITS.md`
+   * named this pull as the trigger that would have to sequence it.
+   */
+  releaseRule?: (rule: ForwardRule) => Promise<void>;
+  stores: SyncStores;
+  now?: () => number;
+  /** Injected so a check can fire the debounce without waiting five real
+   *  seconds, and so a disposed scheduler's timer is cancellable. */
+  setTimer?: (fn: () => void, ms: number) => unknown;
+  clearTimer?: (handle: unknown) => void;
+};
+
+export type SyncScheduler = {
+  /** What a store's committed write owes a push. Never throws - see
+   *  `markDirty` in `src/lib/dirtySink.ts`. */
+  markDirty(dirty: DirtyId[]): void;
+  /** Reconcile now, then publish what the remote turned out to be missing. */
+  pullNow(): Promise<void>;
+  /** Publish everything marked dirty since the last push, now. */
+  pushNow(): Promise<void>;
+  /** The window regained focus. Rate limited. */
+  onFocus(): void;
+  /** Drop the pending debounce. */
+  dispose(): void;
+};
+
+/** Every entry point, doing nothing. What a non-`main` webview gets. */
+const INERT: SyncScheduler = {
+  markDirty: () => {},
+  pullNow: async () => {},
+  pushNow: async () => {},
+  onFocus: () => {},
+  dispose: () => {},
+};
+
+/** Landings sorted into the arrays the three `applyRemote` calls take. */
+type Sorted = {
+  hosts: RemoteLanding<Host>[];
+  groups: RemoteLanding<HostGroup>[];
+  identities: RemoteLanding<VaultIdentity>[];
+  keys: RemoteLanding<VaultKey>[];
+  rules: RemoteLanding<ForwardRule>[];
+};
+
+export function createScheduler(io: SchedulerIo): SyncScheduler {
+  if (io.label !== "main") return INERT;
+
+  const now = io.now ?? Date.now;
+  const setTimer = io.setTimer ?? ((fn, ms) => setTimeout(fn, ms));
+  const clearTimer = io.clearTimer ?? ((handle) => clearTimeout(handle as never));
+
+  /** Record slots (`kind:id`) this device owes the remote. */
+  const dirty = new Set<string>();
+  let pending: unknown = null;
+  /** `-Infinity` so the app-setup pull is never rate limited away. */
+  let lastPull = -Infinity;
+  let status: SyncStatus = { ...EMPTY_SYNC_STATUS };
+  /** A close that reported during this pull's apply. Held rather than written
+   *  at once, because the pull's own status write comes after and would put a
+   *  `null` over it. */
+  let closeError: string | null = null;
+
+  async function localEnvelopes(): Promise<Envelope[]> {
+    const [hosts, groups, hostGraves, identities, keys, vaultGraves, rules, ruleGraves] =
+      await Promise.all([
+        io.stores.hosts.listHosts(),
+        io.stores.hosts.listGroups(),
+        io.stores.hosts.listTombstones(),
+        io.stores.vault.listIdentities(),
+        io.stores.vault.listKeys(),
+        io.stores.vault.listTombstones(),
+        io.stores.forwards.listRules(),
+        io.stores.forwards.listTombstones(),
+      ]);
+    return [
+      ...hosts.map((h) => recordEnvelope(HOST_TOMBSTONE_KIND, h)),
+      ...groups.map((g) => recordEnvelope(GROUP_TOMBSTONE_KIND, g)),
+      ...identities.map((i) => recordEnvelope(IDENTITY_TOMBSTONE_KIND, i)),
+      ...keys.map((k) => recordEnvelope(KEY_TOMBSTONE_KIND, k)),
+      ...rules.map((r) => recordEnvelope(RULE_TOMBSTONE_KIND, r)),
+      // LIVING TOMBSTONES ARE PART OF THE LOCAL SET, not an afterthought: a
+      // local delete has to pair with its remote counterpart and resolve
+      // through the merge, or a record deleted here reads as remote-only and
+      // lands again on the device that deleted it.
+      ...[...hostGraves, ...vaultGraves, ...ruleGraves].map(tombstoneEnvelope),
+    ];
+  }
+
+  /** Sort one pull's landings by the store that owns each kind. */
+  function sort(records: Reconciled[]): Sorted {
+    const out: Sorted = { hosts: [], groups: [], identities: [], keys: [], rules: [] };
+    for (const record of records) {
+      // A `changed: false` merge writes NOTHING. It is the steady state of two
+      // devices that agree, so applying it would rewrite every store file on
+      // every focus for no new information.
+      const envelope =
+        record.outcome === "remoteOnly"
+          ? record.envelope
+          : record.outcome === "merged" && record.changed
+            ? record.envelope
+            : null;
+      if (!envelope) continue;
+      const landing = landingOf(envelope);
+      if (!landing) continue;
+      switch (record.kind) {
+        case HOST_TOMBSTONE_KIND:
+          out.hosts.push(landing as RemoteLanding<Host>);
+          break;
+        case GROUP_TOMBSTONE_KIND:
+          out.groups.push(landing as RemoteLanding<HostGroup>);
+          break;
+        case IDENTITY_TOMBSTONE_KIND:
+          out.identities.push(landing as RemoteLanding<VaultIdentity>);
+          break;
+        case KEY_TOMBSTONE_KIND:
+          out.keys.push(landing as RemoteLanding<VaultKey>);
+          break;
+        case RULE_TOMBSTONE_KIND:
+          out.rules.push(landing as RemoteLanding<ForwardRule>);
+          break;
+        default:
+        // A kind no store here owns, from a device running a newer build. Left
+        // out of the map below with the refusals, so it is re-read rather than
+        // recorded as applied.
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Apply one pull's landings, dependency first.
+   *
+   * Vault before hosts before forwards, because that is the direction the
+   * references point. It buys only the ordinary case - the reference guards are
+   * deliberately skipped on this path, so a landing whose referent has not
+   * arrived is applied with the reference dangling either way.
+   */
+  async function apply(sorted: Sorted): Promise<RemoteLandingRefusal[]> {
+    const refusals: RemoteLandingRefusal[] = [];
+    if (sorted.identities.length > 0 || sorted.keys.length > 0) {
+      refusals.push(...(await io.stores.vault.applyRemote(sorted.identities, sorted.keys)));
+    }
+    if (sorted.hosts.length > 0 || sorted.groups.length > 0) {
+      refusals.push(...(await io.stores.hosts.applyRemote(sorted.hosts, sorted.groups)));
+    }
+    if (sorted.rules.length > 0) {
+      await release(sorted.rules);
+      refusals.push(...(await io.stores.forwards.applyRemote(sorted.rules)));
+    }
+    return refusals;
+  }
+
+  /**
+   * Stop the forwards a landed delete is about to remove the record for.
+   *
+   * ONE FAILURE DOES NOT ABORT THE PASS, unlike `deleteHost`'s use of the same
+   * call. There a rejecting close leaves the host and its rules both intact,
+   * which is recoverable; here the apply is ONE queued write over every landing
+   * in the pull, so a throw would lose all of them - the failure the whole
+   * refusal design exists to prevent, arriving through a different door. The
+   * close is reported instead, and the record still lands.
+   *
+   * A LANDED EDIT IS NOT RELEASED, only a landed delete: a remote rename would
+   * otherwise drop a tunnel the user is working over. Carried in
+   * `KNOWN-LIMITS.md`.
+   */
+  async function release(landings: RemoteLanding<ForwardRule>[]): Promise<void> {
+    const releaseRule = io.releaseRule;
+    if (!releaseRule) return;
+    const dropped = new Set(landings.filter((l) => l.deleted).map((l) => l.tombstone.id));
+    if (dropped.size === 0) return;
+    for (const rule of await io.stores.forwards.listRules()) {
+      if (!dropped.has(rule.id)) continue;
+      try {
+        await releaseRule(rule);
+      } catch (e) {
+        closeError = e instanceof Error ? e.message : String(e);
+      }
+    }
+  }
+
+  async function writeStatus(next: Partial<SyncStatus>): Promise<void> {
+    status = { ...status, ...next };
+    await io.settings.writeStatus(status);
+  }
+
+  /**
+   * Publish `envelopes` and fold the etags the remote answered with back into
+   * the map.
+   *
+   * Returns the slots that did NOT land, so a caller holding dirty marks can
+   * put them back rather than losing the edit until the next one.
+   */
+  async function publish(envelopes: Envelope[]): Promise<string[]> {
+    if (envelopes.length === 0) return [];
+    const etags = await io.settings.readEtags();
+    const report = await io.commands.push(envelopes, etags);
+    await io.settings.writeEtags({ ...etags, ...report.etags });
+    const failed = report.failed.map((f) => etagSlot(f.kind, f.id));
+    await writeStatus({
+      lastPushAt: now(),
+      lastError: report.failed[0]?.reason ?? null,
+    });
+    return failed;
+  }
+
+  async function pullNow(): Promise<void> {
+    const config = await io.settings.readConfig();
+    if (!config.enabled) return;
+    closeError = null;
+    try {
+      const [envelopes, etags] = await Promise.all([localEnvelopes(), io.settings.readEtags()]);
+      const report = await io.commands.pull(envelopes, etags);
+      const refusals = await apply(sort(report.records));
+
+      // THE MAP ADVANCES MINUS THE REFUSED, never frozen wholesale. Freezing on
+      // any refusal would leave one unresolvable landing degrading every later
+      // pull to a full inventory download, forever and silently. A refusal
+      // names `{kind, id}`, which is exactly the map's key.
+      const refused = new Set(refusals.map((r) => etagSlot(r.kind, r.id)));
+      const next: Record<string, string> = {};
+      for (const [slot, etag] of Object.entries(report.etags)) {
+        if (!refused.has(slot)) next[slot] = etag;
+      }
+      // WRITTEN AFTER THE APPLY RESOLVES. A crash between the two costs one
+      // redundant, idempotent re-apply; the other order costs the landing.
+      await io.settings.writeEtags(next);
+
+      await writeStatus({
+        lastPullAt: now(),
+        pending: report.pending,
+        quarantine: report.quarantined,
+        stale: report.records
+          .filter((r) => r.outcome === "localOnly" && r.stale)
+          .map((r) => ({ kind: r.kind, id: r.id })),
+        lastError: closeError,
+      });
+
+      // What the reconcile found the remote is missing. A record the apply
+      // refused is left out: this device does not hold what it would publish.
+      const bySlot = new Map(envelopes.map((e) => [etagSlot(e.kind, e.id), e]));
+      const owed: Envelope[] = [];
+      for (const record of report.records) {
+        const slot = etagSlot(record.kind, record.id);
+        if (refused.has(slot)) continue;
+        if (record.outcome === "merged" && record.republish) owed.push(record.envelope);
+        if (record.outcome === "localOnly" && !record.stale) {
+          const mine = bySlot.get(slot);
+          if (mine) owed.push(mine);
+        }
+      }
+      await publish(owed);
+    } catch (e) {
+      await writeStatus({ lastError: e instanceof Error ? e.message : String(e) });
+    }
+  }
+
+  async function pushNow(): Promise<void> {
+    const config = await io.settings.readConfig();
+    // Taken whether or not sync is on: marks accumulated while it was off
+    // describe an inventory the remote has never seen, and the pull that
+    // follows enabling it publishes the whole of it anyway.
+    const taken = [...dirty];
+    dirty.clear();
+    if (!config.enabled || taken.length === 0) return;
+    try {
+      const wanted = new Set(taken);
+      // ONE OBJECT PER EDIT, not the inventory. The whole reason `persist`
+      // takes record ids: a hook that could only say "this store changed" would
+      // push every host every time one was renamed.
+      const envelopes = (await localEnvelopes()).filter((e) => wanted.has(etagSlot(e.kind, e.id)));
+      for (const slot of await publish(envelopes)) dirty.add(slot);
+    } catch (e) {
+      // The edit is not lost: the marks go back and the next trigger retries.
+      for (const slot of taken) dirty.add(slot);
+      await writeStatus({ lastError: e instanceof Error ? e.message : String(e) });
+    }
+  }
+
+  function schedule(): void {
+    if (pending !== null) return;
+    // The window opens at the FIRST edit of a burst rather than sliding with
+    // each one, so a long stream of edits still publishes every five seconds
+    // instead of never.
+    pending = setTimer(() => {
+      pending = null;
+      void pushNow();
+    }, PUSH_DEBOUNCE_MS);
+  }
+
+  return {
+    markDirty(ids) {
+      if (ids.length === 0) return;
+      for (const id of ids) dirty.add(etagSlot(id.kind, id.id));
+      schedule();
+    },
+    pullNow,
+    pushNow,
+    onFocus() {
+      const at = now();
+      if (at - lastPull < FOCUS_INTERVAL_MS) return;
+      // Stamped BEFORE the pull rather than after it, so a pull that fails or
+      // hangs still costs the rate limit - otherwise a broken endpoint is
+      // retried on every alt-tab.
+      lastPull = at;
+      void pullNow();
+    },
+    dispose() {
+      if (pending !== null) clearTimer(pending);
+      pending = null;
+    },
+  };
+}
