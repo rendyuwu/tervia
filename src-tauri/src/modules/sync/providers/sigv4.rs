@@ -273,7 +273,11 @@ pub fn authorization_header(
 //
 // The name is not `parse_http_date` deliberately: an HTTP date is the RFC 7231
 // form that the `Last-Modified` HEADER carries, which is a different spelling
-// of a different field.
+// of a different field. That third format has a home now:
+// `parse_http_date` in `src-tauri/src/modules/sync/providers/webdav.rs` reads
+// it, because a WebDAV listing spells its modification time that way. It
+// shares [`days_from_civil`] rather than carrying a second copy of the era
+// arithmetic, which is why that one is `pub(super)` where its inverse is not.
 //
 // This is the only hand-rolled civil arithmetic in the diff, and the signing
 // vectors take their timestamp as a literal string, so nothing else in this
@@ -295,7 +299,7 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 
 /// Day count since the epoch from a civil date. The inverse of
 /// [`civil_from_days`].
-fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
+pub(super) fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
     let y = if m <= 2 { y - 1 } else { y };
     let era = if y >= 0 { y } else { y - 399 } / 400;
     let yoe = y - era * 400;
