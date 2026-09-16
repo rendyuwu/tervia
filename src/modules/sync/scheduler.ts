@@ -339,9 +339,16 @@ export function createScheduler(io: SchedulerIo): SyncScheduler {
     lastPull = now();
     closeError = null;
     let error: string | null = null;
-    let pending = 0;
-    let quarantine: SyncStatus["quarantine"] = [];
-    let stale: SyncStatus["stale"] = [];
+    /**
+     * What the reconcile FOUND, or nothing when it never got that far.
+     *
+     * Held as one value rather than three initialized fields, because three
+     * fields initialized to "healthy" and written unconditionally is how a
+     * failed pull comes to report zero pending, nothing quarantined and a last
+     * pull just now - the settings window reading its healthiest exactly when
+     * sync is broken.
+     */
+    let found: Pick<SyncStatus, "lastPullAt" | "pending" | "quarantine" | "stale"> | null = null;
     try {
       const [envelopes, etags] = await Promise.all([localEnvelopes(), io.settings.readEtags()]);
       const report = await io.commands.pull(envelopes, etags);
@@ -362,11 +369,6 @@ export function createScheduler(io: SchedulerIo): SyncScheduler {
       // WRITTEN AFTER THE APPLY RESOLVES. A crash between the two costs one
       // redundant, idempotent re-apply; the other order costs the landing.
       await io.settings.writeEtags(next);
-
-      quarantine = report.quarantined;
-      stale = report.records
-        .filter((r) => r.outcome === "localOnly" && r.stale)
-        .map((r) => ({ kind: r.kind, id: r.id }));
 
       // What the reconcile found the remote is missing. A record the apply
       // refused is left out: this device does not hold what it would publish.
@@ -390,7 +392,18 @@ export function createScheduler(io: SchedulerIo): SyncScheduler {
       // reconcile found minus what this pass just gave it, and reporting the
       // pre-push number leaves the settings window showing work that is
       // already done until the next pull.
-      pending = Math.max(0, report.pending - (owed.length - failed.length));
+      found = {
+        lastPullAt: now(),
+        // COUNTED AFTER THE PUSH, not before: the remote is missing what the
+        // reconcile found minus what this pass just gave it, and reporting the
+        // pre-push number leaves the settings window showing work that is
+        // already done until the next pull.
+        pending: Math.max(0, report.pending - (owed.length - failed.length)),
+        quarantine: report.quarantined,
+        stale: report.records
+          .filter((r) => r.outcome === "localOnly" && r.stale)
+          .map((r) => ({ kind: r.kind, id: r.id })),
+      };
       error = failed[0]?.reason ?? closeError;
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
@@ -401,13 +414,11 @@ export function createScheduler(io: SchedulerIo): SyncScheduler {
     // reconcile entirely. Its error folds into the same write rather than
     // arriving in a second one that would put a `null` over this one.
     const pushError = await runPush();
-    await writeStatus({
-      lastPullAt: now(),
-      pending,
-      quarantine,
-      stale,
-      lastError: error ?? pushError,
-    });
+    // A PULL THAT FAILED REPORTS ONLY THAT. Leaving the previous pull's counts
+    // in place is the honest reading - they are the last thing this device
+    // actually learned - and stamping a fresh `lastPullAt` over them would say
+    // the opposite.
+    await writeStatus({ ...found, lastError: error ?? pushError });
   }
 
   /**
@@ -418,22 +429,30 @@ export function createScheduler(io: SchedulerIo): SyncScheduler {
    * the error the pull just recorded.
    */
   async function runPush(): Promise<string | null> {
-    const config = await io.settings.readConfig();
-    await hydrate();
-    // SNAPSHOT AND REMOVE WITH NO AWAIT BETWEEN THEM. `hydrate` has already
-    // folded what was on disk into this set, so there is no second read here -
-    // and that is the point: a read at this line would spread `dirty` before
-    // its own await was evaluated, and a mark made while it was in flight
-    // would land in neither the snapshot nor the set afterwards. Gone from
-    // memory and disk both, with no error and a pending count of zero.
-    const taken = new Set(dirty);
-    for (const slot of taken) dirty.delete(slot);
-    // Taken whether or not sync is on: marks accumulated while it was off
-    // describe an inventory the remote has never seen, and the pull that
-    // follows enabling it publishes the whole of it anyway.
-    await persistDirty();
-    if (!config.enabled || taken.size === 0) return null;
+    // EVERYTHING THAT TOUCHES THE SET IS INSIDE THE TRY, including the write
+    // that records the removal. The removal happens in memory first, so a
+    // throw between it and the write would leave those slots gone from memory
+    // while `hydrate` never reads the key again - and the next successful
+    // write would then put a set without them over the disk copy that still
+    // had them. The catch below is what puts them back.
+    const taken = new Set<string>();
     try {
+      const config = await io.settings.readConfig();
+      await hydrate();
+      // SNAPSHOT AND REMOVE WITH NO AWAIT BETWEEN THEM. `hydrate` has already
+      // folded what was on disk into this set, so there is no second read here
+      // - and that is the point: a read at this line would spread `dirty`
+      // before its own await was evaluated, and a mark made while it was in
+      // flight would land in neither the snapshot nor the set afterwards. Gone
+      // from memory and disk both, with no error and a pending count of zero.
+      for (const slot of dirty) taken.add(slot);
+      for (const slot of taken) dirty.delete(slot);
+      // Taken whether or not sync is on: marks accumulated while it was off
+      // describe an inventory the remote has never seen, and the pull that
+      // follows enabling it publishes the whole of it anyway.
+      await persistDirty();
+      if (!config.enabled || taken.size === 0) return null;
+
       // ONE OBJECT PER EDIT, not the inventory. The whole reason `persist`
       // takes record ids: a hook that could only say "this store changed" would
       // push every host every time one was renamed.
@@ -445,8 +464,11 @@ export function createScheduler(io: SchedulerIo): SyncScheduler {
       return failed[0]?.reason ?? null;
     } catch (e) {
       // The edit is not lost: the marks go back and the next trigger retries.
+      // A slot re-marked meanwhile costs one redundant push, which is the safe
+      // direction. The write itself may be what failed, so it cannot be the
+      // thing that decides whether this reports.
       for (const slot of taken) dirty.add(slot);
-      await persistDirty();
+      await persistDirty().catch(() => {});
       return e instanceof Error ? e.message : String(e);
     }
   }
@@ -489,9 +511,21 @@ export function createScheduler(io: SchedulerIo): SyncScheduler {
    * After this runs, memory is authoritative and nothing reads the key again.
    */
   function hydrate(): Promise<void> {
-    loaded ??= io.settings.readDirty().then((slots) => {
-      for (const slot of slots) dirty.add(slot);
-    });
+    loaded ??= io.settings
+      .readDirty()
+      .then((slots) => {
+        for (const slot of slots) dirty.add(slot);
+      })
+      // RESET ON FAILURE, or one rejection is permanent for the session: every
+      // later `persistDirty` would reject on the memoized promise and the set
+      // would never be written again. `createFileKeyValueStore` memoizes an
+      // in-flight read the same way one layer down and resets for the same
+      // reason. NOT `finally` - on success memory is authoritative, and a
+      // second read would re-add slots a flush has already published.
+      .catch((e: unknown) => {
+        loaded = null;
+        throw e;
+      });
     return loaded;
   }
 

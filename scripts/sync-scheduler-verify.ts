@@ -105,13 +105,33 @@ import {
 const ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
 
 let failed = 0;
+
+/**
+ * Everything the scheduler LOGGED instead of throwing.
+ *
+ * `serialize` swallows every rejection, which is right - each of its four
+ * callers is a `void` or an event handler, and an unhandled rejection there has
+ * no owner. The cost is that a check awaiting `pullNow()` sees a clean resolve
+ * on a pass that failed outside its own try, so the whole of that blind spot is
+ * invisible to an assertion. Counting the log is what closes it.
+ *
+ * `check` writes its own failures through the captured writer, so a FAIL is not
+ * also counted here.
+ */
+const logged: string[] = [];
+const write = console.error.bind(console);
+console.error = (...args: unknown[]): void => {
+  if (typeof args[0] === "string" && args[0].startsWith("sync:")) logged.push(args[0]);
+  write(...args);
+};
+
 function check(label: string, got: unknown, want: unknown): void {
   const found = JSON.stringify(got) ?? String(got);
   const wanted = JSON.stringify(want) ?? String(want);
   if (found === wanted) {
     console.log(`  ok: ${label}`);
   } else {
-    console.error(`  FAIL: ${label} = ${found}, want ${wanted}`);
+    write(`  FAIL: ${label} = ${found}, want ${wanted}`);
     failed++;
   }
 }
@@ -1008,6 +1028,38 @@ async function b19(): Promise<void> {
     (await h.status()).lastError,
     "the remote answered 503",
   );
+
+  // A FAILED PULL MUST NOT REPORT A HEALTHY RECONCILE. Fields initialized to
+  // "nothing found" and written unconditionally make the settings window read
+  // its healthiest - zero pending, nothing quarantined, last pull just now -
+  // exactly when sync is broken. A run that succeeded FIRST and then failed is
+  // the arrangement that can tell "left alone" from "written as empty".
+  const after = harness({
+    hosts: [host("h-1"), host("h-2")],
+    pull: {
+      records: [localOnly(HOST_TOMBSTONE_KIND, "h-2", true)],
+      etags: {},
+      quarantined: [{ name: "deadbeef", reason: "unreadable" }],
+      pruned: 0,
+      pending: 3,
+    },
+  });
+  await after.scheduler.pullNow();
+  await settle();
+  const healthy = await after.status();
+  check("a good pull records what it found", [healthy.pending, healthy.quarantine.length], [3, 1]);
+
+  after.failPull("the remote answered 503");
+  await after.scheduler.pullNow();
+  await settle();
+  const broken = await after.status();
+  check(
+    "a failed pull leaves those counts alone rather than zeroing them",
+    [broken.pending, broken.quarantine.length, broken.stale.length],
+    [3, 1, 1],
+  );
+  check("and does not stamp a fresh lastPullAt", broken.lastPullAt, healthy.lastPullAt);
+  check("while reporting the failure", broken.lastError, "the remote answered 503");
 }
 
 async function main(): Promise<void> {
@@ -1028,6 +1080,10 @@ async function main(): Promise<void> {
   await b17();
   await b18();
   await b19();
+
+  // A pass that failed where no assertion could see it. Asserted last so the
+  // group that produced it has already printed.
+  check("nothing was swallowed into a log line", logged, []);
 
   if (failed > 0) throw new Error(`sync-scheduler-verify: ${failed} FAILED`);
   console.log("\nsync-scheduler-verify: OK\n");

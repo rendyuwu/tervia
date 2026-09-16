@@ -581,8 +581,21 @@ deletes nobody will ever consult again. Against that, the alternative is keeping
 every tombstone forever, which makes the file grow without bound for a store
 whose whole content is a few dozen rows.
 
+A remote tombstone past the window widens this by one step, and it is the same
+guess seen from the other side: the pull in `src-tauri/src/modules/sync/engine.rs`
+does not hand an expired tombstone to the apply path at all — landing it would
+write a row every read then filters straight back out, once per pull, for the
+life of the bucket. So a local record nobody has touched for longer than the
+window, against a remote delete older than the window, is reported as a
+divergence for the user to resolve rather than deleted. That is the direction a
+local record with no remote object at all already takes, and for the same
+reason: an absence and an expiry are both inferences, and acting on either
+destroys data.
+
 **Carried by.** `TOMBSTONE_TTL_MS` in `src/lib/tombstones.ts`, which is the
-window, and `livingTombstones` in the same file, which applies it.
+window, `livingTombstones` in the same file, which applies it on this side, and
+the `expired` clause in `pull` in `src-tauri/src/modules/sync/engine.rs`, which
+applies it to the remote's copy.
 
 **Trigger.** A device registry that can say when each device last pulled. The
 window can then be derived from the oldest live device rather than guessed, and
