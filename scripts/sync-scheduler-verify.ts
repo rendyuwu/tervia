@@ -621,11 +621,15 @@ async function b2b3b4(): Promise<void> {
     edit.pushed[0]?.envelopes.map((e) => `${e.kind}:${e.id}`),
     ["host:h-2"],
   );
+  // `null` rather than an index straight into the record: with no envelope to
+  // read, the cast fed `undefined` to a subscript and the whole run died on a
+  // TypeError - taking every later check with it, so a regression that stopped
+  // pushes reported one crash instead of its own failures. Reported as a miss
+  // instead, which fails this line loudly and lets the rest of the suite speak.
+  const carried = (edit.pushed[0]?.envelopes[0]?.record ?? null) as Record<string, unknown> | null;
   check(
     "B4: and no device-local field rides with it",
-    DEVICE_LOCAL_FIELDS.filter(
-      (f) => (edit.pushed[0]?.envelopes[0]?.record as Record<string, unknown>)[f] !== undefined,
-    ),
+    carried && DEVICE_LOCAL_FIELDS.filter((f) => carried[f] !== undefined),
     [],
   );
   check("B4: and this side names no device", edit.pushed[0]?.envelopes[0]?.device ?? null, null);
