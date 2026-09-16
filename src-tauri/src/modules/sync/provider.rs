@@ -56,8 +56,10 @@ pub struct Entry {
     /// Unix MILLISECONDS, matching `Envelope::updated_at` in
     /// `src-tauri/src/modules/sync/model.rs`.
     ///
-    /// The wire format it is parsed from is seconds-with-a-fraction, so the
-    /// conversion is arithmetic and not a cast. Getting that wrong puts every
+    /// MILLISECONDS IS THE CONTRACT AND THE WIRE FORMAT IS THE PROVIDER'S OWN.
+    /// The backends do not agree on one: one listing spells a modification
+    /// time as seconds-with-a-fraction and another as a fixed-width calendar
+    /// date, so each parses its own and converts. Getting that wrong puts every
     /// remote stamp a thousandfold below every local one, and `ordering_key`
     /// in that same module reads a smaller stamp as "the remote is older" -
     /// so the remote would lose every merge it took part in, silently.
@@ -96,8 +98,14 @@ pub enum ProviderError {
     /// is the ordinary answer when reading and an anomaly when writing
     /// conditionally.
     NotFound,
-    /// The SSRF guard, an unsupported scheme, or a redirect that was refused
-    /// rather than followed.
+    /// The SSRF guard, an unsupported scheme, a redirect that was refused
+    /// rather than followed, or a remote whose own shape will not accept the
+    /// write - a parent that is an ordinary file where a collection was
+    /// needed.
+    ///
+    /// NOT A RETRY DISPOSITION, which is why that last case is here rather
+    /// than in [`ProviderError::Conflict`]: nothing about trying again changes
+    /// the answer, and the user is the one who has to move the offending file.
     Blocked(String),
     /// A response the provider understood as a failure but has no specific
     /// disposition for. `code` is the remote's own error code when the body
@@ -224,6 +232,14 @@ pub fn build(id: &str, cfg: Value) -> Result<Arc<dyn SyncProvider>, ProviderErro
             })?;
             Ok(Arc::new(super::providers::s3::S3Provider::new(cfg)?))
         }
+        "webdav" => {
+            let cfg = serde_json::from_value(cfg).map_err(|e| {
+                ProviderError::Config(format!("the webdav configuration is not usable: {e}"))
+            })?;
+            Ok(Arc::new(super::providers::webdav::WebDavProvider::new(
+                cfg,
+            )?))
+        }
         other => Err(ProviderError::Config(format!(
             "unknown sync provider \"{other}\""
         ))),
@@ -251,6 +267,78 @@ mod tests {
         let provider = build("s3", s3_config()).expect("s3 builds");
         assert_eq!(provider.id(), "s3");
         assert!(provider.capabilities().cas);
+    }
+
+    fn webdav_config() -> Value {
+        json!({
+            "endpoint": "https://cloud.example/remote.php/dav/files/rendi",
+            "username": "rendi",
+            "password": "hunter2",
+        })
+    }
+
+    #[test]
+    fn the_second_backend_builds_and_reports_no_conditional_write() {
+        let provider = build("webdav", webdav_config()).expect("webdav builds");
+        assert_eq!(provider.id(), "webdav");
+        // A CONSTANT, not a toggle the user can set: the protocol gives no
+        // guarantee for the user to report.
+        assert!(!provider.capabilities().cas);
+    }
+
+    #[test]
+    fn a_backend_with_no_conditional_write_refuses_a_config_that_names_one() {
+        // The seam working as its own documentation describes. Without the
+        // refusal of unknown fields a frontend that copied this key across from
+        // the other provider's form would have it silently ignored, and the
+        // user would believe conditional writes were on.
+        let mut cfg = webdav_config();
+        cfg["cas"] = json!(false);
+        let err = build("webdav", cfg)
+            .err()
+            .expect("a cas field must be refused");
+        assert!(
+            matches!(&err, ProviderError::Config(m) if m.contains("cas")),
+            "unexpected: {err:?}"
+        );
+    }
+
+    #[test]
+    fn the_second_backend_refuses_a_bad_config_and_a_bad_endpoint_at_build_time() {
+        let mut missing = webdav_config();
+        missing.as_object_mut().unwrap().remove("password");
+
+        let mut wrong_type = webdav_config();
+        wrong_type["username"] = json!(7);
+
+        let mut misspelled = webdav_config();
+        let obj = misspelled.as_object_mut().unwrap();
+        let name = obj.remove("username").unwrap();
+        obj.insert("usernme".into(), name);
+
+        let mut cfgs = vec![missing, wrong_type, misspelled];
+        // Refused HERE rather than at the first request, so a provider that
+        // exists is one that can address something.
+        for endpoint in [
+            "not a url",
+            "ftp://dav.example",
+            "https://",
+            "https://cloud.example/dav%20files",
+        ] {
+            let mut cfg = webdav_config();
+            cfg["endpoint"] = json!(endpoint);
+            cfgs.push(cfg);
+        }
+
+        for cfg in cfgs {
+            let err = build("webdav", cfg.clone())
+                .err()
+                .unwrap_or_else(|| panic!("{cfg} must be refused"));
+            assert!(
+                matches!(err, ProviderError::Config(_)),
+                "{cfg} gave {err:?}"
+            );
+        }
     }
 
     #[test]

@@ -38,6 +38,8 @@ import {
   SYNC_REQUEST_EVENT,
   SYNC_SECRET_ACCESS_KEY_ACCOUNT,
   SYNC_STORE_PATH,
+  SYNC_WEBDAV_PASSWORD_ACCOUNT,
+  SYNC_WEBDAV_USERNAME_ACCOUNT,
   type Envelope,
   type PullReport,
   type PushReport,
@@ -90,11 +92,23 @@ let openedWith: string | null = null;
  * one changes nothing this side could see without reading it. One read per pass
  * is the price, and a pass is at most one per minute and already carries a
  * network round trip.
+ *
+ * ONLY THE SELECTED PROVIDER'S FIELDS ARE SENT, and that is not tidiness. The
+ * Rust side refuses a configuration carrying a field the provider does not
+ * declare, so a stray `bucket` on a WebDAV configuration is a hard error at
+ * configure time rather than a key nobody reads. The passphrase is outside that
+ * body and is the same on every provider.
  */
 async function openSession(config: SyncConfig): Promise<void> {
-  const [passphrase, accessKeyId, secretAccessKey] = await tauriSecretsIo.getAll(
+  const webdav = config.provider === "webdav";
+  // The credential is a PAIR either way - an access key id and its secret, or a
+  // username and its password - so one read serves both and the accounts it
+  // names are the only thing that differs.
+  const [passphrase, credentialId, credentialSecret] = await tauriSecretsIo.getAll(
     SYNC_KEYRING_SERVICE,
-    [SYNC_PASSPHRASE_ACCOUNT, SYNC_ACCESS_KEY_ID_ACCOUNT, SYNC_SECRET_ACCESS_KEY_ACCOUNT],
+    webdav
+      ? [SYNC_PASSPHRASE_ACCOUNT, SYNC_WEBDAV_USERNAME_ACCOUNT, SYNC_WEBDAV_PASSWORD_ACCOUNT]
+      : [SYNC_PASSPHRASE_ACCOUNT, SYNC_ACCESS_KEY_ID_ACCOUNT, SYNC_SECRET_ACCESS_KEY_ACCOUNT],
   );
   if (!passphrase) {
     throw new Error(
@@ -105,14 +119,20 @@ async function openSession(config: SyncConfig): Promise<void> {
     provider: config.provider,
     prefix: config.prefix,
     passphrase,
-    config: {
-      endpoint: config.endpoint,
-      region: config.region,
-      bucket: config.bucket,
-      cas: config.cas,
-      accessKeyId: accessKeyId ?? "",
-      secretAccessKey: secretAccessKey ?? "",
-    },
+    config: webdav
+      ? {
+          endpoint: config.endpoint,
+          username: credentialId ?? "",
+          password: credentialSecret ?? "",
+        }
+      : {
+          endpoint: config.endpoint,
+          region: config.region,
+          bucket: config.bucket,
+          cas: config.cas,
+          accessKeyId: credentialId ?? "",
+          secretAccessKey: credentialSecret ?? "",
+        },
   };
   const fingerprint = JSON.stringify(args);
   if (fingerprint === openedWith) return;
