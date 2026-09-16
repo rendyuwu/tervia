@@ -25,7 +25,13 @@ import type { Host, HostGroup } from "@/modules/hosts/types";
 import type { VaultIdentity, VaultKey } from "@/modules/vault/types";
 import { GROUP_TOMBSTONE_KIND, HOST_TOMBSTONE_KIND } from "@/modules/hosts/types";
 import { RULE_TOMBSTONE_KIND } from "@/modules/forwards/types";
-import { IDENTITY_TOMBSTONE_KIND, KEY_TOMBSTONE_KIND } from "@/modules/vault/types";
+import {
+  IDENTITY_TOMBSTONE_KIND,
+  KEY_PASSPHRASE_FIELD,
+  KEY_PRIVATE_KEY_FIELD,
+  KEY_TOMBSTONE_KIND,
+} from "@/modules/vault/types";
+import { vaultKeyFactsFrom, type KeyInspectResult } from "@/modules/vault/keyInspect";
 
 import { landingOf, recordEnvelope, tombstoneEnvelope } from "./envelope";
 import type { SyncSettingsStore } from "./store";
@@ -38,6 +44,7 @@ import {
   type PushFailure,
   type Reconciled,
   type SyncCommands,
+  type SyncConfig,
   type SyncStatus,
 } from "./types";
 
@@ -74,7 +81,46 @@ export type SyncStores = {
   };
 };
 
-export type SchedulerIo = {
+/**
+ * The keychain and the key inspector, as the two paths that carry a private key
+ * body need them.
+ *
+ * SEPARATE FROM {@link SyncStores} and both optional, because a scheduler built
+ * without them is a scheduler that never carries a body and never corrects a
+ * record - which is the whole behaviour of a device with the carry toggle off,
+ * and therefore has to be constructible.
+ */
+export type SyncKeyBodies = {
+  /**
+   * This device's stored secrets for one vault key, by field name.
+   *
+   * INJECTED RATHER THAN A PORT OBJECT: the accounts a vault key's secrets sit
+   * at are the vault store's vocabulary, and a second spelling of them here is
+   * how a body comes to be published under a name nothing reads back.
+   */
+  readKeySecrets?: (id: string) => Promise<Record<string, string>>;
+  /**
+   * What a private key body says about itself.
+   *
+   * The derivation is the registered inspect command and nothing in TypeScript
+   * computes a fingerprint. Injected because the module holding that command
+   * imports a Tauri surface at the top level, and this file is loaded under
+   * plain node by its own check.
+   */
+  inspectKey?: (body: string, passphrase?: string) => Promise<KeyInspectResult>;
+  /**
+   * Re-state what this device holds about a key, after a landing understated
+   * it.
+   *
+   * A REAL LOCAL EDIT, stamped and published like any other - not a quiet
+   * repair. The device holding the body is the only one that can know the
+   * record is wrong, so the correction has to reach the remote or the next pull
+   * lands the same understatement again, forever.
+   */
+  correctKey?: (key: VaultKey) => Promise<void>;
+};
+
+export type SchedulerIo = SyncKeyBodies & {
   /** This webview's label. Everything is a no-op unless it is `main`. */
   label: string;
   commands: SyncCommands;
@@ -93,6 +139,21 @@ export type SchedulerIo = {
    * named this pull as the trigger that would have to sequence it.
    */
   releaseRule?: (rule: ForwardRule) => Promise<void>;
+  /**
+   * Open a session in the Rust process for this configuration.
+   *
+   * CALLED BEFORE EVERY PASS, and that is not belt-and-braces: the Rust state
+   * is empty on every launch, so a configuration the settings window stored
+   * last week opens nothing until `main` asks for it. Settings stores the
+   * configuration; `main` is what turns it into a session.
+   *
+   * INJECTED because opening one means reading the passphrase and the provider
+   * credentials out of the keychain, which is a Tauri surface - and because the
+   * shape a provider's own configuration takes is not this file's business.
+   * Expected to be cheap when nothing changed: a keychain read, and no key
+   * derivation and no network unless the configuration actually moved.
+   */
+  openSession?: (config: SyncConfig) => Promise<void>;
   stores: SyncStores;
   now?: () => number;
   /** Injected so a check can fire the debounce without waiting five real
@@ -154,12 +215,57 @@ export function createScheduler(io: SchedulerIo): SyncScheduler {
   /** `-Infinity` so the app-setup pull is never rate limited away. */
   let lastPull = -Infinity;
   let status: SyncStatus = { ...EMPTY_SYNC_STATUS };
-  /** A close that reported during this pull's apply. Held rather than written
-   *  at once, because the pull's own status write comes after and would put a
-   *  `null` over it. */
-  let closeError: string | null = null;
+  /** What went wrong ALONGSIDE this pull's apply rather than inside it - a
+   *  forward that would not close, a key body that would not re-derive. Held
+   *  rather than written at once, because the pull's own status write comes
+   *  after and would put a `null` over it. */
+  let applyError: string | null = null;
 
-  async function localEnvelopes(): Promise<Envelope[]> {
+  /**
+   * The private key body one outbound key record carries, or nothing.
+   *
+   * THE ONLY PLACE A BODY IS READ FOR PUBLICATION, and the toggle is checked
+   * first so that a device with carrying off makes no keychain call at all -
+   * not a call whose result is then discarded. That matters beyond tidiness:
+   * on Linux and Windows a keychain read is a read of the whole secrets file,
+   * once per key, on every pull and every push.
+   *
+   * ONLY KEYS, never identities and never hosts. An account password is not a
+   * private key body, and the toggle is published as an opt-in to carrying the
+   * latter.
+   */
+  async function outboundSecrets(
+    config: SyncConfig,
+    key: VaultKey,
+  ): Promise<Record<string, string> | undefined> {
+    const read = io.readKeySecrets;
+    if (!config.carrySecrets || !read) return undefined;
+    if (!key.hasPrivateKey && !key.hasPassphrase) return undefined;
+    const found = await read(key.id);
+    const carried: Record<string, string> = {};
+    for (const field of [KEY_PRIVATE_KEY_FIELD, KEY_PASSPHRASE_FIELD]) {
+      const value = found[field];
+      if (value) carried[field] = value;
+    }
+    return Object.keys(carried).length > 0 ? carried : undefined;
+  }
+
+  /**
+   * Every local record and living tombstone, as envelopes.
+   *
+   * `wanted` names the slots the caller is going to keep, and it gates ONLY the
+   * keychain reads - the envelope list is built whole either way, because a
+   * pull's reconcile needs every local record to pair against. Without it a
+   * push of one renamed host would read every stored key body out of the
+   * keychain to build envelopes it then throws away, which on two of the three
+   * platforms is one whole-file read per key.
+   *
+   * THE PULL PASSES NONE, deliberately, and pays that cost on every pass with
+   * carrying on. It has to: `secretsChanged` is a comparison against the local
+   * body, so an envelope built without one would answer that the remote's body
+   * differs from nothing at all, on every key, forever.
+   */
+  async function localEnvelopes(config: SyncConfig, wanted?: Set<string>): Promise<Envelope[]> {
     const [hosts, groups, hostGraves, identities, keys, vaultGraves, rules, ruleGraves] =
       await Promise.all([
         io.stores.hosts.listHosts(),
@@ -171,11 +277,23 @@ export function createScheduler(io: SchedulerIo): SyncScheduler {
         io.stores.forwards.listRules(),
         io.stores.forwards.listTombstones(),
       ]);
+    // SEQUENTIAL over the keys, not `Promise.all`. Each iteration is a keychain
+    // read, and on two of the three platforms those serialize behind one file
+    // lock anyway - so the parallel spelling would buy nothing and make a burst
+    // of simultaneous reads the shape a future change has to reason about.
+    const keyEnvelopes: Envelope[] = [];
+    for (const k of keys) {
+      const carried =
+        wanted && !wanted.has(etagSlot(KEY_TOMBSTONE_KIND, k.id))
+          ? undefined
+          : await outboundSecrets(config, k);
+      keyEnvelopes.push(recordEnvelope(KEY_TOMBSTONE_KIND, k, carried));
+    }
     return [
       ...hosts.map((h) => recordEnvelope(HOST_TOMBSTONE_KIND, h)),
       ...groups.map((g) => recordEnvelope(GROUP_TOMBSTONE_KIND, g)),
       ...identities.map((i) => recordEnvelope(IDENTITY_TOMBSTONE_KIND, i)),
-      ...keys.map((k) => recordEnvelope(KEY_TOMBSTONE_KIND, k)),
+      ...keyEnvelopes,
       ...rules.map((r) => recordEnvelope(RULE_TOMBSTONE_KIND, r)),
       // LIVING TOMBSTONES ARE PART OF THE LOCAL SET, not an afterthought: a
       // local delete has to pair with its remote counterpart and resolve
@@ -194,21 +312,50 @@ export function createScheduler(io: SchedulerIo): SyncScheduler {
    * the landing never happens again, silently, for the life of the object.
    * Refusals from `applyRemote` and discards from here go into the same set.
    */
-  function sort(records: Reconciled[]): { sorted: Sorted; dropped: RemoteLandingRefusal[] } {
+  function sort(
+    records: Reconciled[],
+    config: SyncConfig,
+  ): { sorted: Sorted; dropped: RemoteLandingRefusal[] } {
     const out: Sorted = { hosts: [], groups: [], identities: [], keys: [], rules: [] };
     const dropped: RemoteLandingRefusal[] = [];
     for (const record of records) {
-      // A `changed: false` merge writes NOTHING. It is the steady state of two
-      // devices that agree, so applying it would rewrite every store file on
-      // every focus for no new information.
+      // THE CARRY TOGGLE, BOTH DIRECTIONS, and it is computed FIRST because the
+      // landing below is gated on it as well as filtered by it. A device with
+      // the toggle off drops the body here and the store never sees one.
+      //
+      // WHY THE GATE AND THE FILTER MUST BE THE SAME EXPRESSION. `ordering_key`
+      // in `src-tauri/src/modules/sync/model.rs` includes `secrets`, and an
+      // absent one sorts below a present one - so a device that does not carry
+      // bodies gets `secretsChanged: true` against every remote object that DOES
+      // carry one, on every pull, forever. That is not an exotic fleet: it is
+      // exactly what this app's own settings produce the moment one device turns
+      // carrying off. Landing on `secretsChanged` alone would then rewrite the
+      // whole vault file and take a fresh snapshot on every single pull, for a
+      // body this device is about to discard anyway.
+      //
+      // A MERGE THAT DID NOT MOVE THE BODY IS ALSO NOT CARRIED, even with the
+      // toggle on: the winner's envelope carries its `secrets` whether or not
+      // they differ from this device's, and landing them unconditionally would
+      // rewrite the keychain on every pull for a body already at the account.
+      const withSecrets =
+        config.carrySecrets &&
+        (record.outcome === "remoteOnly" || (record.outcome === "merged" && record.secretsChanged));
+      // A merge that changed NEITHER destination writes nothing: that is the
+      // steady state of two devices that agree, so applying it would rewrite
+      // every store file on every focus for no new information. `withSecrets`
+      // is the second destination, and a body arriving for a record whose
+      // fields already agree is exactly the `changed: false` shape - so keying
+      // the landing off `changed` alone would make a body that travelled
+      // correctly unlandable, silently, for as long as the two records stayed
+      // equal.
       const envelope =
         record.outcome === "remoteOnly"
           ? record.envelope
-          : record.outcome === "merged" && record.changed
+          : record.outcome === "merged" && (record.changed || withSecrets)
             ? record.envelope
             : null;
       if (!envelope) continue;
-      const landing = landingOf(envelope);
+      const landing = landingOf(envelope, withSecrets);
       if (!landing) {
         dropped.push({
           kind: record.kind,
@@ -285,6 +432,87 @@ export function createScheduler(io: SchedulerIo): SyncScheduler {
    * otherwise drop a tunnel the user is working over. Carried in
    * `KNOWN-LIMITS.md`.
    */
+  /**
+   * Correct a landed key record against the body this device actually holds.
+   *
+   * WHY A LANDING CAN UNDERSTATE. The merge drops `fingerprint` whenever the
+   * winner's own record claims no private key, and never copies one off the
+   * loser - correctly, because that layer has no keychain and a fingerprint it
+   * carried forward could describe a body nobody has. A device that holds the
+   * body is then the only place the truth exists, and this is where it is put
+   * back.
+   *
+   * WHY IT PUBLISHES. `correctKey` stamps and marks the record like any local
+   * edit, and that is load bearing rather than incidental: a correction kept
+   * local would lose the next merge to the remote copy still claiming no body,
+   * land the same understatement again, and be re-derived again - a store write
+   * per pull, for the life of the record. Published, both devices agree after
+   * one round.
+   *
+   * WHAT IT COSTS TO SKIP THE CHEAP CASE. The keychain is read only for a key
+   * the landing left incomplete, so a device whose records already agree with
+   * its keychain makes no call at all.
+   *
+   * A LEGACY PEM BODY CANNOT BE INSPECTED WITHOUT ITS PASSPHRASE, so its
+   * fingerprint stays dropped until the key is next opened. The presence flag
+   * is still corrected, because that one is known from the body existing rather
+   * than from reading it. Carried in `KNOWN-LIMITS.md`.
+   *
+   * ONE BAD KEY DOES NOT STOP THE REST: a refusing keychain, an unparseable
+   * body and a name collision inside `correctKey` are all per record, and the
+   * first of them taking the whole pass would be the failure the refusal design
+   * exists to prevent arriving through a different door.
+   */
+  async function rederive(landings: RemoteLanding<VaultKey>[]): Promise<void> {
+    const read = io.readKeySecrets;
+    const inspect = io.inspectKey;
+    const correct = io.correctKey;
+    if (!read || !inspect || !correct) return;
+    const landed = landings.filter((l) => !l.deleted).map((l) => l.id);
+    if (landed.length === 0) return;
+    const stored = await io.stores.vault.listKeys();
+    for (const id of landed) {
+      const key = stored.find((k) => k.id === id);
+      // Read from the STORE rather than from the landing, so a landing the
+      // apply refused - or one a local delete superseded - is never corrected
+      // into existence.
+      if (!key || (key.hasPrivateKey && key.fingerprint)) continue;
+      try {
+        const secrets = await read(id);
+        const body = secrets[KEY_PRIVATE_KEY_FIELD];
+        if (!body) continue;
+        const facts = vaultKeyFactsFrom(await inspect(body, secrets[KEY_PASSPHRASE_FIELD]));
+        // `hasPrivateKey` is stated here rather than taken from the inspection,
+        // which answers about the body's CONTENT and says nothing about whether
+        // this machine stores one. Reading it back out of the account is what
+        // just happened, so the flag is known.
+        const next: VaultKey = { ...key, hasPrivateKey: true };
+        // FIELD BY FIELD, and `undefined` is skipped rather than spread. An
+        // inspection that could not answer must not erase what the record
+        // already knew - the sealed-container branch answers `encrypted` alone,
+        // so spreading it wholesale would blank a fingerprint and a public half
+        // that were perfectly good.
+        if (facts.keyType !== undefined) next.keyType = facts.keyType;
+        if (facts.fingerprint !== undefined) next.fingerprint = facts.fingerprint;
+        if (facts.publicKey !== undefined) next.publicKey = facts.publicKey;
+        if (facts.encrypted !== undefined) next.encrypted = facts.encrypted;
+        // NOTHING TO SAY, SO NOTHING IS SAID - and this comparison is what makes
+        // the whole pass terminate, rather than the guard above. A body that
+        // cannot be inspected without its passphrase leaves `fingerprint`
+        // undefined FOREVER, so the guard can never fire for it; without this
+        // line `correctKey` would stamp a fresh `updatedAt` and mark the record
+        // dirty on every pull, two devices holding such a body would land each
+        // other's restamp and restamp back, and the exchange would never settle
+        // - one vault write, one snapshot and one remote object per pull, per
+        // device, for the life of the record.
+        if (JSON.stringify(next) === JSON.stringify(key)) continue;
+        await correct(next);
+      } catch (e) {
+        applyError = e instanceof Error ? e.message : String(e);
+      }
+    }
+  }
+
   async function release(landings: RemoteLanding<ForwardRule>[]): Promise<void> {
     const releaseRule = io.releaseRule;
     if (!releaseRule) return;
@@ -295,7 +523,7 @@ export function createScheduler(io: SchedulerIo): SyncScheduler {
       try {
         await releaseRule(rule);
       } catch (e) {
-        closeError = e instanceof Error ? e.message : String(e);
+        applyError = e instanceof Error ? e.message : String(e);
       }
     }
   }
@@ -334,13 +562,22 @@ export function createScheduler(io: SchedulerIo): SyncScheduler {
   }
 
   async function runPull(): Promise<void> {
+    // FRESH FROM DISK, not from a cache this webview filled at launch. The
+    // settings window is the other writer of that file and nothing broadcasts a
+    // change event for it - `SyncSettingsStore` drops its cache on every call
+    // for that reason, so nothing is needed here beyond reading it each pass.
     const config = await io.settings.readConfig();
     if (!config.enabled) return;
     // Stamped here as well as in `onFocus`, so a pull from any other entry
     // point also costs the rate limit rather than leaving the next focus free
     // to start a second one on top of it.
     lastPull = now();
-    closeError = null;
+    // INSIDE THE RATE LIMIT AND OUTSIDE THE TRY, in that order: a configuration
+    // that cannot be opened - a wrong passphrase, an endpoint that is gone -
+    // must still cost the limit, or every alt-tab retries it; and its error
+    // belongs in the same status write as everything else below rather than
+    // thrown out of a background pass.
+    applyError = null;
     let error: string | null = null;
     /**
      * What the reconcile FOUND, or nothing when it never got that far.
@@ -353,10 +590,18 @@ export function createScheduler(io: SchedulerIo): SyncScheduler {
      */
     let found: Pick<SyncStatus, "lastPullAt" | "pending" | "quarantine" | "stale"> | null = null;
     try {
-      const [envelopes, etags] = await Promise.all([localEnvelopes(), io.settings.readEtags()]);
+      await io.openSession?.(config);
+      const [envelopes, etags] = await Promise.all([
+        localEnvelopes(config),
+        io.settings.readEtags(),
+      ]);
       const report = await io.commands.pull(envelopes, etags);
-      const { sorted, dropped } = sort(report.records);
+      const { sorted, dropped } = sort(report.records, config);
       const refusals = [...dropped, ...(await apply(sorted))];
+      // AFTER the apply and OUTSIDE it: the correction is a local edit through
+      // the ordinary mutator, so it stamps its own clock and marks the record
+      // dirty - neither of which an apply is allowed to do.
+      await rederive(sorted.keys);
 
       // THE MAP ADVANCES MINUS THE REFUSED, never frozen wholesale. Freezing on
       // any refusal would leave one unresolvable landing degrading every later
@@ -407,7 +652,7 @@ export function createScheduler(io: SchedulerIo): SyncScheduler {
           .filter((r) => r.outcome === "localOnly" && r.stale)
           .map((r) => ({ kind: r.kind, id: r.id })),
       };
-      error = failed[0]?.reason ?? closeError;
+      error = failed[0]?.reason ?? applyError;
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     }
@@ -440,6 +685,10 @@ export function createScheduler(io: SchedulerIo): SyncScheduler {
     // had them. The catch below is what puts them back.
     const taken = new Set<string>();
     try {
+      // FRESH FROM DISK, not from a cache this webview filled at launch. The
+      // settings window is the other writer of that file and nothing broadcasts a
+      // change event for it - `SyncSettingsStore` drops its cache on every call
+      // for that reason, so nothing is needed here beyond reading it each pass.
       const config = await io.settings.readConfig();
       await hydrate();
       // SNAPSHOT AND REMOVE WITH NO AWAIT BETWEEN THEM. `hydrate` has already
@@ -455,11 +704,17 @@ export function createScheduler(io: SchedulerIo): SyncScheduler {
       // follows enabling it publishes the whole of it anyway.
       await persistDirty();
       if (!config.enabled || taken.size === 0) return null;
+      // A push can be the FIRST thing a session does - a pull that returned
+      // early, then an edit - so it opens the session too rather than assuming
+      // the pull already did.
+      await io.openSession?.(config);
 
       // ONE OBJECT PER EDIT, not the inventory. The whole reason `persist`
       // takes record ids: a hook that could only say "this store changed" would
       // push every host every time one was renamed.
-      const envelopes = (await localEnvelopes()).filter((e) => taken.has(etagSlot(e.kind, e.id)));
+      const envelopes = (await localEnvelopes(config, taken)).filter((e) =>
+        taken.has(etagSlot(e.kind, e.id)),
+      );
       const failed = await publish(envelopes);
       for (const failure of failed) dirty.add(etagSlot(failure.kind, failure.id));
       await persistDirty();

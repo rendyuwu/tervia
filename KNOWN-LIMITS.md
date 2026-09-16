@@ -434,7 +434,18 @@ secret commands take the accounts to fetch rather than enumerating what exists,
 so the app cannot ask what it still holds. What comes back is a record whose
 `hasPrivateKey`, `hasPassphrase`, `hasPassword` and `hasKeyPassphrase` may name a
 secret that has since been deleted, and whose `fingerprint` may name a PEM the
-account no longer holds. None of those is ever read back and re-derived.
+account no longer holds. None of those is read back and re-derived **on this
+path**.
+
+That qualifier is narrower than it used to be, and the narrowing is real rather
+than a wording change. `rederive` in `src/modules/sync/scheduler.ts` does read a
+vault key's stored body back and re-derive its fingerprint — but only for a key
+a pull just landed, and only when the landed record and this device's keychain
+disagree. A restore triggers no pull, so nothing here reaches that path: what
+came back is a file, not a landing. A device that also syncs will have the vault
+half corrected by its next pull as a side effect, which is a happy accident and
+not a recovery mechanism — the accepted state below is what holds for a device
+that does not.
 
 The whole of what is done about it is that the recovery toast says so. It states
 that stored passwords and keys did not come back with the file; it does not claim
@@ -765,3 +776,113 @@ everybody's.
 
 **Trigger.** A device registry — the same trigger the 90-day resurrection entry
 above already names, so the two retire together.
+
+### A legacy PEM key keeps a dropped fingerprint until it is next opened
+
+**Accepted state.** The merge drops a key record's `fingerprint` whenever the
+winning envelope's own record claims no private key, because that layer has no
+keychain and a fingerprint carried forward could describe a body nobody holds.
+The apply path puts it back by inspecting the body this device stores — and for
+an `openssh-key-v1` body that works with no passphrase, so the ordinary case
+fires no prompt during a background pull. A legacy PEM or PuTTY body cannot be
+read at all without its passphrase, so for those the inspection answers only
+"this is encrypted" and the record is left with its presence flag corrected and
+its fingerprint still absent. The key works; the row shows no fingerprint until
+the user next opens it with the passphrase in hand.
+
+**Carried by.** `rederive` in `src/modules/sync/scheduler.ts`, which writes
+whatever the inspection answered and states the flag from the body existing
+rather than from reading it, and `vaultKeyFactsFrom` in
+`src/modules/vault/keyInspect.ts`, whose sealed-container branch answers
+`encrypted` and nothing else by decision.
+
+Prompting for the passphrase was rejected rather than overlooked: this runs
+inside a background pull, on a device the user may not be looking at, over
+however many keys one pull landed. A dialog there is a modal nobody asked for,
+at a moment nobody chose.
+
+**Trigger.** A report of a key showing no fingerprint after a sync, or a
+passphrase cache existing — with one, the inspection can be retried for free at
+the moment the user opens the key anyway.
+
+### Stripping key bodies from the remote only holds once every device has stopped carrying them
+
+**Accepted state.** The purge rewrites every remote object so it no longer
+carries a private key body. A device that still has carrying on then holds the
+only copy of what was stripped, and `merge` never merges the `secrets`
+component — the winner's rides along and the loser's is discarded — so that
+device's next reconcile finds its own copy wins on that component and publishes
+the body straight back. One pull is enough. The purge is therefore a per-fleet
+operation wearing a per-device button, and the settings section says so beside
+the button rather than leaving the user to discover it.
+
+**Carried by.** `purge_secrets` in `src-tauri/src/modules/sync/engine.rs`, which
+rewrites and does not gate on anything fleet-wide because it cannot see the
+fleet, and the note in the purge block of
+`src/settings/sections/SyncSection.tsx`.
+
+Making the purge refuse until every device has opted out was rejected: there is
+no device registry, so the only thing that could answer "has every device
+stopped" is a guess, and a guess that refuses is worse than a sentence that
+explains.
+
+**Trigger.** A device registry — the same trigger the retired-device tombstone
+entry names — or a report of bodies reappearing after a purge.
+
+### Deleting a key body on one device does not stick while another device still holds it
+
+**Accepted state.** `hasPrivateKey` is a field on the record, not a per-device
+fact, so it travels. A user who clears a key's body on one device publishes
+`hasPrivateKey: false`; a second device that still holds that body lands the
+record, sees the disagreement with its own keychain, corrects the flag back to
+`true` and publishes the correction — which the first device then lands. The
+body really is gone on the first device, and its record now claims one it does
+not hold, so a connect through that key fails there with a message about a
+missing secret rather than about a deleted one. Clearing the body on every
+device settles it.
+
+This converges rather than oscillating: the correction is made only by a device
+that holds the body, and a device holding none re-derives nothing, so the
+exchange is one round and stops.
+
+**Carried by.** `rederive` in `src/modules/sync/scheduler.ts`, and the absence
+of `hasPrivateKey` from `DEVICE_LOCAL_FIELDS` in
+`src-tauri/src/modules/sync/model.rs`.
+
+The alternative dispositions are both worse and were rejected rather than
+missed. Honouring the remote's `false` would have one device's delete destroy a
+private key on another, which is the data loss the whole apply path is built
+around refusing. Correcting the fingerprint without the flag leaves the record
+claiming no body, so the merge drops the fingerprint again on the next pull and
+the re-derivation repeats — a store write per pull, for the life of the record.
+
+**Trigger.** `hasPrivateKey` becoming a per-device fact, which needs the
+records to carry presence per device rather than once — or a report of a key
+that will not connect after a body was deleted elsewhere.
+
+### Two devices configuring one empty prefix at the same moment can strand a root key
+
+**Accepted state.** `sync_configure` reads the keyfile and writes a fresh one
+when there is none. The write is unconditional, so two devices that both find
+the prefix empty both mint a root key and both write it: the second overwrites
+the first, and the device that lost is left holding a root key nothing on the
+remote was ever sealed under. Its own pushes seal under a key no other device
+can open, and it cannot open theirs. Recovery is to re-enter the passphrase on
+the losing device, which re-reads the winning keyfile.
+
+The window is the round trip between the read and the write, on a prefix that
+has never been synced — so it needs two devices set up within seconds of each
+other against the same fresh bucket, and it cannot recur once a keyfile exists.
+
+**Carried by.** The `None` arm of the keyfile read in `sync_configure` in
+`src-tauri/src/modules/sync/engine.rs`, whose comment states the residue.
+
+A conditional create was the obvious fix and is not available: `put` on
+`SyncProvider` takes an etag to match, which no absent object can satisfy, and
+there is no create-if-absent verb on the port at all. Adding one means adding a
+sixth verb every backend has to implement, for a race that costs one re-entry
+and cannot happen twice.
+
+**Trigger.** A create-if-absent verb existing on `SyncProvider` for another
+reason, or a report of two devices set up simultaneously failing to see each
+other.

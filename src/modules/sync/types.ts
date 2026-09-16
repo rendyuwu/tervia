@@ -15,6 +15,30 @@ export const SYNC_STORE_PATH = "tervia-sync.json";
  *  Sync's own, beside `tervia-hosts` and `tervia-vault`. */
 export const SYNC_KEYRING_SERVICE = "tervia-sync";
 
+/**
+ * Accounts under {@link SYNC_KEYRING_SERVICE}.
+ *
+ * ONE SET OF NAMES for the window that writes them and the window that reads
+ * them back: the settings section stores what the user typed, and `main`'s
+ * scheduler reads them at launch to open a session. A second spelling anywhere
+ * would present as sync that silently never configures.
+ */
+export const SYNC_PASSPHRASE_ACCOUNT = "passphrase";
+export const SYNC_ACCESS_KEY_ID_ACCOUNT = "accessKeyId";
+export const SYNC_SECRET_ACCESS_KEY_ACCOUNT = "secretAccessKey";
+
+/**
+ * Settings asking `main` to do something it is the only window allowed to do.
+ *
+ * WEBVIEW TO WEBVIEW, so it is not in `src/lib/ipc.ts` - that file mirrors the
+ * events the RUST process emits. `pull` also covers "the configuration
+ * changed": a new configuration is only observable by reconciling against it,
+ * and a second event whose handler was a subset of this one's would be one more
+ * thing to keep in step.
+ */
+export const SYNC_REQUEST_EVENT = "tervia:sync-request";
+export type SyncRequest = "pull" | "push";
+
 /** Keys inside {@link SYNC_STORE_PATH}. Separate keys rather than one blob, so a
  *  status write and a config write never contend for the same value. */
 export const SYNC_CONFIG_KEY = "config";
@@ -179,16 +203,41 @@ export type PushReport = {
 };
 
 /**
- * The two Rust commands, as a port.
+ * What `sync_configure` takes. Mirrors Rust `SyncConfigureArgs`.
  *
- * TWO NAMED METHODS rather than one `invoke(command, args)`, and that is not
+ * `config` is the PROVIDER's own shape, passed through to `build` in
+ * `src-tauri/src/modules/sync/provider.rs` unread by anything between here and
+ * there - which is what keeps a second backend to one file plus one line.
+ *
+ * The passphrase and the provider credentials arrive as arguments rather than
+ * being read from the keychain by Rust, because the window that has them is the
+ * window that just took them from the user, and a read-back would need a second
+ * command whose only job is to say what this device is called.
+ */
+export type SyncConfigureArgs = {
+  provider: string;
+  prefix: string;
+  passphrase: string;
+  config: Record<string, unknown>;
+};
+
+/**
+ * The Rust commands the SCHEDULER drives, as a port.
+ *
+ * NAMED METHODS rather than one `invoke(command, args)`, and that is not
  * decoration: `scripts/command-registry-verify.ts` reads the command name as a
  * LITERAL at the `invoke` call and pins every site that passes a variable
  * instead. A generic port would make this module such a site, and the pin would
- * then be the only thing tying two registered commands to a caller.
+ * then be the only thing tying registered commands to a caller.
  *
  * It is also what the checks count: "with sync off, nothing is invoked" is a
- * measured zero on these two, not a consequence of nobody calling.
+ * measured zero on these, not a consequence of nobody calling.
+ *
+ * `sync_configure`, `sync_disable` and `sync_purge_secrets` are NOT here. Each
+ * is invoked from the one place that holds what it needs - the session opener
+ * beside the keychain, the other two beside the toggle the user just moved -
+ * and none is reachable from a background pass, so putting them here would add
+ * three methods every fake has to write and no check could fail on.
  */
 export type SyncCommands = {
   pull(envelopes: Envelope[], etags: Record<string, string>): Promise<PullReport>;

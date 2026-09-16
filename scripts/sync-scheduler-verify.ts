@@ -9,6 +9,13 @@
  * asserting against a fake. What is here is what only TypeScript decides: the
  * triggers, which store a landing goes to, and the map write.
  *
+ * WHICH IS WHY THE NUMBERING BELOW SKIPS C5, rather than a check having been
+ * deleted. C5 is the purge that removes key bodies already published, and the
+ * purge is Rust: it is a pass over the stored objects in
+ * `src-tauri/src/modules/sync/engine.rs` and it is checked by `cargo test`
+ * there, for the same reason the merge is. Nothing in this file could assert it
+ * without faking the provider it walks.
+ *
  * REAL STORES, NOT FAKES. Every check below that involves a dirty mark drives
  * `createHostsStore` and friends with in-memory ports and the scheduler wired in
  * as their live `markDirty`. That is the whole reason B5 can fail here and could
@@ -52,17 +59,35 @@
  *    agree or the symptom is a store rewritten on every pull, or remote objects
  *    removed while devices still compare against them. Both are read out of the
  *    Rust source as text, because `tsc` cannot see across that boundary.
+ *
+ * 9. A CARRY TOGGLE THAT WORKS IN ONE DIRECTION ONLY. Off has to stop a body
+ *    leaving AND stop one arriving, and the outbound half is asserted as a
+ *    MEASURED ZERO on a counting keychain fake - a port left absent would make
+ *    that zero a property of the harness. The inbound mirror is worse than
+ *    silent: an envelope with no `secrets` read as "delete the body" destroys a
+ *    private key the user still holds, on an ordinary background pull.
+ *
+ * 10. A CORRECTION THAT RUNS ON EVERY LANDING. Re-deriving a key record the
+ *     merge understated costs one keychain read, one store write and one
+ *     republish; doing it for a record that was already complete costs those
+ *     three PER PULL, forever, and nothing local looks wrong while it happens.
+ *
+ * TWO CHECKS READ SOURCE TEXT, AND THAT IS THE ONLY READING AVAILABLE. There is
+ * no DOM in this suite - every `scripts/*-verify.ts` runs under plain `tsx`, and
+ * nothing in `devDependencies` can render a component - so a claim about what
+ * the sync tab SHOWS is made the way `scripts/hosts-header-narrow-verify.ts`
+ * makes its own: anchored regex against the actual source of
+ * `src/settings/sections/SyncSection.tsx`, with comments stripped first. The
+ * stripping is load bearing rather than tidy: that file argues in its comments
+ * about the very wording one of these checks requires to be ABSENT.
  */
 /// <reference types="node" />
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import {
-  createWriteQueue,
-  type KeyValueStore,
-  type RecoveredStoreIo,
-} from "../src/lib/recoveredStore";
+import type { FileKeyValueStore } from "../src/lib/fileKeyValueStore";
+import { createWriteQueue, type RecoveredStoreIo } from "../src/lib/recoveredStore";
 import { TOMBSTONE_TTL_MS, TOMBSTONES_KEY, type Tombstone } from "../src/lib/tombstones";
 import { createForwardStore } from "../src/modules/forwards/store";
 import { FORWARDS_KEY, RULE_TOMBSTONE_KIND, type ForwardRule } from "../src/modules/forwards/types";
@@ -93,12 +118,17 @@ import {
   type SyncStatus,
 } from "../src/modules/sync/types";
 import type { SecretsIo } from "../src/modules/vault/adapters";
+import type { KeyInspectResult } from "../src/modules/vault/keyInspect";
 import { createVaultStore } from "../src/modules/vault/store";
 import {
   IDENTITY_TOMBSTONE_KIND,
+  KEY_PRIVATE_KEY_FIELD,
   KEY_TOMBSTONE_KIND,
   VAULT_IDENTITIES_KEY,
+  VAULT_KEYRING_SERVICE,
   VAULT_KEYS_KEY,
+  VAULT_KEY_SECRET_FIELDS,
+  vaultAccount,
   type VaultIdentity,
   type VaultKey,
 } from "../src/modules/vault/types";
@@ -189,23 +219,69 @@ function port(seed: Record<string, unknown>, label: string): RecoveredStoreIo {
   };
 }
 
-/** The sync settings file, in memory, saving straight through. */
-function settingsPort(seed: Record<string, unknown>): KeyValueStore {
-  const data: Record<string, unknown> = { ...seed };
+/**
+ * The sync settings file, WITH THE CACHE THE REAL ONE HOLDS.
+ *
+ * NOT A STRAIGHT-THROUGH MAP, and the difference is the whole of C10. The real
+ * store keeps a per-webview copy of the file, serves reads out of it, and builds
+ * every `save` payload from that copy plus this session's pending keys - so a
+ * cache filled before the settings window wrote is how this webview comes to put
+ * an older configuration back over the user's, permanently, with nothing to see
+ * until the pass after. A straight-through map cannot express that at all: it
+ * has nothing to go stale, so a check driving it would pass whether or not the
+ * cache was ever dropped.
+ *
+ * `file` is what a second webview writes to, behind this one's back. Handed back
+ * so a check can play the settings window and then read what actually landed,
+ * rather than counting calls and calling that an ordering.
+ *
+ * Every operation is also marked, `invalidate` included, so the sweep in C10 can
+ * ask the narrower question the two behavioural halves cannot: that no method
+ * AT ALL skips the drop, including the ones no scenario here drives. One mark
+ * per operation, so "the drop came immediately before" is a question about
+ * adjacent entries. `writeEtags` is a second, narrower mark that B10's ordering
+ * check keys on, and it is emitted after the operation's own.
+ */
+function settingsPort(seed: Record<string, unknown>) {
+  const file: Record<string, unknown> = { ...seed };
+  let cache: Record<string, unknown> = {};
   let pending: Record<string, unknown> = {};
-  return {
+  let loaded = false;
+  function load(): void {
+    if (loaded) return;
+    cache = { ...file };
+    loaded = true;
+  }
+  const io: FileKeyValueStore = {
     async get<T>(key: string): Promise<T | null> {
-      return ((key in pending ? pending[key] : data[key]) as T | undefined) ?? null;
+      mark("settings:get");
+      if (key in pending) return (pending[key] as T | undefined) ?? null;
+      load();
+      return (cache[key] as T | undefined) ?? null;
     },
     async set(key: string, value: unknown): Promise<void> {
       pending[key] = value;
     },
     async save(): Promise<void> {
+      mark("settings:save");
       if (SYNC_ETAGS_KEY in pending) mark("writeEtags");
-      Object.assign(data, pending);
+      // READ WHOLE, WRITTEN WHOLE, from the cache plus what this session set.
+      // A key the other window added that this cache never saw is not in the
+      // payload, so it is gone - which is the loss, stated as code.
+      load();
+      const payload = { ...cache, ...pending };
+      for (const key of Object.keys(file)) delete file[key];
+      Object.assign(file, payload);
+      Object.assign(cache, pending);
       pending = {};
     },
+    invalidate(): void {
+      mark("invalidate");
+      loaded = false;
+      cache = {};
+    },
   };
+  return { io, file };
 }
 
 const noSecrets: SecretsIo = {
@@ -231,12 +307,21 @@ function harness(
     rules?: ForwardRule[];
     etags?: Record<string, string>;
     pull?: PullReport;
+    /** One report per pull, in order, for a check that needs two consecutive
+     *  passes to differ. Falls through to `pull` once the list is spent. */
+    pulls?: PullReport[];
     push?: PushReport;
     dirty?: string[];
     status?: SyncStatus;
     park?: boolean;
     parkDirty?: boolean;
     releaseThrows?: boolean;
+    carrySecrets?: boolean;
+    /** The vault store's keychain. Defaults to one that holds nothing. */
+    secrets?: SecretsIo;
+    readKeySecrets?: (id: string) => Promise<Record<string, string>>;
+    inspectKey?: (body: string, passphrase?: string) => Promise<KeyInspectResult>;
+    correctKey?: (key: VaultKey) => Promise<void>;
   } = {},
 ) {
   const now = () => START;
@@ -255,7 +340,11 @@ function harness(
   const forwardsData = port({ [FORWARDS_KEY]: seed.rules ?? [] }, "forwards");
 
   const settingsData = settingsPort({
-    [SYNC_CONFIG_KEY]: { ...DEFAULT_SYNC_CONFIG, enabled: seed.enabled ?? true },
+    [SYNC_CONFIG_KEY]: {
+      ...DEFAULT_SYNC_CONFIG,
+      enabled: seed.enabled ?? true,
+      carrySecrets: seed.carrySecrets ?? false,
+    },
     [SYNC_ETAGS_KEY]: seed.etags ?? {},
     ...(seed.dirty ? { [SYNC_DIRTY_KEY]: seed.dirty } : {}),
     ...(seed.status ? { [SYNC_STATUS_KEY]: seed.status } : {}),
@@ -267,7 +356,7 @@ function harness(
   const dirtyParked = new Promise<void>((r) => {
     releaseDirty = r;
   });
-  const base = createSyncSettingsStore(settingsData);
+  const base = createSyncSettingsStore(settingsData.io);
   const settings: SyncSettingsStore = {
     ...base,
     async readDirty() {
@@ -294,7 +383,10 @@ function harness(
       pulled.push({ envelopes, etags });
       if (seed.park) await parked;
       if (failPull) throw new Error(failPull);
-      return seed.pull ?? { records: [], etags: {}, quarantined: [], pruned: 0, pending: 0 };
+      return (
+        seed.pulls?.shift() ??
+        seed.pull ?? { records: [], etags: {}, quarantined: [], pruned: 0, pending: 0 }
+      );
     },
     async push(envelopes, etags) {
       calls.push++;
@@ -313,7 +405,7 @@ function harness(
   });
   const vault = createVaultStore({
     store: vaultData,
-    secrets: noSecrets,
+    secrets: seed.secrets ?? noSecrets,
     now,
     markDirty: (d) => scheduler.markDirty(d),
   });
@@ -329,6 +421,9 @@ function harness(
     commands,
     settings,
     stores: { hosts, vault, forwards },
+    readKeySecrets: seed.readKeySecrets,
+    inspectKey: seed.inspectKey,
+    correctKey: seed.correctKey,
     async releaseRule(rule) {
       mark(`release:${rule.id}`);
       released.push(rule.id);
@@ -354,7 +449,8 @@ function harness(
       failPull = reason;
     },
     settings,
-    settingsData,
+    /** The bytes on disk, for a check that has to play the other webview. */
+    settingsFile: settingsData.file,
     dirty: (): Promise<string[]> => settings.readDirty(),
     calls,
     pulled,
@@ -402,7 +498,12 @@ function merged(
   kind: string,
   id: string,
   record: unknown,
-  over: { changed?: boolean; republish?: boolean } = {},
+  over: {
+    changed?: boolean;
+    secretsChanged?: boolean;
+    republish?: boolean;
+    secrets?: Record<string, string>;
+  } = {},
 ): Reconciled {
   return {
     kind,
@@ -416,14 +517,22 @@ function merged(
       device: "dev-b",
       deleted: false,
       record,
+      ...(over.secrets ? { secrets: over.secrets } : {}),
     },
     changed: over.changed ?? true,
-    secretsChanged: false,
+    secretsChanged: over.secretsChanged ?? false,
     republish: over.republish ?? false,
   };
 }
 
-function remoteOnly(kind: string, id: string, record: unknown): Reconciled {
+/** `secrets` is the carried key body, absent unless a check is about one - which
+ *  is the ordinary case, since only a key envelope ever has one. */
+function remoteOnly(
+  kind: string,
+  id: string,
+  record: unknown,
+  secrets?: Record<string, string>,
+): Reconciled {
   return {
     kind,
     id,
@@ -436,6 +545,7 @@ function remoteOnly(kind: string, id: string, record: unknown): Reconciled {
       device: "dev-b",
       deleted: false,
       record,
+      ...(secrets ? { secrets } : {}),
     },
   };
 }
@@ -445,6 +555,16 @@ const localOnly = (kind: string, id: string, stale: boolean): Reconciled => ({
   id,
   outcome: "localOnly",
   stale,
+});
+
+/** One pull report carrying `records` and nothing else: no etags, nothing
+ *  quarantined, nothing pruned, nothing pending. */
+const reportOf = (records: Reconciled[]): PullReport => ({
+  records,
+  etags: {},
+  quarantined: [],
+  pruned: 0,
+  pending: 0,
 });
 
 // ---------------------------------------------------------------------------
@@ -1081,6 +1201,628 @@ async function b19(): Promise<void> {
   check("and reports its own failure", carried.lastError, "still offline");
 }
 
+/** The sync tab's source, which two checks below read instead of rendering. */
+const SYNC_SECTION = "src/settings/sections/SyncSection.tsx";
+
+/**
+ * `source` with its block comments and its whole-line `//` comments gone.
+ *
+ * SHARED BY C1 AND C4, and load bearing for both directions. C1 asserts that a
+ * phrasing is ABSENT from what the user reads, and the file's own comments argue
+ * at length about why it is absent - so an unstripped scan would fail on the
+ * paragraph explaining the property. C4 asserts that markup is PRESENT, and an
+ * unstripped scan would be satisfied by a comment describing markup nobody
+ * wrote.
+ *
+ * Only whole-line `//` is stripped, so a `//` inside a string literal survives.
+ */
+function withoutComments(source: string): string {
+  return source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^[ \t]*\/\/.*$/gm, "");
+}
+
+async function c1(): Promise<void> {
+  console.log("\nC1 - the conditional-write warning is about the setting, not a probe");
+  const source = readFileSync(resolve(ROOT, SYNC_SECTION), "utf8");
+  // THE GATING EXPRESSION, not the string. A warning that exists somewhere in
+  // the file and is never reached from the toggle is the same as no warning, and
+  // a check that searched the whole file for the sentence would pass on one.
+  const block = /\{!config\.cas \? \(([\s\S]*?)\n\s*\) : null\}/.exec(source);
+  check("the warning is reached from the cas toggle being off", block !== null, true);
+  // Comments out, then tags out: what is left is what a reader sees.
+  const warning = withoutComments(block?.[1] ?? "")
+    .replace(/<[^>]*>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  // ANTI-VACUITY for the absence below, which passes for free against the empty
+  // string a failed match leaves: the block has to have been found AND still say
+  // whose choice the fact came from.
+  check("and it names the setting as the user's own choice", /which you chose/.test(warning), true);
+  // THE PROPERTY. Nothing in the app probes the endpoint, so a warning phrased
+  // as a finding would be a claim no code backs - and a check asserting only
+  // that the sentence is present would pass against exactly that warning.
+  check(
+    "and no phrasing claims this device tested the endpoint",
+    warning.match(/detect|probe|does not support|doesn't support|we found|unsupported/gi) ?? [],
+    [],
+  );
+}
+
+/**
+ * A private key body, as a fixture. Inert everywhere: nothing here parses one.
+ *
+ * NO TRAILING NEWLINE, unlike a real PEM file, because `landKeySecrets` in
+ * `src/modules/vault/store.ts` trims what it lands - so a fixture carrying one
+ * would make C3's round trip assert that trim rather than the carry it is about.
+ */
+const KEY_BODY = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjE";
+
+async function c2(): Promise<void> {
+  console.log("\nC2 - with the carry toggle off, no key body leaves the machine");
+  const key = (): VaultKey => ({
+    id: "k-1",
+    name: "id_ed25519",
+    hasPrivateKey: true,
+    hasPassphrase: false,
+    updatedAt: START - 1000,
+  });
+  const slot = `${KEY_TOMBSTONE_KIND}:k-1`;
+
+  let offReads = 0;
+  const off = harness({
+    vaultKeys: [key()],
+    dirty: [slot],
+    carrySecrets: false,
+    // A REAL FAKE, present and counting. Leaving the port off would make the
+    // zero below a property of this harness rather than of the toggle - which is
+    // the whole failure the measured-zero rule exists for.
+    readKeySecrets: async () => {
+      offReads++;
+      return { [KEY_PRIVATE_KEY_FIELD]: KEY_BODY };
+    },
+  });
+  await off.scheduler.pushNow();
+  await settle();
+  check("off: the keychain is not read at all", offReads, 0);
+  check(
+    "off: and no envelope carries a body",
+    off.pushed[0]?.envelopes.filter((e) => e.secrets !== undefined).map((e) => e.id),
+    [],
+  );
+
+  // ANTI-VACUITY, REQUIRED: without this arm the check above passes in a tree
+  // where carrying was deleted outright rather than gated.
+  let onReads = 0;
+  const on = harness({
+    vaultKeys: [key()],
+    dirty: [slot],
+    carrySecrets: true,
+    readKeySecrets: async () => {
+      onReads++;
+      return { [KEY_PRIVATE_KEY_FIELD]: KEY_BODY };
+    },
+  });
+  await on.scheduler.pushNow();
+  await settle();
+  check("on: the keychain is read, once for the one key", onReads, 1);
+  check(
+    "on: and the key's envelope carries the body",
+    on.pushed[0]?.envelopes.find((e) => e.kind === KEY_TOMBSTONE_KIND)?.secrets,
+    { [KEY_PRIVATE_KEY_FIELD]: KEY_BODY },
+  );
+}
+
+/** A keychain that holds what it is given and records every write, so "nothing
+ *  was written" and "nothing was deleted" are both measurable. */
+function recordingSecrets(seed: Record<string, string> = {}) {
+  const held: Record<string, string> = { ...seed };
+  const sets: { service: string; account: string; value: string }[] = [];
+  const deletes: { service: string; account: string }[] = [];
+  const io: SecretsIo = {
+    async getAll(_service, accounts) {
+      return accounts.map((a) => held[a] ?? null);
+    },
+    async set(service, account, value) {
+      sets.push({ service, account, value });
+      held[account] = value;
+    },
+    async delete(service, account) {
+      deletes.push({ service, account });
+      delete held[account];
+    },
+    async copy() {
+      return false;
+    },
+  };
+  return { io, sets, deletes };
+}
+
+async function c3(): Promise<void> {
+  console.log("\nC3 - the inbound body: carried, refused, and absent");
+  const landedKey = (over: Partial<VaultKey> = {}): VaultKey => ({
+    id: "k-1",
+    name: "id_ed25519",
+    hasPrivateKey: false,
+    hasPassphrase: false,
+    ...over,
+  });
+  const account = vaultAccount("k-1", KEY_PRIVATE_KEY_FIELD);
+  const mine = new Set<string>(VAULT_KEY_SECRET_FIELDS.map((f) => vaultAccount("k-1", f)));
+  const arriving = (secrets?: Record<string, string>): PullReport => ({
+    records: [remoteOnly(KEY_TOMBSTONE_KIND, "k-1", landedKey(), secrets)],
+    etags: {},
+    quarantined: [],
+    pruned: 0,
+    pending: 0,
+  });
+
+  // 1. CARRY ON, A BODY ARRIVES. The whole point of the toggle being on.
+  const on = recordingSecrets();
+  const carried = harness({
+    carrySecrets: true,
+    secrets: on.io,
+    pull: arriving({ [KEY_PRIVATE_KEY_FIELD]: KEY_BODY }),
+  });
+  await carried.scheduler.pullNow();
+  await settle();
+  check("on: the body is written at this key's private-key account", on.sets, [
+    { service: VAULT_KEYRING_SERVICE, account, value: KEY_BODY },
+  ]);
+  check(
+    "on: and the stored record now claims one",
+    (await carried.vault.listKeys()).find((k) => k.id === "k-1")?.hasPrivateKey,
+    true,
+  );
+
+  // 2. CARRY OFF, THE SAME BODY ARRIVES. ONE TOGGLE, BOTH DIRECTIONS: a device
+  // that opted out of publishing bodies has equally opted out of receiving them,
+  // and the drop happens before the store is handed the landing at all.
+  const off = recordingSecrets();
+  const refused = harness({
+    carrySecrets: false,
+    secrets: off.io,
+    pull: arriving({ [KEY_PRIVATE_KEY_FIELD]: KEY_BODY }),
+  });
+  await refused.scheduler.pullNow();
+  await settle();
+  check(
+    "off: nothing is written to this key's accounts",
+    off.sets.filter((s) => mine.has(s.account)),
+    [],
+  );
+
+  // 3. CARRY ON, NO BODY ARRIVES, A LOCAL BODY EXISTS. An absent `secrets` is no
+  // information and must never read as "delete the body": a device that carries
+  // nothing wins an ordinary merge with `secrets` unset, so the delete reading
+  // would destroy a private key the user still holds on a background pull. This
+  // is why the check has three cases and not one.
+  const kept = recordingSecrets({ [account]: KEY_BODY });
+  const quiet = harness({
+    carrySecrets: true,
+    secrets: kept.io,
+    vaultKeys: [landedKey({ hasPrivateKey: true, updatedAt: START - 1000 })],
+    pull: {
+      records: [
+        merged(KEY_TOMBSTONE_KIND, "k-1", landedKey({ hasPrivateKey: true, name: "renamed" })),
+      ],
+      etags: {},
+      quarantined: [],
+      pruned: 0,
+      pending: 0,
+    },
+  });
+  await quiet.scheduler.pullNow();
+  await settle();
+  check(
+    "absent: no delete reaches this key's accounts",
+    kept.deletes.filter((d) => mine.has(d.account)),
+    [],
+  );
+  check(
+    "absent: and the body is still readable afterwards",
+    (await kept.io.getAll(VAULT_KEYRING_SERVICE, [account]))[0],
+    KEY_BODY,
+  );
+}
+
+async function c4(): Promise<void> {
+  console.log("\nC4 - the stale list, and the control that settles it");
+  const source = withoutComments(readFileSync(resolve(ROOT, SYNC_SECTION), "utf8"));
+  // ANCHORED ON JSX AND IDENTIFIER SYNTAX over comment-stripped source, never a
+  // substring search for a word: "stale" appears in this file's prose, and a
+  // check a comment can satisfy is a check that survives the markup being
+  // deleted.
+  check("the section is still the component", /export function SyncSection\(\)/.test(source), true);
+  check(
+    "the stale list is rendered off the status it loaded",
+    /\{status\.stale\.length > 0 \? \(/.test(source),
+    true,
+  );
+  check("one row per entry", /\{status\.stale\.map\(\(s\) => \(/.test(source), true);
+  // THE LOOKBEHIND IS THE CHECK. Each row's `key` prop is a template literal
+  // holding both fields, so a pattern without it is satisfied by React
+  // bookkeeping the user never sees - measured: deleting the rendered kind left
+  // the naive pattern green.
+  check(
+    "each carrying its kind and its id, rendered rather than keyed",
+    [/(?<!\$)\{s\.kind\}/.test(source), /(?<!\$)\{s\.id\}/.test(source)],
+    [true, true],
+  );
+
+  // AND THE RESOLUTION PATH, PINNED TO THE LIST THAT NEEDS IT. A stale list with
+  // nothing that settles it is a report the user cannot act on.
+  //
+  // THE CONTROL IS NOT INSIDE THE BLOCK, so this cannot anchor on markup there:
+  // the block names a control that lives in the group above it. What is pinned
+  // instead is the pairing that DOES exist - the label the block tells the user
+  // to press, and the button carrying exactly that label and the handler. Those
+  // two drifting apart is the real failure: an instruction naming a control
+  // nobody can find reads as a bug in the sync itself. An assertion that merely
+  // found the handler somewhere in the file would pass in a tree where the list
+  // rendered with no route out of it at all, which is what this replaced.
+  const block = /\{status\.stale\.length > 0 \? \(([\s\S]*?)\n\s*\) : null\}/.exec(source);
+  check("the stale block is there to read", block !== null, true);
+  check(
+    "and it names the control that settles it",
+    /Use Pull now above to settle them/.test(block?.[1] ?? ""),
+    true,
+  );
+  check(
+    "a request is emitted as the sync event",
+    /void emit\(SYNC_REQUEST_EVENT, what\)/.test(source),
+    true,
+  );
+  check(
+    "and the control under that exact label asks for the pass",
+    /onClick=\{\(\) => request\("pull"\)\}\s*>\s*Pull now\s*</.test(source),
+    true,
+  );
+}
+
+/** What a body that parsed says about itself. */
+const PARSED: KeyInspectResult = {
+  parsed: true,
+  encrypted: false,
+  keyType: "ed25519",
+  fingerprint: "SHA256:from-the-inspector",
+  publicKey: "ssh-ed25519 AAAA",
+  comment: null,
+};
+
+/**
+ * What a SEALED CONTAINER says: nothing at all.
+ *
+ * A legacy PEM or PuTTY body cannot be inspected without its passphrase, and
+ * `vaultKeyFactsFrom` answers `encrypted` alone for it - so `fingerprint` stays
+ * undefined for such a key forever. That is the whole reason C7 and C8 exist:
+ * every guard keyed on a fingerprint being present can never fire here.
+ */
+const SEALED: KeyInspectResult = {
+  parsed: false,
+  encrypted: true,
+  keyType: null,
+  fingerprint: null,
+  publicKey: null,
+  comment: null,
+};
+
+/**
+ * A body that PARSED and still answered no fingerprint and no public half.
+ *
+ * THE SHAPE THAT CAN ERASE, and it is NOT the sealed one. `vaultKeyFactsFrom`
+ * short-circuits for a container it could not open and answers `encrypted`
+ * alone, so spreading THAT wholesale overwrites nothing and a check built on it
+ * proves nothing. For a body it did open, the two fields come back as explicit
+ * `undefined` properties when they were empty - and a spread writes those
+ * straight over a fingerprint the record already held. Measured: C8 passed
+ * against the wholesale spread until this fixture replaced the sealed one.
+ */
+const PARSED_BLANK: KeyInspectResult = {
+  parsed: true,
+  encrypted: false,
+  keyType: "ed25519",
+  fingerprint: null,
+  publicKey: null,
+  comment: null,
+};
+
+/**
+ * A scheduler whose key ports are fakes that record what they were asked.
+ *
+ * A FAKE INSPECTOR, never the real bridge: the derivation is a registered
+ * command, nothing in TypeScript computes a fingerprint, and the module holding
+ * that command imports a Tauri surface at the top level. Shared by C6, C7 and
+ * C8, which differ only in what the inspector answers and what the pulls land.
+ */
+function correcting(pulls: PullReport[], answer: KeyInspectResult, stored?: VaultKey[]) {
+  const inspected: string[] = [];
+  const corrected: VaultKey[] = [];
+  const h = harness({
+    pulls,
+    ...(stored ? { vaultKeys: stored } : {}),
+    readKeySecrets: async () => ({ [KEY_PRIVATE_KEY_FIELD]: KEY_BODY }),
+    inspectKey: async (body) => {
+      inspected.push(body);
+      return answer;
+    },
+    correctKey: async (key) => {
+      corrected.push(key);
+    },
+  });
+  return { h, inspected, corrected };
+}
+
+/** A key record as a landing hands it over, understated by default. */
+const keyRecord = (over: Partial<VaultKey> = {}): VaultKey => ({
+  id: "k-1",
+  name: "id_ed25519",
+  hasPrivateKey: false,
+  hasPassphrase: false,
+  ...over,
+});
+
+/** One pull landing one key record. */
+const landsKey = (record: VaultKey): PullReport =>
+  reportOf([remoteOnly(KEY_TOMBSTONE_KIND, "k-1", record)]);
+
+async function c6(): Promise<void> {
+  console.log("\nC6 - a landed key record is corrected from the local body");
+
+  // A. The merge drops a fingerprint whenever the winner claims no private key,
+  // so the device that HOLDS the body is the only place the truth exists.
+  const understated = correcting([landsKey(keyRecord())], PARSED);
+  await understated.h.scheduler.pullNow();
+  await settle();
+  check("A: the inspector is handed the stored body", understated.inspected, [KEY_BODY]);
+  check(
+    "A: and the correction carries the body and the inspector's fingerprint",
+    understated.corrected.map((k) => [k.hasPrivateKey, k.fingerprint]),
+    [[true, PARSED.fingerprint]],
+  );
+
+  // B, ANTI-VACUITY AND REQUIRED: without it, a correction that ran on every
+  // landing - a keychain read, a store write and a republish per pull, forever -
+  // would pass A and be invisible everywhere else.
+  const complete = correcting(
+    [landsKey(keyRecord({ hasPrivateKey: true, fingerprint: "SHA256:already-known" }))],
+    PARSED,
+  );
+  await complete.h.scheduler.pullNow();
+  await settle();
+  check("B: a landing that needs nothing inspects nothing", complete.inspected, []);
+  check("B: and corrects nothing", complete.corrected.length, 0);
+}
+
+async function c7(): Promise<void> {
+  console.log("\nC7 - a body that cannot be inspected still settles after one correction");
+  // TWO CONSECUTIVE PULLS, and the second is the check. A sealed container
+  // leaves `fingerprint` undefined forever, so the guard keyed on it can never
+  // fire for this key - the only thing that stops a second correction is the
+  // comparison of the corrected record against the stored one. `correctKey`
+  // stamps `updatedAt` and marks the record dirty unconditionally, and the Rust
+  // record includes that stamp, so two devices both holding a sealed body would
+  // land each other's restamp and restamp back: one vault write, one snapshot
+  // and one remote object per pull, per device, for the life of the record.
+  //
+  // ANTI-VACUITY: one pull alone passes against the broken code, which is why
+  // this check is two. The second pull lands the record in the state the FIRST
+  // correction produces - the shape a peer's restamp arrives in - so the pass
+  // cannot be saved by the landing looking incomplete.
+  const sealed = correcting(
+    [landsKey(keyRecord()), landsKey(keyRecord({ hasPrivateKey: true, encrypted: true }))],
+    SEALED,
+  );
+  await sealed.h.scheduler.pullNow();
+  await settle();
+  check("the first pull corrects the record once", sealed.corrected.length, 1);
+  check(
+    "carrying the body it found and the one fact the inspection could answer",
+    sealed.corrected.map((k) => [k.hasPrivateKey, k.encrypted, k.fingerprint ?? null]),
+    [[true, true, null]],
+  );
+
+  await sealed.h.scheduler.pullNow();
+  await settle();
+  // THE WHOLE CHECK. The inspection runs again - nothing skips it - and the
+  // correction does not, because there is nothing left to say.
+  check("and the second pull corrects nothing more", sealed.corrected.length, 1);
+  check("though it did look again", sealed.inspected.length, 2);
+}
+
+async function c8(): Promise<void> {
+  console.log("\nC8 - a correction never erases what the record already knew");
+  const known = keyRecord({
+    fingerprint: "SHA256:already-on-the-record",
+    publicKey: "ssh-ed25519 ALREADY",
+  });
+
+  // An inspection that opened the body and still answered neither field hands
+  // back two explicit `undefined` properties, and spreading them wholesale
+  // blanks a fingerprint and a public half that were perfectly good - on a
+  // record the correction was only ever meant to ADD a presence flag to.
+  const blank = correcting([landsKey(known)], PARSED_BLANK);
+  await blank.h.scheduler.pullNow();
+  await settle();
+  check(
+    "an answer with neither field leaves the stored fingerprint and public half alone",
+    blank.corrected.map((k) => [k.fingerprint ?? null, k.publicKey ?? null]),
+    [["SHA256:already-on-the-record", "ssh-ed25519 ALREADY"]],
+  );
+
+  // ANTI-VACUITY, REQUIRED: a correction that copied NOTHING would pass the
+  // check above. An inspection that really answered has to land, fingerprint
+  // included, and the answer here disagrees with the record on purpose.
+  const answered = correcting([landsKey(known)], PARSED);
+  await answered.h.scheduler.pullNow();
+  await settle();
+  check(
+    "and a real answer replaces both",
+    answered.corrected.map((k) => [k.fingerprint ?? null, k.publicKey ?? null]),
+    [[PARSED.fingerprint, PARSED.publicKey]],
+  );
+}
+
+async function c9(): Promise<void> {
+  console.log("\nC9 - a carry-off device lands nothing for a body it would discard");
+  // THE SHAPE C3 CANNOT REACH. `ordering_key` in
+  // `src-tauri/src/modules/sync/model.rs` includes `secrets`, and an absent one
+  // sorts below a present one - so a device with carrying off gets
+  // `secretsChanged: true` against every remote object that DOES carry a body,
+  // on every pull, forever. That is not an exotic fleet: it is what this app's
+  // own settings produce the moment one device turns carrying off. A `merged`
+  // disposition is required here, because C3's `remoteOnly` never reaches the
+  // expression this is about, which is exactly why the defect survived it.
+  const landing = (): PullReport =>
+    reportOf([
+      merged(KEY_TOMBSTONE_KIND, "k-1", keyRecord({ hasPrivateKey: true }), {
+        changed: false,
+        secretsChanged: true,
+        secrets: { [KEY_PRIVATE_KEY_FIELD]: KEY_BODY },
+      }),
+    ]);
+
+  const off = recordingSecrets();
+  const discarding = harness({
+    carrySecrets: false,
+    secrets: off.io,
+    vaultKeys: [keyRecord({ hasPrivateKey: true, updatedAt: START - 1000 })],
+    pull: landing(),
+  });
+  const before = trace.length;
+  await discarding.scheduler.pullNow();
+  await settle();
+  // ON THE COMMIT COUNT, not on the record. The record would be written back
+  // identical, so a content assertion could not tell a write from no write -
+  // and the cost being guarded is the write itself: the whole vault file
+  // rewritten and a fresh snapshot taken, on every pull, forever.
+  check(
+    "off: the vault store is not written at all",
+    trace.slice(before).filter((t) => t.endsWith("commit:vault")).length,
+    0,
+  );
+
+  // ANTI-VACUITY, REQUIRED: the same disposition with carrying ON must land,
+  // and must reach the keychain. Otherwise a tree that dropped every merged
+  // body would pass the arm above.
+  const on = recordingSecrets();
+  const accepting = harness({
+    carrySecrets: true,
+    secrets: on.io,
+    vaultKeys: [keyRecord({ hasPrivateKey: true, updatedAt: START - 1000 })],
+    pull: landing(),
+  });
+  const at = trace.length;
+  await accepting.scheduler.pullNow();
+  await settle();
+  check(
+    "on: the same landing is applied",
+    trace.slice(at).filter((t) => t.endsWith("commit:vault")).length,
+    1,
+  );
+  check("on: and the body reaches the keychain", on.sets, [
+    {
+      service: VAULT_KEYRING_SERVICE,
+      account: vaultAccount("k-1", KEY_PRIVATE_KEY_FIELD),
+      value: KEY_BODY,
+    },
+  ]);
+}
+
+async function c10(): Promise<void> {
+  console.log("\nC10 - the two cross-webview guards");
+  // THE SETTINGS FILE IS WRITTEN BY TWO WEBVIEWS and nothing broadcasts a change
+  // event for it, so a cached copy is frozen at whatever the file said when this
+  // one last read it. Both halves below are OBSERVABLE IN WHAT LANDS, against a
+  // port that models the real cache - not counted off a call log, which would
+  // pass against a drop made at the wrong moment.
+  //
+  // MEASURED RATHER THAN READ OFF THE SOURCE, because the drop has already moved
+  // once: it was two calls at the top of the two passes and is now one wrapper
+  // inside the settings store, so an assertion naming either call site would pin
+  // a shape instead of the property.
+
+  // THE READ HALF. The settings window stores a configuration after this webview
+  // has cached the file. Without the drop the cached copy answers forever: the
+  // user turns sync on, gets a confirmation, and gets no sync until they
+  // relaunch. The first pass is what fills the cache, so it is part of the
+  // arrangement rather than a warm-up.
+  const reading = harness({ enabled: false });
+  await reading.scheduler.pullNow();
+  await settle();
+  check("a pass with sync off invokes nothing, and caches the file", reading.calls.pull, 0);
+  reading.settingsFile[SYNC_CONFIG_KEY] = { ...DEFAULT_SYNC_CONFIG, enabled: true };
+  await reading.scheduler.pullNow();
+  await settle();
+  check("and the next pass reads what the settings window stored", reading.calls.pull, 1);
+
+  // THE WRITE HALF, which is the one that loses data and the one no source-text
+  // check could see. Every `save` writes the whole map built from this webview's
+  // cache, so a cache filled before the user pressed Save carries that older
+  // configuration back over theirs - silently, permanently, and invisible until
+  // the pass after.
+  const writing = harness({ hosts: [host("h-1")] });
+  await writing.scheduler.pullNow();
+  await settle();
+  const saved = { ...DEFAULT_SYNC_CONFIG, enabled: true, bucket: "the one the user typed" };
+  writing.settingsFile[SYNC_CONFIG_KEY] = saved;
+  // An edit and its flush: the dirty set, the etag map and the status are three
+  // writes through the same wrapper, and any one of them carrying a stale
+  // baseline is enough to lose the configuration.
+  await writing.hosts.upsertHost(host("h-1", { name: "renamed" }));
+  await writing.fire();
+  check(
+    "a pass's own writes do not carry a stale configuration back over the user's",
+    writing.settingsFile[SYNC_CONFIG_KEY],
+    saved,
+  );
+  // ANTI-VACUITY for the arm above: the writes have to have actually happened,
+  // or "the configuration survived" is a statement about a pass that did nothing.
+  check("while still writing what it owed", writing.calls.push, 1);
+
+  // AND THE SWEEP, which is the narrower question the two halves cannot ask:
+  // that NO method skips the drop, including the ones neither scenario drives.
+  // The store's own reason for being one wrapper rather than a line per body is
+  // that a method added later cannot be the one that forgets - this is that
+  // claim, asserted.
+  const pass = async (run: (h: ReturnType<typeof harness>) => Promise<void>) => {
+    const h = harness({ hosts: [host("h-1")], dirty: [`${HOST_TOMBSTONE_KIND}:h-1`] });
+    const before = trace.length;
+    await run(h);
+    await settle();
+    const marks = trace.slice(before).map((t) => t.split(" ")[1]);
+    return {
+      operations: marks.filter((m) => m.startsWith("settings:")).length,
+      unpaired: marks.filter((m, i) => m.startsWith("settings:") && marks[i - 1] !== "invalidate"),
+    };
+  };
+
+  // ANTI-VACUITY for both arms: a pass that performed no settings operation at
+  // all would have an empty unpaired list and say nothing.
+  const pulled = await pass((h) => h.scheduler.pullNow());
+  check("a pull touches the settings file", pulled.operations > 0, true);
+  check("and every operation in it drops the cache first", pulled.unpaired, []);
+
+  const pushed = await pass((h) => h.scheduler.pushNow());
+  check("a push touches the settings file", pushed.operations > 0, true);
+  check("and every operation in it drops the cache first", pushed.unpaired, []);
+
+  // THE SECOND GUARD, as source text: `src/modules/sync/index.ts` imports a
+  // Tauri surface at the top level, so this suite cannot load it. The settings
+  // window invokes `sync_disable` itself, which empties the session in the Rust
+  // process while this module's memo still names it - so switching sync off and
+  // back on, which is the remedy a user reaches for, would otherwise leave every
+  // later pull answering that nothing is configured for the life of the process.
+  const index = withoutComments(readFileSync(resolve(ROOT, "src/modules/sync/index.ts"), "utf8"));
+  const listener = /listen<SyncRequest>\(SYNC_REQUEST_EVENT, \(e\) => \{([\s\S]*?)\n {2}\}\)/.exec(
+    index,
+  );
+  check("the sync-request listener is there to read", listener !== null, true);
+  check(
+    "and it drops the memo of what the session was opened with",
+    /openedWith = null;/.test(listener?.[1] ?? ""),
+    true,
+  );
+}
+
 async function main(): Promise<void> {
   await b1();
   await b2b3b4();
@@ -1099,6 +1841,15 @@ async function main(): Promise<void> {
   await b17();
   await b18();
   await b19();
+  await c1();
+  await c2();
+  await c3();
+  await c4();
+  await c6();
+  await c7();
+  await c8();
+  await c9();
+  await c10();
 
   // A pass that failed where no assertion could see it. Asserted last so the
   // group that produced it has already printed.
