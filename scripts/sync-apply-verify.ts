@@ -39,6 +39,21 @@
  *    first-connect prompt must mark nothing, or a machine that merely reconnects
  *    pushes over a real edit made elsewhere.
  *
+ * 6. A LANDING THAT NAMES NO ID. `livingTombstones` requires a string id, so a
+ *    tombstone landed with anything else is written to the file and filtered out
+ *    of every read of it afterwards - the delete lost on this device while the
+ *    caller records the object as applied and never lands it again.
+ *
+ * 7. A KEYCHAIN FAILURE THAT ESCAPES THE LOOP. The account release is the only
+ *    await inside an apply that can reject, and a rejection out of a queued write
+ *    takes every other landing in the set with it - which is the failure the
+ *    returned refusal exists to prevent, arriving through the one path left open.
+ *
+ * 8. A LANDING THAT UNDOES A DELETE MADE AFTER THE MERGE. The merge runs outside
+ *    the write queue and the apply runs inside it, so a local delete can land
+ *    between the two, and only the apply can see it. The fixtures run BOTH
+ *    directions: a newer local delete wins, an older one loses.
+ *
  * THE CLOCK IS INJECTED and the fake store BUFFERS `set` - both for the reasons
  * `sync-prereq-verify.ts` states at length. The commit COUNT and the keys a
  * commit carried are questions only a buffering fake can answer, and half the
@@ -61,6 +76,7 @@ import {
   HOST_TOMBSTONE_KIND,
   type Host,
   type HostGroup,
+  type RdpHost,
   type SshHost,
 } from "../src/modules/hosts/types";
 import type { SecretsIo } from "../src/modules/vault/adapters";
@@ -263,6 +279,23 @@ const inlineHost = (over: Partial<SshHost> = {}): SshHost =>
     ...over,
   });
 
+/** The other protocol arm, which reads the other flat pin field. Without a
+ *  fixture on this side, `withPins`'s RDP branch is never executed by this suite
+ *  at all and a rewrite of it would pass every check here. */
+const rdpHost = (over: Partial<RdpHost> = {}): RdpHost => ({
+  id: "r-1",
+  name: "desktop",
+  host: "10.0.0.9",
+  port: 3389,
+  protocol: "rdp",
+  credential: { kind: "identity", identityId: "i-1" },
+  desktopWidth: 1920,
+  desktopHeight: 1080,
+  sizeMode: "preset",
+  updatedAt: WRONG,
+  ...over,
+});
+
 const group = (over: Partial<HostGroup> = {}): HostGroup => ({
   id: "g-1",
   name: "prod",
@@ -441,8 +474,25 @@ const lastKeys = (p: Port): string[] => p.keyLog()[p.keyLog().length - 1] ?? [];
   check("nor the flat projection of it", kept.lastFingerprint, "SHA256:local");
   check("nor this device's connect history", kept.lastConnectedAt, 1_700_000_000_000);
 
-  // An RDP landing reads the other flat field, and an unpinned host must not
-  // grow one out of nothing.
+  // The RDP arm, which reads the OTHER flat field. Without this the suite never
+  // executes that branch of `withPins` at all.
+  const desktop = harness({
+    hosts: [
+      rdpHost({
+        pins: { "10.0.0.9": "SHA256:cert" },
+        certFingerprint: "SHA256:cert",
+        lastConnectedAt: 1_700_000_000_001,
+      }),
+    ],
+  });
+  await desktop.hosts.applyRemote([landed(rdpHost({ name: "renamed" }))], []);
+  const desk = (await desktop.hosts.listHosts())[0] as RdpHost;
+  check("an RDP landing keeps the stored cert pin", desk.certFingerprint, "SHA256:cert");
+  check("and the pin map behind it", desk.pins, { "10.0.0.9": "SHA256:cert" });
+  check("and its connect history", desk.lastConnectedAt, 1_700_000_000_001);
+  check("and the landing's content landed", desk.name, "renamed");
+
+  // An unpinned host must not grow a pin out of nothing.
   const fresh = harness();
   await fresh.hosts.applyRemote([landed(host({ id: "h-new" }))], []);
   const first = (await fresh.hosts.listHosts())[0] as SshHost;
@@ -455,8 +505,11 @@ const lastKeys = (p: Port): string[] => p.keyLog()[p.keyLog().length - 1] ?? [];
 // ---------------------------------------------------------------------------
 {
   console.log("\n[A4] a landed record clears the tombstone naming it, in the same commit");
+  // The local delete is OLDER than the landing, which is the resurrection case:
+  // the record was deleted here and then edited on another device. A newer local
+  // delete is the other way round and wins - that is A12.
   const h = harness({
-    hostGraves: [{ id: "h-1", kind: HOST_TOMBSTONE_KIND, deletedAt: START - 1000 }],
+    hostGraves: [{ id: "h-1", kind: HOST_TOMBSTONE_KIND, deletedAt: REMOTE - 1000 }],
   });
 
   await h.hosts.applyRemote([landed(host())], []);
@@ -482,7 +535,7 @@ const lastKeys = (p: Port): string[] => p.keyLog()[p.keyLog().length - 1] ?? [];
   // A re-landed delete REPLACES the stored tombstone rather than joining it: one
   // delete recorded twice would expire at two different times.
   const twice = harness({
-    hostGraves: [{ id: "h-1", kind: HOST_TOMBSTONE_KIND, deletedAt: START - 1000 }],
+    hostGraves: [{ id: "h-1", kind: HOST_TOMBSTONE_KIND, deletedAt: REMOTE - 1000 }],
   });
   await twice.hosts.applyRemote([buried<Host>("h-1", HOST_TOMBSTONE_KIND)], []);
   check("a re-landed delete leaves exactly one tombstone", await twice.hosts.listTombstones(), [
@@ -755,6 +808,163 @@ const lastKeys = (p: Port): string[] => p.keyLog()[p.keyLog().length - 1] ?? [];
     "and each of the three really did commit",
     [applied.hostsPort.commits(), applied.vaultPort.commits(), applied.forwardsPort.commits()],
     [1, 1, 1],
+  );
+}
+
+// ---------------------------------------------------------------------------
+// A10. A landing that names no id is refused, in both arms
+// ---------------------------------------------------------------------------
+{
+  console.log(
+    "\n[A10] an unnamed landing is refused rather than written where nothing can read it",
+  );
+  const h = harness();
+
+  // A tombstone whose id is not a string is the dangerous one: `livingTombstones`
+  // requires a string, so the row would be written to the file and then filtered
+  // out of every read of it forever - the delete lost on this device, silently,
+  // while the caller records the object as applied and never lands it again.
+  const numbered = await h.hosts.applyRemote(
+    [
+      {
+        deleted: true,
+        tombstone: { id: 7 as unknown as string, kind: HOST_TOMBSTONE_KIND, deletedAt: REMOTE },
+      },
+    ],
+    [],
+  );
+  check("a tombstone with a non-string id is refused", numbered.length, 1);
+  check("and nothing was written", h.hostsPort.commits(), 0);
+  check("so the file holds no unreadable row", await h.hosts.listTombstones(), []);
+
+  const unnamed = await h.hosts.applyRemote(
+    [{ deleted: false, id: undefined as unknown as string, record: {} as Host, updatedAt: REMOTE }],
+    [],
+  );
+  check("a record landing with no id is refused", unnamed.length, 1);
+  check("and no id-less row reached the host list", await h.hosts.listHosts(), []);
+  check("still no commit", h.hostsPort.commits(), 0);
+}
+
+// ---------------------------------------------------------------------------
+// A11. A keychain that refuses is a refusal, not a lost landing set
+// ---------------------------------------------------------------------------
+{
+  console.log("\n[A11] a keychain failure refuses that landing and keeps the rest of the set");
+  const h = harness({ hosts: [inlineHost(), host({ id: "h-2" })] });
+  h.hostSecrets.io.delete = async () => {
+    throw new Error("keyring locked");
+  };
+
+  // The delete comes FIRST and the good landing after it, which is the only
+  // arrangement that can tell a refusal from an abort.
+  const refusals = await h.hosts.applyRemote(
+    [buried<Host>("h-1", HOST_TOMBSTONE_KIND), landed(host({ id: "h-2", name: "renamed" }))],
+    [],
+  );
+  check("the failing release comes back as a refusal", refusals.length, 1);
+  check("naming the host it could not release", refusals[0]?.id, "h-1");
+  check(
+    "the host whose accounts would not clear is still there",
+    (await h.hosts.listHosts()).some((x) => x.id === "h-1"),
+    true,
+  );
+  check(
+    "and the good landing in the same set still landed",
+    (await h.hosts.listHosts()).find((x) => x.id === "h-2")?.name,
+    "renamed",
+  );
+  check("no tombstone was filed for the refused delete", await h.hosts.listTombstones(), []);
+
+  const v = harness({ vaultKeys: [vaultKey({ hasPrivateKey: true })], identities: [identity()] });
+  v.vaultSecrets.io.delete = async () => {
+    throw new Error("keyring locked");
+  };
+  const vaultRefusals = await v.vault.applyRemote(
+    [landed(identity({ name: "renamed" }))],
+    [buried<VaultKey>("k-1", KEY_TOMBSTONE_KIND)],
+  );
+  check(
+    "the vault store refuses the same way",
+    vaultRefusals.map((r) => r.id),
+    ["k-1"],
+  );
+  check("and its other landing survived", (await v.vault.listIdentities())[0]?.name, "renamed");
+}
+
+// ---------------------------------------------------------------------------
+// A12. A local delete made after the merge outranks a record landing
+// ---------------------------------------------------------------------------
+{
+  console.log("\n[A12] a newer local delete wins over the landing that did not know about it");
+  const h = harness({
+    // Deleted AFTER the stamp the landing carries, which is what the merge could
+    // not have seen: it read this device's state before the delete happened.
+    hostGraves: [{ id: "h-1", kind: HOST_TOMBSTONE_KIND, deletedAt: REMOTE + 1000 }],
+  });
+
+  const refusals = await h.hosts.applyRemote([landed(host())], []);
+  check("the landing is skipped, not refused", refusals, []);
+  check("the record does not come back", await h.hosts.listHosts(), []);
+  check("the local delete still stands", (await h.hosts.listTombstones()).length, 1);
+  check("and nothing was written at all", h.hostsPort.commits(), 0);
+
+  // The other direction, so the check above is not passing because a record
+  // landing never clears a tombstone: a delete OLDER than the landing loses.
+  const older = harness({
+    hostGraves: [{ id: "h-1", kind: HOST_TOMBSTONE_KIND, deletedAt: REMOTE - 1000 }],
+  });
+  await older.hosts.applyRemote([landed(host())], []);
+  check("an older local delete loses to the landing", (await older.hosts.listHosts()).length, 1);
+  check("and its tombstone is cleared", await older.hosts.listTombstones(), []);
+}
+
+// ---------------------------------------------------------------------------
+// A13. The tombstone key is left out of a commit that would not change it
+// ---------------------------------------------------------------------------
+{
+  console.log("\n[A13] a delete that landed before does not rewrite the key on every pull");
+  const already: Tombstone = { id: "h-1", kind: HOST_TOMBSTONE_KIND, deletedAt: REMOTE };
+  const h = harness({ hostGraves: [already] });
+
+  await h.hosts.applyRemote([buried<Host>("h-1", HOST_TOMBSTONE_KIND)], []);
+  check("the same delete arriving twice costs no commit", h.hostsPort.commits(), 0);
+  check("and the list is unchanged", await h.hosts.listTombstones(), [already]);
+
+  // Two landings of one id in one set leave ONE row, not two.
+  const twice = harness();
+  await twice.hosts.applyRemote(
+    [buried<Host>("h-9", HOST_TOMBSTONE_KIND), buried<Host>("h-9", HOST_TOMBSTONE_KIND)],
+    [],
+  );
+  check("a repeated id inside one set files one tombstone", await twice.hosts.listTombstones(), [
+    { id: "h-9", kind: HOST_TOMBSTONE_KIND, deletedAt: REMOTE },
+  ]);
+
+  // A tombstone and a record for one id in one set leave the two lists agreeing,
+  // whichever order they arrive in. One id carries one disposition out of a
+  // merge, so this is a malformed set - but the state it would otherwise leave is
+  // a live record with deleted accounts and a tombstone naming it.
+  const after = harness({ hosts: [inlineHost()] });
+  await after.hosts.applyRemote([buried<Host>("h-1", HOST_TOMBSTONE_KIND), landed(host())], []);
+  check(
+    "record after tombstone: the record is live and no tombstone names it",
+    {
+      hosts: (await after.hosts.listHosts()).map((x) => x.id),
+      graves: await after.hosts.listTombstones(),
+    },
+    { hosts: ["h-1"], graves: [] },
+  );
+
+  const before = harness({ hosts: [inlineHost()] });
+  await before.hosts.applyRemote([landed(host()), buried<Host>("h-1", HOST_TOMBSTONE_KIND)], []);
+  check(
+    "tombstone after record: the record is gone and one tombstone names it",
+    {
+      hosts: (await before.hosts.listHosts()).map((x) => x.id),
+      graves: (await before.hosts.listTombstones()).map((t) => t.id),
+    },
+    { hosts: [], graves: ["h-1"] },
   );
 }
 

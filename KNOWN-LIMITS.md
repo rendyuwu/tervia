@@ -617,7 +617,7 @@ worse than the gap: the reference guards `throw`, and a throw from inside the
 single queued write an apply runs as would lose every other landing in the same
 set.
 
-**Carried by.** `landingRefusal` in `src/lib/tombstones.ts`, whose four
+**Carried by.** `landingRefusal` in `src/lib/tombstones.ts`, whose five
 conditions are the whole refusal set and deliberately exclude every reference
 guard, and the `applyRemote` doc on each of the three stores. `assertReferences`
 in `src/modules/hosts/store.ts` already accepts the analogous case for a missing
@@ -625,7 +625,57 @@ group, and says why: the member renders as ungrouped, which is visible and
 recoverable. Hosts and groups are applied before rules within one pull, so the
 ordinary case resolves in one pass.
 
-**Trigger.** A reference whose dangling state is neither visible nor recoverable
+**Trigger.** A reference whose dangling state is neither visible nor
+recoverable, one that makes a record unopenable rather than oddly rendered.
+That would need a per-pull deferral pass, which is a different shape from a
+refusal.
 
-- one that makes a record unopenable rather than oddly rendered. That would need
-  a per-pull deferral pass, which is a different shape from a refusal.
+### A landed delete runs none of the in-use refusals a local delete runs
+
+**Accepted state.** `deleteKey` refuses while an identity still names the key,
+`deleteIdentity` refuses while a host still binds it, and `deleteHost` refuses
+while another row jumps or tunnels through it. `applyRemote` runs none of the
+three: it drops the record and releases the keychain accounts it owned. So a
+holder this device has created and not yet pushed does not stop a delete another
+device published, and the released secret cannot be put back - this layer never
+reads one to hold a copy.
+
+Accepted because refusing is worse in the direction that matters. The other
+device decided the delete against the inventory it could see; a refusal here
+leaves the record alive locally, and a live record is pushed, so one user's
+delete would resurrect on every device that still has a holder. The holder that
+remains is the state the local refusals describe as recoverable: an identity
+naming a key that is gone, or a row whose jump host vanished.
+
+**Carried by.** The `applyRemote` doc on each of the three stores, which states
+it beside the two cascades that are deliberately not re-run. The local refusals
+are `identitiesUsingKey` in `src/modules/vault/refs.ts`, the `hostRefs` argument
+to `deleteIdentity`, and the `VaultInUseError` branch of `deleteHost` in
+`src/modules/hosts/store.ts`.
+
+**Trigger.** A report of a secret lost this way, or the pull gaining a place to
+put a refusal that does not republish the record - a per-object quarantine that
+holds the landing without reviving what it names.
+
+### A landed delete drops a forward rule without stopping the forward it is running
+
+**Accepted state.** Every user-reachable write route in the forwards store is
+sequenced behind a release of the running forward; `applyRemote` is the fourth
+write route and is not, so a landed delete can remove a rule record while its
+tunnel is still bound to a local port. The tunnel then runs with nothing naming
+it until the app is restarted.
+
+The store cannot close this itself: the runtime lives in
+`src/modules/forwards/controller.ts`, which imports the store, so a store that
+called back into it would close the cycle every port in that module exists to
+keep open. The release belongs to whatever calls `applyRemote`, ahead of the
+apply, which is how `HostsPage.tsx` sequences the same pair for `deleteHost`.
+
+**Carried by.** The pinned member set in `scripts/forwards-shell-verify.ts`,
+which names `applyRemote` as a write route the release claim does not cover, and
+the `applyRemote` doc in `src/modules/forwards/store.ts`. Nothing calls
+`applyRemote` today, so nothing reaches this state yet.
+
+**Trigger.** The first caller of `applyRemote`. It either sequences
+`releaseRulesForHost`-style release ahead of the apply, or this entry becomes a
+defect rather than an accepted state.

@@ -1,3 +1,4 @@
+import { describeError } from "@/lib/describeError";
 import type { StoreRecovery } from "@/lib/storeRecovery";
 import {
   landedTombstones,
@@ -198,11 +199,24 @@ export type HostsStore = {
    * a first-connect prompt it should never have been asked.
    *
    * REFUSALS COME BACK, nothing throws. See `landingRefusal` in
-   * `src/lib/tombstones.ts` for the four conditions and for why the reference
+   * `src/lib/tombstones.ts` for the five conditions and for why the reference
    * guards are outside them. `assertBindingOwner` is outside them too, on the
    * same terms: the landing is a snapshot of an inventory another device already
    * held, and a throw from inside this queued write would lose every other
    * landing in the set.
+   *
+   * A LANDED DELETE RUNS NONE OF THE IN-USE REFUSALS `deleteHost` RUNS, and that
+   * is accepted rather than overlooked - `KNOWN-LIMITS.md` carries it. The other
+   * device decided the delete against the inventory it could see, and a local
+   * holder it never saw cannot un-decide it: refusing here would leave the record
+   * alive locally and push it straight back, resurrecting on every device what
+   * one user deleted.
+   *
+   * A LOCAL DELETE MADE AFTER THE MERGE WINS over a record landing for the same
+   * id. The merge runs outside the queue and this runs inside it, so only this
+   * function can compare the two, and it applies the merge's own rule: the later
+   * stamp wins. The landing is skipped rather than refused, because the local
+   * delete is already marked dirty and the next push is what tells the remote.
    */
   applyRemote(
     hosts: RemoteLanding<Host>[],
@@ -1196,15 +1210,50 @@ export function createHostsStore(io: HostsIo): HostsStore {
             // The keychain half is not optional in the same way. There is no
             // `secrets_list` command, so a password left at an account whose host
             // is gone is unreachable by anything on this machine, forever.
-            await deleteAccounts(nextHosts[idx].id, secretFieldsFor(nextHosts[idx]));
+            //
+            // A keychain that refuses becomes a REFUSAL, not a throw. This is the
+            // only await in the loop that can reject, and letting it out would
+            // lose every other landing in the set - the failure the returned
+            // refusal exists to prevent, arriving through the one path that had
+            // not been closed. The record is left in place, so what a partial
+            // release leaves behind is an account the record still names and
+            // `deleteHost` can still reach.
+            try {
+              await deleteAccounts(nextHosts[idx].id, secretFieldsFor(nextHosts[idx]));
+            } catch (e) {
+              refusals.push({
+                kind: HOST_TOMBSTONE_KIND,
+                id: landing.tombstone.id,
+                reason: `the keychain refused to release this host's accounts: ${describeError(e)}`,
+              });
+              continue;
+            }
             nextHosts.splice(idx, 1);
             hostsTouched = true;
           }
+          // A record landed for this id EARLIER IN THE SAME SET is undone here, so
+          // the two lists cannot disagree about one id. One id carries one
+          // disposition out of a merge, so this is a malformed set rather than an
+          // ordinary one - but the state it would otherwise leave is a live record
+          // whose accounts are gone with a tombstone naming it.
+          const revivedIdx = revived.indexOf(landing.tombstone.id);
+          if (revivedIdx >= 0) revived.splice(revivedIdx, 1);
           // Filed even with no local record to drop: another device deleted it,
           // and a device that has not pulled since would push its own copy back.
           buried.push(landing.tombstone);
           continue;
         }
+        // A LOCAL DELETE MADE AFTER THE MERGE OUTRANKS THIS LANDING. The merge
+        // runs outside the write queue and the apply runs inside it, so a delete
+        // can land between the two - and this is the only place that can see it,
+        // because only this function reads the tombstone list under the same lock
+        // that writes the record. The comparison is the merge's own rule, applied
+        // to what the merge could not have seen; the local delete is already
+        // marked dirty, so the remote learns about it on the next push.
+        const superseding = graves.find(
+          (t) => t.id === landing.id && t.kind === HOST_TOMBSTONE_KIND,
+        );
+        if (superseding && superseding.deletedAt > landing.updatedAt) continue;
         const idx = nextHosts.findIndex((h) => h.id === landing.id);
         const existing = idx >= 0 ? nextHosts[idx] : undefined;
         // The pins come from the STORED record and from nowhere else, and the
@@ -1221,6 +1270,10 @@ export function createHostsStore(io: HostsIo): HostsStore {
         );
         if (idx >= 0) nextHosts[idx] = record;
         else nextHosts.push(record);
+        // Undoes a tombstone landed for this id earlier in the same set - see the
+        // other half of this pair in the deleted branch above.
+        const buriedIdx = buried.findIndex((t) => t.id === landing.id);
+        if (buriedIdx >= 0) buried.splice(buriedIdx, 1);
         revived.push(landing.id);
         hostsTouched = true;
       }
@@ -1237,6 +1290,8 @@ export function createHostsStore(io: HostsIo): HostsStore {
             nextGroups.splice(idx, 1);
             groupsTouched = true;
           }
+          const revivedIdx = revived.indexOf(landing.tombstone.id);
+          if (revivedIdx >= 0) revived.splice(revivedIdx, 1);
           // No cascade onto the members either, for the reason above: the origin
           // device cleared their `groupId` and stamped them, so those rows arrive
           // as host landings of their own. A member whose record has not landed
@@ -1245,10 +1300,16 @@ export function createHostsStore(io: HostsIo): HostsStore {
           buried.push(landing.tombstone);
           continue;
         }
+        const supersedingGroup = graves.find(
+          (t) => t.id === landing.id && t.kind === GROUP_TOMBSTONE_KIND,
+        );
+        if (supersedingGroup && supersedingGroup.deletedAt > landing.updatedAt) continue;
         const record: HostGroup = { ...landing.record, updatedAt: landing.updatedAt };
         const idx = nextGroups.findIndex((g) => g.id === landing.id);
         if (idx >= 0) nextGroups[idx] = record;
         else nextGroups.push(record);
+        const buriedIdx = buried.findIndex((t) => t.id === landing.id);
+        if (buriedIdx >= 0) buried.splice(buriedIdx, 1);
         revived.push(landing.id);
         groupsTouched = true;
       }

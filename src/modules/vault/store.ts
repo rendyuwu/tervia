@@ -1,3 +1,4 @@
+import { describeError } from "@/lib/describeError";
 import type { StoreRecovery } from "@/lib/storeRecovery";
 import {
   landedTombstones,
@@ -127,10 +128,20 @@ export type VaultStore = {
    * at an account no record names is not untidy, it is unreachable forever.
    *
    * REFUSALS COME BACK, nothing throws - see `landingRefusal` in
-   * `src/lib/tombstones.ts` for the four conditions, and for why the reference
+   * `src/lib/tombstones.ts` for the five conditions, and for why the reference
    * guards `upsertIdentity` runs are deliberately outside them: an identity may
    * legitimately arrive before the key it names, since the order within one pull
    * is an artifact of a listing rather than of what the other device holds.
+   *
+   * A LANDED DELETE RUNS NEITHER IN-USE REFUSAL. `deleteKey` refuses while an
+   * identity still names the key and `deleteIdentity` refuses while a host still
+   * binds it; a landing does neither, so a key body can be released here while a
+   * local-only identity still names it. Accepted, with the reasoning and the
+   * trigger in `KNOWN-LIMITS.md`.
+   *
+   * A LOCAL DELETE MADE AFTER THE MERGE WINS over a record landing for the same
+   * id - see `applyRemote` in `modules/hosts/store.ts` for why only this function
+   * can make that comparison.
    */
   applyRemote(
     identities: RemoteLanding<VaultIdentity>[],
@@ -477,11 +488,7 @@ export function createVaultStore(io: VaultIo): VaultStore {
         throw new VaultInUseError(`identity "${identity.name}"`, "host", holders);
       }
 
-      await Promise.all(
-        VAULT_IDENTITY_SECRET_FIELDS.map((field) =>
-          io.secrets.delete(VAULT_KEYRING_SERVICE, vaultAccount(id, field)),
-        ),
-      );
+      await releaseAccounts(id, VAULT_IDENTITY_SECRET_FIELDS);
       // The record drop and its tombstone in ONE commit, after the accounts are
       // cleared - the ordering is unchanged, only the second key is new. The
       // `if (!identity) return` above keeps a missing id from minting a tombstone
@@ -515,11 +522,7 @@ export function createVaultStore(io: VaultIo): VaultStore {
         throw new VaultInUseError(`key "${key.name}"`, "identity", holders);
       }
 
-      await Promise.all(
-        VAULT_KEY_SECRET_FIELDS.map((field) =>
-          io.secrets.delete(VAULT_KEYRING_SERVICE, vaultAccount(id, field)),
-        ),
-      );
+      await releaseAccounts(id, VAULT_KEY_SECRET_FIELDS);
       // One commit, after the accounts are cleared - see `deleteIdentity`.
       const at = now();
       const graves = await readTombstones(at);
@@ -537,12 +540,12 @@ export function createVaultStore(io: VaultIo): VaultStore {
   }
 
   /**
-   * Clear every account one dropped record owned.
+   * Clear every account one dropped record owned - the keychain half of every
+   * delete in this module, local or landed.
    *
-   * The purely local half of a delete, and the half a landing DOES re-run: the
-   * origin device cleared its own keychain, and there is no `secrets_list`
-   * command, so a body left behind here is reachable by nothing on this machine
-   * ever again.
+   * A landed delete re-runs it rather than trusting the origin device's: that
+   * device cleared ITS keychain, and there is no `secrets_list` command, so a
+   * body left behind here is reachable by nothing on this machine ever again.
    */
   async function releaseAccounts(id: string, fields: readonly string[]): Promise<void> {
     await Promise.all(
@@ -578,21 +581,45 @@ export function createVaultStore(io: VaultIo): VaultStore {
         if (landing.deleted) {
           const idx = nextIdentities.findIndex((i) => i.id === landing.tombstone.id);
           if (idx >= 0) {
-            await releaseAccounts(landing.tombstone.id, VAULT_IDENTITY_SECRET_FIELDS);
+            // A keychain that refuses becomes a REFUSAL, not a throw: this is the
+            // only await in the loop that can reject, and letting it out would
+            // lose every other landing in the set. The record stays, so a partial
+            // release leaves accounts `deleteIdentity` can still reach.
+            try {
+              await releaseAccounts(landing.tombstone.id, VAULT_IDENTITY_SECRET_FIELDS);
+            } catch (e) {
+              refusals.push({
+                kind: IDENTITY_TOMBSTONE_KIND,
+                id: landing.tombstone.id,
+                reason: `the keychain refused to release this identity's accounts: ${describeError(e)}`,
+              });
+              continue;
+            }
             nextIdentities.splice(idx, 1);
             identitiesTouched = true;
           }
+          const revivedIdx = revived.indexOf(landing.tombstone.id);
+          if (revivedIdx >= 0) revived.splice(revivedIdx, 1);
           // Filed even with no local record to drop: another device deleted it,
           // and a device that has not pulled since would push its own copy back.
           buried.push(landing.tombstone);
           continue;
         }
+        // A local delete made after the merge outranks the landing - see the same
+        // comparison in `applyRemote` in `modules/hosts/store.ts` for why only
+        // this function can make it.
+        const superseding = graves.find(
+          (t) => t.id === landing.id && t.kind === IDENTITY_TOMBSTONE_KIND,
+        );
+        if (superseding && superseding.deletedAt > landing.updatedAt) continue;
         // `secrets` is deliberately not read here - see `RemoteLanding`. The
         // record's own `hasPassword` is applied as the merge decided it.
         const record: VaultIdentity = { ...landing.record, updatedAt: landing.updatedAt };
         const idx = nextIdentities.findIndex((i) => i.id === landing.id);
         if (idx >= 0) nextIdentities[idx] = record;
         else nextIdentities.push(record);
+        const buriedIdx = buried.findIndex((t) => t.id === landing.id);
+        if (buriedIdx >= 0) buried.splice(buriedIdx, 1);
         revived.push(landing.id);
         identitiesTouched = true;
       }
@@ -606,17 +633,34 @@ export function createVaultStore(io: VaultIo): VaultStore {
         if (landing.deleted) {
           const idx = nextKeys.findIndex((k) => k.id === landing.tombstone.id);
           if (idx >= 0) {
-            await releaseAccounts(landing.tombstone.id, VAULT_KEY_SECRET_FIELDS);
+            try {
+              await releaseAccounts(landing.tombstone.id, VAULT_KEY_SECRET_FIELDS);
+            } catch (e) {
+              refusals.push({
+                kind: KEY_TOMBSTONE_KIND,
+                id: landing.tombstone.id,
+                reason: `the keychain refused to release this key's accounts: ${describeError(e)}`,
+              });
+              continue;
+            }
             nextKeys.splice(idx, 1);
             keysTouched = true;
           }
+          const revivedIdx = revived.indexOf(landing.tombstone.id);
+          if (revivedIdx >= 0) revived.splice(revivedIdx, 1);
           buried.push(landing.tombstone);
           continue;
         }
+        const superseding = graves.find(
+          (t) => t.id === landing.id && t.kind === KEY_TOMBSTONE_KIND,
+        );
+        if (superseding && superseding.deletedAt > landing.updatedAt) continue;
         const record: VaultKey = { ...landing.record, updatedAt: landing.updatedAt };
         const idx = nextKeys.findIndex((k) => k.id === landing.id);
         if (idx >= 0) nextKeys[idx] = record;
         else nextKeys.push(record);
+        const buriedIdx = buried.findIndex((t) => t.id === landing.id);
+        if (buriedIdx >= 0) buried.splice(buriedIdx, 1);
         revived.push(landing.id);
         keysTouched = true;
       }

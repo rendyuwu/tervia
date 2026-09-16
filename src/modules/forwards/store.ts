@@ -77,11 +77,23 @@ export type ForwardsStore = {
    * every device that receives it.
    *
    * REFUSALS COME BACK, nothing throws - see `landingRefusal` in
-   * `src/lib/tombstones.ts` for the four conditions and for why the reference
+   * `src/lib/tombstones.ts` for the five conditions and for why the reference
    * guard `upsertRule` runs is deliberately not among them. A rule whose host
    * has not landed yet is applied with a `hostId` that dangles until the host
    * arrives, on the same terms `assertReferences` in `modules/hosts/store.ts`
    * already accepts for a missing group.
+   *
+   * A LANDED DELETE DROPS A RULE WITHOUT STOPPING IT. The runtime that would
+   * release a running forward lives in `controller.ts`, which imports this
+   * module, so this store cannot reach it without closing the cycle every port
+   * here exists to keep open - the caller sequences the release ahead of the
+   * apply, the way `HostsPage.tsx` sequences `deleteHost`'s. Carried in
+   * `KNOWN-LIMITS.md` with the pinned member set in
+   * `scripts/forwards-shell-verify.ts`.
+   *
+   * A LOCAL DELETE MADE AFTER THE MERGE WINS over a record landing for the same
+   * id - see `applyRemote` in `modules/hosts/store.ts` for why only this function
+   * can make that comparison.
    */
   applyRemote(rules: RemoteLanding<ForwardRule>[]): Promise<RemoteLandingRefusal[]>;
   /** What this store's deletes have left behind, already pruned to the window -
@@ -295,16 +307,27 @@ export function createForwardStore(io: ForwardsIo): ForwardsStore {
             rules.splice(idx, 1);
             touched = true;
           }
+          const revivedIdx = revived.indexOf(landing.tombstone.id);
+          if (revivedIdx >= 0) revived.splice(revivedIdx, 1);
           // Filed even when no local rule matched: another device deleted it, and
           // a device that has not pulled since would otherwise push its own copy
           // back the moment this one lands.
           buried.push(landing.tombstone);
           continue;
         }
+        // A local delete made after the merge outranks the landing - see the same
+        // comparison in `applyRemote` in `modules/hosts/store.ts` for why only
+        // this function can make it.
+        const superseding = graves.find(
+          (t) => t.id === landing.id && t.kind === RULE_TOMBSTONE_KIND,
+        );
+        if (superseding && superseding.deletedAt > landing.updatedAt) continue;
         const record: ForwardRule = { ...landing.record, updatedAt: landing.updatedAt };
         const idx = rules.findIndex((r) => r.id === landing.id);
         if (idx >= 0) rules[idx] = record;
         else rules.push(record);
+        const buriedIdx = buried.findIndex((t) => t.id === landing.id);
+        if (buriedIdx >= 0) buried.splice(buriedIdx, 1);
         revived.push(landing.id);
         touched = true;
       }
