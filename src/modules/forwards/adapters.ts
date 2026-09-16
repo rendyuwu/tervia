@@ -1,4 +1,5 @@
 import { createRecoveredStore, type RecoveredStoreIo } from "@/lib/recoveredStore";
+import type { DirtyId } from "@/lib/tombstones";
 
 import { FORWARDS_KEY, FORWARDS_STORE_PATH } from "./types";
 
@@ -31,7 +32,12 @@ export function createTauriForwardsStoreIo(): ForwardsStoreIo {
   });
 }
 
-/** `now` is the clock every `updatedAt` and `deletedAt` here is stamped from -
- *  optional with the real default, and see `HostsIo` in `modules/hosts/adapters.ts`
- *  for why a port rather than an inline `Date.now()`. */
-export type ForwardsIo = { store: ForwardsStoreIo; now?: () => number };
+/** `now` is the clock every `updatedAt` and `deletedAt` here is stamped from, and
+ *  `markDirty` is told which records a committed write owes a push. Both optional
+ *  with the real default - see `HostsIo` in `modules/hosts/adapters.ts` for why
+ *  each is a port rather than an inline call. */
+export type ForwardsIo = {
+  store: ForwardsStoreIo;
+  now?: () => number;
+  markDirty?: (dirty: DirtyId[]) => void;
+};

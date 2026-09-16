@@ -181,8 +181,9 @@ export type HostBase = {
    * a save never bumps the stamp. A restored backup is therefore stamped as a
    * local write, which it genuinely is: every sanitizer in `modules/backup` is
    * a whitelist, so an exported stamp is dropped at import rather than carried
-   * through. Landing a record at a timestamp the store did not just produce is
-   * a merge decision and is deferred - see `KNOWN-LIMITS.md`.
+   * through. The one writer that does NOT overwrite it is `applyRemote` in
+   * `store.ts`, which lands an already-merged record at the timestamp the remote
+   * gave it - the only caller that did not originate what it is writing.
    *
    * On {@link HostBase} rather than per arm, on the same grounds as `pins`: the
    * shape does not depend on `protocol`, so nothing needs narrowing.

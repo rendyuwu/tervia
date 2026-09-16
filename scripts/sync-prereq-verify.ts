@@ -4,16 +4,20 @@
  * something behind. Run: `npx tsx scripts/sync-prereq-verify.ts`.
  *
  * One suite for three stores rather than three additions to three suites,
- * because this is ONE shape repeated: `modules/hosts`, `modules/vault` and
- * `modules/forwards` each stamp `updatedAt` from their own clock and each file a
- * tombstone in the same key through the same helpers in `src/lib/tombstones.ts`.
+ * because this is ONE shape repeated: in `modules/hosts`, `modules/vault` and
+ * `modules/forwards` every mutator a user reaches stamps `updatedAt` from its
+ * own store's clock, and each files a tombstone in the same key through the same
+ * helpers in `src/lib/tombstones.ts`. The one writer that does NOT stamp is
+ * `applyRemote`, which lands another device's record at the remote's timestamp;
+ * nothing here exercises it, and `sync-apply-verify.ts` is where it is pinned.
  * There is no vault store suite to extend in any case - `createVaultStore` is
  * only built inside suites that declare a different subject.
  *
  * Every property here fails SILENTLY, which is why they are pinned before any
  * sync code exists:
  *
- * 1. THE STORE STAMPS, NOT THE CALLER. An editor round-trips the record it
+ * 1. THE STORE STAMPS, NOT THE CALLER, in every mutator below. An editor
+ *    round-trips the record it
  *    loaded, so a store that honoured a caller-supplied `updatedAt` would carry
  *    the OLD stamp forward on every save and a real edit would never win a
  *    merge. Every stamp check here feeds a deliberately wrong value in, because
@@ -300,7 +304,7 @@ const lastKeys = (p: Port): string[] => p.keyLog()[p.keyLog().length - 1] ?? [];
 // 1. Every mutator stamps `updatedAt` from the store's own clock
 // ---------------------------------------------------------------------------
 {
-  console.log("\n[stamps] every mutator stamps updatedAt, overwriting the caller");
+  console.log("\n[stamps] every mutator a user reaches stamps updatedAt, overwriting the caller");
   const h = harness();
 
   const saved = await h.hosts.upsertHost(host());

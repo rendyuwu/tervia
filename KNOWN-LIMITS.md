@@ -43,11 +43,15 @@ _secret material itself_ moved. Refreshing there would hand the stale form a
 record whose next Save writes the user's draft over a body or a password
 another window just stored - the very thing the stamp fired to refuse.
 
-**Trigger.** A vault editor gaining a field whose content exists nowhere but
-the form - a key the dialog generates rather than one picked from a file is
-the case, and neither editor has one today: the key body comes from a file
-that is still on disk, and everything else is typed. Or a user report of the
-retyping cost, which does not wait on a new field.
+**Trigger.** A user report of the retyping cost. That trigger used to wait on
+how often two windows of this app edit one record at the same moment, which is
+rare; it no longer does. `applyRemote` in `src/modules/vault/store.ts` lands
+another DEVICE's records into the same store, so a key or an identity can move
+underneath an open editor with nothing on this machine having touched it. Or a
+vault editor gaining a field whose content exists nowhere but the form - a key
+the dialog generates rather than one picked from a file is the case, and
+neither editor has one today: the key body comes from a file that is still on
+disk, and everything else is typed.
 
 ### Nothing pins where a vault editor's message renders
 
@@ -603,34 +607,75 @@ only things that compact the stored list. All three name this file back.
 **Trigger.** Any store gaining a load-time maintenance pass for some other
 reason. The pruning can ride it at no extra cost, and this entry retires.
 
-### The stores stamp every timestamp from their own clock, so no caller can land a record or a tombstone at a time it did not just produce
+### A landed record can sit with a reference that has not arrived yet
 
-**Accepted state.** Every mutator overwrites whatever `updatedAt` its caller
-supplied and stamps the store's own clock, and every delete stamps `deletedAt`
-the same way. That is correct for every caller that exists: an editor
-round-trips the record it loaded, so honouring a caller-supplied value would
-mean a save never bumps the stamp, and a restored backup genuinely is a local
-write. It is not sufficient for a sync pull, which has to land a remote record
-at its REMOTE `updatedAt` and a remote tombstone at its remote `deletedAt` - a
-locally-stamped `deletedAt` restarts the 90-day window on every device that
-receives it, and can outrank a resurrection the remote already published. Safe to
-defer because the field is optional and no wire format is minted yet.
+**Accepted state.** `applyRemote` applies a landing whose `hostId`, `keyId` or
+`groupId` names a record this device does not hold, rather than refusing it. The
+order of a pull is an artifact of a listing rather than of what the other device
+holds, so a rule arriving before its host is ordinary - and the alternative is
+worse than the gap: the reference guards `throw`, and a throw from inside the
+single queued write an apply runs as would lose every other landing in the same
+set.
 
-The shortcut that is NOT available: reaching past this layer with a direct
-`io.store.set`. `hosts/store.ts`'s header states the rule - every integrity rule
-lives in the store layer, because a dialog is never the only writer - and nothing
-outside the three `store.ts` files names a record key today. So the pull has to
-go through the layer, and widening ten signatures one at a time is the wrong
-shape for it: a single `applyRemote`-style entry point on each store, which
-takes an already-merged record or tombstone together with its remote timestamp,
-is the surface to add.
+**Carried by.** `landingRefusal` in `src/lib/tombstones.ts`, whose five
+conditions are the whole refusal set and deliberately exclude every reference
+guard, and the `applyRemote` doc on each of the three stores. `assertReferences`
+in `src/modules/hosts/store.ts` already accepts the analogous case for a missing
+group, and says why: the member renders as ungrouped, which is visible and
+recoverable. Hosts and groups are applied before rules within one pull, so the
+ordinary case resolves in one pass.
 
-**Carried by.** `upsertHost`, `upsertGroup`, `deleteHost` and `deleteGroup` in
-`src/modules/hosts/store.ts`; `upsertIdentity`, `upsertKey`, `deleteIdentity`
-and `deleteKey` in `src/modules/vault/store.ts`; `upsertRule`, `deleteRule` and
-`dropRulesForHost` in `src/modules/forwards/store.ts`. Each of the three files
-reads its clock through a single `now`, which is where the decision is stated.
+**Trigger.** A reference whose dangling state is neither visible nor
+recoverable, one that makes a record unopenable rather than oddly rendered.
+That would need a per-pull deferral pass, which is a different shape from a
+refusal.
 
-**Trigger.** The sync pull path needing to land a remote record or a remote
-tombstone at its remote timestamp - the first writer in this codebase that did
-not originate what it is writing.
+### A landed delete runs none of the in-use refusals a local delete runs
+
+**Accepted state.** `deleteKey` refuses while an identity still names the key,
+`deleteIdentity` refuses while a host still binds it, and `deleteHost` refuses
+while another row jumps or tunnels through it. `applyRemote` runs none of the
+three: it drops the record and releases the keychain accounts it owned. So a
+holder this device has created and not yet pushed does not stop a delete another
+device published, and the released secret cannot be put back - this layer never
+reads one to hold a copy.
+
+Accepted because refusing is worse in the direction that matters. The other
+device decided the delete against the inventory it could see; a refusal here
+leaves the record alive locally, and a live record is pushed, so one user's
+delete would resurrect on every device that still has a holder. The holder that
+remains is the state the local refusals describe as recoverable: an identity
+naming a key that is gone, or a row whose jump host vanished.
+
+**Carried by.** The `applyRemote` doc on each of the three stores, which states
+it beside the two cascades that are deliberately not re-run. The local refusals
+are `identitiesUsingKey` in `src/modules/vault/refs.ts`, the `hostRefs` argument
+to `deleteIdentity`, and the `VaultInUseError` branch of `deleteHost` in
+`src/modules/hosts/store.ts`.
+
+**Trigger.** A report of a secret lost this way, or the pull gaining a place to
+put a refusal that does not republish the record - a per-object quarantine that
+holds the landing without reviving what it names.
+
+### A landed delete drops a forward rule without stopping the forward it is running
+
+**Accepted state.** Every user-reachable write route in the forwards store is
+sequenced behind a release of the running forward; `applyRemote` is the fourth
+write route and is not, so a landed delete can remove a rule record while its
+tunnel is still bound to a local port. The tunnel then runs with nothing naming
+it until the app is restarted.
+
+The store cannot close this itself: the runtime lives in
+`src/modules/forwards/controller.ts`, which imports the store, so a store that
+called back into it would close the cycle every port in that module exists to
+keep open. The release belongs to whatever calls `applyRemote`, ahead of the
+apply, which is how `HostsPage.tsx` sequences the same pair for `deleteHost`.
+
+**Carried by.** The pinned member set in `scripts/forwards-shell-verify.ts`,
+which names `applyRemote` as a write route the release claim does not cover, and
+the `applyRemote` doc in `src/modules/forwards/store.ts`. Nothing calls
+`applyRemote` today, so nothing reaches this state yet.
+
+**Trigger.** The first caller of `applyRemote`. It either sequences
+`releaseRulesForHost`-style release ahead of the apply, or this entry becomes a
+defect rather than an accepted state.
