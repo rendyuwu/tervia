@@ -8,10 +8,10 @@
 //
 // SECRETS ARE WRITE-ONLY HERE. `SecretsIo` in `src/modules/vault/adapters.ts`
 // has no single-value read at all - deliberately - and re-displaying a stored
-// passphrase would buy nothing anyway. So the three secret fields always render
-// empty, and A BLANK FIELD MEANS "stored, unchanged": the alternative, treating
-// blank as a clear, would wipe a working passphrase every time somebody opened
-// this tab to correct a bucket name.
+// passphrase would buy nothing anyway. So the secret fields always render empty,
+// and A BLANK FIELD MEANS "stored, unchanged": the alternative, treating blank
+// as a clear, would wipe a working passphrase every time somebody opened this
+// tab to correct a bucket name.
 
 import { invoke } from "@tauri-apps/api/core";
 import { emit } from "@tauri-apps/api/event";
@@ -39,6 +39,8 @@ import {
   SYNC_REQUEST_EVENT,
   SYNC_SECRET_ACCESS_KEY_ACCOUNT,
   SYNC_STORE_PATH,
+  SYNC_WEBDAV_PASSWORD_ACCOUNT,
+  SYNC_WEBDAV_USERNAME_ACCOUNT,
   type SyncConfig,
   type SyncRequest,
   type SyncStatus,
@@ -48,25 +50,55 @@ import { Label } from "../components/Label";
 import { SectionHeader } from "../components/SectionHeader";
 import { SettingRow } from "../components/SettingRow";
 
-/** The one provider `build` in `src-tauri/src/modules/sync/provider.rs`
- *  dispatches on today. A list rather than a constant because the id is stored
- *  and the label is not, and the two must not drift apart. */
-const PROVIDERS: { id: string; label: string }[] = [{ id: "s3", label: "S3-compatible" }];
+/** The providers `build` in `src-tauri/src/modules/sync/provider.rs` dispatches
+ *  on. A list rather than a constant because the id is stored and the label is
+ *  not, and the two must not drift apart. */
+const PROVIDERS: { id: string; label: string }[] = [
+  { id: "s3", label: "S3-compatible" },
+  { id: "webdav", label: "WebDAV (Nextcloud, ownCloud)" },
+];
 
-/** What this session typed into the three secret fields. Never read back out of
- *  the keychain, and never written into {@link SyncConfig}. */
-type SecretDraft = { passphrase: string; accessKeyId: string; secretAccessKey: string };
+/**
+ * What this session typed into the secret fields. Never read back out of the
+ * keychain, and never written into {@link SyncConfig}.
+ *
+ * EVERY PROVIDER'S FIELDS IN ONE FLAT SHAPE, not one shape per provider. Only
+ * the selected provider's fields are rendered, so the rest stay empty, and every
+ * write below is already gated on "the user actually typed something" - which
+ * makes the per-provider shape a discriminated union earning nothing but the
+ * narrowing it would then demand at each of five call sites.
+ */
+type SecretDraft = {
+  passphrase: string;
+  accessKeyId: string;
+  secretAccessKey: string;
+  webdavUsername: string;
+  webdavPassword: string;
+};
 
-const EMPTY_SECRETS: SecretDraft = { passphrase: "", accessKeyId: "", secretAccessKey: "" };
+const EMPTY_SECRETS: SecretDraft = {
+  passphrase: "",
+  accessKeyId: "",
+  secretAccessKey: "",
+  webdavUsername: "",
+  webdavPassword: "",
+};
 
-/** Whether the keychain already holds each of the three, for the placeholders
- *  only. */
-type SecretPresence = { passphrase: boolean; accessKeyId: boolean; secretAccessKey: boolean };
+/** Whether the keychain already holds each one, for the placeholders only. */
+type SecretPresence = {
+  passphrase: boolean;
+  accessKeyId: boolean;
+  secretAccessKey: boolean;
+  webdavUsername: boolean;
+  webdavPassword: boolean;
+};
 
 const NO_SECRETS: SecretPresence = {
   passphrase: false,
   accessKeyId: false,
   secretAccessKey: false,
+  webdavUsername: false,
+  webdavPassword: false,
 };
 
 /** What a rejected `invoke` or store call is worth showing. Tauri rejects with a
@@ -85,9 +117,9 @@ function when(at: number | null): string {
 /**
  * One labelled free-text field.
  *
- * A REAL `label`/`id` pair rather than `aria-label`, because these six fields
- * carry a description each and a screen reader that gets only the terse name
- * loses it. `SettingRow` puts its control in a shrink-0 right slot, which is
+ * A REAL `label`/`id` pair rather than `aria-label`, because these fields carry
+ * a description each and a screen reader that gets only the terse name loses it.
+ * `SettingRow` puts its control in a shrink-0 right slot, which is
  * right for a switch and wrong for an input that wants the width, so this
  * borrows that row's chrome and stacks instead.
  */
@@ -142,22 +174,32 @@ export function SyncSection() {
         // enter state. A failed keychain read costs a placeholder and must not
         // cost the configuration, so it resolves to "nothing stored" rather
         // than rejecting the whole load.
+        //
+        // EVERY PROVIDER'S ACCOUNTS, not the selected one's. Asking for a subset
+        // would mean waiting for the configuration to land before the keychain
+        // could be asked anything, and it would leave the placeholders lying the
+        // moment the user picks a different provider from the list below without
+        // reopening this tab.
         tauriSecretsIo
           .getAll(SYNC_KEYRING_SERVICE, [
             SYNC_PASSPHRASE_ACCOUNT,
             SYNC_ACCESS_KEY_ID_ACCOUNT,
             SYNC_SECRET_ACCESS_KEY_ACCOUNT,
+            SYNC_WEBDAV_USERNAME_ACCOUNT,
+            SYNC_WEBDAV_PASSWORD_ACCOUNT,
           ])
           .catch((): (string | null)[] => []),
       ]);
       if (!alive) return;
-      const [passphrase, accessKeyId, secretAccessKey] = present;
+      const [passphrase, accessKeyId, secretAccessKey, webdavUsername, webdavPassword] = present;
       setConfig(loadedConfig);
       setStatus(loadedStatus);
       setStored({
         passphrase: passphrase != null,
         accessKeyId: accessKeyId != null,
         secretAccessKey: secretAccessKey != null,
+        webdavUsername: webdavUsername != null,
+        webdavPassword: webdavPassword != null,
       });
     })().catch((e: unknown) => {
       if (alive) setError(message(e));
@@ -201,11 +243,27 @@ export function SyncSection() {
           secrets.secretAccessKey,
         );
       }
+      if (secrets.webdavUsername) {
+        await tauriSecretsIo.set(
+          SYNC_KEYRING_SERVICE,
+          SYNC_WEBDAV_USERNAME_ACCOUNT,
+          secrets.webdavUsername,
+        );
+      }
+      if (secrets.webdavPassword) {
+        await tauriSecretsIo.set(
+          SYNC_KEYRING_SERVICE,
+          SYNC_WEBDAV_PASSWORD_ACCOUNT,
+          secrets.webdavPassword,
+        );
+      }
       await settings.writeConfig(config);
       setStored({
         passphrase: stored.passphrase || secrets.passphrase.length > 0,
         accessKeyId: stored.accessKeyId || secrets.accessKeyId.length > 0,
         secretAccessKey: stored.secretAccessKey || secrets.secretAccessKey.length > 0,
+        webdavUsername: stored.webdavUsername || secrets.webdavUsername.length > 0,
+        webdavPassword: stored.webdavPassword || secrets.webdavPassword.length > 0,
       });
       setSecrets(EMPTY_SECRETS);
       setSaved(true);
@@ -276,6 +334,11 @@ export function SyncSection() {
   };
 
   const providerLabel = PROVIDERS.find((p) => p.id === config.provider)?.label ?? config.provider;
+  // WebDAV differs from S3 in more than a field list: it authenticates with a
+  // username and a password sent on every request, and it has no conditional
+  // write to offer, so both the credential fields and the Behaviour block below
+  // turn on this.
+  const webdav = config.provider === "webdav";
 
   return (
     <div className="flex flex-col gap-6">
@@ -303,7 +366,7 @@ export function SyncSection() {
         <Label>Storage</Label>
         <SettingRow
           title="Provider"
-          description="Which kind of storage this device talks to. S3 and S3-compatible storage is the only one today."
+          description="Which kind of storage this device talks to: S3 and S3-compatible storage, or a WebDAV server such as Nextcloud or ownCloud. Each keeps its own credentials, so switching between them does not send one's secret to the other."
         >
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
@@ -329,48 +392,109 @@ export function SyncSection() {
         <Field
           id="sync-endpoint"
           label="Endpoint"
-          description="The full URL of the storage service. There is no default: this is the one field that decides whose servers your records go to."
+          description={
+            webdav
+              ? "The full URL of the collection your files hang off, not the server's home page - on Nextcloud and ownCloud that is the WebDAV address their own settings screen shows you. There is no default: this is the one field that decides whose servers your records go to."
+              : "The full URL of the storage service. There is no default: this is the one field that decides whose servers your records go to."
+          }
           value={config.endpoint}
           onChange={(e) => setConfig({ ...config, endpoint: e.target.value })}
         />
-        <Field
-          id="sync-region"
-          label="Region"
-          value={config.region}
-          onChange={(e) => setConfig({ ...config, region: e.target.value })}
-        />
-        <Field
-          id="sync-bucket"
-          label="Bucket"
-          value={config.bucket}
-          onChange={(e) => setConfig({ ...config, bucket: e.target.value })}
-        />
+        {webdav && config.endpoint.trimStart().toLowerCase().startsWith("http://") ? (
+          // Gated on the PROVIDER as well as the scheme, because the sentence is
+          // only true of this one: a WebDAV request carries the password itself,
+          // where an S3 request carries a signature computed from the secret and
+          // never the secret. Allowed rather than refused - a WebDAV server on a
+          // home network with no certificate is a real arrangement, and which
+          // networks are worth trusting is the user's call and not this app's.
+          //
+          // CASE-INSENSITIVE, because the backend's url parser lowercases a
+          // scheme and this warning is the only defence there is - a pasted
+          // uppercase spelling would otherwise be accepted in silence.
+          <div
+            role="status"
+            className="border-border/60 bg-card flex flex-col gap-1 rounded-lg border px-3 py-2.5"
+          >
+            <span className="text-[11.5px] font-semibold">
+              Note: this endpoint is not encrypted
+            </span>
+            <span className="text-muted-foreground text-[10.5px] leading-relaxed">
+              The password below is sent with every single request, in a form that can be read back,
+              and anything between this device and that server can read it - other machines on the
+              same network, and whatever the traffic passes through on the way. Your records
+              themselves stay encrypted with the passphrase either way. Use an https:// address
+              instead if the server offers one.
+            </span>
+          </div>
+        ) : null}
+        {webdav ? null : (
+          <>
+            <Field
+              id="sync-region"
+              label="Region"
+              value={config.region}
+              onChange={(e) => setConfig({ ...config, region: e.target.value })}
+            />
+            <Field
+              id="sync-bucket"
+              label="Bucket"
+              value={config.bucket}
+              onChange={(e) => setConfig({ ...config, bucket: e.target.value })}
+            />
+          </>
+        )}
         <Field
           id="sync-prefix"
           label="Prefix"
-          description="Where in the bucket this inventory lives. May be left empty, which puts it at the root."
+          description="Where in that storage this inventory lives. May be left empty, which puts it at the root."
           value={config.prefix}
           onChange={(e) => setConfig({ ...config, prefix: e.target.value })}
         />
-        <Field
-          id="sync-access-key-id"
-          label="Access key ID"
-          description="Stored in the OS keychain under the sync service, never in the settings file."
-          autoComplete="off"
-          placeholder={stored.accessKeyId ? "Stored. Leave blank to keep it." : "Not set"}
-          value={secrets.accessKeyId}
-          onChange={(e) => setSecrets({ ...secrets, accessKeyId: e.target.value })}
-        />
-        <Field
-          id="sync-secret-access-key"
-          label="Secret access key"
-          description="Stored in the OS keychain under the sync service, never in the settings file."
-          type="password"
-          autoComplete="off"
-          placeholder={stored.secretAccessKey ? "Stored. Leave blank to keep it." : "Not set"}
-          value={secrets.secretAccessKey}
-          onChange={(e) => setSecrets({ ...secrets, secretAccessKey: e.target.value })}
-        />
+        {webdav ? (
+          <>
+            <Field
+              id="sync-webdav-username"
+              label="Username"
+              description="The account on the WebDAV server. Stored in the OS keychain beside the password rather than in the settings file - it is half of a credential, and splitting the two halves across two places is how one of them gets left behind."
+              autoComplete="off"
+              placeholder={stored.webdavUsername ? "Stored. Leave blank to keep it." : "Not set"}
+              value={secrets.webdavUsername}
+              onChange={(e) => setSecrets({ ...secrets, webdavUsername: e.target.value })}
+            />
+            <Field
+              id="sync-webdav-password"
+              label="Password"
+              description="Stored in the OS keychain under the sync service, never in the settings file. If your server offers app passwords, one of those is worth more here than your account password: it can be revoked on its own."
+              type="password"
+              autoComplete="off"
+              placeholder={stored.webdavPassword ? "Stored. Leave blank to keep it." : "Not set"}
+              value={secrets.webdavPassword}
+              onChange={(e) => setSecrets({ ...secrets, webdavPassword: e.target.value })}
+            />
+          </>
+        ) : (
+          <>
+            <Field
+              id="sync-access-key-id"
+              label="Access key ID"
+              description="Stored in the OS keychain under the sync service, never in the settings file."
+              autoComplete="off"
+              placeholder={stored.accessKeyId ? "Stored. Leave blank to keep it." : "Not set"}
+              value={secrets.accessKeyId}
+              onChange={(e) => setSecrets({ ...secrets, accessKeyId: e.target.value })}
+            />
+            <Field
+              id="sync-secret-access-key"
+              label="Secret access key"
+              description="Stored in the OS keychain under the sync service, never in the settings file."
+              type="password"
+              autoComplete="off"
+              placeholder={stored.secretAccessKey ? "Stored. Leave blank to keep it." : "Not set"}
+              value={secrets.secretAccessKey}
+              onChange={(e) => setSecrets({ ...secrets, secretAccessKey: e.target.value })}
+            />
+          </>
+        )}
       </div>
 
       <div className="flex flex-col gap-2">
@@ -389,38 +513,71 @@ export function SyncSection() {
 
       <div className="flex flex-col gap-2">
         <Label>Behaviour</Label>
-        <SettingRow
-          title="Endpoint honours conditional writes"
-          description="Turn this on only if you know your storage supports a write that fails when the object changed underneath it. Tervia does not test for it."
-        >
-          <Switch
-            checked={config.cas}
-            onCheckedChange={(v) => {
-              setConfig({ ...config, cas: v });
-              setSaved(false);
-            }}
-            aria-label="Endpoint honours conditional writes"
-          />
-        </SettingRow>
-        {!config.cas ? (
-          // Worded as a consequence of the SETTING, not as a finding. Nothing in
-          // the app probes the endpoint - `Caps` in
-          // `src-tauri/src/modules/sync/provider.rs` is this toggle and nothing
-          // else - so a label claiming Tervia detected anything would be a
-          // claim no code backs.
+        {/* TWO WHOLE RENDERINGS rather than one with the toggle conditional
+            inside it. On a provider with no conditional write to offer there is
+            no switch, and so the note below it cannot say "the setting above,
+            which you chose" - it would be naming something that is not on the
+            screen. Keeping the arms separate is also what keeps the S3 arm
+            exactly the shape `scripts/sync-scheduler-verify.ts` reads, which is
+            the check that the warning is reached from the toggle rather than
+            merely present in this file somewhere. */}
+        {webdav ? (
+          // A SWITCH THE USER COULD MOVE WITH NO EFFECT WOULD BE WORSE THAN NO
+          // SWITCH: it would read as a promise. WebDAV leaves the conditional
+          // write to each server, so Tervia never asks for one here, and the
+          // consequence is stated unconditionally because nothing about it is
+          // the user's to change.
           <div
             role="status"
             className="border-border/60 bg-card flex flex-col gap-1 rounded-lg border px-3 py-2.5"
           >
             <span className="text-[11.5px] font-semibold">Note: conditional writes are off</span>
             <span className="text-muted-foreground text-[10.5px] leading-relaxed">
-              With this off, two devices that write the same record at the same moment can leave
-              only one of the two writes on the remote, and the other is lost without an error. This
-              follows from the setting above, which you chose; Tervia does not check what your
-              endpoint supports.
+              Two devices that write the same record at the same moment can leave only one of the
+              two writes on the remote, and the other is lost without an error. WebDAV does not
+              guarantee a server can refuse a write that would do that, so Tervia never asks one to,
+              and there is nothing here to turn on. This is what this provider costs, not a setting
+              you got wrong.
             </span>
           </div>
-        ) : null}
+        ) : (
+          <>
+            <SettingRow
+              title="Endpoint honours conditional writes"
+              description="Turn this on only if you know your storage supports a write that fails when the object changed underneath it. Tervia does not test for it."
+            >
+              <Switch
+                checked={config.cas}
+                onCheckedChange={(v) => {
+                  setConfig({ ...config, cas: v });
+                  setSaved(false);
+                }}
+                aria-label="Endpoint honours conditional writes"
+              />
+            </SettingRow>
+            {!config.cas ? (
+              // Worded as a consequence of the SETTING, not as a finding.
+              // Nothing in the app probes the endpoint - `Caps` in
+              // `src-tauri/src/modules/sync/provider.rs` is this toggle and
+              // nothing else - so a label claiming Tervia detected anything
+              // would be a claim no code backs.
+              <div
+                role="status"
+                className="border-border/60 bg-card flex flex-col gap-1 rounded-lg border px-3 py-2.5"
+              >
+                <span className="text-[11.5px] font-semibold">
+                  Note: conditional writes are off
+                </span>
+                <span className="text-muted-foreground text-[10.5px] leading-relaxed">
+                  With this off, two devices that write the same record at the same moment can leave
+                  only one of the two writes on the remote, and the other is lost without an error.
+                  This follows from the setting above, which you chose; Tervia does not check what
+                  your endpoint supports.
+                </span>
+              </div>
+            ) : null}
+          </>
+        )}
 
         <SettingRow
           title="Carry private key bodies"

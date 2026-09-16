@@ -28,6 +28,22 @@ export const SYNC_ACCESS_KEY_ID_ACCOUNT = "accessKeyId";
 export const SYNC_SECRET_ACCESS_KEY_ACCOUNT = "secretAccessKey";
 
 /**
+ * WebDAV's own credential pair.
+ *
+ * ITS OWN ACCOUNTS, not the two above reused as a generic user and password: a
+ * device configured for S3 and then switched to WebDAV would send its S3 secret
+ * as an HTTP password to a different host. Distinct accounts make that
+ * unrepresentable rather than merely unlikely.
+ *
+ * The username goes in the keychain rather than in {@link SyncConfig} for the
+ * same reason both halves of the S3 credential do - it is half of a pair, and
+ * splitting a pair across two storage locations is how one half gets left
+ * behind.
+ */
+export const SYNC_WEBDAV_USERNAME_ACCOUNT = "webdavUsername";
+export const SYNC_WEBDAV_PASSWORD_ACCOUNT = "webdavPassword";
+
+/**
  * Settings asking `main` to do something it is the only window allowed to do.
  *
  * WEBVIEW TO WEBVIEW, so it is not in `src/lib/ipc.ts` - that file mirrors the
@@ -67,9 +83,10 @@ export const FOCUS_INTERVAL_MS = 60_000;
 /**
  * The non-secret half of a sync configuration.
  *
- * WHAT IS NOT HERE: the passphrase, the access key id and the secret access
- * key. Those go to the keychain under {@link SYNC_KEYRING_SERVICE}, because this
- * file sits in the app data directory in plain JSON beside the host list.
+ * WHAT IS NOT HERE: the passphrase and either half of whichever provider
+ * credential is in use. Those go to the keychain under
+ * {@link SYNC_KEYRING_SERVICE}, because this file sits in the app data directory
+ * in plain JSON beside the host list.
  *
  * `enabled` off means NO NETWORK, checked before anything is invoked rather
  * than inside the Rust commands - see `KNOWN-LIMITS.md` for what that costs.
@@ -77,15 +94,21 @@ export const FOCUS_INTERVAL_MS = 60_000;
 export type SyncConfig = {
   enabled: boolean;
   /** The provider id `build` in `src-tauri/src/modules/sync/provider.rs`
-   *  dispatches on. One value today. */
+   *  dispatches on. A bare string and not a union: that `build` is the authority
+   *  on which ids exist, and a union here would be a second list to keep in step
+   *  with it. */
   provider: string;
   endpoint: string;
+  /** S3's, and ignored by any provider that has no such notion. */
   region: string;
+  /** S3's, and ignored by any provider that has no such notion. */
   bucket: string;
-  /** Where in the bucket this device's inventory lives. May be empty. */
+  /** Where in the remote storage this device's inventory lives. May be empty. */
   prefix: string;
   /** Whether the endpoint honours a conditional write. A STORED USER TOGGLE and
-   *  never a probe - see `Caps` in `src-tauri/src/modules/sync/provider.rs`. */
+   *  never a probe - see `Caps` in `src-tauri/src/modules/sync/provider.rs`. Not
+   *  sent to a provider that has no conditional write to offer, which is why the
+   *  settings section renders no switch for one. */
   cas: boolean;
   /**
    * Whether private key bodies travel at all.
