@@ -301,6 +301,9 @@ export function createScheduler(io: SchedulerIo): SyncScheduler {
   }
 
   async function writeStatus(next: Partial<SyncStatus>): Promise<void> {
+    // Hydrated first, or this merges over an empty object rather than over what
+    // the last session left - see {@link hydrate}.
+    await hydrate();
     status = { ...status, ...next };
     await io.settings.writeStatus(status);
   }
@@ -511,10 +514,17 @@ export function createScheduler(io: SchedulerIo): SyncScheduler {
    * After this runs, memory is authoritative and nothing reads the key again.
    */
   function hydrate(): Promise<void> {
-    loaded ??= io.settings
-      .readDirty()
-      .then((slots) => {
+    loaded ??= Promise.all([io.settings.readDirty(), io.settings.readStatus()])
+      .then(([slots, stored]) => {
         for (const slot of slots) dirty.add(slot);
+        // THE STATUS COMES BACK TOO, for the reason the pull's own write gives:
+        // what is reported is "the last thing this device actually learned",
+        // and that is a claim about the DEVICE, so it holds across a relaunch.
+        // Without this, `writeStatus` merges over an empty object and the first
+        // failed pull of a new session - launch offline and it is the first
+        // pull - writes zero pending and no last pull over what the previous
+        // session had found.
+        status = stored;
       })
       // RESET ON FAILURE, or one rejection is permanent for the session: every
       // later `persistDirty` would reject on the memoized promise and the set

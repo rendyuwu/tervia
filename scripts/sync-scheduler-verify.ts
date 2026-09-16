@@ -83,6 +83,7 @@ import {
   SYNC_CONFIG_KEY,
   SYNC_DIRTY_KEY,
   SYNC_ETAGS_KEY,
+  SYNC_STATUS_KEY,
   WIRE_VERSION,
   type Envelope,
   type PullReport,
@@ -232,6 +233,7 @@ function harness(
     pull?: PullReport;
     push?: PushReport;
     dirty?: string[];
+    status?: SyncStatus;
     park?: boolean;
     parkDirty?: boolean;
     releaseThrows?: boolean;
@@ -256,6 +258,7 @@ function harness(
     [SYNC_CONFIG_KEY]: { ...DEFAULT_SYNC_CONFIG, enabled: seed.enabled ?? true },
     [SYNC_ETAGS_KEY]: seed.etags ?? {},
     ...(seed.dirty ? { [SYNC_DIRTY_KEY]: seed.dirty } : {}),
+    ...(seed.status ? { [SYNC_STATUS_KEY]: seed.status } : {}),
   });
   // A `readDirty` that can be parked mid-flight, which is the only way to
   // construct a mark made DURING a flush - the window the spread order in
@@ -1060,6 +1063,22 @@ async function b19(): Promise<void> {
   );
   check("and does not stamp a fresh lastPullAt", broken.lastPullAt, healthy.lastPullAt);
   check("while reporting the failure", broken.lastError, "the remote answered 503");
+
+  // ACROSS A RELAUNCH TOO. "The last thing this device actually learned" is a
+  // claim about the DEVICE, so a fresh session that fails its first pull -
+  // launching offline is exactly that - must not write an empty status over
+  // what the previous session found.
+  const relaunched = harness({ status: { ...broken } });
+  relaunched.failPull("still offline");
+  await relaunched.scheduler.pullNow();
+  await settle();
+  const carried = await relaunched.status();
+  check(
+    "a new session's failed first pull keeps the last session's counts",
+    [carried.pending, carried.quarantine.length, carried.lastPullAt],
+    [broken.pending, broken.quarantine.length, broken.lastPullAt],
+  );
+  check("and reports its own failure", carried.lastError, "still offline");
 }
 
 async function main(): Promise<void> {
