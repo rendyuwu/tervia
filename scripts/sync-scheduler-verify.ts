@@ -81,6 +81,7 @@ import { createSyncSettingsStore } from "../src/modules/sync/store";
 import {
   DEFAULT_SYNC_CONFIG,
   SYNC_CONFIG_KEY,
+  SYNC_DIRTY_KEY,
   SYNC_ETAGS_KEY,
   WIRE_VERSION,
   type Envelope,
@@ -210,6 +211,8 @@ function harness(
     etags?: Record<string, string>;
     pull?: PullReport;
     push?: PushReport;
+    dirty?: string[];
+    park?: boolean;
     releaseThrows?: boolean;
   } = {},
 ) {
@@ -231,9 +234,17 @@ function harness(
   const settingsData = settingsPort({
     [SYNC_CONFIG_KEY]: { ...DEFAULT_SYNC_CONFIG, enabled: seed.enabled ?? true },
     [SYNC_ETAGS_KEY]: seed.etags ?? {},
+    ...(seed.dirty ? { [SYNC_DIRTY_KEY]: seed.dirty } : {}),
   });
   const settings = createSyncSettingsStore(settingsData);
 
+  // A pull that can be parked mid-flight, which is the only way to construct
+  // the interleaving B17 is about: a real pull's read-to-write window is a LIST
+  // plus N GETs, and here every fake resolves on the next microtask.
+  let release = (): void => {};
+  const parked = new Promise<void>((r) => {
+    release = r;
+  });
   const calls = { pull: 0, push: 0 };
   const pulled: { envelopes: Envelope[]; etags: Record<string, string> }[] = [];
   const pushed: { envelopes: Envelope[]; etags: Record<string, string> }[] = [];
@@ -241,6 +252,7 @@ function harness(
     async pull(envelopes, etags) {
       calls.pull++;
       pulled.push({ envelopes, etags });
+      if (seed.park) await parked;
       return seed.pull ?? { records: [], etags: {}, quarantined: [], pruned: 0, pending: 0 };
     },
     async push(envelopes, etags) {
@@ -295,8 +307,10 @@ function harness(
     vault,
     forwards,
     released,
+    release: (): void => release(),
     settings,
     settingsData,
+    dirty: (): Promise<string[]> => settings.readDirty(),
     calls,
     pulled,
     pushed,
@@ -402,6 +416,10 @@ async function b1(): Promise<void> {
   await settle();
   // A MEASURED ZERO on the port itself, not an absence of call sites.
   check("off: no pull and no push", h.calls, { pull: 0, push: 0 });
+  // And the marks accumulated while it was off are dropped rather than held
+  // forever: turning sync on publishes the whole inventory anyway, so a set
+  // that grew for months would only make that first push describe itself twice.
+  check("off: the dirty set is cleared, not hoarded", await h.dirty(), []);
 }
 
 async function b2b3b4(): Promise<void> {
@@ -554,7 +572,13 @@ async function b8(): Promise<void> {
   check("stale LocalOnly is still in the store", (await h.hosts.findHost("h-2"))?.id, "h-2");
   const status = await h.status();
   check("stale LocalOnly is reported", status.stale, [{ kind: "host", id: "h-2" }]);
-  check("the pending count reaches the store file", status.pending, 1);
+  // COUNTED AFTER THE PUSH. The reconcile said one record was missing from the
+  // remote, and the push in the same pass placed it, so nothing is pending -
+  // reporting the pre-push number would leave the settings window showing work
+  // that was already done until the next pull. B15 is the other direction: a
+  // push that FAILS leaves its record counted.
+  check("the pending count is what the push left behind", status.pending, 0);
+  check("and it reaches the store file", (await h.settings.readStatus()).pending, 0);
 }
 
 async function b9(): Promise<void> {
@@ -739,15 +763,184 @@ async function b13(): Promise<void> {
 
   // A REJECTING CLOSE DOES NOT ABORT THE PASS. The apply is one queued write
   // over every landing in the pull, so a throw would lose all of them.
-  const noisy = harness({ rules: [runningRule()], pull, releaseThrows: true });
+  //
+  // THE FIXTURE CARRIES A REPUBLISH, deliberately: with nothing to publish the
+  // pull's push path never runs, and a status write there that overwrote the
+  // close error would go unnoticed. This is the arrangement that can fail.
+  const noisy = harness({
+    hosts: [host("h-1")],
+    rules: [runningRule()],
+    pull: {
+      ...pull,
+      records: [
+        ...pull.records,
+        merged(HOST_TOMBSTONE_KIND, "h-1", host("h-1"), { changed: false, republish: true }),
+      ],
+    },
+    releaseThrows: true,
+  });
   await noisy.scheduler.pullNow();
   await settle();
   check("a rejecting close still lands the delete", (await noisy.forwards.listRules()).length, 0);
+  check("and the pull still published what it owed", noisy.calls.push, 1);
   check(
-    "and is reported rather than swallowed",
+    "and the close is reported rather than swallowed",
     (await noisy.status()).lastError,
     "forwards: the close reported",
   );
+}
+
+async function b14(): Promise<void> {
+  console.log("\nB14 - a landing nothing applied does not advance the etag map");
+
+  // Arm one: a kind no store on this device owns, which is what a record type
+  // added by a newer build looks like from here.
+  const unknown = harness({
+    pull: {
+      records: [
+        remoteOnly("workspace", "w-1", { id: "w-1" }),
+        remoteOnly(HOST_TOMBSTONE_KIND, "h-9", host("h-9")),
+      ],
+      etags: { "workspace:w-1": "e1", "host:h-9": "e2" },
+      quarantined: [],
+      pruned: 0,
+      pending: 0,
+    },
+  });
+  await unknown.scheduler.pullNow();
+  await settle();
+  // Without this the object is etag-skipped on every later pull, so the build
+  // that DOES own the kind never sees it.
+  check("an unownable kind keeps its etag out of the map", await unknown.settings.readEtags(), {
+    "host:h-9": "e2",
+  });
+
+  // Arm two: a tombstone with no `deletedAt`. `livingTombstones` requires a
+  // number, so landing it would write a row that every read then filters out -
+  // the delete lost here while the map says it was applied.
+  const stampless = harness({
+    pull: {
+      records: [
+        {
+          kind: HOST_TOMBSTONE_KIND,
+          id: "h-7",
+          outcome: "remoteOnly",
+          envelope: {
+            v: WIRE_VERSION,
+            kind: HOST_TOMBSTONE_KIND,
+            id: "h-7",
+            device: "dev-b",
+            deleted: true,
+            record: null,
+          },
+        },
+        remoteOnly(HOST_TOMBSTONE_KIND, "h-9", host("h-9")),
+      ],
+      etags: { "host:h-7": "e1", "host:h-9": "e2" },
+      quarantined: [],
+      pruned: 0,
+      pending: 0,
+    },
+  });
+  await stampless.scheduler.pullNow();
+  await settle();
+  check(
+    "an unstamped tombstone keeps its etag out of the map",
+    await stampless.settings.readEtags(),
+    { "host:h-9": "e2" },
+  );
+  check(
+    "and the good landing in the same set still landed",
+    (await stampless.hosts.listHosts()).map((x) => x.id),
+    ["h-9"],
+  );
+}
+
+async function b15(): Promise<void> {
+  console.log("\nB15 - a failed push loses its etag and keeps its dirty mark");
+  // The worst shape: a local delete that must overwrite a live remote record.
+  // If the failed slot keeps the etag the pull already recorded, the next pull
+  // etag-skips the object AND skips the local tombstone with it - no
+  // disposition, pending 0, and the delete never propagates.
+  const h = harness({
+    hosts: [host("h-1")],
+    etags: { "host:h-1": "e0" },
+    pull: {
+      records: [merged(HOST_TOMBSTONE_KIND, "h-1", host("h-1"), { republish: true })],
+      etags: { "host:h-1": "e1" },
+      quarantined: [],
+      pruned: 0,
+      pending: 1,
+    },
+    push: { etags: {}, failed: [{ kind: "host", id: "h-1", reason: "the remote answered 500" }] },
+  });
+  await h.scheduler.pullNow();
+  await settle();
+
+  check("the failed slot is gone from the map", await h.settings.readEtags(), {});
+  check("it is still owed, durably", await h.dirty(), ["host:h-1"]);
+  check("and the failure is reported", (await h.status()).lastError, "the remote answered 500");
+  // Pending counts what the remote is still missing AFTER the push, and the
+  // push placed nothing.
+  check("pending still counts it", (await h.status()).pending, 1);
+}
+
+async function b16(): Promise<void> {
+  console.log("\nB16 - the dirty set survives a quit inside the debounce");
+  const edit = harness({ hosts: [host("h-1")] });
+  await edit.hosts.upsertHost(host("h-1", { name: "renamed" }));
+  await settle();
+  // Written at the mark, not at the flush: the debounce is five seconds, and a
+  // quit inside it used to lose the edit outright with no error anywhere.
+  check("the mark is durable before the debounce fires", await edit.dirty(), ["host:h-1"]);
+  edit.scheduler.dispose();
+
+  // What the next launch sees: a fresh scheduler, the same store file.
+  const relaunch = harness({ hosts: [host("h-1", { name: "renamed" })], dirty: ["host:h-1"] });
+  await relaunch.scheduler.pullNow();
+  await settle();
+  check(
+    "and the next launch publishes it",
+    relaunch.pushed[relaunch.pushed.length - 1]?.envelopes.map((e) => `${e.kind}:${e.id}`),
+    ["host:h-1"],
+  );
+  check("then clears it", await relaunch.dirty(), []);
+}
+
+async function b17(): Promise<void> {
+  console.log("\nB17 - two passes never interleave over the etag map");
+  // The interleaving this guards: a pull reads the map, its apply refuses a
+  // slot, the debounce fires a push that read the OLD map, the pull writes the
+  // map without the refused slot, and the push writes it back in. After that
+  // the refused object is etag-skipped forever.
+  const h = harness({
+    hosts: [host("h-1")],
+    etags: { "host:h-bad": "e1" },
+    park: true,
+    pull: {
+      records: [merged(HOST_TOMBSTONE_KIND, "h-bad", host("h-other"))],
+      etags: { "host:h-bad": "e1" },
+      quarantined: [],
+      pruned: 0,
+      pending: 0,
+    },
+  });
+  const pulling = h.scheduler.pullNow();
+  await settle();
+  // Edit and fire the debounce while the pull is parked mid-flight. Five
+  // seconds inside a LIST plus N GETs is not a stretch.
+  await h.hosts.upsertGroup({ id: "g-1", name: "prod" });
+  await h.fire();
+  // THE PROPERTY, asserted directly rather than through its consequence: the
+  // push has not started. An unserialized push would read the map here - still
+  // holding the refused slot - and write it back after the pull removed it.
+  check("a push fired mid-pull waits for it", h.calls.push, 0);
+
+  h.release();
+  await pulling;
+  await settle();
+  check("so the refused slot stays out of the map", await h.settings.readEtags(), {});
+  check("and the push that waited still ran", h.calls.push, 1);
 }
 
 async function main(): Promise<void> {
@@ -762,6 +955,10 @@ async function main(): Promise<void> {
   await b11();
   await b12();
   await b13();
+  await b14();
+  await b15();
+  await b16();
+  await b17();
 
   if (failed > 0) throw new Error(`sync-scheduler-verify: ${failed} FAILED`);
   console.log("\nsync-scheduler-verify: OK\n");

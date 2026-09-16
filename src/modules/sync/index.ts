@@ -21,7 +21,7 @@ import { forwardsStore } from "@/modules/forwards/store";
 import { hostsStore } from "@/modules/hosts/store";
 import { vaultStore } from "@/modules/vault/store";
 
-import { createScheduler, type SyncScheduler } from "./scheduler";
+import { createScheduler } from "./scheduler";
 import { createSyncSettingsStore } from "./store";
 import {
   SYNC_STORE_PATH,
@@ -40,7 +40,8 @@ const commands: SyncCommands = {
     invoke<PushReport>("sync_push", { envelopes, etags }),
 };
 
-let running: SyncScheduler | null = null;
+/** The teardown for the scheduler currently running in this webview. */
+let stop: (() => void) | null = null;
 
 /**
  * Start sync for this webview, and answer with how to stop it.
@@ -49,12 +50,16 @@ let running: SyncScheduler | null = null;
  * `main`, so calling this from a shared entry point costs one store handle and
  * one listener that never fires anything.
  *
+ * A SECOND CALL ANSWERS WITH THE FIRST CALL'S TEARDOWN rather than a no-op. A
+ * no-op there is the shape that leaves sync unstoppable: whoever holds it
+ * believes it can stop what it started, and cannot.
+ *
  * The mount is also the app-setup pull. It is here rather than emitted from
  * Rust's setup because emitting there races the frontend listener - a webview
  * that has not finished loading has nothing subscribed yet.
  */
 export function startSync(): () => void {
-  if (running) return () => {};
+  if (stop) return stop;
   const scheduler = createScheduler({
     label: getCurrentWebviewWindow().label,
     commands,
@@ -64,16 +69,20 @@ export function startSync(): () => void {
     // already is, and injected - see `SchedulerIo.releaseRule`.
     releaseRule,
   });
-  running = scheduler;
   setDirtySink(scheduler.markDirty);
 
-  const unlisten = listen(IPC_EVENTS.SYNC_FOCUSED, () => scheduler.onFocus());
+  // Caught at construction as well as at teardown: an unhandled rejection here
+  // would surface as a console error with no owner, on a path that is allowed
+  // to fail - a webview with no such event is a webview that never pulls on
+  // focus, which is a degradation and not a fault.
+  const unlisten = listen(IPC_EVENTS.SYNC_FOCUSED, () => scheduler.onFocus()).catch(() => () => {});
   void scheduler.pullNow();
 
-  return () => {
-    running = null;
+  stop = () => {
+    stop = null;
     setDirtySink(null);
     scheduler.dispose();
-    void unlisten.then((off) => off()).catch(() => {});
+    void unlisten.then((off) => off());
   };
+  return stop;
 }

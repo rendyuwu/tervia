@@ -19,6 +19,7 @@ export const SYNC_KEYRING_SERVICE = "tervia-sync";
  *  status write and a config write never contend for the same value. */
 export const SYNC_CONFIG_KEY = "config";
 export const SYNC_ETAGS_KEY = "etags";
+export const SYNC_DIRTY_KEY = "dirty";
 export const SYNC_STATUS_KEY = "status";
 
 /**
@@ -167,10 +168,14 @@ export type PullReport = {
   pending: number;
 };
 
+/** Mirrors Rust `PushFailure`. Named because the scheduler routes these back
+ *  into the dirty set and out of the etag map, and needs to say so in a type. */
+export type PushFailure = { kind: string; id: string; reason: string };
+
 /** Mirrors Rust `PushReport`. */
 export type PushReport = {
   etags: Record<string, string>;
-  failed: { kind: string; id: string; reason: string }[];
+  failed: PushFailure[];
 };
 
 /**

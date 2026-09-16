@@ -25,7 +25,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::Serialize;
 
 use super::crypto::{object_name, open_record, seal_record, SealedRecord, SyncKeys};
-use super::model::{content_differs, merge, strip_device_local, Envelope};
+use super::model::{content_differs, merge, strip_device_local, Envelope, WIRE_VERSION};
 use super::provider::{ProviderError, SyncProvider};
 
 /// How long a tombstone stays meaningful, in milliseconds.
@@ -181,8 +181,14 @@ pub struct PullReport {
     ///
     /// The pull's own count, and it deliberately excludes an etag-skipped
     /// object: the remote's copy of that one has not moved since the last pull,
-    /// so this pass has nothing to say about it, and a local edit since then is
-    /// carried by its dirty mark rather than by this number.
+    /// so this pass has nothing to say about it.
+    ///
+    /// THAT MAKES THE PULL STRUCTURALLY BLIND TO LOCAL CHANGE behind the skip,
+    /// and the only thing carrying a local edit past it is the caller's dirty
+    /// set - which is why that set is written to the caller's store file on
+    /// every mark rather than held in memory. In memory alone, a quit inside
+    /// the push debounce loses the edit with no error and a pending count of
+    /// zero. See `readDirty` in `src/modules/sync/store.ts`.
     pub pending: usize,
 }
 
@@ -326,8 +332,39 @@ pub async fn pull(
         // would make the winner depend on who pushed last - and says nothing
         // about a prune, where provenance is exactly the question being asked.
         if candidate && envelope.deleted && envelope.device == device {
-            provider.delete(&entry.key).await?;
-            report.pruned += 1;
+            // A REFUSED DELETE IS NOT A FAILED PULL. A prune is housekeeping:
+            // a bucket with read-only credentials, an object lock or a
+            // lifecycle policy refuses every one of these, and propagating
+            // that would make the FIRST expired tombstone abort the whole
+            // reconcile - no landings, no pushes, forever, over an object
+            // whose only cost is the bytes it occupies. The object is left in
+            // place and reconciled below like any other tombstone, which is
+            // the same outcome as the retired-device case `KNOWN-LIMITS.md`
+            // already accepts.
+            if provider.delete(&entry.key).await.is_ok() {
+                report.pruned += 1;
+                continue;
+            }
+        }
+
+        // THE VERSION CHECK, HERE RATHER THAN IN THE MERGE. `merge` refuses a
+        // version it does not know, but a `RemoteOnly` object never reaches
+        // the merge - there is no local copy to merge it with - so an object
+        // from a newer build would otherwise be handed to the apply path
+        // unexamined, and its record shape written straight into this device's
+        // store. That is exactly what `WIRE_VERSION` was minted to prevent.
+        //
+        // AFTER the prune, deliberately: `deleted` and `device` are the two
+        // fields a prune reads, and this device's own expired tombstone is
+        // still its own to remove whatever version it was written at.
+        if envelope.v != WIRE_VERSION {
+            report.quarantined.push(Quarantined {
+                name,
+                reason: format!(
+                    "sync: this object was written by a newer build (wire version {}, this build reads {WIRE_VERSION})",
+                    envelope.v
+                ),
+            });
             continue;
         }
 
@@ -336,6 +373,13 @@ pub async fn pull(
         remotes.insert(key, envelope);
     }
 
+    // LAST WINS on a duplicate slot, and the caller sends tombstones after
+    // records, so a store that somehow held both a live record and a living
+    // tombstone for one id would present the TOMBSTONE here. That is the
+    // conservative side and the same one `ordering_key` takes on an exact tie:
+    // a lost delete re-spreads data the user removed, a lost resurrection costs
+    // one re-create. `withoutTombstone` should make the case unreachable; this
+    // says which way it falls if it ever is not.
     let mut mine: BTreeMap<String, Envelope> = locals
         .into_iter()
         .map(|e| (slot(&e.kind, &e.id), e))
@@ -596,6 +640,7 @@ mod tests {
     use serde_json::{json, Value};
     use std::future::Future;
     use std::pin::Pin;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     const DAY: u64 = 24 * 60 * 60 * 1000;
     /// "Now" for every test here, far enough from the epoch that a stamp a
@@ -620,6 +665,9 @@ mod tests {
         cas: bool,
         /// Keys whose next conditional put is rejected once, to reach the retry.
         reject_once: Mutex<BTreeSet<String>>,
+        /// What a read-only bucket, an object lock or a lifecycle policy does
+        /// to every delete this provider is asked for.
+        refuse_deletes: AtomicBool,
     }
 
     impl Fake {
@@ -728,6 +776,12 @@ mod tests {
         ) -> Pin<Box<dyn Future<Output = Result<(), ProviderError>> + Send + 'a>> {
             Box::pin(async move {
                 self.deletes.lock().unwrap().push(key.to_string());
+                if self.refuse_deletes.load(Ordering::SeqCst) {
+                    return Err(ProviderError::Remote {
+                        status: 403,
+                        code: Some("AccessDenied".into()),
+                    });
+                }
                 self.objects.lock().unwrap().remove(key);
                 Ok(())
             })
@@ -996,6 +1050,70 @@ mod tests {
             Outcome::RemoteOnly { .. }
         ));
         assert_eq!(report.etags.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_object_from_a_newer_build_is_quarantined_rather_than_landed() {
+        // The `RemoteOnly` arm never reaches `merge`, so `MergeError::Version`
+        // cannot fire there - and that arm is precisely the one a brand new
+        // record kind arrives through. Without the check here the first v2
+        // object publishes its record shape straight into this device's store.
+        let keys = keys();
+        let fake = Fake::cas(true);
+        let mut future = host("h-1", NOW - 1000, "dev-b", "from a newer build");
+        future.v = WIRE_VERSION + 1;
+        let good = host("h-2", NOW - 1000, "dev-b", "readable");
+        publish(&fake, &keys, &future, "e1", Some(NOW - 1000));
+        publish(&fake, &keys, &good, "e2", Some(NOW - 1000));
+
+        let report = pull_with(&fake, &keys, Vec::new(), BTreeMap::new()).await;
+        assert!(
+            !report.records.iter().any(|r| r.id == "h-1"),
+            "a newer-build object reached the apply path"
+        );
+        assert_eq!(report.quarantined.len(), 1);
+        assert!(
+            report.quarantined[0].reason.contains("newer build"),
+            "unexpected: {}",
+            report.quarantined[0].reason
+        );
+        // Out of the etag map too, or the next pull skips it and the
+        // quarantine is reported exactly once, ever.
+        assert!(!report.etags.contains_key("host:h-1"));
+        // And the readable object in the same listing still landed.
+        assert!(matches!(
+            outcome(&report, "h-2"),
+            Outcome::RemoteOnly { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_refused_prune_delete_does_not_abort_the_pull() {
+        // A bucket with read-only credentials, an object lock or a lifecycle
+        // policy refuses every prune. Propagating that makes the FIRST expired
+        // tombstone abort the whole reconcile - no landings, no pushes - over
+        // an object whose only cost is the bytes it occupies.
+        let keys = keys();
+        let fake = Fake::cas(true);
+        fake.refuse_deletes.store(true, Ordering::SeqCst);
+        let mine_old = grave("host", "h-1", NOW - 100 * DAY, "this-device");
+        let live = host("h-2", NOW - 1000, "dev-b", "still wanted");
+        publish(&fake, &keys, &mine_old, "a", Some(NOW - 100 * DAY));
+        publish(&fake, &keys, &live, "b", Some(NOW - 1000));
+
+        let report = pull_with(&fake, &keys, Vec::new(), BTreeMap::new()).await;
+        assert_eq!(report.pruned, 0, "a refused delete was counted as pruned");
+        // The rest of the inventory reconciled anyway, which is the property.
+        assert!(matches!(
+            outcome(&report, "h-2"),
+            Outcome::RemoteOnly { .. }
+        ));
+        // And the tombstone it could not remove is reconciled like any other
+        // rather than dropped on the floor.
+        assert!(matches!(
+            outcome(&report, "h-1"),
+            Outcome::RemoteOnly { .. }
+        ));
     }
 
     #[tokio::test]

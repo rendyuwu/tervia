@@ -35,6 +35,7 @@ import {
   FOCUS_INTERVAL_MS,
   PUSH_DEBOUNCE_MS,
   type Envelope,
+  type PushFailure,
   type Reconciled,
   type SyncCommands,
   type SyncStatus,
@@ -139,9 +140,14 @@ export function createScheduler(io: SchedulerIo): SyncScheduler {
   const setTimer = io.setTimer ?? ((fn, ms) => setTimeout(fn, ms));
   const clearTimer = io.clearTimer ?? ((handle) => clearTimeout(handle as never));
 
-  /** Record slots (`kind:id`) this device owes the remote. */
+  /** Record slots (`kind:id`) this device owes the remote. Mirrored into the
+   *  sync store file on every change - see `markDirty` for why in memory alone
+   *  loses an edit. */
   const dirty = new Set<string>();
   let pending: unknown = null;
+  /** The pass in flight, so a second entry point queues behind it rather than
+   *  interleaving two read-modify-writes of the etag map. */
+  let running: Promise<void> | null = null;
   /** `-Infinity` so the app-setup pull is never rate limited away. */
   let lastPull = -Infinity;
   let status: SyncStatus = { ...EMPTY_SYNC_STATUS };
@@ -176,9 +182,18 @@ export function createScheduler(io: SchedulerIo): SyncScheduler {
     ];
   }
 
-  /** Sort one pull's landings by the store that owns each kind. */
-  function sort(records: Reconciled[]): Sorted {
+  /**
+   * Sort one pull's landings by the store that owns each kind.
+   *
+   * `dropped` is the half that is easy to forget and expensive to get wrong: a
+   * landing this function DISCARDS has not been applied, so its etag must not
+   * advance either - otherwise the pull etag-skips that object from now on and
+   * the landing never happens again, silently, for the life of the object.
+   * Refusals from `applyRemote` and discards from here go into the same set.
+   */
+  function sort(records: Reconciled[]): { sorted: Sorted; dropped: RemoteLandingRefusal[] } {
     const out: Sorted = { hosts: [], groups: [], identities: [], keys: [], rules: [] };
+    const dropped: RemoteLandingRefusal[] = [];
     for (const record of records) {
       // A `changed: false` merge writes NOTHING. It is the steady state of two
       // devices that agree, so applying it would rewrite every store file on
@@ -191,7 +206,14 @@ export function createScheduler(io: SchedulerIo): SyncScheduler {
             : null;
       if (!envelope) continue;
       const landing = landingOf(envelope);
-      if (!landing) continue;
+      if (!landing) {
+        dropped.push({
+          kind: record.kind,
+          id: record.id,
+          reason: "the tombstone carries no usable deletedAt",
+        });
+        continue;
+      }
       switch (record.kind) {
         case HOST_TOMBSTONE_KIND:
           out.hosts.push(landing as RemoteLanding<Host>);
@@ -209,12 +231,18 @@ export function createScheduler(io: SchedulerIo): SyncScheduler {
           out.rules.push(landing as RemoteLanding<ForwardRule>);
           break;
         default:
-        // A kind no store here owns, from a device running a newer build. Left
-        // out of the map below with the refusals, so it is re-read rather than
-        // recorded as applied.
+          // A kind no store here owns, from a device running a newer build.
+          // Reported as a drop rather than ignored, so its etag stays out of
+          // the map and a build that DOES own the kind reads the object when
+          // it arrives.
+          dropped.push({
+            kind: record.kind,
+            id: record.id,
+            reason: `no store on this device owns a ${record.kind}`,
+          });
       }
     }
-    return out;
+    return { sorted: out, dropped };
   }
 
   /**
@@ -278,35 +306,51 @@ export function createScheduler(io: SchedulerIo): SyncScheduler {
    * Publish `envelopes` and fold the etags the remote answered with back into
    * the map.
    *
-   * Returns the slots that did NOT land, so a caller holding dirty marks can
-   * put them back rather than losing the edit until the next one.
+   * A SLOT THAT FAILED LOSES ITS ETAG, rather than merely keeping the old one.
+   * The two are not the same: the pull has already recorded the remote object's
+   * current etag, so leaving it there means the next pull etag-skips the object
+   * AND skips this device's local copy with it - no disposition, `pending: 0`,
+   * and a status that reads "in sync" while a delete this device made never
+   * propagates. Dropping the etag makes the next pull fetch the object and see
+   * the divergence again.
+   *
+   * Returns the slots that did not land, so the caller can put their dirty
+   * marks back.
    */
-  async function publish(envelopes: Envelope[]): Promise<string[]> {
+  async function publish(envelopes: Envelope[]): Promise<PushFailure[]> {
     if (envelopes.length === 0) return [];
     const etags = await io.settings.readEtags();
     const report = await io.commands.push(envelopes, etags);
-    await io.settings.writeEtags({ ...etags, ...report.etags });
-    const failed = report.failed.map((f) => etagSlot(f.kind, f.id));
-    await writeStatus({
-      lastPushAt: now(),
-      lastError: report.failed[0]?.reason ?? null,
-    });
-    return failed;
+    const next = { ...etags, ...report.etags };
+    for (const failure of report.failed) delete next[etagSlot(failure.kind, failure.id)];
+    await io.settings.writeEtags(next);
+    return report.failed;
   }
 
-  async function pullNow(): Promise<void> {
+  async function runPull(): Promise<void> {
     const config = await io.settings.readConfig();
     if (!config.enabled) return;
+    // Stamped here as well as in `onFocus`, so a pull from any other entry
+    // point also costs the rate limit rather than leaving the next focus free
+    // to start a second one on top of it.
+    lastPull = now();
     closeError = null;
+    let error: string | null = null;
+    let pending = 0;
+    let quarantine: SyncStatus["quarantine"] = [];
+    let stale: SyncStatus["stale"] = [];
     try {
       const [envelopes, etags] = await Promise.all([localEnvelopes(), io.settings.readEtags()]);
       const report = await io.commands.pull(envelopes, etags);
-      const refusals = await apply(sort(report.records));
+      const { sorted, dropped } = sort(report.records);
+      const refusals = [...dropped, ...(await apply(sorted))];
 
       // THE MAP ADVANCES MINUS THE REFUSED, never frozen wholesale. Freezing on
       // any refusal would leave one unresolvable landing degrading every later
       // pull to a full inventory download, forever and silently. A refusal
-      // names `{kind, id}`, which is exactly the map's key.
+      // names `{kind, id}`, which is exactly the map's key - and `dropped` is in
+      // here too, because a landing nothing applied is a landing that did not
+      // happen whichever layer declined it.
       const refused = new Set(refusals.map((r) => etagSlot(r.kind, r.id)));
       const next: Record<string, string> = {};
       for (const [slot, etag] of Object.entries(report.etags)) {
@@ -316,15 +360,10 @@ export function createScheduler(io: SchedulerIo): SyncScheduler {
       // redundant, idempotent re-apply; the other order costs the landing.
       await io.settings.writeEtags(next);
 
-      await writeStatus({
-        lastPullAt: now(),
-        pending: report.pending,
-        quarantine: report.quarantined,
-        stale: report.records
-          .filter((r) => r.outcome === "localOnly" && r.stale)
-          .map((r) => ({ kind: r.kind, id: r.id })),
-        lastError: closeError,
-      });
+      quarantine = report.quarantined;
+      stale = report.records
+        .filter((r) => r.outcome === "localOnly" && r.stale)
+        .map((r) => ({ kind: r.kind, id: r.id }));
 
       // What the reconcile found the remote is missing. A record the apply
       // refused is left out: this device does not hold what it would publish.
@@ -339,19 +378,41 @@ export function createScheduler(io: SchedulerIo): SyncScheduler {
           if (mine) owed.push(mine);
         }
       }
-      await publish(owed);
+      const failed = await publish(owed);
+      // A record the reconcile says the remote is missing and the push did not
+      // place is still owed, so it goes back on the dirty set - which is
+      // durable, so it also survives the window closing.
+      for (const failure of failed) dirty.add(etagSlot(failure.kind, failure.id));
+      // COUNTED AFTER THE PUSH, not before: the remote is missing what the
+      // reconcile found minus what this pass just gave it, and reporting the
+      // pre-push number leaves the settings window showing work that is
+      // already done until the next pull.
+      pending = Math.max(0, report.pending - (owed.length - failed.length));
+      error = failed[0]?.reason ?? closeError;
     } catch (e) {
-      await writeStatus({ lastError: e instanceof Error ? e.message : String(e) });
+      error = e instanceof Error ? e.message : String(e);
     }
+    await writeStatus({
+      lastPullAt: now(),
+      pending,
+      quarantine,
+      stale,
+      lastError: error,
+    });
+    // The pull is also the flush: a dirty mark that survived the last quit has
+    // nothing else that would notice it, because an etag-skipped object hides
+    // this device's local edit from the reconcile entirely.
+    await runPush();
   }
 
-  async function pushNow(): Promise<void> {
+  async function runPush(): Promise<void> {
     const config = await io.settings.readConfig();
     // Taken whether or not sync is on: marks accumulated while it was off
     // describe an inventory the remote has never seen, and the pull that
     // follows enabling it publishes the whole of it anyway.
-    const taken = [...dirty];
+    const taken = [...dirty, ...(await io.settings.readDirty())];
     dirty.clear();
+    await io.settings.writeDirty([]);
     if (!config.enabled || taken.length === 0) return;
     try {
       const wanted = new Set(taken);
@@ -359,12 +420,38 @@ export function createScheduler(io: SchedulerIo): SyncScheduler {
       // takes record ids: a hook that could only say "this store changed" would
       // push every host every time one was renamed.
       const envelopes = (await localEnvelopes()).filter((e) => wanted.has(etagSlot(e.kind, e.id)));
-      for (const slot of await publish(envelopes)) dirty.add(slot);
+      const failed = await publish(envelopes);
+      for (const failure of failed) dirty.add(etagSlot(failure.kind, failure.id));
+      await persistDirty();
+      await writeStatus({ lastPushAt: now(), lastError: failed[0]?.reason ?? null });
     } catch (e) {
       // The edit is not lost: the marks go back and the next trigger retries.
       for (const slot of taken) dirty.add(slot);
+      await persistDirty();
       await writeStatus({ lastError: e instanceof Error ? e.message : String(e) });
     }
+  }
+
+  /**
+   * Run `op` after whatever is already running.
+   *
+   * SERIAL, because both entry points are read-modify-write over one etag map
+   * and the read-to-write window is a whole network round trip. Two overlapping
+   * passes put a refused slot's etag back into the map, and once there the etag
+   * skip guarantees nothing ever looks at that object again.
+   *
+   * Queued rather than dropped: a push carries edits, and discarding one would
+   * lose them until the next mutation.
+   */
+  function serialize(op: () => Promise<void>): Promise<void> {
+    const next = (running ?? Promise.resolve()).then(op, op);
+    running = next.catch(() => {});
+    return next;
+  }
+
+  /** The dirty set, written where a quit can no longer take it. */
+  async function persistDirty(): Promise<void> {
+    await io.settings.writeDirty([...dirty]);
   }
 
   function schedule(): void {
@@ -374,7 +461,7 @@ export function createScheduler(io: SchedulerIo): SyncScheduler {
     // instead of never.
     pending = setTimer(() => {
       pending = null;
-      void pushNow();
+      void serialize(runPush);
     }, PUSH_DEBOUNCE_MS);
   }
 
@@ -382,10 +469,16 @@ export function createScheduler(io: SchedulerIo): SyncScheduler {
     markDirty(ids) {
       if (ids.length === 0) return;
       for (const id of ids) dirty.add(etagSlot(id.kind, id.id));
+      // WRITTEN BEFORE THE DEBOUNCE, not after it. The debounce is five
+      // seconds; quitting inside it used to lose the edit outright, because the
+      // next pull etag-skips an unmoved remote object and skips this device's
+      // local copy with it - so nothing would have noticed, and `pending` would
+      // have said zero.
+      void persistDirty();
       schedule();
     },
-    pullNow,
-    pushNow,
+    pullNow: () => serialize(runPull),
+    pushNow: () => serialize(runPush),
     onFocus() {
       const at = now();
       if (at - lastPull < FOCUS_INTERVAL_MS) return;
@@ -393,7 +486,7 @@ export function createScheduler(io: SchedulerIo): SyncScheduler {
       // hangs still costs the rate limit - otherwise a broken endpoint is
       // retried on every alt-tab.
       lastPull = at;
-      void pullNow();
+      void serialize(runPull);
     },
     dispose() {
       if (pending !== null) clearTimer(pending);

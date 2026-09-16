@@ -18,6 +18,7 @@ import {
   DEFAULT_SYNC_CONFIG,
   EMPTY_SYNC_STATUS,
   SYNC_CONFIG_KEY,
+  SYNC_DIRTY_KEY,
   SYNC_ETAGS_KEY,
   SYNC_STATUS_KEY,
   type SyncConfig,
@@ -41,6 +42,18 @@ export type SyncSettingsStore = {
   /** `kind:id` to etag, as `sync_pull` returned it. */
   readEtags(): Promise<Record<string, string>>;
   writeEtags(etags: Record<string, string>): Promise<void>;
+  /**
+   * The `kind:id` slots this device still owes the remote.
+   *
+   * DURABLE, and that is not tidiness. An etag-skipped object hides this
+   * device's local edit from the reconcile entirely - the pull sees the remote
+   * copy has not moved and skips the local copy with it - so the dirty set is
+   * the only thing carrying a local edit across a restart. In memory alone, a
+   * quit inside the five-second debounce loses the edit with no error, no
+   * failed request, and a pending count of zero.
+   */
+  readDirty(): Promise<string[]>;
+  writeDirty(slots: string[]): Promise<void>;
   readStatus(): Promise<SyncStatus>;
   writeStatus(status: SyncStatus): Promise<void>;
 };
@@ -70,6 +83,14 @@ export function createSyncSettingsStore(io: SyncStoreIo): SyncSettingsStore {
     },
     async writeEtags(etags) {
       await io.set(SYNC_ETAGS_KEY, etags);
+      await io.save();
+    },
+    async readDirty() {
+      const raw = await io.get(SYNC_DIRTY_KEY);
+      return Array.isArray(raw) ? raw.filter((s): s is string => typeof s === "string") : [];
+    },
+    async writeDirty(slots) {
+      await io.set(SYNC_DIRTY_KEY, slots);
       await io.save();
     },
     async readStatus() {

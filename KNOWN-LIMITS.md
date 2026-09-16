@@ -700,11 +700,18 @@ command is reached, never inside them. `sync_pull` and `sync_push` will run
 against a configured session whenever they are called, so a future caller that
 did not consult the config would sync for a user who never turned it on.
 
-**Carried by.** The `config.enabled` guard at the top of `pullNow` and `pushNow`
-in `src/modules/sync/scheduler.ts`, and the absence of any enabled flag on
+**Carried by.** The `config.enabled` guard in `runPull` and `runPush` in
+`src/modules/sync/scheduler.ts`, and the absence of any enabled flag on
 `SyncState` in `src-tauri/src/modules/sync/engine.rs`. The first check in
 `scripts/sync-scheduler-verify.ts` asserts the zero on a counting command port,
 so the guard cannot quietly stop existing.
+
+In `runPush` the guard sits after the dirty set is taken and cleared, not
+before, and that order is deliberate: marks accumulated while sync was off
+describe an inventory the remote has never seen, and the pull that follows
+turning it on publishes all of it anyway — so holding them would only make that
+first push describe itself twice, while a set that grew for months would be
+carried forever for nothing.
 
 A Rust-side duplicate was rejected rather than overlooked: the flag lives in the
 same store file as the rest of the configuration, which is a TypeScript store,
@@ -728,6 +735,13 @@ the bytes.
 **Carried by.** The `envelope.device == device` clause in `pull` in
 `src-tauri/src/modules/sync/engine.rs`, and the test there that asserts another
 device's expired tombstone survives the prune.
+
+A bucket that refuses DELETE outright — read-only credentials, an object lock, a
+lifecycle policy — reaches the same state by a different road, and the prune
+tolerates it rather than failing: a refused delete is not counted and the pull
+carries on, because making the first expired tombstone abort the whole reconcile
+would cost every landing and every push over an object whose only cost is the
+bytes it occupies.
 
 The clause is what makes the prune safe at all, which is why the residue is
 accepted rather than traded away: a device whose clock runs a hundred days fast
