@@ -788,6 +788,9 @@ pub fn run() {
             rdp::rdp_attach,
             rdp::rdp_snapshot,
             rdp::rdp_confirm_cert,
+            sync::engine::sync_configure,
+            sync::engine::sync_disable,
+            sync::engine::sync_purge_secrets,
             sync::engine::sync_pull,
             sync::engine::sync_push,
         ])

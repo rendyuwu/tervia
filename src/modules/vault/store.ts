@@ -554,6 +554,42 @@ export function createVaultStore(io: VaultIo): VaultStore {
     );
   }
 
+  /**
+   * Store the private-key body a landing carried, and report the presence flags
+   * it earns.
+   *
+   * ONLY THE TWO KEY FIELDS. A landing naming anything else is a device running
+   * a newer build, or a remote that has been tampered with; either way this
+   * store has no account for it and writing one would put bytes at an address
+   * nothing on this machine can ever enumerate, since no registered command
+   * lists accounts.
+   *
+   * A BLANK VALUE IS SKIPPED rather than written or deleted. The delete reading
+   * is the destructive one and it is not what an empty string from another
+   * device means; the write reading would store an empty secret behind a `true`
+   * flag, which is the record lying about what it holds.
+   *
+   * No rollback, unlike `writeKeySecrets`. Its rollback exists for a record the
+   * store has never seen, where the accounts held nothing to lose; here the
+   * record either already exists or is arriving with its body, and clearing an
+   * account on a partial failure would destroy a secret this layer never read
+   * and cannot put back. A half-landed pair leaves the other field's flag
+   * false, so the next pull carrying the body lands it again.
+   */
+  async function landKeySecrets(
+    id: string,
+    secrets: Record<string, string>,
+  ): Promise<Record<string, boolean>> {
+    const flags: Record<string, boolean> = {};
+    for (const field of VAULT_KEY_SECRET_FIELDS) {
+      const value = secrets[field]?.trim();
+      if (!value) continue;
+      await io.secrets.set(VAULT_KEYRING_SERVICE, vaultAccount(id, field), value);
+      flags[field === KEY_PRIVATE_KEY_FIELD ? "hasPrivateKey" : "hasPassphrase"] = true;
+    }
+    return flags;
+  }
+
   async function applyRemote(
     identityLandings: RemoteLanding<VaultIdentity>[],
     keyLandings: RemoteLanding<VaultKey>[],
@@ -613,8 +649,12 @@ export function createVaultStore(io: VaultIo): VaultStore {
           (t) => t.id === landing.id && t.kind === IDENTITY_TOMBSTONE_KIND,
         );
         if (superseding && superseding.deletedAt > landing.updatedAt) continue;
-        // `secrets` is deliberately not read here - see `RemoteLanding`. The
-        // record's own `hasPassword` is applied as the merge decided it.
+        // AN IDENTITY'S `secrets` IS NEVER LANDED, and that is not an omission
+        // the key branch below forgot to copy. The carry toggle is an opt-in to
+        // holding a PRIVATE KEY BODY, which is what `README.md` publishes; an
+        // account password is not one, so nothing attaches one on the way out
+        // and nothing accepts one on the way in. The record's own `hasPassword`
+        // is applied as the merge decided it.
         const record: VaultIdentity = { ...landing.record, updatedAt: landing.updatedAt };
         const idx = nextIdentities.findIndex((i) => i.id === landing.id);
         if (idx >= 0) nextIdentities[idx] = record;
@@ -656,7 +696,40 @@ export function createVaultStore(io: VaultIo): VaultStore {
           (t) => t.id === landing.id && t.kind === KEY_TOMBSTONE_KIND,
         );
         if (superseding && superseding.deletedAt > landing.updatedAt) continue;
-        const record: VaultKey = { ...landing.record, updatedAt: landing.updatedAt };
+        // THE CARRIED BODY, when the pull decided one should land. Written in
+        // THIS mutator and before the commit, so a key record and the secret it
+        // claims can never be committed apart.
+        //
+        // ABSENT SECRETS MEANS NO INFORMATION, NEVER "DELETE THE BODY". `merge`
+        // discards the loser's secrets, absent included, so a device that does
+        // not carry bodies wins every merge with `secrets` unset - against a
+        // local body that is perfectly good. Reading that as a reconcile would
+        // destroy a private key the user still holds, on an ordinary background
+        // pull. So this writes a body when one arrives and deletes none when
+        // none did.
+        //
+        // THE GATE IS NOT HERE. Whether a body is allowed onto this device at
+        // all is the carry toggle's question, and the scheduler answers it by
+        // dropping `secrets` off the landing before this function sees it -
+        // which is also what keeps the two sides of the pull's
+        // `secretsChanged` comparison symmetric.
+        let landed: Record<string, boolean> = {};
+        if (landing.secrets) {
+          try {
+            landed = await landKeySecrets(landing.id, landing.secrets);
+          } catch (e) {
+            refusals.push({
+              kind: KEY_TOMBSTONE_KIND,
+              id: landing.id,
+              reason: `the keychain refused to store this key's body: ${describeError(e)}`,
+            });
+            continue;
+          }
+        }
+        // The presence flags are raised PER FIELD ACTUALLY WRITTEN rather than
+        // per landing: a landing carrying only a passphrase must not have the
+        // record claim a private key nobody sent.
+        const record: VaultKey = { ...landing.record, ...landed, updatedAt: landing.updatedAt };
         const idx = nextKeys.findIndex((k) => k.id === landing.id);
         if (idx >= 0) nextKeys[idx] = record;
         else nextKeys.push(record);

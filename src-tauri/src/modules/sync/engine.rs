@@ -22,11 +22,15 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
-use super::crypto::{object_name, open_record, seal_record, SealedRecord, SyncKeys};
+use super::crypto::{
+    new_keyfile, object_name, open_keyfile, open_record, seal_record, Keyfile, SealedRecord,
+    SyncKeys,
+};
 use super::model::{content_differs, merge, strip_device_local, Envelope, WIRE_VERSION};
-use super::provider::{ProviderError, SyncProvider};
+use super::provider::{build, ProviderError, SyncProvider};
 
 /// How long a tombstone stays meaningful, in milliseconds.
 ///
@@ -41,8 +45,9 @@ const TOMBSTONE_TTL_MS: u64 = 90 * 24 * 60 * 60 * 1000;
 
 /// What a command answers when no configuration has been opened.
 ///
-/// The only answer either command gives today: the command that builds a
-/// session arrives with the settings surface that lets a user fill one in.
+/// Reachable on every launch, not only on a device that never configured:
+/// [`SyncState`] starts empty and [`sync_configure`] is what fills it, so a
+/// stored configuration is worth nothing until the caller has opened it again.
 const NOT_CONFIGURED: &str = "sync: no sync configuration is open on this device";
 
 const POISONED: &str = "sync: the sync state lock is poisoned";
@@ -77,6 +82,18 @@ fn object_prefix(prefix: &str) -> String {
 
 fn object_key(prefix: &str, name: &str) -> String {
     format!("{}{name}", object_prefix(prefix))
+}
+
+/// Where the keyfile sits: beside the object namespace, not inside it.
+///
+/// OUTSIDE `obj/` deliberately. The pull lists that prefix and hands every key
+/// it finds to `open_envelope`, and a keyfile is not a sealed record - it would
+/// quarantine on every pull, forever, and the quarantine list is a user-facing
+/// surface. Composed here for the reason [`object_key`] is: `crypto.rs` says in
+/// its own header that it builds no path, and a provider has no idea what a
+/// keyfile is.
+fn keyfile_key(prefix: &str) -> String {
+    format!("{}/keyfile", root(prefix))
 }
 
 /// The `<name>` half of a listed key, which is what the etag map is matched on.
@@ -557,6 +574,72 @@ async fn retry_merged(
 }
 
 // ---------------------------------------------------------------------------
+// The purge
+// ---------------------------------------------------------------------------
+
+/// Rewrite every remote object that carries a private key body so that it no
+/// longer does, and answer with how many were rewritten.
+///
+/// What a user asking to stop carrying secrets actually means. Turning the
+/// carry toggle off only stops this device publishing new bodies; every body
+/// already on the remote stays there until something goes and removes it, and
+/// the objects are opaque from outside so nothing else can tell which ones
+/// those are.
+///
+/// REWRITTEN RATHER THAN DELETED. The object also holds the record, which every
+/// other device still wants; deleting it would publish a disappearance that the
+/// pull reads as `LocalOnly` on every other device and re-pushes straight back,
+/// body and all.
+///
+/// A plain function beside [`pull`] and [`push`] rather than a command body,
+/// for the reason those two are split the same way: the fake provider in this
+/// file's tests can drive it, and a `tauri::State` cannot be built in a test.
+pub async fn purge_secrets(
+    provider: &dyn SyncProvider,
+    keys: &SyncKeys,
+    prefix: &str,
+) -> Result<usize, ProviderError> {
+    let cas = provider.capabilities().cas;
+    let mut purged = 0;
+    for entry in provider.list(&object_prefix(prefix)).await? {
+        let Some(object) = provider.get(&entry.key).await? else {
+            // Raced a delete by another device. Nothing left to strip.
+            continue;
+        };
+        // SKIPPED, NOT FATAL - the disposition the pull already gives an object
+        // it cannot read. One object written by a newer build, or one the
+        // keyfile does not open, must not leave every body after it in the
+        // listing on the remote.
+        let Ok(mut envelope) = open_envelope(keys, &object.bytes) else {
+            continue;
+        };
+        if envelope.secrets.is_none() {
+            continue;
+        }
+        envelope.secrets = None;
+        let bytes = seal_envelope(keys, &envelope).map_err(ProviderError::Config)?;
+        // The etag of the copy that was READ, not the one the listing reported:
+        // the condition has to name the bytes this rewrite was computed from,
+        // and a write landing between the list and the get would make those two
+        // different.
+        let condition = if cas {
+            Some(object.etag.as_str())
+        } else {
+            None
+        };
+        // A REFUSED WRITE ABORTS, which is the opposite of the pull's
+        // disposition for a refused prune and is not an inconsistency. There the
+        // residue is bytes nobody reads; here it is a private key body still
+        // legible to whoever holds the storage, so answering with a count as
+        // though the purge had run would be the failure itself. The caller sees
+        // the error and can ask again.
+        provider.put(&entry.key, bytes, condition).await?;
+        purged += 1;
+    }
+    Ok(purged)
+}
+
+// ---------------------------------------------------------------------------
 // State and commands
 // ---------------------------------------------------------------------------
 
@@ -575,13 +658,12 @@ pub struct SyncSession {
     pub device: String,
 }
 
-/// The configuration the two commands run against, or none.
+/// The configuration the commands below run against, or none.
 ///
-/// EMPTY ON EVERY LAUNCH, and there is nothing here that fills it: the command
-/// that opens a keyfile and builds a provider arrives with the settings surface
-/// that lets a user supply one. Until then both commands below answer
-/// [`NOT_CONFIGURED`], which is also the honest description of a device where
-/// sync has never been turned on.
+/// EMPTY ON EVERY LAUNCH, and nothing persists it. [`sync_configure`] fills it
+/// and the process losing it is the whole of "sync is off" - there is no file
+/// here holding a passphrase, and a stored configuration cannot open itself.
+/// Until a caller configures, every other command answers [`NOT_CONFIGURED`].
 #[derive(Default)]
 pub struct SyncState {
     session: Mutex<Option<SyncSession>>,
@@ -595,6 +677,13 @@ impl SyncState {
             .clone()
             .ok_or_else(|| NOT_CONFIGURED.to_string())
     }
+
+    /// ONE SPELLING OF THE WRITE for both the open and the close, so neither
+    /// can grow its own lock handling.
+    fn set(&self, session: Option<SyncSession>) -> Result<(), String> {
+        *self.session.lock().map_err(|_| POISONED.to_string())? = session;
+        Ok(())
+    }
 }
 
 fn now_ms() -> u64 {
@@ -602,6 +691,122 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+/// What [`sync_configure`] takes.
+///
+/// MIRRORED BY `SyncConfigureArgs` in `src/modules/sync/types.ts`, kept in
+/// lockstep by hand: `tsc` cannot see across the IPC boundary, so a field
+/// renamed on one side arrives `undefined` on the other with no error anywhere.
+/// `deny_unknown_fields` is what turns that into a loud refusal at the first
+/// call instead of a silently defaulted field - the same reason each provider
+/// config struct carries it.
+///
+/// THE SECRETS ARRIVE AS ARGUMENTS rather than being read from the keychain
+/// here. The window that has them is the window that just took them from the
+/// user, and reading them back would put a second copy of the passphrase on a
+/// path that does not need one.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SyncConfigureArgs {
+    provider: String,
+    prefix: String,
+    passphrase: String,
+    /// The PROVIDER's own shape, unread by anything between the caller and
+    /// `build` in `src-tauri/src/modules/sync/provider.rs`. A typed field here
+    /// would make a second backend a change to this struct rather than one file
+    /// plus one line.
+    config: Value,
+}
+
+/// Open a session: build the provider, unwrap the keyfile, and hold both.
+///
+/// REPLACES WHATEVER WAS THERE, but only once the new session is in hand. A
+/// configure that fails - an endpoint that is down, a passphrase mistyped -
+/// leaves the working session it could not replace, which is the recoverable
+/// direction: the caller retries and nothing stopped syncing meanwhile. Clearing
+/// first would turn one transient failure into sync being off until someone
+/// noticed, and the caller that genuinely wants it off has [`sync_disable`].
+#[tauri::command]
+pub async fn sync_configure(
+    state: tauri::State<'_, SyncState>,
+    args: SyncConfigureArgs,
+) -> Result<(), String> {
+    let provider = build(&args.provider, args.config).map_err(|e| e.to_string())?;
+    let key = keyfile_key(&args.prefix);
+
+    let keys = match provider.get(&key).await.map_err(|e| e.to_string())? {
+        Some(object) => {
+            // TWO DIFFERENT SENTENCES, and the distinction is the whole point of
+            // parsing separately from opening. `open_keyfile` answers a wrong
+            // passphrase and a tampered keyfile with one opaque message, on
+            // purpose - but bytes that are not a keyfile at all tell nobody
+            // anything about the passphrase, and folding them into that message
+            // would tell a user who simply mistyped that their remote is
+            // corrupt.
+            let keyfile: Keyfile = serde_json::from_slice(&object.bytes).map_err(|_| {
+                "sync: the file at the root of this prefix is not a sync keyfile - check that the \
+                 prefix names the right place"
+                    .to_string()
+            })?;
+            open_keyfile(&keyfile, &args.passphrase)?
+        }
+        None => {
+            let (keyfile, keys) = new_keyfile(&args.passphrase)?;
+            let bytes = serde_json::to_vec(&keyfile)
+                .map_err(|_| "sync: the keyfile could not be written".to_string())?;
+            // THE RACE IS REAL AND UNMITIGATED HERE. Two devices configuring
+            // against one fresh prefix both read no keyfile and both mint one;
+            // the second write wins, and the first device is left holding a root
+            // key that nothing on the remote was sealed under - every object it
+            // published before its next configure becomes unreadable to
+            // everyone, itself included.
+            //
+            // The mitigation is a create-if-absent condition, and `put` cannot
+            // express one: `if_match` carries an etag, and `build_put` in
+            // `src-tauri/src/modules/sync/providers/s3.rs` spends it on an
+            // `if-match` header, which no absent object can satisfy. Inventing a
+            // sentinel spelling for it would be a provider contract written from
+            // the calling side, against a trait whose own doc says `if_match`
+            // is an etag. So the write goes out unconditional and the residue
+            // stands: two devices configured against one empty prefix in the
+            // same moment need one of them redone.
+            provider
+                .put(&key, bytes, None)
+                .await
+                .map_err(|e| e.to_string())?;
+            keys
+        }
+    };
+
+    let device = super::device_id()?;
+    state.set(Some(SyncSession {
+        keys: Arc::new(keys),
+        provider,
+        prefix: args.prefix,
+        device,
+    }))
+}
+
+/// Close the session this process holds.
+///
+/// NO NETWORK AND NO KEYCHAIN WRITE, and that is the whole contract. The stored
+/// configuration and the credentials under it are the caller's to remove - it is
+/// the side that wrote them, and the objects on the remote are not this
+/// command's business either, since another device is still syncing them. All
+/// this does is make every other command here answer [`NOT_CONFIGURED`] again.
+#[tauri::command]
+pub async fn sync_disable(state: tauri::State<'_, SyncState>) -> Result<(), String> {
+    state.set(None)
+}
+
+/// Strip every private key body the remote is still carrying.
+#[tauri::command]
+pub async fn sync_purge_secrets(state: tauri::State<'_, SyncState>) -> Result<usize, String> {
+    let session = state.open()?;
+    purge_secrets(session.provider.as_ref(), &session.keys, &session.prefix)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Reconcile, and answer with what the caller has to apply.
@@ -1368,11 +1573,50 @@ mod tests {
         assert_eq!(report.pending, 0);
     }
 
+    #[tokio::test]
+    async fn the_purge_rewrites_the_objects_that_carried_a_body_and_touches_no_others() {
+        // WHICH KEYS GOT A PUT is the entire content of this check. Byte
+        // equality on the untouched objects would look like a stronger claim
+        // and be a broken one: `seal_record` draws a fresh nonce, so a
+        // re-sealed object is never byte-equal to itself and the assertion
+        // would fail against a correct implementation.
+        let keys = keys();
+        let fake = Fake::cas(true);
+        let carrying = |id: &str, updated_at: u64, body: &str| Envelope {
+            secrets: Some(json!({ "privateKey": body })),
+            ..env("key", id, updated_at, "dev-b", json!({"id": id}))
+        };
+        let one = carrying("k-1", NOW - 1000, "BODY ONE");
+        let two = carrying("k-2", NOW - 2000, "BODY TWO");
+        let bare = host("h-1", NOW - 3000, "dev-b", "never carried one");
+        publish(&fake, &keys, &one, "e1", Some(NOW - 1000));
+        publish(&fake, &keys, &two, "e2", Some(NOW - 2000));
+        publish(&fake, &keys, &bare, "e3", Some(NOW - 3000));
+
+        let purged = purge_secrets(&fake, &keys, PREFIX).await.expect("purge");
+
+        assert_eq!(purged, 2);
+        let mut written = fake.puts();
+        written.sort();
+        let mut expected = vec![key_of(&keys, &one), key_of(&keys, &two)];
+        expected.sort();
+        assert_eq!(
+            written, expected,
+            "the purge wrote the wrong set of objects"
+        );
+        // And what landed is the same record without the body, rather than a
+        // record the other devices will read as a change.
+        let stored = fake.objects.lock().unwrap()[&key_of(&keys, &one)].0.clone();
+        let rewritten = open_envelope(&keys, &stored).unwrap();
+        assert!(rewritten.secrets.is_none(), "the body survived the purge");
+        assert_eq!(rewritten.record, one.record);
+    }
+
     #[test]
     fn neither_command_runs_without_a_configuration() {
-        // The shipped state of this build, asserted rather than assumed: there
-        // is no path that fills the session, so both commands answer the same
-        // way and the scheduler above them is unreachable by design.
+        // The state every launch starts in, asserted rather than assumed:
+        // nothing persists a session, so a device whose user configured sync
+        // last week still answers this way until a caller reopens it.
         let state = SyncState::default();
         // `.err()` rather than `.unwrap_err()`, which would need `SyncSession`
         // to be `Debug` - and a derived one prints the `SyncKeys` inside it,

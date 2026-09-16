@@ -5,11 +5,11 @@
 //! write: `KNOWN-LIMITS.md` records that every integrity rule lives in the
 //! store layer and that a pull has to go through it, and the stores are
 //! TypeScript - so this module decides and `src/modules/sync/` applies. No
-//! settings surface either, and therefore nothing that OPENS a configuration:
-//! `SyncState` in `src-tauri/src/modules/sync/engine.rs` is empty on every
-//! launch, so the two commands it registers answer "no configuration" until
-//! the command that fills it arrives with the settings section that lets a
-//! user supply one.
+//! settings surface either: `sync_configure` in
+//! `src-tauri/src/modules/sync/engine.rs` is handed a passphrase and a provider
+//! configuration, and never goes looking for them. `SyncState` there is empty
+//! on every launch and nothing persists it, so every other command answers "no
+//! configuration" until a caller has opened one.
 //!
 //! `engine.rs` is where an object key is composed, which `crypto.rs` and
 //! `provider.rs` both decline for their own reasons.

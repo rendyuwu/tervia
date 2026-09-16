@@ -96,8 +96,19 @@ export function tombstoneEnvelope(tombstone: Tombstone): Envelope {
  * the honest reading of "written before the field existed": it orders below
  * everything, so the first edit on any device outranks it. Refusing would leave
  * the record unlandable forever, which is the worse of the two.
+ *
+ * `withSecrets` is the carry toggle and the "this body actually moved" answer,
+ * already resolved by the caller into one boolean. A PARAMETER WITH NO DEFAULT,
+ * so that a caller building a landing has to say which it means: defaulting to
+ * true would carry a body onto a device that opted out the first time someone
+ * added a second call site, and defaulting to false would silently stop
+ * carrying one at all - and neither failure has a symptom until a user looks in
+ * their keychain.
  */
-export function landingOf<T extends { id: string }>(envelope: Envelope): RemoteLanding<T> | null {
+export function landingOf<T extends { id: string }>(
+  envelope: Envelope,
+  withSecrets: boolean,
+): RemoteLanding<T> | null {
   if (envelope.deleted) {
     if (typeof envelope.updatedAt !== "number") return null;
     return {
@@ -111,5 +122,5 @@ export function landingOf<T extends { id: string }>(envelope: Envelope): RemoteL
     record: envelope.record as T,
     updatedAt: typeof envelope.updatedAt === "number" ? envelope.updatedAt : 0,
   };
-  return envelope.secrets ? { ...landing, secrets: envelope.secrets } : landing;
+  return withSecrets && envelope.secrets ? { ...landing, secrets: envelope.secrets } : landing;
 }
