@@ -1745,14 +1745,17 @@ console.log(
     "deleteRule",
     "dropRulesForHost",
     "upsertRule",
-    // THE FOURTH WRITE ROUTE, AND THE RELEASE CLAIM ABOVE DOES NOT COVER IT.
-    // `applyRemote` lands another device's deletes, so it can drop a rule record
-    // whose forward is running here, and it cannot release one: the runtime
-    // lives in `controller.ts`, which imports this store, so a store that called
-    // back into it would close the cycle every port in this module exists to
-    // keep open. Nothing calls `applyRemote` yet - the pull that will is not in
-    // the tree - and whatever does is where the release has to be sequenced,
-    // ahead of the apply, the way `HostsPage.tsx` sequences `deleteHost`'s.
+    // THE FOURTH WRITE ROUTE, AND THE RELEASE CLAIM ABOVE COVERS IT FROM THE
+    // CALLER'S SIDE, NOT FROM HERE. `applyRemote` lands another device's
+    // deletes, so it can drop a rule record whose forward is running here, and
+    // it cannot release one itself: the runtime lives in `controller.ts`, which
+    // imports this store, so a store that called back into it would close the
+    // cycle every port in this module exists to keep open. So the release is
+    // sequenced ahead of the apply by the one caller - `release` in
+    // `src/modules/sync/scheduler.ts`, through an injected port - the way
+    // `HostsPage.tsx` sequences `deleteHost`'s. `scripts/sync-scheduler-verify.ts`
+    // pins that order; a landed EDIT is still not released, which is what
+    // `KNOWN-LIMITS.md` now carries.
     "applyRemote",
     // The reads and the plumbing. `listTombstones` is a READ: it reports what
     // the three write routes above left behind, and adding it changed no rule

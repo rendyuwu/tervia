@@ -581,8 +581,21 @@ deletes nobody will ever consult again. Against that, the alternative is keeping
 every tombstone forever, which makes the file grow without bound for a store
 whose whole content is a few dozen rows.
 
+A remote tombstone past the window widens this by one step, and it is the same
+guess seen from the other side: the pull in `src-tauri/src/modules/sync/engine.rs`
+does not hand an expired tombstone to the apply path at all — landing it would
+write a row every read then filters straight back out, once per pull, for the
+life of the bucket. So a local record nobody has touched for longer than the
+window, against a remote delete older than the window, is reported as a
+divergence for the user to resolve rather than deleted. That is the direction a
+local record with no remote object at all already takes, and for the same
+reason: an absence and an expiry are both inferences, and acting on either
+destroys data.
+
 **Carried by.** `TOMBSTONE_TTL_MS` in `src/lib/tombstones.ts`, which is the
-window, and `livingTombstones` in the same file, which applies it.
+window, `livingTombstones` in the same file, which applies it on this side, and
+the `expired` clause in `pull` in `src-tauri/src/modules/sync/engine.rs`, which
+applies it to the remote's copy.
 
 **Trigger.** A device registry that can say when each device last pulled. The
 window can then be derived from the oldest live device rather than guessed, and
@@ -673,9 +686,82 @@ apply, which is how `HostsPage.tsx` sequences the same pair for `deleteHost`.
 
 **Carried by.** The pinned member set in `scripts/forwards-shell-verify.ts`,
 which names `applyRemote` as a write route the release claim does not cover, and
-the `applyRemote` doc in `src/modules/forwards/store.ts`. Nothing calls
-`applyRemote` today, so nothing reaches this state yet.
+the `applyRemote` doc in `src/modules/forwards/store.ts`.
 
-**Trigger.** The first caller of `applyRemote`. It either sequences
-`releaseRulesForHost`-style release ahead of the apply, or this entry becomes a
-defect rather than an accepted state.
+**Trigger — fired, and narrowed rather than retired.** The first caller of
+`applyRemote` is the sync scheduler, and it does sequence the release: `release`
+in `src/modules/sync/scheduler.ts` runs `releaseRule` for every rule a landed
+DELETE is about to remove, before the apply, through an injected port so the
+module stays loadable without a Tauri runtime. `scripts/sync-scheduler-verify.ts`
+pins both the release and its order against the commit.
+
+What remains is narrower and is what this entry now describes: a landed EDIT is
+not released. Another device renaming a rule, or changing its endpoints, lands
+over a record whose tunnel is still bound to the old ones — the rule row then
+describes something other than what is running. Releasing there was rejected
+because the common case is cosmetic and the cost is dropping a tunnel the user
+is working over. The trigger for closing it is a report of a rule whose row and
+running forward disagree, or an edit path that can change `localPort` from
+another device.
+
+## Cross-device sync
+
+### Sync's on/off switch is enforced in TypeScript only
+
+**Accepted state.** "Sync off means no network" is checked before either Rust
+command is reached, never inside them. `sync_pull` and `sync_push` will run
+against a configured session whenever they are called, so a future caller that
+did not consult the config would sync for a user who never turned it on.
+
+**Carried by.** The `config.enabled` guard in `runPull` and `runPush` in
+`src/modules/sync/scheduler.ts`, and the absence of any enabled flag on
+`SyncState` in `src-tauri/src/modules/sync/engine.rs`. The first check in
+`scripts/sync-scheduler-verify.ts` asserts the zero on a counting command port,
+so the guard cannot quietly stop existing.
+
+In `runPush` the guard sits after the dirty set is taken and cleared, not
+before, and that order is deliberate: marks accumulated while sync was off
+describe an inventory the remote has never seen, and the pull that follows
+turning it on publishes all of it anyway — so holding them would only make that
+first push describe itself twice, while a set that grew for months would be
+carried forever for nothing.
+
+A Rust-side duplicate was rejected rather than overlooked: the flag lives in the
+same store file as the rest of the configuration, which is a TypeScript store,
+so Rust would have to either read that file itself or be told the flag on every
+call — and a flag passed in by the caller is not a gate, it is the same guard
+one layer further from where the decision is.
+
+**Trigger.** A second caller of `sync_pull` or `sync_push` from outside
+`src/modules/sync/scheduler.ts`. At that point the gate belongs where both
+callers pass through, which is the session itself.
+
+### A tombstone published by a device that has since been retired is never pruned
+
+**Accepted state.** The prune removes a remote tombstone object only when this
+device published it. A device that is wiped, lost or reinstalled leaves its
+tombstone objects on the remote with nobody left who will delete them, so they
+accumulate for the life of the bucket. They are small and harmless — every other
+device reads them, finds them expired, and ignores them — but nothing reclaims
+the bytes.
+
+**Carried by.** The `envelope.device == device` clause in `pull` in
+`src-tauri/src/modules/sync/engine.rs`, and the test there that asserts another
+device's expired tombstone survives the prune.
+
+A bucket that refuses DELETE outright — read-only credentials, an object lock, a
+lifecycle policy — reaches the same state by a different road, and the prune
+tolerates it rather than failing: a refused delete is not counted and the pull
+carries on, because making the first expired tombstone abort the whole reconcile
+would cost every landing and every push over an object whose only cost is the
+bytes it occupies.
+
+The clause is what makes the prune safe at all, which is why the residue is
+accepted rather than traded away: a device whose clock runs a hundred days fast
+would otherwise delete every remote tombstone on its first pull, and every other
+device would then re-push any record edited inside the window. A wrong clock
+locally skews one device's view; a wrong clock pruning globally rewrites
+everybody's.
+
+**Trigger.** A device registry — the same trigger the 90-day resurrection entry
+above already names, so the two retire together.

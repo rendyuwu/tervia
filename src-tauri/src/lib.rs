@@ -64,7 +64,7 @@ pub mod modules;
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 use modules::{
-    backup, cli, clipboard, format, fs, git, net, pty, pty_daemon, rdp, secrets, shell, ssh,
+    backup, cli, clipboard, format, fs, git, net, pty, pty_daemon, rdp, secrets, shell, ssh, sync,
 };
 use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_window_state::StateFlags;
@@ -694,6 +694,7 @@ pub fn run() {
         .manage(secrets::SecretsState::default())
         .manage(ssh::SshState::default())
         .manage(rdp::RdpState::default())
+        .manage(sync::engine::SyncState::default())
         .invoke_handler(tauri::generate_handler![
             pty::pty_open,
             pty::pty_attach,
@@ -787,6 +788,8 @@ pub fn run() {
             rdp::rdp_attach,
             rdp::rdp_snapshot,
             rdp::rdp_confirm_cert,
+            sync::engine::sync_pull,
+            sync::engine::sync_push,
         ])
         .on_window_event(|window, event| {
             // Mirror main-window minimize/restore onto the settings child.
@@ -830,6 +833,20 @@ pub fn run() {
                             let _ = w.close();
                         }
                     }
+                }
+                // The sync scheduler's second trigger, after the debounce on a
+                // local edit. Emitted here rather than listened for on the
+                // frontend because a webview's own focus and the WINDOW's focus
+                // are different questions - a click on the header restores one
+                // and not the other.
+                //
+                // The `main` guard above is what keeps this to one webview, and
+                // that is load bearing rather than tidy: `fileKeyValueStore.ts`
+                // records that a contended write eventually gives up and writes
+                // over a stale baseline, losing another window's update, so two
+                // windows applying a pull at once would make that routine.
+                tauri::WindowEvent::Focused(true) => {
+                    let _ = window.emit(crate::modules::events::SYNC_FOCUSED, ());
                 }
                 _ => {}
             }

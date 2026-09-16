@@ -16,6 +16,7 @@ import { applyTerminalThemeFastPath } from "@/modules/settings/terminalPalette";
 import { applyAppOpacityFastPath } from "@/modules/settings/appOpacity";
 import { applyFontFastPath } from "@/lib/fonts";
 import { installFocusRestore } from "./lib/focusRestore";
+import { startSync } from "@/modules/sync";
 
 if (USE_CUSTOM_WINDOW_CONTROLS) {
   document.documentElement.dataset.chrome = "borderless";
@@ -38,6 +39,12 @@ applyFontFastPath();
 // Alt-Tab can leave the webview with focus on <body>, stranding the caret that
 // was in the AI prompt (or a terminal). Put it back where the user left it.
 installFocusRestore();
+// Cross-device sync. Inert unless this is the `main` webview AND the user has
+// turned it on - `createScheduler` returns a no-op object for any other label,
+// which is what keeps two windows from applying a pull into one store file at
+// once. Started here rather than from a React effect so the app-setup pull is
+// not tied to a component's mount order.
+startSync();
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <ErrorBoundary

@@ -37,4 +37,13 @@ export const IPC_EVENTS = {
   OPEN_CLI_TARGET: "tervia:open-cli-target",
   /** Rust -> main window: the `tervia --update` shim asks the UI to start updating. */
   TRIGGER_UPDATE: "tervia:trigger-update",
+  /**
+   * Rust -> main window: the window regained focus, which is when the sync
+   * scheduler may pull.
+   *
+   * A SIGNAL, not a command. The rate limit lives on this side beside the push
+   * debounce, because both measure the same thing and splitting them across the
+   * IPC boundary would put half the policy where the other half cannot see it.
+   */
+  SYNC_FOCUSED: "tervia:sync-focused",
 } as const;

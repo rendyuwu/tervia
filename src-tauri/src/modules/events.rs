@@ -12,3 +12,13 @@ pub const OPEN_CLI_TARGET: &str = "tervia:open-cli-target";
 
 /// Rust -> main window: the `tervia --update` shim asks the UI to start updating.
 pub const TRIGGER_UPDATE: &str = "tervia:trigger-update";
+
+/// Rust -> main window: the window regained focus, which is when the sync
+/// scheduler may pull.
+///
+/// A SIGNAL, not a command: the rate limit lives on the frontend beside the
+/// debounce, because both of them measure the same thing and splitting them
+/// across the IPC boundary would put half the policy where the other half
+/// cannot see it. Emitted only for the `main` label - see the window event
+/// handler in `src-tauri/src/lib.rs` for why only one webview may apply.
+pub const SYNC_FOCUSED: &str = "tervia:sync-focused";
