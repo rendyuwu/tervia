@@ -1,9 +1,14 @@
 import type { StoreRecovery } from "@/lib/storeRecovery";
 import {
+  landedTombstones,
+  landingRefusal,
   livingTombstones,
   TOMBSTONES_KEY,
   withoutTombstone,
   withTombstone,
+  type DirtyId,
+  type RemoteLanding,
+  type RemoteLandingRefusal,
   type Tombstone,
 } from "@/lib/tombstones";
 
@@ -104,6 +109,34 @@ export type VaultStore = {
   deleteIdentity(id: string, hostRefs: IdentityHostRefs): Promise<void>;
   deleteKey(id: string): Promise<void>;
   /**
+   * Land already-merged identities and keys, and their tombstones, at their
+   * REMOTE timestamps in ONE commit, and report the ones that were not applied.
+   *
+   * The one writer here that does not originate what it writes, which is why it
+   * is the one that does not stamp: every other mutator overwrites its caller's
+   * `updatedAt`, and doing that to a pulled record would have it outrank the copy
+   * it came from, while a locally-stamped `deletedAt` restarts the expiry window
+   * on every device that receives the delete.
+   *
+   * BOTH KINDS IN ONE CALL and one commit, because both live in one file: two
+   * calls would be two commits, and the second could tear against a write from
+   * another window in between.
+   *
+   * A TOMBSTONE LANDING RELEASES THE KEYCHAIN, the same accounts `deleteKey` and
+   * `deleteIdentity` clear. There is no `secrets_list` command, so a body left
+   * at an account no record names is not untidy, it is unreachable forever.
+   *
+   * REFUSALS COME BACK, nothing throws - see `landingRefusal` in
+   * `src/lib/tombstones.ts` for the four conditions, and for why the reference
+   * guards `upsertIdentity` runs are deliberately outside them: an identity may
+   * legitimately arrive before the key it names, since the order within one pull
+   * is an artifact of a listing rather than of what the other device holds.
+   */
+  applyRemote(
+    identities: RemoteLanding<VaultIdentity>[],
+    keys: RemoteLanding<VaultKey>[],
+  ): Promise<RemoteLandingRefusal[]>;
+  /**
    * What this store's deletes have left behind, already pruned to the window.
    *
    * ONE list for both record kinds, because both live in one file and `kind` is
@@ -146,9 +179,9 @@ export function createVaultStore(io: VaultIo): VaultStore {
 
   // Read ONCE per mutator and reused - see the same line in `hosts/store.ts` for
   // why separate reads of an injected constant clock are indistinguishable from
-  // one, and what that hides. Always this store's own clock, never a caller's
-  // value: accepted and deferred in `KNOWN-LIMITS.md`, which also names the
-  // shape the sync pull should add rather than widening ten signatures.
+  // one, and what that hides. This store's own clock in every mutator, never a
+  // caller's value - `applyRemote` is the one exception, and takes the remote
+  // timestamp beside the record it lands.
   const now = io.now ?? Date.now;
 
   async function listIdentities(): Promise<VaultIdentity[]> {
@@ -174,10 +207,16 @@ export function createVaultStore(io: VaultIo): VaultStore {
    * pushes the record straight back. A `set` reaches the store's cache only and
    * the `commit` writes the whole file in one `atomic_write`, so either both keys
    * land or neither does.
+   *
+   * DIRTY IS REQUIRED, and per RECORD - `hosts/store.ts`'s copy of this doc
+   * carries the full reasoning; it is the same parameter for the same reasons.
+   * `[]` is what `applyRemote` passes: a landing is what the remote already
+   * holds.
    */
-  async function persist(entries: [string, unknown][]): Promise<void> {
+  async function persist(entries: [string, unknown][], dirty: DirtyId[]): Promise<void> {
     for (const [key, value] of entries) await io.store.set(key, value);
     await io.store.commit();
+    io.markDirty?.(dirty);
   }
 
   /** Both the public read and every write's baseline, so no caller can reason
@@ -354,7 +393,7 @@ export function createVaultStore(io: VaultIo): VaultStore {
       const entries: [string, unknown][] = [[VAULT_IDENTITIES_KEY, next]];
       const graves = withoutTombstone(await readTombstones(at), [identity.id], at);
       if (graves) entries.push([TOMBSTONES_KEY, graves]);
-      await persist(entries);
+      await persist(entries, [{ kind: IDENTITY_TOMBSTONE_KIND, id: identity.id }]);
       return { record };
     });
   }
@@ -420,7 +459,7 @@ export function createVaultStore(io: VaultIo): VaultStore {
       const entries: [string, unknown][] = [[VAULT_KEYS_KEY, next]];
       const graves = withoutTombstone(await readTombstones(at), [key.id], at);
       if (graves) entries.push([TOMBSTONES_KEY, graves]);
-      await persist(entries);
+      await persist(entries, [{ kind: KEY_TOMBSTONE_KIND, id: key.id }]);
       return warning ? { record, warning } : { record };
     });
   }
@@ -450,13 +489,16 @@ export function createVaultStore(io: VaultIo): VaultStore {
       // a real delete.
       const at = now();
       const graves = await readTombstones(at);
-      await persist([
-        [VAULT_IDENTITIES_KEY, identities.filter((i) => i.id !== id)],
+      await persist(
         [
-          TOMBSTONES_KEY,
-          withTombstone(graves, [{ id, kind: IDENTITY_TOMBSTONE_KIND, deletedAt: at }], at),
+          [VAULT_IDENTITIES_KEY, identities.filter((i) => i.id !== id)],
+          [
+            TOMBSTONES_KEY,
+            withTombstone(graves, [{ id, kind: IDENTITY_TOMBSTONE_KIND, deletedAt: at }], at),
+          ],
         ],
-      ]);
+        [{ kind: IDENTITY_TOMBSTONE_KIND, id }],
+      );
     });
   }
 
@@ -481,13 +523,114 @@ export function createVaultStore(io: VaultIo): VaultStore {
       // One commit, after the accounts are cleared - see `deleteIdentity`.
       const at = now();
       const graves = await readTombstones(at);
-      await persist([
-        [VAULT_KEYS_KEY, keys.filter((k) => k.id !== id)],
+      await persist(
         [
-          TOMBSTONES_KEY,
-          withTombstone(graves, [{ id, kind: KEY_TOMBSTONE_KIND, deletedAt: at }], at),
+          [VAULT_KEYS_KEY, keys.filter((k) => k.id !== id)],
+          [
+            TOMBSTONES_KEY,
+            withTombstone(graves, [{ id, kind: KEY_TOMBSTONE_KIND, deletedAt: at }], at),
+          ],
         ],
-      ]);
+        [{ kind: KEY_TOMBSTONE_KIND, id }],
+      );
+    });
+  }
+
+  /**
+   * Clear every account one dropped record owned.
+   *
+   * The purely local half of a delete, and the half a landing DOES re-run: the
+   * origin device cleared its own keychain, and there is no `secrets_list`
+   * command, so a body left behind here is reachable by nothing on this machine
+   * ever again.
+   */
+  async function releaseAccounts(id: string, fields: readonly string[]): Promise<void> {
+    await Promise.all(
+      fields.map((field) => io.secrets.delete(VAULT_KEYRING_SERVICE, vaultAccount(id, field))),
+    );
+  }
+
+  async function applyRemote(
+    identityLandings: RemoteLanding<VaultIdentity>[],
+    keyLandings: RemoteLanding<VaultKey>[],
+  ): Promise<RemoteLandingRefusal[]> {
+    return enqueueWrite(async () => {
+      // ONE clock read for the whole set, and it stamps nothing: it is the window
+      // boundary every tombstone read and write here is filtered against, so one
+      // apply judges every landing in it against one instant.
+      const at = now();
+      const refusals: RemoteLandingRefusal[] = [];
+      const [identities, keys] = await Promise.all([listIdentities(), listKeys()]);
+      const nextIdentities = [...identities];
+      const nextKeys = [...keys];
+      const graves = await readTombstones(at);
+      const buried: Tombstone[] = [];
+      const revived: string[] = [];
+      let identitiesTouched = false;
+      let keysTouched = false;
+
+      for (const landing of identityLandings) {
+        const refusal = landingRefusal(landing, IDENTITY_TOMBSTONE_KIND);
+        if (refusal) {
+          refusals.push(refusal);
+          continue;
+        }
+        if (landing.deleted) {
+          const idx = nextIdentities.findIndex((i) => i.id === landing.tombstone.id);
+          if (idx >= 0) {
+            await releaseAccounts(landing.tombstone.id, VAULT_IDENTITY_SECRET_FIELDS);
+            nextIdentities.splice(idx, 1);
+            identitiesTouched = true;
+          }
+          // Filed even with no local record to drop: another device deleted it,
+          // and a device that has not pulled since would push its own copy back.
+          buried.push(landing.tombstone);
+          continue;
+        }
+        // `secrets` is deliberately not read here - see `RemoteLanding`. The
+        // record's own `hasPassword` is applied as the merge decided it.
+        const record: VaultIdentity = { ...landing.record, updatedAt: landing.updatedAt };
+        const idx = nextIdentities.findIndex((i) => i.id === landing.id);
+        if (idx >= 0) nextIdentities[idx] = record;
+        else nextIdentities.push(record);
+        revived.push(landing.id);
+        identitiesTouched = true;
+      }
+
+      for (const landing of keyLandings) {
+        const refusal = landingRefusal(landing, KEY_TOMBSTONE_KIND);
+        if (refusal) {
+          refusals.push(refusal);
+          continue;
+        }
+        if (landing.deleted) {
+          const idx = nextKeys.findIndex((k) => k.id === landing.tombstone.id);
+          if (idx >= 0) {
+            await releaseAccounts(landing.tombstone.id, VAULT_KEY_SECRET_FIELDS);
+            nextKeys.splice(idx, 1);
+            keysTouched = true;
+          }
+          buried.push(landing.tombstone);
+          continue;
+        }
+        const record: VaultKey = { ...landing.record, updatedAt: landing.updatedAt };
+        const idx = nextKeys.findIndex((k) => k.id === landing.id);
+        if (idx >= 0) nextKeys[idx] = record;
+        else nextKeys.push(record);
+        revived.push(landing.id);
+        keysTouched = true;
+      }
+
+      const entries: [string, unknown][] = [];
+      if (identitiesTouched) entries.push([VAULT_IDENTITIES_KEY, nextIdentities]);
+      if (keysTouched) entries.push([VAULT_KEYS_KEY, nextKeys]);
+      const next = landedTombstones(graves, revived, buried, at);
+      if (next) entries.push([TOMBSTONES_KEY, next]);
+      // An apply with nothing to write costs no commit, which is what keeps a
+      // pull that landed nothing - the ordinary case once two devices agree -
+      // from rewriting the file anyway.
+      if (entries.length > 0) await persist(entries, []);
+      return refusals;
     });
   }
 
@@ -502,6 +645,7 @@ export function createVaultStore(io: VaultIo): VaultStore {
     upsertKey,
     deleteIdentity,
     deleteKey,
+    applyRemote,
     listTombstones: () => readTombstones(),
     onVaultChanged: (cb) => io.store.onChanged(cb),
     ensureLoaded: () => io.store.ensureLoaded(),
@@ -526,6 +670,7 @@ export const {
   upsertKey,
   deleteIdentity,
   deleteKey,
+  applyRemote,
   listTombstones,
   onVaultChanged,
   ensureLoaded,

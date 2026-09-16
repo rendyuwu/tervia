@@ -1,0 +1,762 @@
+/**
+ * Self-check for the apply path: the one writer in each store that does not
+ * originate what it writes, and the record-level dirty mark every other writer
+ * now leaves behind. Run: `npx tsx scripts/sync-apply-verify.ts`.
+ *
+ * One suite for three stores, on the same grounds as `sync-prereq-verify.ts`:
+ * this is ONE shape repeated, and the three `applyRemote` implementations differ
+ * only in which arrays they own and which accounts a delete releases.
+ *
+ * What fails silently without these:
+ *
+ * 1. A LANDING STAMPED FROM THE LOCAL CLOCK. Every other mutator overwrites the
+ *    caller's `updatedAt`, which is right for an editor round-tripping the
+ *    record it loaded. Here it inverts the merge: the pulled copy outranks the
+ *    copy it came from, and the two devices push at each other forever. Every
+ *    stamp check below feeds a timestamp DELIBERATELY OLDER than the injected
+ *    clock, because a landing stamped locally and a landing stamped correctly
+ *    are indistinguishable when the fixture's stamp is the current time.
+ *
+ * 2. A LANDING THAT ERASES THE DEVICE-LOCAL FIELDS. The publishing side strips
+ *    `pins`, the flat fingerprint and `lastConnectedAt`, so a wholesale write
+ *    does not stale them, it DELETES this device's trust pins - and the next
+ *    connect asks a first-connect question it already has the answer to. The
+ *    fixture carries none of the four, which is what the wire guarantees.
+ *
+ * 3. A TOMBSTONE LANDING THAT STRANDS A SECRET. There is no `secrets_list`
+ *    command, so a body at an account whose record is gone is unreachable by
+ *    anything on this machine, forever. Three fixtures, not one: hosts, vault
+ *    keys and vault identities all fan out a delete, and covering only the first
+ *    would leave the two that hold private key material unproven.
+ *
+ * 4. A REFUSAL THAT THROWS. Every apply runs as ONE queued write, so a throw
+ *    from the middle of the loop loses every other landing in the set - the good
+ *    ones included. Each bad landing below is followed by a good one in the same
+ *    set, which is the only arrangement that can tell "refused" from "aborted".
+ *
+ * 5. A WRITE THAT MARKS THE WRONG THING DIRTY, OR NOTHING AT ALL. `persist`
+ *    takes whole arrays, so the mark has to name records; and a connect or a
+ *    first-connect prompt must mark nothing, or a machine that merely reconnects
+ *    pushes over a real edit made elsewhere.
+ *
+ * THE CLOCK IS INJECTED and the fake store BUFFERS `set` - both for the reasons
+ * `sync-prereq-verify.ts` states at length. The commit COUNT and the keys a
+ * commit carried are questions only a buffering fake can answer, and half the
+ * checks here are exactly those two questions.
+ */
+import { createWriteQueue, type RecoveredStoreIo } from "../src/lib/recoveredStore";
+import {
+  TOMBSTONES_KEY,
+  type DirtyId,
+  type RemoteLanding,
+  type Tombstone,
+} from "../src/lib/tombstones";
+import { createForwardStore, type HostLookup } from "../src/modules/forwards/store";
+import { FORWARDS_KEY, RULE_TOMBSTONE_KIND, type ForwardRule } from "../src/modules/forwards/types";
+import { createHostsStore, noForwardRules } from "../src/modules/hosts/store";
+import {
+  GROUP_TOMBSTONE_KIND,
+  HOSTS_KEY,
+  HOST_GROUPS_KEY,
+  HOST_TOMBSTONE_KIND,
+  type Host,
+  type HostGroup,
+  type SshHost,
+} from "../src/modules/hosts/types";
+import type { SecretsIo } from "../src/modules/vault/adapters";
+import { createVaultStore } from "../src/modules/vault/store";
+import {
+  HOST_KEYRING_SERVICE,
+  IDENTITY_TOMBSTONE_KIND,
+  KEY_TOMBSTONE_KIND,
+  VAULT_IDENTITIES_KEY,
+  VAULT_KEYRING_SERVICE,
+  VAULT_KEYS_KEY,
+  type IdentityHostRefs,
+  type VaultIdentity,
+  type VaultKey,
+} from "../src/modules/vault/types";
+
+let failed = 0;
+function check(label: string, got: unknown, want: unknown): void {
+  // `JSON.stringify` answers `undefined` for an absent value, which several
+  // checks here are about, so the two are compared as text.
+  const found = JSON.stringify(got) ?? String(got);
+  const wanted = JSON.stringify(want) ?? String(want);
+  if (found === wanted) {
+    console.log(`  ok: ${label}`);
+  } else {
+    console.error(`  FAIL: ${label} = ${found}, want ${wanted}`);
+    failed++;
+  }
+}
+
+/** Far enough from the epoch that a landing stamped well before it is still
+ *  positive. */
+const START = 1_800_000_000_000;
+/** Every landing's remote stamp, deliberately OLDER than the injected clock: a
+ *  store that stamped its own clock would answer `START` instead. */
+const REMOTE = START - 5000;
+
+// ---------------------------------------------------------------------------
+// In-memory ports, with the REAL write queue, a per-commit key log, and a
+// recording keychain and dirty sink.
+// ---------------------------------------------------------------------------
+
+type Port = {
+  store: RecoveredStoreIo;
+  data: Record<string, unknown>;
+  commits: () => number;
+  keyLog: () => string[][];
+};
+
+function port(seed: Record<string, unknown>): Port {
+  const data: Record<string, unknown> = { ...seed };
+  let pending: Record<string, unknown> = {};
+  const keyLog: string[][] = [];
+  let commits = 0;
+
+  const store: RecoveredStoreIo = {
+    async get<T>(key: string): Promise<T | null> {
+      return ((key in pending ? pending[key] : data[key]) as T | undefined) ?? null;
+    },
+    async set(key: string, value: unknown): Promise<void> {
+      pending[key] = value;
+    },
+    async commit(): Promise<void> {
+      keyLog.push(Object.keys(pending));
+      Object.assign(data, pending);
+      pending = {};
+      commits++;
+    },
+    enqueueWrite: createWriteQueue(),
+    async onChanged(): Promise<() => void> {
+      return () => {};
+    },
+    ensureLoaded: async () => null,
+    takeRecoveryNotice: () => null,
+    fileState: async () => ({ found: "ok" as const, recovered: false }),
+  };
+
+  return { store, data, commits: () => commits, keyLog: () => keyLog };
+}
+
+/** Every account this suite's deletes cleared, in order, spelled the way
+ *  `secrets.rs` addresses one. */
+function recordingSecrets(): { io: SecretsIo; deleted: string[] } {
+  const deleted: string[] = [];
+  return {
+    deleted,
+    io: {
+      async getAll(_service: string, accounts: string[]) {
+        return accounts.map(() => null);
+      },
+      async set() {},
+      async delete(service: string, account: string) {
+        deleted.push(`${service}::${account}`);
+      },
+      async copy() {
+        return false;
+      },
+    },
+  };
+}
+
+const noHolders: IdentityHostRefs = async () => [];
+
+function harness(
+  seed: {
+    hosts?: Host[];
+    groups?: HostGroup[];
+    hostGraves?: Tombstone[];
+    identities?: VaultIdentity[];
+    vaultKeys?: VaultKey[];
+    vaultGraves?: Tombstone[];
+    rules?: ForwardRule[];
+    ruleGraves?: Tombstone[];
+  } = {},
+) {
+  const clock = START;
+  const now = () => clock;
+
+  const hostsPort = port({
+    [HOSTS_KEY]: seed.hosts ?? [],
+    [HOST_GROUPS_KEY]: seed.groups ?? [],
+    ...(seed.hostGraves ? { [TOMBSTONES_KEY]: seed.hostGraves } : {}),
+  });
+  const vaultPort = port({
+    [VAULT_IDENTITIES_KEY]: seed.identities ?? [],
+    [VAULT_KEYS_KEY]: seed.vaultKeys ?? [],
+    ...(seed.vaultGraves ? { [TOMBSTONES_KEY]: seed.vaultGraves } : {}),
+  });
+  const forwardsPort = port({
+    [FORWARDS_KEY]: seed.rules ?? [],
+    ...(seed.ruleGraves ? { [TOMBSTONES_KEY]: seed.ruleGraves } : {}),
+  });
+
+  const hostSecrets = recordingSecrets();
+  const vaultSecrets = recordingSecrets();
+  // One array per store, appended to on every commit - so "received `[]`" and
+  // "was never called" are different answers rather than the same one.
+  const dirty: { hosts: DirtyId[][]; vault: DirtyId[][]; forwards: DirtyId[][] } = {
+    hosts: [],
+    vault: [],
+    forwards: [],
+  };
+
+  return {
+    hosts: createHostsStore({
+      store: hostsPort.store,
+      secrets: hostSecrets.io,
+      now,
+      markDirty: (d) => dirty.hosts.push(d),
+    }),
+    vault: createVaultStore({
+      store: vaultPort.store,
+      secrets: vaultSecrets.io,
+      now,
+      markDirty: (d) => dirty.vault.push(d),
+    }),
+    forwards: createForwardStore({
+      store: forwardsPort.store,
+      now,
+      markDirty: (d) => dirty.forwards.push(d),
+    }),
+    hostsPort,
+    vaultPort,
+    forwardsPort,
+    hostSecrets,
+    vaultSecrets,
+    dirty,
+    at: (): number => clock,
+  };
+}
+
+/** A stored record's `updatedAt` is never what a landing asserts, so every
+ *  fixture carries a value no check expects to survive. */
+const WRONG = 1;
+
+const host = (over: Partial<SshHost> = {}): SshHost => ({
+  id: "h-1",
+  name: "bastion",
+  host: "10.0.0.1",
+  port: 22,
+  protocol: "ssh",
+  credential: { kind: "identity", identityId: "i-1" },
+  updatedAt: WRONG,
+  ...over,
+});
+
+/** A host that OWNS its three accounts, which is what makes the keychain release
+ *  observable: a vault-bound host owns none and would release nothing. */
+const inlineHost = (over: Partial<SshHost> = {}): SshHost =>
+  host({
+    credential: {
+      kind: "inline",
+      hostId: over.id ?? "h-1",
+      user: "root",
+      authMode: "password",
+      hasPassword: true,
+      hasPrivateKey: true,
+      hasKeyPassphrase: true,
+    },
+    ...over,
+  });
+
+const group = (over: Partial<HostGroup> = {}): HostGroup => ({
+  id: "g-1",
+  name: "prod",
+  updatedAt: WRONG,
+  ...over,
+});
+
+const identity = (over: Partial<VaultIdentity> = {}): VaultIdentity => ({
+  id: "i-1",
+  name: "root @ prod",
+  username: "root",
+  authMode: "password",
+  hasPassword: false,
+  updatedAt: WRONG,
+  ...over,
+});
+
+const vaultKey = (over: Partial<VaultKey> = {}): VaultKey => ({
+  id: "k-1",
+  name: "id_ed25519",
+  hasPrivateKey: false,
+  hasPassphrase: false,
+  updatedAt: WRONG,
+  ...over,
+});
+
+const rule = (over: Partial<ForwardRule> = {}): ForwardRule => ({
+  id: "f-1",
+  name: "web tunnel",
+  hostId: "h-1",
+  localPort: 8080,
+  remoteHost: "127.0.0.1",
+  remotePort: 80,
+  startWithHost: false,
+  updatedAt: WRONG,
+  ...over,
+});
+
+const anySshHost: HostLookup = async (hostId) => host({ id: hostId });
+
+/** A record landing at the remote stamp. */
+function landed<T extends { id: string }>(record: T, updatedAt = REMOTE): RemoteLanding<T> {
+  return { deleted: false, id: record.id, record, updatedAt };
+}
+
+/** A tombstone landing at the remote stamp. */
+function buried<T>(id: string, kind: string, deletedAt = REMOTE): RemoteLanding<T> {
+  return { deleted: true, tombstone: { id, kind, deletedAt } };
+}
+
+const lastKeys = (p: Port): string[] => p.keyLog()[p.keyLog().length - 1] ?? [];
+
+// ---------------------------------------------------------------------------
+// A1. A landed record carries the LANDING's updatedAt
+// ---------------------------------------------------------------------------
+{
+  console.log("\n[A1] a landed record keeps the remote stamp, not this store's clock");
+  const h = harness({ hosts: [host()], identities: [identity()], rules: [rule()] });
+
+  await h.hosts.applyRemote([landed(host({ name: "renamed" }))], [landed(group())]);
+  const landedHost = (await h.hosts.listHosts())[0];
+  check("host takes the landing's stamp", landedHost.updatedAt, REMOTE);
+  check("and is not the store's clock", landedHost.updatedAt === h.at(), false);
+  check("the record content landed too", landedHost.name, "renamed");
+  check("group takes the landing's stamp", (await h.hosts.listGroups())[0].updatedAt, REMOTE);
+
+  await h.vault.applyRemote([landed(identity({ name: "renamed" }))], [landed(vaultKey())]);
+  check("identity takes it", (await h.vault.listIdentities())[0].updatedAt, REMOTE);
+  check("key takes it", (await h.vault.listKeys())[0].updatedAt, REMOTE);
+
+  await h.forwards.applyRemote([landed(rule({ name: "renamed" }))]);
+  check("rule takes it", (await h.forwards.listRules())[0].updatedAt, REMOTE);
+
+  // The landing's own stamp wins over the one inside the record, which is the
+  // half a spread would silently get backwards: the two disagree here on purpose.
+  const disagreeing = harness();
+  await disagreeing.hosts.applyRemote([landed(host({ updatedAt: WRONG }), REMOTE)], []);
+  check(
+    "the landing's stamp beats the one inside the record",
+    (await disagreeing.hosts.listHosts())[0].updatedAt,
+    REMOTE,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// A2. A landed tombstone carries the LANDING's deletedAt
+// ---------------------------------------------------------------------------
+{
+  console.log(
+    "\n[A2] a landed tombstone keeps the remote deletedAt, so the window does not restart",
+  );
+  const h = harness({
+    hosts: [host()],
+    groups: [group()],
+    identities: [identity()],
+    vaultKeys: [vaultKey()],
+    rules: [rule()],
+  });
+
+  await h.hosts.applyRemote(
+    [buried<Host>("h-1", HOST_TOMBSTONE_KIND)],
+    [buried<HostGroup>("g-1", GROUP_TOMBSTONE_KIND)],
+  );
+  check("hosts store files both at the remote stamp", await h.hosts.listTombstones(), [
+    { id: "h-1", kind: HOST_TOMBSTONE_KIND, deletedAt: REMOTE },
+    { id: "g-1", kind: GROUP_TOMBSTONE_KIND, deletedAt: REMOTE },
+  ]);
+  check("and the record is gone", await h.hosts.listHosts(), []);
+  check("and so is the group", await h.hosts.listGroups(), []);
+
+  await h.vault.applyRemote(
+    [buried<VaultIdentity>("i-1", IDENTITY_TOMBSTONE_KIND)],
+    [buried<VaultKey>("k-1", KEY_TOMBSTONE_KIND)],
+  );
+  check("vault store files both at the remote stamp", await h.vault.listTombstones(), [
+    { id: "i-1", kind: IDENTITY_TOMBSTONE_KIND, deletedAt: REMOTE },
+    { id: "k-1", kind: KEY_TOMBSTONE_KIND, deletedAt: REMOTE },
+  ]);
+
+  await h.forwards.applyRemote([buried<ForwardRule>("f-1", RULE_TOMBSTONE_KIND)]);
+  check("forwards store files it at the remote stamp", await h.forwards.listTombstones(), [
+    { id: "f-1", kind: RULE_TOMBSTONE_KIND, deletedAt: REMOTE },
+  ]);
+
+  // A delete whose local record is already gone still has to be recorded, or a
+  // device that has not pulled since pushes its own copy straight back.
+  const absent = harness();
+  await absent.hosts.applyRemote([buried<Host>("h-gone", HOST_TOMBSTONE_KIND)], []);
+  check(
+    "a tombstone for a record this device never held is still filed",
+    await absent.hosts.listTombstones(),
+    [{ id: "h-gone", kind: HOST_TOMBSTONE_KIND, deletedAt: REMOTE }],
+  );
+}
+
+// ---------------------------------------------------------------------------
+// A3. A landed host keeps this device's pins, fingerprint and connect history
+// ---------------------------------------------------------------------------
+{
+  console.log("\n[A3] a landing carries none of the four device-local fields, and erases none");
+  const stored = host({
+    pins: { "10.0.0.1": "SHA256:local" },
+    lastFingerprint: "SHA256:local",
+    lastConnectedAt: 1_700_000_000_000,
+  });
+  const h = harness({ hosts: [stored] });
+
+  // The landing carries NONE of the four, which is what the publishing side
+  // guarantees: it strips all of them before an envelope is sealed.
+  await h.hosts.applyRemote([landed(host({ name: "renamed" }))], []);
+  const after = (await h.hosts.listHosts())[0] as SshHost;
+  check("pins survive", after.pins, { "10.0.0.1": "SHA256:local" });
+  check("the flat fingerprint survives", after.lastFingerprint, "SHA256:local");
+  check("lastConnectedAt survives", after.lastConnectedAt, 1_700_000_000_000);
+  check("and the landing's own content did land", after.name, "renamed");
+
+  // The other direction, which no stripped fixture can see: a landing that DOES
+  // carry pins must not file them - they describe another machine's trust.
+  const foreign = harness({ hosts: [stored] });
+  await foreign.hosts.applyRemote(
+    [
+      landed(
+        host({
+          pins: { "10.0.0.1": "SHA256:theirs" },
+          lastFingerprint: "SHA256:theirs",
+          lastConnectedAt: 9,
+        }),
+      ),
+    ],
+    [],
+  );
+  const kept = (await foreign.hosts.listHosts())[0] as SshHost;
+  check("a carried pin does not overwrite this device's", kept.pins, {
+    "10.0.0.1": "SHA256:local",
+  });
+  check("nor the flat projection of it", kept.lastFingerprint, "SHA256:local");
+  check("nor this device's connect history", kept.lastConnectedAt, 1_700_000_000_000);
+
+  // An RDP landing reads the other flat field, and an unpinned host must not
+  // grow one out of nothing.
+  const fresh = harness();
+  await fresh.hosts.applyRemote([landed(host({ id: "h-new" }))], []);
+  const first = (await fresh.hosts.listHosts())[0] as SshHost;
+  check("a host with no stored pins lands unpinned", first.pins, undefined);
+  check("and with no flat fingerprint", first.lastFingerprint, undefined);
+}
+
+// ---------------------------------------------------------------------------
+// A4. A record landing clears a living tombstone naming its id, same commit
+// ---------------------------------------------------------------------------
+{
+  console.log("\n[A4] a landed record clears the tombstone naming it, in the same commit");
+  const h = harness({
+    hostGraves: [{ id: "h-1", kind: HOST_TOMBSTONE_KIND, deletedAt: START - 1000 }],
+  });
+
+  await h.hosts.applyRemote([landed(host())], []);
+  check("the tombstone is gone", await h.hosts.listTombstones(), []);
+  check("the record is there", (await h.hosts.listHosts()).length, 1);
+  check("one commit", h.hostsPort.commits(), 1);
+  check(
+    "carrying both keys",
+    [...lastKeys(h.hostsPort)].sort(),
+    [HOSTS_KEY, TOMBSTONES_KEY].sort(),
+  );
+
+  // And a landing that clears nothing leaves the key out, which is the clobber
+  // discipline every upsert in these stores already follows.
+  const clean = harness();
+  await clean.hosts.applyRemote([landed(host())], []);
+  check(
+    "a landing with no tombstone to clear writes the record list alone",
+    lastKeys(clean.hostsPort),
+    [HOSTS_KEY],
+  );
+
+  // A re-landed delete REPLACES the stored tombstone rather than joining it: one
+  // delete recorded twice would expire at two different times.
+  const twice = harness({
+    hostGraves: [{ id: "h-1", kind: HOST_TOMBSTONE_KIND, deletedAt: START - 1000 }],
+  });
+  await twice.hosts.applyRemote([buried<Host>("h-1", HOST_TOMBSTONE_KIND)], []);
+  check("a re-landed delete leaves exactly one tombstone", await twice.hosts.listTombstones(), [
+    { id: "h-1", kind: HOST_TOMBSTONE_KIND, deletedAt: REMOTE },
+  ]);
+}
+
+// ---------------------------------------------------------------------------
+// A5. A mixed landing set is exactly ONE commit
+// ---------------------------------------------------------------------------
+{
+  console.log("\n[A5] records, tombstones and both record kinds land in one commit");
+  const h = harness({
+    hosts: [host(), host({ id: "h-2" })],
+    groups: [group(), group({ id: "g-2" })],
+    identities: [identity()],
+    vaultKeys: [vaultKey()],
+    rules: [rule(), rule({ id: "f-2" })],
+  });
+
+  await h.hosts.applyRemote(
+    [landed(host({ name: "renamed" })), buried<Host>("h-2", HOST_TOMBSTONE_KIND)],
+    [landed(group({ name: "staging" })), buried<HostGroup>("g-2", GROUP_TOMBSTONE_KIND)],
+  );
+  check("four host-store landings cost one commit", h.hostsPort.commits(), 1);
+  check(
+    "carrying all three keys",
+    [...lastKeys(h.hostsPort)].sort(),
+    [HOSTS_KEY, HOST_GROUPS_KEY, TOMBSTONES_KEY].sort(),
+  );
+
+  await h.vault.applyRemote(
+    [landed(identity({ name: "renamed" }))],
+    [buried<VaultKey>("k-1", KEY_TOMBSTONE_KIND)],
+  );
+  check("both vault kinds cost one commit", h.vaultPort.commits(), 1);
+  check(
+    "carrying all three keys",
+    [...lastKeys(h.vaultPort)].sort(),
+    [TOMBSTONES_KEY, VAULT_IDENTITIES_KEY, VAULT_KEYS_KEY].sort(),
+  );
+
+  await h.forwards.applyRemote([
+    landed(rule({ name: "renamed" })),
+    buried<ForwardRule>("f-2", RULE_TOMBSTONE_KIND),
+  ]);
+  check("both forwards landings cost one commit", h.forwardsPort.commits(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// A6. An empty landing set writes nothing at all
+// ---------------------------------------------------------------------------
+{
+  console.log("\n[A6] an apply with nothing to land costs no commit and no key");
+  const h = harness({ hosts: [host()], identities: [identity()], rules: [rule()] });
+
+  check("hosts refuses nothing", await h.hosts.applyRemote([], []), []);
+  check("vault refuses nothing", await h.vault.applyRemote([], []), []);
+  check("forwards refuses nothing", await h.forwards.applyRemote([]), []);
+  check("hosts store: no commit", h.hostsPort.commits(), 0);
+  check("vault store: no commit", h.vaultPort.commits(), 0);
+  check("forwards store: no commit", h.forwardsPort.commits(), 0);
+  check("and nothing was marked dirty either", h.dirty, {
+    hosts: [],
+    vault: [],
+    forwards: [],
+  });
+}
+
+// ---------------------------------------------------------------------------
+// A7. A tombstone landing releases the keychain - hosts AND vault
+// ---------------------------------------------------------------------------
+{
+  console.log("\n[A7] a landed delete clears the accounts its record owned");
+
+  const hostFixture = harness({ hosts: [inlineHost()] });
+  await hostFixture.hosts.applyRemote([buried<Host>("h-1", HOST_TOMBSTONE_KIND)], []);
+  check("an SSH host releases all three of its accounts", hostFixture.hostSecrets.deleted, [
+    `${HOST_KEYRING_SERVICE}::h-1::password`,
+    `${HOST_KEYRING_SERVICE}::h-1::privateKey`,
+    `${HOST_KEYRING_SERVICE}::h-1::keyPassphrase`,
+  ]);
+
+  const keyFixture = harness({ vaultKeys: [vaultKey({ hasPrivateKey: true })] });
+  await keyFixture.vault.applyRemote([], [buried<VaultKey>("k-1", KEY_TOMBSTONE_KIND)]);
+  check("a vault key releases the body and its passphrase", keyFixture.vaultSecrets.deleted, [
+    `${VAULT_KEYRING_SERVICE}::k-1::privateKey`,
+    `${VAULT_KEYRING_SERVICE}::k-1::passphrase`,
+  ]);
+
+  const identityFixture = harness({ identities: [identity({ hasPassword: true })] });
+  await identityFixture.vault.applyRemote(
+    [buried<VaultIdentity>("i-1", IDENTITY_TOMBSTONE_KIND)],
+    [],
+  );
+  check("a vault identity releases its password", identityFixture.vaultSecrets.deleted, [
+    `${VAULT_KEYRING_SERVICE}::i-1::password`,
+  ]);
+
+  // A vault-bound host owns no accounts, so nothing is released - which is what
+  // keeps the three checks above from passing on an unconditional fan-out.
+  const bound = harness({ hosts: [host()] });
+  await bound.hosts.applyRemote([buried<Host>("h-1", HOST_TOMBSTONE_KIND)], []);
+  check("a vault-bound host releases nothing", bound.hostSecrets.deleted, []);
+
+  // And a landed delete does NOT re-run the forward-rule cleanup: the origin
+  // device already published a tombstone per rule, so minting a second set here
+  // would record one user delete twice, at two times.
+  const rules = harness({ hosts: [host()], rules: [rule()] });
+  await rules.hosts.applyRemote([buried<Host>("h-1", HOST_TOMBSTONE_KIND)], []);
+  check(
+    "the rules riding a landed-deleted host are left to their own landings",
+    (await rules.forwards.listRules()).map((r) => r.id),
+    ["f-1"],
+  );
+}
+
+// ---------------------------------------------------------------------------
+// A8. Every refusal comes back, and the rest of the set still lands
+// ---------------------------------------------------------------------------
+{
+  console.log("\n[A8] each of the four refusal conditions returns, and nothing else is lost");
+  const h = harness();
+
+  const refusals = await h.hosts.applyRemote(
+    [
+      // 1. the record names an id the landing does not.
+      { deleted: false, id: "h-bad", record: host({ id: "h-other" }), updatedAt: REMOTE },
+      // 2. no record object at all - a file or a wire can produce this, and the
+      //    type cannot exclude it.
+      { deleted: false, id: "h-null", record: null as unknown as Host, updatedAt: REMOTE },
+      // 3. a tombstone with no usable deletedAt, which would otherwise compare as
+      //    deleted at the epoch forever.
+      { deleted: true, tombstone: { id: "h-nan", kind: HOST_TOMBSTONE_KIND, deletedAt: NaN } },
+      // 4. a tombstone of a kind this store does not own, routed into the wrong
+      //    array: applied, it would delete whatever local host shared its id.
+      { deleted: true, tombstone: { id: "h-1", kind: RULE_TOMBSTONE_KIND, deletedAt: REMOTE } },
+      // The good landing comes LAST on purpose: a throw at any of the four above
+      // would take it with them, and the refusal list alone cannot tell the two
+      // apart.
+      landed(host({ id: "h-good" })),
+    ],
+    [],
+  );
+
+  check(
+    "four refusals, each naming what it refused",
+    refusals.map((r) => `${r.kind}/${r.id}`),
+    ["host/h-bad", "host/h-null", "host/h-nan", "rule/h-1"],
+  );
+  check(
+    "every refusal carries a reason",
+    refusals.every((r) => r.reason.length > 0),
+    true,
+  );
+  check(
+    "the good landing in the same set still landed",
+    (await h.hosts.listHosts()).map((x) => x.id),
+    ["h-good"],
+  );
+  check("in one commit", h.hostsPort.commits(), 1);
+  check("and no refused id was filed as a tombstone", await h.hosts.listTombstones(), []);
+
+  // A set that is refused ENTIRELY writes nothing: there is nothing to commit,
+  // and a commit here would rewrite the file for a pull that landed nothing.
+  const allBad = harness();
+  const every = await allBad.hosts.applyRemote(
+    [{ deleted: false, id: "h-x", record: null as unknown as Host, updatedAt: REMOTE }],
+    [],
+  );
+  check("an entirely refused set still reports", every.length, 1);
+  check("and costs no commit", allBad.hostsPort.commits(), 0);
+
+  // The other two stores validate through the same function, so one landing each
+  // is enough to prove they call it at all.
+  const vaultRefusals = await h.vault.applyRemote(
+    [{ deleted: false, id: "i-bad", record: identity({ id: "i-other" }), updatedAt: REMOTE }],
+    [{ deleted: true, tombstone: { id: "k-1", kind: HOST_TOMBSTONE_KIND, deletedAt: REMOTE } }],
+  );
+  check(
+    "the vault store refuses on the same four conditions",
+    vaultRefusals.map((r) => `${r.kind}/${r.id}`),
+    ["identity/i-bad", "host/k-1"],
+  );
+  const ruleRefusals = await h.forwards.applyRemote([
+    { deleted: false, id: "f-bad", record: rule({ id: "f-other" }), updatedAt: REMOTE },
+  ]);
+  check(
+    "and so does the forwards store",
+    ruleRefusals.map((r) => `${r.kind}/${r.id}`),
+    ["rule/f-bad"],
+  );
+}
+
+// ---------------------------------------------------------------------------
+// A9. What every write marks dirty
+// ---------------------------------------------------------------------------
+{
+  console.log("\n[A9] every committed write names the records it owes a push");
+  const h = harness({ groups: [group()], hosts: [host({ id: "h-member", groupId: "g-1" })] });
+
+  await h.hosts.upsertHost(host());
+  await h.hosts.upsertGroup(group({ id: "g-2", name: "staging" }));
+  await h.hosts.deleteHost("h-1", noForwardRules);
+  await h.hosts.deleteGroup("g-1");
+  check("the four hosts-store mutators mark their own records", h.dirty.hosts, [
+    [{ kind: HOST_TOMBSTONE_KIND, id: "h-1" }],
+    [{ kind: GROUP_TOMBSTONE_KIND, id: "g-2" }],
+    [{ kind: HOST_TOMBSTONE_KIND, id: "h-1" }],
+    // The group AND the member whose `groupId` the cascade cleared: that clear is
+    // real content under a new stamp, so it owes a push of its own.
+    [
+      { kind: GROUP_TOMBSTONE_KIND, id: "g-1" },
+      { kind: HOST_TOMBSTONE_KIND, id: "h-member" },
+    ],
+  ]);
+
+  // A connect and a first-connect prompt mark NOTHING, which is the statement
+  // `patchHost` makes by passing `[]` - and the only place a live consumer could
+  // see the difference between "marked nothing" and "was not called".
+  const pinned = harness({ hosts: [host()] });
+  await pinned.hosts.markConnected("h-1", "SHA256:aaa");
+  await pinned.hosts.pinFingerprint("h-1", "SHA256:bbb");
+  check("markConnected and pinFingerprint mark nothing", pinned.dirty.hosts, [[], []]);
+  check(
+    "and both really did write, so the check above is not vacuous",
+    pinned.hostsPort.commits(),
+    2,
+  );
+
+  const v = harness({ identities: [identity()], vaultKeys: [vaultKey()] });
+  await v.vault.upsertIdentity(identity({ id: "i-2" }), {});
+  await v.vault.upsertKey(vaultKey({ id: "k-2" }), {});
+  await v.vault.deleteIdentity("i-1", noHolders);
+  await v.vault.deleteKey("k-1");
+  check("the four vault mutators mark their own records", v.dirty.vault, [
+    [{ kind: IDENTITY_TOMBSTONE_KIND, id: "i-2" }],
+    [{ kind: KEY_TOMBSTONE_KIND, id: "k-2" }],
+    [{ kind: IDENTITY_TOMBSTONE_KIND, id: "i-1" }],
+    [{ kind: KEY_TOMBSTONE_KIND, id: "k-1" }],
+  ]);
+
+  const f = harness({ rules: [rule(), rule({ id: "f-2" }), rule({ id: "f-3" })] });
+  await f.forwards.upsertRule(rule({ id: "f-4", hostId: "h-9" }), anySshHost);
+  await f.forwards.deleteRule("f-1");
+  await f.forwards.dropRulesForHost("h-1");
+  check("the three forwards mutators mark their own records", f.dirty.forwards, [
+    [{ kind: RULE_TOMBSTONE_KIND, id: "f-4" }],
+    [{ kind: RULE_TOMBSTONE_KIND, id: "f-1" }],
+    // One per rule dropped, matching the tombstones the same call files.
+    [
+      { kind: RULE_TOMBSTONE_KIND, id: "f-2" },
+      { kind: RULE_TOMBSTONE_KIND, id: "f-3" },
+    ],
+  ]);
+
+  // And the apply path owes nothing, in all three stores: a landing is what the
+  // remote already holds, so a mark here is a push straight back at the device
+  // that just sent it.
+  const applied = harness({ hosts: [host()], identities: [identity()], rules: [rule()] });
+  await applied.hosts.applyRemote([landed(host({ name: "renamed" }))], [landed(group())]);
+  await applied.vault.applyRemote([landed(identity({ name: "renamed" }))], []);
+  await applied.forwards.applyRemote([landed(rule({ name: "renamed" }))]);
+  check("applyRemote marks nothing", applied.dirty, {
+    hosts: [[]],
+    vault: [[]],
+    forwards: [[]],
+  });
+  check(
+    "and each of the three really did commit",
+    [applied.hostsPort.commits(), applied.vaultPort.commits(), applied.forwardsPort.commits()],
+    [1, 1, 1],
+  );
+}
+
+if (failed > 0) throw new Error(`sync-apply-verify: ${failed} FAILED`);
+console.log("\nsync-apply-verify: OK\n");

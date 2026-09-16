@@ -43,11 +43,15 @@ _secret material itself_ moved. Refreshing there would hand the stale form a
 record whose next Save writes the user's draft over a body or a password
 another window just stored - the very thing the stamp fired to refuse.
 
-**Trigger.** A vault editor gaining a field whose content exists nowhere but
-the form - a key the dialog generates rather than one picked from a file is
-the case, and neither editor has one today: the key body comes from a file
-that is still on disk, and everything else is typed. Or a user report of the
-retyping cost, which does not wait on a new field.
+**Trigger.** A user report of the retyping cost. That trigger used to wait on
+how often two windows of this app edit one record at the same moment, which is
+rare; it no longer does. `applyRemote` in `src/modules/vault/store.ts` lands
+another DEVICE's records into the same store, so a key or an identity can move
+underneath an open editor with nothing on this machine having touched it. Or a
+vault editor gaining a field whose content exists nowhere but the form - a key
+the dialog generates rather than one picked from a file is the case, and
+neither editor has one today: the key body comes from a file that is still on
+disk, and everything else is typed.
 
 ### Nothing pins where a vault editor's message renders
 
@@ -603,34 +607,25 @@ only things that compact the stored list. All three name this file back.
 **Trigger.** Any store gaining a load-time maintenance pass for some other
 reason. The pruning can ride it at no extra cost, and this entry retires.
 
-### The stores stamp every timestamp from their own clock, so no caller can land a record or a tombstone at a time it did not just produce
+### A landed record can sit with a reference that has not arrived yet
 
-**Accepted state.** Every mutator overwrites whatever `updatedAt` its caller
-supplied and stamps the store's own clock, and every delete stamps `deletedAt`
-the same way. That is correct for every caller that exists: an editor
-round-trips the record it loaded, so honouring a caller-supplied value would
-mean a save never bumps the stamp, and a restored backup genuinely is a local
-write. It is not sufficient for a sync pull, which has to land a remote record
-at its REMOTE `updatedAt` and a remote tombstone at its remote `deletedAt` - a
-locally-stamped `deletedAt` restarts the 90-day window on every device that
-receives it, and can outrank a resurrection the remote already published. Safe to
-defer because the field is optional and no wire format is minted yet.
+**Accepted state.** `applyRemote` applies a landing whose `hostId`, `keyId` or
+`groupId` names a record this device does not hold, rather than refusing it. The
+order of a pull is an artifact of a listing rather than of what the other device
+holds, so a rule arriving before its host is ordinary - and the alternative is
+worse than the gap: the reference guards `throw`, and a throw from inside the
+single queued write an apply runs as would lose every other landing in the same
+set.
 
-The shortcut that is NOT available: reaching past this layer with a direct
-`io.store.set`. `hosts/store.ts`'s header states the rule - every integrity rule
-lives in the store layer, because a dialog is never the only writer - and nothing
-outside the three `store.ts` files names a record key today. So the pull has to
-go through the layer, and widening ten signatures one at a time is the wrong
-shape for it: a single `applyRemote`-style entry point on each store, which
-takes an already-merged record or tombstone together with its remote timestamp,
-is the surface to add.
+**Carried by.** `landingRefusal` in `src/lib/tombstones.ts`, whose four
+conditions are the whole refusal set and deliberately exclude every reference
+guard, and the `applyRemote` doc on each of the three stores. `assertReferences`
+in `src/modules/hosts/store.ts` already accepts the analogous case for a missing
+group, and says why: the member renders as ungrouped, which is visible and
+recoverable. Hosts and groups are applied before rules within one pull, so the
+ordinary case resolves in one pass.
 
-**Carried by.** `upsertHost`, `upsertGroup`, `deleteHost` and `deleteGroup` in
-`src/modules/hosts/store.ts`; `upsertIdentity`, `upsertKey`, `deleteIdentity`
-and `deleteKey` in `src/modules/vault/store.ts`; `upsertRule`, `deleteRule` and
-`dropRulesForHost` in `src/modules/forwards/store.ts`. Each of the three files
-reads its clock through a single `now`, which is where the decision is stated.
+**Trigger.** A reference whose dangling state is neither visible nor recoverable
 
-**Trigger.** The sync pull path needing to land a remote record or a remote
-tombstone at its remote timestamp - the first writer in this codebase that did
-not originate what it is writing.
+- one that makes a record unopenable rather than oddly rendered. That would need
+  a per-pull deferral pass, which is a different shape from a refusal.

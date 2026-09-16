@@ -1737,13 +1737,23 @@ console.log(
   // added to one side only is as loud as one added to both.
   // --------------------------------------------------------------------------
   const FORWARDS_STORE_MEMBERS = [
-    // The three WRITE ROUTES. Every other member is a read or plumbing, and
-    // these three are the whole of how a rule record is created, rewritten or
-    // removed - which is what makes "release before every one of them" a claim
-    // with a finite surface rather than a hope.
+    // The three WRITE ROUTES A USER REACHES. Every other member is a read or
+    // plumbing, and these three are the whole of how a rule record is created,
+    // rewritten or removed from this machine - which is what makes "release
+    // before every one of them" a claim with a finite surface rather than a
+    // hope.
     "deleteRule",
     "dropRulesForHost",
     "upsertRule",
+    // THE FOURTH WRITE ROUTE, AND THE RELEASE CLAIM ABOVE DOES NOT COVER IT.
+    // `applyRemote` lands another device's deletes, so it can drop a rule record
+    // whose forward is running here, and it cannot release one: the runtime
+    // lives in `controller.ts`, which imports this store, so a store that called
+    // back into it would close the cycle every port in this module exists to
+    // keep open. Nothing calls `applyRemote` yet - the pull that will is not in
+    // the tree - and whatever does is where the release has to be sequenced,
+    // ahead of the apply, the way `HostsPage.tsx` sequences `deleteHost`'s.
+    "applyRemote",
     // The reads and the plumbing. `listTombstones` is a READ: it reports what
     // the three write routes above left behind, and adding it changed no rule
     // record, so the release claim's surface is still those three.
@@ -1784,7 +1794,7 @@ console.log(
       visit(factory);
     }
     check(
-      "the object createForwardStore returns has EXACTLY these members, three of them write routes (upsertRule, deleteRule, dropRulesForHost) - a fourth route reddens here",
+      "the object createForwardStore returns has EXACTLY these members, four of them write routes (upsertRule, deleteRule, dropRulesForHost, applyRemote) - a fifth route reddens here",
       JSON.stringify(returned) === JSON.stringify(FORWARDS_STORE_MEMBERS),
       returned,
     );

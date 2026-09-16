@@ -1,5 +1,6 @@
 import { createRecoveredStore, type RecoveredStoreIo } from "@/lib/recoveredStore";
 import { tauriStoreFileIo, type StoreFileIo } from "@/lib/storeRecovery";
+import type { DirtyId } from "@/lib/tombstones";
 import type { SecretsIo } from "@/modules/vault/adapters";
 
 import { HOSTS_KEY, HOSTS_STORE_PATH } from "./types";
@@ -51,6 +52,17 @@ export type HostsIo = {
    * tombstone window's boundary needs the same control.
    */
   now?: () => number;
+  /**
+   * Told which records a committed write owes a push, after every commit.
+   *
+   * INJECTED and optional with a no-op default, which is the only shape that
+   * keeps the dependency pointing the right way: a store that imported a
+   * scheduler would put a network module behind every host edit, and every
+   * suite that builds this store would have to construct one. Omitting it means
+   * "nothing is listening", never "this write does not count" - what a write
+   * owes is decided at the call site, by what it passes `persist`.
+   */
+  markDirty?: (dirty: DirtyId[]) => void;
 };
 
 /** The file port every caller gets unless a test hands one in. */

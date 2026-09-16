@@ -133,10 +133,10 @@
  * 2,342 distinct backticked identifiers in this tree's comments appear nowhere
  * in its comment-stripped code, and almost every one is legitimate. They name
  * Win32 entry points, a dependency's internals, TypeScript compiler node kinds,
- * DOM events, and external tools. The decisive case is `secrets_list`, cited 22
- * times across 12 files precisely BECAUSE it does not exist: the secrets IPC
+ * DOM events, and external tools. The decisive case is `secrets_list`, cited 26
+ * times across 13 files precisely BECAUSE it does not exist: the secrets IPC
  * surface names an account per call and exposes no listing command, and several
- * docblocks argue exactly that. A resolvability rule would redden all 22 for
+ * docblocks argue exactly that. A resolvability rule would redden all 26 for
  * being right. So the ratio on offer was about 186 false positives to 1 true
  * one, and a symbol can legitimately live in a dependency in any case. Out of
  * scope, deliberately.
@@ -144,7 +144,7 @@
  * THAT SYMBOL IS NAMED HERE, AND ITS ABSENCE IS ASSERTED, which is what makes
  * naming it safe. Two checks below hold this paragraph's arithmetic: one that
  * `secrets_list` still appears nowhere outside a comment in the three roots, and
- * one that it is still cited 22 times inside them. The day somebody implements
+ * one that it is still cited 26 times inside them. The day somebody implements
  * such a command, or edits one of those comments, a check reddens and whoever is
  * holding it learns that this paragraph needs rewriting. A prose claim about the
  * tree is exactly as durable as the assertion standing behind it, and with no
@@ -160,7 +160,7 @@
  *
  * What separates the two: a row id's absence is nobody's invariant, so it can
  * change without anyone noticing and no check could reasonably watch it, whereas
- * `secrets_list` not existing is a deliberate architectural property that 22
+ * `secrets_list` not existing is a deliberate architectural property that 26
  * comments already assert and that a check here now watches. Name a fact when
  * something announces its change, and describe the class when nothing does.
  *
@@ -1534,7 +1534,7 @@ const PARTIAL_PATH_CEILING = 38;
  */
 const ABSENT_SYMBOL = "secrets_list";
 /** How many comments cite it. An exact pin: the docblock states this number. */
-const ABSENT_SYMBOL_CITATIONS = 22;
+const ABSENT_SYMBOL_CITATIONS = 26;
 /**
  * This file, excluded from that accounting, because it names the symbol in order
  * to discuss it.

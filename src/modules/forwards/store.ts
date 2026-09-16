@@ -1,9 +1,14 @@
 import type { StoreRecovery } from "@/lib/storeRecovery";
 import {
+  landedTombstones,
+  landingRefusal,
   livingTombstones,
   TOMBSTONES_KEY,
   withoutTombstone,
   withTombstone,
+  type DirtyId,
+  type RemoteLanding,
+  type RemoteLandingRefusal,
   type Tombstone,
 } from "@/lib/tombstones";
 import type { Host } from "@/modules/hosts/types";
@@ -61,6 +66,24 @@ export type ForwardsStore = {
    * shortcut, which is the only sense in which it is unconditional.
    */
   dropRulesForHost(hostId: string): Promise<void>;
+  /**
+   * Land already-merged rules and rule tombstones at their REMOTE timestamps, in
+   * one commit, and report the ones that were not applied.
+   *
+   * The one writer in this module that does not originate what it writes, which
+   * is why it is the one that does not stamp: every other mutator overwrites its
+   * caller's `updatedAt`, and doing that here would have a pulled rule outrank
+   * the copy it came from and a pulled tombstone restart its expiry window on
+   * every device that receives it.
+   *
+   * REFUSALS COME BACK, nothing throws - see `landingRefusal` in
+   * `src/lib/tombstones.ts` for the four conditions and for why the reference
+   * guard `upsertRule` runs is deliberately not among them. A rule whose host
+   * has not landed yet is applied with a `hostId` that dangles until the host
+   * arrives, on the same terms `assertReferences` in `modules/hosts/store.ts`
+   * already accepts for a missing group.
+   */
+  applyRemote(rules: RemoteLanding<ForwardRule>[]): Promise<RemoteLandingRefusal[]>;
   /** What this store's deletes have left behind, already pruned to the window -
    *  see `livingTombstones` in `src/lib/tombstones.ts`. */
   listTombstones(): Promise<Tombstone[]>;
@@ -91,8 +114,9 @@ export function createForwardStore(io: ForwardsIo): ForwardsStore {
 
   // Read ONCE per mutator and reused - `dropRulesForHost` stamps one `deletedAt`
   // per rule it drops, and those stamps describe one operation. See the same line
-  // in `hosts/store.ts`. Always this store's own clock, never a caller's value:
-  // accepted and deferred in `KNOWN-LIMITS.md`.
+  // in `hosts/store.ts`. This store's own clock in every mutator, never a
+  // caller's value - `applyRemote` is the one exception, and takes the remote
+  // timestamp beside the record it lands.
   const now = io.now ?? Date.now;
 
   async function listRules(): Promise<ForwardRule[]> {
@@ -108,11 +132,22 @@ export function createForwardStore(io: ForwardsIo): ForwardsStore {
    * the tombstone together. Split into two commits there would be a window where
    * the rule is gone and nothing records that it was deleted, and a device
    * pulling into that window pushes the rule straight back.
+   *
+   * DIRTY IS REQUIRED, and per RECORD - `hosts/store.ts`'s copy of this doc
+   * carries the full reasoning; it is the same parameter for the same reasons.
+   * `[]` is what `applyRemote` passes: a landing is what the remote already
+   * holds.
    */
-  async function persist(entries: [string, unknown][]): Promise<void> {
+  async function persist(entries: [string, unknown][], dirty: DirtyId[]): Promise<void> {
     for (const [key, value] of entries) await io.store.set(key, value);
     await io.store.commit();
+    io.markDirty?.(dirty);
   }
+
+  /** Every rule dirty mark this store makes, since a rule is the only record it
+   *  owns. */
+  const dirtyRules = (ids: string[]): DirtyId[] =>
+    ids.map((id) => ({ kind: RULE_TOMBSTONE_KIND, id }));
 
   /** Both the public read and every write's baseline, so no caller can reason
    *  about an expired row. `at` is the mutator's own single clock read. */
@@ -167,7 +202,7 @@ export function createForwardStore(io: ForwardsIo): ForwardsStore {
       const entries: [string, unknown][] = [[FORWARDS_KEY, next]];
       const graves = withoutTombstone(await readTombstones(at), [rule.id], at);
       if (graves) entries.push([TOMBSTONES_KEY, graves]);
-      await persist(entries);
+      await persist(entries, dirtyRules([rule.id]));
       return record;
     });
   }
@@ -186,13 +221,16 @@ export function createForwardStore(io: ForwardsIo): ForwardsStore {
       if (!rules.some((r) => r.id === id)) return;
       const at = now();
       const graves = await readTombstones(at);
-      await persist([
-        [FORWARDS_KEY, rules.filter((r) => r.id !== id)],
+      await persist(
         [
-          TOMBSTONES_KEY,
-          withTombstone(graves, [{ id, kind: RULE_TOMBSTONE_KIND, deletedAt: at }], at),
+          [FORWARDS_KEY, rules.filter((r) => r.id !== id)],
+          [
+            TOMBSTONES_KEY,
+            withTombstone(graves, [{ id, kind: RULE_TOMBSTONE_KIND, deletedAt: at }], at),
+          ],
         ],
-      ]);
+        dirtyRules([id]),
+      );
     });
   }
 
@@ -211,17 +249,75 @@ export function createForwardStore(io: ForwardsIo): ForwardsStore {
       if (dropped.length === 0) return;
       const at = now();
       const graves = await readTombstones(at);
-      await persist([
-        [FORWARDS_KEY, rules.filter((r) => r.hostId !== hostId)],
+      await persist(
         [
-          TOMBSTONES_KEY,
-          withTombstone(
-            graves,
-            dropped.map((r) => ({ id: r.id, kind: RULE_TOMBSTONE_KIND, deletedAt: at })),
-            at,
-          ),
+          [FORWARDS_KEY, rules.filter((r) => r.hostId !== hostId)],
+          [
+            TOMBSTONES_KEY,
+            withTombstone(
+              graves,
+              dropped.map((r) => ({ id: r.id, kind: RULE_TOMBSTONE_KIND, deletedAt: at })),
+              at,
+            ),
+          ],
         ],
-      ]);
+        // One mark per rule dropped, matching the tombstones: this call deletes
+        // rules, and the host's own record is the hosts store's business.
+        dirtyRules(dropped.map((r) => r.id)),
+      );
+    });
+  }
+
+  async function applyRemote(
+    landings: RemoteLanding<ForwardRule>[],
+  ): Promise<RemoteLandingRefusal[]> {
+    return enqueueWrite(async () => {
+      // ONE clock read for the whole set, and it stamps nothing: it is the
+      // window boundary the tombstone reads and writes are filtered against, so
+      // every landing in one apply is judged against one instant.
+      const at = now();
+      const refusals: RemoteLandingRefusal[] = [];
+      const rules = [...(await listRules())];
+      const graves = await readTombstones(at);
+      const buried: Tombstone[] = [];
+      const revived: string[] = [];
+      let touched = false;
+
+      for (const landing of landings) {
+        const refusal = landingRefusal(landing, RULE_TOMBSTONE_KIND);
+        if (refusal) {
+          refusals.push(refusal);
+          continue;
+        }
+        if (landing.deleted) {
+          const idx = rules.findIndex((r) => r.id === landing.tombstone.id);
+          if (idx >= 0) {
+            rules.splice(idx, 1);
+            touched = true;
+          }
+          // Filed even when no local rule matched: another device deleted it, and
+          // a device that has not pulled since would otherwise push its own copy
+          // back the moment this one lands.
+          buried.push(landing.tombstone);
+          continue;
+        }
+        const record: ForwardRule = { ...landing.record, updatedAt: landing.updatedAt };
+        const idx = rules.findIndex((r) => r.id === landing.id);
+        if (idx >= 0) rules[idx] = record;
+        else rules.push(record);
+        revived.push(landing.id);
+        touched = true;
+      }
+
+      const entries: [string, unknown][] = [];
+      if (touched) entries.push([FORWARDS_KEY, rules]);
+      const next = landedTombstones(graves, revived, buried, at);
+      if (next) entries.push([TOMBSTONES_KEY, next]);
+      // An apply with nothing to write costs no commit at all, which is what
+      // keeps a pull that landed nothing - the ordinary case once two devices
+      // agree - from rewriting the file on every focus.
+      if (entries.length > 0) await persist(entries, []);
+      return refusals;
     });
   }
 
@@ -232,6 +328,7 @@ export function createForwardStore(io: ForwardsIo): ForwardsStore {
     upsertRule,
     deleteRule,
     dropRulesForHost,
+    applyRemote,
     listTombstones: () => readTombstones(),
     onForwardsChanged: (cb) => io.store.onChanged(cb),
     ensureLoaded: () => io.store.ensureLoaded(),
@@ -249,6 +346,7 @@ export const {
   upsertRule,
   deleteRule,
   dropRulesForHost,
+  applyRemote,
   listTombstones,
   onForwardsChanged,
   ensureLoaded,

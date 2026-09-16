@@ -1,10 +1,14 @@
-// What a delete leaves behind, shared by the three stores whose records sync.
+// What a delete leaves behind, shared by the three stores whose records sync -
+// and, below it, the two shapes the sync path speaks to those same three stores
+// in: what a pull LANDS, and what a write owes a push.
 //
 // Here rather than in one of them for the reason `recoveredStore.ts` is here:
 // `modules/hosts`, `modules/vault` and `modules/forwards` all need the same
 // record shape and the same window, and three spellings of the 90-day constant
 // is exactly the kind of thing that drifts apart - after which two devices
-// disagree about when a delete stops being true.
+// disagree about when a delete stops being true. The landing shapes are here on
+// the same grounds, plus one of their own: all three stores already import this
+// file, so nothing gains an import edge on a sync module to speak to it.
 //
 // A delete has to leave something behind at all because the alternative is
 // indistinguishable from never having had the record: a device that has not
@@ -116,4 +120,130 @@ export function withoutTombstone(
   const named = new Set(ids);
   if (!current.some((t) => named.has(t.id))) return null;
   return livingTombstones(current, now).filter((t) => !named.has(t.id));
+}
+
+/**
+ * The tombstone list one apply pass should persist, or `null` when nothing it
+ * landed touches this key.
+ *
+ * The `null` is {@link withoutTombstone}'s, for the reason that one exists:
+ * every key a write sets is a key a contended save can put over a stale
+ * baseline, so an apply that landed only live records must not stamp this one.
+ *
+ * `added` REPLACES a stored tombstone naming the same id rather than joining it.
+ * The landing carries the remote's `deletedAt`, which is the answer both devices
+ * have to agree on; keeping the local copy beside it would leave the list saying
+ * one delete happened twice, at two times, and the earlier one would expire
+ * first.
+ */
+export function landedTombstones(
+  current: Tombstone[],
+  cleared: string[],
+  added: Tombstone[],
+  now = Date.now(),
+): Tombstone[] | null {
+  const replaced = new Set(added.map((t) => t.id));
+  const base = added.length > 0 ? current.filter((t) => !replaced.has(t.id)) : current;
+  const withoutCleared = withoutTombstone(base, cleared, now);
+  if (added.length === 0) return withoutCleared;
+  return withTombstone(withoutCleared ?? base, added, now);
+}
+
+/**
+ * One record a push still owes the remote.
+ *
+ * `kind` is the same string a {@link Tombstone} uses, so a dirty mark and a
+ * tombstone naming the same record agree without a second vocabulary - the
+ * remote object a push writes is named from exactly these two fields, whether
+ * what it carries is a record or a delete.
+ *
+ * A RECORD ID rather than a store, which is the whole reason this type exists:
+ * a store's `persist` takes whole arrays, so a hook there could only ever say
+ * "something in this file changed" and every edit would push the entire
+ * inventory.
+ */
+export type DirtyId = { kind: string; id: string };
+
+/**
+ * One already-merged record or tombstone on its way INTO a store, carrying the
+ * timestamp the REMOTE gave it.
+ *
+ * The timestamp is the point. Every mutator in the three stores overwrites what
+ * its caller supplied and stamps its own clock, which is right for every caller
+ * that originates what it writes - and wrong for the one that does not: a pulled
+ * record stamped locally outranks the copy it came from, and a pulled tombstone
+ * restarts the expiry window on every device that receives it.
+ *
+ * `id` is on the record arm rather than read off `record`, because the two can
+ * disagree and a landing that refuses for that reason still has to be able to
+ * NAME what it refused. `record` arrives from another device through a file and
+ * a network, so "not an object at all" is a state this type cannot exclude and
+ * `record.id` is not reachable in it.
+ *
+ * `updatedAt` here WINS over any `updatedAt` inside `record`. The record's own
+ * copy is whatever the remote device serialized; this one is what the merge
+ * decided, and only one of them can be what gets stored.
+ *
+ * `secrets` is the carried private-key body, keyed by the secret field name it
+ * belongs at. Accepted and IGNORED for now - the keychain write that consumes it
+ * arrives with the settings surface that lets a user opt into carrying bodies at
+ * all. It is in the type from the start so that arrival is an implementation
+ * rather than a second signature change rippling through every call site.
+ */
+export type RemoteLanding<T> =
+  | { deleted: false; id: string; record: T; updatedAt: number; secrets?: Record<string, string> }
+  | { deleted: true; tombstone: Tombstone };
+
+/** One landing a store would not apply, named the way a push names an object so
+ *  the caller can exclude it from what it records as applied. */
+export type RemoteLandingRefusal = { kind: string; id: string; reason: string };
+
+/**
+ * The landing's refusal, or `null` when there is nothing wrong with it.
+ *
+ * FOUR CONDITIONS, and they are the whole set: an id that disagrees with the
+ * record carrying it, a `record` that is not an object, a tombstone with no
+ * usable `deletedAt`, and a tombstone of a kind this argument does not own. A
+ * fifth is a deliberate act, not a tidy-up - what is deliberately NOT here is
+ * every REFERENCE guard the ordinary mutators run. A rule arriving before the
+ * host it names is normal: the landing set is a snapshot of another device's
+ * consistent inventory, and the order within one pull is an artifact of a
+ * listing.
+ *
+ * `kind` is a parameter rather than something read off the landing because the
+ * record arm has no kind to read - the array a landing arrived in is what says
+ * what it is. That is also what the fourth condition checks: a tombstone routed
+ * into the wrong array would otherwise delete whatever local record happened to
+ * share its id, in a store that never held the record it names.
+ *
+ * RETURNED, never thrown, and that is the load-bearing half. Every store applies
+ * its landings inside one queued write; a throw from the middle of that loses
+ * every other landing in the same set, including the good ones.
+ */
+export function landingRefusal<T extends { id: string }>(
+  landing: RemoteLanding<T>,
+  kind: string,
+): RemoteLandingRefusal | null {
+  if (landing.deleted) {
+    const grave = landing.tombstone;
+    if (grave.kind !== kind) {
+      return {
+        kind: grave.kind,
+        id: grave.id,
+        reason: `a ${grave.kind} tombstone is not a ${kind}`,
+      };
+    }
+    if (typeof grave.deletedAt !== "number" || !Number.isFinite(grave.deletedAt)) {
+      return { kind, id: grave.id, reason: "the tombstone carries no usable deletedAt" };
+    }
+    return null;
+  }
+  const record: unknown = landing.record;
+  if (typeof record !== "object" || record === null) {
+    return { kind, id: landing.id, reason: "the landing carries no record object" };
+  }
+  if ((record as { id?: unknown }).id !== landing.id) {
+    return { kind, id: landing.id, reason: "the record names a different id than the landing" };
+  }
+  return null;
 }
