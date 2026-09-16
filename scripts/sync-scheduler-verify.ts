@@ -77,7 +77,7 @@ import {
 } from "../src/modules/hosts/types";
 import { DEVICE_LOCAL_FIELDS } from "../src/modules/sync/envelope";
 import { createScheduler } from "../src/modules/sync/scheduler";
-import { createSyncSettingsStore } from "../src/modules/sync/store";
+import { createSyncSettingsStore, type SyncSettingsStore } from "../src/modules/sync/store";
 import {
   DEFAULT_SYNC_CONFIG,
   SYNC_CONFIG_KEY,
@@ -213,6 +213,7 @@ function harness(
     push?: PushReport;
     dirty?: string[];
     park?: boolean;
+    parkDirty?: boolean;
     releaseThrows?: boolean;
   } = {},
 ) {
@@ -236,7 +237,21 @@ function harness(
     [SYNC_ETAGS_KEY]: seed.etags ?? {},
     ...(seed.dirty ? { [SYNC_DIRTY_KEY]: seed.dirty } : {}),
   });
-  const settings = createSyncSettingsStore(settingsData);
+  // A `readDirty` that can be parked mid-flight, which is the only way to
+  // construct a mark made DURING a flush - the window the spread order in
+  // `runPush` decides.
+  let releaseDirty = (): void => {};
+  const dirtyParked = new Promise<void>((r) => {
+    releaseDirty = r;
+  });
+  const base = createSyncSettingsStore(settingsData);
+  const settings: SyncSettingsStore = {
+    ...base,
+    async readDirty() {
+      if (seed.parkDirty) await dirtyParked;
+      return base.readDirty();
+    },
+  };
 
   // A pull that can be parked mid-flight, which is the only way to construct
   // the interleaving B17 is about: a real pull's read-to-write window is a LIST
@@ -245,6 +260,8 @@ function harness(
   const parked = new Promise<void>((r) => {
     release = r;
   });
+  /** Set by a check to make the next pull command reject. */
+  let failPull: string | null = null;
   const calls = { pull: 0, push: 0 };
   const pulled: { envelopes: Envelope[]; etags: Record<string, string> }[] = [];
   const pushed: { envelopes: Envelope[]; etags: Record<string, string> }[] = [];
@@ -253,6 +270,7 @@ function harness(
       calls.pull++;
       pulled.push({ envelopes, etags });
       if (seed.park) await parked;
+      if (failPull) throw new Error(failPull);
       return seed.pull ?? { records: [], etags: {}, quarantined: [], pruned: 0, pending: 0 };
     },
     async push(envelopes, etags) {
@@ -308,6 +326,10 @@ function harness(
     forwards,
     released,
     release: (): void => release(),
+    releaseDirty: (): void => releaseDirty(),
+    failPull: (reason: string | null): void => {
+      failPull = reason;
+    },
     settings,
     settingsData,
     dirty: (): Promise<string[]> => settings.readDirty(),
@@ -943,6 +965,51 @@ async function b17(): Promise<void> {
   check("and the push that waited still ran", h.calls.push, 1);
 }
 
+async function b18(): Promise<void> {
+  console.log("\nB18 - a mark made during a flush is not eaten by it");
+  // `[...dirty, ...(await readDirty())]` spreads the SET before the await is
+  // evaluated, so a mark made while that read is in flight lands in neither the
+  // snapshot nor the set afterwards - and the `writeDirty([])` that follows
+  // puts an empty list over it on disk too. Gone from memory and disk both,
+  // with no error and a pending count of zero.
+  const h = harness({ hosts: [host("h-1"), host("h-2")], dirty: ["host:h-1"], parkDirty: true });
+  const flushing = h.scheduler.pushNow();
+  await settle();
+  // The flush is parked inside its own `readDirty`. Edit now.
+  await h.hosts.upsertHost(host("h-2", { name: "edited mid-flush" }));
+  await settle();
+  h.releaseDirty();
+  await flushing;
+  await settle();
+
+  // NEITHER IS LOST. The mid-flush mark joins the one the last session left
+  // behind, because the read that folds disk into memory is the SAME read the
+  // flush is parked in - so the mark waits for it rather than racing it.
+  check(
+    "the flush publishes both the persisted mark and the mid-flush one",
+    h.pushed[0]?.envelopes.map((e) => `${e.kind}:${e.id}`).sort(),
+    ["host:h-1", "host:h-2"],
+  );
+  check("and nothing is left owed", await h.dirty(), []);
+}
+
+async function b19(): Promise<void> {
+  console.log("\nB19 - one status write per pass, and the pull's error wins");
+  // A pull that fails and a flush that succeeds used to produce two status
+  // writes, the second of which put `null` over the first's error - so the
+  // settings window reported "no error" on a pull that did not happen.
+  const h = harness({ hosts: [host("h-1")], dirty: ["host:h-1"] });
+  h.failPull("the remote answered 503");
+  await h.scheduler.pullNow();
+  await settle();
+  check("the flush ran", h.calls.push, 1);
+  check(
+    "and the pull's error survived it",
+    (await h.status()).lastError,
+    "the remote answered 503",
+  );
+}
+
 async function main(): Promise<void> {
   await b1();
   await b2b3b4();
@@ -959,6 +1026,8 @@ async function main(): Promise<void> {
   await b15();
   await b16();
   await b17();
+  await b18();
+  await b19();
 
   if (failed > 0) throw new Error(`sync-scheduler-verify: ${failed} FAILED`);
   console.log("\nsync-scheduler-verify: OK\n");

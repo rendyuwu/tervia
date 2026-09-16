@@ -148,6 +148,9 @@ export function createScheduler(io: SchedulerIo): SyncScheduler {
   /** The pass in flight, so a second entry point queues behind it rather than
    *  interleaving two read-modify-writes of the etag map. */
   let running: Promise<void> | null = null;
+  /** The one-time read that folds the last session's dirty set into this one's.
+   *  See {@link hydrate}. */
+  let loaded: Promise<void> | null = null;
   /** `-Infinity` so the app-setup pull is never rate limited away. */
   let lastPull = -Infinity;
   let status: SyncStatus = { ...EMPTY_SYNC_STATUS };
@@ -392,43 +395,59 @@ export function createScheduler(io: SchedulerIo): SyncScheduler {
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     }
+    // THE PULL IS ALSO THE FLUSH, and it runs BEFORE the one status write: a
+    // dirty mark that survived the last quit has nothing else that would notice
+    // it, because an etag-skipped object hides this device's local edit from the
+    // reconcile entirely. Its error folds into the same write rather than
+    // arriving in a second one that would put a `null` over this one.
+    const pushError = await runPush();
     await writeStatus({
       lastPullAt: now(),
       pending,
       quarantine,
       stale,
-      lastError: error,
+      lastError: error ?? pushError,
     });
-    // The pull is also the flush: a dirty mark that survived the last quit has
-    // nothing else that would notice it, because an etag-skipped object hides
-    // this device's local edit from the reconcile entirely.
-    await runPush();
   }
 
-  async function runPush(): Promise<void> {
+  /**
+   * Publish everything marked since the last push.
+   *
+   * Returns what to report, so the caller writes status ONCE: a pull ends by
+   * calling this, and a second status write here would put its own `null` over
+   * the error the pull just recorded.
+   */
+  async function runPush(): Promise<string | null> {
     const config = await io.settings.readConfig();
+    await hydrate();
+    // SNAPSHOT AND REMOVE WITH NO AWAIT BETWEEN THEM. `hydrate` has already
+    // folded what was on disk into this set, so there is no second read here -
+    // and that is the point: a read at this line would spread `dirty` before
+    // its own await was evaluated, and a mark made while it was in flight
+    // would land in neither the snapshot nor the set afterwards. Gone from
+    // memory and disk both, with no error and a pending count of zero.
+    const taken = new Set(dirty);
+    for (const slot of taken) dirty.delete(slot);
     // Taken whether or not sync is on: marks accumulated while it was off
     // describe an inventory the remote has never seen, and the pull that
     // follows enabling it publishes the whole of it anyway.
-    const taken = [...dirty, ...(await io.settings.readDirty())];
-    dirty.clear();
-    await io.settings.writeDirty([]);
-    if (!config.enabled || taken.length === 0) return;
+    await persistDirty();
+    if (!config.enabled || taken.size === 0) return null;
     try {
-      const wanted = new Set(taken);
       // ONE OBJECT PER EDIT, not the inventory. The whole reason `persist`
       // takes record ids: a hook that could only say "this store changed" would
       // push every host every time one was renamed.
-      const envelopes = (await localEnvelopes()).filter((e) => wanted.has(etagSlot(e.kind, e.id)));
+      const envelopes = (await localEnvelopes()).filter((e) => taken.has(etagSlot(e.kind, e.id)));
       const failed = await publish(envelopes);
       for (const failure of failed) dirty.add(etagSlot(failure.kind, failure.id));
       await persistDirty();
-      await writeStatus({ lastPushAt: now(), lastError: failed[0]?.reason ?? null });
+      await writeStatus({ lastPushAt: now() });
+      return failed[0]?.reason ?? null;
     } catch (e) {
       // The edit is not lost: the marks go back and the next trigger retries.
       for (const slot of taken) dirty.add(slot);
       await persistDirty();
-      await writeStatus({ lastError: e instanceof Error ? e.message : String(e) });
+      return e instanceof Error ? e.message : String(e);
     }
   }
 
@@ -443,14 +462,45 @@ export function createScheduler(io: SchedulerIo): SyncScheduler {
    * Queued rather than dropped: a push carries edits, and discarding one would
    * lose them until the next mutation.
    */
-  function serialize(op: () => Promise<void>): Promise<void> {
-    const next = (running ?? Promise.resolve()).then(op, op);
-    running = next.catch(() => {});
+  function serialize(op: () => Promise<unknown>): Promise<void> {
+    // NOTHING THAT COMES OUT OF HERE REJECTS. Every caller is `void
+    // serialize(...)` or a fire-and-forget event handler, and the store file
+    // being unwritable would otherwise surface as an unhandled rejection with
+    // no owner - on a background path that is allowed to fail.
+    const next = (running ?? Promise.resolve()).then(op, op).then(
+      () => {},
+      (e: unknown) => {
+        console.error("sync: a pass failed", e);
+      },
+    );
+    running = next;
     return next;
   }
 
-  /** The dirty set, written where a quit can no longer take it. */
+  /**
+   * Fold what the last session left on disk into the in-memory set, ONCE.
+   *
+   * Every write of the set is `[...dirty]`, so memory has to be a superset of
+   * disk before the first one - otherwise the first mark of a session writes
+   * its one slot over everything the previous session was still owed, which is
+   * the lost edit the durable set exists to prevent, reintroduced by the thing
+   * that makes it durable.
+   *
+   * After this runs, memory is authoritative and nothing reads the key again.
+   */
+  function hydrate(): Promise<void> {
+    loaded ??= io.settings.readDirty().then((slots) => {
+      for (const slot of slots) dirty.add(slot);
+    });
+    return loaded;
+  }
+
+  /** The dirty set, written where a quit can no longer take it.
+   *
+   *  `[...dirty]` is read at the moment of the write rather than snapshotted by
+   *  the caller, so two writers racing both write current state. */
   async function persistDirty(): Promise<void> {
+    await hydrate();
     await io.settings.writeDirty([...dirty]);
   }
 
@@ -474,7 +524,13 @@ export function createScheduler(io: SchedulerIo): SyncScheduler {
       // next pull etag-skips an unmoved remote object and skips this device's
       // local copy with it - so nothing would have noticed, and `pending` would
       // have said zero.
-      void persistDirty();
+      //
+      // Caught rather than left floating: this runs at the end of a queued
+      // STORE write, so an unhandled rejection here would attach itself to a
+      // record the user did save.
+      void persistDirty().catch((e: unknown) => {
+        console.error("sync: the dirty set could not be written", e);
+      });
       schedule();
     },
     pullNow: () => serialize(runPull),

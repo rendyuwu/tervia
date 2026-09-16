@@ -319,6 +319,31 @@ pub async fn pull(
             }
         };
 
+        // THE VERSION CHECK, HERE RATHER THAN IN THE MERGE, AND BEFORE THE
+        // PRUNE. `merge` refuses a version it does not know, but a `RemoteOnly`
+        // object never reaches the merge - there is no local copy to merge it
+        // with - so an object from a newer build would otherwise be handed to
+        // the apply path unexamined, and its record shape written straight into
+        // this device's store. That is exactly what `WIRE_VERSION` was minted
+        // to prevent.
+        //
+        // BEFORE the prune rather than after, because the prune's decision is
+        // an irreversible DELETE authorized by `deleted` and `device` - two
+        // fields read through a schema this build has just said it cannot
+        // interpret. The ordering costs nothing: `root` puts every object under
+        // a `v1` path segment, so a v2 envelope at a v1 key is not a state the
+        // layout produces.
+        if envelope.v != WIRE_VERSION {
+            report.quarantined.push(Quarantined {
+                name,
+                reason: format!(
+                    "sync: this object was written by a newer build (wire version {}, this build reads {WIRE_VERSION})",
+                    envelope.v
+                ),
+            });
+            continue;
+        }
+
         // Step three: delete only what THIS device published.
         //
         // A prune is destructive to every device, unlike a local expiry. A
@@ -331,40 +356,28 @@ pub async fn pull(
         // `ordering_key`'s prohibition is about the MERGE - a device id there
         // would make the winner depend on who pushed last - and says nothing
         // about a prune, where provenance is exactly the question being asked.
-        if candidate && envelope.deleted && envelope.device == device {
-            // A REFUSED DELETE IS NOT A FAILED PULL. A prune is housekeeping:
-            // a bucket with read-only credentials, an object lock or a
-            // lifecycle policy refuses every one of these, and propagating
-            // that would make the FIRST expired tombstone abort the whole
-            // reconcile - no landings, no pushes, forever, over an object
-            // whose only cost is the bytes it occupies. The object is left in
-            // place and reconciled below like any other tombstone, which is
-            // the same outcome as the retired-device case `KNOWN-LIMITS.md`
-            // already accepts.
-            if provider.delete(&entry.key).await.is_ok() {
-                report.pruned += 1;
-                continue;
-            }
-        }
-
-        // THE VERSION CHECK, HERE RATHER THAN IN THE MERGE. `merge` refuses a
-        // version it does not know, but a `RemoteOnly` object never reaches
-        // the merge - there is no local copy to merge it with - so an object
-        // from a newer build would otherwise be handed to the apply path
-        // unexamined, and its record shape written straight into this device's
-        // store. That is exactly what `WIRE_VERSION` was minted to prevent.
         //
-        // AFTER the prune, deliberately: `deleted` and `device` are the two
-        // fields a prune reads, and this device's own expired tombstone is
-        // still its own to remove whatever version it was written at.
-        if envelope.v != WIRE_VERSION {
-            report.quarantined.push(Quarantined {
-                name,
-                reason: format!(
-                    "sync: this object was written by a newer build (wire version {}, this build reads {WIRE_VERSION})",
-                    envelope.v
-                ),
-            });
+        // The candidacy is re-asked against the envelope's OWN stamp rather
+        // than taken from the listing, because that stamp is the `deletedAt`
+        // every device filters by and the listing's is only when the object was
+        // last written.
+        let expired = envelope
+            .updated_at
+            .is_some_and(|u| now.saturating_sub(u) >= TOMBSTONE_TTL_MS);
+        if candidate && envelope.deleted && expired {
+            // A REFUSED DELETE IS NOT A FAILED PULL. A bucket with read-only
+            // credentials, an object lock or a lifecycle policy refuses every
+            // one of these, and propagating that would make the FIRST expired
+            // tombstone abort the whole reconcile - no landings, no pushes,
+            // forever, over an object whose only cost is the bytes it occupies.
+            if envelope.device == device && provider.delete(&entry.key).await.is_ok() {
+                report.pruned += 1;
+            }
+            // SKIPPED EITHER WAY, and that is not tidiness. An expired
+            // tombstone is older than the window every device filters reads by,
+            // so landing it writes a row that every subsequent read discards -
+            // one store commit per expired tombstone per pull, forever, on any
+            // remote holding one this device cannot remove.
             continue;
         }
 
@@ -1020,11 +1033,17 @@ mod tests {
         assert_eq!(report.pruned, 1);
         // A pruned object leaves the etag map with it.
         assert!(!report.etags.contains_key("host:h-1"));
-        // The other device's expired tombstone is still reconciled normally.
-        assert!(matches!(
-            outcome(&report, "h-3"),
-            Outcome::RemoteOnly { .. }
-        ));
+        // The other device's expired tombstone survives on the remote - that is
+        // the accepted residue - and is NOT landed here, which is a different
+        // claim and the one that costs something: see
+        // `another_devices_expired_tombstone_is_not_landed_either`.
+        assert!(!report.records.iter().any(|r| r.id == "h-3"));
+        // And the one INSIDE the window keeps its etag, so the skip above is
+        // keyed on expiry rather than on being a tombstone at all - the
+        // reconcile half of that claim is
+        // `a_tombstone_inside_the_window_is_still_reconciled`, which runs with
+        // no etag map so the object is actually read.
+        assert_eq!(report.etags.get("host:h-2"), Some(&"b".to_string()));
     }
 
     #[tokio::test]
@@ -1108,10 +1127,52 @@ mod tests {
             outcome(&report, "h-2"),
             Outcome::RemoteOnly { .. }
         ));
-        // And the tombstone it could not remove is reconciled like any other
-        // rather than dropped on the floor.
+        // And the one it could not remove produces NO disposition. Landing an
+        // expired tombstone writes a row every read then filters straight back
+        // out, so a remote holding one this device cannot delete would
+        // otherwise cost a store commit on every pull for the life of the
+        // bucket.
+        assert!(
+            !report.records.iter().any(|r| r.id == "h-1"),
+            "an expired tombstone was handed to the apply path"
+        );
+    }
+
+    #[tokio::test]
+    async fn another_devices_expired_tombstone_is_not_landed_either() {
+        // The prune leaves it in place - that is the accepted residue - but
+        // leaving it in place and LANDING it on every pull are different
+        // things, and only the second costs a commit per pull forever.
+        let keys = keys();
+        let fake = Fake::cas(true);
+        let theirs = grave("host", "h-3", NOW - 100 * DAY, "dev-b");
+        publish(&fake, &keys, &theirs, "c", Some(NOW - 100 * DAY));
+
+        let report = pull_with(&fake, &keys, Vec::new(), BTreeMap::new()).await;
+        assert!(
+            fake.deletes().is_empty(),
+            "another device's object was pruned"
+        );
+        assert!(
+            report.records.is_empty(),
+            "an expired tombstone was handed to the apply path: {:?}",
+            report.records
+        );
+    }
+
+    #[tokio::test]
+    async fn a_tombstone_inside_the_window_is_still_reconciled() {
+        // The anti-vacuity pair for the two checks above: the skip is keyed on
+        // EXPIRY, so a live delete still has to reach the apply path or every
+        // delete stops propagating.
+        let keys = keys();
+        let fake = Fake::cas(true);
+        let recent = grave("host", "h-4", NOW - DAY, "dev-b");
+        publish(&fake, &keys, &recent, "d", Some(NOW - DAY));
+
+        let report = pull_with(&fake, &keys, Vec::new(), BTreeMap::new()).await;
         assert!(matches!(
-            outcome(&report, "h-1"),
+            outcome(&report, "h-4"),
             Outcome::RemoteOnly { .. }
         ));
     }
