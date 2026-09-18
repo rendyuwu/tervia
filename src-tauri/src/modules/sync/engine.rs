@@ -158,6 +158,22 @@ pub enum Outcome {
         /// `ProviderError::Protocol` exists in this tree precisely because a
         /// listing can misbehave. The user resolves it with a manual push or a
         /// local delete.
+        ///
+        /// NEVER SET WHEN THE LISTING WAS EMPTY, and an empty listing is not
+        /// the same claim as a short one. A page that lost some objects says
+        /// nothing about the ones it did return; a prefix holding zero objects
+        /// says the remote has never taken this inventory at all - a keyfile
+        /// minted seconds ago, or a second provider being set up - and the
+        /// stale rule there withholds the whole inventory from the remote it
+        /// was pointed at, reporting nothing pending and no error. So the
+        /// empty case is read as "never held" and everything publishes.
+        ///
+        /// THE KNOWN FALSE POSITIVE IS WEBDAV'S 404. `classify_list`
+        /// (`providers/webdav.rs`) maps a missing collection to an empty
+        /// listing, because a prefix whose collections have not been created is
+        /// exactly the fresh-remote case. A mistyped prefix therefore presents
+        /// as a fresh remote and takes a copy of the inventory. That is a
+        /// write, never a delete, and the local records are untouched.
         stale: bool,
     },
 }
@@ -283,6 +299,12 @@ pub async fn pull(
     now: u64,
 ) -> Result<PullReport, ProviderError> {
     let entries = provider.list(&object_prefix(prefix)).await?;
+
+    // A REMOTE THAT HOLDS NOTHING AT ALL HAS NEVER HELD THIS INVENTORY, and
+    // that is what lifts the stale rule at the bottom of this function. See
+    // `Outcome::LocalOnly::stale` for why an empty listing is read differently
+    // from a short one.
+    let remote_is_empty = entries.is_empty();
 
     // The map arrives keyed by `kind:id`; the listing speaks object names. One
     // HMAC per known record turns one into the other.
@@ -461,9 +483,15 @@ pub async fn pull(
         // An UNSTAMPED local record is not stale. Absent means "written before
         // the field existed", which is the one record that has certainly never
         // been published - so it is pushed, not reported.
-        let stale = local
-            .updated_at
-            .is_some_and(|u| now.saturating_sub(u) >= TOMBSTONE_TTL_MS);
+        //
+        // NOTHING IS STALE ON AN EMPTY REMOTE. The rule reads absence as a
+        // delete whose tombstone has expired, and that reading needs a remote
+        // that once held the record. A prefix with no objects at all is the one
+        // shape where it cannot be true of every record at once.
+        let stale = !remote_is_empty
+            && local
+                .updated_at
+                .is_some_and(|u| now.saturating_sub(u) >= TOMBSTONE_TTL_MS);
         if !stale {
             report.pending += 1;
         }
@@ -1142,6 +1170,13 @@ mod tests {
     async fn a_local_only_record_older_than_the_window_is_reported_and_not_deleted() {
         let keys = keys();
         let fake = Fake::cas(true);
+        // THE REMOTE HOLDS SOMETHING, and that is load-bearing rather than
+        // scenery: an empty listing lifts the stale rule outright, so a version
+        // of this test with nothing published would pass for the wrong reason
+        // and stop guarding the window at all. See
+        // `an_empty_remote_is_never_stale_so_the_whole_inventory_publishes`.
+        let theirs = host("h-9", NOW - 9000, "dev-b", "over there");
+        publish(&fake, &keys, &theirs, "e1", Some(NOW - 9000));
         let locals = vec![
             host("h-1", NOW - 100 * DAY, "this-device", "long gone elsewhere"),
             host("h-2", NOW - 1000, "this-device", "recent"),
@@ -1161,6 +1196,42 @@ mod tests {
         assert_eq!(report.pending, 1);
         assert!(fake.deletes().is_empty(), "a listing gap deleted a record");
         assert!(fake.puts().is_empty(), "the pull wrote objects itself");
+    }
+
+    #[tokio::test]
+    async fn an_empty_remote_is_never_stale_so_the_whole_inventory_publishes() {
+        // D1, from the cross-device sync hand test: a device holding an inventory it had
+        // already published to one remote was pointed at a fresh prefix, and
+        // published only the records it had touched inside the tombstone
+        // window - 16 of 65 - while reporting nothing pending and no error.
+        // A prefix with no objects in it has never held any of these, so the
+        // reading the stale rule makes is unavailable and every record is owed.
+        let keys = keys();
+        let fake = Fake::cas(true);
+        let locals = vec![
+            host(
+                "h-1",
+                NOW - 100 * DAY,
+                "this-device",
+                "older than the window",
+            ),
+            host("h-2", NOW - 1000, "this-device", "recent"),
+        ];
+        let report = pull_with(&fake, &keys, locals, BTreeMap::new()).await;
+
+        assert!(
+            matches!(outcome(&report, "h-1"), Outcome::LocalOnly { stale: false }),
+            "an old record was withheld from a remote that holds nothing"
+        );
+        assert!(matches!(
+            outcome(&report, "h-2"),
+            Outcome::LocalOnly { stale: false }
+        ));
+        // Both are owed, so the settings surface says so rather than zero.
+        assert_eq!(report.pending, 2);
+        // The publishing is still the caller's, not the pull's.
+        assert!(fake.puts().is_empty(), "the pull wrote objects itself");
+        assert!(fake.deletes().is_empty());
     }
 
     #[tokio::test]

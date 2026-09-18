@@ -41,6 +41,7 @@ import {
   SYNC_STORE_PATH,
   SYNC_WEBDAV_PASSWORD_ACCOUNT,
   SYNC_WEBDAV_USERNAME_ACCOUNT,
+  namesTheSameRemote,
   type SyncConfig,
   type SyncRequest,
   type SyncStatus,
@@ -256,6 +257,15 @@ export function SyncSection() {
           SYNC_WEBDAV_PASSWORD_ACCOUNT,
           secrets.webdavPassword,
         );
+      }
+      // A DIFFERENT REMOTE IS A DIFFERENT ETAG MAP, and it is emptied before
+      // the configuration that renames the remote is stored - the pull this
+      // Save requests must not be able to start on the old map. Compared
+      // against what the FILE says rather than against the copy this window
+      // loaded, because the pull running in `main` is the other writer here.
+      // See {@link REMOTE_IDENTITY_FIELDS}.
+      if (!namesTheSameRemote(await settings.readConfig(), config)) {
+        await settings.writeEtags({});
       }
       await settings.writeConfig(config);
       setStored({
@@ -707,7 +717,7 @@ export function SyncSection() {
         </SettingRow>
         <SettingRow
           title="Waiting to be pushed"
-          description="Records this device has changed that the remote does not hold yet."
+          description="The remote is missing at least this many records from this device: what the last completed pull found, or what this device has changed and not yet uploaded, whichever is larger."
         >
           <span className="text-muted-foreground text-[11px] tabular-nums">{status.pending}</span>
         </SettingRow>
@@ -734,8 +744,10 @@ export function SyncSection() {
             <span className="text-[12.5px] font-medium">Local records the remote has dropped</span>
             <span className="text-muted-foreground text-[10.5px] leading-relaxed">
               This device still holds these and the remote no longer has an object for them. They
-              are reported and never deleted. Use Pull now above to settle them: a pull is what
-              re-publishes a record the remote is missing, or confirms it was deleted elsewhere.
+              are reported and never deleted. Each is older than the 90-day window a deletion
+              travels in, so the likeliest reading is that it was deleted on another device long
+              ago. A pull does not re-publish these - edit one to send it to the remote again, or
+              delete it here to accept the removal.
             </span>
             <ul className="flex flex-col gap-1">
               {status.stale.map((s) => (

@@ -603,14 +603,48 @@ local record with no remote object at all already takes, and for the same
 reason: an absence and an expiry are both inferences, and acting on either
 destroys data.
 
+**A remote holding no objects at all is the exception, and it is deliberate.**
+The stale rule above reads "no object for this record" as "deleted elsewhere,
+tombstone expired", and that reading needs a remote that once held the record.
+A prefix with zero objects in it has never held any of them — a keyfile minted
+seconds ago, a second provider being set up — and applying the rule there
+withheld the entire inventory from the remote it had just been pointed at,
+reporting nothing pending and no error while three quarters of the records were
+absent. So `pull` lifts the rule when the listing comes back empty and every
+local record is published. The cost is the resurrection above at its widest: a
+remote whose records were all deleted more than 90 days ago, whose tombstones
+have all been pruned, and a device that was away throughout, will refill it. The
+user can delete again; the alternative was a sync that silently does not sync.
+
 **Carried by.** `TOMBSTONE_TTL_MS` in `src/lib/tombstones.ts`, which is the
-window, `livingTombstones` in the same file, which applies it on this side, and
-the `expired` clause in `pull` in `src-tauri/src/modules/sync/engine.rs`, which
-applies it to the remote's copy.
+window, `livingTombstones` in the same file, which applies it on this side, the
+`expired` clause in `pull` in `src-tauri/src/modules/sync/engine.rs`, which
+applies it to the remote's copy, and `remote_is_empty` in the same function,
+which is the exception.
 
 **Trigger.** A device registry that can say when each device last pulled. The
 window can then be derived from the oldest live device rather than guessed, and
 this entry retires rather than being re-tuned.
+
+### A mistyped WebDAV prefix presents as a fresh remote and takes a copy of the inventory
+
+**Accepted state.** `classify_list` in
+`src-tauri/src/modules/sync/providers/webdav.rs` maps a 404 to an empty listing,
+because a prefix whose collections have not been created yet is exactly the
+fresh-remote case and the first push is what creates them. Combined with the
+empty-listing exception above, a prefix typed wrongly — under a base path the
+server still answers on — therefore reads as a new remote and receives the whole
+inventory, sealed, under a keyfile minted for it. Nothing is deleted and nothing
+leaves the user's own server; the cost is a second copy in a place they did not
+mean, and a second sync root that does not converge with the first. It is the
+same typo hazard as a prefix that mints an unwanted keyfile, one step wider.
+
+**Carried by.** `classify_list` in `providers/webdav.rs`, and `remote_is_empty`
+in `pull` in `src-tauri/src/modules/sync/engine.rs`.
+
+**Trigger.** A confirmation in the settings surface when a Save is about to mint
+a keyfile at a prefix that holds none — which is the same prompt this and the
+unwanted-keyfile hazard both want, and is worth building once.
 
 ### Expired tombstone bytes are never reclaimed in a store that sees no further deletes
 
