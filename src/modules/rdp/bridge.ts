@@ -137,8 +137,13 @@ export type RdpSession = {
   id: number;
   /** Queue a batch of input events. Batched on purpose: a single mouse drag
    *  produces dozens of moves per second and each IPC round trip costs far more
-   *  than the frame it produces. */
-  sendInput: (events: RdpInputEvent[]) => Promise<void>;
+   *  than the frame it produces.
+   *
+   *  Resolves `false` when the session task has fallen behind and the batch was
+   *  not taken - none of it. Keep the batch and retry it rather than dropping
+   *  it: a discarded `keyUp` or `releaseAll` strands a modifier down on the
+   *  server. */
+  sendInput: (events: RdpInputEvent[]) => Promise<boolean>;
   close: () => Promise<void>;
 };
 
@@ -167,8 +172,11 @@ export function rdpListSessions(): Promise<RdpSessionInfo[]> {
   return invoke<RdpSessionInfo[]>("rdp_list_sessions");
 }
 
-export function rdpInput(id: number, events: RdpInputEvent[]): Promise<void> {
-  return invoke("rdp_input", { id, events });
+/** `false` means the session task is behind and the batch was not taken - keep
+ *  it and retry, because a discarded `keyUp` or `releaseAll` strands a modifier
+ *  down on the server. */
+export function rdpInput(id: number, events: RdpInputEvent[]): Promise<boolean> {
+  return invoke<boolean>("rdp_input", { id, events });
 }
 
 /**
@@ -330,7 +338,7 @@ export async function openRdp(input: RdpOpenInput, handlers: RdpHandlers): Promi
   });
   return {
     id,
-    sendInput: (events) => (events.length === 0 ? Promise.resolve() : rdpInput(id, events)),
+    sendInput: (events) => (events.length === 0 ? Promise.resolve(true) : rdpInput(id, events)),
     close: () => rdpClose(id),
   };
 }

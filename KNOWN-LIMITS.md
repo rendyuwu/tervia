@@ -964,3 +964,30 @@ and the compile-from-C-source option for that decoder is already ruled out: it
 needs NASM on Windows, which is the exact dependency the `ironrdp-tls`
 rustls-ring feature and the russh ring feature both exist to avoid. Loading a
 prebuilt library at runtime is the only option compatible with the pins above.
+
+### A panic in an RDP session kills the app, because the release profile cannot unwind
+
+**Accepted state.** The session task has no `catch_unwind` boundary, so a panic
+anywhere in the active-stage loop - a decoder, a PDU parser, an arithmetic
+overflow - takes the whole process down, every other tab with it. Adding the
+boundary would change nothing while `[profile.release] panic = "abort"` stands
+(`src-tauri/Cargo.toml`): under abort there is no unwinding to catch, so the
+`catch_unwind` is dead code in exactly the build that matters.
+
+**Carried by.** `panic = "abort"` in `src-tauri/Cargo.toml`, and the session
+task spawned in `connect` in `src-tauri/src/modules/rdp/session.rs`.
+
+The module avoids the usual sources rather than relying on the boundary it does
+not have. Its production code contains no `as` numeric cast, and it does not
+use `DecodedImage::data_for_rect`, which underflows at height 0 and slices out
+of bounds past the framebuffer (`ironrdp-session` 0.10.0, `image.rs`). What is
+left is the decode path inside the dependency, and that one is unlinted: the
+crate sets `#![allow(clippy::arithmetic_side_effects)]` at its root, marked
+`FIXME: remove`.
+
+**Trigger.** A decision to accept unwinding tables in the release binary. That
+is one profile line plus an `AssertUnwindSafe(...).catch_unwind()` around `run`,
+emitting `error` then `disconnected` and leaving the janitor to evict the id -
+everything the panic would unwind past is dropped with the session, and
+`lock_or_recover` already recovers a poisoned guard, so there is no half-state
+to reason about. Until then a parser panic takes every tab with it.

@@ -186,8 +186,9 @@ struct Shared {
     /// layer - that is what makes the transport a pull.
     ///
     /// LOCK ORDER: `batcher` is released before `image` is taken (see
-    /// `RdpSession::take_frame`), and `add_mirror_sink` takes `mirrors` then
-    /// `image`. Nothing ever takes `image` first. Keep it that way.
+    /// `RdpSession::take_frame`), and `add_mirror_sink` takes `dims`,
+    /// releases it, then takes `mirrors` alone. Nothing ever takes `image`
+    /// first. Keep it that way.
     batcher: Mutex<FrameBatcher>,
     /// Extra event sinks (the remote-access bridge / a second view).
     mirrors: Mutex<Vec<EventSink>>,
@@ -201,7 +202,7 @@ pub struct RdpSession {
     /// owns the `ironrdp_input::Database` because it holds key/button state and
     /// suppresses no-op transitions, so it must be one long-lived instance per
     /// session rather than rebuilt per command.
-    input_tx: mpsc::UnboundedSender<SessionOp>,
+    input_tx: mpsc::Sender<SessionOp>,
     /// The active-stage task. Aborted on close.
     task: tokio::sync::Mutex<Option<JoinHandle<()>>>,
     /// Fires when the task exits, by `send` on a normal end or by the sender
@@ -225,14 +226,24 @@ pub struct RdpSession {
 }
 
 impl RdpSession {
-    /// Queue a batch of input operations. `Err` once the session task is gone.
-    pub fn send_input(&self, ops: Vec<InputOp>) -> Result<(), String> {
+    /// Queue a batch of input operations. `Ok(true)` once queued, `Ok(false)`
+    /// when the session task has fallen behind and the queue is full, `Err`
+    /// once the task is gone.
+    ///
+    /// A full queue takes **none** of the batch rather than part of it, so the
+    /// caller still holds every event and a re-sent batch cannot interleave
+    /// with one already queued. Nothing is discarded here: a key transition or
+    /// a `ReleaseAll` is never lost on this path, provided the caller keeps a
+    /// rejected batch and retries it.
+    pub fn send_input(&self, ops: Vec<InputOp>) -> Result<bool, String> {
         if ops.is_empty() {
-            return Ok(());
+            return Ok(true);
         }
-        self.input_tx
-            .send(SessionOp::Input(ops))
-            .map_err(|_| "rdp: session is closed".to_string())
+        match self.input_tx.try_send(SessionOp::Input(ops)) {
+            Ok(()) => Ok(true),
+            Err(mpsc::error::TrySendError::Full(_)) => Ok(false),
+            Err(mpsc::error::TrySendError::Closed(_)) => Err("rdp: session is closed".to_string()),
+        }
     }
 
     /// Queue a desktop-resize request. `Err` once the session task is gone.
@@ -240,13 +251,25 @@ impl RdpSession {
     /// Queued, not applied: the server answers a monitor-layout PDU with a
     /// Deactivate All and reactivates at a size of its own choosing, which
     /// reaches consumers as the ordinary `resize` event.
-    pub fn request_resize(&self, width: u16, height: u16, scale_factor: u32) -> Result<(), String> {
+    ///
+    /// Waits for queue room instead of being rejected the way `send_input` is:
+    /// a resize is at most ~4/s (the pane debounces 250 ms) and the frontend
+    /// records the size it asked for before sending, so a rejected resize
+    /// would never be re-asked. The wait is an async one, not a blocked
+    /// thread, and it ends as `Err` the moment the task dies.
+    pub async fn request_resize(
+        &self,
+        width: u16,
+        height: u16,
+        scale_factor: u32,
+    ) -> Result<(), String> {
         self.input_tx
             .send(SessionOp::Resize {
                 width,
                 height,
                 scale_factor,
             })
+            .await
             .map_err(|_| "rdp: session is closed".to_string())
     }
 
@@ -300,13 +323,21 @@ impl RdpSession {
     /// the primary's batcher, since two consumers draining one batcher would
     /// steal each other's rects. Returns whether the session is still live.
     pub fn add_mirror_sink(&self, sink: EventSink) -> bool {
-        let mut mirrors = self.shared.mirrors.lock_or_recover();
+        // Primed before the lock, not under it: the session task's `emit`
+        // takes `mirrors` for every event, so a `Channel::send` held under it
+        // parks the task behind an IPC enqueue. Registering first instead
+        // would let a `frameReady` reach the mirror ahead of its `connected`,
+        // which the "`connected` first" contract forbids. The window this
+        // leaves is an event emitted between the send and the push, costing
+        // the mirror at most one `frameReady` for a snapshot it is about to
+        // take anyway.
         let (width, height) = self.dims();
         let _ = sink.send(event_body(&RdpEvent::Connected {
             desktop_width: width,
             desktop_height: height,
             server_fingerprint: self.fingerprint.clone(),
         }));
+        let mut mirrors = self.shared.mirrors.lock_or_recover();
         // Bound the live sink count: a buggy caller could call rdp_attach in a
         // loop, and every extra sink costs a full owned copy of every batch.
         // Evict the oldest.
@@ -404,6 +435,14 @@ const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
 /// owned `Vec<u8>` per sink (see `ChannelTransport::deliver`), so each extra
 /// mirror is a full copy of every batch - up to one framebuffer.
 const MAX_MIRROR_SINKS: usize = 4;
+
+/// Input/resize batches the session task may fall behind by. One batch is one
+/// `rdp_input` call, and the pane flushes at most one per animation frame, so
+/// this is about a second of input at 60 Hz. Deeper only hides a task that has
+/// stopped draining (a `write_all` against a stalled peer, a reactivation),
+/// which is the condition the frontend has to learn about rather than queue
+/// behind.
+const INPUT_QUEUE_DEPTH: usize = 64;
 
 /// Turn on kernel TCP keepalive with a usable idle time.
 ///
@@ -792,7 +831,7 @@ pub async fn connect(
         server_fingerprint: fingerprint.clone(),
     }));
 
-    let (input_tx, input_rx) = mpsc::unbounded_channel::<SessionOp>();
+    let (input_tx, input_rx) = mpsc::channel::<SessionOp>(INPUT_QUEUE_DEPTH);
     // The task owns the sender; whether it fires or merely drops on abort, the
     // receiver handed to `rdp_open` unblocks and the janitor evicts the id.
     let (exit_tx, exit_rx) = oneshot::channel::<()>();
@@ -836,7 +875,7 @@ enum Ending {
 async fn run(
     result: ConnectionResult,
     mut framed: TlsFramed,
-    mut input_rx: mpsc::UnboundedReceiver<SessionOp>,
+    mut input_rx: mpsc::Receiver<SessionOp>,
     shared: Arc<Shared>,
     sink: EventSink,
 ) {
@@ -1516,13 +1555,18 @@ mod tests {
     }
 
     /// A session with no network behind it. Everything `RdpSession` needs is
-    /// constructible: the input channel's receiver is simply dropped, and there
-    /// is no task. Enough to exercise `keyframe`, `add_mirror_sink`, `info` and
-    /// `close`'s event, which are otherwise only reachable through a real
+    /// constructible, and there is no task. The receiver comes back with it
+    /// rather than being dropped: dropping it closes the channel, after which
+    /// every `send_input` reports `Closed` instead of exercising the queue.
+    /// Enough to exercise `keyframe`, `add_mirror_sink`, `send_input`, `info`
+    /// and `close`'s event, which are otherwise only reachable through a real
     /// connect.
-    fn session_fixture(shared: Arc<Shared>, primary: EventSink) -> Arc<RdpSession> {
-        let (input_tx, _input_rx) = mpsc::unbounded_channel::<SessionOp>();
-        Arc::new(RdpSession {
+    fn session_fixture(
+        shared: Arc<Shared>,
+        primary: EventSink,
+    ) -> (Arc<RdpSession>, mpsc::Receiver<SessionOp>) {
+        let (input_tx, input_rx) = mpsc::channel::<SessionOp>(INPUT_QUEUE_DEPTH);
+        let session = Arc::new(RdpSession {
             input_tx,
             task: tokio::sync::Mutex::new(None),
             exit_signal: Mutex::new(None),
@@ -1532,7 +1576,8 @@ mod tests {
             username: "admin".to_owned(),
             fingerprint: "AA:BB".to_owned(),
             created_at_ms: 1,
-        })
+        });
+        (session, input_rx)
     }
 
     /// Records what a sink received, in order, tagging each payload by kind so
@@ -1621,7 +1666,7 @@ mod tests {
     #[test]
     fn mirror_sink_is_primed_with_connected() {
         let shared = shared_fixture(8, 4);
-        let session = session_fixture(shared, EventSink::new(|_| Ok(())));
+        let (session, _input_rx) = session_fixture(shared, EventSink::new(|_| Ok(())));
 
         let recorder = Arc::new(Recorder::default());
         assert!(
@@ -1638,13 +1683,76 @@ mod tests {
         assert!(seen[0].1.contains(r#""serverFingerprint":"AA:BB""#));
     }
 
+    /// The priming `Channel::send` must not run under the `mirrors` lock: the
+    /// session task takes that same lock for every event it emits, so a send
+    /// held under it parks the task behind an IPC enqueue.
+    #[test]
+    fn priming_a_mirror_does_not_hold_the_mirrors_lock() {
+        let shared = shared_fixture(4, 4);
+        // Cloned before `shared` moves into the fixture.
+        let probe = Arc::clone(&shared);
+        let (session, _input_rx) = session_fixture(shared, EventSink::new(|_| Ok(())));
+
+        let was_free = Arc::new(AtomicBool::new(false));
+        let observed = Arc::clone(&was_free);
+        // `try_lock`, not `lock`: a regression must fail this test rather than
+        // deadlock the whole suite on a non-reentrant mutex.
+        session.add_mirror_sink(EventSink::new(move |_| {
+            observed.store(probe.mirrors.try_lock().is_ok(), Ordering::Release);
+            Ok(())
+        }));
+
+        assert!(
+            was_free.load(Ordering::Acquire),
+            "`connected` was sent while the mirrors lock was held"
+        );
+    }
+
+    /// Backpressure, not loss. A full queue takes none of the batch, so the
+    /// caller still holds every event: that is what keeps a `keyUp` or a
+    /// `ReleaseAll` from vanishing between the pane and the session task.
+    #[test]
+    fn input_queue_rejects_rather_than_dropping_when_full() {
+        let shared = shared_fixture(4, 4);
+        let (session, mut input_rx) = session_fixture(shared, EventSink::new(|_| Ok(())));
+
+        for i in 0..INPUT_QUEUE_DEPTH {
+            assert!(
+                session
+                    .send_input(distinct_key_presses(1))
+                    .expect("the task is still there"),
+                "batch {i} fits a queue {INPUT_QUEUE_DEPTH} deep"
+            );
+        }
+        assert!(
+            !session
+                .send_input(distinct_key_presses(1))
+                .expect("a full queue is not a closed one"),
+            "past the depth the batch is refused, not queued"
+        );
+
+        input_rx.try_recv().expect("the task drains one batch");
+        assert!(
+            session
+                .send_input(distinct_key_presses(1))
+                .expect("still open"),
+            "one drained batch is one batch of room"
+        );
+
+        drop(input_rx);
+        assert!(
+            session.send_input(distinct_key_presses(1)).is_err(),
+            "a gone task is an error, not a refusal"
+        );
+    }
+
     /// The pull contract: a pull returns exactly what accumulated since the
     /// last one, and the next returns nothing until the server dirties
     /// something again.
     #[test]
     fn take_frame_drains_the_batcher() {
         let shared = shared_fixture(8, 4);
-        let session = session_fixture(Arc::clone(&shared), EventSink::new(|_| Ok(())));
+        let (session, _input_rx) = session_fixture(Arc::clone(&shared), EventSink::new(|_| Ok(())));
 
         assert!(
             session.take_frame().is_empty(),
@@ -1687,7 +1795,7 @@ mod tests {
     #[test]
     fn keyframe_is_one_full_framebuffer_rect() {
         let shared = shared_fixture(8, 4);
-        let session = session_fixture(Arc::clone(&shared), EventSink::new(|_| Ok(())));
+        let (session, _input_rx) = session_fixture(Arc::clone(&shared), EventSink::new(|_| Ok(())));
 
         let bytes = session.keyframe();
         assert_eq!(&bytes[0..4], &frame::FRAME_MAGIC);
@@ -1721,7 +1829,7 @@ mod tests {
     #[test]
     fn mirror_sinks_are_bounded() {
         let shared = shared_fixture(4, 4);
-        let session = session_fixture(Arc::clone(&shared), EventSink::new(|_| Ok(())));
+        let (session, _input_rx) = session_fixture(Arc::clone(&shared), EventSink::new(|_| Ok(())));
 
         for _ in 0..MAX_MIRROR_SINKS + 3 {
             session.add_mirror_sink(EventSink::new(|_| Ok(())));
@@ -1739,7 +1847,7 @@ mod tests {
     fn mirror_sink_reports_a_dead_session() {
         let shared = shared_fixture(4, 4);
         shared.alive.store(false, Ordering::Release);
-        let session = session_fixture(shared, EventSink::new(|_| Ok(())));
+        let (session, _input_rx) = session_fixture(shared, EventSink::new(|_| Ok(())));
         assert!(!session.add_mirror_sink(EventSink::new(|_| Ok(()))));
     }
 
@@ -1750,7 +1858,7 @@ mod tests {
     fn close_emits_disconnected_to_primary_and_mirrors() {
         let shared = shared_fixture(4, 4);
         let primary = Arc::new(Recorder::default());
-        let session = session_fixture(Arc::clone(&shared), recording(&primary));
+        let (session, _input_rx) = session_fixture(Arc::clone(&shared), recording(&primary));
 
         let mirror = Arc::new(Recorder::default());
         session.add_mirror_sink(recording(&mirror));
@@ -1971,18 +2079,21 @@ mod rdp_live {
 
             // Nudge the desktop so it has something to repaint, then wait for
             // the server to actually send it.
-            session
-                .send_input(vec![
-                    InputOp::Op(Operation::MouseMove(ironrdp_input::MousePosition {
-                        x: width / 2,
-                        y: height / 2,
-                    })),
-                    InputOp::Op(Operation::KeyPressed(ironrdp_input::Scancode::from_u16(
-                        0x001D,
-                    ))),
-                    InputOp::ReleaseAll,
-                ])
-                .expect("queueing input failed");
+            assert!(
+                session
+                    .send_input(vec![
+                        InputOp::Op(Operation::MouseMove(ironrdp_input::MousePosition {
+                            x: width / 2,
+                            y: height / 2,
+                        })),
+                        InputOp::Op(Operation::KeyPressed(ironrdp_input::Scancode::from_u16(
+                            0x001D,
+                        ))),
+                        InputOp::ReleaseAll,
+                    ])
+                    .expect("queueing input failed"),
+                "a fresh session has queue room"
+            );
 
             // Pull on a ~60 Hz tick for a 20s window. These numbers are the
             // evidence the frame-encoding question is closed on: what the
