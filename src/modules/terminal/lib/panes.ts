@@ -1,7 +1,6 @@
 // Unified pane tree. Leaves are terminal, editor, rdp, board, or page.
 // `kind: "leaf"` stays for back-compat; the discriminator is `leafKind`.
 
-import type { RdpSizeMode } from "@/modules/hosts/types";
 import type { AiCliKind } from "./aiCliStatus";
 
 export type PaneId = number;
@@ -134,12 +133,6 @@ export type RdpLeafState = {
   leafKind: "rdp";
   /** Id of the saved RDP host in the hosts store (`modules/hosts/store.ts`). */
   rdpConnectionId: string;
-  /**
-   * How this pane's desktop resolution is chosen. Only `"preset"` exists today,
-   * and it is carried on the leaf anyway so that adding `"fit"` later is a new
-   * branch in the pane rather than a migration of every saved workspace.
-   */
-  sizeMode: RdpSizeMode;
   /** User-chosen tab name; see {@link TerminalLeafState.customTitle}. */
   customTitle?: string;
 };
@@ -470,7 +463,6 @@ export function cloneLeafState(leaf: PaneLeaf): LeafState {
     return {
       leafKind: "rdp",
       rdpConnectionId: leaf.rdpConnectionId,
-      sizeMode: leaf.sizeMode,
     };
   }
   if (leaf.leafKind === "board") {

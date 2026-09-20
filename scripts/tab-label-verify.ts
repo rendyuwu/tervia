@@ -80,7 +80,6 @@ function rdpLeaf(extra: Partial<PaneLeaf> = {}): PaneLeaf {
     id: id(),
     leafKind: "rdp",
     rdpConnectionId: "r1",
-    sizeMode: "preset",
     ...extra,
   } as PaneLeaf;
 }

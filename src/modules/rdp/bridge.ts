@@ -2,7 +2,7 @@ import { invoke, Channel } from "@tauri-apps/api/core";
 import { parseFrameBatch, type RdpFrameBatch } from "./frame";
 
 /**
- * Typed wrapper over the eight `rdp_*` commands, mirroring `ssh/bridge.ts`.
+ * Typed wrapper over the nine `rdp_*` commands, mirroring `ssh/bridge.ts`.
  *
  * The session `Channel` carries JSON control events ONLY. Pixels are pulled:
  * `frameReady` says dirty rects are waiting and `rdpTakeFrame` collects them
@@ -76,6 +76,10 @@ export type RdpOpenInput = {
    *  handshake fails fast on anything else - before a credential is sent.
    *  Omit on first connect, which prompts the user instead. */
   expectedCertFingerprint?: string;
+  /** DPI percentage (`devicePixelRatio * 100`) for the initial desktop. Omit
+   *  for unset, which is what a `"preset"` row sends: the backend only derives
+   *  a scale factor for values in 100..=500. */
+  scaleFactor?: number;
 };
 
 /** One live session, as `rdp_list_sessions` reports it. */
@@ -165,6 +169,24 @@ export function rdpListSessions(): Promise<RdpSessionInfo[]> {
 
 export function rdpInput(id: number, events: RdpInputEvent[]): Promise<void> {
   return invoke("rdp_input", { id, events });
+}
+
+/**
+ * Ask the server to resize the desktop. `scaleFactor` is a DPI percentage
+ * (`devicePixelRatio * 100`).
+ *
+ * Fire and forget: the requested size is not authoritative. The server answers
+ * with a reactivation at a size of its choosing, which arrives as the `resize`
+ * event, and a server with no Display Control channel drops the request and
+ * keeps its current size.
+ */
+export function rdpResize(
+  id: number,
+  width: number,
+  height: number,
+  scaleFactor: number,
+): Promise<void> {
+  return invoke("rdp_resize", { id, width, height, scaleFactor });
 }
 
 export function rdpClose(id: number): Promise<void> {
@@ -302,6 +324,7 @@ export async function openRdp(input: RdpOpenInput, handlers: RdpHandlers): Promi
       width: input.width,
       height: input.height,
       expectedCertFingerprint: input.expectedCertFingerprint ?? null,
+      scaleFactor: input.scaleFactor ?? 0,
     },
     onEvent: buildChannel(handlers),
   });

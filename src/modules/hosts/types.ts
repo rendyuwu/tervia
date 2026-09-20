@@ -73,12 +73,15 @@ export const HOST_RDP_SECRET_FIELDS = [HOST_RDP_PASSWORD_FIELD] as const;
 /**
  * How the remote desktop's resolution is chosen.
  *
- * `"preset"` is the only mode today: the desktop is negotiated at a fixed size
- * and the pane letterboxes it. It is persisted from day one anyway, so a later
- * `"fit"` mode is a new union member and a new branch in the pane - not a store
- * migration over everyone's saved rows.
+ * `"preset"` negotiates a fixed size and the pane letterboxes it. `"fit"` opens
+ * at the pane's device-pixel size and asks the server to follow it over the
+ * Display Control channel (MS-RDPEDISP).
+ *
+ * `desktopWidth`/`desktopHeight` stay meaningful in `"fit"`: they are the size
+ * used when the pane cannot be measured at connect, and the size a server with
+ * no Display Control channel stays at.
  */
-export type RdpSizeMode = "preset";
+export type RdpSizeMode = "preset" | "fit";
 
 /** One offered desktop resolution. */
 export type RdpSizePreset = {
@@ -104,6 +107,11 @@ export const RDP_SIZE_PRESETS: readonly RdpSizePreset[] = [
 ];
 
 export const RDP_DEFAULT_PRESET = RDP_SIZE_PRESETS[4];
+
+/** `<Combobox>` value for fit mode in the host editor's size picker. Not a
+ *  preset id, so `presetById` returns `undefined` for it and the editor falls
+ *  through to `RDP_DEFAULT_PRESET` for the persisted fallback size. */
+export const RDP_FIT_SIZE_ID = "fit";
 
 /** Preset id for a width/height pair, or "" when it matches no preset (a row
  *  written by a later build offering a size this one does not). */

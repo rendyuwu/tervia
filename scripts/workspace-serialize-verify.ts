@@ -19,14 +19,14 @@
  *    added in BOTH directions - and the failure is a name that quietly reverts
  *    to the folder basename on the next launch. Clearing a name must remove the
  *    key rather than persist `""`, which would restore as a blank tab.
- * 5. An RDP leaf must round-trip its connection id AND its size mode, and must
- *    restore with NO session identity of any kind. The id is the only thing
- *    that can find the host, the credentials and the desktop size again, and a
- *    leaf that loses it comes back as a pane that can never connect; the size
- *    mode is persisted from day one purely so adding `"fit"` later needs no
- *    migration, which is worthless if the serializer drops it. Together these
- *    are property 4's whitelist problem on a kind where the symptom is a dead
- *    pane rather than a wrong name.
+ * 5. An RDP leaf must round-trip its connection id, and must restore with NO
+ *    session identity of any kind. The id is the only thing that can find the
+ *    host, the credentials and the desktop size again, and a leaf that loses it
+ *    comes back as a pane that can never connect. This is property 4's
+ *    whitelist problem on a kind where the symptom is a dead pane rather than a
+ *    wrong name. The leaf no longer carries a size mode - that lives on the
+ *    host row - so a file written before it was deleted must still restore,
+ *    which is checked here too.
  * 6. A page leaf must round-trip its `page` value and rename, inside a split
  *    exactly like any other kind, and an unrecognised `page` value (a newer
  *    build's page, or hand-edited state) must restore as Hosts rather than crash
@@ -122,10 +122,10 @@ function savedRemoteEditor(leafId: number, path: string): PaneNode {
     sshHostLabel: "u@h:22",
   };
 }
-/** An RDP leaf: a reference to a saved connection and how it sizes itself.
- *  Nothing else - no host, no credential, no session. */
+/** An RDP leaf: a reference to a saved connection, and nothing else - no host,
+ *  no credential, no session, no size. */
 function rdp(leafId: number, rdpConnectionId: string): PaneNode {
-  return { kind: "leaf", id: leafId, leafKind: "rdp", rdpConnectionId, sizeMode: "preset" };
+  return { kind: "leaf", id: leafId, leafKind: "rdp", rdpConnectionId };
 }
 /** A page leaf: nothing but which page it is. `TabPageKind`, so a Vault or
  *  Port-Forwarding leaf cannot be built here either - that is a
@@ -498,12 +498,13 @@ console.log("\n[active index] savedActiveTabIndex must match what serializeTabs 
   );
 }
 
-console.log("\n[rdp] an rdp leaf must round-trip its connection id and size mode");
+console.log("\n[rdp] an rdp leaf must round-trip its connection id");
 
-// 5. The whole of an RDP leaf's restorable identity is `rdpConnectionId` +
-//    `sizeMode`. Dropping either is silent: the layout still restores, and the
-//    pane is simply one that cannot connect (or one that will size itself wrong
-//    once a second size mode exists).
+// 5. The whole of an RDP leaf's restorable identity is `rdpConnectionId`. The
+//    size mode is NOT here: it lives on the host row the id names, which is the
+//    only place that can answer it after the row is edited. Dropping the id is
+//    silent - the layout still restores, and the pane is simply one that cannot
+//    connect.
 {
   const t = tab(split("row", [term(1300), rdp(1301, "r-win-build")]), 1301);
   const s = serializeTabs([t]);
@@ -520,11 +521,6 @@ console.log("\n[rdp] an rdp leaf must round-trip its connection id and size mode
     savedLeaf.kind === "leaf" && savedLeaf.leafKind === "rdp" && savedLeaf.rdpConnectionId,
     "r-win-build",
   );
-  check(
-    "the size mode is persisted",
-    savedLeaf.kind === "leaf" && savedLeaf.leafKind === "rdp" && savedLeaf.sizeMode,
-    "preset",
-  );
   // An RDP session cannot be reattached, so there must be nothing here that
   // looks like one: a persisted session number would be dead on the next launch
   // and, since the counter restarts at 1, liable to name a different host - the
@@ -532,18 +528,36 @@ console.log("\n[rdp] an rdp leaf must round-trip its connection id and size mode
   check(
     "and nothing session-shaped is persisted with it",
     savedLeaf.kind === "leaf" && Object.keys(savedLeaf).sort(),
-    ["kind", "leafKind", "rdpConnectionId", "sizeMode"],
+    ["kind", "leafKind", "rdpConnectionId"],
   );
 
   const restored = restoreOne(s[0], () => id());
   const liveLeaf =
     restored.paneTree.kind === "split" ? restored.paneTree.children[1] : restored.paneTree;
   check(
-    "and both come back on restore",
-    liveLeaf.kind === "leaf" && liveLeaf.leafKind === "rdp"
-      ? [liveLeaf.rdpConnectionId, liveLeaf.sizeMode]
-      : null,
-    ["r-win-build", "preset"],
+    "and it comes back on restore",
+    liveLeaf.kind === "leaf" && liveLeaf.leafKind === "rdp" ? liveLeaf.rdpConnectionId : null,
+    "r-win-build",
+  );
+
+  // A workspace file written before the leaf's `sizeMode` was deleted still
+  // carries the key. Proven rather than assumed: the deserializer names the
+  // fields it wants instead of validating a schema, so an extra one is ignored -
+  // but if that were ever wrong, the symptom is every pre-existing workspace
+  // losing its RDP panes on the first launch after the upgrade.
+  const legacy = {
+    kind: "leaf",
+    leafKind: "rdp",
+    rdpConnectionId: "r-win-build",
+    sizeMode: "preset",
+  } as unknown as SavedPaneNode;
+  const legacyTree = restoreOne({ kind: "pane", paneTree: legacy, activeLeafIndex: 0 }, () =>
+    id(),
+  ).paneTree;
+  check(
+    "a leaf written before the size mode was deleted still restores",
+    legacyTree.kind === "leaf" && legacyTree.leafKind === "rdp" ? legacyTree.rdpConnectionId : null,
+    "r-win-build",
   );
 
   // A rename has to survive on this kind too, same whitelist, same symptom.
@@ -650,8 +664,8 @@ console.log("\n[page] a page leaf round-trips its page value, name and tree shap
 // `!isTabPageKind`, so there is no list of known-bad pages to keep in step).
 //
 // This used to default to Hosts, on the reasoning that `page` is a leaf kind
-// this build recognises with a value it does not - the shape of RDP's
-// `sizeMode ?? "preset"`. That reasoning does not survive the page leaf becoming
+// this build recognises with a value it does not - the shape RDP's `sizeMode`
+// once had on the leaf. That reasoning does not survive the page leaf becoming
 // PERMANENT (`tabs/lib/closable.ts` invariant 1): the fallback minted a SECOND
 // Hosts tab, and neither of the two could then be closed. A page leaf holds
 // nothing but which page it is, so dropping it loses no state - unlike an RDP

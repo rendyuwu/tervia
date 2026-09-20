@@ -78,7 +78,7 @@ function editorLeaf(id: number, path = "/w/a.ts", dirty = false): PaneNode {
   return { kind: "leaf", id, leafKind: "editor", path, dirty, preview: false };
 }
 function rdpLeaf(id: number, rdpConnectionId = "conn-1"): PaneNode {
-  return { kind: "leaf", id, leafKind: "rdp", rdpConnectionId, sizeMode: "preset" };
+  return { kind: "leaf", id, leafKind: "rdp", rdpConnectionId };
 }
 function split(id: number, children: PaneNode[]): PaneNode {
   return { kind: "split", id, dir: "row", children };

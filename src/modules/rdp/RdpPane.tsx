@@ -6,6 +6,7 @@ import { useHostKeyPrompt } from "@/modules/ssh/hostKeyPrompt";
 import {
   confirmRdpCert,
   openRdp,
+  rdpResize,
   rdpTakeFrame,
   type RdpInputEvent,
   type RdpSession,
@@ -14,7 +15,13 @@ import { listHosts, markConnected, pinFingerprint } from "@/modules/hosts/store"
 import { isRdpHost, type RdpHost } from "@/modules/hosts/types";
 import { openRdpDialTarget, rdpOpenInput, type RdpDialTarget } from "./dial";
 import type { RdpFrameBatch } from "./frame";
-import { fitViewport, toRemotePoint, wheelRotation, type RdpViewport } from "./lib/viewport";
+import {
+  fitDesktopSize,
+  fitViewport,
+  toRemotePoint,
+  wheelRotation,
+  type RdpViewport,
+} from "./lib/viewport";
 import { onRdpPaneAction, type RdpPaneAction } from "./paneActions";
 import { CTRL_ALT_DEL_SCANCODES, scancodeFor } from "./scancodes";
 
@@ -58,8 +65,8 @@ import { CTRL_ALT_DEL_SCANCODES, scancodeFor } from "./scancodes";
  *
  * The remote cursor is composited into the framebuffer by the server, so the
  * CSS cursor stays at its default and no cursor bitmap is drawn - two cursors
- * is worse than one in the wrong shape. Clipboard, audio, device redirection
- * and dynamic resize are not implemented.
+ * is worse than one in the wrong shape. Clipboard, audio and device
+ * redirection are not implemented.
  */
 
 type Props = {
@@ -90,12 +97,32 @@ type Framebuffer = {
   height: number;
 };
 
+/** Quiet time before a pane resize is sent to the server. A divider drag emits
+ *  a ResizeObserver callback per frame and each one costs the remote a
+ *  Deactivate-All/reactivate round trip, so only the settled size is sent. */
+const FIT_RESIZE_DEBOUNCE_MS = 250;
+
+/** `devicePixelRatio` as the DPI percentage MS-RDPEDISP takes, inside the
+ *  100..=500 range outside which the spec says the server ignores it. */
+function scalePercent(dpr: number): number {
+  return Math.min(500, Math.max(100, Math.round(dpr * 100)));
+}
+
 export function RdpPane({ leafId, connectionId, visible, focused = true }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const fbRef = useRef<Framebuffer | null>(null);
   const viewportRef = useRef<RdpViewport>({ left: 0, top: 0, width: 0, height: 0, scale: 0 });
   const sessionRef = useRef<RdpSession | null>(null);
+  /** Whether the live session's row asked for fit mode. Written once the row
+   *  resolves inside the connect effect, cleared in its teardown. */
+  const fitRef = useRef(false);
+  /** The size most recently REQUESTED. Keyed on the request, not on the
+   *  framebuffer: the server may grant something else, and comparing against
+   *  the granted size would re-ask for a size it has already refused on every
+   *  subsequent resize. */
+  const lastFitRef = useRef<{ width: number; height: number } | null>(null);
+  const fitTimer = useRef<number | undefined>(undefined);
 
   const [status, setStatus] = useState<Status>({ kind: "connecting" });
   const [conn, setConn] = useState<RdpHost | null>(null);
@@ -253,16 +280,46 @@ export function RdpPane({ leafId, connectionId, visible, focused = true }: Props
 
   pullRef.current = pullFrame;
 
+  /** Debounced "the pane is this big now" for a fit-mode session. */
+  const requestFit = useCallback(() => {
+    if (!fitRef.current) return;
+    clearTimeout(fitTimer.current);
+    fitTimer.current = window.setTimeout(() => {
+      fitTimer.current = undefined;
+      const session = sessionRef.current;
+      const host = hostRef.current;
+      // A hidden pane measures 0x0, which would otherwise clamp to the 200x200
+      // floor and shrink the remote desktop to a postage stamp.
+      if (!session || !host || !visibleRef.current) return;
+      const rect = host.getBoundingClientRect();
+      const dpr = window.devicePixelRatio || 1;
+      const size = fitDesktopSize(rect.width, rect.height, dpr);
+      if (!size) return;
+      const last = lastFitRef.current;
+      if (last && last.width === size.width && last.height === size.height) return;
+      lastFitRef.current = size;
+      void rdpResize(session.id, size.width, size.height, scalePercent(dpr)).catch(() => {});
+    }, FIT_RESIZE_DEBOUNCE_MS);
+  }, []);
+
   // Re-letterbox on a pane resize (a divider drag, a window resize, the sidebar
-  // collapsing). The desktop resolution is fixed, so this only moves the bars
-  // and rescales - nothing is renegotiated with the server.
+  // collapsing). In `"preset"` that is all it does - the desktop resolution is
+  // fixed, so only the bars move. In `"fit"` the settled size is also sent to
+  // the server, which answers with a reactivation at the new resolution.
+  //
+  // A hidden tab's pane is CSS-hidden rather than unmounted, so becoming
+  // visible is itself a 0->N size change and fires the observer; no extra
+  // visibility effect is needed.
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
-    const ro = new ResizeObserver(() => scheduleComposite());
+    const ro = new ResizeObserver(() => {
+      scheduleComposite();
+      requestFit();
+    });
     ro.observe(host);
     return () => ro.disconnect();
-  }, [scheduleComposite]);
+  }, [scheduleComposite, requestFit]);
 
   // Redraw on becoming visible: composites are skipped while the tab is hidden,
   // so without this the pane shows whatever was on screen when it left. It also
@@ -275,6 +332,7 @@ export function RdpPane({ leafId, connectionId, visible, focused = true }: Props
   useEffect(
     () => () => {
       if (compositeHandle.current !== null) cancelAnimationFrame(compositeHandle.current);
+      clearTimeout(fitTimer.current);
     },
     [],
   );
@@ -488,6 +546,9 @@ export function RdpPane({ leafId, connectionId, visible, focused = true }: Props
 
     setStatus({ kind: "connecting" });
     fbRef.current = null;
+    fitRef.current = false;
+    lastFitRef.current = null;
+    clearTimeout(fitTimer.current);
     heldKeys.current.clear();
     heldUnicode.current.clear();
     heldButtons.current.clear();
@@ -521,6 +582,16 @@ export function RdpPane({ leafId, connectionId, visible, focused = true }: Props
         });
         return;
       }
+      fitRef.current = row.sizeMode === "fit";
+      const dpr = window.devicePixelRatio || 1;
+      const rect = hostRef.current?.getBoundingClientRect();
+      // Opening AT the pane size means the first frame is already correct and
+      // costs no reactivation round trip. `null` on an unmeasurable pane - a
+      // restored workspace whose tab is not the active one - falls back to the
+      // row's saved size, which is exactly what `desktopWidth`/`desktopHeight`
+      // are for in fit mode.
+      const openSize = fitRef.current && rect ? fitDesktopSize(rect.width, rect.height, dpr) : null;
+      lastFitRef.current = openSize;
       try {
         if (row.tunnel) setStatus({ kind: "connecting", viaTunnel: true });
         // The tunnel first, and it can block for a long time: dialling the
@@ -540,7 +611,11 @@ export function RdpPane({ leafId, connectionId, visible, focused = true }: Props
           // connect differs from a direct one in the address and nothing else -
           // the pinned certificate included, which is what stops an ephemeral
           // local port from looking like a new machine every time.
-          await rdpOpenInput(row, target),
+          await rdpOpenInput(
+            row,
+            target,
+            openSize ? { ...openSize, scaleFactor: scalePercent(dpr) } : undefined,
+          ),
           {
             onConnected: (width, height, fingerprint) => {
               if (!alive) return;
@@ -622,6 +697,13 @@ export function RdpPane({ leafId, connectionId, visible, focused = true }: Props
         }
         session = opened;
         sessionRef.current = opened;
+        // The pane can have been dragged while this was still dialling, and
+        // `requestFit` bails when there is no session yet, so that resize was
+        // dropped. Re-check now that there is one - after the ref is set, not
+        // from `onConnected`, which runs before `openRdp` has resolved. A no-op
+        // when the pane still matches the size the session opened with, because
+        // `lastFitRef` already holds it.
+        requestFit();
       } catch (e) {
         // Covers the tunnel's own failures too - a refused bastion, a rejected
         // host key, a target the jump host cannot reach - so the message a user
@@ -635,6 +717,9 @@ export function RdpPane({ leafId, connectionId, visible, focused = true }: Props
     return () => {
       alive = false;
       sessionRef.current = null;
+      // A pending request must not fire against a session that is going away.
+      fitRef.current = false;
+      clearTimeout(fitTimer.current);
       // ANSWER the certificate question, do not merely drop it from the queue.
       //
       // This teardown is every way out of an RDP pane: unmount, tab close,
@@ -660,7 +745,7 @@ export function RdpPane({ leafId, connectionId, visible, focused = true }: Props
       // one that got as far as a live session is released here.
       releaseDial();
     };
-  }, [connectionId, attempt, resetFramebuffer, scheduleComposite]);
+  }, [connectionId, attempt, resetFramebuffer, scheduleComposite, requestFit]);
 
   const hostLabel = conn ? conn.name.trim() || conn.host : "";
 

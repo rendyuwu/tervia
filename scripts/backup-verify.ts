@@ -755,11 +755,13 @@ check("so does an absurd one", sizeOf(rdp({ desktopWidth: 99999 })), [1600, 900]
 // with the fallback and with itself. The kept width proves the row was not
 // wholesale defaulted on the way through.
 check("and a non-number", sizeOf(rdp({ desktopWidth: 1280, desktopHeight: "800" })), [1280, 900]);
-// Only one mode exists today. A file written by a later build must resolve to
-// the mode THIS build can render, not to a string the pane cannot switch on.
+// `"fit"` is a mode this build renders, so it must survive an import. A mode it
+// does not recognise - a file written by a later build - must resolve to one the
+// pane can switch on, rather than to a string it cannot.
+check("a known sizeMode survives", rdpOf(sanitizeHost(rdp({ sizeMode: "fit" })))?.sizeMode, "fit");
 check(
   "an unknown sizeMode becomes preset",
-  rdpOf(sanitizeHost(rdp({ sizeMode: "fit" })))?.sizeMode,
+  rdpOf(sanitizeHost(rdp({ sizeMode: "scale" })))?.sizeMode,
   "preset",
 );
 

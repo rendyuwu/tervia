@@ -102,6 +102,7 @@ import {
   presetIdFor,
   RDP_DEFAULT_PORT,
   RDP_DEFAULT_PRESET,
+  RDP_FIT_SIZE_ID,
   SSH_DEFAULT_PORT,
   type Host,
   type HostGroup,
@@ -379,7 +380,7 @@ export function HostEditorDialog({
   const [forgetKey, setForgetKey] = useState(false);
   const [proxyJumpId, setProxyJumpId] = useState("");
   const [rdpCred, setRdpCred] = useState<RdpCredentialDraft>(EMPTY_RDP_CRED);
-  const [presetId, setPresetId] = useState(RDP_DEFAULT_PRESET.id);
+  const [presetId, setPresetId] = useState(RDP_FIT_SIZE_ID);
   const [tunnelSshHostId, setTunnelSshHostId] = useState("");
   /** The stored record being edited, or null in create mode. */
   const [existing, setExisting] = useState<Host | null>(null);
@@ -572,7 +573,7 @@ export function HostEditorDialog({
         setSshCred({ ...EMPTY_SSH_CRED, user: prefill.user ?? "" });
         setRdpCred({ ...EMPTY_RDP_CRED, username: prefill.user ?? "" });
         setProxyJumpId("");
-        setPresetId(RDP_DEFAULT_PRESET.id);
+        setPresetId(RDP_FIT_SIZE_ID);
         setTunnelSshHostId("");
         setPins({});
         // The create arm returns before the `currentCredentialChoice(host)`
@@ -624,7 +625,7 @@ export function HostEditorDialog({
         });
         setProxyJumpId(liveSshHost(host.proxyJumpId));
         setRdpCred(EMPTY_RDP_CRED);
-        setPresetId(RDP_DEFAULT_PRESET.id);
+        setPresetId(RDP_FIT_SIZE_ID);
         setTunnelSshHostId("");
         // Interactive BEFORE the secret read, deliberately. Moving this below the
         // await would close the race the seed below guards against, but it would
@@ -667,7 +668,11 @@ export function HostEditorDialog({
         });
         // A row written by a build offering a size this one does not falls back to
         // the default rather than showing an empty picker.
-        setPresetId(presetIdFor(host.desktopWidth, host.desktopHeight) || RDP_DEFAULT_PRESET.id);
+        setPresetId(
+          host.sizeMode === "fit"
+            ? RDP_FIT_SIZE_ID
+            : presetIdFor(host.desktopWidth, host.desktopHeight) || RDP_DEFAULT_PRESET.id,
+        );
         setTunnelSshHostId(liveSshHost(host.tunnel?.sshHostId));
         setSshCred(EMPTY_SSH_CRED);
         setProxyJumpId("");
@@ -1217,7 +1222,7 @@ export function HostEditorDialog({
               },
           desktopWidth: preset.width,
           desktopHeight: preset.height,
-          sizeMode: "preset",
+          sizeMode: presetId === RDP_FIT_SIZE_ID ? "fit" : "preset",
           // `undefined` rather than an empty object, so a direct connection is the
           // absence of a tunnel and not an empty one.
           tunnel: tunnelSshHostId ? { sshHostId: tunnelSshHostId } : undefined,

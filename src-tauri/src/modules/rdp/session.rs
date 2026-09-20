@@ -13,6 +13,9 @@ use ironrdp_connector::{
     ConnectorErrorKind, ConnectorResult, Credentials, DesktopSize,
 };
 use ironrdp_core::WriteBuf;
+use ironrdp_displaycontrol::client::DisplayControlClient;
+use ironrdp_displaycontrol::pdu::MonitorLayoutEntry;
+use ironrdp_dvc::DrdynvcClient;
 use ironrdp_graphics::image_processing::PixelFormat;
 use ironrdp_input::{Database, Operation};
 use ironrdp_pdu::gcc::KeyboardType;
@@ -35,7 +38,7 @@ use crate::modules::lockext::LockExt as _;
 
 use super::frame::{self, encode_batch, Batch, FrameBatcher, FrameBuffer, Rect, HEADER_LEN};
 use super::tls;
-use super::{event_body, EventSink, InputOp, RdpOpenInput, RdpSessionInfo};
+use super::{event_body, EventSink, InputOp, RdpOpenInput, RdpSessionInfo, SessionOp};
 
 type TlsFramed = TokioFramed<tokio_rustls::client::TlsStream<TcpStream>>;
 
@@ -194,11 +197,11 @@ struct Shared {
 }
 
 pub struct RdpSession {
-    /// Batched input, drained by the session task. The task owns the
-    /// `ironrdp_input::Database` because it holds key/button state and
+    /// Batched input and resize requests, drained by the session task. The task
+    /// owns the `ironrdp_input::Database` because it holds key/button state and
     /// suppresses no-op transitions, so it must be one long-lived instance per
     /// session rather than rebuilt per command.
-    input_tx: mpsc::UnboundedSender<Vec<InputOp>>,
+    input_tx: mpsc::UnboundedSender<SessionOp>,
     /// The active-stage task. Aborted on close.
     task: tokio::sync::Mutex<Option<JoinHandle<()>>>,
     /// Fires when the task exits, by `send` on a normal end or by the sender
@@ -228,7 +231,22 @@ impl RdpSession {
             return Ok(());
         }
         self.input_tx
-            .send(ops)
+            .send(SessionOp::Input(ops))
+            .map_err(|_| "rdp: session is closed".to_string())
+    }
+
+    /// Queue a desktop-resize request. `Err` once the session task is gone.
+    ///
+    /// Queued, not applied: the server answers a monitor-layout PDU with a
+    /// Deactivate All and reactivates at a size of its own choosing, which
+    /// reaches consumers as the ordinary `resize` event.
+    pub fn request_resize(&self, width: u16, height: u16, scale_factor: u32) -> Result<(), String> {
+        self.input_tx
+            .send(SessionOp::Resize {
+                width,
+                height,
+                scale_factor,
+            })
             .map_err(|_| "rdp: session is closed".to_string())
     }
 
@@ -498,7 +516,7 @@ fn build_config(input: &RdpOpenInput, password: &str) -> Config {
             width: input.width,
             height: input.height,
         },
-        desktop_scale_factor: 0,
+        desktop_scale_factor: input.scale_factor,
         enable_tls: false,
         enable_credssp: true,
         credentials: Credentials::UsernamePassword {
@@ -601,7 +619,15 @@ pub async fn connect(
         .map_err(|e| format!("rdp: reading local address failed: {e}"))?;
 
     let mut framed = TokioFramed::new(tcp);
-    let mut connector = ClientConnector::new(build_config(&input, &password), client_addr);
+    let mut connector = ClientConnector::new(build_config(&input, &password), client_addr)
+        // DRDYNVC carrying DISPLAYCONTROL, which is what makes `rdp_resize` work.
+        // The callback fires when the server sends its capabilities and has
+        // nothing to reply with; `ActiveStage::encode_resize` reads the
+        // channel's readiness itself and returns `None` until then, so no
+        // readiness flag is tracked on our side.
+        .with_static_channel(
+            DrdynvcClient::new().with_dynamic_channel(DisplayControlClient::new(|_| Ok(Vec::new()))),
+        );
     // The plaintext now lives only inside the connector's `Credentials`, on its
     // way to CredSSP. Drop our copy.
     drop(password);
@@ -766,7 +792,7 @@ pub async fn connect(
         server_fingerprint: fingerprint.clone(),
     }));
 
-    let (input_tx, input_rx) = mpsc::unbounded_channel::<Vec<InputOp>>();
+    let (input_tx, input_rx) = mpsc::unbounded_channel::<SessionOp>();
     // The task owns the sender; whether it fires or merely drops on abort, the
     // receiver handed to `rdp_open` unblocks and the janitor evicts the id.
     let (exit_tx, exit_rx) = oneshot::channel::<()>();
@@ -810,7 +836,7 @@ enum Ending {
 async fn run(
     result: ConnectionResult,
     mut framed: TlsFramed,
-    mut input_rx: mpsc::UnboundedReceiver<Vec<InputOp>>,
+    mut input_rx: mpsc::UnboundedReceiver<SessionOp>,
     shared: Arc<Shared>,
     sink: EventSink,
 ) {
@@ -835,6 +861,11 @@ async fn run(
     enum Wake {
         Pdu(ironrdp_pdu::Action, BytesMut),
         Input(Vec<InputOp>),
+        Resize {
+            width: u16,
+            height: u16,
+            scale_factor: u32,
+        },
     }
 
     let ending = 'session: loop {
@@ -844,8 +875,11 @@ async fn run(
                 Ok((action, payload)) => Wake::Pdu(action, payload),
                 Err(e) => break 'session Ending::Faulted(format!("rdp: connection lost: {e}")),
             },
-            ops = input_rx.recv() => match ops {
-                Some(ops) => Wake::Input(ops),
+            op = input_rx.recv() => match op {
+                Some(SessionOp::Input(ops)) => Wake::Input(ops),
+                Some(SessionOp::Resize { width, height, scale_factor }) => {
+                    Wake::Resize { width, height, scale_factor }
+                }
                 // Every sender is gone, i.e. the RdpSession was dropped.
                 None => break 'session Ending::Graceful("client closed the session".to_owned()),
             },
@@ -900,6 +934,40 @@ async fn run(
                     break 'session Ending::Faulted(message);
                 }
                 collected
+            }
+            Wake::Resize {
+                width,
+                height,
+                scale_factor,
+            } => {
+                // MS-RDPEDISP 2.2.2.2.1: 200..=8192 on both axes and an even
+                // width. `adjust_display_size` is the upstream clamp for
+                // exactly that.
+                let (width, height) =
+                    MonitorLayoutEntry::adjust_display_size(u32::from(width), u32::from(height));
+                // The spec says to ignore a scale factor outside 100..=500, so
+                // pass `None` rather than a value the server must discard.
+                let scale = (100..=500).contains(&scale_factor).then_some(scale_factor);
+                match stage.encode_resize(width, height, scale, None) {
+                    Some(Ok(frame)) => vec![ActiveStageOutput::ResponseFrame(frame)],
+                    Some(Err(e)) => {
+                        break 'session Ending::Faulted(session_error(
+                            "rdp: encoding a resize failed",
+                            &e,
+                        ))
+                    }
+                    // No Display Control channel (pre-2012 Windows, older xrdp)
+                    // or it has not finished opening. Deliberately not fatal and
+                    // deliberately not a reconnect: the session keeps its
+                    // current size and the pane goes on letterboxing, which is
+                    // what every RDP client did before MS-RDPEDISP.
+                    None => {
+                        log::debug!(
+                            "rdp: dropped a resize to {width}x{height}; no display-control channel"
+                        );
+                        Vec::new()
+                    }
+                }
             }
         };
 
@@ -1268,6 +1336,7 @@ mod tests {
                 width: 1280,
                 height: 800,
                 expected_cert_fingerprint: None,
+                scale_factor: 0,
             },
             "secret",
         );
@@ -1452,7 +1521,7 @@ mod tests {
     /// `close`'s event, which are otherwise only reachable through a real
     /// connect.
     fn session_fixture(shared: Arc<Shared>, primary: EventSink) -> Arc<RdpSession> {
-        let (input_tx, _input_rx) = mpsc::unbounded_channel::<Vec<InputOp>>();
+        let (input_tx, _input_rx) = mpsc::unbounded_channel::<SessionOp>();
         Arc::new(RdpSession {
             input_tx,
             task: tokio::sync::Mutex::new(None),
@@ -1800,6 +1869,7 @@ mod rdp_live {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(800),
             expected_cert_fingerprint: fingerprint,
+            scale_factor: 0,
         };
         Some((input, password))
     }

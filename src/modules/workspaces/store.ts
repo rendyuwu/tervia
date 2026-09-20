@@ -102,9 +102,6 @@ export type SavedRdpLeaf = {
    *  deleted restores anyway and reports it in the pane, rather than vanishing
    *  from the layout without explanation. */
   rdpConnectionId: string;
-  /** Persisted from day one even though `"preset"` is the only value, so adding
-   *  `"fit"` needs no migration of everyone's saved workspaces. */
-  sizeMode: "preset";
   /** User-chosen tab name from the tab's right-click "Rename". */
   customTitle?: string;
 };

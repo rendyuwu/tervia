@@ -783,6 +783,7 @@ pub fn run() {
             ssh::sftp::ssh_sftp_delete,
             rdp::rdp_open,
             rdp::rdp_input,
+            rdp::rdp_resize,
             rdp::rdp_close,
             rdp::rdp_list_sessions,
             rdp::rdp_attach,

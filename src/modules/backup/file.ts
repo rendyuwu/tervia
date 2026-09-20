@@ -416,9 +416,9 @@ function rdpArm(base: HostBase, raw: Record<string, unknown>): RdpHost {
   const certFingerprint = str(raw.certFingerprint).trim();
   const pins = pinsOf(raw.pins, base.host, certFingerprint);
   const sshHostId = isRecord(raw.tunnel) ? str(raw.tunnel.sshHostId).trim() : "";
-  // Only one member today, so anything else - including a mode a later build
-  // writes - resolves to the mode this build can actually render.
-  const sizeMode: RdpSizeMode = "preset";
+  // An unrecognised mode from a later build still resolves to the mode this
+  // build can actually render.
+  const sizeMode: RdpSizeMode = raw.sizeMode === "fit" ? "fit" : "preset";
 
   return {
     ...base,
