@@ -180,11 +180,18 @@ ironrdp-input = "=0.6.0"
 # re-exports them and the RDP module names their types. `ironrdp-pdu` for
 # `Action` (the discriminant `Framed::read_pdu` hands back), `InclusiveRectangle`
 # and the `Rectangle` trait that gives it `width()`/`height()`; `ironrdp-core`
-# for `WriteBuf`, which appears in every `Sequence::step` signature. The `=`
-# pins are the versions connector 0.9 / session 0.10 resolve to; a different
-# version would make the rectangle types distinct and stop compiling.
+# for `WriteBuf`, which appears in every `Sequence::step` signature;
+# `ironrdp-dvc` for `DrdynvcClient`, the dynamic-channel multiplexer registered
+# as a static channel on the connector; `ironrdp-displaycontrol` for
+# `DisplayControlClient`, which carries the MS-RDPEDISP monitor-layout PDU that
+# makes `rdp_resize` work, and `MonitorLayoutEntry::adjust_display_size`, the
+# upstream clamp for that PDU's size constraints. The `=` pins are the versions
+# connector 0.9 / session 0.10 resolve to; a different version would make the
+# rectangle and channel-processor types distinct and stop compiling.
 ironrdp-pdu = "=0.8.0"
 ironrdp-core = { version = "=0.2.1", features = ["alloc"] }
+ironrdp-dvc = "=0.7.0"
+ironrdp-displaycontrol = "=0.7.0"
 # TCP keepalive with a usable idle time on the RDP socket. Already in the tree
 # via tokio/hyper at exactly this version, so this is a promotion, not a new
 # crate. Needed because tokio only exposes `TcpSocket::set_keepalive(bool)`,

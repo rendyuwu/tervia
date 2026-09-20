@@ -2,53 +2,34 @@
  * Self-check that `RdpSizeMode`'s membership and the sites writing it agree.
  * Run: `npx tsx scripts/rdp-size-mode-verify.ts`.
  *
- * NOTHING IS BROKEN TODAY. `RdpSizeMode` has one member, `"preset"`, and every
- * site writes it, which is consistent. This file exists because of what happens
- * on the day a second member is added: `"preset"` stays assignable to the wider
- * union, so every site that hardcodes it keeps compiling, and a mode the user
- * picked would be silently rewritten to `"preset"` on the next save, import or
- * restore. The union feels guarded and is not.
- *
- * `tsc` HELPS IN EXACTLY ONE PLACE, WHICH IS WORSE THAN NONE. `workspaces/store.ts`
- * types the persisted field as the LITERAL `"preset"` rather than as
- * `RdpSizeMode`, so widening the union does produce one type error, where
- * `serialize.ts` assigns a live leaf's mode into that saved shape. One error out
- * of five sites reads as "the compiler has this covered". It does not, and the
- * arm it covers is the persistence hop rather than any of the writes. That
- * asymmetry is pinned below so this check does not claim credit for it.
- *
  * WHAT REDDENS. The membership of the union and the set of literals actually
- * written have to be the same set. Adding `"fit"` to the type breaks that
- * equality on the day it is added rather than on the day a user notices their
- * choice did not stick - and the failure hands over the list of sites with the
- * question each one owes, because the question is not the same at each:
+ * written have to be the same set. A member nothing writes is a mode the user
+ * can never end up in: the picker offers it, every save path rewrites it to
+ * something else, and nothing raises. `tsc` does not catch that, because a
+ * narrower literal stays assignable to the wider union, so every site that
+ * hardcodes one keeps compiling. This file is the thing that notices.
  *
- *   - the editor save path mints a fresh row and has to write what was chosen;
- *   - the import path deliberately FLATTENS to the only mode this build can
- *     render, so its question is whether an imported second mode should now
- *     survive rather than be replaced;
- *   - the aux-tab opener mints a leaf and has to carry the host's mode;
- *   - the restore path's `??` is a default for a snapshot that predates the
- *     field, which `"preset"` is the correct answer for whatever else the union
- *     gains. It is enumerated so the list is complete and DELIBERATELY EXCLUDED
- *     from the revisit requirement, and it is asserted to still BE a `??`, so
- *     turning it into an unconditional write moves it into the other class.
+ * It has already fired once for its intended reason: `"fit"` was added to the
+ * union and this check named the sites that had to be revisited.
  *
- * The sites are DISCOVERED by walking `src/` rather than listed, so a fifth one
+ * The sites are DISCOVERED by walking `src/` rather than listed, so a new one
  * cannot arrive unseen; the pinned table below then has to account for what the
  * walk found. Fixtures under `scripts/` are out of scope on purpose: a fixture
  * naming an existing member stays valid when the union widens, so reddening
  * every one of them would be a dozen edits with nothing on the other side.
  *
- * WHAT THE WALK DOES NOT SEE, measured by probing it rather than reasoned. It
- * matches three shapes - a property assigned a string literal, a `const`
- * declaration of one, and a `??` whose right side is one - and each was proved
- * by adding a fifth site in that shape and watching the count redden. Three
- * shapes pass it unseen, all three measured the same way: a literal reached
- * through a local binding (`const m = "fit"` then `sizeMode: m`), a conditional
- * (`sizeMode: c ? "fit" : "preset"`), and an assertion (`sizeMode: "fit" as
- * RdpSizeMode`). Following those would mean an indirection walk, both arms of a
- * ternary and an unwrap, for shapes nothing in the tree uses.
+ * WHAT THE WALK SEES. A property assigned a string literal, a `const`
+ * declaration of one, a `??` whose right side is one, and BOTH ARMS of a
+ * conditional. The arms are followed because a conditional is the shape both
+ * write sites have today - each picks between `"fit"` and `"preset"` - and a
+ * walk that stopped at them would find nothing at all and report the trip-wire
+ * as broken rather than as passing.
+ *
+ * Two shapes still pass unseen, and both were measured by adding a site in that
+ * shape and watching the count: a literal reached through a local binding
+ * (`const m = "fit"` then `sizeMode: m`), and an assertion (`sizeMode: "fit" as
+ * RdpSizeMode`). Following those would mean an indirection walk and an unwrap,
+ * for shapes nothing in the tree uses.
  *
  * They are left unmatched because the cost of missing one is bounded, and the
  * bound was measured too: widening the union with the new member written ONLY
@@ -132,8 +113,8 @@ function unionMembers(rel: string, name: string): string[] | null {
 const members = unionMembers("src/modules/hosts/types.ts", UNION);
 check(`${UNION} is a union of string literals`, members !== null, members ?? "(not found)");
 check(
-  `...and its membership is exactly ["preset"]`,
-  members !== null && members.join(",") === "preset",
+  `...and its membership is exactly ["fit","preset"]`,
+  members !== null && [...members].sort().join(",") === "fit,preset",
   members ?? "(not found)",
 );
 
@@ -141,14 +122,28 @@ check(
 // 2. The write sites, discovered
 // ---------------------------------------------------------------------------
 
-type Kind = "unconditional" | "default";
-type Site = { rel: string; kind: Kind; literal: string; text: string };
+type Kind = "unconditional" | "default" | "conditional";
+type Site = { rel: string; kind: Kind; literals: string[]; text: string };
 
-/** `?? "literal"` on the right of a nullish coalesce, or null. */
-function nullishDefault(expr: ts.Expression): ts.StringLiteral | null {
-  if (!ts.isBinaryExpression(expr)) return null;
-  if (expr.operatorToken.kind !== ts.SyntaxKind.QuestionQuestionToken) return null;
-  return ts.isStringLiteral(expr.right) ? expr.right : null;
+/**
+ * The string literals an initializer can produce, and the shape that produced
+ * them: a conditional contributes BOTH arms, a `??` its right side, anything
+ * else nothing. The outermost shape names the site.
+ */
+function shapeOf(expr: ts.Expression): { kind: Kind; literals: string[] } | null {
+  if (ts.isStringLiteral(expr)) return { kind: "unconditional", literals: [expr.text] };
+  if (ts.isConditionalExpression(expr)) {
+    const arms = [expr.whenTrue, expr.whenFalse].flatMap((arm) => shapeOf(arm)?.literals ?? []);
+    return arms.length > 0 ? { kind: "conditional", literals: arms } : null;
+  }
+  if (
+    ts.isBinaryExpression(expr) &&
+    expr.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken
+  ) {
+    const right = shapeOf(expr.right);
+    return right ? { kind: "default", literals: right.literals } : null;
+  }
+  return null;
 }
 
 const sites: Site[] = [];
@@ -157,28 +152,18 @@ for (const rel of SRC_FILES) {
   if (!src.includes(FIELD)) continue;
   const sf = parseSource(rel, src);
   walk(sf, (n) => {
-    // `{ sizeMode: <literal> }` and `{ sizeMode: x ?? <literal> }`. A property
-    // SIGNATURE (`sizeMode: "preset";` in a type) is a different node kind and
-    // is deliberately not matched here - that one is section 4's subject.
+    // `{ sizeMode: <expr> }`. A property SIGNATURE (`sizeMode: RdpSizeMode;` in
+    // a type) is a different node kind and is not a write, so it is not matched.
     if (ts.isPropertyAssignment(n) && ts.isIdentifier(n.name) && n.name.text === FIELD) {
-      const init = n.initializer;
-      if (ts.isStringLiteral(init)) {
-        sites.push({ rel, kind: "unconditional", literal: init.text, text: n.getText() });
-        return;
-      }
-      const fallback = nullishDefault(init);
-      if (fallback) {
-        sites.push({ rel, kind: "default", literal: fallback.text, text: n.getText() });
-      }
+      const shape = shapeOf(n.initializer);
+      if (shape) sites.push({ rel, ...shape, text: n.getText() });
       return;
     }
-    // `const sizeMode: RdpSizeMode = <literal>` - the same write through a
-    // binding instead of straight into the object.
+    // `const sizeMode: RdpSizeMode = <expr>` - the same write through a binding
+    // instead of straight into the object.
     if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.name.text === FIELD) {
-      const init = n.initializer;
-      if (init && ts.isStringLiteral(init)) {
-        sites.push({ rel, kind: "unconditional", literal: init.text, text: n.getText() });
-      }
+      const shape = n.initializer ? shapeOf(n.initializer) : null;
+      if (shape) sites.push({ rel, ...shape, text: n.getText() });
     }
   });
 }
@@ -192,23 +177,13 @@ for (const rel of SRC_FILES) {
 const EXPECTED: Array<{ rel: string; kind: Kind; owes: string }> = [
   {
     rel: "src/modules/hosts/HostEditorDialog.tsx",
-    kind: "unconditional",
+    kind: "conditional",
     owes: "the editor save path mints a row and must write the mode that was chosen",
   },
   {
     rel: "src/modules/backup/file.ts",
-    kind: "unconditional",
-    owes: "the import path flattens to the only renderable mode on purpose; decide whether an imported second mode should survive",
-  },
-  {
-    rel: "src/modules/tabs/lib/useAuxTabs.ts",
-    kind: "unconditional",
-    owes: "the aux-tab opener mints a leaf and must carry the host's mode",
-  },
-  {
-    rel: "src/modules/workspaces/serialize.ts",
-    kind: "default",
-    owes: "EXCLUDED: a default for a snapshot predating the field, for which `preset` stays the right answer",
+    kind: "conditional",
+    owes: "the import path resolves an unrecognised mode to one this build can render; decide where a third mode should land",
   },
 ];
 
@@ -236,7 +211,7 @@ for (const site of sites) {
 // ---------------------------------------------------------------------------
 
 console.log("\n[agreement] the union's membership and the literals written are one set");
-const written = [...new Set(sites.map((s) => s.literal))].sort();
+const written = [...new Set(sites.flatMap((s) => s.literals))].sort();
 check(
   "every literal written is a member of the union",
   members !== null && written.every((w) => members.includes(w)),
@@ -247,47 +222,6 @@ check(
   members !== null && members.every((m) => written.includes(m)),
   { members, written, sites: EXPECTED.map((e) => `${e.rel}: ${e.owes}`) },
 );
-
-// ---------------------------------------------------------------------------
-// 4. The excluded default, and what `tsc` covers on its own
-// ---------------------------------------------------------------------------
-
-console.log("\n[excluded] the restore path's default is a different shape and stays");
-const restoreDefault = sites.filter((s) => s.kind === "default");
-check("exactly one site is the `??` default form", restoreDefault.length === 1, restoreDefault);
-check(
-  "...and it is the restore path in workspaces/serialize.ts",
-  restoreDefault[0]?.rel === "src/modules/workspaces/serialize.ts",
-  restoreDefault[0]?.rel ?? "(none)",
-);
-check(
-  "...reading the saved field rather than restating it, so a snapshot that HAS a mode keeps it",
-  restoreDefault[0]?.text.includes(`.${FIELD} ??`) === true,
-  restoreDefault[0]?.text ?? "(none)",
-);
-
-console.log("\n[tsc] the one arm the compiler covers by itself, so this file cannot claim it");
-{
-  const rel = "src/modules/workspaces/store.ts";
-  const sf = parseSource(rel, read(rel));
-  let signature: ts.PropertySignature | null = null;
-  walk(sf, (n) => {
-    if (!ts.isPropertySignature(n) || !ts.isIdentifier(n.name) || n.name.text !== FIELD) return;
-    // The saved RDP leaf is the only persisted shape declaring the field.
-    signature = n;
-  });
-  const declared = signature as ts.PropertySignature | null;
-  check("the saved leaf declares the field", declared !== null);
-  const typeNode = declared?.type;
-  check(
-    `...as the literal "preset" and NOT as ${UNION}, which is why widening the union is one type error there and none at the four write sites`,
-    typeNode !== undefined &&
-      ts.isLiteralTypeNode(typeNode) &&
-      ts.isStringLiteral(typeNode.literal) &&
-      typeNode.literal.text === "preset",
-    typeNode?.getText() ?? "(absent)",
-  );
-}
 
 console.log(failed === 0 ? "\nALL PASS" : `\n${failed} FAILED`);
 process.exit(failed === 0 ? 0 : 1);

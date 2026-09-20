@@ -26,8 +26,8 @@
 //!
 //! # Out of scope for this phase
 //!
-//! Clipboard, audio, device redirection, RD Gateway, KDC proxy, dynamic resize,
-//! EGFX/H.264, `.rdp` import and multi-monitor. Transport is direct TCP only;
+//! Clipboard, audio, device redirection, RD Gateway, KDC proxy, EGFX/H.264,
+//! `.rdp` import and multi-monitor. Transport is direct TCP only;
 //! tunnelling through SSH needs no change here, it just dials a different
 //! address.
 
@@ -180,6 +180,13 @@ pub struct RdpOpenInput {
     /// the server presents anything else - before CredSSP sends a credential.
     /// `None` on first connect, which prompts the user instead.
     pub expected_cert_fingerprint: Option<String>,
+    /// DPI percentage (`devicePixelRatio * 100`) for the initial desktop.
+    /// `0` - the default - means "unset", which is what this connector sent
+    /// before fit mode existed: the connector only derives a non-zero
+    /// `device_scale_factor` for values in 100..=500
+    /// (`ironrdp-connector` 0.9.0, `create_gcc_blocks`).
+    #[serde(default)]
+    pub scale_factor: u32,
 }
 
 fn default_rdp_port() -> u16 {
@@ -257,6 +264,22 @@ pub enum RdpInputEvent {
 pub(crate) enum InputOp {
     Op(Operation),
     ReleaseAll,
+}
+
+/// One item on the wire to the session task.
+///
+/// A resize rides the same queue as input rather than a channel of its own:
+/// the session task is the only thing that may touch `ActiveStage`, and one
+/// queue means a resize cannot overtake the keystroke that preceded it.
+pub(crate) enum SessionOp {
+    Input(Vec<InputOp>),
+    /// Ask the server for a new desktop size. `scale_factor` is a DPI
+    /// percentage; see [`rdp_resize`].
+    Resize {
+        width: u16,
+        height: u16,
+        scale_factor: u32,
+    },
 }
 
 impl RdpInputEvent {
@@ -380,6 +403,32 @@ pub async fn rdp_input(
         .filter_map(RdpInputEvent::into_input_op)
         .collect();
     session.send_input(ops)
+}
+
+/// Ask the server to resize the desktop to `width` x `height` over the Display
+/// Control channel (MS-RDPEDISP). `scale_factor` is a DPI percentage
+/// (`devicePixelRatio * 100`); the spec ignores anything outside 100..=500, so
+/// `100` is the "no scaling" value.
+///
+/// Resolves as soon as the request is queued, and the requested size is NOT
+/// authoritative: the server answers with a Deactivate All and reactivates at a
+/// size of its own choosing, which arrives as the ordinary `resize` event. A
+/// server with no Display Control channel keeps its current size silently and
+/// the consumer goes on letterboxing - the request is dropped, never escalated
+/// to a reconnect.
+///
+/// Dimensions are clamped and the width made even by the session task, so a
+/// caller may send the raw pane size.
+#[tauri::command]
+pub async fn rdp_resize(
+    state: tauri::State<'_, RdpState>,
+    id: u32,
+    width: u16,
+    height: u16,
+    scale_factor: u32,
+) -> Result<(), String> {
+    let session = lookup(&state, id, "rdp_resize").await?;
+    session.request_resize(width, height, scale_factor)
 }
 
 #[tauri::command]
@@ -695,6 +744,7 @@ mod tests {
             width: 1280,
             height: 800,
             expected_cert_fingerprint: None,
+            scale_factor: 0,
         };
         let rendered = format!("{input:?}");
         assert!(!rendered.contains("hunter2"), "got: {rendered}");

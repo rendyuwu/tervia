@@ -76,7 +76,6 @@ function leafToSaved(leaf: PaneLeaf): SavedPaneNode {
       kind: "leaf",
       leafKind: "rdp",
       rdpConnectionId: leaf.rdpConnectionId,
-      sizeMode: leaf.sizeMode,
       ...(leaf.customTitle ? { customTitle: leaf.customTitle } : {}),
     };
   }
@@ -309,10 +308,6 @@ function savedToNode(
         id,
         leafKind: "rdp",
         rdpConnectionId: node.rdpConnectionId,
-        // Older snapshots cannot exist (the field shipped with the kind), but
-        // a hand-edited or downgraded file can still be missing it, and the
-        // fallback is the only mode there is.
-        sizeMode: node.sizeMode ?? "preset",
         ...(node.customTitle ? { customTitle: node.customTitle } : {}),
       };
     }

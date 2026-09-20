@@ -1,4 +1,4 @@
-import { RDP_SIZE_PRESETS, type SshHost } from "../types";
+import { RDP_DEFAULT_PRESET, RDP_FIT_SIZE_ID, RDP_SIZE_PRESETS, type SshHost } from "../types";
 import { Combobox, type ComboboxOption } from "./Combobox";
 import { Field } from "./FormControls";
 import { savedHostOptions } from "./hostOptions";
@@ -6,11 +6,14 @@ import { savedHostOptions } from "./hostOptions";
 // The two RDP-only rows: the negotiated desktop size, and the SSH host to tunnel
 // through.
 
-const SIZE_OPTIONS: ComboboxOption[] = RDP_SIZE_PRESETS.map((p) => ({
-  value: p.id,
-  label: p.label,
-  search: `${p.label} ${p.id}`,
-}));
+const SIZE_OPTIONS: ComboboxOption[] = [
+  { value: RDP_FIT_SIZE_ID, label: "Fit to pane", search: "fit pane follow resize automatic" },
+  ...RDP_SIZE_PRESETS.map((p) => ({
+    value: p.id,
+    label: p.label,
+    search: `${p.label} ${p.id}`,
+  })),
+];
 
 export function RdpOptions({
   sshHosts,
@@ -41,9 +44,18 @@ export function RdpOptions({
           emptyLabel="No matching size."
         />
         <span className="text-muted-foreground text-[10.5px]">
-          The desktop is negotiated at this size and the pane letterboxes it, so a pane that is not
-          the same shape shows bars rather than cropping. Resizing the desktop to follow the pane is
-          a later change.
+          {presetId === RDP_FIT_SIZE_ID ? (
+            <>
+              The desktop is resized to match the pane as you drag it. This needs the server's
+              Display Control channel, which Windows Server 2012 and later have; a server without it
+              stays at {RDP_DEFAULT_PRESET.label} and the pane letterboxes it.
+            </>
+          ) : (
+            <>
+              The desktop is negotiated at this size and the pane letterboxes it, so a pane that is
+              not the same shape shows bars rather than cropping.
+            </>
+          )}
         </span>
       </Field>
 
