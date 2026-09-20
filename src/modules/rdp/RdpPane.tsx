@@ -6,7 +6,7 @@ import { useHostKeyPrompt } from "@/modules/ssh/hostKeyPrompt";
 import {
   confirmRdpCert,
   openRdp,
-  rdpSnapshot,
+  rdpTakeFrame,
   type RdpInputEvent,
   type RdpSession,
 } from "./bridge";
@@ -36,19 +36,10 @@ import { CTRL_ALT_DEL_SCANCODES, scancodeFor } from "./scancodes";
  * full-resolution intermediate means the scale happens once, over one image,
  * with the browser's own filtering.
  *
- * NOTHING touches a canvas on the channel callback. That is a constraint Tauri
- * imposes, not a preference: a raw payload of 1024 bytes or more is parked in a
- * process-global map and only freed when the JS side's `invoke(fetch)` actually
- * runs, and Tauri's own wrapper swallows failures with `.catch(console.error)` -
- * so a handler that throws, or that blocks long enough for messages to pile up
- * behind it, can strand payloads in that map with nothing left to collect them.
- * The callback queues a reference and returns; the blit and the composite both
- * happen on the next frame, which also coalesces several batches into one draw.
- *
- * The queue is bounded (`MAX_QUEUED_FRAME_BYTES`) because a batch is bounded at
- * one framebuffer - 33 MB at 4K - and they can arrive at up to 62 Hz, so an
- * unbounded backlog behind a stalled main thread is an OOM rather than a stutter.
- * Overflowing drops the backlog and repairs the image from `rdp_snapshot`.
+ * Pixels are PULLED, not pushed. The channel carries a tiny `frameReady`; the
+ * pane asks for the accumulated batch with `rdpTakeFrame` on a frame, at most
+ * one pull outstanding. There is no frame queue on this side at all - the
+ * `rdp_take_frame` command documents what the backend does while it waits.
  *
  * # How the keys get there
  *
@@ -91,22 +82,6 @@ type Status =
   | { kind: "error"; message: string }
   | { kind: "closed"; reason: string };
 
-/**
- * Cap on the queued frame BACKLOG, in bytes.
- *
- * A batch is bounded at one framebuffer, which is ~4 MiB at 1280x800 but ~33 MB
- * at 4K, and they can arrive at up to 62 Hz. A main thread stalled for a second
- * would queue gigabytes, so the backlog cannot be unbounded.
- *
- * It caps the BACKLOG and not a single batch, which is why the check below only
- * fires with something already queued. One batch is affordable by definition -
- * it is exactly what would be held for the duration of a synchronous blit - and
- * capping a lone batch would mean a framebuffer larger than this could never be
- * drawn at all: each one would trip the cap, request a resync, and get back a
- * keyframe that trips it again.
- */
-const MAX_QUEUED_FRAME_BYTES = 48 * 1024 * 1024;
-
 /** The framebuffer, at the remote desktop's resolution. */
 type Framebuffer = {
   canvas: HTMLCanvasElement;
@@ -132,36 +107,16 @@ export function RdpPane({ leafId, connectionId, visible, focused = true }: Props
   // must not close over a stale render.
   const visibleRef = useRef(visible);
   visibleRef.current = visible;
-  // A composite was skipped while hidden, so becoming visible must redraw even
-  // if no new frame has arrived since.
-  const staleRef = useRef(false);
 
   // ---------------------------------------------------------------- rendering
 
   const compositeHandle = useRef<number | null>(null);
-  /**
-   * Batches waiting to be blitted into the framebuffer, oldest first.
-   *
-   * Frames do NOT touch a canvas on the channel callback. Tauri's `Channel`
-   * makes that dangerous rather than merely slow: a payload of 1024 bytes or
-   * more is parked in a process-global map and only removed when the JS side's
-   * `invoke(fetch)` actually runs, and Tauri's own wrapper ends in
-   * `.catch(console.error)` - so a handler that throws, or that blocks long
-   * enough to pile messages up behind it, can leave payloads parked with
-   * nothing left to collect them. The handler therefore does the cheapest
-   * possible thing: push a reference and return.
-   *
-   * References, not copies. The `ArrayBuffer` handed to `onmessage` belongs to
-   * that message alone and nothing reuses it, so holding a view across a frame
-   * is safe - and copying would cost the same memcpy the blit is being deferred
-   * to avoid, on up to 33 MB.
-   */
-  const pendingBatches = useRef<RdpFrameBatch[]>([]);
-  /** Bytes held in `pendingBatches`, to bound it. */
-  const queuedBytes = useRef(0);
-  /** The queue overflowed and deltas were dropped, so the framebuffer no longer
-   *  matches the server's and only a fresh keyframe can reconcile them. */
-  const desyncedRef = useRef(false);
+  /** At most one pull in flight; that single credit IS the backpressure. */
+  const pullingRef = useRef(false);
+  /** `pullFrame`, read through a ref so `composite` can drive it without the
+   *  two memoizations depending on each other. Assigned on every render, and
+   *  only ever read from a frame callback, so there is nothing stale here. */
+  const pullRef = useRef<() => void>(() => {});
 
   /** Point the framebuffer at a `width` x `height` desktop, discarding whatever
    *  was there. Called on connect and on a server-side resize, where the
@@ -181,22 +136,16 @@ export function RdpPane({ leafId, connectionId, visible, focused = true }: Props
   }, []);
 
   /**
-   * Blit every queued batch into the framebuffer, oldest first. Runs on a frame,
-   * never on the channel callback.
+   * Blit one pulled batch into the framebuffer. Runs on a frame, never on the
+   * channel callback.
    *
-   * Wrapped so one bad batch cannot wedge the pane: `putImageData` should not be
-   * able to throw here (the parser has already proved every rect is in bounds
-   * and every view in range), but if it ever does, the queue is cleared and a
-   * resync requested rather than the same poison batch being retried on every
-   * subsequent frame forever.
+   * `putImageData` should not be able to throw here - the parser has already
+   * proved every rect is in bounds and every view in range - so a throw is
+   * logged and the region waits for the server's next repaint.
    */
-  const drainBatches = useCallback(() => {
-    const queued = pendingBatches.current;
-    if (queued.length === 0) return;
-    pendingBatches.current = [];
-    queuedBytes.current = 0;
-    try {
-      for (const batch of queued) {
+  const blitBatch = useCallback(
+    (batch: RdpFrameBatch): void => {
+      try {
         // The batch header is authoritative about the framebuffer it describes:
         // a batch that arrives right after a server-side resize carries the NEW
         // size whether or not the `resize` event has been handled yet, so sizing
@@ -216,14 +165,12 @@ export function RdpPane({ leafId, connectionId, visible, focused = true }: Props
           const data = new Uint8ClampedArray(buffer, pixelOffsets[i], r.w * r.h * 4);
           fb.ctx.putImageData(new ImageData(data, r.w, r.h), r.x, r.y);
         }
-        // A keyframe replaces everything, so it also clears any earlier loss.
-        if (batch.keyframe) desyncedRef.current = false;
+      } catch (e) {
+        console.error("rdp: dropped a frame batch that could not be blitted", e);
       }
-    } catch (e) {
-      console.error("rdp: dropped a frame batch that could not be blitted", e);
-      desyncedRef.current = true;
-    }
-  }, [resetFramebuffer]);
+    },
+    [resetFramebuffer],
+  );
 
   /** Draw the framebuffer onto the visible canvas, letterboxed and at device
    *  resolution. Also the only place `viewportRef` is written, so the input
@@ -232,17 +179,13 @@ export function RdpPane({ leafId, connectionId, visible, focused = true }: Props
     compositeHandle.current = null;
     const host = hostRef.current;
     const canvas = canvasRef.current;
-    // Drain first, and unconditionally: the queue holds Tauri's own buffers, so
-    // leaving it full while the tab is hidden would pin tens of megabytes for as
-    // long as the user is looking somewhere else.
-    drainBatches();
+    // Pull first, and unconditionally, before the early returns: a hidden pane
+    // must still drain the backend's batcher, or the session sits holding
+    // dirty rects nothing will ever ask for.
+    pullRef.current();
     const fb = fbRef.current;
     if (!host || !canvas) return;
-    if (!visibleRef.current) {
-      staleRef.current = true;
-      return;
-    }
-    staleRef.current = false;
+    if (!visibleRef.current) return;
     // `getBoundingClientRect`, not `clientWidth`: the workspace column applies
     // a CSS `zoom` to counter the UI zoom, and the rect is in the SAME space as
     // the pointer coordinates below. Measuring in layout pixels here and
@@ -281,88 +224,34 @@ export function RdpPane({ leafId, connectionId, visible, focused = true }: Props
       vp.width * dpr,
       vp.height * dpr,
     );
-  }, [drainBatches]);
+  }, []);
 
   const scheduleComposite = useCallback(() => {
     if (compositeHandle.current !== null) return;
     compositeHandle.current = requestAnimationFrame(composite);
   }, [composite]);
 
-  /**
-   * What the channel callback does with a batch, and all it does: queue the
-   * reference, note the bytes, ask for a frame. No canvas, no allocation beyond
-   * the push, no `await`. See `pendingBatches` for why the work is deferred
-   * rather than done here.
-   */
-  const enqueueBatch = useCallback(
-    (batch: RdpFrameBatch) => {
-      // A keyframe replaces the whole framebuffer, so everything queued behind
-      // it is already dead. Dropping those is free correctness AND the main
-      // thing that keeps the queue short on a busy desktop, where the Rust
-      // batcher collapses to a keyframe whenever the dirty area passes half the
-      // screen.
-      if (batch.keyframe) {
-        pendingBatches.current = [];
-        queuedBytes.current = 0;
-      }
-      const bytes = batch.buffer.byteLength;
-      // `length > 0` is load-bearing: the cap bounds the BACKLOG, so a lone
-      // batch is always accepted however large. See `MAX_QUEUED_FRAME_BYTES`.
-      if (
-        pendingBatches.current.length > 0 &&
-        queuedBytes.current + bytes > MAX_QUEUED_FRAME_BYTES
-      ) {
-        // The main thread is far enough behind that holding the backlog costs
-        // more than the picture is worth. Deltas cannot be merged on this side,
-        // so the whole queue goes and the framebuffer is declared out of date;
-        // `resync` below fetches a keyframe to repair it. Dropping is the only
-        // bounded option - an unbounded queue at 33 MB a batch takes the webview
-        // out with it.
-        console.warn(
-          `rdp: frame queue exceeded ${MAX_QUEUED_FRAME_BYTES} bytes, dropping the backlog and resyncing`,
-        );
-        pendingBatches.current = [];
-        queuedBytes.current = 0;
-        desyncedRef.current = true;
-        scheduleComposite();
-        void resync();
-        return;
-      }
-      pendingBatches.current.push(batch);
-      queuedBytes.current += bytes;
-      scheduleComposite();
-    },
-    // `resync` is declared just below and is only ever read when the channel
-    // calls this - long after both are bound - and it is memoized on the same
-    // dependency, so there is nothing stale to capture and nothing to list.
-    [scheduleComposite],
-  );
-
-  /**
-   * Repair the framebuffer after dropped deltas, by asking the host process for
-   * the current framebuffer as one keyframe.
-   *
-   * This is what `rdp_snapshot` is for, and why dropping a backlog is safe
-   * rather than permanent: without it a desktop that went idle straight after an
-   * overflow would show a stale image until something happened to repaint the
-   * lost region, which on an idle desktop is never.
-   */
-  const resync = useCallback(async () => {
+  /** Collect whatever the backend has accumulated. */
+  const pullFrame = useCallback(() => {
     const session = sessionRef.current;
-    if (!session) return;
-    try {
-      const keyframe = await rdpSnapshot(session.id);
-      // Still the same session, and nothing has arrived that already fixed it.
-      if (keyframe && sessionRef.current === session && desyncedRef.current) {
-        pendingBatches.current = [keyframe];
-        queuedBytes.current = keyframe.buffer.byteLength;
+    if (!session || pullingRef.current) return;
+    pullingRef.current = true;
+    void rdpTakeFrame(session.id)
+      .then((batch) => {
+        if (!batch || sessionRef.current !== session) return;
+        blitBatch(batch);
+        // There may be more behind it. Scheduling a composite rather than
+        // pulling again immediately is what rate-limits pulls to one per frame
+        // and lets the backend coalesce in between.
         scheduleComposite();
-      }
-    } catch {
-      // The session went away mid-fetch. The next keyframe from the server
-      // repairs the image anyway; there is nothing useful to report here.
-    }
-  }, [scheduleComposite]);
+      })
+      .catch(() => {})
+      .finally(() => {
+        pullingRef.current = false;
+      });
+  }, [blitBatch, scheduleComposite]);
+
+  pullRef.current = pullFrame;
 
   // Re-letterbox on a pane resize (a divider drag, a window resize, the sidebar
   // collapsing). The desktop resolution is fixed, so this only moves the bars
@@ -376,9 +265,11 @@ export function RdpPane({ leafId, connectionId, visible, focused = true }: Props
   }, [scheduleComposite]);
 
   // Redraw on becoming visible: composites are skipped while the tab is hidden,
-  // so without this the pane shows whatever was on screen when it left.
+  // so without this the pane shows whatever was on screen when it left. It also
+  // RE-ARMS the pull loop, which is why there is no "was it stale" condition -
+  // the loop stops whenever a pull comes back empty.
   useEffect(() => {
-    if (visible && staleRef.current) scheduleComposite();
+    if (visible) scheduleComposite();
   }, [visible, scheduleComposite]);
 
   useEffect(
@@ -597,9 +488,6 @@ export function RdpPane({ leafId, connectionId, visible, focused = true }: Props
 
     setStatus({ kind: "connecting" });
     fbRef.current = null;
-    pendingBatches.current = [];
-    queuedBytes.current = 0;
-    desyncedRef.current = false;
     heldKeys.current.clear();
     heldUnicode.current.clear();
     heldButtons.current.clear();
@@ -706,8 +594,8 @@ export function RdpPane({ leafId, connectionId, visible, focused = true }: Props
               resetFramebuffer(width, height);
               scheduleComposite();
             },
-            onFrame: (batch) => {
-              if (alive) enqueueBatch(batch);
+            onFrameReady: () => {
+              if (alive) scheduleComposite();
             },
             onDisconnected: (reason) => {
               if (!alive) return;
@@ -771,12 +659,8 @@ export function RdpPane({ leafId, connectionId, visible, focused = true }: Props
       // before `rdp_open` returned is released by the `!alive` check above, and
       // one that got as far as a live session is released here.
       releaseDial();
-      // Drop references to Tauri's frame buffers rather than holding them until
-      // the next GC. A queued keyframe is a whole framebuffer - 33 MB at 4K.
-      pendingBatches.current = [];
-      queuedBytes.current = 0;
     };
-  }, [connectionId, attempt, enqueueBatch, resetFramebuffer, scheduleComposite]);
+  }, [connectionId, attempt, resetFramebuffer, scheduleComposite]);
 
   const hostLabel = conn ? conn.name.trim() || conn.host : "";
 

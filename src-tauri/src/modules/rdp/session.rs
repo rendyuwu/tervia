@@ -23,6 +23,9 @@ use ironrdp_session::{fast_path, ActiveStage, ActiveStageOutput, SessionError};
 use ironrdp_tokio::bytes::BytesMut;
 use ironrdp_tokio::{FramedWrite as _, NetworkClient, TokioFramed};
 use serde::Serialize;
+// Only the test harnesses inspect a sink's payloads directly; the session
+// itself only ever sends JSON, through `event_body`.
+#[cfg(test)]
 use tauri::ipc::InvokeResponseBody;
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot};
@@ -30,10 +33,7 @@ use tokio::task::JoinHandle;
 
 use crate::modules::lockext::LockExt as _;
 
-use super::frame::{
-    self, encode_batch, Batch, FrameBatcher, FrameBuffer, FrameTransport, Rect, TransportGone,
-    HEADER_LEN,
-};
+use super::frame::{self, encode_batch, Batch, FrameBatcher, FrameBuffer, Rect, HEADER_LEN};
 use super::tls;
 use super::{event_body, EventSink, InputOp, RdpOpenInput, RdpSessionInfo};
 
@@ -45,10 +45,6 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 /// capability exchange). Generous because CredSSP is several round trips and a
 /// licence exchange can be slow on a first connect to a fresh host.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(45);
-/// Dirty-rect coalescing window, ~60 Hz. Short enough that interactive latency
-/// is not noticeable, long enough that a burst of small updates ships as one
-/// batch rather than one IPC message each.
-const FLUSH_WINDOW: Duration = Duration::from_millis(16);
 
 /// Maximum input events in one fastpath PDU. **Do not remove the chunking this
 /// feeds; it is not an optimisation.**
@@ -99,9 +95,9 @@ const POINTER_SOFTWARE_RENDERING: bool = true;
 
 /// Events pushed to the frontend over the session's IPC channel as JSON.
 ///
-/// Frame batches travel on the *same* channel as `InvokeResponseBody::Raw`, so
-/// the frontend distinguishes the two by payload type: an `ArrayBuffer` is a
-/// frame batch (see `frame.rs` for the layout), anything else is one of these.
+/// Control events only - pixels never travel here. A consumer that sees
+/// `frameReady` pulls the encoded batch with `rdp_take_frame`; see that
+/// command for why the channel is the wrong place for a framebuffer.
 ///
 /// `rename_all` camelCases the variant *tags*; `rename_all_fields` is what
 /// camelCases the fields inside struct variants. Both are load-bearing - the
@@ -114,7 +110,8 @@ const POINTER_SOFTWARE_RENDERING: bool = true;
 )]
 pub enum RdpEvent {
     /// The connect sequence reached the active stage. Also re-sent to a sink
-    /// that arrives later via `rdp_attach`, immediately before its keyframe.
+    /// that arrives later via `rdp_attach`, which then calls `rdp_snapshot`
+    /// for its first picture.
     Connected {
         desktop_width: u16,
         desktop_height: u16,
@@ -141,6 +138,11 @@ pub enum RdpEvent {
     PointerHidden,
     /// Server-initiated cursor warp.
     PointerPosition { x: u16, y: u16 },
+    /// The batcher has dirty rects waiting. Pull them with `rdp_take_frame`;
+    /// the payload never travels on this channel. A spurious one (the batch
+    /// was already drained by a pull in flight) is harmless - the pull just
+    /// comes back empty.
+    FrameReady,
     /// The session ended, for this reason. Always the last event, on every
     /// path: a remote hangup, a fault, and a local `rdp_close` all emit it
     /// (`close` sends it before aborting the task, since the abort means the
@@ -169,44 +171,6 @@ impl NetworkClient for NoNetworkClient {
     }
 }
 
-/// Push transport: encode on the session task, hand the bytes straight to the
-/// IPC channel. The only [`FrameTransport`] impl today; see the trait's docs
-/// for what a pull model would replace.
-struct ChannelTransport {
-    primary: EventSink,
-    mirrors: Arc<Mutex<Vec<EventSink>>>,
-}
-
-impl FrameTransport for ChannelTransport {
-    /// One owned copy of the batch per sink, which is Tauri's floor and not a
-    /// missed optimisation: `InvokeResponseBody::Raw` owns a `Vec<u8>`, and
-    /// under the 1024-byte threshold the channel `eval`s it while at or above it
-    /// the body is parked in `ChannelDataIpcQueue` as its own map entry - so
-    /// there is no point in the API where an `Arc` could be shared. The
-    /// original is moved into the last send rather than cloned, so N sinks cost
-    /// exactly N buffers. `MAX_MIRROR_SINKS` is what bounds the total, and it is
-    /// deliberately low for this reason.
-    ///
-    /// `Err(TransportGone)` is **currently unreachable**. `Channel::send`
-    /// returns `Ok` on both paths whether or not the frontend ever collects the
-    /// payload - the queued path's JS side is `.catch(console.error)`
-    /// (`tauri` 2.11.5, `JavaScriptChannelId::channel_on`) and never reports
-    /// back - so this is not a liveness signal and the caller must not treat it
-    /// as backpressure. Kept because it is the right shape for the seam and a
-    /// pull transport would have a real answer here.
-    fn deliver(&mut self, bytes: Vec<u8>) -> Result<(), TransportGone> {
-        {
-            // Prune sinks whose channel has closed, exactly as the SSH pump's
-            // fan does, so dead mirrors do not cost a copy per frame forever.
-            let mut mirrors = self.mirrors.lock_or_recover();
-            mirrors.retain(|sink| sink.send(InvokeResponseBody::Raw(bytes.clone())).is_ok());
-        }
-        self.primary
-            .send(InvokeResponseBody::Raw(bytes))
-            .map_err(|_| TransportGone)
-    }
-}
-
 /// Shared handles the session task and the command layer both touch.
 struct Shared {
     /// The authoritative framebuffer. Shared rather than task-private so
@@ -214,8 +178,16 @@ struct Shared {
     /// through the task. Every critical section is pure CPU work with no await
     /// inside it, so a plain `std::sync::Mutex` is correct here.
     image: Mutex<DecodedImage>,
+    /// Dirty rects accumulated since the last pull. Shared rather than
+    /// task-private because `rdp_take_frame` drains it from the command
+    /// layer - that is what makes the transport a pull.
+    ///
+    /// LOCK ORDER: `batcher` is released before `image` is taken (see
+    /// `RdpSession::take_frame`), and `add_mirror_sink` takes `mirrors` then
+    /// `image`. Nothing ever takes `image` first. Keep it that way.
+    batcher: Mutex<FrameBatcher>,
     /// Extra event sinks (the remote-access bridge / a second view).
-    mirrors: Arc<Mutex<Vec<EventSink>>>,
+    mirrors: Mutex<Vec<EventSink>>,
     /// Live desktop size, updated on reactivation.
     dims: Mutex<(u16, u16)>,
     alive: AtomicBool,
@@ -260,23 +232,13 @@ impl RdpSession {
             .map_err(|_| "rdp: session is closed".to_string())
     }
 
-    /// Encode the current framebuffer as a full keyframe batch. Backs both
-    /// `rdp_snapshot` and the keyframe a fresh `rdp_attach` gets: unlike SSH
-    /// there is no byte stream to replay, so a new consumer needs one whole
-    /// frame before deltas mean anything.
-    ///
-    /// Empty when there is no framebuffer to describe, rather than a
+    /// Encode `batch` against the current framebuffer. Empty rather than the
     /// `rectCount == 0` header the wire format tells the reader to treat as
-    /// corrupt. Unreachable while `connect` refuses a zero desktop size, but
-    /// this is the same guard `flush` carries and the two should not disagree.
-    pub fn keyframe(&self) -> Vec<u8> {
-        self.keyframe_with_dims().0
-    }
-
-    /// The keyframe plus the dimensions it describes, read under one lock so
-    /// the two cannot disagree - `Shared::dims` and the framebuffer are updated
-    /// in sequence during a reactivation, not atomically.
-    fn keyframe_with_dims(&self) -> (Vec<u8>, u16, u16) {
+    /// corrupt, which is what a batch caught mid-reactivation clips down to.
+    ///
+    /// The batch is built INSIDE the `image` lock, so a keyframe names the
+    /// dimensions it was actually encoded from.
+    fn encode(&self, batch: impl FnOnce(u16, u16) -> Batch) -> Vec<u8> {
         let image = self.shared.image.lock_or_recover();
         let (width, height) = (image.width(), image.height());
         let bytes = encode_batch(
@@ -285,37 +247,48 @@ impl RdpSession {
                 width,
                 height,
             },
-            &Batch::keyframe(width, height),
+            &batch(width, height),
         );
         if bytes.len() <= HEADER_LEN {
-            return (Vec::new(), width, height);
+            return Vec::new();
         }
-        (bytes, width, height)
+        bytes
     }
 
-    /// Register an extra sink and prime it with `connected` plus a full
-    /// keyframe, after which it sees the same deltas the primary does.
-    /// Returns whether the session is still live.
+    /// Encode the current framebuffer as a full keyframe batch. Backs
+    /// `rdp_snapshot`: unlike SSH there is no byte stream to replay, so a new
+    /// consumer needs one whole frame before deltas mean anything.
+    pub fn keyframe(&self) -> Vec<u8> {
+        self.encode(Batch::keyframe)
+    }
+
+    /// Drain the batcher and encode it. Empty when nothing is pending.
+    pub fn take_frame(&self) -> Vec<u8> {
+        // Taken and released in its own scope, never nested inside `image`:
+        // `encode` locks `image` next, and the reverse order is a deadlock.
+        let batch = {
+            let mut batcher = self.shared.batcher.lock_or_recover();
+            batcher.take()
+        };
+        let Some(batch) = batch else {
+            return Vec::new();
+        };
+        self.encode(|_, _| batch)
+    }
+
+    /// Register an extra sink and prime it with `connected`, after which it
+    /// sees the same control events the primary does. The first picture comes
+    /// from `rdp_snapshot`, which the mirror calls itself - it does not share
+    /// the primary's batcher, since two consumers draining one batcher would
+    /// steal each other's rects. Returns whether the session is still live.
     pub fn add_mirror_sink(&self, sink: EventSink) -> bool {
-        // The mirror list is taken FIRST and held across the priming sends, so
-        // a batch the session task delivers in between cannot slip past the
-        // keyframe and leave this sink permanently stale in that region.
-        //
-        // That means holding `mirrors` while `keyframe()` takes `image`, which
-        // is only safe because the session task never does the reverse: it
-        // encodes under `image`, releases it, and only then fans out under
-        // `mirrors` (see `flush` and `run`'s `emit`). Keep it that way or this
-        // becomes a lock-order inversion.
         let mut mirrors = self.shared.mirrors.lock_or_recover();
-        let (keyframe, width, height) = self.keyframe_with_dims();
+        let (width, height) = self.dims();
         let _ = sink.send(event_body(&RdpEvent::Connected {
             desktop_width: width,
             desktop_height: height,
             server_fingerprint: self.fingerprint.clone(),
         }));
-        if !keyframe.is_empty() {
-            let _ = sink.send(InvokeResponseBody::Raw(keyframe));
-        }
         // Bound the live sink count: a buggy caller could call rdp_attach in a
         // loop, and every extra sink costs a full owned copy of every batch.
         // Evict the oldest.
@@ -779,10 +752,10 @@ pub async fn connect(
         result.compression_type
     );
 
-    let mirrors: Arc<Mutex<Vec<EventSink>>> = Arc::new(Mutex::new(Vec::new()));
     let shared = Arc::new(Shared {
         image: Mutex::new(DecodedImage::new(PixelFormat::RgbA32, width, height)),
-        mirrors: Arc::clone(&mirrors),
+        batcher: Mutex::new(FrameBatcher::new(width, height)),
+        mirrors: Mutex::new(Vec::new()),
         dims: Mutex::new((width, height)),
         alive: AtomicBool::new(true),
     });
@@ -797,15 +770,11 @@ pub async fn connect(
     // The task owns the sender; whether it fires or merely drops on abort, the
     // receiver handed to `rdp_open` unblocks and the janitor evicts the id.
     let (exit_tx, exit_rx) = oneshot::channel::<()>();
-    let transport = ChannelTransport {
-        primary: sink.clone(),
-        mirrors,
-    };
     let task_shared = Arc::clone(&shared);
     let task_sink = sink.clone();
     let task = tokio::spawn(async move {
         let _exit_tx = exit_tx;
-        run(result, framed, input_rx, task_shared, task_sink, transport).await;
+        run(result, framed, input_rx, task_shared, task_sink).await;
     });
 
     let created_at_ms = SystemTime::now()
@@ -844,9 +813,7 @@ async fn run(
     mut input_rx: mpsc::UnboundedReceiver<Vec<InputOp>>,
     shared: Arc<Shared>,
     sink: EventSink,
-    mut transport: ChannelTransport,
 ) {
-    let (mut width, mut height) = (result.desktop_size.width, result.desktop_size.height);
     // Kept for the Deactivation-Reactivation rebuild below: the MCS channels
     // stay joined across a reactivation, so the ids do not change and
     // `ConnectionActivationSequence` (0.9) does not expose them anyway.
@@ -857,8 +824,6 @@ async fn run(
     // suppresses no-op transitions, so rebuilding it per command would resend
     // held modifiers and lose auto-repeat suppression.
     let mut keys = Database::new();
-    let mut batcher = FrameBatcher::new(width, height);
-    let mut flush_at: Option<tokio::time::Instant> = None;
 
     let emit = |event: &RdpEvent| {
         let body = event_body(event);
@@ -870,11 +835,9 @@ async fn run(
     enum Wake {
         Pdu(ironrdp_pdu::Action, BytesMut),
         Input(Vec<InputOp>),
-        Flush,
     }
 
     let ending = 'session: loop {
-        let deadline = flush_at;
         let wake = tokio::select! {
             // read_pdu is documented cancel-safe: buffered bytes survive a drop.
             pdu = framed.read_pdu() => match pdu {
@@ -886,14 +849,6 @@ async fn run(
                 // Every sender is gone, i.e. the RdpSession was dropped.
                 None => break 'session Ending::Graceful("client closed the session".to_owned()),
             },
-            () = async move {
-                match deadline {
-                    Some(at) => tokio::time::sleep_until(at).await,
-                    // No pending rects: park forever rather than waking 60
-                    // times a second on an idle desktop.
-                    None => core::future::pending().await,
-                }
-            } => Wake::Flush,
         };
 
         let outputs = match wake {
@@ -946,11 +901,6 @@ async fn run(
                 }
                 collected
             }
-            Wake::Flush => {
-                flush(&mut batcher, &shared.image, &mut transport);
-                flush_at = None;
-                continue;
-            }
         };
 
         // Outputs are drained OUTSIDE the select above, and that is load
@@ -990,10 +940,19 @@ async fn run(
                         log::trace!("rdp: dropping empty graphics-update sentinel");
                         continue;
                     }
-                    let was_empty = batcher.is_empty();
-                    batcher.push(Rect::from_inclusive(&rect));
-                    if was_empty && !batcher.is_empty() {
-                        flush_at = Some(tokio::time::Instant::now() + FLUSH_WINDOW);
+                    let armed = {
+                        let mut batcher = shared.batcher.lock_or_recover();
+                        let was_empty = batcher.is_empty();
+                        batcher.push(Rect::from_inclusive(&rect));
+                        was_empty && !batcher.is_empty()
+                    };
+                    // Only on the empty -> non-empty edge, so a busy desktop
+                    // costs one notification per pull cycle rather than one
+                    // per PDU. Race-free in the direction that matters: the
+                    // edge is evaluated under the same lock as the push, so a
+                    // pull that drains in between re-arms on the next push.
+                    if armed {
+                        emit(&RdpEvent::FrameReady);
                     }
                 }
                 ActiveStageOutput::PointerDefault => emit(&RdpEvent::PointerDefault),
@@ -1055,8 +1014,7 @@ async fn run(
                         Err(e) => break 'session Ending::Faulted(e),
                     };
                     // Framebuffer, dims and batcher, validated together.
-                    if let Err(e) = apply_reactivation(&shared, &mut batcher, new_width, new_height)
-                    {
+                    if let Err(e) = apply_reactivation(&shared, new_width, new_height) {
                         break 'session Ending::Faulted(e);
                     }
                     stage.set_fastpath_processor(
@@ -1074,9 +1032,10 @@ async fn run(
                     );
                     stage.set_share_id(share_id);
                     stage.set_enable_server_pointer(server_pointer);
-                    flush_at = None;
-                    (width, height) = (new_width, new_height);
-                    emit(&RdpEvent::Resize { width, height });
+                    emit(&RdpEvent::Resize {
+                        width: new_width,
+                        height: new_height,
+                    });
                     // Known and accepted: `ActiveStage::process` appends
                     // processor updates AFTER the x224 outputs, so a
                     // `GraphicsUpdate` carrying old-framebuffer coordinates can
@@ -1104,9 +1063,6 @@ async fn run(
     };
 
     shared.alive.store(false, Ordering::Release);
-    // Ship whatever was pending so the last frame before a disconnect is not
-    // lost, then report the ending.
-    flush(&mut batcher, &shared.image, &mut transport);
     let reason = match ending {
         Ending::Graceful(reason) => reason,
         Ending::Faulted(message) => {
@@ -1147,44 +1103,6 @@ fn apply_input(
         out.extend(keys.apply(run));
     }
     out
-}
-
-/// Encode and ship whatever the batcher accumulated. No-op when nothing was
-/// dirty.
-fn flush(
-    batcher: &mut FrameBatcher,
-    image: &Mutex<DecodedImage>,
-    transport: &mut dyn FrameTransport,
-) {
-    let Some(batch) = batcher.take() else {
-        return;
-    };
-    let bytes = {
-        let image = image.lock_or_recover();
-        let (width, height) = (image.width(), image.height());
-        encode_batch(
-            FrameBuffer {
-                data: image.data(),
-                width,
-                height,
-            },
-            &batch,
-        )
-    };
-    // `encode_batch` drops rects the framebuffer can no longer back, which for
-    // a batch caught mid-reactivation can leave nothing. Do not ship a
-    // rect-less header the frontend would have to treat as corrupt.
-    if bytes.len() <= HEADER_LEN {
-        return;
-    }
-    if transport.deliver(bytes).is_err() {
-        // Not fatal, and in practice not reachable either - see
-        // `ChannelTransport::deliver` on why `Channel::send` cannot report a
-        // frontend that has stopped collecting. Left in place so the seam has
-        // one, rather than swallowing an error a pull transport would care
-        // about.
-        log::debug!("rdp: frame sink reported itself gone");
-    }
 }
 
 /// What the server told us in the `Finalized` state of a reactivation.
@@ -1247,12 +1165,7 @@ async fn reactivate(
 /// Rejects a zero axis for the same reason `connect` does: `DecodedImage::new`
 /// would build an empty framebuffer and the session would look alive while
 /// being incapable of ever producing a frame.
-fn apply_reactivation(
-    shared: &Shared,
-    batcher: &mut FrameBatcher,
-    width: u16,
-    height: u16,
-) -> Result<(), String> {
+fn apply_reactivation(shared: &Shared, width: u16, height: u16) -> Result<(), String> {
     if width == 0 || height == 0 {
         return Err(format!(
             "rdp: the server reactivated with an unusable desktop size of {width}x{height}"
@@ -1265,7 +1178,7 @@ fn apply_reactivation(
     // Whatever had accumulated describes a framebuffer that no longer exists.
     // The new one is blank and the server repaints it, so the next deltas are
     // already correct - no point shipping a black keyframe first.
-    batcher.resize(width, height);
+    shared.batcher.lock_or_recover().resize(width, height);
     *shared.dims.lock_or_recover() = (width, height);
     Ok(())
 }
@@ -1321,6 +1234,9 @@ mod tests {
             json(&RdpEvent::PointerPosition { x: 7, y: 9 }),
             r#"{"type":"pointerPosition","x":7,"y":9}"#
         );
+        // The tag the frontend's pull loop switches on, and the whole payload:
+        // pixels are collected with `rdp_take_frame`, never sent here.
+        assert_eq!(json(&RdpEvent::FrameReady), r#"{"type":"frameReady"}"#);
         assert_eq!(
             json(&RdpEvent::Disconnected {
                 reason: "user initiated disconnect".into()
@@ -1523,7 +1439,8 @@ mod tests {
     fn shared_fixture(width: u16, height: u16) -> Arc<Shared> {
         Arc::new(Shared {
             image: Mutex::new(DecodedImage::new(PixelFormat::RgbA32, width, height)),
-            mirrors: Arc::new(Mutex::new(Vec::new())),
+            batcher: Mutex::new(FrameBatcher::new(width, height)),
+            mirrors: Mutex::new(Vec::new()),
             dims: Mutex::new((width, height)),
             alive: AtomicBool::new(true),
         })
@@ -1550,7 +1467,7 @@ mod tests {
     }
 
     /// Records what a sink received, in order, tagging each payload by kind so
-    /// the connected-then-keyframe ordering is checkable.
+    /// a test can prove pixels never travel on it.
     #[derive(Default)]
     struct Recorder {
         seen: Mutex<Vec<(&'static str, String, usize)>>,
@@ -1573,17 +1490,16 @@ mod tests {
     #[test]
     fn reactivation_rebuilds_the_framebuffer_and_clears_stale_rects() {
         let shared = shared_fixture(1280, 800);
-        let mut batcher = FrameBatcher::new(1280, 800);
         // A rect that only makes sense at the old size.
-        batcher.push(Rect {
+        shared.batcher.lock_or_recover().push(Rect {
             x: 1000,
             y: 700,
             w: 200,
             h: 80,
         });
-        assert!(!batcher.is_empty());
+        assert!(!shared.batcher.lock_or_recover().is_empty());
 
-        apply_reactivation(&shared, &mut batcher, 640, 480).expect("valid size");
+        apply_reactivation(&shared, 640, 480).expect("valid size");
 
         assert_eq!(*shared.dims.lock_or_recover(), (640, 480), "dims published");
         {
@@ -1595,13 +1511,14 @@ mod tests {
                 "the framebuffer was rebuilt, not resized in place"
             );
         }
+
+        // The new batcher really is at the new size: the old rect is gone, and
+        // one valid only at the old size is now clipped away entirely.
+        let mut batcher = shared.batcher.lock_or_recover();
         assert!(
             batcher.is_empty(),
             "rects describing the old framebuffer are dropped, not carried over"
         );
-
-        // The new batcher really is at the new size: a rect valid only at the
-        // old one is now clipped away entirely.
         batcher.push(Rect {
             x: 1000,
             y: 700,
@@ -1620,11 +1537,9 @@ mod tests {
     #[test]
     fn reactivation_refuses_an_unusable_size() {
         let shared = shared_fixture(1280, 800);
-        let mut batcher = FrameBatcher::new(1280, 800);
 
         for (w, h) in [(0, 480), (640, 0), (0, 0)] {
-            let err = apply_reactivation(&shared, &mut batcher, w, h)
-                .expect_err("a zero axis must be refused");
+            let err = apply_reactivation(&shared, w, h).expect_err("a zero axis must be refused");
             assert!(err.contains("unusable desktop size"), "got: {err}");
         }
         // And it left the old state untouched rather than half-applying.
@@ -1632,9 +1547,10 @@ mod tests {
         assert_eq!(shared.image.lock_or_recover().width(), 1280);
     }
 
-    /// A fresh mirror needs the size before the pixels, then one whole frame.
+    /// A fresh mirror needs the size, and nothing else: the picture comes from
+    /// `rdp_snapshot`, which the mirror calls itself.
     #[test]
-    fn mirror_sink_is_primed_with_connected_then_keyframe() {
+    fn mirror_sink_is_primed_with_connected() {
         let shared = shared_fixture(8, 4);
         let session = session_fixture(shared, EventSink::new(|_| Ok(())));
 
@@ -1645,18 +1561,90 @@ mod tests {
         );
 
         let seen = recorder.seen.lock_or_recover().clone();
-        assert_eq!(seen.len(), 2, "exactly connected + keyframe");
-        assert_eq!(seen[0].0, "json", "the size must arrive before the pixels");
+        assert_eq!(seen.len(), 1, "connected, and no pixels behind it");
+        assert_eq!(seen[0].0, "json", "nothing raw travels on the channel");
         assert!(seen[0].1.contains(r#""type":"connected""#));
         assert!(seen[0].1.contains(r#""desktopWidth":8"#));
         assert!(seen[0].1.contains(r#""desktopHeight":4"#));
         assert!(seen[0].1.contains(r#""serverFingerprint":"AA:BB""#));
-        assert_eq!(seen[1].0, "raw", "then one full-framebuffer keyframe");
+    }
+
+    /// The pull contract: a pull returns exactly what accumulated since the
+    /// last one, and the next returns nothing until the server dirties
+    /// something again.
+    #[test]
+    fn take_frame_drains_the_batcher() {
+        let shared = shared_fixture(8, 4);
+        let session = session_fixture(Arc::clone(&shared), EventSink::new(|_| Ok(())));
+
+        assert!(
+            session.take_frame().is_empty(),
+            "nothing dirty, nothing to pull"
+        );
+
+        shared.batcher.lock_or_recover().push(Rect {
+            x: 0,
+            y: 0,
+            w: 4,
+            h: 2,
+        });
+        let first = session.take_frame();
+        assert_eq!(&first[0..4], &frame::FRAME_MAGIC);
+        assert_eq!(first[5], 0, "an accumulated batch is a delta");
         assert_eq!(
-            seen[1].2,
+            u16::from_le_bytes([first[6], first[7]]),
+            1,
+            "one rect in, one rect out"
+        );
+        assert_eq!(
+            u16::from_le_bytes([first[8], first[9]]),
+            8,
+            "the header names the framebuffer, not the rect"
+        );
+        assert_eq!(
+            first.len(),
+            HEADER_LEN + RECT_LEN + 4 * 2 * 4,
+            "header + one rect + its pixels"
+        );
+
+        assert!(
+            session.take_frame().is_empty(),
+            "the batcher was drained, so a second pull yields nothing"
+        );
+    }
+
+    /// `rdp_snapshot`'s whole contract: one full-framebuffer rect, whatever the
+    /// batcher holds. The live test covers this too, but only with a server.
+    #[test]
+    fn keyframe_is_one_full_framebuffer_rect() {
+        let shared = shared_fixture(8, 4);
+        let session = session_fixture(Arc::clone(&shared), EventSink::new(|_| Ok(())));
+
+        let bytes = session.keyframe();
+        assert_eq!(&bytes[0..4], &frame::FRAME_MAGIC);
+        assert_eq!(bytes[5], 1, "a snapshot is a keyframe");
+        assert_eq!(
+            u16::from_le_bytes([bytes[6], bytes[7]]),
+            1,
+            "exactly one rect"
+        );
+        assert_eq!(u16::from_le_bytes([bytes[8], bytes[9]]), 8);
+        assert_eq!(u16::from_le_bytes([bytes[10], bytes[11]]), 4);
+        assert_eq!(
+            bytes.len(),
             HEADER_LEN + RECT_LEN + 8 * 4 * 4,
             "header + one rect + every pixel"
         );
+
+        // A keyframe does not consume the batcher: a pull right after one still
+        // returns the rects that accumulated.
+        shared.batcher.lock_or_recover().push(Rect {
+            x: 0,
+            y: 0,
+            w: 4,
+            h: 2,
+        });
+        assert!(!session.take_frame().is_empty());
     }
 
     /// The bound exists because each extra sink costs a full copy of every
@@ -1827,9 +1815,11 @@ mod rdp_live {
     /// What the harness saw on the session channel.
     #[derive(Default)]
     struct Observed {
-        frames: AtomicUsize,
-        /// First raw batch, kept for header validation.
-        first_frame: Mutex<Option<Vec<u8>>>,
+        /// `frameReady` notifications. Pixels are pulled, not pushed, so this
+        /// counts wake-ups rather than batches.
+        notifications: AtomicUsize,
+        /// Raw payloads. MUST stay zero: no pixel may travel on the channel.
+        raw_payloads: AtomicUsize,
         events: Mutex<Vec<String>>,
     }
 
@@ -1839,13 +1829,16 @@ mod rdp_live {
         EventSink::new(move |body| {
             match body {
                 InvokeResponseBody::Raw(bytes) => {
-                    observed.frames.fetch_add(1, Ordering::Relaxed);
-                    let mut first = observed.first_frame.lock_or_recover();
-                    if first.is_none() {
-                        *first = Some(bytes);
-                    }
+                    observed.raw_payloads.fetch_add(1, Ordering::Relaxed);
+                    eprintln!("[rdp_live] UNEXPECTED raw payload of {} bytes", bytes.len());
                 }
                 InvokeResponseBody::Json(json) => {
+                    // One per pull cycle on a busy desktop, so counted rather
+                    // than logged.
+                    if json.contains(r#""type":"frameReady""#) {
+                        observed.notifications.fetch_add(1, Ordering::Relaxed);
+                        return Ok(());
+                    }
                     eprintln!("[rdp_live] event {json}");
                     observed.events.lock_or_recover().push(json.clone());
                     // Stand in for the confirmation dialog.
@@ -1921,21 +1914,53 @@ mod rdp_live {
                 ])
                 .expect("queueing input failed");
 
-            let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
-            while observed.frames.load(Ordering::Relaxed) == 0
-                && tokio::time::Instant::now() < deadline
-            {
-                tokio::time::sleep(Duration::from_millis(100)).await;
+            // Pull on a ~60 Hz tick for a 20s window. These numbers are the
+            // evidence the encoding question (RDP-02) is closed on: what the
+            // transport actually costs, not what a compressor might save.
+            let mut first_frame: Option<Vec<u8>> = None;
+            let (mut total_bytes, mut batches, mut max_batch_len) = (0usize, 0usize, 0usize);
+            let (mut peak_second, mut window_bytes) = (0usize, 0usize);
+            let started = tokio::time::Instant::now();
+            let mut window_at = started + Duration::from_secs(1);
+            let deadline = started + Duration::from_secs(20);
+            while tokio::time::Instant::now() < deadline {
+                tokio::time::sleep(Duration::from_millis(16)).await;
+                let bytes = session.take_frame();
+                if !bytes.is_empty() {
+                    batches += 1;
+                    total_bytes += bytes.len();
+                    window_bytes += bytes.len();
+                    max_batch_len = max_batch_len.max(bytes.len());
+                    if first_frame.is_none() {
+                        first_frame = Some(bytes);
+                    }
+                }
+                let now = tokio::time::Instant::now();
+                if now >= window_at {
+                    peak_second = peak_second.max(window_bytes);
+                    window_bytes = 0;
+                    window_at = now + Duration::from_secs(1);
+                }
             }
-            let frames = observed.frames.load(Ordering::Relaxed);
-            assert!(frames > 0, "no frame batch arrived within 20s");
-            eprintln!("[rdp_live] {frames} batch(es) received");
+            peak_second = peak_second.max(window_bytes);
 
-            let batch = observed
-                .first_frame
-                .lock_or_recover()
-                .clone()
-                .expect("a batch was recorded");
+            assert!(batches > 0, "no frame batch arrived within 20s");
+            eprintln!(
+                "[rdp_live] {batches} batch(es), {total_bytes} bytes total, \
+                 largest {max_batch_len} bytes, peak {peak_second} bytes/s"
+            );
+            eprintln!(
+                "[rdp_live] {} frameReady notification(s), {} raw channel payload(s)",
+                observed.notifications.load(Ordering::Relaxed),
+                observed.raw_payloads.load(Ordering::Relaxed)
+            );
+            assert_eq!(
+                observed.raw_payloads.load(Ordering::Relaxed),
+                0,
+                "pixels must never travel on the session channel"
+            );
+
+            let batch = first_frame.expect("a batch was recorded");
             check_batch_header(&batch, width, height);
 
             let events = observed.events.lock_or_recover().clone();

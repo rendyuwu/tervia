@@ -2,12 +2,12 @@ import { invoke, Channel } from "@tauri-apps/api/core";
 import { parseFrameBatch, type RdpFrameBatch } from "./frame";
 
 /**
- * Typed wrapper over the seven `rdp_*` commands, mirroring `ssh/bridge.ts`.
+ * Typed wrapper over the eight `rdp_*` commands, mirroring `ssh/bridge.ts`.
  *
- * One `Channel` carries BOTH control events and pixels: a JSON payload is an
- * `RdpEvent`, a raw payload is a frame batch and arrives as an `ArrayBuffer`.
- * So the handler dispatches on the payload type, which is why the channel is
- * typed as the union rather than as `RdpEvent`.
+ * The session `Channel` carries JSON control events ONLY. Pixels are pulled:
+ * `frameReady` says dirty rects are waiting and `rdpTakeFrame` collects them
+ * as raw bytes, so a framebuffer never goes through JSON and never sits in
+ * Tauri's process-global channel queue.
  */
 
 /** First-connect certificate confirmation request from the backend. Emitted
@@ -42,6 +42,9 @@ export type RdpEvent =
   | { type: "pointerDefault" }
   | { type: "pointerHidden" }
   | { type: "pointerPosition"; x: number; y: number }
+  /** Dirty rects are waiting. Collect them with `rdpTakeFrame`; no pixels
+   *  travel on the channel. */
+  | { type: "frameReady" }
   | { type: "disconnected"; reason: string }
   | { type: "error"; message: string };
 
@@ -119,8 +122,9 @@ export type RdpHandlers = {
    *  been rebuilt at this size and is BLANK; the server repaints it, so the
    *  next frames arrive as ordinary deltas. */
   onResize?: (width: number, height: number) => void;
-  /** One batch of dirty rectangles. A keyframe batch replaces everything. */
-  onFrame?: (batch: RdpFrameBatch) => void;
+  /** Dirty rects are waiting on the backend. Call `rdpTakeFrame` to collect
+   *  them; nothing is sent until you do, which is the backpressure. */
+  onFrameReady?: () => void;
   onDisconnected?: (reason: string) => void;
   onError?: (message: string) => void;
 };
@@ -169,9 +173,11 @@ export function rdpClose(id: number): Promise<void> {
 
 /**
  * Mirror a live session onto a second sink. Unlike SSH there is no byte stream
- * to replay, so the new sink gets a `connected` event and one full-framebuffer
- * keyframe first, then the same deltas the primary sink sees. Resolves with
- * whether the session is still alive.
+ * to replay, so the new sink gets a `connected` event and then takes its first
+ * picture from {@link rdpSnapshot}, repainting from it again on each
+ * `frameReady` - a mirror does NOT share the primary's batcher, so it must
+ * never call {@link rdpTakeFrame}. Resolves with whether the session is still
+ * alive.
  *
  * Uncalled: there is no detach-to-window. See
  * {@link rdpListSessions} for why the wrapper exists anyway.
@@ -181,16 +187,16 @@ export function rdpAttach(id: number, handlers: RdpHandlers): Promise<boolean> {
 }
 
 /**
- * The current framebuffer as one keyframe batch, in the same wire format the
- * session channel uses. Raw, so the pixels never go through JSON. `null` when
- * the payload is not a batch this build understands.
+ * The current framebuffer as one keyframe batch, in the same wire format
+ * {@link rdpTakeFrame} returns. Raw, so the pixels never go through JSON.
+ * `null` when the payload is not a batch this build understands.
  *
- * This is the pane's RESYNC path. Frame batches are queued for the next frame
- * rather than blitted on the channel callback, and that queue is bounded; when
- * it overflows the backlog is dropped, which leaves the local framebuffer
- * holding pixels the server has since changed. Deltas cannot be merged on this
- * side, so a keyframe is the only way back - and on an idle desktop the server
- * sends nothing, so waiting for one is waiting forever. Hence this.
+ * A mirror's first picture and its repaint on every `frameReady`: a mirror
+ * does not share the primary's batcher, so this is the only way it sees
+ * pixels, and on an idle desktop nothing else will ever paint it.
+ *
+ * Uncalled by the pane, which pulls deltas and has no resync path. See
+ * {@link rdpListSessions} for why the wrapper exists anyway.
  */
 export async function rdpSnapshot(id: number): Promise<RdpFrameBatch | null> {
   const raw = await invoke<ArrayBuffer>("rdp_snapshot", { id });
@@ -198,34 +204,29 @@ export async function rdpSnapshot(id: number): Promise<RdpFrameBatch | null> {
 }
 
 /**
- * Build the session channel. JSON payloads are events, raw payloads are frame
- * batches - the split the backend documents.
+ * Drain the session's pending dirty rects. `null` when nothing is pending -
+ * the backend returns a zero-length body and `parseFrameBatch` refuses
+ * anything shorter than a header.
  *
- * A raw payload arrives as an `ArrayBuffer`, but it does not arrive the same way
- * twice. Tauri switches transport on size at
- * `MAX_RAW_DIRECT_EXECUTE_THRESHOLD = 1024`:
- *
- * * **Under 1024 bytes** the bytes are JSON-encoded and delivered by
- *   `webview.eval` as a `new Uint8Array([...]).buffer` literal. That is the
- *   COMMON idle case - a blinking caret is about 128 bytes - so most batches on
- *   a quiet desktop never touch a binary transfer at all.
- * * **1024 bytes and up** the payload is parked in a process-global
- *   `Arc<Mutex<HashMap<u32, InvokeResponseBody>>>` and an eval fires a JS
- *   `invoke(fetch)` to pull it back. The entry is removed **only when that fetch
- *   runs**, and Tauri's wrapper ends in `.catch(console.error)`.
- *
- * The second one is why `onmessage` is wrapped below. An exception escaping this
- * handler does not merely lose a frame: it can leave later payloads parked in
- * that map with nothing left to collect them, which is a process-lifetime leak
- * of whole framebuffers. So the handler is total - it drops what it cannot
- * understand and always returns normally.
- *
- * Both transports produce an `ArrayBuffer`, so `instanceof` is the
- * discriminator; a view is normalised rather than trusted to be one, since
- * misreading a batch as an event would silently no-op on `message.type`.
+ * This is the frame transport; the caller's own pace is the backpressure, and
+ * the `rdp_take_frame` command documents why the channel cannot carry pixels.
  */
-function buildChannel(handlers: RdpHandlers): Channel<RdpEvent | ArrayBuffer> {
-  const channel = new Channel<RdpEvent | ArrayBuffer>();
+export async function rdpTakeFrame(id: number): Promise<RdpFrameBatch | null> {
+  const raw = await invoke<ArrayBuffer>("rdp_take_frame", { id });
+  return parseFrameBatch(raw);
+}
+
+/**
+ * Build the session channel. It carries JSON control events only - pixels come
+ * from {@link rdpTakeFrame}, never from here.
+ *
+ * `onmessage` is wrapped because an exception escaping it reaches Tauri's own
+ * `.catch(console.error)` and buys nothing, while losing every event queued
+ * behind it. The handler is total: it drops what it cannot understand and
+ * always returns normally.
+ */
+function buildChannel(handlers: RdpHandlers): Channel<RdpEvent> {
+  const channel = new Channel<RdpEvent>();
   // Assigned exactly once, and never replaced or detached while the session is
   // live: swapping the handler on a channel Tauri is still delivering to would
   // orphan whatever is in flight. A session is ended by `rdp_close`, not by
@@ -245,16 +246,7 @@ function buildChannel(handlers: RdpHandlers): Channel<RdpEvent | ArrayBuffer> {
 
 /** The whole of the message handling, so `onmessage` above is nothing but the
  *  try/catch that has to wrap it. */
-function dispatch(message: RdpEvent | ArrayBuffer, handlers: RdpHandlers): void {
-  const raw = asArrayBuffer(message);
-  if (raw) {
-    const batch = parseFrameBatch(raw);
-    // A batch this reader does not trust is dropped rather than partially
-    // applied; the next update repaints the same region. See `frame.ts`.
-    if (batch) handlers.onFrame?.(batch);
-    return;
-  }
-  const event = message as RdpEvent;
+function dispatch(event: RdpEvent, handlers: RdpHandlers): void {
   switch (event.type) {
     case "connected":
       handlers.onConnected?.(event.desktopWidth, event.desktopHeight, event.serverFingerprint);
@@ -271,6 +263,9 @@ function dispatch(message: RdpEvent | ArrayBuffer, handlers: RdpHandlers): void 
     case "resize":
       handlers.onResize?.(event.width, event.height);
       break;
+    case "frameReady":
+      handlers.onFrameReady?.();
+      break;
     case "disconnected":
       handlers.onDisconnected?.(event.reason);
       break;
@@ -286,25 +281,6 @@ function dispatch(message: RdpEvent | ArrayBuffer, handlers: RdpHandlers): void 
     case "pointerPosition":
       break;
   }
-}
-
-/**
- * The raw payload behind a channel message, or `null` when it is a JSON event.
- *
- * Both of Tauri's raw transports hand over an `ArrayBuffer`, so the first test
- * is the real one. The `ArrayBufferView` arm is insurance, not speculation: if a
- * Tauri version ever delivered the `Uint8Array` rather than its `.buffer`, the
- * `instanceof` would fail, the payload would fall through to the event switch,
- * and an `undefined` `.type` would match no case - a silently black pane with
- * nothing logged anywhere. Normalising here makes that a non-event instead.
- */
-function asArrayBuffer(message: RdpEvent | ArrayBuffer): ArrayBuffer | null {
-  if (message instanceof ArrayBuffer) return message;
-  if (ArrayBuffer.isView(message)) {
-    const view: ArrayBufferView = message;
-    return view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength) as ArrayBuffer;
-  }
-  return null;
 }
 
 /**
