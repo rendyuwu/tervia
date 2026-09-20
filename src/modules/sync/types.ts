@@ -122,6 +122,24 @@ export type SyncConfig = {
   carrySecrets: boolean;
 };
 
+/** The fields that say WHICH REMOTE a configuration names. `region` is how the
+ *  same bucket is addressed, `cas` and `carrySecrets` are behaviour, `enabled`
+ *  is a switch - none of them is an address. */
+const REMOTE_IDENTITY_FIELDS = ["provider", "endpoint", "bucket", "prefix"] as const;
+
+/**
+ * Whether two configurations name the same place.
+ *
+ * A change of address is a change of etag map: its keys are `kind:id`, not
+ * object names, so a map filled against the old remote supplies an `If-Match`
+ * for objects that never existed on the new one - a whole first pass refused as
+ * stale on a conditional-write provider, reported as conflicts that did not
+ * happen.
+ */
+export function namesTheSameRemote(a: SyncConfig, b: SyncConfig): boolean {
+  return REMOTE_IDENTITY_FIELDS.every((field) => a[field] === b[field]);
+}
+
 /** A device with sync never configured. Off, and naming nothing. */
 export const DEFAULT_SYNC_CONFIG: SyncConfig = {
   enabled: false,

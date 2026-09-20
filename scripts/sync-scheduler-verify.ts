@@ -105,11 +105,13 @@ import { createScheduler } from "../src/modules/sync/scheduler";
 import { createSyncSettingsStore, type SyncSettingsStore } from "../src/modules/sync/store";
 import {
   DEFAULT_SYNC_CONFIG,
+  EMPTY_SYNC_STATUS,
   SYNC_CONFIG_KEY,
   SYNC_DIRTY_KEY,
   SYNC_ETAGS_KEY,
   SYNC_STATUS_KEY,
   WIRE_VERSION,
+  namesTheSameRemote,
   type Envelope,
   type PullReport,
   type PushReport,
@@ -374,6 +376,10 @@ function harness(
   });
   /** Set by a check to make the next pull command reject. */
   let failPull: string | null = null;
+  /** The same for the push command. A per-record `failed` entry is the other
+   *  shape and B15 covers it; this one is the endpoint being gone, which is
+   *  what a mid-session outage actually looks like. */
+  let failPush: string | null = null;
   const calls = { pull: 0, push: 0 };
   const pulled: { envelopes: Envelope[]; etags: Record<string, string> }[] = [];
   const pushed: { envelopes: Envelope[]; etags: Record<string, string> }[] = [];
@@ -391,6 +397,7 @@ function harness(
     async push(envelopes, etags) {
       calls.push++;
       pushed.push({ envelopes, etags });
+      if (failPush) throw new Error(failPush);
       return seed.push ?? { etags: {}, failed: [] };
     },
   };
@@ -447,6 +454,9 @@ function harness(
     releaseDirty: (): void => releaseDirty(),
     failPull: (reason: string | null): void => {
       failPull = reason;
+    },
+    failPush: (reason: string | null): void => {
+      failPush = reason;
     },
     settings,
     /** The bytes on disk, for a check that has to play the other webview. */
@@ -1224,6 +1234,57 @@ function withoutComments(source: string): string {
   return source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^[ \t]*\/\/.*$/gm, "");
 }
 
+async function b20(): Promise<void> {
+  console.log("\nB20 - the pending count is a floor, and an outage cannot read zero");
+  // D2 from the cross-device sync hand test: the server was stopped mid-session, two records
+  // were edited, and "Waiting to be pushed" read 0 throughout - because the
+  // number is the RECONCILE's, which is what the remote was missing as of the
+  // last SUCCESSFUL pull, and a failed pull leaves it alone by design. The
+  // dirty set is the half that holds unpushed local edits, and it was never in
+  // the number.
+
+  // A. A pull that fails and a push that fails, which is one dead endpoint.
+  const outage = harness({ hosts: [host("h-1"), host("h-2")] });
+  outage.failPull("the remote could not be reached");
+  outage.failPush("the remote could not be reached");
+  await outage.hosts.upsertHost(host("h-1", { name: "edited in the dark" }));
+  await outage.hosts.upsertHost(host("h-2", { name: "edited too" }));
+  await settle();
+  await outage.scheduler.pullNow();
+  await settle();
+  const dark = await outage.status();
+  check("the two edits are still owed", (await outage.dirty()).sort(), ["host:h-1", "host:h-2"]);
+  check("and the count says so rather than zero", dark.pending, 2);
+  check("it reaches the store file", (await outage.settings.readStatus()).pending, 2);
+  check("with the outage still reported", dark.lastError, "the remote could not be reached");
+
+  // B. THE DEBOUNCED PUSH ALONE, with no pull anywhere near it. Both entry
+  // points that reach `runPush` drop its returned string, so a flush into a
+  // dead endpoint used to write no status at all - the settings window sat on
+  // the last pull's healthy figures until a focus cleared the rate limit.
+  const flush = harness({ hosts: [host("h-1")] });
+  flush.failPush("the remote answered 503");
+  await flush.hosts.upsertHost(host("h-1", { name: "renamed" }));
+  await settle();
+  check("nothing has been written yet", (await flush.status()).lastError, null);
+  await flush.fire();
+  const flushed = await flush.status();
+  check("the failed flush reports itself", flushed.lastError, "the remote answered 503");
+  check("and its edit is counted", flushed.pending, 1);
+
+  // C. THE OTHER DIRECTION, or the floor is a ratchet: a reconcile figure that
+  // no push can lower leaves the window reporting work that is done.
+  const settled = harness({
+    hosts: [host("h-1")],
+    status: { ...EMPTY_SYNC_STATUS, pending: 1 },
+  });
+  await settled.hosts.upsertHost(host("h-1", { name: "renamed" }));
+  await settle();
+  await settled.fire();
+  check("a push that lands clears the count", (await settled.status()).pending, 0);
+  check("and nothing is left owed", await settled.dirty(), []);
+}
+
 async function c1(): Promise<void> {
   console.log("\nC1 - the conditional-write warning is about the setting, not a probe");
   const source = readFileSync(resolve(ROOT, SYNC_SECTION), "utf8");
@@ -1466,9 +1527,18 @@ async function c4(): Promise<void> {
   const block = /\{status\.stale\.length > 0 \? \(([\s\S]*?)\n\s*\) : null\}/.exec(source);
   check("the stale block is there to read", block !== null, true);
   check(
-    "and it names the control that settles it",
-    /Use Pull now above to settle them/.test(block?.[1] ?? ""),
+    "and it names the two things that settle it",
+    /edit one to send it to the remote again, or\s+delete it here/.test(block?.[1] ?? ""),
     true,
+  );
+  // AND DOES NOT PROMISE THE ONE THING THAT DOES NOT WORK. A stale record is
+  // exactly what the pull declines to publish, so telling the user to press
+  // Pull now sends them round a loop that cannot end - the instruction this
+  // replaced, and the reason D1 read as the remote's fault.
+  check(
+    "without telling the user a pull republishes them",
+    /Pull now/.test(block?.[1] ?? ""),
+    false,
   );
   check(
     "a request is emitted as the sync event",
@@ -1827,6 +1897,45 @@ async function c10(): Promise<void> {
   );
 }
 
+async function c11(): Promise<void> {
+  console.log("\nC11 - a different remote is a different etag map");
+  // The map is keyed `kind:id`, not by object name, so it survives a change of
+  // provider or prefix and reads as current against a remote that has never
+  // held any of those objects - see `namesTheSameRemote`.
+  const at = (over: Partial<typeof DEFAULT_SYNC_CONFIG>) => ({ ...DEFAULT_SYNC_CONFIG, ...over });
+  const s3 = at({ provider: "s3", endpoint: "http://one:9000", bucket: "b", prefix: "p" });
+  check("the same four fields are the same remote", namesTheSameRemote(s3, { ...s3 }), true);
+  check(
+    "and region, cas and the carry toggle are not part of the address",
+    namesTheSameRemote(s3, { ...s3, region: "eu-west-1", cas: true, carrySecrets: true }),
+    true,
+  );
+  for (const [field, value] of [
+    ["provider", "webdav"],
+    ["endpoint", "http://two:9000"],
+    ["bucket", "other"],
+    ["prefix", "dav1"],
+  ] as const) {
+    check(
+      `a new ${field} is a new remote`,
+      namesTheSameRemote(s3, { ...s3, [field]: value }),
+      false,
+    );
+  }
+
+  // AND THE SETTINGS WINDOW ACTS ON IT, before it stores the configuration that
+  // renames the remote: the pull that Save requests must not be able to start
+  // on the old map.
+  const source = withoutComments(readFileSync(resolve(ROOT, SYNC_SECTION), "utf8"));
+  check(
+    "the map is emptied under the guard, before the new address is stored",
+    /namesTheSameRemote\([\s\S]*?\)\s*\)\s*\{\s*await settings\.writeEtags\(\{\}\);\s*\}\s*await settings\.writeConfig\(config\);/.test(
+      source,
+    ),
+    true,
+  );
+}
+
 async function main(): Promise<void> {
   await b1();
   await b2b3b4();
@@ -1845,6 +1954,7 @@ async function main(): Promise<void> {
   await b17();
   await b18();
   await b19();
+  await b20();
   await c1();
   await c2();
   await c3();
@@ -1854,6 +1964,7 @@ async function main(): Promise<void> {
   await c8();
   await c9();
   await c10();
+  await c11();
 
   // A pass that failed where no assertion could see it. Asserted last so the
   // group that produced it has already printed.

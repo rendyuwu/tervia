@@ -530,9 +530,18 @@ export function createScheduler(io: SchedulerIo): SyncScheduler {
 
   async function writeStatus(next: Partial<SyncStatus>): Promise<void> {
     // Hydrated first, or this merges over an empty object rather than over what
-    // the last session left - see {@link hydrate}.
+    // the last session left - see {@link hydrate}. It is also what makes the
+    // floor below complete: `hydrate` folds the last session's dirty set into
+    // this one's, so `dirty.size` is the whole of what this device owes.
     await hydrate();
     status = { ...status, ...next };
+    // THE COUNT IS A FLOOR, and the dirty set is the half the reconcile cannot
+    // see. `pending` is what the remote was missing as of the last SUCCESSFUL
+    // pull, so during an outage - the one moment a user goes looking for it -
+    // it reads zero while edits sit unpublished. A slot that is both dirty and
+    // remote-missing is counted once, so this never double counts; two disjoint
+    // sets report the larger, which is why the field says "at least".
+    status.pending = Math.max(status.pending, dirty.size);
     await io.settings.writeStatus(status);
   }
 
@@ -636,10 +645,6 @@ export function createScheduler(io: SchedulerIo): SyncScheduler {
       // place is still owed, so it goes back on the dirty set - which is
       // durable, so it also survives the window closing.
       for (const failure of failed) dirty.add(etagSlot(failure.kind, failure.id));
-      // COUNTED AFTER THE PUSH, not before: the remote is missing what the
-      // reconcile found minus what this pass just gave it, and reporting the
-      // pre-push number leaves the settings window showing work that is
-      // already done until the next pull.
       found = {
         lastPullAt: now(),
         // COUNTED AFTER THE PUSH, not before: the remote is missing what the
@@ -718,7 +723,12 @@ export function createScheduler(io: SchedulerIo): SyncScheduler {
       const failed = await publish(envelopes);
       for (const failure of failed) dirty.add(etagSlot(failure.kind, failure.id));
       await persistDirty();
-      await writeStatus({ lastPushAt: now() });
+      // Counted down by what this pass placed, the way the pull's own figure
+      // is - without it the floor in `writeStatus` can only ever rise.
+      await writeStatus({
+        lastPushAt: now(),
+        pending: Math.max(0, status.pending - (taken.size - failed.length)),
+      });
       return failed[0]?.reason ?? null;
     } catch (e) {
       // The edit is not lost: the marks go back and the next trigger retries.
@@ -727,7 +737,13 @@ export function createScheduler(io: SchedulerIo): SyncScheduler {
       // thing that decides whether this reports.
       for (const slot of taken) dirty.add(slot);
       await persistDirty().catch(() => {});
-      return e instanceof Error ? e.message : String(e);
+      const reason = e instanceof Error ? e.message : String(e);
+      // A DEBOUNCED PUSH IS THE ONLY THING THAT RAN, so it is the only thing
+      // that can report: both entry points that reach here drop the returned
+      // string. Swallowed rather than thrown on - the edit is already safe on
+      // the dirty set, and a failed status write must not replace the reason.
+      await writeStatus({ lastError: reason }).catch(() => {});
+      return reason;
     }
   }
 

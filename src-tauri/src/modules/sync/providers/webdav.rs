@@ -362,7 +362,8 @@ pub fn classify_put(status: u16, key: &str, retried: bool) -> Result<Option<()>,
 /// The residue, named rather than argued away: a user who edits their prefix
 /// after a successful setup, to another value under the same reachable base
 /// path, gets an empty inventory instead of an error - which is also the
-/// correct reading of a genuinely fresh prefix.
+/// correct reading of a genuinely fresh prefix. `KNOWN-LIMITS.md` carries what
+/// that costs now that an empty listing publishes the whole inventory.
 pub fn classify_list(status: u16) -> Result<Option<()>, ProviderError> {
     match status {
         200..=299 => Ok(Some(())),
