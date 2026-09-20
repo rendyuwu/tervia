@@ -22,6 +22,7 @@ import {
   wheelRotation,
   type RdpViewport,
 } from "./lib/viewport";
+import { coalesceMoves } from "./lib/inputQueue";
 import { onRdpPaneAction, type RdpPaneAction } from "./paneActions";
 import { CTRL_ALT_DEL_SCANCODES, scancodeFor } from "./scancodes";
 
@@ -341,6 +342,10 @@ export function RdpPane({ leafId, connectionId, visible, focused = true }: Props
 
   const pendingRef = useRef<RdpInputEvent[]>([]);
   const flushHandle = useRef<number | null>(null);
+  /** One batch on the wire at a time. A rejected batch goes back to the head of
+   *  the queue, and a second send overtaking it would transpose key
+   *  transitions - which is how a modifier gets stranded down on the server. */
+  const inFlight = useRef(false);
   const heldKeys = useRef<Set<number>>(new Set());
   /**
    * Characters sent as `unicodeDown` with no `keyUp` yet - a dead key, IME
@@ -357,14 +362,45 @@ export function RdpPane({ leafId, connectionId, visible, focused = true }: Props
   const heldUnicode = useRef<Set<string>>(new Set());
   const heldButtons = useRef<Set<number>>(new Set());
 
-  const flushInput = useCallback(() => {
+  // The explicit type argument is required: the body references `flushInput`
+  // to reschedule itself, which TypeScript cannot infer from its own
+  // initializer.
+  const flushInput = useCallback<() => void>(() => {
     flushHandle.current = null;
+    if (pendingRef.current.length === 0) return;
+    // Read before `pendingRef` is cleared, and not optional-chained: a
+    // short-circuited `?.` would skip the whole promise chain and leave
+    // `inFlight` stuck true.
+    const session = sessionRef.current;
+    if (!session || inFlight.current) {
+      // Rescheduled, not cleared: input queued before `openRdp` resolves is
+      // kept rather than dropped. The loop is bounded at both ends - the
+      // unmount effect cancels the frame, and both teardown paths empty
+      // `pendingRef` as they null `sessionRef`, so a pane left sitting on its
+      // "ended" overlay stops on the next frame instead of spinning.
+      if (flushHandle.current === null) flushHandle.current = requestAnimationFrame(flushInput);
+      return;
+    }
     const batch = pendingRef.current;
-    if (batch.length === 0) return;
     pendingRef.current = [];
-    // Dropped rather than retried: input is only meaningful in order and in
-    // time, and the session is torn down on any error worth surfacing.
-    void sessionRef.current?.sendInput(batch).catch(() => {});
+    inFlight.current = true;
+    void session
+      .sendInput(batch)
+      .then((accepted) => {
+        // The same staleness guard `pullFrame` uses: a session that died while
+        // this was in flight must not have its batch put back, or the queue is
+        // refilled behind the teardown that just emptied it.
+        if (accepted || sessionRef.current !== session) return;
+        // Not dropped: the backend took none of it. Put it back in front of
+        // whatever arrived while it was in flight, collapse the move runs that
+        // seam creates, and try again next frame.
+        pendingRef.current = coalesceMoves(batch.concat(pendingRef.current));
+        if (flushHandle.current === null) flushHandle.current = requestAnimationFrame(flushInput);
+      })
+      .catch(() => {})
+      .finally(() => {
+        inFlight.current = false;
+      });
   }, []);
 
   const queueInput = useCallback(
@@ -675,6 +711,10 @@ export function RdpPane({ leafId, connectionId, visible, focused = true }: Props
             onDisconnected: (reason) => {
               if (!alive) return;
               sessionRef.current = null;
+              // Input for a dead session is meaningless, and leaving it queued
+              // would keep `flushInput` rescheduling against a session that is
+              // never coming back.
+              pendingRef.current = [];
               setStatus({ kind: "closed", reason: lastError || reason });
               // Nothing is riding the tunnel any more, and the pane stays
               // mounted on its "ended" overlay for as long as the user leaves
@@ -717,6 +757,7 @@ export function RdpPane({ leafId, connectionId, visible, focused = true }: Props
     return () => {
       alive = false;
       sessionRef.current = null;
+      pendingRef.current = [];
       // A pending request must not fire against a session that is going away.
       fitRef.current = false;
       clearTimeout(fitTimer.current);

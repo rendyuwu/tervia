@@ -98,6 +98,21 @@ fn rdp_runtime() -> &'static Runtime {
     })
 }
 
+/// Simultaneous sessions. Each holds a whole framebuffer (33 MB at 4K) plus,
+/// while a snapshot is being encoded, a second buffer of the same order, and
+/// each adds a task to a 2-worker runtime.
+const MAX_RDP_SESSIONS: usize = 8;
+
+/// `Err` once `live` sessions are already open.
+fn capacity_check(live: usize) -> Result<(), String> {
+    if live >= MAX_RDP_SESSIONS {
+        return Err(format!(
+            "rdp: too many sessions open ({MAX_RDP_SESSIONS}); close one before opening another"
+        ));
+    }
+    Ok(())
+}
+
 pub struct RdpState {
     sessions: Arc<tokio::sync::RwLock<HashMap<u32, Arc<RdpSession>>>>,
     next_id: AtomicU32,
@@ -349,6 +364,9 @@ pub async fn rdp_open(
     input: RdpOpenInput,
     on_event: EventSink,
 ) -> Result<u32, String> {
+    // Refuse before the keychain read and the handshake, so a caller past the
+    // ceiling is told immediately rather than after up to 45 s of connecting.
+    capacity_check(state.sessions.read().await.len())?;
     // Read the keychain on this side of the spawn: `tauri::State` is borrowed
     // from the command invocation and cannot cross into the RDP runtime, and
     // resolving here keeps the plaintext's life as short as possible.
@@ -363,18 +381,30 @@ pub async fn rdp_open(
             e
         })?;
     let id = state.next_id.fetch_add(1, Ordering::Relaxed);
+    // The authoritative check, held across check and insert: two concurrent
+    // opens can both clear the pre-check above, and only this guard serialises
+    // them.
+    let mut sessions = state.sessions.write().await;
+    if let Err(message) = capacity_check(sessions.len()) {
+        drop(sessions);
+        // Emits `disconnected`, aborts the task and drops the TLS stream.
+        session.close().await;
+        return Err(message);
+    }
     // Take the exit receiver before the Arc reaches the map, so the janitor
     // cannot race another caller for the slot. It fires both when the session
     // task ends on its own and when `rdp_close` aborts it (the sender is
     // dropped mid-future), so every teardown path wakes it; it no-ops on an
-    // already-removed id.
+    // already-removed id. After the capacity check, because a rejected session
+    // never reaches the map and so needs no janitor.
     let exit_signal = session.take_exit_signal();
-    let sessions = Arc::clone(&state.sessions);
-    state.sessions.write().await.insert(id, session);
+    let map = Arc::clone(&state.sessions);
+    sessions.insert(id, session);
+    drop(sessions);
     if let Some(rx) = exit_signal {
         rt.spawn(async move {
             let _ = rx.await;
-            sessions.write().await.remove(&id);
+            map.write().await.remove(&id);
             log::info!("rdp session id={id} evicted after task exit");
         });
     }
@@ -395,14 +425,20 @@ pub async fn rdp_open(
 /// everything at once - and do not pre-chunk on the frontend. The count that
 /// matters is the one the events *expand into*, which only the backend can see:
 /// one `releaseAll` can become hundreds of events on its own.
+///
+/// `false` means the session task has fallen behind and the batch was **not**
+/// taken - none of it, so the caller still holds every event and must keep the
+/// batch and retry it. Dropping it instead strands a modifier down on the
+/// server, because a discarded `keyUp` or `releaseAll` never reaches the
+/// keyboard state machine. `Err` means the session is gone.
 #[tauri::command]
 pub async fn rdp_input(
     state: tauri::State<'_, RdpState>,
     id: u32,
     events: Vec<RdpInputEvent>,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     if events.is_empty() {
-        return Ok(());
+        return Ok(true);
     }
     let session = lookup(&state, id, "rdp_input").await?;
     let ops: Vec<InputOp> = events
@@ -435,7 +471,7 @@ pub async fn rdp_resize(
     scale_factor: u32,
 ) -> Result<(), String> {
     let session = lookup(&state, id, "rdp_resize").await?;
-    session.request_resize(width, height, scale_factor)
+    session.request_resize(width, height, scale_factor).await
 }
 
 #[tauri::command]
@@ -488,10 +524,18 @@ pub async fn rdp_attach(
 /// framebuffer yet, or whose deltas were lost, cannot reconstruct one from
 /// deltas, and on an idle desktop the server sends nothing to reconstruct it
 /// from.
+///
+/// The encode runs on the RDP runtime's blocking pool, never here: it takes
+/// the `image` lock, which the session task holds for the whole of a RemoteFX
+/// decode, and a Tauri worker parked on that stalls every other command.
 #[tauri::command]
 pub async fn rdp_snapshot(state: tauri::State<'_, RdpState>, id: u32) -> Result<Response, String> {
     let session = lookup(&state, id, "rdp_snapshot").await?;
-    Ok(Response::new(session.keyframe()))
+    let bytes = rdp_runtime()
+        .spawn_blocking(move || session.keyframe())
+        .await
+        .map_err(|e| format!("rdp: encoding a snapshot failed: {e}"))?;
+    Ok(Response::new(bytes))
 }
 
 /// Drain whatever the session batcher has accumulated, as one batch in the
@@ -513,13 +557,21 @@ pub async fn rdp_snapshot(state: tauri::State<'_, RdpState>, id: u32) -> Result<
 /// until then the batcher coalesces. One batch is capped at one framebuffer by
 /// the batcher's collapse rule, so a consumer that stops pulling costs exactly
 /// one framebuffer of host memory and no IPC at all.
+///
+/// Drained on the RDP runtime's blocking pool, never here, for the same reason
+/// [`rdp_snapshot`] is: it takes the `image` lock, which the session task holds
+/// across a whole RemoteFX decode.
 #[tauri::command]
 pub async fn rdp_take_frame(
     state: tauri::State<'_, RdpState>,
     id: u32,
 ) -> Result<Response, String> {
     let session = lookup(&state, id, "rdp_take_frame").await?;
-    Ok(Response::new(session.take_frame()))
+    let bytes = rdp_runtime()
+        .spawn_blocking(move || session.take_frame())
+        .await
+        .map_err(|e| format!("rdp: draining the frame batcher failed: {e}"))?;
+    Ok(Response::new(bytes))
 }
 
 /// Answer a first-connect `certPrompt`. `accept = true` lets the paused TLS
@@ -561,6 +613,16 @@ mod tests {
 
     fn parse(json: &str) -> RdpInputEvent {
         serde_json::from_str(json).expect("deserialize")
+    }
+
+    /// The ceiling exists because each session pins a whole framebuffer and a
+    /// task on a 2-worker runtime. Refusal, not eviction: an open session
+    /// belongs to a user who is looking at it.
+    #[test]
+    fn session_cap_refuses_past_the_ceiling() {
+        capacity_check(MAX_RDP_SESSIONS - 1).expect("one slot left is still a slot");
+        let err = capacity_check(MAX_RDP_SESSIONS).expect_err("a full map refuses");
+        assert!(err.contains("too many sessions open"), "got: {err}");
     }
 
     /// The frontend writes these by hand, so the tags and field names are the
