@@ -117,7 +117,6 @@ console.log("\n[wire] a well-formed batch parses exactly");
   const batch = parseFrameBatch(buf);
   checkTrue("it parses", batch !== null);
   if (!batch) throw new Error("unreachable: guarded above");
-  check("delta, not keyframe", batch.keyframe, false);
   check("framebuffer size", [batch.fbWidth, batch.fbHeight], [8, 4]);
   check("rect table, in order", batch.rects, rects);
   // The offsets are ABSOLUTE into the buffer, which is what lets a caller build
@@ -144,7 +143,6 @@ console.log("\n[wire] a keyframe is one full-framebuffer rect");
     encode({ keyframe: true, fbWidth: 6, fbHeight: 3, rects: [{ x: 0, y: 0, w: 6, h: 3 }] }),
   );
   checkTrue("it parses", batch !== null);
-  check("kind 1 reads as a keyframe", batch?.keyframe, true);
   check("covering the whole framebuffer", batch?.rects, [{ x: 0, y: 0, w: 6, h: 3 }]);
 }
 

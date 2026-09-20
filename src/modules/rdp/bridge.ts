@@ -191,10 +191,12 @@ export function rdpAttach(id: number, handlers: RdpHandlers): Promise<boolean> {
  * {@link rdpTakeFrame} returns. Raw, so the pixels never go through JSON.
  * `null` when the payload is not a batch this build understands.
  *
- * This is the pane's RESYNC path. Deltas cannot be merged on this side, so a
- * framebuffer that failed to take a batch has no way back except a whole
- * keyframe - and on an idle desktop the server sends nothing, so waiting for
- * one is waiting forever. Hence this.
+ * A mirror's first picture and its repaint on every `frameReady`: a mirror
+ * does not share the primary's batcher, so this is the only way it sees
+ * pixels, and on an idle desktop nothing else will ever paint it.
+ *
+ * Uncalled by the pane, which pulls deltas and has no resync path. See
+ * {@link rdpListSessions} for why the wrapper exists anyway.
  */
 export async function rdpSnapshot(id: number): Promise<RdpFrameBatch | null> {
   const raw = await invoke<ArrayBuffer>("rdp_snapshot", { id });
@@ -206,10 +208,8 @@ export async function rdpSnapshot(id: number): Promise<RdpFrameBatch | null> {
  * the backend returns a zero-length body and `parseFrameBatch` refuses
  * anything shorter than a header.
  *
- * This is the frame transport, and the caller's own pace is the backpressure:
- * nothing is sent until this is called, and the backend coalesces in between.
- * Raw, so pixels never go through JSON and never sit in Tauri's process-global
- * channel queue.
+ * This is the frame transport; the caller's own pace is the backpressure, and
+ * the `rdp_take_frame` command documents why the channel cannot carry pixels.
  */
 export async function rdpTakeFrame(id: number): Promise<RdpFrameBatch | null> {
   const raw = await invoke<ArrayBuffer>("rdp_take_frame", { id });

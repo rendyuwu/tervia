@@ -43,9 +43,6 @@ const BYTES_PER_PIXEL = 4;
 export type RdpRect = { x: number; y: number; w: number; h: number };
 
 export type RdpFrameBatch = {
-  /** True when this batch replaces the whole framebuffer. Always exactly one
-   *  rect covering `fbWidth` x `fbHeight`. */
-  keyframe: boolean;
   /** Framebuffer this batch belongs to. Authoritative: a batch that arrives
    *  after a server-side resize carries the NEW size, whether or not the
    *  `resize` event has been processed yet. */
@@ -128,5 +125,5 @@ export function parseFrameBatch(buffer: ArrayBuffer): RdpFrameBatch | null {
   // read past the end on the last rect.
   if (expected !== payloadLen) return null;
 
-  return { keyframe: kind === 1, fbWidth, fbHeight, rects, buffer, pixelOffsets };
+  return { fbWidth, fbHeight, rects, buffer, pixelOffsets };
 }

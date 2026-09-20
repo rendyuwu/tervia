@@ -6,7 +6,6 @@ import { useHostKeyPrompt } from "@/modules/ssh/hostKeyPrompt";
 import {
   confirmRdpCert,
   openRdp,
-  rdpSnapshot,
   rdpTakeFrame,
   type RdpInputEvent,
   type RdpSession,
@@ -37,13 +36,10 @@ import { CTRL_ALT_DEL_SCANCODES, scancodeFor } from "./scancodes";
  * full-resolution intermediate means the scale happens once, over one image,
  * with the browser's own filtering.
  *
- * Pixels are PULLED, not pushed. The session channel carries a tiny
- * `frameReady`; the pane asks for the accumulated batch with `rdpTakeFrame` on
- * a frame, with at most one pull outstanding. That single credit is the
- * backpressure: while it is in flight the backend keeps coalescing into its
- * own batcher, whose collapse rule caps it at one framebuffer, so a stalled
- * main thread costs resolution in time rather than an unbounded local queue.
- * There is no frame queue on this side at all.
+ * Pixels are PULLED, not pushed. The channel carries a tiny `frameReady`; the
+ * pane asks for the accumulated batch with `rdpTakeFrame` on a frame, at most
+ * one pull outstanding. There is no frame queue on this side at all - the
+ * `rdp_take_frame` command documents what the backend does while it waits.
  *
  * # How the keys get there
  *
@@ -115,9 +111,7 @@ export function RdpPane({ leafId, connectionId, visible, focused = true }: Props
   // ---------------------------------------------------------------- rendering
 
   const compositeHandle = useRef<number | null>(null);
-  /** At most one pull in flight; that single credit IS the backpressure. While
-   *  it is outstanding the backend keeps coalescing into its batcher, which is
-   *  capped at one framebuffer by the collapse rule. */
+  /** At most one pull in flight; that single credit IS the backpressure. */
   const pullingRef = useRef(false);
   /** `pullFrame`, read through a ref so `composite` can drive it without the
    *  two memoizations depending on each other. Assigned on every render, and
@@ -145,13 +139,12 @@ export function RdpPane({ leafId, connectionId, visible, focused = true }: Props
    * Blit one pulled batch into the framebuffer. Runs on a frame, never on the
    * channel callback.
    *
-   * `false` means it was not applied. `putImageData` should not be able to
-   * throw here - the parser has already proved every rect is in bounds and
-   * every view in range - but if it ever does, the caller resyncs instead of
-   * retrying the same poison bytes forever.
+   * `putImageData` should not be able to throw here - the parser has already
+   * proved every rect is in bounds and every view in range - so a throw is
+   * logged and the region waits for the server's next repaint.
    */
   const blitBatch = useCallback(
-    (batch: RdpFrameBatch): boolean => {
+    (batch: RdpFrameBatch): void => {
       try {
         // The batch header is authoritative about the framebuffer it describes:
         // a batch that arrives right after a server-side resize carries the NEW
@@ -161,7 +154,7 @@ export function RdpPane({ leafId, connectionId, visible, focused = true }: Props
         if (!fb || fb.width !== batch.fbWidth || fb.height !== batch.fbHeight) {
           resetFramebuffer(batch.fbWidth, batch.fbHeight);
           fb = fbRef.current;
-          if (!fb) return false;
+          if (!fb) return;
         }
         const { buffer, pixelOffsets, rects } = batch;
         for (let i = 0; i < rects.length; i++) {
@@ -172,10 +165,8 @@ export function RdpPane({ leafId, connectionId, visible, focused = true }: Props
           const data = new Uint8ClampedArray(buffer, pixelOffsets[i], r.w * r.h * 4);
           fb.ctx.putImageData(new ImageData(data, r.w, r.h), r.x, r.y);
         }
-        return true;
       } catch (e) {
         console.error("rdp: dropped a frame batch that could not be blitted", e);
-        return false;
       }
     },
     [resetFramebuffer],
@@ -240,31 +231,6 @@ export function RdpPane({ leafId, connectionId, visible, focused = true }: Props
     compositeHandle.current = requestAnimationFrame(composite);
   }, [composite]);
 
-  /**
-   * Repair the framebuffer by asking the host process for the current one as
-   * a whole keyframe.
-   *
-   * This is what `rdp_snapshot` is for: deltas cannot be merged on this side,
-   * so a batch that failed to blit leaves the framebuffer holding pixels the
-   * server has since changed, and on an idle desktop nothing will ever repaint
-   * the lost region.
-   */
-  const resync = useCallback(async () => {
-    const session = sessionRef.current;
-    if (!session) return;
-    try {
-      const keyframe = await rdpSnapshot(session.id);
-      // Still the same session: a reconnect in flight owns the canvas now.
-      if (keyframe && sessionRef.current === session) {
-        blitBatch(keyframe);
-        scheduleComposite();
-      }
-    } catch {
-      // The session went away mid-fetch. The next keyframe from the server
-      // repairs the image anyway; there is nothing useful to report here.
-    }
-  }, [blitBatch, scheduleComposite]);
-
   /** Collect whatever the backend has accumulated. */
   const pullFrame = useCallback(() => {
     const session = sessionRef.current;
@@ -273,9 +239,7 @@ export function RdpPane({ leafId, connectionId, visible, focused = true }: Props
     void rdpTakeFrame(session.id)
       .then((batch) => {
         if (!batch || sessionRef.current !== session) return;
-        // Failed blits are not retried with the same bytes: a keyframe is the
-        // only way back, since deltas cannot be merged on this side.
-        if (!blitBatch(batch)) void resync();
+        blitBatch(batch);
         // There may be more behind it. Scheduling a composite rather than
         // pulling again immediately is what rate-limits pulls to one per frame
         // and lets the backend coalesce in between.
@@ -285,7 +249,7 @@ export function RdpPane({ leafId, connectionId, visible, focused = true }: Props
       .finally(() => {
         pullingRef.current = false;
       });
-  }, [blitBatch, resync, scheduleComposite]);
+  }, [blitBatch, scheduleComposite]);
 
   pullRef.current = pullFrame;
 
@@ -307,14 +271,6 @@ export function RdpPane({ leafId, connectionId, visible, focused = true }: Props
   useEffect(() => {
     if (visible) scheduleComposite();
   }, [visible, scheduleComposite]);
-
-  // Same re-arm for the webview pausing `requestAnimationFrame` on a minimised
-  // or backgrounded window: the loop stopped on an empty pull, and nothing else
-  // would restart it when the batcher refills while frames were not running.
-  useEffect(() => {
-    document.addEventListener("visibilitychange", scheduleComposite);
-    return () => document.removeEventListener("visibilitychange", scheduleComposite);
-  }, [scheduleComposite]);
 
   useEffect(
     () => () => {

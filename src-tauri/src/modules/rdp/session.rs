@@ -187,7 +187,7 @@ struct Shared {
     /// `image`. Nothing ever takes `image` first. Keep it that way.
     batcher: Mutex<FrameBatcher>,
     /// Extra event sinks (the remote-access bridge / a second view).
-    mirrors: Arc<Mutex<Vec<EventSink>>>,
+    mirrors: Mutex<Vec<EventSink>>,
     /// Live desktop size, updated on reactivation.
     dims: Mutex<(u16, u16)>,
     alive: AtomicBool,
@@ -232,16 +232,13 @@ impl RdpSession {
             .map_err(|_| "rdp: session is closed".to_string())
     }
 
-    /// Encode the current framebuffer as a full keyframe batch. Backs
-    /// `rdp_snapshot`: unlike SSH there is no byte stream to replay, so a new
-    /// consumer needs one whole frame before deltas mean anything.
-    ///
-    /// Empty when there is no framebuffer to describe, rather than a
+    /// Encode `batch` against the current framebuffer. Empty rather than the
     /// `rectCount == 0` header the wire format tells the reader to treat as
-    /// corrupt. Unreachable while `connect` refuses a zero desktop size, but
-    /// this is the same guard `take_frame` carries and the two should not
-    /// disagree.
-    pub fn keyframe(&self) -> Vec<u8> {
+    /// corrupt, which is what a batch caught mid-reactivation clips down to.
+    ///
+    /// The batch is built INSIDE the `image` lock, so a keyframe names the
+    /// dimensions it was actually encoded from.
+    fn encode(&self, batch: impl FnOnce(u16, u16) -> Batch) -> Vec<u8> {
         let image = self.shared.image.lock_or_recover();
         let (width, height) = (image.width(), image.height());
         let bytes = encode_batch(
@@ -250,7 +247,7 @@ impl RdpSession {
                 width,
                 height,
             },
-            &Batch::keyframe(width, height),
+            &batch(width, height),
         );
         if bytes.len() <= HEADER_LEN {
             return Vec::new();
@@ -258,14 +255,17 @@ impl RdpSession {
         bytes
     }
 
-    /// Drain the batcher and encode it. Empty when nothing is pending, or
-    /// when every rect clipped away mid-reactivation - the same guard
-    /// `keyframe` carries, and for the same reason: a `rectCount == 0` header
-    /// is what the wire format tells the reader to treat as corrupt.
-    ///
-    /// The two locks are taken in sequence, never nested: `take()` returns an
-    /// owned `Batch`, so the batcher guard is gone before `image` is touched.
+    /// Encode the current framebuffer as a full keyframe batch. Backs
+    /// `rdp_snapshot`: unlike SSH there is no byte stream to replay, so a new
+    /// consumer needs one whole frame before deltas mean anything.
+    pub fn keyframe(&self) -> Vec<u8> {
+        self.encode(Batch::keyframe)
+    }
+
+    /// Drain the batcher and encode it. Empty when nothing is pending.
     pub fn take_frame(&self) -> Vec<u8> {
+        // Taken and released in its own scope, never nested inside `image`:
+        // `encode` locks `image` next, and the reverse order is a deadlock.
         let batch = {
             let mut batcher = self.shared.batcher.lock_or_recover();
             batcher.take()
@@ -273,20 +273,7 @@ impl RdpSession {
         let Some(batch) = batch else {
             return Vec::new();
         };
-        let image = self.shared.image.lock_or_recover();
-        let (width, height) = (image.width(), image.height());
-        let bytes = encode_batch(
-            FrameBuffer {
-                data: image.data(),
-                width,
-                height,
-            },
-            &batch,
-        );
-        if bytes.len() <= HEADER_LEN {
-            return Vec::new();
-        }
-        bytes
+        self.encode(|_, _| batch)
     }
 
     /// Register an extra sink and prime it with `connected`, after which it
@@ -768,7 +755,7 @@ pub async fn connect(
     let shared = Arc::new(Shared {
         image: Mutex::new(DecodedImage::new(PixelFormat::RgbA32, width, height)),
         batcher: Mutex::new(FrameBatcher::new(width, height)),
-        mirrors: Arc::new(Mutex::new(Vec::new())),
+        mirrors: Mutex::new(Vec::new()),
         dims: Mutex::new((width, height)),
         alive: AtomicBool::new(true),
     });
@@ -1453,7 +1440,7 @@ mod tests {
         Arc::new(Shared {
             image: Mutex::new(DecodedImage::new(PixelFormat::RgbA32, width, height)),
             batcher: Mutex::new(FrameBatcher::new(width, height)),
-            mirrors: Arc::new(Mutex::new(Vec::new())),
+            mirrors: Mutex::new(Vec::new()),
             dims: Mutex::new((width, height)),
             alive: AtomicBool::new(true),
         })
@@ -1624,6 +1611,40 @@ mod tests {
             session.take_frame().is_empty(),
             "the batcher was drained, so a second pull yields nothing"
         );
+    }
+
+    /// `rdp_snapshot`'s whole contract: one full-framebuffer rect, whatever the
+    /// batcher holds. The live test covers this too, but only with a server.
+    #[test]
+    fn keyframe_is_one_full_framebuffer_rect() {
+        let shared = shared_fixture(8, 4);
+        let session = session_fixture(Arc::clone(&shared), EventSink::new(|_| Ok(())));
+
+        let bytes = session.keyframe();
+        assert_eq!(&bytes[0..4], &frame::FRAME_MAGIC);
+        assert_eq!(bytes[5], 1, "a snapshot is a keyframe");
+        assert_eq!(
+            u16::from_le_bytes([bytes[6], bytes[7]]),
+            1,
+            "exactly one rect"
+        );
+        assert_eq!(u16::from_le_bytes([bytes[8], bytes[9]]), 8);
+        assert_eq!(u16::from_le_bytes([bytes[10], bytes[11]]), 4);
+        assert_eq!(
+            bytes.len(),
+            HEADER_LEN + RECT_LEN + 8 * 4 * 4,
+            "header + one rect + every pixel"
+        );
+
+        // A keyframe does not consume the batcher: a pull right after one still
+        // returns the rects that accumulated.
+        shared.batcher.lock_or_recover().push(Rect {
+            x: 0,
+            y: 0,
+            w: 4,
+            h: 2,
+        });
+        assert!(!session.take_frame().is_empty());
     }
 
     /// The bound exists because each extra sink costs a full copy of every

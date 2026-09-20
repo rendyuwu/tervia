@@ -449,9 +449,9 @@ pub async fn rdp_snapshot(state: tauri::State<'_, RdpState>, id: u32) -> Result<
 /// until a JS `invoke(fetch)` collects it, so a fetch that errors or races a
 /// navigation leaks a whole framebuffer for the life of the process and a slow
 /// consumer accumulates frames there where nothing on this side can see or
-/// bound them (`tauri` 2.11.5, `ipc/channel.rs`,
-/// `MAX_RAW_DIRECT_EXECUTE_THRESHOLD` / `JavaScriptChannelId::channel_on` /
-/// `fetch`). A command `Response` has no such queue.
+/// bound them: the threshold (`tauri` 2.11.5, `MAX_RAW_DIRECT_EXECUTE_THRESHOLD`),
+/// the eval path (`tauri` 2.11.5, `JavaScriptChannelId::channel_on`) and the
+/// collector (`tauri` 2.11.5, `fetch`). A command `Response` has no such queue.
 ///
 /// Backpressure falls out of it: the consumer pulls when it is ready, and
 /// until then the batcher coalesces. One batch is capped at one framebuffer by
