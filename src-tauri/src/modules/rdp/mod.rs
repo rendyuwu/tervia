@@ -24,12 +24,19 @@
 //! aborts. See [`tls`] for the full policy, including why the pin is keyed to
 //! the saved connection rather than to `host:port`.
 //!
-//! # Out of scope for this phase
+//! # Not implemented
 //!
-//! Clipboard, audio, device redirection, RD Gateway, KDC proxy, EGFX/H.264,
-//! `.rdp` import and multi-monitor. Transport is direct TCP only;
+//! Clipboard, audio, device redirection, RD Gateway, KDC proxy, `.rdp` import
+//! and multi-monitor are deliberate omissions. Transport is direct TCP only;
 //! tunnelling through SSH needs no change here, it just dials a different
 //! address.
+//!
+//! EGFX/H.264 is NOT one of those, and is listed apart from them because the
+//! difference is actionable. It is blocked on the pinned connector, which never
+//! advertises the early-capability bit that makes a server open the graphics
+//! channel and offers no seam to set it (`ironrdp-connector` 0.9.0, `Config`).
+//! Bumping the ironrdp pins does not lift it. `KNOWN-LIMITS.md` carries the
+//! state and the trigger.
 
 mod frame;
 mod session;

@@ -920,3 +920,47 @@ and cannot happen twice.
 **Trigger.** A create-if-absent verb existing on `SyncProvider` for another
 reason, or a report of two devices set up simultaneously failing to see each
 other.
+
+## RDP
+
+### EGFX/H.264 cannot be reached from the pinned connector, and moving the pins does not change that
+
+**Accepted state.** An RDP desktop is painted from RemoteFX and raw bitmap
+updates. The Graphics Pipeline Extension, and with it H.264, is not used, and
+adding the channel handler would not change that. A server opens the graphics
+channel only when the client sets the graphics-pipeline bit in the early
+capability flags of its client core data; the pinned connector never sets that
+bit, and its configuration struct exposes no field that would
+(`ironrdp-connector` 0.9.0, `Config`). A handler would sit registered on a
+channel nothing ever opens.
+
+**Carried by.** The connector configuration `build_config` returns, and the
+static-channel registration beside it in `src-tauri/src/modules/rdp/session.rs`,
+which registers a `DrdynvcClient` carrying only `DisplayControlClient`. The bit
+itself is defined, and unused, by the pinned PDU crate (`ironrdp-pdu` 0.8.0,
+`ClientEarlyCapabilityFlags`).
+
+Worth stating precisely, because the obvious next move is the wrong one. The
+newest PUBLISHED connector does not set the bit either, so bumping the ironrdp
+pins one minor - the expensive change whose resolution constraints the comment
+block in `src-tauri/Cargo.toml` works out - buys nothing here. The field that
+would set it exists only on IronRDP's main branch, and as a breaking change, so
+it can only arrive in a connector minor that has not been released
+(IronRDP #1237).
+
+**Trigger.** A published connector whose configuration carries the
+graphics-pipeline early-capability field. That same release also has to move
+picky off the candidate version this repository's russh pin cannot co-resolve
+with, or the pins still cannot move and the field cannot be reached; the comment
+block in `src-tauri/Cargo.toml` is where that half is worked out. Both
+conditions, not either.
+
+When both hold, the handler is an addition rather than a port: the EGFX client
+crate is a dynamic-channel processor, so it registers beside
+`DisplayControlClient` on the existing `DrdynvcClient`, and it hands a consumer
+RGBA rectangles that `FrameBatcher` in `src-tauri/src/modules/rdp/frame.rs`
+already coalesces and ships. Its H.264 decoder is a trait the consumer supplies,
+and the compile-from-C-source option for that decoder is already ruled out: it
+needs NASM on Windows, which is the exact dependency the `ironrdp-tls`
+rustls-ring feature and the russh ring feature both exist to avoid. Loading a
+prebuilt library at runtime is the only option compatible with the pins above.
