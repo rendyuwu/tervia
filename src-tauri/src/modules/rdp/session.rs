@@ -1985,7 +1985,7 @@ mod rdp_live {
                 .expect("queueing input failed");
 
             // Pull on a ~60 Hz tick for a 20s window. These numbers are the
-            // evidence the encoding question (RDP-02) is closed on: what the
+            // evidence the frame-encoding question is closed on: what the
             // transport actually costs, not what a compressor might save.
             let mut first_frame: Option<Vec<u8>> = None;
             let (mut total_bytes, mut batches, mut max_batch_len) = (0usize, 0usize, 0usize);

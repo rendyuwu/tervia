@@ -165,6 +165,16 @@ interprocess = { version = "2.2", features = ["tokio"] }
 # those pins to `ed25519-dalek ^3` / `p256 ^0.14`. When an ironrdp-connector
 # release pins rc.26 or later, this whole block and the russh pin can move
 # forward together.
+#
+# That unblocks the PINS. It does not unblock EGFX/H.264, which needs a second
+# thing from the same crate: a way to advertise the graphics-pipeline
+# early-capability flag, without which a server never opens the graphics
+# channel at all. No published release has one - not 0.9.0, and not the 0.10.0
+# this block already declines for other reasons. The field exists only on
+# IronRDP's main branch, behind a breaking change, so it lands in a connector
+# minor that does not exist yet (IronRDP #1237). A release satisfying only the
+# picky half would move these pins and leave EGFX exactly as unreachable as it
+# is now. `KNOWN-LIMITS.md` carries that as an accepted state.
 ironrdp-connector = "=0.9.0"
 ironrdp-session = "=0.10.0"
 ironrdp-tokio = "=0.9.0"
