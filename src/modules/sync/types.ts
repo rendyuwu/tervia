@@ -122,26 +122,20 @@ export type SyncConfig = {
   carrySecrets: boolean;
 };
 
-/**
- * The fields that say WHICH REMOTE this is, as opposed to how this device
- * talks to it.
- *
- * A change to any of them is a change of address, and the etag map does not
- * survive one: its keys are `kind:id`, not object names, so a map filled
- * against the old remote reads as current against the new one and supplies an
- * `If-Match` for objects that never existed there. On a conditional-write
- * provider every put on the first pass after a reconfigure is then refused as
- * stale - recovered on the same pass, but reported as a conflict that did not
- * happen.
- *
- * `region` is not in here. It names how the same bucket is addressed, not a
- * different set of objects. `cas` and `carrySecrets` are behaviour, and
- * `enabled` is a switch.
- */
-export const REMOTE_IDENTITY_FIELDS = ["provider", "endpoint", "bucket", "prefix"] as const;
+/** The fields that say WHICH REMOTE a configuration names. `region` is how the
+ *  same bucket is addressed, `cas` and `carrySecrets` are behaviour, `enabled`
+ *  is a switch - none of them is an address. */
+const REMOTE_IDENTITY_FIELDS = ["provider", "endpoint", "bucket", "prefix"] as const;
 
-/** Whether two configurations name the same place, by
- *  {@link REMOTE_IDENTITY_FIELDS}. */
+/**
+ * Whether two configurations name the same place.
+ *
+ * A change of address is a change of etag map: its keys are `kind:id`, not
+ * object names, so a map filled against the old remote supplies an `If-Match`
+ * for objects that never existed on the new one - a whole first pass refused as
+ * stale on a conditional-write provider, reported as conflicts that did not
+ * happen.
+ */
 export function namesTheSameRemote(a: SyncConfig, b: SyncConfig): boolean {
   return REMOTE_IDENTITY_FIELDS.every((field) => a[field] === b[field]);
 }

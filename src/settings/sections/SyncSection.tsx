@@ -258,12 +258,10 @@ export function SyncSection() {
           secrets.webdavPassword,
         );
       }
-      // A DIFFERENT REMOTE IS A DIFFERENT ETAG MAP, and it is emptied before
-      // the configuration that renames the remote is stored - the pull this
-      // Save requests must not be able to start on the old map. Compared
-      // against what the FILE says rather than against the copy this window
-      // loaded, because the pull running in `main` is the other writer here.
-      // See {@link REMOTE_IDENTITY_FIELDS}.
+      // Emptied BEFORE the configuration that renames the remote is stored, or
+      // the pull this Save requests can start on the old map. Compared against
+      // what the FILE says rather than the copy this window loaded, because the
+      // pull running in `main` is the other writer - see `namesTheSameRemote`.
       if (!namesTheSameRemote(await settings.readConfig(), config)) {
         await settings.writeEtags({});
       }
@@ -717,7 +715,7 @@ export function SyncSection() {
         </SettingRow>
         <SettingRow
           title="Waiting to be pushed"
-          description="The remote is missing at least this many records from this device: what the last completed pull found, or what this device has changed and not yet uploaded, whichever is larger."
+          description="Records this device has changed that the remote does not hold yet - at least this many."
         >
           <span className="text-muted-foreground text-[11px] tabular-nums">{status.pending}</span>
         </SettingRow>

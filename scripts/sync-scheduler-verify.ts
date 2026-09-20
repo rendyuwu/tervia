@@ -1899,12 +1899,9 @@ async function c10(): Promise<void> {
 
 async function c11(): Promise<void> {
   console.log("\nC11 - a different remote is a different etag map");
-  // The etag map is keyed `kind:id`, not by object name, so it survives a
-  // change of provider or prefix and reads as current against a remote that has
-  // never held any of those objects. On a conditional-write provider every put
-  // on the first pass after a reconfigure is then refused as stale - recovered
-  // in the same pass, but reported as a conflict that did not happen. D1's
-  // WebDAV run could not show this: that provider has no conditional write.
+  // The map is keyed `kind:id`, not by object name, so it survives a change of
+  // provider or prefix and reads as current against a remote that has never
+  // held any of those objects - see `namesTheSameRemote`.
   const at = (over: Partial<typeof DEFAULT_SYNC_CONFIG>) => ({ ...DEFAULT_SYNC_CONFIG, ...over });
   const s3 = at({ provider: "s3", endpoint: "http://one:9000", bucket: "b", prefix: "p" });
   check("the same four fields are the same remote", namesTheSameRemote(s3, { ...s3 }), true);
@@ -1931,8 +1928,8 @@ async function c11(): Promise<void> {
   // on the old map.
   const source = withoutComments(readFileSync(resolve(ROOT, SYNC_SECTION), "utf8"));
   check(
-    "the save path empties the map when the remote is a new one",
-    /if \(!namesTheSameRemote\(await settings\.readConfig\(\), config\)\) \{\s*await settings\.writeEtags\(\{\}\);\s*\}\s*await settings\.writeConfig\(config\);/.test(
+    "the map is emptied under the guard, before the new address is stored",
+    /namesTheSameRemote\([\s\S]*?\)\s*\)\s*\{\s*await settings\.writeEtags\(\{\}\);\s*\}\s*await settings\.writeConfig\(config\);/.test(
       source,
     ),
     true,

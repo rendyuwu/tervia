@@ -645,10 +645,6 @@ export function createScheduler(io: SchedulerIo): SyncScheduler {
       // place is still owed, so it goes back on the dirty set - which is
       // durable, so it also survives the window closing.
       for (const failure of failed) dirty.add(etagSlot(failure.kind, failure.id));
-      // COUNTED AFTER THE PUSH, not before: the remote is missing what the
-      // reconcile found minus what this pass just gave it, and reporting the
-      // pre-push number leaves the settings window showing work that is
-      // already done until the next pull.
       found = {
         lastPullAt: now(),
         // COUNTED AFTER THE PUSH, not before: the remote is missing what the
@@ -727,10 +723,8 @@ export function createScheduler(io: SchedulerIo): SyncScheduler {
       const failed = await publish(envelopes);
       for (const failure of failed) dirty.add(etagSlot(failure.kind, failure.id));
       await persistDirty();
-      // COUNTED DOWN BY WHAT THIS PASS PLACED. Without it the floor above can
-      // only ever rise: the reconcile's figure is carried forward untouched by
-      // a push, so a pull that never runs again leaves the settings window
-      // reporting work this push has already done.
+      // Counted down by what this pass placed, the way the pull's own figure
+      // is - without it the floor in `writeStatus` can only ever rise.
       await writeStatus({
         lastPushAt: now(),
         pending: Math.max(0, status.pending - (taken.size - failed.length)),
@@ -745,16 +739,9 @@ export function createScheduler(io: SchedulerIo): SyncScheduler {
       await persistDirty().catch(() => {});
       const reason = e instanceof Error ? e.message : String(e);
       // A DEBOUNCED PUSH IS THE ONLY THING THAT RAN, so it is the only thing
-      // that can report. Both entry points that reach this path -
-      // `markDirty`'s timer and `pushNow` - drop the returned string, so
-      // without this write a five-second push into a dead endpoint leaves the
-      // settings window on the last pull's healthy figures until a focus
-      // clears the rate limit. The floor in `writeStatus` is what puts the
-      // marks just restored above into the count.
-      //
-      // Swallowed rather than thrown on: the edit is already safe on the dirty
-      // set, and a failed status write must not replace the reason it was
-      // reporting.
+      // that can report: both entry points that reach here drop the returned
+      // string. Swallowed rather than thrown on - the edit is already safe on
+      // the dirty set, and a failed status write must not replace the reason.
       await writeStatus({ lastError: reason }).catch(() => {});
       return reason;
     }

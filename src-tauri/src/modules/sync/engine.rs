@@ -159,21 +159,11 @@ pub enum Outcome {
         /// listing can misbehave. The user resolves it with a manual push or a
         /// local delete.
         ///
-        /// NEVER SET WHEN THE LISTING WAS EMPTY, and an empty listing is not
-        /// the same claim as a short one. A page that lost some objects says
-        /// nothing about the ones it did return; a prefix holding zero objects
-        /// says the remote has never taken this inventory at all - a keyfile
-        /// minted seconds ago, or a second provider being set up - and the
-        /// stale rule there withholds the whole inventory from the remote it
-        /// was pointed at, reporting nothing pending and no error. So the
-        /// empty case is read as "never held" and everything publishes.
-        ///
-        /// THE KNOWN FALSE POSITIVE IS WEBDAV'S 404. `classify_list`
-        /// (`providers/webdav.rs`) maps a missing collection to an empty
-        /// listing, because a prefix whose collections have not been created is
-        /// exactly the fresh-remote case. A mistyped prefix therefore presents
-        /// as a fresh remote and takes a copy of the inventory. That is a
-        /// write, never a delete, and the local records are untouched.
+        /// NEVER SET WHEN THE LISTING WAS EMPTY. A prefix holding zero objects
+        /// has never held this inventory at all, so the absence is not a
+        /// delete and everything publishes. What that reading costs, and
+        /// WebDAV's 404 arriving here as an empty listing, are two entries in
+        /// `KNOWN-LIMITS.md`.
         stale: bool,
     },
 }
@@ -300,10 +290,8 @@ pub async fn pull(
 ) -> Result<PullReport, ProviderError> {
     let entries = provider.list(&object_prefix(prefix)).await?;
 
-    // A REMOTE THAT HOLDS NOTHING AT ALL HAS NEVER HELD THIS INVENTORY, and
-    // that is what lifts the stale rule at the bottom of this function. See
-    // `Outcome::LocalOnly::stale` for why an empty listing is read differently
-    // from a short one.
+    // Lifts the stale rule at the bottom of this function - see
+    // `Outcome::LocalOnly`'s `stale` and the entries in `KNOWN-LIMITS.md`.
     let remote_is_empty = entries.is_empty();
 
     // The map arrives keyed by `kind:id`; the listing speaks object names. One
