@@ -7,13 +7,11 @@
 //!
 //! # What travels on the session channel
 //!
-//! One `Channel` carries both control events and pixels:
-//!
-//! * JSON payloads are [`RdpEvent`]s (a plain object on the JS side).
-//! * Raw payloads are frame batches (an `ArrayBuffer` on the JS side). The
-//!   binary layout is documented in [`frame`].
-//!
-//! So a frontend handler dispatches on `message instanceof ArrayBuffer`.
+//! JSON control events ([`RdpEvent`]) and nothing else. Pixels are PULLED:
+//! the session emits a tiny `frameReady` and the consumer collects the
+//! encoded batch with [`rdp_take_frame`], whose docs explain why the channel
+//! is the wrong place for a framebuffer. The binary layout is documented in
+//! [`frame`].
 //!
 //! # Certificate trust
 //!
@@ -412,8 +410,10 @@ pub async fn rdp_list_sessions(
 /// `rdp_input`.
 ///
 /// Unlike SSH there is no byte stream to replay, so the new sink gets a
-/// `connected` event and one full-framebuffer keyframe first, then the same
-/// dirty-rect deltas the primary sink sees. Returns `alive`.
+/// `connected` event and then takes its first picture from [`rdp_snapshot`],
+/// repainting from `rdp_snapshot` again on each `frameReady`. It does NOT
+/// share the primary's batcher - two consumers draining one batcher would
+/// steal each other's rects. Returns `alive`.
 #[tauri::command]
 pub async fn rdp_attach(
     state: tauri::State<'_, RdpState>,
@@ -424,24 +424,46 @@ pub async fn rdp_attach(
     Ok(session.add_mirror_sink(on_event))
 }
 
-/// The current framebuffer as one keyframe batch, in the same wire format the
-/// session channel uses.
+/// The current framebuffer as one keyframe batch, in the same wire format
+/// [`rdp_take_frame`] uses. Returned as a raw `Response`, so the pixels never
+/// touch JSON.
 ///
-/// Returned as a raw `Response`, which is the one path in this module where
-/// pixels genuinely never touch JSON. The channel path is not so clean: Tauri
-/// only avoids JSON for raw payloads of 1024 bytes or more
-/// (`tauri` 2.11.5, `MAX_RAW_DIRECT_EXECUTE_THRESHOLD`).
-/// Below that it serialises the bytes as a JSON number array and `eval`s
-/// `new Uint8Array([...]).buffer`
-/// (`tauri` 2.11.5, `JavaScriptChannelId::channel_on`) - and a small delta like
-/// a blinking text caret (~2x16 px = 128 bytes) is exactly that case, so on an
-/// idle desktop most batches do go through JSON. At or above the threshold the
-/// body is parked in `ChannelDataIpcQueue` and pulled back by a JS `invoke`
-/// (`tauri` 2.11.5, `JavaScriptChannelId::channel_on`).
+/// This is the RESYNC and FIRST-PICTURE path: a consumer that has no
+/// framebuffer yet, or whose deltas were lost, cannot reconstruct one from
+/// deltas, and on an idle desktop the server sends nothing to reconstruct it
+/// from.
 #[tauri::command]
 pub async fn rdp_snapshot(state: tauri::State<'_, RdpState>, id: u32) -> Result<Response, String> {
     let session = lookup(&state, id, "rdp_snapshot").await?;
     Ok(Response::new(session.keyframe()))
+}
+
+/// Drain whatever the session batcher has accumulated, as one batch in the
+/// wire format [`frame`] documents. Empty when nothing is pending.
+///
+/// This is the whole frame transport. Pixels do NOT travel on the session
+/// `Channel`: a raw channel payload under 1024 bytes is `serde_json`'d and
+/// `eval`'d as a `new Uint8Array([...]).buffer` literal - which is the COMMON
+/// idle case, a blinking caret being about 128 bytes - and one at or above
+/// that threshold is parked in Tauri's process-global `ChannelDataIpcQueue`
+/// until a JS `invoke(fetch)` collects it, so a fetch that errors or races a
+/// navigation leaks a whole framebuffer for the life of the process and a slow
+/// consumer accumulates frames there where nothing on this side can see or
+/// bound them (`tauri` 2.11.5, `ipc/channel.rs`,
+/// `MAX_RAW_DIRECT_EXECUTE_THRESHOLD` / `JavaScriptChannelId::channel_on` /
+/// `fetch`). A command `Response` has no such queue.
+///
+/// Backpressure falls out of it: the consumer pulls when it is ready, and
+/// until then the batcher coalesces. One batch is capped at one framebuffer by
+/// the batcher's collapse rule, so a consumer that stops pulling costs exactly
+/// one framebuffer of host memory and no IPC at all.
+#[tauri::command]
+pub async fn rdp_take_frame(
+    state: tauri::State<'_, RdpState>,
+    id: u32,
+) -> Result<Response, String> {
+    let session = lookup(&state, id, "rdp_take_frame").await?;
+    Ok(Response::new(session.take_frame()))
 }
 
 /// Answer a first-connect `certPrompt`. `accept = true` lets the paused TLS
