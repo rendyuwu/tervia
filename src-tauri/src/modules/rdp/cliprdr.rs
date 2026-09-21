@@ -596,8 +596,10 @@ mod tests {
         // others, which is the bug this pins.
         assert_eq!(&bytes[bytes.len() - 2..], &[0x00, 0x00]);
         let utf16: Vec<u16> = bytes[..bytes.len() - 2]
-            .chunks_exact(2)
-            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| u16::from_le_bytes(*pair))
             .collect();
         assert_eq!(String::from_utf16_lossy(&utf16), "line one\r\nline two");
 
