@@ -81,6 +81,22 @@ export const HOST_RDP_SECRET_FIELDS = [HOST_RDP_PASSWORD_FIELD] as const;
  */
 export type RdpSizeMode = "preset" | "fit";
 
+/**
+ * Which directions the RDP clipboard bridge carries.
+ *
+ * Absent means `"both"`: optional-with-default on read, so no stored record
+ * needs migrating. `"off"` does not register the CLIPRDR channel at all, so
+ * the server is never told there is a clipboard.
+ */
+export type RdpClipboardMode = "both" | "hostToRemote" | "remoteToHost" | "off";
+
+export const RDP_CLIPBOARD_MODES: readonly RdpClipboardMode[] = [
+  "both",
+  "hostToRemote",
+  "remoteToHost",
+  "off",
+];
+
 /** One offered desktop resolution. */
 export type RdpSizePreset = {
   /** Stable id, `<w>x<h>`. Only used as a `<select>` value / React key. */
@@ -265,6 +281,8 @@ export type RdpHost = HostBase & {
    */
   certFingerprint?: string;
   tunnel?: RdpTunnel;
+  /** Clipboard directions. Absent means `"both"`; see {@link RdpClipboardMode}. */
+  clipboard?: RdpClipboardMode;
 };
 
 /**

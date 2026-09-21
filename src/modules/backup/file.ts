@@ -88,12 +88,14 @@
  */
 import type { ForwardRule } from "@/modules/forwards/types";
 import {
+  RDP_CLIPBOARD_MODES,
   RDP_DEFAULT_PRESET,
   hostPins,
   type Host,
   type HostBase,
   type HostGroup,
   type HostPins,
+  type RdpClipboardMode,
   type RdpHost,
   type RdpSizeMode,
   type SshHost,
@@ -419,6 +421,11 @@ function rdpArm(base: HostBase, raw: Record<string, unknown>): RdpHost {
   // An unrecognised mode from a later build still resolves to the mode this
   // build can actually render.
   const sizeMode: RdpSizeMode = raw.sizeMode === "fit" ? "fit" : "preset";
+  // Dropped rather than defaulted, so the record stays "absent means both"
+  // instead of pinning a value a later build might redefine.
+  const clipboard = RDP_CLIPBOARD_MODES.includes(raw.clipboard as RdpClipboardMode)
+    ? (raw.clipboard as RdpClipboardMode)
+    : undefined;
 
   return {
     ...base,
@@ -438,6 +445,7 @@ function rdpArm(base: HostBase, raw: Record<string, unknown>): RdpHost {
     // Keyed the same way on both arms - only the flat field's NAME differs.
     ...(pins ? { pins } : {}),
     ...(sshHostId ? { tunnel: { sshHostId } } : {}),
+    ...(clipboard ? { clipboard } : {}),
   };
 }
 

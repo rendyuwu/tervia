@@ -146,5 +146,6 @@ export async function rdpOpenInput(
     height: size?.height ?? row.desktopHeight,
     expectedCertFingerprint: row.certFingerprint,
     scaleFactor: size?.scaleFactor,
+    clipboard: row.clipboard,
   };
 }

@@ -238,7 +238,7 @@ function check(label: string, ok: boolean, detail?: unknown): void {
  *
  * Every version here is checked against `src-tauri/Cargo.lock` on every run, so
  * an entry cannot survive the bump that invalidates it. A crate that is NOT on
- * this list is not citable at all: `Cargo.lock` pins far more than seven
+ * this list is not citable at all: `Cargo.lock` pins far more than ten
  * crates, and the ones listed are the ones whose internals this repository
  * actually reasons about.
  *
@@ -251,7 +251,10 @@ function check(label: string, ok: boolean, detail?: unknown): void {
  * happen to say, and only the lockfile can confirm an entry.
  */
 const THIRD_PARTY_SOURCES = [
+  "arboard 3.6.1",
   "ironrdp-async 0.9.0",
+  "ironrdp-cliprdr 0.6.0",
+  "ironrdp-cliprdr-format 0.2.0",
   "ironrdp-connector 0.9.0",
   "ironrdp-input 0.6.0",
   "ironrdp-pdu 0.8.0",
@@ -288,8 +291,8 @@ const sortedSet = (xs: string[]): boolean =>
 
 console.log("[allow-list] pinned, sorted, and still true of the lockfile");
 check(
-  "the third-party source allow-list is a sorted set of exactly 7 entries",
-  sortedSet(THIRD_PARTY_SOURCES) && THIRD_PARTY_SOURCES.length === 7,
+  "the third-party source allow-list is a sorted set of exactly 10 entries",
+  sortedSet(THIRD_PARTY_SOURCES) && THIRD_PARTY_SOURCES.length === 10,
   THIRD_PARTY_SOURCES,
 );
 check(

@@ -24,10 +24,18 @@
 //! aborts. See [`tls`] for the full policy, including why the pin is keyed to
 //! the saved connection rather than to `host:port`.
 //!
+//! # Clipboard
+//!
+//! Text and images both ways over CLIPRDR, in [`cliprdr`]. The transfer is
+//! triggered on pane focus EDGES rather than on every clipboard change, and
+//! the direction is a per-connection setting ([`RdpClipboardMode`]) whose
+//! `Off` value does not register the channel at all. Files are deliberately
+//! out: the client advertises no file capability, so the server never asks.
+//!
 //! # Not implemented
 //!
-//! Clipboard, audio, device redirection, RD Gateway, KDC proxy, `.rdp` import
-//! and multi-monitor are deliberate omissions. Transport is direct TCP only;
+//! Audio, device redirection, RD Gateway, KDC proxy, `.rdp` import and
+//! multi-monitor are deliberate omissions. Transport is direct TCP only;
 //! tunnelling through SSH needs no change here, it just dials a different
 //! address.
 //!
@@ -38,6 +46,7 @@
 //! Bumping the ironrdp pins does not lift it. `KNOWN-LIMITS.md` carries the
 //! state and the trigger.
 
+mod cliprdr;
 mod frame;
 mod session;
 mod tls;
@@ -209,6 +218,37 @@ pub struct RdpOpenInput {
     /// (`ironrdp-connector` 0.9.0, `create_gcc_blocks`).
     #[serde(default)]
     pub scale_factor: u32,
+    /// Which directions the clipboard bridge carries. Absent means
+    /// [`RdpClipboardMode::Both`], so no stored connection needs migrating.
+    #[serde(default)]
+    pub clipboard: RdpClipboardMode,
+}
+
+/// Which directions the clipboard bridge carries.
+///
+/// [`Self::Off`] skips registering the CLIPRDR channel entirely, so the server
+/// is never told there is a clipboard at all - as opposed to being told there
+/// is one that then refuses every transfer.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RdpClipboardMode {
+    #[default]
+    Both,
+    HostToRemote,
+    RemoteToHost,
+    Off,
+}
+
+impl RdpClipboardMode {
+    /// Is the host clipboard advertised to, and served to, the remote?
+    pub(crate) fn host_to_remote(self) -> bool {
+        matches!(self, Self::Both | Self::HostToRemote)
+    }
+
+    /// Is the remote's clipboard pulled onto the host's?
+    pub(crate) fn remote_to_host(self) -> bool {
+        matches!(self, Self::Both | Self::RemoteToHost)
+    }
 }
 
 fn default_rdp_port() -> u16 {
@@ -302,6 +342,10 @@ pub(crate) enum SessionOp {
         height: u16,
         scale_factor: u32,
     },
+    /// One CLIPRDR message to hand to the session's `CliprdrClient`. Rides
+    /// this queue for the same reason a resize does, and so costs the
+    /// `select!` no extra arm.
+    Clipboard(ironrdp_cliprdr::backend::ClipboardMessage),
 }
 
 impl RdpInputEvent {
@@ -591,6 +635,30 @@ pub fn rdp_confirm_cert(prompt_id: String, accept: bool) -> Result<(), String> {
     }
 }
 
+/// Sync the clipboard across a pane focus edge.
+///
+/// `true` on focus-in advertises the host clipboard to the remote, so a paste
+/// made inside the session finds it; `false` on blur pulls whatever the remote
+/// last advertised onto the host clipboard. Both are no-ops when the saved
+/// direction excludes them, and the whole command is a no-op when the mode is
+/// `Off`, which never registered the channel.
+///
+/// Runs on the RDP runtime's blocking pool, never here: an advertise is a
+/// synchronous arboard round trip to whichever process owns the selection, and
+/// a Tauri worker parked on a slow owner stalls every other command.
+#[tauri::command]
+pub async fn rdp_clipboard_focus(
+    state: tauri::State<'_, RdpState>,
+    id: u32,
+    focused: bool,
+) -> Result<(), String> {
+    let session = lookup(&state, id, "rdp_clipboard_focus").await?;
+    rdp_runtime()
+        .spawn_blocking(move || session.clipboard_focus(focused))
+        .await
+        .map_err(|e| format!("rdp: clipboard task failed: {e}"))?
+}
+
 async fn lookup(
     state: &tauri::State<'_, RdpState>,
     id: u32,
@@ -815,6 +883,7 @@ mod tests {
             height: 800,
             expected_cert_fingerprint: None,
             scale_factor: 0,
+            clipboard: RdpClipboardMode::Both,
         };
         let rendered = format!("{input:?}");
         assert!(!rendered.contains("hunter2"), "got: {rendered}");

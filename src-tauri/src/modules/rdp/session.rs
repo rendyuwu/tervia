@@ -4,6 +4,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use ironrdp_cliprdr::backend::ClipboardMessage;
+use ironrdp_cliprdr::CliprdrClient;
 use ironrdp_connector::connection_activation::{
     ConnectionActivationSequence, ConnectionActivationState,
 };
@@ -37,9 +39,11 @@ use zeroize::Zeroizing;
 
 use crate::modules::lockext::LockExt as _;
 
+use super::cliprdr::{self, ClipboardShared, TerviaCliprdrBackend};
 use super::frame::{self, encode_batch, Batch, FrameBatcher, FrameBuffer, Rect, HEADER_LEN};
 use super::tls;
-use super::{event_body, EventSink, InputOp, RdpOpenInput, RdpSessionInfo, SessionOp};
+use super::{event_body, EventSink, InputOp, RdpClipboardMode, RdpOpenInput};
+use super::{RdpSessionInfo, SessionOp};
 
 type TlsFramed = TokioFramed<tokio_rustls::client::TlsStream<TcpStream>>;
 
@@ -224,6 +228,10 @@ pub struct RdpSession {
     /// `expectedCertFingerprint` on every later connect.
     fingerprint: String,
     created_at_ms: u64,
+    /// Clipboard state shared with the CLIPRDR backend on the session task.
+    /// Present even when the mode is `Off`, in which case the channel was
+    /// never registered and every path through it short-circuits.
+    clipboard: Arc<ClipboardShared>,
 }
 
 impl RdpSession {
@@ -272,6 +280,52 @@ impl RdpSession {
             })
             .await
             .map_err(|_| "rdp: session is closed".to_string())
+    }
+
+    /// Sync the clipboard across a pane focus edge.
+    ///
+    /// BLOCKING - the advertise reads arboard. Call from the RDP runtime's
+    /// blocking pool.
+    ///
+    /// Focus-in advertises the host clipboard so a paste inside the remote
+    /// finds it. Blur pulls whatever the remote last advertised, and blur is
+    /// the right gesture for that rather than an eager fetch on every remote
+    /// copy: leaving the pane is a PRECONDITION of any host-side paste (the
+    /// user cannot paste into a host application while the pane holds the
+    /// keyboard), so blur cannot miss a paste an eager fetch would have
+    /// caught, and it is the latest moment still guaranteed to precede one.
+    /// Fetching eagerly would instead put every copy-made-inside-the-remote on
+    /// the wire - the common case in a remote desktop - which with images is
+    /// multi-megabyte inbound reassembly on the loop that also serves frames,
+    /// for data nobody pastes. Flipping to eager is one call site: the
+    /// `SendInitiatePaste` send below moves to `on_remote_copy`.
+    ///
+    /// A full queue on either path logs and returns `Ok(())`. Nothing is
+    /// stranded: the next focus edge retries, and unlike a format-data request
+    /// neither path has a peer waiting on a reply.
+    pub fn clipboard_focus(&self, focused: bool) -> Result<(), String> {
+        if focused {
+            cliprdr::advertise(&self.clipboard, &self.input_tx, false);
+            return Ok(());
+        }
+        if !self.clipboard.mode.remote_to_host() {
+            return Ok(());
+        }
+        let Some(format) = self.clipboard.best_remote() else {
+            return Ok(());
+        };
+        match self
+            .input_tx
+            .try_send(SessionOp::Clipboard(ClipboardMessage::SendInitiatePaste(
+                format,
+            ))) {
+            // Recorded only once the send succeeded. Setting it first would
+            // leave a pending format with no response coming, which the next
+            // unrelated response would then decode against.
+            Ok(()) => self.clipboard.set_pending_paste(format),
+            Err(e) => log::warn!("rdp: could not queue a clipboard paste request: {e}"),
+        }
+        Ok(())
     }
 
     /// Encode `batch` against the current framebuffer. Empty rather than the
@@ -658,6 +712,15 @@ pub async fn connect(
         .local_addr()
         .map_err(|e| format!("rdp: reading local address failed: {e}"))?;
 
+    // The input queue is created HERE, well before `tokio::spawn`, because the
+    // CLIPRDR backend needs a handle on it and has to exist before
+    // `ClientConnector::new`. Everything between here and the spawn is the
+    // X.224 negotiation, the TLS upgrade, the certificate extraction and
+    // `connect_finalize`; several of those legs `return Err` early, and each
+    // drops sender and receiver together, which is inert because no task
+    // exists yet. Nothing in that span reads or moves either half.
+    let (input_tx, input_rx) = mpsc::channel::<SessionOp>(INPUT_QUEUE_DEPTH);
+    let clipboard = Arc::new(ClipboardShared::new(input.clipboard));
     let mut framed = TokioFramed::new(tcp);
     let mut connector = ClientConnector::new(build_config(&input, &password), client_addr)
         // DRDYNVC carrying DISPLAYCONTROL, which is what makes `rdp_resize` work.
@@ -668,6 +731,20 @@ pub async fn connect(
         .with_static_channel(
             DrdynvcClient::new().with_dynamic_channel(DisplayControlClient::new(|_| Ok(Vec::new()))),
         );
+    if input.clipboard != RdpClipboardMode::Off {
+        // `attach_static_channel` rather than a second `with_static_channel`:
+        // that one takes `self` by value and would need a rebind dance around
+        // the conditional. `Off` skips this entirely, so the server is never
+        // told there is a clipboard at all.
+        //
+        // Inbound needs no new arm anywhere: `ActiveStage::process` routes SVC
+        // data to the registered processor, which calls this backend's `on_*`
+        // methods, and the existing `ResponseFrame` arm writes the answer back.
+        connector.attach_static_channel(CliprdrClient::new(Box::new(TerviaCliprdrBackend::new(
+            Arc::clone(&clipboard),
+            input_tx.downgrade(),
+        ))));
+    }
     // Our copy is scrubbed on drop. The connector's `Config` still holds an
     // unscrubbed `String` - see KNOWN-LIMITS.md.
     drop(password);
@@ -832,7 +909,6 @@ pub async fn connect(
         server_fingerprint: fingerprint.clone(),
     }));
 
-    let (input_tx, input_rx) = mpsc::channel::<SessionOp>(INPUT_QUEUE_DEPTH);
     // The task owns the sender; whether it fires or merely drops on abort, the
     // receiver handed to `rdp_open` unblocks and the janitor evicts the id.
     let (exit_tx, exit_rx) = oneshot::channel::<()>();
@@ -858,6 +934,7 @@ pub async fn connect(
         username: input.username,
         fingerprint,
         created_at_ms,
+        clipboard,
     }))
 }
 
@@ -906,6 +983,7 @@ async fn run(
             height: u16,
             scale_factor: u32,
         },
+        Clipboard(ClipboardMessage),
     }
 
     let ending = 'session: loop {
@@ -920,6 +998,7 @@ async fn run(
                 Some(SessionOp::Resize { width, height, scale_factor }) => {
                     Wake::Resize { width, height, scale_factor }
                 }
+                Some(SessionOp::Clipboard(message)) => Wake::Clipboard(message),
                 // Every sender is gone, i.e. the RdpSession was dropped.
                 None => break 'session Ending::Graceful("client closed the session".to_owned()),
             },
@@ -1005,6 +1084,55 @@ async fn run(
                         log::debug!(
                             "rdp: dropped a resize to {width}x{height}; no display-control channel"
                         );
+                        Vec::new()
+                    }
+                }
+            }
+            Wake::Clipboard(message) => {
+                // The inner block ends the `&mut stage` borrow before the
+                // shared one below; `CliprdrSvcMessages` borrows nothing from
+                // `stage`.
+                let encoded = {
+                    let Some(cliprdr) = stage.get_svc_processor_mut::<CliprdrClient>() else {
+                        // The channel is off for this session, or the server
+                        // never joined it.
+                        continue;
+                    };
+                    match message {
+                        ClipboardMessage::SendInitiateCopy(formats) => {
+                            cliprdr.initiate_copy(&formats)
+                        }
+                        ClipboardMessage::SendInitiatePaste(format) => {
+                            cliprdr.initiate_paste(format)
+                        }
+                        ClipboardMessage::SendFormatData(response) => {
+                            cliprdr.submit_format_data(response)
+                        }
+                        ClipboardMessage::Error(e) => {
+                            log::warn!("rdp: clipboard backend error: {e}");
+                            continue;
+                        }
+                        // Never sent: the file capabilities are unadvertised.
+                        other => {
+                            log::warn!("rdp: ignoring out-of-scope clipboard message {other:?}");
+                            continue;
+                        }
+                    }
+                };
+                // Both failures are non-fatal, and deliberately so: a clipboard
+                // round trip that fails costs one copy, while ending the
+                // session over it would cost the desktop.
+                let messages = match encoded {
+                    Ok(messages) => messages,
+                    Err(e) => {
+                        log::warn!("rdp: encoding a clipboard message failed: {e}");
+                        continue;
+                    }
+                };
+                match stage.process_svc_processor_messages(messages) {
+                    Ok(bytes) => vec![ActiveStageOutput::ResponseFrame(bytes)],
+                    Err(e) => {
+                        log::warn!("rdp: {}", session_error("sending a clipboard message", &e));
                         Vec::new()
                     }
                 }
@@ -1377,6 +1505,7 @@ mod tests {
                 height: 800,
                 expected_cert_fingerprint: None,
                 scale_factor: 0,
+                clipboard: RdpClipboardMode::Both,
             },
             "secret",
         );
@@ -1577,6 +1706,7 @@ mod tests {
             username: "admin".to_owned(),
             fingerprint: "AA:BB".to_owned(),
             created_at_ms: 1,
+            clipboard: Arc::new(ClipboardShared::new(RdpClipboardMode::Both)),
         });
         (session, input_rx)
     }
@@ -1982,6 +2112,7 @@ mod rdp_live {
                 .unwrap_or(800),
             expected_cert_fingerprint: fingerprint,
             scale_factor: 0,
+            clipboard: RdpClipboardMode::Both,
         };
         Some((input, Zeroizing::new(password)))
     }

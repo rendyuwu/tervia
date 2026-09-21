@@ -1,10 +1,16 @@
-import { RDP_DEFAULT_PRESET, RDP_FIT_SIZE_ID, RDP_SIZE_PRESETS, type SshHost } from "../types";
+import {
+  RDP_DEFAULT_PRESET,
+  RDP_FIT_SIZE_ID,
+  RDP_SIZE_PRESETS,
+  type RdpClipboardMode,
+  type SshHost,
+} from "../types";
 import { Combobox, type ComboboxOption } from "./Combobox";
 import { Field } from "./FormControls";
 import { savedHostOptions } from "./hostOptions";
 
-// The two RDP-only rows: the negotiated desktop size, and the SSH host to tunnel
-// through.
+// The three RDP-only rows: the negotiated desktop size, the SSH host to tunnel
+// through, and which directions the clipboard carries.
 
 const SIZE_OPTIONS: ComboboxOption[] = [
   { value: RDP_FIT_SIZE_ID, label: "Fit to pane", search: "fit pane follow resize automatic" },
@@ -15,12 +21,21 @@ const SIZE_OPTIONS: ComboboxOption[] = [
   })),
 ];
 
+const CLIPBOARD_OPTIONS: ComboboxOption[] = [
+  { value: "both", label: "Both directions", search: "clipboard copy paste both" },
+  { value: "hostToRemote", label: "This machine to remote only", search: "clipboard copy out" },
+  { value: "remoteToHost", label: "Remote to this machine only", search: "clipboard paste in" },
+  { value: "off", label: "Off", search: "clipboard disabled off none" },
+];
+
 export function RdpOptions({
   sshHosts,
   presetId,
   tunnelSshHostId,
+  clipboardMode,
   onPresetChange,
   onTunnelChange,
+  onClipboardChange,
 }: {
   /** Saved SSH hosts, offered as tunnels. The whole list: any host that can reach
    *  the target's 3389 works, and it is usually not the target itself - a Linux
@@ -28,8 +43,10 @@ export function RdpOptions({
   sshHosts: SshHost[];
   presetId: string;
   tunnelSshHostId: string;
+  clipboardMode: RdpClipboardMode;
   onPresetChange: (presetId: string) => void;
   onTunnelChange: (sshHostId: string) => void;
+  onClipboardChange: (mode: RdpClipboardMode) => void;
 }) {
   const selectedTunnel = sshHosts.find((h) => h.id === tunnelSshHostId);
 
@@ -80,6 +97,30 @@ export function RdpOptions({
             <>
               Reach this host through a saved SSH connection instead of dialling it directly, for a
               machine whose 3389 is not exposed. The trusted certificate is the same either way.
+            </>
+          )}
+        </span>
+      </Field>
+
+      <Field label="Clipboard">
+        <Combobox
+          options={CLIPBOARD_OPTIONS}
+          value={clipboardMode}
+          onChange={(value) => onClipboardChange(value as RdpClipboardMode)}
+          searchPlaceholder="Search clipboard modes…"
+          emptyLabel="No matching mode."
+        />
+        <span className="text-muted-foreground text-[10.5px]">
+          {clipboardMode === "off" ? (
+            <>
+              The clipboard channel is not opened at all, so the server is never told this
+              connection has a clipboard.
+            </>
+          ) : (
+            <>
+              Text and images are carried across; files are not. The transfer happens as focus
+              enters and leaves the pane, so a copy made without leaving it is picked up on the next
+              switch.
             </>
           )}
         </span>
