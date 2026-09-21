@@ -80,6 +80,12 @@ export type RdpOpenInput = {
    *  for unset, which is what a `"preset"` row sends: the backend only derives
    *  a scale factor for values in 100..=500. */
   scaleFactor?: number;
+  /** Clipboard directions this session carries. Omit for both, which is what
+   *  the backend defaults to. The literals are restated here rather than
+   *  imported from `hosts/types` for the same reason `RdpCredential` is: this
+   *  file is the IPC surface and owns its own wire types. `tsc` pins the two
+   *  copies against each other through `dial.ts`. */
+  clipboard?: "both" | "hostToRemote" | "remoteToHost" | "off";
 };
 
 /** One live session, as `rdp_list_sessions` reports it. */
@@ -195,6 +201,18 @@ export function rdpResize(
   scaleFactor: number,
 ): Promise<void> {
   return invoke("rdp_resize", { id, width, height, scaleFactor });
+}
+
+/**
+ * Sync the clipboard across a pane focus edge.
+ *
+ * `true` on focus-in advertises the host clipboard to the remote, so a paste
+ * made inside the session finds it; `false` on blur pulls whatever the remote
+ * last advertised onto the host clipboard. Both are no-ops when the saved
+ * direction excludes them.
+ */
+export function rdpClipboardFocus(id: number, focused: boolean): Promise<void> {
+  return invoke("rdp_clipboard_focus", { id, focused });
 }
 
 export function rdpClose(id: number): Promise<void> {
@@ -333,6 +351,10 @@ export async function openRdp(input: RdpOpenInput, handlers: RdpHandlers): Promi
       height: input.height,
       expectedCertFingerprint: input.expectedCertFingerprint ?? null,
       scaleFactor: input.scaleFactor ?? 0,
+      // `"both"` and not `null`: the Rust field is `#[serde(default)]` over a
+      // non-optional enum, so an explicit null would fail to deserialise
+      // where an absent key would have defaulted.
+      clipboard: input.clipboard ?? "both",
     },
     onEvent: buildChannel(handlers),
   });

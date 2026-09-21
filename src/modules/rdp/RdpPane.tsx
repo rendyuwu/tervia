@@ -6,6 +6,7 @@ import { useHostKeyPrompt } from "@/modules/ssh/hostKeyPrompt";
 import {
   confirmRdpCert,
   openRdp,
+  rdpClipboardFocus,
   rdpResize,
   rdpTakeFrame,
   type RdpInputEvent,
@@ -478,6 +479,49 @@ export function RdpPane({ leafId, connectionId, visible, focused = true }: Props
    */
   const liveFocus = useRef({ visible, focused });
   liveFocus.current = { visible, focused };
+
+  // Clipboard follows the pane's focus. The rising edge advertises the host
+  // clipboard so a paste inside the remote finds it; the falling edge pulls
+  // whatever the remote copied, because leaving the pane is a precondition of
+  // pasting anywhere on the host. Covers Tervia-internal pane and tab
+  // switches, where window focus never changes at all.
+  //
+  // No `onPaste` handler anywhere: a paste inside the remote is Ctrl+V
+  // forwarded as scancodes, and the server then asks US for the data over
+  // CLIPRDR. `sessionRef.current` is null until `openRdp` resolves, which
+  // costs nothing - the initial advertise comes from the backend's own
+  // `on_request_format_list` during channel initialization.
+  useEffect(() => {
+    const id = sessionRef.current?.id;
+    if (id === undefined) return;
+    void rdpClipboardFocus(id, visible && focused).catch(() => {});
+  }, [visible, focused]);
+
+  // The window-level half: alt-tabbing away and back never changes `focused`.
+  //
+  // No `e.target === window` guard. `focus` and `blur` do not bubble, so a
+  // non-capturing window listener fires only when the window itself is the
+  // target - an element's focus reaches a window listener in the CAPTURE
+  // phase only. The `releaseAll` window listener above carries no such guard
+  // for the same reason, and element blur is handled separately by this
+  // pane's own `onBlur`. Registering either of these with `true` would
+  // reintroduce the need for one.
+  useEffect(() => {
+    const sync = (on: boolean) => () => {
+      const id = sessionRef.current?.id;
+      if (id === undefined) return;
+      if (!liveFocus.current.visible || !liveFocus.current.focused) return;
+      void rdpClipboardFocus(id, on).catch(() => {});
+    };
+    const onFocus = sync(true);
+    const onBlur = sync(false);
+    window.addEventListener("focus", onFocus);
+    window.addEventListener("blur", onBlur);
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      window.removeEventListener("blur", onBlur);
+    };
+  }, []);
 
   // Claimed, not taken. This effect can run INSIDE the mousedown that
   // switched the tab (Radix `Tabs` changes value on mousedown and React 19

@@ -107,6 +107,7 @@ import {
   type Host,
   type HostGroup,
   type HostPins,
+  type RdpClipboardMode,
   type SshHost,
 } from "./types";
 
@@ -381,6 +382,7 @@ export function HostEditorDialog({
   const [rdpCred, setRdpCred] = useState<RdpCredentialDraft>(EMPTY_RDP_CRED);
   const [presetId, setPresetId] = useState(RDP_FIT_SIZE_ID);
   const [tunnelSshHostId, setTunnelSshHostId] = useState("");
+  const [clipboardMode, setClipboardMode] = useState<RdpClipboardMode>("both");
   /** The stored record being edited, or null in create mode. */
   const [existing, setExisting] = useState<Host | null>(null);
   const [hosts, setHosts] = useState<Host[]>([]);
@@ -574,6 +576,7 @@ export function HostEditorDialog({
         setProxyJumpId("");
         setPresetId(RDP_FIT_SIZE_ID);
         setTunnelSshHostId("");
+        setClipboardMode("both");
         setPins({});
         // The create arm returns before the `currentCredentialChoice(host)`
         // reset below is reached, so it gets its own: a choice left over from a
@@ -626,6 +629,7 @@ export function HostEditorDialog({
         setRdpCred(EMPTY_RDP_CRED);
         setPresetId(RDP_FIT_SIZE_ID);
         setTunnelSshHostId("");
+        setClipboardMode("both");
         // Interactive BEFORE the secret read, deliberately. Moving this below the
         // await would close the race the seed below guards against, but it would
         // hold the whole form - name, address, port, group - behind "Loading…" for
@@ -673,6 +677,7 @@ export function HostEditorDialog({
             : presetIdFor(host.desktopWidth, host.desktopHeight) || RDP_DEFAULT_PRESET.id,
         );
         setTunnelSshHostId(liveSshHost(host.tunnel?.sshHostId));
+        setClipboardMode(host.clipboard ?? "both");
         setSshCred(EMPTY_SSH_CRED);
         setProxyJumpId("");
         setReady(true);
@@ -1225,6 +1230,10 @@ export function HostEditorDialog({
           // `undefined` rather than an empty object, so a direct connection is the
           // absence of a tunnel and not an empty one.
           tunnel: tunnelSshHostId ? { sshHostId: tunnelSshHostId } : undefined,
+          // Same shape as `tunnel`: `undefined` for the default, so a record
+          // written by this build is indistinguishable from one written before
+          // the field existed.
+          clipboard: clipboardMode === "both" ? undefined : clipboardMode,
         };
         // `undefined`, not `""`, when the field was left blank: an empty string
         // would DELETE the stored password, so an edit that only renamed the host
@@ -1812,8 +1821,10 @@ export function HostEditorDialog({
                     sshHosts={sshHosts}
                     presetId={presetId}
                     tunnelSshHostId={tunnelSshHostId}
+                    clipboardMode={clipboardMode}
                     onPresetChange={setPresetId}
                     onTunnelChange={setTunnelSshHostId}
+                    onClipboardChange={setClipboardMode}
                   />
                 )}
 

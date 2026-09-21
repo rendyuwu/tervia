@@ -764,6 +764,20 @@ check(
   rdpOf(sanitizeHost(rdp({ sizeMode: "scale" })))?.sizeMode,
   "preset",
 );
+// Every sanitizer here is a whitelist, so an un-whitelisted field is dropped on
+// import with no error at all - which is the one silent failure this field can
+// have. Absent is meaningful (it reads as "both"), so an unknown value must
+// come back absent rather than pinned to a default.
+check(
+  "a known clipboard mode survives",
+  rdpOf(sanitizeHost(rdp({ clipboard: "off" })))?.clipboard,
+  "off",
+);
+check(
+  "an unknown clipboard mode is dropped",
+  rdpOf(sanitizeHost(rdp({ clipboard: "sideways" })))?.clipboard,
+  undefined,
+);
 
 console.log("\n[rdp tunnel] a bastion that did not travel must not break every connect");
 check("a tunnel survives", tunnelOf(host(rdp({ tunnel: { sshHostId: "h-1" } }))), "h-1");

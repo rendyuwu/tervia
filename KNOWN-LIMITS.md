@@ -983,7 +983,12 @@ use `DecodedImage::data_for_rect`, which underflows at height 0 and slices out
 of bounds past the framebuffer (`ironrdp-session` 0.10.0, `image.rs`). What is
 left is the decode path inside the dependency, and that one is unlinted: the
 crate sets `#![allow(clippy::arithmetic_side_effects)]` at its root, marked
-`FIXME: remove`.
+`FIXME: remove`. The clipboard callbacks in
+`src-tauri/src/modules/rdp/cliprdr.rs` now parse hostile server input on that
+same task: a `FormatDataResponse`'s length and its DIB headers are both
+attacker-chosen, and both are capped and decoded through
+`ironrdp-cliprdr-format`, which returns errors rather than panicking - but they
+sit inside this boundary's absence like everything else on the loop.
 
 **Trigger.** A decision to accept unwinding tables in the release binary. That
 is one profile line plus an `AssertUnwindSafe(...).catch_unwind()` around `run`,
@@ -991,6 +996,55 @@ emitting `error` then `disconnected` and leaving the janitor to evict the id -
 everything the panic would unwind past is dropped with the session, and
 `lock_or_recover` already recovers a poisoned guard, so there is no half-state
 to reason about. Until then a parser panic takes every tab with it.
+
+### A copy made without leaving the RDP pane is never advertised
+
+**Accepted state.** The host clipboard is read on a pane focus EDGE and nowhere
+else, so a global-hotkey clipboard manager - or any other application that
+writes the clipboard while the pane still holds focus - changes it with nothing
+to notice. A paste inside the remote then serves whatever the last focus-in
+saw. The next focus edge picks it up, so the content is late rather than lost.
+
+**Carried by.** The focus effect in `src/modules/rdp/RdpPane.tsx` and
+`RdpSession::clipboard_focus` in `src-tauri/src/modules/rdp/session.rs`.
+
+**Trigger.** A native clipboard-change listener that does not cost three
+per-platform backends. There is no Tauri clipboard event
+(tauri-apps/tauri#5746, closed not-planned), and polling buys an X11 round trip
+per tick for a signal that is idle almost always - so this waits on an upstream
+notification API, not on effort here.
+
+### A remote-to-host paste is one round trip behind
+
+**Accepted state.** The remote's clipboard is fetched on blur, so a user who
+switches away and pastes inside that same window gets the previous clipboard
+content. Text is kilobytes and the window is one PDU round trip, so this is
+small; it is not zero, and a large image makes it visible.
+
+**Carried by.** The `SendInitiatePaste` send in `RdpSession::clipboard_focus`
+(`src-tauri/src/modules/rdp/session.rs`).
+
+**Trigger.** A report of a paste landing stale in ordinary use. The fix is to
+fetch eagerly from `on_remote_copy` in
+`src-tauri/src/modules/rdp/cliprdr.rs` - the same single call site - which
+costs every copy made inside the remote on the wire whether or not anybody
+pastes it, which in a remote desktop is most of them.
+
+### A large clipboard transfer head-of-line blocks the RDP graphics path
+
+**Accepted state.** `ironrdp-svc` fragments outbound SVC data itself, so
+chunking is not ours - but the resulting `ResponseFrame` is still one
+`framed.write_all(..).await` on the task that also serves frames, up to
+`MAX_CLIPBOARD_BYTES` (32 MiB) per transfer, and the same on inbound
+reassembly. The desktop visibly stalls for the duration of a large image copy.
+
+**Carried by.** The `Wake::Clipboard` arm and the `for output in outputs`
+write in `run` (`src-tauri/src/modules/rdp/session.rs`).
+
+**Trigger.** A measured stall long enough to matter in ordinary use. Fixing it
+means moving clipboard writes off the session task, which is a second writer on
+the same `Framed` - and `write_all` is not cancel-safe, so that is a structural
+change rather than a line.
 
 ### The connector's `Credentials` holds the RDP password as an unscrubbed `String`
 

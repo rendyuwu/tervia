@@ -790,6 +790,7 @@ pub fn run() {
             rdp::rdp_snapshot,
             rdp::rdp_take_frame,
             rdp::rdp_confirm_cert,
+            rdp::rdp_clipboard_focus,
             sync::engine::sync_configure,
             sync::engine::sync_disable,
             sync::engine::sync_purge_secrets,
