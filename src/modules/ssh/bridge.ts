@@ -7,6 +7,7 @@ import {
   SshAuthRejectedError,
   SshLocalConnectError,
 } from "@/modules/terminal/lib/ssh-exit-decision";
+import type { SecretSource } from "@/modules/vault/resolve";
 
 /** First-connect host-key confirmation request from the backend. */
 export type SshHostKeyPrompt = { promptId: string; fingerprint: string; host: string };
@@ -92,17 +93,17 @@ export type SshHandlers = {
   onError?: (message: string) => void;
 };
 
-/** One hop in a ProxyJump chain, resolved from a saved connection + its
- *  keychain secrets. Passed to `openSsh` in connect order (entry host first). */
+/** One hop in a ProxyJump chain, resolved from a saved connection into keychain
+ *  references. Passed to `openSsh` in connect order (entry host first). */
 export type SshJumpHop = {
   connectionId: string;
   host: string;
   port: number;
   user: string;
   useAgent?: boolean;
-  password?: string;
-  privateKey?: string;
-  privateKeyPassphrase?: string;
+  password?: SecretSource;
+  privateKey?: SecretSource;
+  privateKeyPassphrase?: SecretSource;
   expectedFingerprint?: string;
 };
 
@@ -113,9 +114,9 @@ export type SshOpenInput = {
   /** Authenticate through the local ssh-agent. The private key stays in the
    *  agent; only signatures cross the wire, so no secret is read or stored. */
   useAgent?: boolean;
-  password?: string;
-  privateKey?: string;
-  privateKeyPassphrase?: string;
+  password?: SecretSource;
+  privateKey?: SecretSource;
+  privateKeyPassphrase?: SecretSource;
   /** SHA256 fingerprint from a previous connect. If set and the server key differs, the backend returns a `host key mismatch` error. */
   expectedFingerprint?: string;
   /** ProxyJump chain in connect order (entry host first). Empty/absent = direct. */

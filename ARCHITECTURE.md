@@ -90,9 +90,7 @@ These invariants shape the whole codebase. Violating one is almost always a bug.
   flags — so listing a hundred hosts costs no keychain reads. The one place a
   secret leaves the machine is the connection backup, which is sealed before it
   is written (Section 5). Note what this does **not** claim: it is not a
-  hardening measure. On Linux the store is a mode-0600 JSON file, and the SSH
-  connect path reads plaintext back into the webview on every connect and every
-  ProxyJump hop ([#11](https://github.com/rendyuwu/tervia/issues/11)). What a
+  hardening measure. On Linux the store is a mode-0600 JSON file. What a
   shared vault identity buys is fewer copies of one secret, not a stronger one.
 - **No account outlives the record naming it, and no record outlives its
   account.** There is no `secrets_list` command — only get, set, delete and a
@@ -232,10 +230,10 @@ That credential is either **inline** — this host's own, with the secrets under
 `tervia-hosts :: <hostId>::<field>` and boolean flags saying which exist — or a
 reference to a shared **vault identity**, whose secrets live on `tervia-vault`
 under the identity's id. `vault/resolve.ts` is the single place either one
-becomes something the connect path can use, and the two protocols get
-deliberately different shapes: SSH gets values, because `openSsh` takes values;
-RDP gets a `{service, account}` reference, which is what keeps an RDP password
-out of the webview by construction rather than by discipline.
+becomes something the connect path can use, and both protocols get the same
+shape: a `{service, account}` reference the host process dereferences itself,
+which is what keeps a saved RDP password, SSH password or private key out of the
+webview by construction rather than by discipline.
 
 Four details are load-bearing:
 

@@ -163,7 +163,7 @@ import {
   sanitizePayload,
   sanitizeRule,
 } from "../src/modules/backup/file";
-import { sshCredentialValues } from "../src/modules/vault/resolve";
+import { sshInlineCredentials } from "../src/modules/vault/resolve";
 import {
   IDENTITY_PASSWORD_FIELD,
   KEY_PRIVATE_KEY_FIELD,
@@ -2398,27 +2398,28 @@ check(
   )?.authMode,
   "password",
 );
-// `sshCredentialValues` is the ONE place that turns a saved mode into credentials
-// on the wire (it backs `resolveSshAuth`, so terminal session, tunnel, jump hops
-// and the dialog's Test all reach it). The agent case matters most: it must send
-// the flag and NOTHING else, or a stale key from a previous mode would ride along.
+// `sshInlineCredentials` is the ONE place that turns a typed draft into
+// credentials on the wire. Its only caller is the host editor's Test probe -
+// every saved connection goes through `sshKeychainCredentials` and sends
+// references instead. The agent case matters most: it must send the flag and
+// NOTHING else, or a stale key from a previous mode would ride along.
 const secrets = { password: "pw", privateKey: "KEY", keyPassphrase: "pp" };
-check("password mode sends only the password", sshCredentialValues("password", secrets), {
-  password: "pw",
+check("password mode sends only the password", sshInlineCredentials("password", secrets), {
+  password: { kind: "inline", value: "pw" },
 });
-check("key mode sends the key and its passphrase", sshCredentialValues("key", secrets), {
-  privateKey: "KEY",
-  privateKeyPassphrase: "pp",
+check("key mode sends the key and its passphrase", sshInlineCredentials("key", secrets), {
+  privateKey: { kind: "inline", value: "KEY" },
+  privateKeyPassphrase: { kind: "inline", value: "pp" },
 });
-check("agent mode sends no secret at all", sshCredentialValues("agent", secrets), {
+check("agent mode sends no secret at all", sshInlineCredentials("agent", secrets), {
   useAgent: true,
 });
-check("agent mode ignores leftovers in the keychain", sshCredentialValues("agent", {}), {
+check("agent mode ignores leftovers in the keychain", sshInlineCredentials("agent", {}), {
   useAgent: true,
 });
 check(
   "a missing secret becomes undefined, not an empty string",
-  JSON.stringify(sshCredentialValues("password", { password: "" })),
+  JSON.stringify(sshInlineCredentials("password", { password: "" })),
   "{}",
 );
 

@@ -26,7 +26,6 @@ import { sessions, type Session } from "./sessionState";
 import { describeError } from "./session-helpers";
 import { flushPendingInput, openPtyForSession, syncPtySize } from "./pty-lifecycle";
 import {
-  canAuthenticate,
   classifySshConnectFailure,
   decideSshConnectFailure,
   decideSshEnding,
@@ -38,23 +37,6 @@ import {
 
 const RECONNECT_BACKOFF_MS = [1_000, 3_000, 7_000] as const;
 const MAX_SSH_RECONNECT_ATTEMPTS = RECONNECT_BACKOFF_MS.length;
-
-/**
- * The backend's own "nothing to authenticate with" wording, mirrored verbatim
- * (see `NO_CREDENTIALS_ERROR` in src-tauri/src/modules/ssh/session.rs).
- *
- * Deliberately identical rather than improved: this pre-flight check exists to
- * CLASSIFY the failure, not to reword it, and a user who hits the backend guard
- * through some other caller must read the same sentence. The two constants are
- * cross-referenced in both directions so a change to either is a change to a
- * documented pair.
- */
-const NO_CREDENTIALS_MESSAGE = "ssh: no credentials: set use_agent, password, or private_key";
-
-/** The jump-hop half of the same guard, mirroring `connect`'s per-hop message. */
-function noJumpCredentialsMessage(host: string): string {
-  return `ssh: jump host ${host} has no ssh-agent, password or private key configured`;
-}
 
 // On an SSH drop the remote program (vim/htop/tmux) never got to send its
 // mode-reset teardown, so xterm.js stays in whatever stateful modes it left on -
@@ -167,27 +149,6 @@ export async function openSshForSession(
     s,
     `\x1b[2m[tervia] connecting to ${auth.user}@${conn.host}:${conn.port}…\x1b[0m\r\n`,
   );
-
-  // Refuse to dial with nothing to authenticate with. A host saved with no
-  // password at all is a legal record - `validateSshCredential` deliberately
-  // allows a blank secret - which makes this failure routine rather than
-  // unreachable, and the backend can only report it as one more connect-failed
-  // string, at which point the ladder cannot tell it apart from a server that is
-  // merely down. Asked here, the answer is attributable: it is a fact about the
-  // saved host, and no amount of retrying changes a saved host.
-  //
-  // Deliberately AFTER the banner above rather than up in the resolve block, so
-  // the failure still reads like every other connect failure - "connecting to
-  // user@host:port", then why it did not. The alternative prints an error naming
-  // no host at all, which in a split workspace does not say which pane failed.
-  if (!canAuthenticate(auth)) throw new SshLocalConnectError(NO_CREDENTIALS_MESSAGE);
-  // Every hop is dialled with its own credential and fails the same way, so the
-  // same question is asked of each. Named rather than counted so the banner says
-  // WHICH hop, matching the backend's per-hop message.
-  const hopWithoutCredential = jumps.find((hop) => !canAuthenticate(hop));
-  if (hopWithoutCredential) {
-    throw new SshLocalConnectError(noJumpCredentialsMessage(hopWithoutCredential.host));
-  }
 
   // Route the first ending (onExit or onError) through here; russh can fire
   // both for one drop (an error followed by the channel closing), and only

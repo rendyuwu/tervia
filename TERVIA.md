@@ -80,10 +80,7 @@ Six invariants (rationale in
    store, the workspace store, or `localStorage`. The stores hold metadata plus
    `has*` presence flags, so listing a hundred hosts costs no `secrets_get`.
    This makes secrets no _safer_ - on Linux a private key is in a mode-0600 JSON
-   file either way, and the SSH connect path still round-trips plaintext through
-   the webview on every connect and every ProxyJump hop
-   ([#11](https://github.com/rendyuwu/tervia/issues/11)). What a vault binding
-   buys is fewer copies of one secret.
+   file either way. What a vault binding buys is fewer copies of one secret.
 6. **App.tsx coordinates, it does not implement.** It owns cross-module wiring;
    feature logic lives in `src/modules/<area>/` and the per-concern hooks in
    `src/app/hooks/`.
@@ -336,15 +333,14 @@ macOS/Linux rely on `Drop for Session -> killer.kill()`.
   still references the record (`VaultInUseError` names the holders) rather than
   cascading, and `identityHostRefs` is the host store's answer to "who uses this".
 - `resolve.ts` is the **one** place a binding becomes something the connect path
-  can use, and the two protocols get deliberately different shapes.
-  `resolveRdpAuth` returns a keychain **reference** (`{service, account}`), which
-  is what keeps an RDP password out of the webview by construction;
-  `resolveSshAuth` returns values, because `openSsh` takes values -
-  [#11](https://github.com/rendyuwu/tervia/issues/11), pre-existing and not fixed
-  here. `sshCredentialValues(authMode, secrets)` is the mode-to-wire mapping
-  inside it: the same switch used to be spelled out at four call sites and a
-  missed one connected with no credentials at all. Empty values become `undefined`
-  so the backend's "no credentials" guard fires instead of an empty password.
+  can use, and both protocols get the same shape: a keychain **reference**
+  (`{kind: "keychain", service, account}`). `rdp_open` and `ssh_open` both
+  dereference it in the host process, which is what keeps a saved password or
+  private key out of the webview by construction. `sshInlineCredentials(authMode,
+secrets)` is the mode-to-wire mapping for the one case with nothing to
+  reference - the host editor's Test button, mapping a draft the user just typed.
+  Empty values become `undefined` so the backend's "no credentials" guard fires
+  instead of an empty password.
 - `types.ts` holds the binding union both stores use, and `assertBindingOwner`.
   An inline binding carries its own `hostId`, which removes the resolve-time
   mismatch and moves it to write time - which is why the host store must call that

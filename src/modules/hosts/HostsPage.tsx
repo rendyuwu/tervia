@@ -15,8 +15,7 @@
  * `setTabs` and `nextIdRef` from `useTabs`, which a pane leaf body cannot reach.
  *
  * Nothing here makes a secret safer. On Linux a private key sits in a mode-0600
- * JSON file before and after this work, and SSH still round-trips plaintext
- * through the webview on every connect. What a vault binding buys - and what the
+ * JSON file before and after this work. What a vault binding buys - and what the
  * identity pip on a card is telling you about - is FEWER COPIES of one secret.
  */
 import { Button } from "@/components/ui/button";

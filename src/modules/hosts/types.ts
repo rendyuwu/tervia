@@ -17,9 +17,7 @@ import {
 //
 // Nothing here makes a secret safer. The store holds metadata and presence flags
 // only; on Linux a private key sits in a mode-0600 JSON file before and after
-// this work, and the SSH connect path still round-trips plaintext through the
-// webview on every connect and every ProxyJump hop. What a vault binding buys is
-// FEWER COPIES of one secret.
+// this work. What a vault binding buys is FEWER COPIES of one secret.
 
 export const HOSTS_STORE_PATH = "tervia-hosts.json";
 export const HOSTS_KEY = "hosts";

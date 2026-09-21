@@ -13,10 +13,12 @@
  *
  * 1. THE AUTH CALL SITE RUNS. The call that decides whether a private key or a
  *    password reaches the handshake had never executed in the app's life: its
- *    module had zero callers. That call is `sshCredentialValues`, which
+ *    module had zero callers. That call is `sshKeychainCredentials`, which
  *    `tunnel.ts` reaches through `resolveSshAuth`. A typo there fails as "no
- *    credentials", on a path that reads keys out of the keychain. Now it is
- *    exercised for all three auth modes.
+ *    credentials", on a path that authenticates with keys. Now it is
+ *    exercised for all three auth modes - and this is also where the captured
+ *    `ssh_open` payload proves the wire carries keychain REFERENCES and the
+ *    dial reads no secret at all.
  *
  * 2. ONE SESSION PER BASTION, and it lives exactly as long as its consumers.
  *    Two forwards over one jump host must cost one russh session, and the first
@@ -367,16 +369,26 @@ function reset(rows: Row[]): void {
 }
 
 // ---------------------------------------------------------------------------
-console.log("[auth] the call site that had never executed");
-// `sshCredentialValues(authMode, secrets)` (`src/modules/vault/resolve.ts`),
-// reached from `dialSession`'s `resolveSshAuth` call: dead code until now, on
-// the path that reads private keys out of the keychain.
+console.log("[auth] the connect payload carries references, never a plaintext");
+// `sshKeychainCredentials(mode, fields, service, owner)`
+// (`src/modules/vault/resolve.ts`), reached from `dialSession`'s
+// `resolveSshAuth` call. This is the only place a real `ssh_open` payload is
+// captured end to end, so it is where "no saved SSH secret enters the webview"
+// is actually observed rather than argued.
 {
   reset([row({ id: "c-pass", authMode: "password", hasPassword: true })]);
   secrets["c-pass::password"] = "s3cret";
   const forward = await openForwardForConnection("c-pass", "10.0.0.9", 3389);
   const input = lastOf("ssh_open")?.args.input as Record<string, unknown>;
-  check("a password connection sends its password", input.password, "s3cret");
+  check("a password connection sends a reference to its password", input.password, {
+    kind: "keychain",
+    service: "tervia-hosts",
+    account: "c-pass::password",
+  });
+  // The seeded plaintext is still in the fake keychain; the dial never asked
+  // for it. That is the whole property, and it is free to check here because
+  // the harness records every invoke.
+  check("having read no secret at all", countOf("secrets_get_all"), 0);
   check("and not the agent", input.useAgent, false);
   check("and no key", [input.privateKey, input.privateKeyPassphrase], [null, null]);
   check(
@@ -400,10 +412,14 @@ console.log("[auth] the call site that had never executed");
   const forward = await openForwardForConnection("c-key", "10.0.0.9", 3389);
   const input = lastOf("ssh_open")?.args.input as Record<string, unknown>;
   check(
-    "a key connection sends key and passphrase",
+    "a key connection references the key and its passphrase",
     [input.privateKey, input.privateKeyPassphrase],
-    ["-----BEGIN OPENSSH PRIVATE KEY-----", "hunter2"],
+    [
+      { kind: "keychain", service: "tervia-hosts", account: "c-key::privateKey" },
+      { kind: "keychain", service: "tervia-hosts", account: "c-key::keyPassphrase" },
+    ],
   );
+  check("without reading the key body", countOf("secrets_get_all"), 0);
   check("and no password", input.password, null);
   await closeForwardForConnection("c-key", "10.0.0.9", 3389, 0, forward.claim);
 }
