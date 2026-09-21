@@ -95,7 +95,6 @@ import {
   type HostBase,
   type HostGroup,
   type HostPins,
-  type RdpClipboardMode,
   type RdpHost,
   type RdpSizeMode,
   type SshHost,
@@ -423,9 +422,7 @@ function rdpArm(base: HostBase, raw: Record<string, unknown>): RdpHost {
   const sizeMode: RdpSizeMode = raw.sizeMode === "fit" ? "fit" : "preset";
   // Dropped rather than defaulted, so the record stays "absent means both"
   // instead of pinning a value a later build might redefine.
-  const clipboard = RDP_CLIPBOARD_MODES.includes(raw.clipboard as RdpClipboardMode)
-    ? (raw.clipboard as RdpClipboardMode)
-    : undefined;
+  const clipboard = RDP_CLIPBOARD_MODES.find((mode) => mode === raw.clipboard);
 
   return {
     ...base,

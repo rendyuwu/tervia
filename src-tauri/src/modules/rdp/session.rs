@@ -305,13 +305,13 @@ impl RdpSession {
     /// neither path has a peer waiting on a reply.
     pub fn clipboard_focus(&self, focused: bool) -> Result<(), String> {
         if focused {
-            cliprdr::advertise(&self.clipboard, &self.input_tx, false);
+            cliprdr::advertise(&self.clipboard, &self.input_tx);
             return Ok(());
         }
         if !self.clipboard.mode.remote_to_host() {
             return Ok(());
         }
-        let Some(format) = self.clipboard.best_remote() else {
+        let Some(format) = *self.clipboard.best_remote.lock_or_recover() else {
             return Ok(());
         };
         match self
@@ -322,7 +322,7 @@ impl RdpSession {
             // Recorded only once the send succeeded. Setting it first would
             // leave a pending format with no response coming, which the next
             // unrelated response would then decode against.
-            Ok(()) => self.clipboard.set_pending_paste(format),
+            Ok(()) => *self.clipboard.pending_paste.lock_or_recover() = Some(format),
             Err(e) => log::warn!("rdp: could not queue a clipboard paste request: {e}"),
         }
         Ok(())

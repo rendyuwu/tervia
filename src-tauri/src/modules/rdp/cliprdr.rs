@@ -34,7 +34,6 @@
 //! Every failure here is logged and swallowed. A clipboard error must never end
 //! the session.
 
-use std::hash::{DefaultHasher, Hash as _, Hasher as _};
 use std::sync::{Arc, Mutex};
 
 use ironrdp_cliprdr::backend::{ClipboardMessage, CliprdrBackend};
@@ -95,11 +94,6 @@ const PASTE_PREFERENCE: [ClipboardFormatId; 5] = [
     ClipboardFormatId::CF_DIB,
 ];
 
-/// Domain separators for [`content_hash`], so text that happens to share bytes
-/// with a PNG cannot collide with it.
-const HASH_TAG_TEXT: u8 = 0;
-const HASH_TAG_IMAGE: u8 = 1;
-
 /// State the backend (task side) and [`super::session::RdpSession`] (command
 /// side) both touch.
 #[derive(Debug)]
@@ -109,14 +103,11 @@ pub(crate) struct ClipboardShared {
     /// [`best_paste_format`]. `Cliprdr::initiate_paste` takes exactly one
     /// format and the full list is never consulted again, so nothing keeps the
     /// `Vec`.
-    best_remote: Mutex<Option<ClipboardFormatId>>,
+    pub(crate) best_remote: Mutex<Option<ClipboardFormatId>>,
     /// The format `initiate_paste` last asked for, so `on_format_data_response`
     /// knows how to decode bytes the PDU does not label - the callback carries
     /// no format argument even though `Cliprdr` tracks the request internally.
-    pending_paste: Mutex<Option<ClipboardFormatId>>,
-    /// Hash of the host clipboard content last advertised. The dedup that keeps
-    /// a focus edge from re-sending an unchanged clipboard.
-    advertised: Mutex<Option<u64>>,
+    pub(crate) pending_paste: Mutex<Option<ClipboardFormatId>>,
 }
 
 impl ClipboardShared {
@@ -125,38 +116,7 @@ impl ClipboardShared {
             mode,
             best_remote: Mutex::new(None),
             pending_paste: Mutex::new(None),
-            advertised: Mutex::new(None),
         }
-    }
-
-    fn set_best_remote(&self, format: Option<ClipboardFormatId>) {
-        *self.best_remote.lock_or_recover() = format;
-    }
-
-    pub(crate) fn best_remote(&self) -> Option<ClipboardFormatId> {
-        *self.best_remote.lock_or_recover()
-    }
-
-    pub(crate) fn set_pending_paste(&self, format: ClipboardFormatId) {
-        *self.pending_paste.lock_or_recover() = Some(format);
-    }
-
-    fn take_pending_paste(&self) -> Option<ClipboardFormatId> {
-        self.pending_paste.lock_or_recover().take()
-    }
-
-    /// Record `hash` and report whether it differs from the last one recorded.
-    fn advertise_if_changed(&self, hash: u64) -> bool {
-        let mut advertised = self.advertised.lock_or_recover();
-        if *advertised == Some(hash) {
-            return false;
-        }
-        *advertised = Some(hash);
-        true
-    }
-
-    fn clear_advertised(&self) {
-        *self.advertised.lock_or_recover() = None;
     }
 }
 
@@ -185,15 +145,6 @@ fn best_paste_format(offered: &[ClipboardFormat]) -> Option<ClipboardFormatId> {
         .find(|wanted| offered.iter().any(|format| format.id() == *wanted))
 }
 
-/// Content fingerprint for the advertise dedup. Not a checksum - a collision
-/// costs one skipped advertise, not corruption.
-fn content_hash(tag: u8, bytes: &[u8]) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    tag.hash(&mut hasher);
-    bytes.hash(&mut hasher);
-    hasher.finish()
-}
-
 /// Host text, encoded for `format`. `None` for a format that is not text.
 fn text_to_format_data(text: &str, format: ClipboardFormatId) -> Option<OwnedFormatDataResponse> {
     let text = to_crlf(text);
@@ -201,9 +152,7 @@ fn text_to_format_data(text: &str, format: ClipboardFormatId) -> Option<OwnedFor
     // itself; `new_string` appends the one-byte one.
     let response = match format {
         ClipboardFormatId::CF_UNICODETEXT => FormatDataResponse::new_unicode_string(&text),
-        ClipboardFormatId::CF_TEXT | ClipboardFormatId::CF_OEMTEXT => {
-            FormatDataResponse::new_string(&text)
-        }
+        ClipboardFormatId::CF_TEXT => FormatDataResponse::new_string(&text),
         _ => return None,
     };
     Some(response.into_owned())
@@ -254,9 +203,7 @@ fn format_data_to_png(data: &[u8], format: ClipboardFormatId) -> Result<Vec<u8>,
 /// vanished in between is exactly what an error response is for.
 fn host_format_data(format: ClipboardFormatId) -> Result<OwnedFormatDataResponse, String> {
     match format {
-        ClipboardFormatId::CF_UNICODETEXT
-        | ClipboardFormatId::CF_TEXT
-        | ClipboardFormatId::CF_OEMTEXT => {
+        ClipboardFormatId::CF_UNICODETEXT | ClipboardFormatId::CF_TEXT => {
             let text = clipboard::read_text()?;
             if text.len() > MAX_CLIPBOARD_BYTES {
                 return Err(format!("host clipboard text is {} bytes", text.len()));
@@ -293,30 +240,24 @@ fn write_host_clipboard(format: ClipboardFormatId, data: &[u8]) -> Result<(), St
     }
 }
 
-/// What the host clipboard currently holds, as formats to advertise plus a
-/// fingerprint of the bytes behind them.
+/// What the host clipboard currently holds, as the formats to advertise.
 ///
 /// BLOCKING - call from a blocking thread.
 ///
 /// Text is read first so a focus edge does not ship a multi-megabyte image
 /// every time; a clipboard carrying both is rare enough that preferring the
 /// text is also the right answer.
-fn host_clipboard_state() -> Option<(&'static [ClipboardFormatId], u64)> {
+///
+/// No size check here: an advertise puts no content bytes on the wire at all,
+/// and [`host_format_data`] caps the serve that would follow.
+fn host_clipboard_state() -> Option<&'static [ClipboardFormatId]> {
     match clipboard::read_text() {
-        Ok(text) if !text.is_empty() && text.len() <= MAX_CLIPBOARD_BYTES => {
-            return Some((&TEXT_FORMATS, content_hash(HASH_TAG_TEXT, text.as_bytes())));
-        }
+        Ok(text) if !text.is_empty() => return Some(&TEXT_FORMATS),
         Ok(_) => {}
         Err(e) => log::trace!("rdp: no text on the host clipboard: {e}"),
     }
     match clipboard::read_image_png() {
-        Ok(png) if png.len() <= MAX_CLIPBOARD_BYTES => {
-            Some((&IMAGE_FORMATS, content_hash(HASH_TAG_IMAGE, &png)))
-        }
-        Ok(png) => {
-            log::debug!("rdp: not advertising a {}-byte host image", png.len());
-            None
-        }
+        Ok(_) => Some(&IMAGE_FORMATS),
         Err(e) => {
             log::trace!("rdp: no image on the host clipboard: {e}");
             None
@@ -328,48 +269,27 @@ fn host_clipboard_state() -> Option<(&'static [ClipboardFormatId], u64)> {
 ///
 /// BLOCKING - reads arboard. Call from a blocking thread.
 ///
-/// `always` is what channel initialization needs and is NOT merely a dedup
-/// bypass. A CLIPRDR client only leaves `Initialization` when the server
-/// answers a Format List it sent, `initiate_copy` is the only thing that sends
-/// one, and that first call is also what carries the Capabilities and
-/// Temporary Directory PDUs
-/// (`ironrdp-cliprdr` 0.6.0, `Cliprdr::initiate_copy`). So an empty host
-/// clipboard at startup must still produce an empty Format List, or the channel
-/// never becomes `Ready` and every later paste fails `require_ready` - which
-/// would take the remote-to-host direction down with it.
-pub(crate) fn advertise(shared: &ClipboardShared, ops: &mpsc::Sender<SessionOp>, always: bool) {
-    let state = if shared.mode.host_to_remote() {
-        host_clipboard_state()
+/// An empty host clipboard still sends an empty Format List, and that is
+/// load-bearing rather than merely harmless: a CLIPRDR client only leaves
+/// `Initialization` when the server answers a Format List it sent,
+/// `initiate_copy` is the only thing that sends one, and that first call also
+/// carries the Capabilities and Temporary Directory PDUs
+/// (`ironrdp-cliprdr` 0.6.0, `Cliprdr::initiate_copy`). Returning early on an
+/// empty clipboard would leave the channel in `Initialization` forever, every
+/// later paste failing `require_ready`, and the remote-to-host direction dead
+/// with no error anywhere to say why.
+pub(crate) fn advertise(shared: &ClipboardShared, ops: &mpsc::Sender<SessionOp>) {
+    let formats: &[ClipboardFormatId] = if shared.mode.host_to_remote() {
+        host_clipboard_state().unwrap_or(&[])
     } else {
-        None
+        &[]
     };
-    let formats: &[ClipboardFormatId] = match state {
-        Some((formats, hash)) => {
-            // Order matters: the hash is recorded even when `always` forces the
-            // send, so the focus edge that follows initialization does not
-            // re-advertise the same content.
-            let changed = shared.advertise_if_changed(hash);
-            if !changed && !always {
-                return;
-            }
-            formats
-        }
-        None => {
-            shared.clear_advertised();
-            if !always {
-                return;
-            }
-            &[]
-        }
-    };
-
     let formats = formats.iter().copied().map(ClipboardFormat::new).collect();
     if let Err(e) = ops.try_send(SessionOp::Clipboard(ClipboardMessage::SendInitiateCopy(
         formats,
     ))) {
         // Nothing is stranded: no peer is waiting on this, and the next focus
-        // edge retries. Clearing the hash is what makes that retry possible.
-        shared.clear_advertised();
+        // edge retries.
         log::warn!("rdp: could not queue a clipboard advertise: {e}");
     }
 }
@@ -382,7 +302,6 @@ pub(crate) fn advertise(shared: &ClipboardShared, ops: &mpsc::Sender<SessionOp>,
 pub(crate) struct TerviaCliprdrBackend {
     shared: Arc<ClipboardShared>,
     ops: mpsc::WeakSender<SessionOp>,
-    temp_dir: String,
 }
 
 // `CliprdrBackend` is declared `AsAny + Debug + Send` and there is no blanket
@@ -391,25 +310,19 @@ ironrdp_core::impl_as_any!(TerviaCliprdrBackend);
 
 impl TerviaCliprdrBackend {
     pub(crate) fn new(shared: Arc<ClipboardShared>, ops: mpsc::WeakSender<SessionOp>) -> Self {
-        Self {
-            shared,
-            ops,
-            // Never created on disk. It is only the string inside the Temporary
-            // Directory PDU, which the server would use as a destination for
-            // file transfers - and those are unadvertised, so nothing ever
-            // opens it. `Cliprdr` reads this name and does no I/O with it
-            // (`ironrdp-cliprdr` 0.6.0, `ClientTemporaryDirectory::new`).
-            temp_dir: std::env::temp_dir()
-                .join("tervia-rdp")
-                .to_string_lossy()
-                .into_owned(),
-        }
+        Self { shared, ops }
     }
 }
 
 impl CliprdrBackend for TerviaCliprdrBackend {
     fn temporary_directory(&self) -> &str {
-        &self.temp_dir
+        // Empty on purpose. This string only ends up in the Temporary
+        // Directory PDU, which names where the server should drop clipboard
+        // FILE transfers - and no file capability is advertised, so it is
+        // never used and nothing is created on disk either way. The PDU is
+        // sent regardless and zero-fills its 520-byte buffer, doing no I/O
+        // with the name (`ironrdp-cliprdr` 0.6.0, `ClientTemporaryDirectory::new`).
+        ""
     }
 
     fn client_capabilities(&self) -> ClipboardGeneralCapabilityFlags {
@@ -435,35 +348,23 @@ impl CliprdrBackend for TerviaCliprdrBackend {
 
     fn on_request_format_list(&mut self) {
         // Fires ONCE, during channel initialization, and is not a change
-        // signal. `always = true`; see `advertise` for why an empty clipboard
-        // must still produce a Format List here.
+        // signal. See `advertise` for why an empty clipboard must still
+        // produce a Format List here.
         let Some(ops) = self.ops.upgrade() else {
             return;
         };
         let shared = Arc::clone(&self.shared);
-        super::rdp_runtime().spawn_blocking(move || advertise(&shared, &ops, true));
-    }
-
-    fn on_format_list_response(&mut self, ok: bool) {
-        if ok {
-            return;
-        }
-        // Let the next focus edge retry. Never re-advertise from here: the
-        // crate's own docs warn that a later rejected re-advertise wipes
-        // accepted state and breaks a paste that was about to work.
-        log::debug!("rdp: the server rejected our clipboard advertise");
-        self.shared.clear_advertised();
+        super::rdp_runtime().spawn_blocking(move || advertise(&shared, &ops));
     }
 
     fn on_remote_copy(&mut self, available_formats: &[ClipboardFormat]) {
         // Recorded, not fetched. The fetch happens on pane blur - see
         // `RdpSession::clipboard_focus` for why that is the right moment.
-        self.shared
-            .set_best_remote(best_paste_format(available_formats));
+        *self.shared.best_remote.lock_or_recover() = best_paste_format(available_formats);
         // `Cliprdr` drops its own request correlation on a new Format List, so
         // ours has to go with it or a late response would decode against a
         // format from the previous copy.
-        let _ = self.shared.take_pending_paste();
+        *self.shared.pending_paste.lock_or_recover() = None;
     }
 
     fn on_format_data_request(&mut self, request: FormatDataRequest) {
@@ -510,7 +411,7 @@ impl CliprdrBackend for TerviaCliprdrBackend {
     fn on_format_data_response(&mut self, response: FormatDataResponse<'_>) {
         // Taken unconditionally, so a refused or malformed response cannot
         // leave a stale format for the next one to decode against.
-        let pending = self.shared.take_pending_paste();
+        let pending = self.shared.pending_paste.lock_or_recover().take();
         if !self.shared.mode.remote_to_host() {
             return;
         }
@@ -663,51 +564,29 @@ mod tests {
         assert_eq!(best_paste_format(&[]), None);
     }
 
-    #[test]
-    fn the_advertise_dedup_tracks_content() {
-        let shared = ClipboardShared::new(RdpClipboardMode::Both);
-        let first = content_hash(HASH_TAG_TEXT, b"one");
-        let second = content_hash(HASH_TAG_TEXT, b"two");
-        assert_ne!(first, second);
-        assert_eq!(first, content_hash(HASH_TAG_TEXT, b"one"));
-        // The same bytes under a different tag are a different clipboard.
-        assert_ne!(first, content_hash(HASH_TAG_IMAGE, b"one"));
-
-        assert!(shared.advertise_if_changed(first));
-        assert!(!shared.advertise_if_changed(first));
-        assert!(shared.advertise_if_changed(second));
-        shared.clear_advertised();
-        assert!(shared.advertise_if_changed(second));
-    }
-
     /// The invariant that makes the channel usable at all.
     ///
     /// A CLIPRDR client only leaves `Initialization` once the server answers a
     /// Format List it sent, and `initiate_copy` is the only thing that sends
-    /// one. So the initialization advertise has to reach the queue even when
-    /// there is nothing to advertise - otherwise the channel never becomes
-    /// `Ready`, `initiate_paste` fails `require_ready`, and the
-    /// remote-to-host direction is dead with no error anywhere to say why.
+    /// one. So an advertise with nothing to advertise still has to reach the
+    /// queue - otherwise the channel never becomes `Ready`, `initiate_paste`
+    /// fails `require_ready`, and the remote-to-host direction is dead with no
+    /// error anywhere to say why.
     ///
     /// `RemoteToHost` keeps this hermetic: `host_to_remote()` is false, so
     /// nothing here touches arboard or a real display.
     #[test]
-    fn initialization_advertises_even_with_nothing_to_advertise() {
+    fn an_empty_clipboard_still_advertises() {
         let shared = ClipboardShared::new(RdpClipboardMode::RemoteToHost);
         let (tx, mut rx) = mpsc::channel::<SessionOp>(4);
 
-        advertise(&shared, &tx, true);
+        advertise(&shared, &tx);
         match rx.try_recv() {
             Ok(SessionOp::Clipboard(ClipboardMessage::SendInitiateCopy(formats))) => {
                 assert!(formats.is_empty(), "nothing to offer, so an empty list");
             }
-            _ => panic!("initialization must queue a format list"),
+            _ => panic!("an advertise must always queue a format list"),
         }
-
-        // A focus edge with nothing to say stays silent, which is the whole
-        // difference between the two callers.
-        advertise(&shared, &tx, false);
-        assert!(rx.try_recv().is_err(), "a focus edge advertises nothing");
     }
 
     /// A 2x1 RGBA PNG whose second pixel is half-transparent.
