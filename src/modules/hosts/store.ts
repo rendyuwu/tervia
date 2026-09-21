@@ -1,6 +1,6 @@
 import { describeError } from "@/lib/describeError";
 import { markDirty } from "@/lib/dirtySink";
-import type { StoreRecovery } from "@/lib/storeRecovery";
+import type { StoreFileState, StoreRecovery } from "@/lib/storeRecovery";
 import {
   landedTombstones,
   landingRefusal,
@@ -76,12 +76,14 @@ import {
 //   to save on both sides and then fail every connect to either host.
 //
 //   NO ACCOUNT OUTLIVES THE RECORD NAMING IT, AND NO RECORD OUTLIVES ITS ACCOUNT.
-//   There is no `secrets_list` command, so an account nothing references is not
-//   merely untidy, it is unreachable. A delete clears the host's accounts,
-//   and an upsert clears the ones the new record can no longer name - AFTER the
-//   new record is on disk, never before, because nothing here can read a secret
-//   back to undo a release that a failed write leaves unjustified. `legacyPurge.ts`
-//   is the same rule pointed at the two old connection stores.
+//   `secrets_list` can enumerate an account nothing references, but its only
+//   consumer is the Vault page's unreferenced-entry sweep, which the user has to
+//   find, read and confirm - so an account this layer fails to release is not
+//   merely untidy, it waits on somebody going looking. A delete clears the host's
+//   accounts, and an upsert clears the ones the new record can no longer name -
+//   AFTER the new record is on disk, never before, because nothing here can read
+//   a secret back to undo a release that a failed write leaves unjustified.
+//   `legacyPurge.ts` is the same rule pointed at the two old connection stores.
 
 /**
  * The secret is ALREADY at this host's account: record it as present and write
@@ -250,6 +252,18 @@ export type HostsStore = {
   /** Run the crash-recovery pass and first load, then hand back whatever the
    *  user should be told - once. The startup entry point. */
   ensureLoaded(): Promise<StoreRecovery | null>;
+  /**
+   * How this store's file looked on disk, for a caller that must refuse to act
+   * on emptiness it cannot account for.
+   *
+   * Separate from {@link HostsStore.ensureLoaded} and
+   * {@link HostsStore.takeRecoveryNotice} because both of those DRAIN the
+   * notice slot, and a guard must be able to ask the same question without
+   * racing the toast away. `scanOrphanSecrets` in `modules/vault/orphans.ts` is
+   * the caller: an unreadable file means the ids it would subtract are unknown,
+   * and a sweep over an empty known set calls every stored secret an orphan.
+   */
+  fileState(): Promise<{ found: StoreFileState; recovered: boolean }>;
   /**
    * Clear the keychain accounts the two OLD connection stores left behind, once.
    *
@@ -664,9 +678,9 @@ export function createHostsStore(io: HostsIo): HostsStore {
    * Clear the host-owned accounts the new record can no longer NAME.
    *
    * Covers a credential moving inline -> vault, and a row changing protocol.
-   * Without it those accounts are not merely stale: nothing enumerates them
-   * again, and there is no `secrets_list` command, so "unreferenced" means
-   * unreachable.
+   * Without it those accounts are not merely stale: no record names them, so
+   * nothing but the Vault page's unreferenced-entry sweep - which the user has to
+   * go and run - would ever name them again.
    *
    * Only what the STORED record owned is touched, so a convert-to-vault that
    * copies the secrets to the vault FIRST and rewrites the binding second loses
@@ -702,7 +716,8 @@ export function createHostsStore(io: HostsIo): HostsStore {
       // Re-worded rather than rethrown, because the record IS saved and is
       // accurate about what it owns: reporting the keychain's error alone would
       // read as "your edit was not saved". Not swallowed either - what is left is
-      // bytes at an account nothing names, and no `secrets_list` can find them.
+      // bytes at an account no record names, and only a sweep the user goes
+      // looking for would find them.
       const why = e instanceof Error ? e.message : String(e);
       const left = stale.slice(cleared);
       throw new Error(
@@ -1208,9 +1223,11 @@ export function createHostsStore(io: HostsIo): HostsStore {
             // remembered: `deleteHost` takes its cleanup as a parameter and this
             // function takes none.
             //
-            // The keychain half is not optional in the same way. There is no
-            // `secrets_list` command, so a password left at an account whose host
-            // is gone is unreachable by anything on this machine, forever.
+            // The keychain half is not optional in the same way. A password left
+            // at an account whose host is gone is named by no record, so nothing
+            // on this machine reaches it again except the Vault page's
+            // unreferenced-entry sweep - which is a screen the user has to visit,
+            // not a release.
             //
             // A keychain that refuses becomes a REFUSAL, not a throw. This is the
             // only await in the loop that can reject, and letting it out would
@@ -1459,6 +1476,7 @@ export function createHostsStore(io: HostsIo): HostsStore {
     listTombstones: () => readTombstones(),
     onHostsChanged: (cb) => io.store.onChanged(cb),
     ensureLoaded: () => io.store.ensureLoaded(),
+    fileState: () => io.store.fileState(),
     takeRecoveryNotice: () => io.store.takeRecoveryNotice(),
     purgeLegacySecrets: () =>
       runLegacyPurge({
@@ -1499,6 +1517,7 @@ export const {
   listTombstones,
   onHostsChanged,
   ensureLoaded,
+  fileState,
   takeRecoveryNotice,
   purgeLegacySecrets,
 } = hostsStore;

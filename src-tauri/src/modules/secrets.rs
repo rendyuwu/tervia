@@ -18,7 +18,9 @@
 //!   isolation the secret-service collection would have.
 //!
 //! The frontend talks to `secrets_get`, `secrets_set`, `secrets_delete`,
-//! `secrets_get_all` and `secrets_copy` with no platform branching in JS.
+//! `secrets_get_all`, `secrets_copy` and `secrets_list` with no platform
+//! branching in JS. Only the last of those enumerates; every other one is
+//! named against accounts the caller already holds.
 //!
 //! All commands take `&AppHandle` so the data directory is resolved once via
 //! Tauri's path API.
@@ -66,6 +68,25 @@ pub struct SecretsState {
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 fn key(service: &str, account: &str) -> String {
     format!("{}::{}", service, account)
+}
+
+/// Every account the store map holds under one service, with the
+/// `"<service>::"` prefix stripped back off.
+///
+/// Split out of [`secrets_list`] to be testable at all - `src-tauri` has no
+/// `[dev-dependencies]`, so an `AppHandle` cannot be constructed.
+///
+/// `strip_prefix` on the full `"<service>::"` string, NOT a split on the first
+/// `"::"`: an account is itself `"<id>::<field>"`, so a key is
+/// `"tervia-hosts::h1::password"` and splitting would answer `"h1"`. Including
+/// the separator in the prefix is also what keeps `"tervia-host"` from
+/// matching `"tervia-hosts::…"`.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+fn accounts_under(map: &SecretMap, service: &str) -> Vec<String> {
+    let prefix = key(service, "");
+    map.keys()
+        .filter_map(|k| k.strip_prefix(&prefix).map(str::to_string))
+        .collect()
 }
 
 #[cfg(target_os = "linux")]
@@ -598,6 +619,88 @@ pub async fn secrets_get_all(
     }
 }
 
+/// `errSecItemNotFound`. Nothing under this service, which is an answer rather
+/// than a failure - `SecItemCopyMatching` reports an empty match as an error.
+#[cfg(target_os = "macos")]
+const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;
+
+/// Every account the login keychain holds under one service.
+///
+/// ATTRIBUTES ONLY. `load_data` is deliberately not set: an account name is the
+/// whole answer, and asking for the value would both break this module's
+/// invariant that a plaintext never leaves it unasked and put the item's ACL
+/// prompt in front of the user for a listing.
+///
+/// The keychain is named explicitly rather than left to the default search
+/// scope, because it has to be the SAME one the `keyring` crate writes to: its
+/// macOS credential resolves the user domain's default keychain per call.
+///
+/// NOT SCOPED TO THIS INSTALL, and that is a real difference from the other
+/// two platforms rather than an oversight here. Linux and Windows keep their
+/// store under `app_local_data_dir()`, so a dev build and a release build
+/// cannot see each other's secrets; a bare macOS service string is shared by
+/// both. Recorded in `KNOWN-LIMITS.md`, and it is why the sweep this feeds
+/// confirms before deleting.
+#[cfg(target_os = "macos")]
+fn keychain_accounts(service: &str) -> Result<Vec<String>, String> {
+    use security_framework::item::{ItemClass, ItemSearchOptions, Limit};
+    use security_framework::os::macos::keychain::{SecKeychain, SecPreferencesDomain};
+
+    let chain =
+        SecKeychain::default_for_domain(SecPreferencesDomain::User).map_err(|e| e.to_string())?;
+    match ItemSearchOptions::new()
+        .keychains(&[chain])
+        .class(ItemClass::generic_password())
+        .service(service)
+        .limit(Limit::All)
+        .load_attributes(true)
+        .search()
+    {
+        // `acct` is `kSecAttrAccount`'s four-char key in the attribute dict
+        // `simplify_dict` flattens.
+        Ok(items) => Ok(items
+            .iter()
+            .filter_map(|i| i.simplify_dict().and_then(|mut d| d.remove("acct")))
+            .collect()),
+        Err(e) if e.code() == ERR_SEC_ITEM_NOT_FOUND => Ok(Vec::new()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Every ACCOUNT stored under one service. Never a value, and there is no
+/// arm here that could return one.
+///
+/// The one command on this surface that answers "what is in there". Every
+/// other one is named against accounts the caller already holds, which is what
+/// made a secret left behind by a partial write unnameable from inside the app
+/// - see `src/modules/vault/orphans.ts`, the only caller.
+///
+/// PER SERVICE, never the whole keychain. On macOS an unfiltered search would
+/// enumerate every generic password the user owns, including other
+/// applications'; the four services this app writes are the only ones it has
+/// any business naming.
+///
+/// Windows lists the DPAPI file store only. The legacy Credential Manager
+/// entries `legacy_keyring_get` still falls back to cannot be enumerated - the
+/// `keyring` crate has no listing API - so a pre-migration password-only
+/// credential is invisible here. Recorded in `KNOWN-LIMITS.md`.
+#[tauri::command]
+pub async fn secrets_list(
+    app: AppHandle,
+    state: tauri::State<'_, SecretsState>,
+    service: String,
+) -> Result<Vec<String>, String> {
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    {
+        with_store(&app, &state, |m| accounts_under(m, &service))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = (app, state);
+        keychain_accounts(&service)
+    }
+}
+
 /// Whether a copy would be from an entry to itself.
 ///
 /// BOTH halves, which is the whole reason this is named rather than inline.
@@ -710,7 +813,7 @@ pub async fn secrets_copy(
 /// the first of those observable as a crash on one platform.
 #[cfg(all(test, any(target_os = "linux", target_os = "windows")))]
 mod commit_tests {
-    use super::{commit_locked, SecretMap};
+    use super::{accounts_under, commit_locked, SecretMap};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use zeroize::Zeroizing;
@@ -892,6 +995,23 @@ mod commit_tests {
         .expect("commit");
         assert_eq!(file.loads.load(Ordering::SeqCst), 3);
         assert_eq!(seen.as_deref(), Some("from-elsewhere"));
+    }
+
+    /// `accounts_under` strips the whole `"<service>::"` prefix, which pins
+    /// three things in one map: an account that itself contains `"::"` comes
+    /// back whole, another service's key is excluded, and a service that is a
+    /// PREFIX of the one asked for does not match.
+    #[test]
+    fn accounts_under_one_service_keeps_the_field_and_excludes_the_lookalikes() {
+        let map: SecretMap = [
+            ("tervia-hosts::h1::password", "p"),
+            ("tervia-vault::v1::privateKey", "k"),
+            ("tervia-host::x::password", "q"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), Zeroizing::new(v.to_string())))
+        .collect();
+        assert_eq!(accounts_under(&map, "tervia-hosts"), vec!["h1::password"]);
     }
 }
 

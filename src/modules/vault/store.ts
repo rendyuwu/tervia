@@ -1,6 +1,6 @@
 import { describeError } from "@/lib/describeError";
 import { markDirty } from "@/lib/dirtySink";
-import type { StoreRecovery } from "@/lib/storeRecovery";
+import type { StoreFileState, StoreRecovery } from "@/lib/storeRecovery";
 import {
   landedTombstones,
   landingRefusal,
@@ -125,8 +125,9 @@ export type VaultStore = {
    * another window in between.
    *
    * A TOMBSTONE LANDING RELEASES THE KEYCHAIN, the same accounts `deleteKey` and
-   * `deleteIdentity` clear. There is no `secrets_list` command, so a body left
-   * at an account no record names is not untidy, it is unreachable forever.
+   * `deleteIdentity` clear. A body left at an account no record names is not
+   * untidy: nothing reaches it again but the Vault page's unreferenced-entry
+   * sweep, which the user has to go and run.
    *
    * REFUSALS COME BACK, nothing throws - see `landingRefusal` in
    * `src/lib/tombstones.ts` for the five conditions, and for why the reference
@@ -168,6 +169,11 @@ export type VaultStore = {
    * unreported.
    */
   ensureLoaded(): Promise<StoreRecovery | null>;
+  /** How this store's file looked on disk. Neither draining the notice slot nor
+   *  competing for it - see {@link HostsStore.fileState} in
+   *  `src/modules/hosts/store.ts` for the caller and why it must not use
+   *  {@link VaultStore.ensureLoaded} instead. */
+  fileState(): Promise<{ found: StoreFileState; recovered: boolean }>;
   /** The recovery notice if a read has already triggered the pass. Prefer
    *  {@link VaultStore.ensureLoaded}. */
   takeRecoveryNotice(): StoreRecovery | null;
@@ -274,10 +280,11 @@ export function createVaultStore(io: VaultIo): VaultStore {
    *
    * The hole this closes: `privateKey` lands, `passphrase` throws, and the PEM
    * then sits at `<key.id>::privateKey` with no record naming it - the "bytes no
-   * code path can enumerate or delete" case the module header opens with, and
-   * literally unenumerable, since there is no `secrets_list` command. The required
-   * key name closed the blank-name route into that hole; this closes the failure
-   * route.
+   * code path can enumerate or delete" case the module header opens with. Only
+   * the Vault page's unreferenced-entry sweep would ever name it, and that is a
+   * screen somebody has to visit rather than anything this write can rely on. The
+   * required key name closed the blank-name route into that hole; this closes the
+   * failure route.
    *
    * Rolled back only for a record that did not exist before, which is what makes
    * it safe: for an id the store has never seen there was nothing at these
@@ -545,8 +552,9 @@ export function createVaultStore(io: VaultIo): VaultStore {
    * delete in this module, local or landed.
    *
    * A landed delete re-runs it rather than trusting the origin device's: that
-   * device cleared ITS keychain, and there is no `secrets_list` command, so a
-   * body left behind here is reachable by nothing on this machine ever again.
+   * device cleared ITS keychain, and a body left behind here is named by no record
+   * on this machine, so nothing reaches it again but the Vault page's
+   * unreferenced-entry sweep.
    */
   async function releaseAccounts(id: string, fields: readonly string[]): Promise<void> {
     await Promise.all(
@@ -767,6 +775,7 @@ export function createVaultStore(io: VaultIo): VaultStore {
     listTombstones: () => readTombstones(),
     onVaultChanged: (cb) => io.store.onChanged(cb),
     ensureLoaded: () => io.store.ensureLoaded(),
+    fileState: () => io.store.fileState(),
     takeRecoveryNotice: () => io.store.takeRecoveryNotice(),
   };
 }
@@ -795,5 +804,6 @@ export const {
   listTombstones,
   onVaultChanged,
   ensureLoaded,
+  fileState,
   takeRecoveryNotice,
 } = vaultStore;

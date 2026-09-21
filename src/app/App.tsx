@@ -287,16 +287,18 @@ export default function App() {
 
   // -------- one-shot legacy secret purge --------
   // The two old connection stores are gone, and with them the only code that
-  // could name `tervia-ssh :: <id>::*` or `tervia-rdp :: <id>::password`. There
-  // is no `secrets_list` command, so whatever they left in the macOS keychain,
-  // the Windows `secrets.bin` or the Linux mode-0600 JSON would otherwise be
-  // unreachable forever - private keys included. This clears it once and
-  // remembers that it did.
+  // could name `tervia-ssh :: <id>::*` or `tervia-rdp :: <id>::password`.
+  // `secrets_list` can enumerate them, but its only consumer is the Vault page's
+  // unreferenced-entry sweep, which the user has to find, read and confirm - so
+  // without this pass whatever they left in the macOS keychain, the Windows
+  // `secrets.bin` or the Linux mode-0600 JSON sits there until somebody goes
+  // looking, private keys included. This clears it once and remembers that it
+  // did.
   //
   // Fired and forgotten deliberately: it runs after paint, gates nothing, and
   // never rejects. A partial pass leaves the marker unwritten so the next launch
   // tries again - and it is said out loud rather than swallowed, because the
-  // accounts it could not clear are exactly the ones nothing can name again.
+  // accounts it could not clear are exactly the ones nothing releases on its own.
   useEffect(() => {
     void purgeLegacySecrets()
       .then((result) => {

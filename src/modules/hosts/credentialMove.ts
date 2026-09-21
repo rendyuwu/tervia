@@ -812,8 +812,9 @@ async function undoDetachCopies(
  * The copies land BEFORE the host write, the mirror of convert's ordering and
  * for the same reason. So the same failure path applies: a refused
  * `upsertHost` left a plaintext copy of what may be a SHARED vault key at
- * `tervia-hosts::<hostId>::privateKey`, named by nothing, and unenumerable
- * because there is no `secrets_list`. {@link undoDetachCopies} takes them back.
+ * `tervia-hosts::<hostId>::privateKey`, named by no record, and reachable
+ * afterwards only through the Vault page's unreferenced-entry sweep.
+ * {@link undoDetachCopies} takes them back.
  * The missing-identity arm below needs none of that: it copies nothing, so a
  * refusal there leaves nothing behind, and it must stay that way.
  *

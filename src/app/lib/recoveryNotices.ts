@@ -35,8 +35,10 @@ export type Say = (t: RecoveryToast) => void;
  *
  * Said only on the branch where a file actually WAS rolled back, because that is
  * the only branch where it is true. It states what was not done and stops: the
- * app did not reconcile anything, cannot enumerate the keychain to find out
- * (there is no `secrets_list`), and must not imply either.
+ * app did not reconcile anything, did not read the keychain to find out, and must
+ * not imply either. Enumeration is possible - `secrets_list` exists - but it
+ * answers the opposite question: it names accounts no record claims, where what
+ * diverges here is a record claiming an account that has gone.
  */
 const KEYCHAIN_DIVERGENCE =
   "Stored passwords and keys were not rolled back with it, so a restored record " +

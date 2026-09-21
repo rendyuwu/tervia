@@ -680,7 +680,6 @@ pub fn run() {
                 .build(),
         )
         .plugin(tauri_plugin_autostart::Builder::new().build())
-        .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_os::init())
         .plugin(
             tauri_plugin_log::Builder::new()
@@ -749,6 +748,7 @@ pub fn run() {
             secrets::secrets_set,
             secrets::secrets_delete,
             secrets::secrets_get_all,
+            secrets::secrets_list,
             secrets::secrets_copy,
             backup::backup_seal_payload,
             backup::backup_open_payload,

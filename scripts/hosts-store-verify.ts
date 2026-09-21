@@ -51,14 +51,16 @@
  *    otherwise is a secret `resolveRdpAuth` hands the backend regardless.
  *
  * 7. NO ACCOUNT OUTLIVES THE RECORD NAMING IT, AND NO RECORD OUTLIVES ITS
- *    ACCOUNT. There is no `secrets_list` command, so an account nothing
- *    references is unreachable, not merely untidy. A delete clears the host's
- *    accounts; an upsert clears the ones the new record can no longer name, but
- *    only AFTER the new record is on disk, because a protocol change has no
- *    copy step and this layer cannot put a secret back; a partial write on a
- *    brand-new host rolls back. The two OLD connection stores' accounts are swept
- *    once by `legacyPurge.ts`, which is the only thing that can ever name them
- *    after those modules are deleted.
+ *    ACCOUNT. `secrets_list` can enumerate an account nothing references, but
+ *    its only consumer is the Vault page's unreferenced-entry sweep, which the
+ *    user has to find, read and confirm - so an account this layer fails to
+ *    release waits on somebody going looking rather than being merely untidy. A
+ *    delete clears the host's accounts; an upsert clears the ones the new record
+ *    can no longer name, but only AFTER the new record is on disk, because a
+ *    protocol change has no copy step and this layer cannot put a secret back; a
+ *    partial write on a brand-new host rolls back. The two OLD connection
+ *    stores' accounts are swept once by `legacyPurge.ts`, which is what gives
+ *    that sweep a known set to subtract from for those two services.
  *
  * 8. AN RDP PASSWORD NEVER ENTERS THE WEBVIEW. There is no read-back for one, not
  *    even for the editor. A DUPLICATE still carries it, because `secrets_copy`
@@ -807,8 +809,9 @@ console.log("\n[duplicate] a copy that cannot carry a secret writes no record at
     ["h-1"],
   );
   // The partial copy is rolled back, which is safe for exactly one reason: the
-  // copy's id is brand new, so there was nothing at these accounts to lose. There
-  // is no `secrets_list`, so anything left here is unreachable rather than untidy.
+  // copy's id is brand new, so there was nothing at these accounts to lose. No
+  // record would name anything left here, so only the Vault page's
+  // unreferenced-entry sweep would find it.
   check(
     "the account that DID copy is cleared again, leaving only the source's two",
     [...h.kept.keys()].sort(),
@@ -1128,7 +1131,8 @@ console.log("\n[flags] an RDP row owns one account and refuses key material");
 console.log("\n[accounts] no secret outlives the record naming it");
 {
   // A partial write on a BRAND-NEW host rolls back, or the first secret sits at an
-  // account no record names - and there is no `secrets_list` to find it with.
+  // account no record names - and only the Vault page's unreferenced-entry sweep
+  // would find it.
   const broken = harness({ fail: { setAccount: "h-1::privateKey" } });
   await rejects(
     "a write that throws partway is reported",
@@ -1395,8 +1399,9 @@ console.log("\n[vault] a vault-bound host owns no accounts");
 console.log("\n[delete] an unreferenced host takes its accounts with it");
 {
   // What is left of a delete once both cascades are refusals. Nothing rides
-  // `h-gone`, so it goes, and every account it owned goes by NAME - there is no
-  // `secrets_list`, so an account left behind is unreachable rather than untidy.
+  // `h-gone`, so it goes, and every account it owned goes by NAME - an account
+  // left behind is named by no record, so only the Vault page's
+  // unreferenced-entry sweep would find it.
   // The two refusal cases are the next two blocks.
   const h = harness();
   await h.hosts.upsertHost(sshHost({ id: "h-keep" }), { password: "keeppw" });
@@ -2270,9 +2275,10 @@ console.log("\n[purge] the two old connection stores' secrets are cleared once, 
     "tervia-rdp-connections.json": rdp,
   });
 
-  // What makes this worth building at all: once the old modules are gone there is
-  // no `secrets_list`, so `tervia-ssh :: <id>::privateKey` is a private key with no
-  // delete button anywhere in the app, forever.
+  // What makes this worth building at all: once the old modules are gone, nothing
+  // NAMES `tervia-ssh :: <id>::privateKey` - it is a private key with no delete
+  // button on any screen that shows a host, and the only thing left that reaches
+  // it is a sweep the user has to go and run.
   const h = harness({
     legacy: legacy(sshFile(["c-1", "c-2"]), sshFile(["r-1"])),
     kept: {

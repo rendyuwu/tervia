@@ -270,7 +270,7 @@ function writeShadow(theme: CustomTheme | null): void {
     // Strip multi-MB `data:` blobs from the localStorage shadow. Idle
     // memory stays low (the shadow is read on every boot of the same
     // webview) and `applyCustomTheme` will re-add the dataUrl from the
-    // tauri-plugin-store payload once it resolves. URL dataUrls stay
+    // settings store payload once it resolves. URL dataUrls stay
     // since they are tiny (~100 bytes) and let the wallpaper paint on
     // first frame without waiting for the async store load.
     const slim = theme.background.dataUrl.startsWith("data:")

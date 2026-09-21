@@ -23,11 +23,12 @@
  *    connect asks a first-connect question it already has the answer to. The
  *    fixture carries none of the four, which is what the wire guarantees.
  *
- * 3. A TOMBSTONE LANDING THAT STRANDS A SECRET. There is no `secrets_list`
- *    command, so a body at an account whose record is gone is unreachable by
- *    anything on this machine, forever. Three fixtures, not one: hosts, vault
- *    keys and vault identities all fan out a delete, and covering only the first
- *    would leave the two that hold private key material unproven.
+ * 3. A TOMBSTONE LANDING THAT STRANDS A SECRET. A body at an account whose
+ *    record is gone is named by nothing on this machine, so the only thing that
+ *    reaches it again is the Vault page's unreferenced-entry sweep - a screen the
+ *    user has to visit, not a release. Three fixtures, not one: hosts, vault keys
+ *    and vault identities all fan out a delete, and covering only the first would
+ *    leave the two that hold private key material unproven.
  *
  * 4. A REFUSAL THAT THROWS. Every apply runs as ONE queued write, so a throw
  *    from the middle of the loop loses every other landing in the set - the good

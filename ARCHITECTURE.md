@@ -60,9 +60,9 @@ window** (entry [`src/settings/main.tsx`](src/settings/main.tsx), opened by the
 [`src/float/main.tsx`](src/float/main.tsx), opened by `open_float_window`,
 labeled `float-<leafId>`) that pop one pane out as an always-on-top window
 mirroring a live terminal, an editor, or the board. They share persisted state
-through `tauri-plugin-store`, not through React, so any store the main window
-reads must be hydrated in the others too. This is why two similarly named
-folders exist:
+through the JSON store files under the app-data directory, not through React, so
+any store the main window reads must be hydrated in the others too. This is why
+two similarly named folders exist:
 
 | Folder                  | Role                                                                  |
 | ----------------------- | --------------------------------------------------------------------- |
@@ -93,11 +93,12 @@ These invariants shape the whole codebase. Violating one is almost always a bug.
   hardening measure. On Linux the store is a mode-0600 JSON file. What a
   shared vault identity buys is fewer copies of one secret, not a stronger one.
 - **No account outlives the record naming it, and no record outlives its
-  account.** There is no `secrets_list` command — only get, set, delete and a
-  batch get — so a keychain account nothing references is not untidy, it is
-  unreachable for the life of the install. Deleting a host clears its accounts;
-  an upsert clears the ones the new record can no longer name, and does it
-  **after** the new record is on disk, because nothing in this layer can read a
+  account.** `secrets_list` enumerates accounts per service, but its only
+  consumer is the Vault page's unreferenced-entry sweep — a screen the user has
+  to visit, read and confirm — so a keychain account nothing references is not
+  untidy, it waits on somebody going looking. Deleting a host clears its
+  accounts; an upsert clears the ones the new record can no longer name, and does
+  it **after** the new record is on disk, because nothing in this layer can read a
   secret back to undo a release a failed write left unjustified.
 - **A remote path is never resolved against the local disk.** Every "is this
   file local?" decision routes through `isRemoteEditorLeaf` /
@@ -216,7 +217,7 @@ the app exists.
 
 ### Saved machines
 
-`hosts/store.ts` owns the machine list in a `LazyStore` at `tervia-hosts.json`.
+`hosts/store.ts` owns the machine list at `tervia-hosts.json`.
 There is **one record per machine**, a `Host` union discriminated on `protocol`,
 rather than a store per protocol: grouping, search and vault binding are then
 built once instead of twice, and the union keeps `desktopWidth` off an SSH row
@@ -254,14 +255,15 @@ Four details are load-bearing:
   connect fires `markConnected` once per jump hop plus once for the target,
   near-simultaneously; losing a freshly pinned fingerprint to an interleaved
   read-modify-write would silently drop that host back to a TOFU prompt.
-- **The store is not crash-safe on its own, so it is wrapped.**
-  `tauri-plugin-store` saves with a plain `fs::write` — no temp file, no rename,
-  no `fsync` — and upstream reports zero-byte and nul-filled files after power
-  loss, while the secret store already writes atomically. The asymmetric failure
-  is therefore that the private key survives and the record naming it does not.
-  `lib/recoveredStore.ts` recovers from a `.bak`, snapshots on every commit, and
-  returns one notice for the UI to show once. It is a mitigation, not a fix; the
-  fix is atomic store writes.
+- **The store is not crash-safe on its own, so it is wrapped.** A store file
+  rewritten in place can be left zero-byte or nul-filled by power loss, while the
+  secret store already writes atomically — so the asymmetric failure is that the
+  private key survives and the record naming it does not.
+  `lib/recoveredStore.ts` recovers from a `.bak` and snapshots on every commit,
+  and `lib/fileKeyValueStore.ts` makes each commit one atomic whole-file
+  replacement. The atomic write closes the torn-file class; the `.bak` stays for
+  the rest — a file that stopped being usable JSON for a reason no write ordering
+  prevents.
 
 `hosts/legacyPurge.ts` is the same "no orphan accounts" rule pointed backwards,
 at the two connection stores this one replaced. Their keychain accounts became

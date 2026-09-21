@@ -929,7 +929,8 @@ console.log(
   // Measured before the fix, over two presses of one button: two vault password
   // accounts written under freshly minted identity ids, no identity on record to
   // name either, and three copies of "hunter2" in the keychain - unbounded (one
-  // more per press) and unenumerable, since there is no `secrets_list`. The
+  // more per press) and named by no record, so only the Vault page's
+  // unreferenced-entry sweep would ever find them. The
   // confirmation the user had just read says the point is fewer copies of one
   // credential.
   //
@@ -2622,8 +2623,8 @@ console.log("\n[13b] a refused detach takes its copies back off the host's own a
   // identity's password and the key's two secrets onto the HOST's accounts
   // before `upsertHost` is called, and `upsertHost` is again the first call
   // that can refuse - so a refusal used to leave a plaintext copy of a SHARED
-  // vault key at `tervia-hosts::<hostId>::privateKey`, named by nothing, and
-  // unenumerable because there is no `secrets_list`.
+  // vault key at `tervia-hosts::<hostId>::privateKey`, named by no record and
+  // reachable afterwards only through the Vault page's unreferenced-entry sweep.
   //
   // Asserted positively, for group 9's reason: the copies must be shown to have
   // LANDED first, or an undo of nothing passes every absence check for free.

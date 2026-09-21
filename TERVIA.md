@@ -35,8 +35,8 @@ Apache-2.0 (see [NOTICE](NOTICE)).
 | Dev              | `pnpm tauri:dev` (isolated `.dev` data dir) or `pnpm tauri dev` (see gotcha)    |
 | Auto-updater     | Enabled: signed updates via GitHub Releases, 6 h poll                           |
 
-**Persisted state** (all under the bundle id's app-data dir, via
-`tauri-plugin-store`): `tervia-settings.json`, `tervia-workspaces.json`,
+**Persisted state** (all under the bundle id's app-data dir, as whole-file JSON
+behind `src/lib/recoveredStore.ts`): `tervia-settings.json`, `tervia-workspaces.json`,
 `tervia-hosts.json`, `tervia-vault.json`, `tervia-cli-agents.json`. The two old
 `tervia-ssh-connections.json` / `tervia-rdp-connections.json` files are no
 longer read; they are deliberately left on disk (there is no migration) and
@@ -67,7 +67,7 @@ Six invariants (rationale in
    sites in both directions, so the index cannot drift from the callers.
 2. **Three webviews.** The main window, a separate Settings window
    (`src/settings/`), and per-pane float windows (`src/float/`). They share
-   state via `tauri-plugin-store` and Tauri events, not React.
+   state via the JSON store files and Tauri events, not React.
    `src/settings/` is the Settings UI; `src/modules/settings/` is the state
    layer.
 3. **Modules are self-contained.** Import only through the `@/*` alias, never a
@@ -267,7 +267,7 @@ macOS/Linux rely on `Drop for Session -> killer.kill()`.
 | `rightPanel/`     | Which sidebar sections are docked to the right column (`files`, `workspaces`) and their persisted placement.                                                                                                 |
 | `shortcuts/`      | Keymap catalog + `useGlobalShortcuts`; handlers wired in `app/lib/shortcutHandlers.ts` by id. Use `metaKey \|\| ctrlKey`.                                                                                    |
 | `commandPalette/` | Ctrl+Shift+P palette over the shared `commandRegistry`, which every `useGlobalShortcuts` caller populates so component-owned commands run too.                                                               |
-| `settings/`       | Settings store (`store.ts` via `tauri-plugin-store`), preferences, theme presets, terminal palette, window opener.                                                                                           |
+| `settings/`       | Settings store (`tervia-settings.json`, behind `createRecoveredStore`), preferences, theme presets, terminal palette, window opener.                                                                         |
 | `theme/`          | `ThemeProvider`: applies theme / brand colour / opacity / fonts and keeps them in sync with the settings store across windows.                                                                               |
 | `updater/`        | In-app updater UI on `tauri-plugin-updater`; 6 h poll, listens for `tervia:trigger-update`.                                                                                                                  |
 | `scm/`            | Library only, no UI: `api.ts` wraps the `git_*` and `ssh_git*` commands, `branch.ts` the branch name, `types.ts` the payloads. Consumed by the explorer's git decorations and the Workspaces branch display. |
@@ -311,19 +311,21 @@ macOS/Linux rely on `Drop for Session -> killer.kill()`.
   binding is **shared** rather than duplicated. It rewrites the binding's
   `hostId` and runs read-and-write inside one queue entry.
 - `legacyPurge.ts` clears the accounts the two OLD connection stores left on
-  `tervia-ssh` and `tervia-rdp`, once, and is the only thing that can: there is no
-  `secrets_list`, so an account nothing references is unreachable rather than
-  untidy. It therefore imports nothing from `ssh/` or `rdp/` and reads the old
-  store files directly, so it still works after those modules are gone.
+  `tervia-ssh` and `tervia-rdp`, once, and is the only thing that RELEASES them:
+  `secrets_list` can enumerate them, but its only consumer is the Vault page's
+  unreferenced-entry sweep, which the user has to go and run. It therefore imports
+  nothing from `ssh/` or `rdp/` and reads the old store files directly, so it
+  still works after those modules are gone.
 - `useHosts()` / `useHostGroups()` are the subscribed reads, one per collection
   rather than per surface: the store broadcasts on every commit, so a rename in
   the Settings webview reaches the tab strip without either side knowing about the
   other. `adapters.ts` is the injected IO port that lets the store layer run under
   plain node in `scripts/hosts-store-verify.ts`.
-- Both stores sit behind `createRecoveredStore` (`src/lib/recoveredStore.ts`):
-  `tauri-plugin-store` saves with a plain `fs::write`, so a power cut can leave a
-  zero-byte or nul-filled file. It recovers from a `.bak`, then snapshots on every
-  commit, and hands back one notice for the UI to show once.
+- All six store files sit behind `createRecoveredStore` (`src/lib/recoveredStore.ts`):
+  a store file rewritten in place can come back zero-byte or nul-filled after a
+  power cut. It recovers from a `.bak`, then snapshots on every commit, and hands
+  back one notice for the UI to show once. Writes go through
+  `src/lib/fileKeyValueStore.ts`, so a commit is one atomic whole-file replacement.
 
 ### The vault (`src/modules/vault/`)
 
@@ -749,8 +751,8 @@ never blocks persistence. Not supported in builtin mode:
   land in the `.dev` data dir and cannot stomp an installed release. Prefer it.
   With plain `pnpm tauri dev` the two halves disagree: `ids::BUNDLE_ID` is
   `.dev`-suffixed in _any_ debug build (so the daemon logs and the Rust-side
-  settings read for the terminal's extra PATH go to the `.dev` dir) while
-  `tauri-plugin-store` follows the config identifier and writes to the release
+  settings read for the terminal's extra PATH go to the `.dev` dir) while the
+  frontend's store paths follow the config identifier and write to the release
   dir. The daemon also outlives the dev GUI; set `TERVIA_PTYD_IDLE_SECS=60` when
   iterating on daemon code.
 - **`tervia` CLI** (`cli.rs`): `tervia .` / `tervia <path>` opens a folder or
