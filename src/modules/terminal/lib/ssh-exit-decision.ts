@@ -244,37 +244,3 @@ export function decideSshConnectFailure(failure: SshConnectFailure): SshConnectF
 export function hostKeyRefused(answers: readonly boolean[]): boolean {
   return answers.includes(false);
 }
-
-/**
- * Just the three fields that decide whether a credential can authenticate at
- * all. Structural on purpose (see the header): `ResolvedSshAuth` from the vault
- * module and `SshJumpHop` from the ssh bridge both satisfy it by shape, so the
- * target and every ProxyJump hop are judged by one predicate.
- */
-export type SshAuthAttempt = {
-  useAgent?: boolean;
-  password?: string;
-  privateKey?: string;
-};
-
-/**
- * Whether an attempt has anything to authenticate WITH. Mirrors the backend's
- * own guard (`has_credential` in src-tauri/src/modules/ssh/session.rs) exactly,
- * including its `is_none()` rather than emptiness test, so the two can never
- * disagree about a given input.
- *
- * The frontend checks it too, rather than leaving it to the backend. It is no
- * longer the only thing that can attribute this: the backend guard reports
- * `config` and `openSsh` rewraps that as an `SshLocalConnectError`, so the pane
- * would park on a credential-less host without this check at all. What asking
- * first still buys is that the answer never leaves this machine - no dial, no
- * round trip, no server contacted about a host that could not have
- * authenticated. The backend guard also stays as the backstop for its other
- * callers (the forward tunnel and the host editor's Test probe), which do not
- * come through here.
- */
-export function canAuthenticate(attempt: SshAuthAttempt): boolean {
-  return (
-    attempt.useAgent === true || attempt.password !== undefined || attempt.privateKey !== undefined
-  );
-}

@@ -121,9 +121,8 @@ import {
 // is quite enough to do in one pass.
 //
 // Nothing here protects a secret better than it was protected before. On Linux a
-// private key sits in a mode-0600 JSON file before and after, and the SSH connect
-// path still round-trips plaintext through the webview. What the vault binding this
-// form preserves buys is FEWER COPIES of one secret.
+// private key sits in a mode-0600 JSON file before and after. What the vault
+// binding this form preserves buys is FEWER COPIES of one secret.
 
 export type HostEditorDialogProps = {
   /** null = closed. */

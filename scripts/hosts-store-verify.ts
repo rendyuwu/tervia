@@ -345,7 +345,6 @@ function harness(
       findIdentity: async (id) => (seed.identities ?? []).find((i) => i.id === id),
       findKey: async (id) => (seed.keys ?? []).find((k) => k.id === id),
     },
-    secrets,
   };
   return {
     hosts,
@@ -906,21 +905,22 @@ console.log("\n[jumps] the chain resolves in connect order, once per hop");
     useAgent: true,
     expectedFingerprint: undefined,
   });
-  check("a vault-bound hop resolves through the identity, not the host accounts", hops[1], {
+  check("a vault-bound hop references the identity, not the host accounts", hops[1], {
     connectionId: "j-mid",
     host: "j-mid.example",
     port: 22,
     user: "vaulted",
-    password: "from-the-vault",
+    password: { kind: "keychain", service: "tervia-vault", account: "i-1::password" },
     expectedFingerprint: undefined,
   });
-  // The call LOG, not the hop shape: the agent hop's empty credential is what the
-  // check above proves, and this is what proves it cost no IPC. One read for the
-  // whole chain, against the vault, for the one hop that has an identity.
+  // The call LOG, not the hop shape: the references above say WHERE each hop's
+  // credential lives, and this says the chain never went and got one. Resolving
+  // a chain of any depth costs no keychain IPC at all - the host process
+  // dereferences at connect time.
   check(
-    "the only keychain read in the whole chain is the vault identity's",
+    "resolving the whole chain reads nothing",
     h.reads().flatMap((c) => c.accounts.map((a) => `${c.service}::${a}`)),
-    ["tervia-vault::i-1::password"],
+    [],
   );
   check("no jump host is no hops", await resolveJumpHops(undefined, "h-target", all, h.deps), []);
 }

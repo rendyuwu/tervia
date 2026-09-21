@@ -19,9 +19,10 @@ use serde::Serialize;
 use tauri::ipc::Channel as IpcChannel;
 use tokio::sync::{oneshot, Mutex};
 use tokio::task::JoinHandle;
+use zeroize::Zeroizing;
 
 use super::sftp::open_sftp_on_handle;
-use super::SshOpenInput;
+use super::{SshOpenInput, SshSecrets};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const KEEPALIVE: Duration = Duration::from_secs(30);
@@ -1309,33 +1310,39 @@ async fn authenticate_hop(
 
 /// Whether a hop has anything to authenticate WITH. One predicate for the target
 /// and for every jump hop: the two used to be separate inline expressions, and
-/// they must agree by construction, because the frontend mirrors this exact test
-/// before it dials (`canAuthenticate` in
-/// src/modules/terminal/lib/ssh-exit-decision.ts) so that a host saved with no
-/// credential is reported as a configuration error rather than fed to the
-/// reconnect ladder as if the server had hung up.
+/// they must agree by construction. This is now the ONLY such test - the
+/// frontend's pre-flight mirror is gone, because `resolveSshAuth` returns
+/// keychain references and so cannot know what is behind them. A host saved
+/// with no credential is refused here and reported as a configuration error
+/// rather than fed to the reconnect ladder as if the server had hung up.
 ///
-/// `is_none`, not emptiness: an empty password is a credential the user chose to
-/// send, and the server - not this guard - decides what to make of it.
+/// `is_none`, not emptiness: what reaches this is what `SecretSource::resolve`
+/// found, and an entry holding an empty string resolves to `None` there -
+/// which is exactly the state an absent field used to arrive in.
 fn has_credential(use_agent: bool, password: Option<&str>, private_key: Option<&str>) -> bool {
     use_agent || password.is_some() || private_key.is_some()
 }
 
-/// The target-side wording of that guard. Named because the frontend's
-/// pre-flight check reproduces it verbatim (`NO_CREDENTIALS_MESSAGE` in
-/// src/modules/terminal/lib/ssh-session.ts): a user must read the same sentence
-/// whether they arrived through a terminal leaf, the forward tunnel, or the host
-/// editor's Test probe, only the last two of which reach this guard now.
+/// The target-side wording of that guard. Named because the same sentence must
+/// reach a user whether they arrived through a terminal leaf, the forward
+/// tunnel, or the host editor's Test probe.
 const NO_CREDENTIALS_ERROR: &str = "ssh: no credentials: set use_agent, password, or private_key";
+
+/// One hop's stored credential as `has_credential` and `authenticate_hop` take
+/// it. `Zeroizing<String>` derefs to `String`, which derefs to `str`.
+fn plain(v: &Option<Zeroizing<String>>) -> Option<&str> {
+    v.as_deref().map(String::as_str)
+}
 
 pub async fn connect(
     input: SshOpenInput,
+    secrets: SshSecrets,
     on_event: IpcChannel<SshEvent>,
 ) -> Result<Arc<SshSession>, SshConnectError> {
     if !has_credential(
         input.use_agent,
-        input.password.as_deref(),
-        input.private_key.as_deref(),
+        plain(&secrets.target.password),
+        plain(&secrets.target.private_key),
     ) {
         return Err(SshConnectError::config(NO_CREDENTIALS_ERROR));
     }
@@ -1349,11 +1356,11 @@ pub async fn connect(
     // handle is retained on the session: dropping one collapses every tunnel
     // riding on it (including the target), so they must outlive the session.
     let mut jump_handles: Vec<Handle<HostKeyVerifier>> = Vec::new();
-    for hop in &input.jumps {
+    for (hop, hop_secrets) in input.jumps.iter().zip(&secrets.jumps) {
         if !has_credential(
             hop.use_agent,
-            hop.password.as_deref(),
-            hop.private_key.as_deref(),
+            plain(&hop_secrets.password),
+            plain(&hop_secrets.private_key),
         ) {
             return Err(SshConnectError::config(format!(
                 "ssh: jump host {} has no ssh-agent, password or private key configured",
@@ -1392,9 +1399,9 @@ pub async fn connect(
             &hop.host,
             &hop.user,
             hop.use_agent,
-            hop.password.as_deref(),
-            hop.private_key.as_deref(),
-            hop.private_key_passphrase.as_deref(),
+            plain(&hop_secrets.password),
+            plain(&hop_secrets.private_key),
+            plain(&hop_secrets.private_key_passphrase),
         )
         .await?;
         if !ok {
@@ -1448,9 +1455,9 @@ pub async fn connect(
         &input.host,
         &input.user,
         input.use_agent,
-        input.password.as_deref(),
-        input.private_key.as_deref(),
-        input.private_key_passphrase.as_deref(),
+        plain(&secrets.target.password),
+        plain(&secrets.target.private_key),
+        plain(&secrets.target.private_key_passphrase),
     )
     .await?;
 
@@ -2184,7 +2191,8 @@ mod forward_abort_tests {
 #[cfg(test)]
 mod chain_tests {
     use super::*;
-    use crate::modules::ssh::SshJumpHop;
+    use crate::modules::secrets::SecretSource;
+    use crate::modules::ssh::{HopSecrets, SshJumpHop};
     use tauri::ipc::Channel as IpcChannel;
 
     /// Shared fixture for the live tests below. Every input comes from env vars
@@ -2197,7 +2205,9 @@ mod chain_tests {
     /// The `*_FP` SHA256 fingerprints pin each hop so the handshake never blocks
     /// on the interactive host-key dialog (there is no GUI in a test). Missing
     /// required vars => `None`, and the caller skips.
-    fn it_input(tag: &str) -> Option<SshOpenInput> {
+    /// A unit test has no `AppHandle`, so `resolve_secrets` is unavailable: the
+    /// resolved half is built here from the same key text the input references.
+    fn it_input(tag: &str) -> Option<(SshOpenInput, SshSecrets)> {
         let (Ok(key_path), Ok(target_host)) = (
             std::env::var("TERVIA_IT_KEY_PATH"),
             std::env::var("TERVIA_IT_TARGET_HOST"),
@@ -2207,8 +2217,13 @@ mod chain_tests {
         };
         let key = std::fs::read_to_string(&key_path).expect("read key file");
         let env_opt = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
+        let key_secret = || HopSecrets {
+            private_key: Some(Zeroizing::new(key.clone())),
+            ..Default::default()
+        };
 
         let mut jumps = Vec::new();
+        let mut jump_secrets = Vec::new();
         if let Some(jump_host) = env_opt("TERVIA_IT_JUMP_HOST") {
             jumps.push(SshJumpHop {
                 connection_id: "it-jump".into(),
@@ -2217,25 +2232,31 @@ mod chain_tests {
                 user: env_opt("TERVIA_IT_JUMP_USER").unwrap_or_else(|| "ubuntu".into()),
                 use_agent: false,
                 password: None,
-                private_key: Some(key.clone()),
+                private_key: Some(SecretSource::Inline { value: key.clone() }),
                 private_key_passphrase: None,
                 expected_fingerprint: env_opt("TERVIA_IT_JUMP_FP"),
             });
+            jump_secrets.push(key_secret());
         }
 
-        Some(SshOpenInput {
+        let input = SshOpenInput {
             host: target_host,
             port: 22,
             user: env_opt("TERVIA_IT_TARGET_USER").unwrap_or_else(|| "ubuntu".into()),
             use_agent: false,
             password: None,
-            private_key: Some(key),
+            private_key: Some(SecretSource::Inline { value: key.clone() }),
             private_key_passphrase: None,
             expected_fingerprint: env_opt("TERVIA_IT_TARGET_FP"),
             jumps,
             cols: 80,
             rows: 24,
-        })
+        };
+        let secrets = SshSecrets {
+            target: key_secret(),
+            jumps: jump_secrets,
+        };
+        Some((input, secrets))
     }
 
     fn it_runtime() -> tokio::runtime::Runtime {
@@ -2246,20 +2267,61 @@ mod chain_tests {
             .unwrap()
     }
 
+    /// A saved host whose keychain account holds nothing must be refused
+    /// BEFORE any socket is opened, with the sentence the user has always read.
+    ///
+    /// This is the guard's whole reason for moving: it used to read
+    /// `input.password`, which the frontend had already filled with a resolved
+    /// value or left absent. It now reads what `SecretSource::resolve` found,
+    /// so a reference to an empty or missing account has to refuse here - there
+    /// is no longer a frontend pre-flight behind it. Not `#[ignore]`d: the
+    /// refusal returns before the first `TcpStream::connect`, so this touches
+    /// no network.
+    #[test]
+    fn a_target_whose_reference_resolved_to_nothing_is_refused_before_dialling() {
+        let input = SshOpenInput {
+            host: "198.51.100.1".into(),
+            port: 22,
+            user: "ubuntu".into(),
+            use_agent: false,
+            password: Some(SecretSource::Keychain {
+                service: "tervia-hosts".into(),
+                account: "h-1::password".into(),
+            }),
+            private_key: None,
+            private_key_passphrase: None,
+            expected_fingerprint: None,
+            jumps: Vec::new(),
+            cols: 80,
+            rows: 24,
+        };
+        let empty = SshSecrets {
+            target: HopSecrets::default(),
+            jumps: Vec::new(),
+        };
+        let Err(err) = it_runtime().block_on(connect(input, empty, IpcChannel::new(|_msg| Ok(()))))
+        else {
+            panic!("a reference to an empty account must not dial");
+        };
+        assert_eq!(err.to_string(), NO_CREDENTIALS_ERROR);
+    }
+
     /// Live end-to-end check that the REAL `session::connect` reaches a target
     /// through a ProxyJump chain. Network + a real key + real creds, so it is
     /// `#[ignore]`d (run with `cargo test --release chain -- --ignored`).
     #[test]
     #[ignore]
     fn connects_through_jump_chain() {
-        let Some(input) = it_input("chain_tests") else {
+        let Some((input, secrets)) = it_input("chain_tests") else {
             return;
         };
         let target_host = input.host.clone();
 
         it_runtime().block_on(async move {
             let channel = IpcChannel::new(|_msg| Ok(()));
-            let session = connect(input, channel).await.expect("chain connect failed");
+            let session = connect(input, secrets, channel)
+                .await
+                .expect("chain connect failed");
             let (host, _user, _cols, _rows, alive, _ts) = session.mirror_info();
             assert_eq!(host, target_host, "session bound to target host");
             assert!(
@@ -2306,14 +2368,16 @@ mod chain_tests {
     fn forwards_a_local_port() {
         use tokio::io::AsyncReadExt;
 
-        let Some(input) = it_input("forward_tests") else {
+        let Some((input, secrets)) = it_input("forward_tests") else {
             return;
         };
         let remote_port = input.port;
 
         it_runtime().block_on(async move {
             let channel = IpcChannel::new(|_msg| Ok(()));
-            let session = connect(input, channel).await.expect("connect failed");
+            let session = connect(input, secrets, channel)
+                .await
+                .expect("connect failed");
             // 0 = ephemeral, so a busy dev machine can't fail the test on a
             // port collision that has nothing to do with forwarding.
             let (local, generation) = session

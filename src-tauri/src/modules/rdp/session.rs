@@ -33,6 +33,7 @@ use tauri::ipc::InvokeResponseBody;
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
+use zeroize::Zeroizing;
 
 use crate::modules::lockext::LockExt as _;
 
@@ -624,7 +625,7 @@ fn build_config(input: &RdpOpenInput, password: &str) -> Config {
 /// rather than claiming "no credential of any kind", which is not true.
 pub async fn connect(
     input: RdpOpenInput,
-    password: String,
+    password: Zeroizing<String>,
     sink: EventSink,
 ) -> Result<Arc<RdpSession>, String> {
     let host = input.host.trim().to_owned();
@@ -667,8 +668,8 @@ pub async fn connect(
         .with_static_channel(
             DrdynvcClient::new().with_dynamic_channel(DisplayControlClient::new(|_| Ok(Vec::new()))),
         );
-    // The plaintext now lives only inside the connector's `Credentials`, on its
-    // way to CredSSP. Drop our copy.
+    // Our copy is scrubbed on drop. The connector's `Config` still holds an
+    // unscrubbed `String` - see KNOWN-LIMITS.md.
     drop(password);
 
     let should_upgrade = tokio::time::timeout(
@@ -1949,7 +1950,10 @@ mod rdp_live {
     /// Input plus the resolved plaintext. These tests call `session::connect`
     /// directly, below the keychain lookup that `rdp_open` does, so they pass
     /// the password in the way the dialog's Test button would.
-    fn live_input(tag: &str, fingerprint: Option<String>) -> Option<(RdpOpenInput, String)> {
+    fn live_input(
+        tag: &str,
+        fingerprint: Option<String>,
+    ) -> Option<(RdpOpenInput, Zeroizing<String>)> {
         let (Some(host), Some(username), Some(password)) = (
             env_opt("TERVIA_RDP_HOST"),
             env_opt("TERVIA_RDP_USERNAME"),
@@ -1979,7 +1983,7 @@ mod rdp_live {
             expected_cert_fingerprint: fingerprint,
             scale_factor: 0,
         };
-        Some((input, password))
+        Some((input, Zeroizing::new(password)))
     }
 
     fn live_runtime() -> tokio::runtime::Runtime {

@@ -23,8 +23,11 @@ use std::sync::{Arc, OnceLock};
 use russh::keys::ssh_key::PrivateKey;
 use serde::{Deserialize, Serialize};
 use tauri::ipc::Channel;
+use tauri::AppHandle;
 use tokio::runtime::Runtime;
+use zeroize::Zeroizing;
 
+use crate::modules::secrets::{SecretSource, SecretsState};
 use session::SshSession;
 pub use session::{SshConnectError, SshEvent};
 
@@ -62,8 +65,10 @@ impl Default for SshState {
 }
 
 /// One hop in a ProxyJump chain. Resolved on the frontend (the chain is walked
-/// from saved connections and each hop's secrets are read from the keychain),
-/// then passed in connect order so the backend just dials them in sequence.
+/// from saved connections and each hop's credentials become keychain
+/// references), then passed in connect order so the backend just dials them in
+/// sequence. The references are dereferenced here, in `ssh_open`, so no saved
+/// secret transits the webview.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SshJumpHop {
@@ -77,9 +82,10 @@ pub struct SshJumpHop {
     /// the two fields below, which are then absent.
     #[serde(default)]
     pub use_agent: bool,
-    pub password: Option<String>,
-    pub private_key: Option<String>,
-    pub private_key_passphrase: Option<String>,
+    pub password: Option<SecretSource>,
+    /// Where the PEM-encoded private key text comes from.
+    pub private_key: Option<SecretSource>,
+    pub private_key_passphrase: Option<SecretSource>,
     pub expected_fingerprint: Option<String>,
 }
 
@@ -94,12 +100,12 @@ pub struct SshOpenInput {
     /// `private_key` must be set.
     #[serde(default)]
     pub use_agent: bool,
-    /// Plain password.
-    pub password: Option<String>,
-    /// PEM-encoded private key text (OpenSSH or PKCS8). Optional passphrase
-    /// in `private_key_passphrase`.
-    pub private_key: Option<String>,
-    pub private_key_passphrase: Option<String>,
+    /// Where the password comes from.
+    pub password: Option<SecretSource>,
+    /// Where the PEM-encoded private key text (OpenSSH or PKCS8) comes from.
+    /// Optional passphrase in `private_key_passphrase`.
+    pub private_key: Option<SecretSource>,
+    pub private_key_passphrase: Option<SecretSource>,
     /// SHA256 fingerprint ("SHA256:...") of the server key recorded by a
     /// previous successful connect. When set, the handshake fails fast if
     /// the server presents a different key, blocking silent MITM on saved
@@ -112,6 +118,69 @@ pub struct SshOpenInput {
     pub jumps: Vec<SshJumpHop>,
     pub cols: u16,
     pub rows: u16,
+}
+
+/// One hop's secrets, read out of the keychain at the command boundary.
+#[derive(Default)]
+pub struct HopSecrets {
+    pub password: Option<Zeroizing<String>>,
+    pub private_key: Option<Zeroizing<String>>,
+    pub private_key_passphrase: Option<Zeroizing<String>>,
+}
+
+/// Every secret one connect needs. `jumps` is index-aligned with
+/// [`SshOpenInput::jumps`] BY CONSTRUCTION: [`resolve_secrets`] builds both
+/// from the same input, so the two can never drift apart.
+pub struct SshSecrets {
+    pub target: HopSecrets,
+    pub jumps: Vec<HopSecrets>,
+}
+
+/// Dereference every credential an input names, here rather than in the
+/// webview.
+///
+/// At the command boundary because `tauri::State` is borrowed from the
+/// invocation and cannot cross into the SSH runtime - the same constraint
+/// `rdp_open` already works under.
+fn resolve_secrets(
+    app: &AppHandle,
+    state: &SecretsState,
+    input: &SshOpenInput,
+) -> Result<SshSecrets, String> {
+    let one = |hop_password: &Option<SecretSource>,
+               hop_key: &Option<SecretSource>,
+               hop_passphrase: &Option<SecretSource>|
+     -> Result<HopSecrets, String> {
+        Ok(HopSecrets {
+            password: hop_password
+                .as_ref()
+                .map(|s| s.resolve(app, state))
+                .transpose()?
+                .flatten(),
+            private_key: hop_key
+                .as_ref()
+                .map(|s| s.resolve(app, state))
+                .transpose()?
+                .flatten(),
+            private_key_passphrase: hop_passphrase
+                .as_ref()
+                .map(|s| s.resolve(app, state))
+                .transpose()?
+                .flatten(),
+        })
+    };
+    Ok(SshSecrets {
+        target: one(
+            &input.password,
+            &input.private_key,
+            &input.private_key_passphrase,
+        )?,
+        jumps: input
+            .jumps
+            .iter()
+            .map(|h| one(&h.password, &h.private_key, &h.private_key_passphrase))
+            .collect::<Result<_, _>>()?,
+    })
 }
 
 /// One key the local ssh-agent is holding. Read-only: the agent never hands out
@@ -464,13 +533,20 @@ fn ssh_key_inspect_inner(pem: &str, passphrase: Option<&str>) -> Result<SshKeyIn
 
 #[tauri::command]
 pub async fn ssh_open(
+    app: AppHandle,
+    secrets: tauri::State<'_, SecretsState>,
     state: tauri::State<'_, SshState>,
     input: SshOpenInput,
     on_event: Channel<SshEvent>,
 ) -> Result<u32, SshConnectError> {
+    // Before the spawn: `tauri::State` is borrowed from the invocation and
+    // cannot cross into the SSH runtime. A keychain read that fails is a
+    // `config` kind, which the frontend parks on - the same treatment a
+    // missing credential gets.
+    let secrets = resolve_secrets(&app, &secrets, &input).map_err(SshConnectError::config)?;
     let rt = ssh_runtime();
     let session = rt
-        .spawn(session::connect(input, on_event))
+        .spawn(session::connect(input, secrets, on_event))
         .await
         // A panicked or cancelled connect task says nothing about the host, so
         // the next attempt may well succeed.

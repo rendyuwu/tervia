@@ -87,6 +87,12 @@ arboard = { version = "3", default-features = false, features = [
 ] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Secrets held in memory live in `Zeroizing` containers so a dropped store map,
+# a decrypted buffer or a resolved password is scrubbed rather than merely
+# freed - see `modules/secrets.rs`. Already in the tree transitively; the
+# `serde` feature is what gives `Zeroizing<T>` the `Serialize`/`Deserialize`
+# impls the store map and the `secrets_get` return both need.
+zeroize = { version = "1", features = ["serde"] }
 portable-pty = "0.9"
 dirs = "5"
 base64 = "0.22"

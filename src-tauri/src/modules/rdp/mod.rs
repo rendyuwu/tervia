@@ -137,11 +137,11 @@ impl Default for RdpState {
 /// straight into the CredSSP exchange. The password is never returned to, nor
 /// passed in from, the webview.
 ///
-/// This deliberately does NOT mirror the SSH module. There, `resolveSshAuth`
-/// (`src/modules/vault/resolve.ts`) reads the secret and hands the plaintext
-/// back to JS, and `src/modules/ssh/bridge.ts` passes it down to `ssh_open` -
-/// so for SSH the secret does transit the webview. For RDP the plaintext must
-/// never reach the webview at all.
+/// The SSH module now mirrors this: `resolveSshAuth`
+/// (`src/modules/vault/resolve.ts`) returns keychain references too, and
+/// `ssh_open` dereferences them in the host process, so no saved SSH secret
+/// transits the webview either. The one plaintext arm on each side is the
+/// connection dialog's Test button, which has nothing saved to reference yet.
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum RdpCredential {
@@ -332,13 +332,14 @@ impl RdpInputEvent {
 
 /// Resolve the input's credential to a plaintext password.
 ///
-/// The plaintext exists only as a Rust `String` from here until it reaches the
-/// CredSSP exchange; it is never serialised, logged or handed back to JS.
+/// The plaintext exists only as a `Zeroizing<String>`, scrubbed on drop, from
+/// here until it reaches the CredSSP exchange; it is never serialised, logged
+/// or handed back to JS.
 fn resolve_password(
     app: &tauri::AppHandle,
     secrets: &secrets::SecretsState,
     credential: &RdpCredential,
-) -> Result<String, String> {
+) -> Result<zeroize::Zeroizing<String>, String> {
     match credential {
         RdpCredential::Keychain { service, account } => {
             match secrets::read_secret(app, secrets, service, account)? {
@@ -352,7 +353,7 @@ fn resolve_password(
                 )),
             }
         }
-        RdpCredential::Inline { password } => Ok(password.clone()),
+        RdpCredential::Inline { password } => Ok(zeroize::Zeroizing::new(password.clone())),
     }
 }
 

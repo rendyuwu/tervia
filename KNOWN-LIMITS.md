@@ -991,3 +991,20 @@ emitting `error` then `disconnected` and leaving the janitor to evict the id -
 everything the panic would unwind past is dropped with the session, and
 `lock_or_recover` already recovers a poisoned guard, so there is no half-state
 to reason about. Until then a parser panic takes every tab with it.
+
+### The connector's `Credentials` holds the RDP password as an unscrubbed `String`
+
+**Accepted state.** `ironrdp_connector::Credentials::UsernamePassword` declares
+`password: String` with no `Zeroize` bound and no constructor that would take
+one, so `build_config` copies the plaintext into the connector's `Config`, where
+it lives for the whole connect and is dropped unscrubbed. Everything from
+CredSSP outward is already safe - `sspi::AuthIdentity.password` is a
+`Secret<String>` and `Secret<T>` is `ZeroizeOnDrop` - and Tervia's own copy is a
+`Zeroizing<String>`, so this one field is the whole gap.
+
+**Carried by.** `build_config` and `connect` in
+`src-tauri/src/modules/rdp/session.rs`.
+
+**Trigger.** An `ironrdp-connector` release whose `Credentials::UsernamePassword`
+carries a zeroizing password type; the pinned `=0.9.0` in
+`src-tauri/Cargo.toml` moves with it.

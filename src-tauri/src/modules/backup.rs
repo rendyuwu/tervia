@@ -23,8 +23,10 @@
 //! is one.
 //!
 //! Not solved here: the decrypted plaintext is ordinary `String`/`serde_json`
-//! data and is dropped unscrubbed, same as every other secret in the process
-//! (the `SecretsState` cache is the larger link in that chain).
+//! data and is dropped unscrubbed. The keychain values this module reads are
+//! `Zeroizing<String>`, but the `serde_json::Value` tree and the `String`
+//! payload built around them are plain heap data, so a credential folded into
+//! one outlives its use until the allocator reuses the page.
 //!
 //! This lives in the host process rather than the webview because
 //! `crypto.subtle` is gated to secure contexts and the app origin is plain
@@ -53,7 +55,7 @@ use std::sync::{LazyLock, Mutex};
 use tauri::AppHandle;
 
 use crate::modules::aesgcm::{open_with_key, seal_with_key};
-use crate::modules::secrets::{read_secret, write_secret, SecretsState};
+use crate::modules::secrets::{read_secret, write_secrets, SecretsState};
 
 /// Deliberately high: the passphrase is user-chosen and the file is offline,
 /// so an attacker gets unlimited guesses. OWASP's 2023 floor for
@@ -174,7 +176,10 @@ pub struct SecretRef {
 /// one of those names. This is the guard against exactly that: without it, a
 /// `group` that collided with `hosts` would replace the whole host inventory
 /// with a credential map, and the export would still report success.
-fn merge_secrets(payload: &str, values: &[(SecretRef, String)]) -> Result<String, String> {
+fn merge_secrets(
+    payload: &str,
+    values: &[(SecretRef, zeroize::Zeroizing<String>)],
+) -> Result<String, String> {
     let mut root: Map<String, Value> = serde_json::from_str(payload)
         .map_err(|_| "backup: the payload is not a JSON object".to_string())?;
     for (r, _) in values {
@@ -196,7 +201,7 @@ fn merge_secrets(payload: &str, values: &[(SecretRef, String)]) -> Result<String
             .entry(r.id.clone())
             .or_insert_with(|| Value::Object(Map::new()));
         if let Some(entry) = entry.as_object_mut() {
-            entry.insert(r.field.clone(), Value::String(value.clone()));
+            entry.insert(r.field.clone(), Value::String(value.to_string()));
         }
     }
     serde_json::to_string(&Value::Object(root)).map_err(|e| e.to_string())
@@ -224,7 +229,7 @@ pub async fn backup_seal_payload(
     if passphrase.is_empty() {
         return Err("backup: a passphrase is required".into());
     }
-    let mut values: Vec<(SecretRef, String)> = Vec::new();
+    let mut values: Vec<(SecretRef, zeroize::Zeroizing<String>)> = Vec::new();
     for r in refs {
         // A keychain read that FAILS is propagated rather than skipped: an
         // export that silently omits a credential is worse than one that
@@ -336,6 +341,10 @@ pub async fn backup_open_payload(
 /// Returns one flag per ref, in order, saying whether anything was actually
 /// stored - which is what lets the importer report "imported without stored
 /// credentials" without ever seeing the credentials.
+///
+/// The write is ONE store commit, so a failure writes nothing rather than a
+/// prefix: importing N connections used to cost roughly 3N whole-store
+/// rewrites on Linux and Windows.
 #[tauri::command]
 pub async fn backup_apply_secrets(
     app: AppHandle,
@@ -356,16 +365,16 @@ pub async fn backup_apply_secrets(
         refs.iter().map(|r| pick(&held.groups, r)).collect()
     };
 
-    let mut written = Vec::with_capacity(refs.len());
-    for (r, value) in refs.iter().zip(values) {
-        match value {
-            Some(v) => {
-                write_secret(&app, &state, &r.service, &r.account, &v)?;
-                written.push(true);
-            }
-            None => written.push(false),
-        }
-    }
+    let entries: Vec<(&str, &str, &str)> = refs
+        .iter()
+        .zip(&values)
+        .filter_map(|(r, v)| {
+            v.as_deref()
+                .map(|v| (r.service.as_str(), r.account.as_str(), v))
+        })
+        .collect();
+    write_secrets(&app, &state, &entries)?;
+    let written = values.iter().map(Option::is_some).collect();
     Ok(written)
 }
 
@@ -395,6 +404,10 @@ mod tests {
             service: "tervia-ssh".into(),
             account: format!("{id}::{field}"),
         }
+    }
+    /// A keychain value as `merge_secrets` takes it.
+    fn zz(v: &str) -> zeroize::Zeroizing<String> {
+        zeroize::Zeroizing::new(v.to_string())
     }
 
     /// A blob sealed by the build that came BEFORE the AES-GCM pair moved out
@@ -481,9 +494,9 @@ mod tests {
         let merged = merge_secrets(
             r#"{"connections":[{"id":"c-1"}],"rdpConnections":[]}"#,
             &[
-                (secret_ref("secrets", "c-1", "password"), "hunter2".into()),
-                (secret_ref("secrets", "c-1", "privateKey"), "KEY".into()),
-                (secret_ref("rdpSecrets", "r-1", "password"), "rdp-pw".into()),
+                (secret_ref("secrets", "c-1", "password"), zz("hunter2")),
+                (secret_ref("secrets", "c-1", "privateKey"), zz("KEY")),
+                (secret_ref("rdpSecrets", "r-1", "password"), zz("rdp-pw")),
             ],
         )
         .unwrap();
@@ -503,10 +516,7 @@ mod tests {
         // report success.
         let err = merge_secrets(
             r#"{"connections":[{"id":"c-1"}]}"#,
-            &[(
-                secret_ref("connections", "c-1", "password"),
-                "pw".to_string(),
-            )],
+            &[(secret_ref("connections", "c-1", "password"), zz("pw"))],
         )
         .unwrap_err();
         assert!(err.contains("already carries"), "unexpected error: {err}");
@@ -533,7 +543,7 @@ mod tests {
     fn split_withholds_only_the_named_groups() {
         let sealed_plain = merge_secrets(
             r#"{"connections":[{"id":"c-1","host":"example.com"}],"rdpConnections":[]}"#,
-            &[(secret_ref("secrets", "c-1", "password"), "hunter2".into())],
+            &[(secret_ref("secrets", "c-1", "password"), zz("hunter2"))],
         )
         .unwrap();
         let (rest, taken) =
@@ -555,17 +565,14 @@ mod tests {
         let sealed_plain = merge_secrets(
             r#"{"connections":[{"id":"c-1","host":"example.com"}]}"#,
             &[
-                (
-                    secret_ref("hostSecrets", "c-1", "password"),
-                    "hunter2".into(),
-                ),
+                (secret_ref("hostSecrets", "c-1", "password"), zz("hunter2")),
                 (
                     secret_ref("identitySecrets", "i-1", "passphrase"),
-                    "id-pass".into(),
+                    zz("id-pass"),
                 ),
                 (
                     secret_ref("keySecrets", "k-1", "privateKey"),
-                    "KEYMATERIAL".into(),
+                    zz("KEYMATERIAL"),
                 ),
             ],
         )
@@ -688,7 +695,7 @@ mod tests {
         let needles = ["vpsalpha", "svcdeploy", "hunter2", "54321"];
         let plain = merge_secrets(
             r#"{"hosts":[{"id":"h-1","name":"vps","protocol":"ssh","host":"vpsalpha.example.com","port":54321,"credential":{"kind":"inline","hostId":"h-1","user":"svcdeploy","authMode":"password","hasPassword":true,"hasPrivateKey":false,"hasKeyPassphrase":false}}],"groups":[],"identities":[],"keys":[],"rules":[]}"#,
-            &[(secret_ref("hostSecrets", "h-1", "password"), "hunter2".into())],
+            &[(secret_ref("hostSecrets", "h-1", "password"), zz("hunter2"))],
         )
         .unwrap();
         // Negative assertions below are free to pass if a needle is simply

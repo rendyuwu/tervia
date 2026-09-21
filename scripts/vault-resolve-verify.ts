@@ -42,10 +42,11 @@
  *    right SERVICE - vault-owned and host-owned secrets live in different ones,
  *    and a wrong service reads as "no password stored" at connect time.
  *
- * 6. SSH RESOLVES TO VALUES in the `SshCredentialValues` shape, for all three
- *    auth modes. That mapping is the line deciding whether a key or a password
- *    reaches the handshake, and a mode that returns nothing connects with no
- *    credentials at all.
+ * 6. SSH RESOLVES TO KEYCHAIN REFERENCES in the `SshCredentials` shape, for
+ *    all three auth modes, and makes NO keychain read while doing it. That
+ *    mapping is the line deciding whether a key or a password reaches the
+ *    handshake, and a mode that returns nothing connects with no credentials
+ *    at all.
  *
  * 7. THE SETTLE ORDERING: recover, then force the load, then snapshot. Two of
  *    the three are useless in the wrong order - a snapshot taken before the load
@@ -67,6 +68,10 @@
  * ports, so all of this runs under plain node with no Tauri runtime and no
  * mocking library.
  */
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
 import { createFileKeyValueStore } from "../src/lib/fileKeyValueStore";
 import {
   createRecoveredStore,
@@ -234,7 +239,7 @@ function harness(
     calls,
     data,
     commits: () => commits,
-    deps: (): ResolveDeps => ({ vault, secrets }),
+    deps: (): ResolveDeps => ({ vault }),
     reads,
     /** The batch the resolution under test just issued. */
     lastRead: (): SecretCall | undefined => {
@@ -639,19 +644,18 @@ console.log("\n[owner] an inline binding must name the host that is storing it")
 
   // And why it matters, measured rather than asserted: without the rewrite the
   // copy authenticates as the SOURCE, so rotating one password changes both and
-  // deleting the source breaks the copy.
+  // deleting the source breaks the copy. The account NAME is the whole of that
+  // now - it is what the host process dereferences.
   const h = harness();
-  h.kept.set("tervia-hosts::h-9::password", "source-pw");
-  h.kept.set("tervia-hosts::h-copy::password", "copy-pw");
   check(
-    "an unrewritten hostId reads the source host's password",
+    "an unrewritten hostId references the source host's account",
     (await resolveSshAuth(copy.ssh, h.deps())).password,
-    "source-pw",
+    { kind: "keychain", service: "tervia-hosts", account: "h-9::password" },
   );
   check(
-    "where the rewritten one reads the copy's own",
+    "where the rewritten one references the copy's own",
     (await resolveSshAuth(fixed.ssh, h.deps())).password,
-    "copy-pw",
+    { kind: "keychain", service: "tervia-hosts", account: "h-copy::password" },
   );
 }
 
@@ -746,7 +750,7 @@ console.log("\n[queue] a refused operation rejects alone and leaves the chain al
 }
 
 // ---------------------------------------------------------------------------
-console.log("\n[ssh] resolution hands back the credential shape for every auth mode");
+console.log("\n[ssh] resolution hands back keychain REFERENCES for every auth mode");
 {
   const h = harness();
   await h.vault.upsertKey(vaultKey(), { privateKey: "PRIVATE-PEM", passphrase: "pp" });
@@ -763,49 +767,38 @@ console.log("\n[ssh] resolution hands back the credential shape for every auth m
   );
 
   const before = h.reads().length;
+  const vaultRef = (account: string) =>
+    ({ kind: "keychain", service: "tervia-vault", account }) as const;
+  const hostRef = (account: string) =>
+    ({ kind: "keychain", service: "tervia-hosts", account }) as const;
+
   check(
     "an agent identity resolves to useAgent and nothing else",
     await resolveSshAuth({ kind: "identity", identityId: "i-agent" }, h.deps()),
     { user: "carol", useAgent: true },
   );
-  check("and reads no secret at all", h.reads().length - before, 0);
 
   check(
-    "a password identity resolves to its own password",
+    "a password identity references its own password account",
     await resolveSshAuth({ kind: "identity", identityId: "i-pw" }, h.deps()),
-    { user: "alice", password: "alice-pw" },
+    { user: "alice", password: vaultRef("i-pw::password") },
   );
-  check("from the identity's vault account, in one batch", h.lastRead(), {
-    op: "getAll",
-    service: "tervia-vault",
-    accounts: ["i-pw::password"],
-  });
 
   // Property 1: the key material comes from the KEY's accounts, not the
   // identity's, and the identity's username still wins.
   check(
-    "a key identity resolves to the shared key's secrets",
+    "a key identity references the shared key's accounts",
     await resolveSshAuth({ kind: "identity", identityId: "i-key" }, h.deps()),
-    { user: "bob", privateKey: "PRIVATE-PEM", privateKeyPassphrase: "pp" },
-  );
-  check("read from the KEY's accounts, in one batch", h.lastRead(), {
-    op: "getAll",
-    service: "tervia-vault",
-    accounts: ["k-1::privateKey", "k-1::passphrase"],
-  });
-
-  // A missing secret must come back as undefined, not "", so the backend's
-  // explicit "no credentials" guard fires instead of an empty password attempt.
-  await h.vault.upsertIdentity(identity({ id: "i-empty", name: "empty", username: "dave" }), {});
-  check(
-    "an absent password resolves to undefined, not an empty string",
-    await resolveSshAuth({ kind: "identity", identityId: "i-empty" }, h.deps()),
-    { user: "dave", password: undefined },
+    {
+      user: "bob",
+      privateKey: vaultRef("k-1::privateKey"),
+      privateKeyPassphrase: vaultRef("k-1::passphrase"),
+    },
   );
 
-  // Inline bindings read the HOST's own accounts on the host service, from the
-  // `hostId` the binding itself carries.
-  check("an inline agent binding needs no keychain", await resolveSshAuth(sshInline(), h.deps()), {
+  // Inline bindings reference the HOST's own accounts on the host service, from
+  // the `hostId` the binding itself carries.
+  check("an inline agent binding names no account", await resolveSshAuth(sshInline(), h.deps()), {
     user: "eve",
     useAgent: true,
   });
@@ -814,40 +807,41 @@ console.log("\n[ssh] resolution hands back the credential shape for every auth m
   h.kept.set("tervia-hosts::h-9::privateKey", "host-pem");
   h.kept.set("tervia-hosts::h-9::keyPassphrase", "host-pp");
   check(
-    "an inline password binding reads the host's account",
+    "an inline password binding references the host's account",
     await resolveSshAuth(sshInline({ authMode: "password", hasPassword: true }), h.deps()),
-    { user: "eve", password: "host-pw" },
+    { user: "eve", password: hostRef("h-9::password") },
   );
-  check("on the hosts service", h.lastRead(), {
-    op: "getAll",
-    service: "tervia-hosts",
-    accounts: ["h-9::password"],
-  });
   check(
-    "an inline key binding reads the host's key material",
+    "an inline key binding references the host's key material",
     await resolveSshAuth(
       sshInline({ authMode: "key", hasPrivateKey: true, hasKeyPassphrase: true }),
       h.deps(),
     ),
-    { user: "eve", privateKey: "host-pem", privateKeyPassphrase: "host-pp" },
+    {
+      user: "eve",
+      // The host store's own `keyPassphrase` field name, not the vault's
+      // `passphrase`.
+      privateKey: hostRef("h-9::privateKey"),
+      privateKeyPassphrase: hostRef("h-9::keyPassphrase"),
+    },
   );
-  check("using the host store's keyPassphrase field name", h.lastRead(), {
-    op: "getAll",
-    service: "tervia-hosts",
-    accounts: ["h-9::privateKey", "h-9::keyPassphrase"],
-  });
 
-  // The owner id travels INSIDE the binding, so a second host's binding reads a
+  // The owner id travels INSIDE the binding, so a second host's binding names a
   // second host's accounts with nothing to keep in sync by hand.
-  h.kept.set("tervia-hosts::h-other::password", "other-pw");
   check(
-    "another host's inline binding reads that host's account",
+    "another host's inline binding references that host's account",
     await resolveSshAuth(
       sshInline({ hostId: "h-other", authMode: "password", hasPassword: true }),
       h.deps(),
     ),
-    { user: "eve", password: "other-pw" },
+    { user: "eve", password: hostRef("h-other::password") },
   );
+
+  // The point of the whole change, and it supersedes the old "an absent password
+  // resolves to undefined" case: resolution no longer knows what is stored,
+  // because it never looks. Six resolutions across all three modes and both
+  // binding kinds, zero keychain reads.
+  check("and not one of them read the keychain", h.reads().length - before, 0);
 
   // A binding left pointing at a deleted record must say so rather than connect
   // with nothing.
@@ -1922,6 +1916,21 @@ console.log("\n[recovery] the store layer hands the startup notice through");
   );
   check("and only fires once", await h.vault.ensureLoaded(), null);
   check("sharing one slot with takeRecoveryNotice", h.vault.takeRecoveryNotice(), null);
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n[no-read] resolve.ts has nowhere to put a keychain read");
+{
+  // Over the raw source, so a later edit cannot reintroduce a read without
+  // first changing this file's imports. The expectations above - every
+  // resolution returning a reference, and `h.reads()` staying flat - both hold
+  // for a module that reads and then throws the value away; this one does not.
+  const src = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "../src/modules/vault/resolve.ts"),
+    "utf8",
+  );
+  check("it never calls getAll", src.includes("getAll"), false);
+  check("and never imports a secrets port", src.includes("SecretsIo"), false);
 }
 
 if (failed > 0) throw new Error(`vault-resolve-verify: ${failed} FAILED`);

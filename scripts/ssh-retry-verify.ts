@@ -26,32 +26,32 @@
  * this file already checks, so both halves of the ladder answer one question.
  *
  * What is checked here:
- *   1. `canAuthenticate` - the pre-dial guard, against the same truth table the
- *      backend's `has_credential` is tested with.
- *   2. `classifySshConnectFailure` - structural (an error TYPE), so it cannot
+ *   1. `classifySshConnectFailure` - structural (an error TYPE), so it cannot
  *      rot the way a list of message prefixes would.
- *   3. `decideSshConnectFailure` - only the transport category reconnects, and
+ *   2. `decideSshConnectFailure` - only the transport category reconnects, and
  *      the categories stay DISTINCT.
- *   4. `hostKeyRefused` - an ANSWER decides, and any refusal in a chain counts.
- *   5. `sshConnectErrorFrom` - the wire boundary: each kind becomes the right
+ *   3. `hostKeyRefused` - an ANSWER decides, and any refusal in a chain counts.
+ *   4. `sshConnectErrorFrom` - the wire boundary: each kind becomes the right
  *      error type, an unrecognised rejection passes through IDENTICAL, the end-
  *      to-end verdict is park/park/reconnect, and the two regressions the raw
  *      object caused (`isHostKeyMismatchError` no longer matching,
  *      `[object Object]` / `{"kind":…}` reaching the user) stay closed.
- *   6. Rust/TS parity for the mirrored guard and its wording, and for the set of
- *      connect-error kinds - then, in Rust alone, the kind each connect-path
- *      failure SITE names. That is the only place the choice is actually made,
- *      and nothing else in the tree pins it.
- *   7. Source text, Rust: the Windows ssh-agent fallback marks itself UNPROVEN,
+ *   5. Rust: the credential guard and its wording, and the set of connect-error
+ *      kinds the TS union mirrors - then the kind each connect-path failure
+ *      SITE names. That is the only place the choice is actually made, and
+ *      nothing else in the tree pins it. The guard has no TS counterpart any
+ *      more: `resolveSshAuth` returns keychain references, so the frontend
+ *      cannot know whether one resolves to anything and no longer pretends to.
+ *   6. Source text, Rust: the Windows ssh-agent fallback marks itself UNPROVEN,
  *      so an absent agent parks on that platform too. Nothing else in the tree
  *      can see that arm - it is `#[cfg(windows)]` and CI runs no Rust tests on
  *      Windows.
- *   8. Source text: the `ssh_open` dial's own rejection is chained through
+ *   7. Source text: the `ssh_open` dial's own rejection is chained through
  *      `sshConnectErrorFrom`, and at both catch sites the park arm lexically
  *      CONTROLS the ladder call - it is a statement of the same block and it
- *      terminates it - and the pre-flight block marks what it throws. Pure
- *      functions that nobody calls fix nothing, and a gate that is merely NEAR
- *      the ladder is not a gate (see the section's own header).
+ *      terminates it. Pure functions that nobody calls fix nothing, and a gate
+ *      that is merely NEAR the ladder is not a gate (see the section's own
+ *      header).
  */
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -70,13 +70,11 @@ import {
   type SshConnectErrorKind,
 } from "../src/modules/ssh/bridge";
 import {
-  canAuthenticate,
   classifySshConnectFailure,
   decideSshConnectFailure,
   hostKeyRefused,
   SshAuthRejectedError,
   SshLocalConnectError,
-  type SshAuthAttempt,
 } from "../src/modules/terminal/lib/ssh-exit-decision";
 import { stripCommentsNoJsx } from "./lib/source";
 import { scopeOf } from "./lib/scope";
@@ -108,34 +106,7 @@ function assert(cond: boolean, msg: string): void {
   }
 }
 
-console.log("[canAuthenticate] any one credential is enough to be worth dialling");
-for (const [label, attempt] of [
-  ["ssh-agent alone", { useAgent: true }],
-  ["password alone", { password: "pw" }],
-  ["private key alone", { privateKey: "-----BEGIN..." }],
-] as [string, SshAuthAttempt][]) {
-  assert(canAuthenticate(attempt), `${label} -> dial`);
-}
-
-console.log("\n[canAuthenticate] nothing configured is the state that must not dial");
-assert(!canAuthenticate({}), "no agent, no password, no key -> refuse before dialling");
-assert(
-  !canAuthenticate({ useAgent: false }),
-  "an explicit useAgent:false with nothing else is still nothing to authenticate with",
-);
-// `resolveSshAuth` maps an empty secret to `undefined`, never "", so this row is
-// about agreeing with the backend rather than about a reachable state: the
-// backend's `has_credential` tests presence (`is_some`), so an empty string is
-// a credential to SEND and the server decides. Testing emptiness on one side
-// only would make the two guards disagree about the same input.
-console.log("\n[canAuthenticate] presence, not emptiness - matching the backend guard");
-assert(
-  canAuthenticate({ password: "" }),
-  'password "" is present, so it is dialled (server\'s call)',
-);
-assert(canAuthenticate({ privateKey: "" }), 'private key "" is present, so it is dialled');
-
-console.log("\n[classifySshConnectFailure] the category rides on the error TYPE, not its wording");
+console.log("[classifySshConnectFailure] the category rides on the error TYPE, not its wording");
 {
   const local = classifySshConnectFailure(new SshLocalConnectError("ssh: no credentials: …"), "m");
   assert(local.kind === "local" && local.message === "m", "SshLocalConnectError -> local");
@@ -380,26 +351,26 @@ console.log("\n[hostKeyRefused] an ANSWER decides, and any refusal in a chain co
 }
 
 // ============================================================================
-// RUST/TS PARITY: the pre-dial guard exists on both sides on purpose (the
-// frontend needs it to CLASSIFY, the backend keeps it for its other callers -
-// the forward tunnel and the host editor's Test probe). Two copies of a
-// predicate is a drift risk, so the pairing is checked rather than trusted.
+// THE CREDENTIAL GUARD, in Rust alone. It used to be mirrored on the frontend,
+// and that mirror is gone: `resolveSshAuth` returns keychain references, so JS
+// cannot know whether one resolves to anything. This is now the only test, and
+// every connect path - terminal leaf, forward tunnel, host editor Test probe -
+// reaches it.
 
-console.log("\n[parity] the backend guard and its frontend mirror agree");
+console.log("\n[guard] the backend refuses a connect with nothing to authenticate with");
 {
   const rust = readRust("src-tauri/src/modules/ssh/session.rs");
-  const ts = readTs("src/modules/terminal/lib/ssh-session.ts");
 
   const rustBody =
     /fn has_credential\([^)]*\)\s*->\s*bool\s*\{([\s\S]*?)\n\}/.exec(rust)?.[1] ?? "";
   assert(rustBody !== "", "found has_credential's body in session.rs");
   assert(
     /use_agent/.test(rustBody) && /password\.is_some\(\)/.test(rustBody),
-    "the backend guard still tests PRESENCE (is_some), matching canAuthenticate above",
+    "the guard tests PRESENCE (is_some), so an empty credential is the server's call",
   );
   assert(
     !/is_empty\(\)|unwrap_or_default\(\)/.test(rustBody),
-    "the backend guard has not been switched to an emptiness test the frontend does not mirror",
+    "and has not been switched to an emptiness test - `SecretSource::resolve` already drops empties",
   );
 
   // Both call sites go through the one predicate. A third inline copy is how
@@ -424,12 +395,10 @@ console.log("\n[parity] the backend guard and its frontend mirror agree");
   );
 
   const rustMsg = /const NO_CREDENTIALS_ERROR: &str = "([^"]*)"/.exec(rust)?.[1] ?? null;
-  const tsMsg = /const NO_CREDENTIALS_MESSAGE = "([^"]*)"/.exec(ts)?.[1] ?? null;
   assert(rustMsg !== null, "found NO_CREDENTIALS_ERROR in session.rs");
-  assert(tsMsg !== null, "found NO_CREDENTIALS_MESSAGE in ssh-session.ts");
   assert(
-    rustMsg !== null && rustMsg === tsMsg,
-    `the two sides tell the user the same sentence (rust=${JSON.stringify(rustMsg)}, ts=${JSON.stringify(tsMsg)})`,
+    rustMsg === "ssh: no credentials: set use_agent, password, or private_key",
+    `the sentence a user reads is unchanged (got ${JSON.stringify(rustMsg)})`,
   );
 }
 
@@ -995,7 +964,7 @@ checkLadderSite("first attempt", "src/modules/terminal/lib/session-lifecycle.ts"
 console.log("\n[source-text] the ladder's own re-entry: same question, same answer");
 checkLadderSite("attempts 2 and 3", "src/modules/terminal/lib/ssh-session.ts");
 
-console.log("\n[source-text] nothing is dialled that could not authenticate");
+console.log("\n[source-text] every resolve-block failure is local, so none rejoins the ladder");
 {
   const src = readTs("src/modules/terminal/lib/ssh-session.ts");
   // Everything from the resolve block down to the dial itself: the property is
@@ -1011,14 +980,6 @@ console.log("\n[source-text] nothing is dialled that could not authenticate");
   const dial = dialHits.length === 1 ? dialHits[0] : -1;
   const body = from !== -1 && dial > from ? src.slice(from, dial) : null;
   assert(body !== null, "found the region between the resolve block and the dial");
-  assert(
-    /canAuthenticate\(auth\)/.test(body ?? ""),
-    "the target's credential is checked before openSsh is called",
-  );
-  assert(
-    /canAuthenticate\(hop\)/.test(body ?? ""),
-    "every ProxyJump hop's credential is checked too - a chain fails the same way",
-  );
   // The resolve block's catch re-wraps whatever it threw, which is what makes a
   // failure ADDED to that block later local by default. Losing this line is how
   // the next pre-flight error silently rejoins the ladder.

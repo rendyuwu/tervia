@@ -428,6 +428,21 @@ check(
   bareHandlers === 0,
 );
 
+console.log("\n[apply] an import writes the whole batch as ONE store commit");
+// On Linux and Windows every commit rewrites the entire store, so a per-ref
+// `write_secret` made importing N connections cost roughly 3N whole-store
+// rewrites. No Rust test can pin this: `write_secrets` needs an `AppHandle`,
+// and anything reachable from `cargo test` would only re-exercise
+// `commit_locked` and say nothing about the decision to call it once.
+{
+  const rust = stripComments(read("src-tauri/src/modules/backup.rs"));
+  const batched = (rust.match(/write_secrets\(/g) ?? []).length;
+  check(`backup.rs calls write_secrets exactly once (found ${batched})`, batched === 1);
+  // Disjoint patterns: the trailing `(` excludes the plural, so this says no
+  // per-ref write survived anywhere in the file.
+  check("and no per-ref write_secret( call survives", !/write_secret\(/.test(rust));
+}
+
 // --- Functional: WHAT the pre-check decides, at the point it runs -----------
 
 console.log("\n[functional] the pre-check decides the envelope BEFORE a passphrase is asked for");
