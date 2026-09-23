@@ -30,6 +30,7 @@ import {
   groupCounts,
   hostUsername,
   identityName,
+  lastConnectedLabel,
   matchesGroupFilter,
   missingSecret,
   searchRows,
@@ -796,6 +797,67 @@ console.log("\n[keys] arrow keys move between host cards and stop at the grid's 
     "the card and its action button both follow tabStop",
     (card.match(/tabIndex=\{tabStop \? 0 : -1\}/g) ?? []).length === 2,
   );
+}
+
+// --- lastConnectedLabel: the grid's recency order, made visible ---------
+
+console.log("\n[lastConnectedLabel] boundaries around the unit table and the just-now floor");
+{
+  const now = Date.parse("2024-06-15T12:00:00.000Z");
+  check("never connected renders nothing", lastConnectedLabel(undefined, now), undefined);
+  check(
+    "a future timestamp (clock skew) reads as just now, not a negative duration",
+    lastConnectedLabel(now + 5_000, now),
+    "Connected just now",
+  );
+  check(
+    "one millisecond under the minute floor is still just now",
+    lastConnectedLabel(now - 59_999, now),
+    "Connected just now",
+  );
+  check(
+    "the minute floor itself reports one minute, not just now",
+    lastConnectedLabel(now - 60_000, now),
+    "Connected 1 minute ago",
+  );
+  check(
+    "59 minutes stays in the minute unit rather than rounding up to an hour",
+    lastConnectedLabel(now - 59 * 60_000, now),
+    "Connected 59 minutes ago",
+  );
+  check(
+    "a full day out reports 1 day ago",
+    lastConnectedLabel(now - 24 * 60 * 60_000, now),
+    "Connected 1 day ago",
+  );
+  check(
+    "one millisecond under 48 hours still rounds down to 1 day",
+    lastConnectedLabel(now - (48 * 60 * 60_000 - 1), now),
+    "Connected 1 day ago",
+  );
+  check(
+    "13 days reaches the week arm",
+    lastConnectedLabel(now - 13 * 24 * 60 * 60_000, now),
+    "Connected 1 week ago",
+  );
+  check(
+    "59 days reaches the month arm rather than staying in weeks",
+    lastConnectedLabel(now - 59 * 24 * 60 * 60_000, now),
+    "Connected 1 month ago",
+  );
+  check(
+    "400 days rolls up to the year unit rather than staying in months",
+    lastConnectedLabel(now - 400 * 24 * 60 * 60_000, now),
+    "Connected 1 year ago",
+  );
+}
+
+console.log("\n[lastConnectedLabel] HostCard actually renders it");
+{
+  const card = stripComments(
+    readFileSync(join(root, "src/modules/hosts/page/HostCard.tsx"), "utf8"),
+  );
+  ok("HostCard calls lastConnectedLabel", card.includes("lastConnectedLabel("));
 }
 
 // --- purity: derive.ts reaches nothing it is not allowed to reach --------
