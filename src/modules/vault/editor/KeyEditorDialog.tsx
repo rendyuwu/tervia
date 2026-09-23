@@ -65,6 +65,7 @@ import {
   keySecretsForSave,
   passphraseHelp,
   privateKeyHelp,
+  rebaseKeyDraft,
   validateKeyDraft,
   type KeyDraft,
 } from "./draft";
@@ -317,17 +318,49 @@ export function KeyEditorDialog({ target, onClose }: KeyEditorDialogProps): Reac
       onClose();
     } catch (e) {
       if (e instanceof VaultRecordChangedError) {
-        // Rendered so the user can act on it, and NO recovery is offered:
-        // nothing here calls `setExisting`, so `existing` - and with it the id
-        // and the stamp this form sends - stays exactly as it was. A second
-        // press is refused the same way whichever direction the record moved,
-        // so neither arm may invite one.
+        // A DELETED record gets no recovery: nothing on that arm calls
+        // `setExisting`, so `existing` - and with it the id and the stamp this
+        // form sends - stays exactly as it was, and a second press is refused
+        // the same way every time.
+        //
+        // A MOVED record is re-read, and that is what makes "press Save again"
+        // true: `existing` becomes `fresh`, so the next stamp is
+        // `vaultKeyStamp(fresh)`, and the draft is re-based through
+        // `rebaseKeyDraft` so an untouched field shows what is stored now
+        // instead of writing the loaded value back over it. `setDraft` takes an
+        // updater so keystrokes typed while `save` awaited `inspectSshKey` are
+        // re-based too rather than dropped.
+        //
+        // Nothing loaded (create mode) or a re-read that failed or came back
+        // empty means nothing was refreshed - the stamp is still the old one -
+        // so "close and reopen" is the only instruction that is true there.
+        if (e.actual === VAULT_STAMP_ABSENT) {
+          setError(
+            `${e.message} Close this editor - pressing Save again will not help: this form ` +
+              `still names the deleted record, so the write is refused the same way every time.`,
+          );
+          return;
+        }
+        const loaded = existing;
+        const fresh = loaded ? await findKey(e.recordId).catch(() => undefined) : undefined;
+        if (!loaded || !fresh) {
+          setError(
+            `${e.message} Close and reopen this key to edit it against what is stored now; ` +
+              `anything typed here has to be entered again.`,
+          );
+          return;
+        }
+        // Read off the `draft` closure because the updater below runs later;
+        // the same condition `rebaseKeyDraft` clears the passphrase on.
+        const clearedPassphrase = draft.privateKey.trim() === "" && draft.passphrase !== "";
+        setExisting(fresh);
+        setDraft((d) => rebaseKeyDraft(d, loaded, fresh));
         setError(
-          e.actual === VAULT_STAMP_ABSENT
-            ? `${e.message} Close this editor - pressing Save again will not help: this form ` +
-                `still names the deleted record, so the write is refused the same way every time.`
-            : `${e.message} Close and reopen this key to edit it against what is stored now; ` +
-                `anything typed here has to be entered again.`,
+          `${e.message} Your edits are still here; fields you had not changed and the Stored key ` +
+            `box now show what is stored. Review them and press Save again.` +
+            (clearedPassphrase
+              ? " The passphrase you typed was cleared: it was meant for the key stored before, so enter it again if it still applies."
+              : ""),
         );
         return;
       }

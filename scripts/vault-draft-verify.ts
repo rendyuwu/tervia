@@ -37,19 +37,23 @@ import {
   EMPTY_IDENTITY_DRAFT,
   EMPTY_KEY_DRAFT,
   encryptedKeyRefusal,
+  identityDraftFrom,
   identityPasswordHelp,
   identityRecordFrom,
   identitySecretsForSave,
+  keyDraftFrom,
   keyRecordFrom,
   keySecretsForSave,
   passphraseHelp,
   privateKeyHelp,
+  rebaseIdentityDraft,
+  rebaseKeyDraft,
   validateIdentityDraft,
   validateKeyDraft,
   type IdentityDraft,
   type KeyDraft,
 } from "../src/modules/vault/editor/draft";
-import { vaultKeyStamp, type VaultKey } from "../src/modules/vault/types";
+import { vaultKeyStamp, type VaultIdentity, type VaultKey } from "../src/modules/vault/types";
 import { importSpecifiersOf } from "./lib/ast";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -994,6 +998,72 @@ console.log(
   // `writeKeySecrets` reports for a landed copy rather than read back from it.
 }
 
+// --- 11. rebaseIdentityDraft / rebaseKeyDraft -----------------------------------
+console.log(
+  "\n[11] rebase*Draft - untouched fields follow the refreshed record, edits and typed secrets stay",
+);
+{
+  // What a vault editor's recovery arm carries across a refresh. A field the
+  // user left as loaded must follow the refreshed record - otherwise the second
+  // Save writes the loaded value back over another writer's change - and a
+  // field they changed, or a secret they typed, must survive.
+  const ident = (over: Partial<VaultIdentity> = {}): VaultIdentity => ({
+    id: "i-1",
+    name: "rendy",
+    username: "rendy",
+    authMode: "password",
+    hasPassword: true,
+    ...over,
+  });
+  const loaded = ident();
+  const fresh = ident({ authMode: "key", keyId: "k-2" });
+
+  check(
+    "identity: untouched authMode/keyId follow fresh; the edited name and typed password stay",
+    rebaseIdentityDraft(
+      { ...identityDraftFrom(loaded), name: "renamed", password: "typed" },
+      loaded,
+      fresh,
+    ),
+    { ...identityDraftFrom(fresh), name: "renamed", password: "typed" },
+  );
+  const agent = rebaseIdentityDraft(
+    { ...identityDraftFrom(loaded), authMode: "agent" },
+    loaded,
+    fresh,
+  );
+  check("identity: an authMode the user changed is kept", agent.authMode, "agent");
+  check("identity: ...while an untouched keyId still follows fresh", agent.keyId, "k-2");
+
+  const loadedKey = existingKey();
+  const freshKey = existingKey({ name: "renamed-elsewhere", fingerprint: "SHA256:new" });
+  const rebasedKey = rebaseKeyDraft(
+    { ...keyDraftFrom(loadedKey), description: "mine" },
+    loadedKey,
+    freshKey,
+  );
+  check(
+    "key: an untouched name follows fresh; the edited description stays",
+    { name: rebasedKey.name, description: rebasedKey.description },
+    { name: "renamed-elsewhere", description: "mine" },
+  );
+  const withBody = rebaseKeyDraft(
+    { ...keyDraftFrom(loadedKey), privateKey: "-----BEGIN", passphrase: "p" },
+    loadedKey,
+    freshKey,
+  );
+  check(
+    "key: a typed body and the passphrase typed with it are both kept",
+    { privateKey: withBody.privateKey, passphrase: withBody.passphrase },
+    { privateKey: "-----BEGIN", passphrase: "p" },
+  );
+  check(
+    "key: blank body and typed passphrase - the passphrase is cleared",
+    rebaseKeyDraft({ ...keyDraftFrom(loadedKey), passphrase: "p" }, loadedKey, freshKey).passphrase,
+    "",
+  );
+}
+
 console.log(failed === 0 ? "\nAll vault-draft checks passed." : `\n${failed} check(s) FAILED.`);
 process.exit(failed === 0 ? 0 : 1);
 
@@ -1254,3 +1324,12 @@ process.exit(failed === 0 ? 0 : 1);
 //                                                        it - which is exactly
 //                                                        why 2b is not the only
 //                                                        check on this rule.
+//
+// Section 11's rebase. Run, killed, and `src/modules/vault/editor/draft.ts`
+// restored byte-identical.
+//
+//   Mutation                                          Check(s) it killed
+//   -------------------------------------------------  ---------------------------
+//   R1: draft.ts - rebaseKeyDraft's passphrase clear     section 11's "blank body
+//     dropped, returning `next` as re-based               and typed passphrase" row
+//                                                        (1), exit 1

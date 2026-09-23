@@ -325,6 +325,42 @@ export function keySecretsForSave(draft: KeyDraft): {
 }
 
 /**
+ * A draft carried across a refresh of the record it was opened from. A field
+ * the user left as loaded takes the refreshed record's value; a field they
+ * changed keeps theirs. Secret fields need no rule of their own: the
+ * `*DraftFrom` builders blank them on both sides, so a typed secret survives
+ * and a blank one stays blank - still "leave the stored value alone".
+ */
+function rebaseDraft<T extends Record<keyof T, string>>(draft: T, loaded: T, fresh: T): T {
+  const out = { ...draft };
+  for (const field of Object.keys(draft) as (keyof T)[]) {
+    if (draft[field] === loaded[field]) out[field] = fresh[field];
+  }
+  return out;
+}
+
+/** {@link rebaseDraft} for the identity editor. `authMode` and `keyId` re-base
+ *  like any other field, so an untouched one follows another writer's change
+ *  rather than a second Save quietly reverting it. */
+export function rebaseIdentityDraft(
+  draft: IdentityDraft,
+  loaded: VaultIdentity,
+  fresh: VaultIdentity,
+): IdentityDraft {
+  return rebaseDraft(draft, identityDraftFrom(loaded), identityDraftFrom(fresh));
+}
+
+/** {@link rebaseDraft} for the key editor, with one field cleared: a passphrase
+ *  typed without a new body. It was typed to unlock the body the form loaded,
+ *  which may no longer be the stored one, and with no body beside it
+ *  {@link keySecretsForSave} would write it over whatever is stored now. A
+ *  passphrase typed WITH a body travels with that body and is kept. */
+export function rebaseKeyDraft(draft: KeyDraft, loaded: VaultKey, fresh: VaultKey): KeyDraft {
+  const next = rebaseDraft(draft, keyDraftFrom(loaded), keyDraftFrom(fresh));
+  return next.privateKey.trim() === "" ? { ...next, passphrase: "" } : next;
+}
+
+/**
  * What leaving the identity password blank actually does, which is the OPPOSITE
  * thing on the two sides of `hasStoredPassword`.
  *

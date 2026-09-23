@@ -2007,27 +2007,29 @@ console.log("\n[16. placement] the compare is a direct statement of the queued w
 }
 
 // ============================================================================
-// 17. The two refusal messages tell the user what to do, not to press Save
-//     again. (COMPILER API to locate each arm; SOURCE-TEXT over its content.)
+// 17. A vault refusal invites a second press only on the path that refreshed
+//     the record. (COMPILER API to locate each arm; SOURCE-TEXT over its
+//     content.)
 // ============================================================================
-// Protects: `KNOWN-LIMITS.md`'s entry accepting no refresh/recovery on this
-// refusal rests on the strength of these two messages saying what to do -
-// close and reopen - instead of inviting a second press that is refused the
-// same way every time. Nothing else holds either sentence: both are
-// assembled inline in a `.tsx` catch arm, never exported, so there is no
-// function to pin by return value the way `vault-draft-verify.ts` section [9]
-// pins `encryptedKeyRefusal`. This section is the closest equivalent that
-// shape allows - the ternary each `save` branches on, found structurally so a
-// swap of its two arms cannot hide from a check that reads the file as one
-// blob, and its own two arm texts read directly off the AST rather than by a
-// fragile string anchor.
+// Protects: "press Save again" is true only once `existing` has been re-read -
+// the next stamp is derived from it, so without `setExisting(fresh)` a second
+// press sends the same stale stamp and is refused the same way every time.
+// Copying the host editor's wording without its refresh would ship a false
+// instruction. So each `save`'s `VaultRecordChangedError` arm is found
+// structurally and read as its ordered statements: the two early exits (the
+// deleted record, and nothing refreshed) must each return with their own
+// instruction and no invitation, and the invitation must sit after both of
+// them and after the refresh and the draft re-base. Nothing else holds these
+// sentences: all are assembled inline in a `.tsx` catch arm, never exported,
+// so there is no function to pin by return value the way
+// `vault-draft-verify.ts` section [9] pins `encryptedKeyRefusal`.
 //
-// PINS THE PROPERTY, NOT THE SENTENCE: neither arm may read as an invitation
-// to press Save again, and each arm must still say its own instruction - the
-// deleted-record arm says "close this editor" (no reopen: there is nothing
-// left to reopen against), the moved-record arm says "close and reopen"
+// PINS THE PROPERTY, NOT THE SENTENCE: neither exit may read as an invitation
+// to press Save again, and each must still say its own instruction - the
+// deleted-record exit says "close this editor" (no reopen: there is nothing
+// left to reopen against), the not-refreshed exit says "close and reopen"
 // (there is). A pure negative set passes a message reduced to nothing, which
-// is why each arm also carries its own positive.
+// is why each exit also carries its own positive.
 //
 // ONE SPELLING DECISION IS DISCLOSED HERE, because it decides how a future
 // rewrite of either message may be worded: the deleted-record arm's own
@@ -2039,34 +2041,13 @@ console.log("\n[16. placement] the compare is a direct statement of the queued w
 // help") requires updating `dulled()` alongside it, or the negative goes
 // stale and starts failing the correct, committed text.
 //
-// WHAT THIS CANNOT SEE: whether either message ever reaches a render at all -
-// section 14's own entry above this one is the closest existing coverage of
-// that, and it is an absence, not a check.
-console.log("\n[17. refusal wording] neither vault refusal message invites a second press");
+// WHAT THIS CANNOT SEE: whether any of these messages ever reaches a render -
+// `KNOWN-LIMITS.md`'s "Nothing pins where a vault editor's message renders"
+// records that absence.
+console.log(
+  "\n[17. refusal recovery] a vault refusal invites a second press only after refreshing the record",
+);
 {
-  /** The first ConditionalExpression under `root` whose own condition text
-   *  names `name` - the same nesting question `findAncestorConditionOn`
-   *  above answers walking UP; this walks DOWN from a `save` body to find
-   *  the `e.actual === VAULT_STAMP_ABSENT` ternary structurally, so a swap of
-   *  its two arms moves with the node and cannot be missed by treating the
-   *  region as one blob of text. */
-  function findConditionalOn(
-    root: ts.Node,
-    name: string,
-    sf: ts.SourceFile,
-  ): ts.ConditionalExpression | null {
-    let result: ts.ConditionalExpression | null = null;
-    const visit = (n: ts.Node): void => {
-      if (result) return;
-      if (ts.isConditionalExpression(n) && n.condition.getText(sf).includes(name)) {
-        result = n;
-      }
-      ts.forEachChild(n, visit);
-    };
-    visit(root);
-    return result;
-  }
-
   /** Strips the one phrase the deleted-record arm legitimately contains -
    *  see this section's header comment on why a bare negative cannot tell
    *  the refusal's own "will not help" from an actual invitation. */
@@ -2090,35 +2071,99 @@ console.log("\n[17. refusal wording] neither vault refusal message invites a sec
     );
   };
 
+  /** An early exit: an `if` whose body is a block ending in `return`. */
+  const exitsEarly = (s: ts.IfStatement): boolean =>
+    ts.isBlock(s.thenStatement) &&
+    s.thenStatement.statements.length > 0 &&
+    ts.isReturnStatement(s.thenStatement.statements[s.thenStatement.statements.length - 1]);
+
+  const rebaseFn = { keyDialog: "rebaseKeyDraft", identityDialog: "rebaseIdentityDraft" } as const;
+
   for (const key of ["keyDialog", "identityDialog"] as const) {
     const sf = sourceFile(key);
     const saveBody = findConstArrowBody(sf, "save");
     check(`${FILES[key]}: save's body was located (section 17)`, saveBody !== null);
     if (!saveBody) continue;
 
-    const ternary = findConditionalOn(saveBody, "VAULT_STAMP_ABSENT", sf);
-    check(
-      `${FILES[key]}: the e.actual === VAULT_STAMP_ABSENT ternary was located`,
-      ternary !== null,
-    );
-    if (!ternary) continue;
+    let arm: ts.Block | null = null;
+    const visit = (n: ts.Node): void => {
+      if (arm) return;
+      if (
+        ts.isIfStatement(n) &&
+        norm(n.expression.getText(sf)) === norm("e instanceof VaultRecordChangedError") &&
+        ts.isBlock(n.thenStatement)
+      ) {
+        arm = n.thenStatement;
+        return;
+      }
+      ts.forEachChild(n, visit);
+    };
+    visit(saveBody);
+    const found = arm as ts.Block | null;
+    check(`${FILES[key]}: the VaultRecordChangedError arm of save was located`, found !== null);
+    if (!found) continue;
+    const stmts = found.statements;
 
-    const deletedArm = ternary.whenTrue.getText(sf);
-    const movedArm = ternary.whenFalse.getText(sf);
+    const ifAt = (needle: string): number =>
+      stmts.findIndex((s) => ts.isIfStatement(s) && s.expression.getText(sf).includes(needle));
+    const deletedIdx = ifAt("VAULT_STAMP_ABSENT");
+    const noFreshIdx = ifAt("!fresh");
+    check(
+      `${FILES[key]}: the deleted-record exit (VAULT_STAMP_ABSENT) was located`,
+      deletedIdx >= 0,
+    );
+    check(`${FILES[key]}: the not-refreshed exit (!fresh) was located`, noFreshIdx >= 0);
+    if (deletedIdx < 0 || noFreshIdx < 0) continue;
+    const deletedIf = stmts[deletedIdx] as ts.IfStatement;
+    const noFreshIf = stmts[noFreshIdx] as ts.IfStatement;
+    check(`${FILES[key]}: the deleted-record exit ends in return`, exitsEarly(deletedIf));
+    check(`${FILES[key]}: the not-refreshed exit ends in return`, exitsEarly(noFreshIf));
 
     pinRefusalArm(
       FILES[key],
       "the deleted-record arm",
-      deletedArm,
+      deletedIf.getText(sf),
       /close this editor/i,
       '"close this editor"',
     );
     pinRefusalArm(
       FILES[key],
-      "the moved-record arm",
-      movedArm,
+      "the not-refreshed arm",
+      noFreshIf.getText(sf),
       /close and reopen/i,
       '"close and reopen"',
+    );
+
+    const stmtAt = (text: string): number =>
+      stmts.findIndex((s) => norm(s.getText(sf)) === norm(text));
+    const refreshIdx = stmtAt("setExisting(fresh);");
+    const rebaseIdx = stmtAt(`setDraft((d) => ${rebaseFn[key]}(d, loaded, fresh));`);
+    const inviteIdx = stmts.findIndex(
+      (s) => !ts.isIfStatement(s) && /press save again/i.test(s.getText(sf)),
+    );
+    check(`${FILES[key]}: the refresh setExisting(fresh) was located`, refreshIdx >= 0);
+    check(`${FILES[key]}: the draft re-base through ${rebaseFn[key]} was located`, rebaseIdx >= 0);
+    check(`${FILES[key]}: the "press Save again" invitation was located`, inviteIdx >= 0);
+    if (refreshIdx < 0 || rebaseIdx < 0 || inviteIdx < 0) continue;
+
+    check(
+      `${FILES[key]}: the deleted-record exit comes before the not-refreshed exit`,
+      deletedIdx < noFreshIdx,
+      { deletedIdx, noFreshIdx },
+    );
+    check(`${FILES[key]}: the refresh sits after both exits`, noFreshIdx < refreshIdx, {
+      noFreshIdx,
+      refreshIdx,
+    });
+    check(
+      `${FILES[key]}: the invitation is reachable only after both exits and after the refresh`,
+      refreshIdx < inviteIdx,
+      { refreshIdx, inviteIdx },
+    );
+    check(
+      `${FILES[key]}: the invitation is reachable only after the draft re-base`,
+      rebaseIdx < inviteIdx,
+      { rebaseIdx, inviteIdx },
     );
   }
 }
