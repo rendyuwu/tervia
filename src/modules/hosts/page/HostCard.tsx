@@ -12,6 +12,7 @@ import { cn } from "@/lib/utils";
 import { CircleAlert, Copy, Pencil, Play, Trash2, type LucideIcon } from "lucide-react";
 import type { ReactNode } from "react";
 import { isSshHost, type Host } from "../types";
+import { lastConnectedLabel } from "./derive";
 
 export type HostCardProps = {
   host: Host;
@@ -62,6 +63,10 @@ export function HostCard({
 }: HostCardProps): ReactNode {
   const detail = connectionDetail(host);
   const credentialLabel = missingSecret ? "Missing secret" : (identityName ?? "Inline");
+  // ponytail: computed at render off Date.now(), not a ticker - the label
+  // goes stale while a card sits on screen unvisited. A minute-interval
+  // re-render is the upgrade if that staleness ever matters.
+  const connectedLabel = lastConnectedLabel(host.lastConnectedAt, Date.now());
 
   return (
     <div
@@ -116,8 +121,17 @@ export function HostCard({
       </div>
 
       <div className="flex min-h-6 flex-wrap items-center justify-between gap-x-2 gap-y-1">
-        {groupName ? (
-          <span className="text-muted-foreground min-w-0 truncate text-xs">{groupName}</span>
+        {groupName || connectedLabel ? (
+          <span
+            className="text-muted-foreground min-w-0 flex-1 truncate text-xs"
+            title={
+              host.lastConnectedAt !== undefined
+                ? `Last connected ${new Date(host.lastConnectedAt).toLocaleString()}`
+                : undefined
+            }
+          >
+            {[groupName, connectedLabel].filter(Boolean).join(" · ")}
+          </span>
         ) : (
           <span />
         )}
