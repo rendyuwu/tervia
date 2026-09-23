@@ -2,14 +2,15 @@
  * Self-check for the one-shot legacy secret purge.
  * Run: `npx tsx scripts/legacy-purge-verify.ts`.
  *
- * `purgeLegacySecrets` is the only thing that can ever name the keychain accounts
- * the two OLD connection stores left behind. The IPC surface is `secrets_get`,
- * `secrets_get_all`, `secrets_set`, `secrets_delete` and `secrets_copy` - each
- * named against the specific accounts it acts on - with no `secrets_list`, so the moment
+ * `purgeLegacySecrets` is the only thing that RELEASES the keychain accounts the
+ * two OLD connection stores left behind. The IPC surface's other commands are
+ * each named against the specific accounts they act on, and `secrets_list` - the
+ * one that enumerates - is read only by the Vault page's unreferenced-entry
+ * sweep, which the user has to find, read and confirm. So from the moment
  * `modules/ssh/connections.ts` and `modules/rdp/connections.ts` were deleted,
- * `tervia-ssh :: <id>::privateKey` became unreachable from inside the app. A
- * pass that SKIPS is therefore not a cheap mistake, it is a private key nobody
- * can delete again.
+ * `tervia-ssh :: <id>::privateKey` was reachable by no automatic path at all. A
+ * pass that SKIPS is therefore not a cheap mistake, it is a private key that
+ * waits on somebody going looking.
  *
  * Which is why the happy path is not what this file is for. The whole suite in
  * `hosts-store-verify.ts` drives the purge through the real store, and it covers

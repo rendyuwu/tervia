@@ -2164,13 +2164,6 @@ const bridgeCallbacks = new Map<number, (payload: unknown) => void>();
 async function handleBridgeInvoke(cmd: string, args: Record<string, unknown>): Promise<unknown> {
   bridgeCalls.push({ cmd, args });
   switch (cmd) {
-    case "plugin:store|load":
-    case "plugin:store|get_store":
-      return 1;
-    case "plugin:store|get":
-      return [[], true];
-    case "plugin:store|set":
-    case "plugin:store|save":
     case "plugin:event|emit":
       return undefined;
     case "secrets_get_all":

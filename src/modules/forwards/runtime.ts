@@ -6,7 +6,7 @@
  *
  * SESSION-SCOPED ONLY - nothing here is persisted, so a relaunch comes up with
  * every rule stopped. That is the design and not an omission: do not add a
- * `LazyStore` (or any other persistence) to "fix" it.
+ * store file (or any other persistence) to "fix" it.
  *
  * KEYED BY `ruleId` ALONE, not `(ruleId, owner)`, because a rule runs under one
  * owner at a time. That has a consequence worth stating up front: a

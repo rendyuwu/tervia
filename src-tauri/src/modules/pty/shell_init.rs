@@ -81,39 +81,37 @@ fn apply_common(cmd: &mut CommandBuilder, cwd: Option<String>) {
 }
 
 /// Directories the user configured under Settings → Terminal → "Additional
-/// PATH". Read straight from the `tauri-plugin-store` settings file rather than
-/// threaded through the daemon protocol: `apply_common` runs in whichever
-/// process owns the PTY (the GUI for the in-process backend, the sidecar for
-/// the daemon backend), and both resolve the same
+/// PATH". Read straight from the settings store file rather than threaded
+/// through the daemon protocol: `apply_common` runs in whichever process owns
+/// the PTY (the GUI for the in-process backend, the sidecar for the daemon
+/// backend), and both resolve the same
 /// `<data_dir>/<BUNDLE_ID>/tervia-settings.json`. Reading per spawn keeps the
 /// setting live - a newly opened terminal sees edits without a daemon restart.
 ///
-/// The plugin-store writes via a non-atomic `fs::write` (truncate-in-place), so
-/// a spawn's read can rarely land between the truncate and the rewrite and see
-/// an empty / partial file. Retry a couple of times with a short sleep before
-/// giving up; the completed file is present on the retry. Any persistent
-/// missing-file / parse error yields no extra entries so the shell still
+/// ONE READ, NO RETRY. The app writes this file through its own whole-file
+/// atomic path - `fs_write_file`, which is `atomic_write`: stage into a sibling
+/// temp, `sync_all`, rename over the target - so a reader sees either the whole
+/// old file or the whole new one. There is no tear to retry into, which there
+/// was while a plugin owned the file and saved by truncating it in place.
+///
+/// What is now ACCEPTED rather than retried: `write_staged` in
+/// `src-tauri/src/modules/fs/atomic.rs` notes that Windows can refuse a rename
+/// while a handle is open, so a spawn can still read the pre-write file. That
+/// costs one terminal opening with the previous PATH, which the next terminal
+/// fixes, and is worth strictly less than the retry it would take to close. A
+/// missing file or a parse error yields no extra entries, so the shell still
 /// launches with the inherited PATH.
 pub(crate) fn user_extra_path_dirs() -> Vec<String> {
     let Some(dir) = crate::modules::ids::app_data_dir() else {
         return Vec::new();
     };
-    let path = dir.join("tervia-settings.json");
-    for attempt in 0..3 {
-        if let Ok(raw) = std::fs::read_to_string(&path) {
-            if !raw.trim().is_empty() {
-                if let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) {
-                    return parse_extra_path_entries(&value);
-                }
-            }
-        }
-        // Empty / partial read (or a transient lock): back off briefly and try
-        // the completed file instead of falling straight back to no entries.
-        if attempt < 2 {
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
-    }
-    Vec::new()
+    let Ok(raw) = std::fs::read_to_string(dir.join("tervia-settings.json")) else {
+        return Vec::new();
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return Vec::new();
+    };
+    parse_extra_path_entries(&value)
 }
 
 /// Pull the enabled `terminalEnvPath` directories out of the parsed settings.

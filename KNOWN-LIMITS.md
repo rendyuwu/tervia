@@ -326,23 +326,53 @@ re-run.
 
 ## Keychain and secrets
 
-### An orphaned keychain account cannot be enumerated
+### The orphan sweep cannot see a legacy Windows credential, and on macOS it can see another install's
 
-**Accepted state.** A secret can exist at `<id>::<field>` in the OS
-keychain/DPAPI/store with nothing in `tervia-hosts.json` or
-`tervia-vault.json` naming it any more. Nothing in the app can list it to find
-out: the registered secret commands are `secrets_get`, `secrets_set`,
-`secrets_delete`, `secrets_get_all` and `secrets_copy`, and `secrets_get_all`
-takes the accounts to fetch rather than enumerating what exists - there is no
-`secrets_list`, so a sweep for orphans cannot be written from the frontend at
-all. It is an extra, inert copy rather than a lost secret: nothing names it,
-so nothing reads it, writes it, or would sync it either.
+**Accepted state.** `secrets_list` enumerates the accounts stored under one
+service, and the Vault page's unreferenced-entry sweep subtracts every account
+the app's records name from what it answers. Two gaps in that enumeration are
+accepted rather than closed.
 
-**Carried by.** `src-tauri/src/modules/secrets.rs`, which is the whole
-registered secret-command surface.
+On Windows it lists the DPAPI file store only. `legacy_keyring_get` still reads
+pre-migration Credential Manager entries as a fallback, and the `keyring` crate
+has no listing API, so a password-only credential written by an earlier build is
+invisible to the sweep - it can still be read and used, and still cannot be
+found by looking.
 
-**Trigger.** A `secrets_list` command being added for another reason, or a
-user reporting keychain clutter.
+On macOS the enumeration is not scoped to one install, and that is the sharper
+half. Linux and Windows resolve their store under `app_local_data_dir()`, so a
+dev build and a release build cannot see each other's secrets at all. macOS
+addresses the shared login keychain by a bare service string, so a dev build's
+sweep enumerates a release install's `tervia-hosts::…` accounts, finds them in no
+record of its own `.dev` store file, and offers to delete them. The confirm
+dialog is the whole of what stands between that and a real loss, which is why
+the sweep asks rather than running unattended.
+
+**Carried by.** `secrets_list` and `keychain_accounts` in
+`src-tauri/src/modules/secrets.rs`, and the confirm dialog in
+`src/modules/vault/VaultPage.tsx`.
+
+**Trigger.** A report of a dev build offering to delete a release install's
+secrets, or a user finding a pre-migration Windows credential the sweep never
+listed.
+
+### A preference write costs a whole-file replacement
+
+**Accepted state.** `tervia-settings.json` now goes through
+`createRecoveredStore` like the other five store files, which means it lost the
+200 ms autosave debounce the plugin store gave it: `src/lib/fileKeyValueStore.ts`
+states that its replacement has no autosave, debounce or retry by design. Each
+`writePref` is one whole-map `fs_write_file`, plus `snapshotAfterSave`'s read
+and copy, plus two `emit`s. The map can legitimately hold two sound data URLs of
+up to `MAX_SOUND_DATA_URL_LEN` characters each - roughly 1.5 MB apiece - so a
+held Ctrl+= moves megabytes per keypress. Durability over throughput is the
+trade this was made for; the number is what belongs on the record.
+
+**Carried by.** `writePref` in `src/modules/settings/store.ts`, which commits
+inside the port's write queue, and `commit` in `src/lib/recoveredStore.ts`.
+
+**Trigger.** A measured stall while dragging a settings slider or holding a zoom
+shortcut. The fix is a debounce at the setter, not in the store layer.
 
 ### Clearing the key textarea removes the key body and strands its passphrase
 
@@ -457,35 +487,11 @@ where the sentence lives. `reusableVaultKey` in
 `src/modules/hosts/credentialMove.ts` is what would act on a stale one: it binds
 on the first fingerprint match.
 
-**Trigger.** A keychain enumeration existing (there is no `secrets_list`), or a
-user report of a host offering a key it does not hold after a recovery toast.
-
-### `tervia-settings.json` is the one store file with no recovery in front of it
-
-**Accepted state.** Five of the six store files go through
-`createRecoveredStore`: a corruption check before the first read, a `.bak`
-snapshot after every commit, and a whole-file atomic write.
-`tervia-settings.json` does not. It is read and written by `tauri-plugin-store`
-directly, whose save is an in-place truncate and whose load error on a file it
-cannot parse is swallowed - so a torn or nul-filled file comes back as an empty
-store and the next save writes that emptiness over it. The worst case is a
-settings reset: the store holds no secret, and every field in it can be set again
-from the settings page.
-
-It stayed on the plugin for one reason. It is the only store depending on
-`LazyStore.onChange`, the plugin's cross-window `store://change` broadcast, which
-the recovered family does not use; and `writePref` pairs that broadcast with a
-`SELF_LABEL` dedupe of its own mirrored event, so the writing window handles the
-change exactly once. Converting means rewriting that dedupe in a second webview,
-which is a change with no durability payoff proportional to it.
-
-**Carried by.** The `LazyStore` at `src/modules/settings/store.ts` and its
-`onChange` subscription, which is what a conversion would have to replace. The
-module header of `src/lib/storeRecovery.ts` names this file as the one still on
-the plugin.
-
-**Trigger.** The settings store gaining a field that cannot be re-entered from
-the UI, or `LazyStore.onChange` no longer being needed there.
+**Trigger.** A user report of a host offering a key it does not hold after a
+recovery toast. The enumeration half of this is no longer pending - `secrets_list`
+exists, and the Vault page's unreferenced-entry sweep uses it - but that names
+accounts no record claims, which is the opposite direction and cannot tell that a
+record naming a live account is stale.
 
 ### A store file this app cannot read is inert until it can
 

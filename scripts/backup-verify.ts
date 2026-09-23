@@ -42,7 +42,8 @@
  * again: `upsertHost` releases every account the new record can no longer NAME,
  * so a row that arrives vault-bound (owning none) or on the other protocol
  * (owning fewer) deletes the saved host's secrets, with nothing copied first and
- * no `secrets_list` to find what is left.
+ * nothing but the Vault page's unreferenced-entry sweep - a screen the user has
+ * to go and visit - able to name what is left.
  *
  * `hostRefs` and `storedFields` are reached from `backup/apply.ts` rather than
  * from `backup/file.ts`, and they are the producing half of the
@@ -970,8 +971,9 @@ const NO_IDENTITIES: ReadonlySet<string> = new Set();
 // The failure this closes. `h-7` is a saved inline host holding the only copy of a
 // passphrased key. A file says `h-7` is `{kind:"identity"}`; a vault-bound record
 // owns no accounts, so `upsertHost` makes all three of that host's fields stale
-// and deletes them - nothing copied them, and there is no `secrets_list`. The
-// import reported `withoutSecrets: 1`, which reads as "the credential did not
+// and deletes them - nothing copied them, and nothing but the Vault page's
+// unreferenced-entry sweep can name them afterwards. The import reported
+// `withoutSecrets: 1`, which reads as "the credential did not
 // travel" rather than "the credential is gone".
 //
 // THE IDENTITY HAVING TRAVELLED DOES NOT MAKE IT SAFE TO APPLY, which is the step

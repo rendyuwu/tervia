@@ -121,3 +121,18 @@ export const tauriSecretsIo: SecretsIo = {
       toAccount: to.account,
     }),
 };
+
+/**
+ * Every account stored under `service`. Never a value.
+ *
+ * Beside {@link SecretsIo} rather than on it, and the port's own doc is the
+ * reason: it says there is "no single-value read on this port at all, precisely
+ * so no caller can assemble one", and every method it does carry is named
+ * against accounts the caller already holds. This is the one call that answers
+ * a question the caller could not answer itself, so it is the one that does not
+ * belong on the shared surface - and keeping it off leaves the in-memory
+ * `SecretsIo` fakes under `scripts/` untouched, all but one of which would have
+ * gained a method nothing calls.
+ */
+export const listSecrets = (service: string): Promise<string[]> =>
+  invoke<string[]>("secrets_list", { service });

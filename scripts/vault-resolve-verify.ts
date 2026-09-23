@@ -61,12 +61,13 @@
  *
  * 9. A SECRET IS NEVER LEFT WITH NO RECORD NAMING IT. `upsertKey` writes two
  *    secrets before it persists, so a throw on the second used to leave the
- *    private key at an account nothing would ever enumerate - there is no
- *    `secrets_list` command, so "unreferenced" means unreachable.
+ *    private key at an account no record names - reachable afterwards only
+ *    through the Vault page's unreferenced-entry sweep, which is a screen
+ *    somebody has to visit rather than anything this write can rely on.
  *
- * The store, secrets, filesystem, plugin store and event bus are all injectable
- * ports, so all of this runs under plain node with no Tauri runtime and no
- * mocking library.
+ * The store, secrets, filesystem, key-value store and event bus are all
+ * injectable ports, so all of this runs under plain node with no Tauri runtime
+ * and no mocking library.
  */
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -664,8 +665,8 @@ console.log("\n[orphans] a key whose second secret fails to write leaves nothing
 {
   // `upsertKey` writes `privateKey`, then `passphrase`, then persists. A throw on
   // the second write used to leave the PEM at `<id>::privateKey` with no record
-  // naming it - and there is no `secrets_list` command, so nothing could ever
-  // enumerate or delete it.
+  // naming it - reachable afterwards only through the Vault page's
+  // unreferenced-entry sweep, which is a screen somebody has to visit.
   const h = harness({ fail: { setAccount: "k-1::passphrase" } });
   await rejects(
     "a passphrase write that fails takes the whole upsert with it",

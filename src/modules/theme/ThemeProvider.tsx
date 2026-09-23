@@ -52,7 +52,7 @@ type ThemeProviderState = {
 const ThemeProviderContext = createContext<ThemeProviderState | null>(null);
 
 // Synchronous fast-path so the initial paint isn't unstyled. The persistent
-// preference (in tauri-plugin-store) overwrites this on mount; we keep a
+// preference (in the settings store file) overwrites this on mount; we keep a
 // localStorage shadow of the *last applied* theme just for first-paint fidelity.
 const FAST_PATH_KEY = "tervia-ui-theme-shadow";
 

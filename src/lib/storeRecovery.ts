@@ -21,16 +21,11 @@ import type { FsReadResult } from "./ipc";
 // to copy. It needs no new Rust: `fs_read_file` and `fs_write_file` already exist,
 // and the latter goes through the app's own atomic temp-plus-rename path.
 //
-// WHICH FILES. Five of the app's six store files go through `createRecoveredStore`
-// and therefore through here: hosts, vault, forwards, workspaces and the CLI
-// agents. `tervia-settings.json` is the sixth and does NOT - it is still read and
-// written by `tauri-plugin-store` (2.4.3, per `src-tauri/Cargo.lock` and
-// `pnpm-lock.yaml`; a comment here long said 2.4.4, which was never a version this
-// repository pinned), whose `StoreBuilder::build` swallows the load
-// error of a file it cannot parse (`let _ = store_inner.load()`) and whose save is
-// `fs::create_dir_all` + `fs::write`, an in-place truncate with no temp file, no
-// rename and no fsync. `KNOWN-LIMITS.md` records why that one stayed, and what
-// would change the answer.
+// WHICH FILES. All six of the app's store files go through
+// `createRecoveredStore` and therefore through here: hosts, vault, forwards,
+// workspaces, the CLI agents and settings. Each one gets a corruption check
+// before its first read, a `.bak` snapshot after every commit, and a whole-file
+// atomic write.
 //
 // EVERY function here is total: it reports a filesystem it could not work with
 // instead of rejecting. A caller that caches the promise of this work - which is
@@ -40,10 +35,9 @@ import type { FsReadResult } from "./ipc";
 // fail worse than not having it.
 //
 // One platform detail worth spelling out: a store path resolves against
-// `BaseDirectory::AppData` (the plugin's `resolve_store_path`), which is
-// `appDataDir()` here. Secrets resolve against `app_local_data_dir()`. Those are
-// the same directory on Linux and DIFFERENT ones on Windows, so nothing here may
-// be reused to reach a secret file.
+// `appDataDir()`. Secrets resolve against `app_local_data_dir()`. Those are the
+// same directory on Linux and DIFFERENT ones on Windows, so nothing here may be
+// reused to reach a secret file.
 
 /** Snapshot taken beside the store file it protects. */
 export const SNAPSHOT_SUFFIX = ".bak";
@@ -99,7 +93,7 @@ export type StoreFileRead =
  * here that cannot be reproduced by hand on a real machine.
  */
 export type StoreFileIo = {
-  /** Directory tauri-plugin-store resolves a store path against. */
+  /** Directory a store path resolves against, which is `appDataDir()`. */
   dir(): Promise<string>;
   read(path: string): Promise<StoreFileRead>;
   /**

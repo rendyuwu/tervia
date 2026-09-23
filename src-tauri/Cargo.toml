@@ -128,7 +128,6 @@ regex = "1"
 shared_child = "1"
 tauri-plugin-log = "2"
 tauri-plugin-os = "2"
-tauri-plugin-store = "2"
 tauri-plugin-process = "2"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2"] }
 url = "2"
@@ -294,6 +293,12 @@ rustls = { version = "0.23", default-features = false, features = [
 keyring = { version = "3.6", default-features = false, features = [
 	"apple-native",
 ] }
+# Enumeration for `secrets_list`. The `keyring` crate has no listing API, and
+# this is the crate its own apple-native backend is built on - version 3 is
+# already in `Cargo.lock` through that dependency, so this adds an edge and no
+# new crate. `default-features = false` because the TLS features the default
+# set carries are nothing to do with reading keychain attributes.
+security-framework = { version = "3", default-features = false }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 keyring = { version = "3.6", default-features = false, features = [
