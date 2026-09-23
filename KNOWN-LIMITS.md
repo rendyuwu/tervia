@@ -24,35 +24,6 @@ group.
 
 ## Vault editors
 
-### The vault editors refuse a moved record and offer no recovery
-
-**Accepted state.** When another window has changed a key or identity
-underneath an open `KeyEditorDialog`/`IdentityEditorDialog`, the save is
-refused and the user is told to close and reopen the editor; anything already
-typed has to be entered again. This is deliberately different from the host
-editor, which refreshes its stored record on the equivalent refusal and lets
-the user press Save a second time.
-
-**Carried by.** The `VaultRecordChangedError` branch of `save`'s catch arm in
-`KeyEditorDialog.tsx` and in `IdentityEditorDialog.tsx`. The asymmetry with
-the host editor traces to what each comparison actually answers:
-`credentialStamp` (`hosts/types.ts`) answers whether a host's credential
-_binding_ moved, which a refresh can safely re-seed a stale form against;
-`vaultKeyStamp` and `vaultIdentityStamp` (`vault/types.ts`) answer whether the
-_secret material itself_ moved. Refreshing there would hand the stale form a
-record whose next Save writes the user's draft over a body or a password
-another window just stored - the very thing the stamp fired to refuse.
-
-**Trigger.** A user report of the retyping cost. That trigger used to wait on
-how often two windows of this app edit one record at the same moment, which is
-rare; it no longer does. `applyRemote` in `src/modules/vault/store.ts` lands
-another DEVICE's records into the same store, so a key or an identity can move
-underneath an open editor with nothing on this machine having touched it. Or a
-vault editor gaining a field whose content exists nowhere but the form - a key
-the dialog generates rather than one picked from a file is the case, and
-neither editor has one today: the key body comes from a file that is still on
-disk, and everything else is typed.
-
 ### Nothing pins where a vault editor's message renders
 
 **Accepted state.** Deleting the JSX that renders a message computed by
