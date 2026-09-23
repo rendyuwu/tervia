@@ -11,8 +11,9 @@
  * `openForwardForConnection` (a forward on a host id, dialling if needed).
  *
  * A MODULE AND NOT A HOOK, for the reason `controller.ts`'s header gives: this
- * runs from a session callback, not a render, so it reads both stores through
- * `getState()` and stays exercisable under plain `node`/`tsx` -
+ * runs from a session callback, not a render, so it reads both stores, and
+ * makes its one page-store write, through `getState()` and stays exercisable
+ * under plain `node`/`tsx` -
  * `scripts/forward-autostart-verify.ts` drives it through {@link AutostartDeps}
  * with no Tauri and no DOM.
  */
@@ -33,10 +34,11 @@ import type { ForwardRule } from "./types";
  * straight off the default. Same seam, and the same reason, as
  * `controller.ts`'s `RuntimeDeps`.
  *
- * `runtimeStatus`, `hostOwnedBy` and `claimHostOwned` are the two STORES, taken
- * as functions rather than imported store handles, so a fixture can drive both
- * exclusions and the claim without reaching into module-level state that other
- * sections of the same script have already written to.
+ * `runtimeStatus`, `hostOwnedBy`, `claimHostOwned` and `markPageStopped` are
+ * the two STORES, taken as functions rather than imported store handles, so a
+ * fixture can drive both exclusions, the claim and the reset without reaching
+ * into module-level state that other sections of the same script have already
+ * written to.
  */
 export type AutostartDeps = {
   listRules: () => Promise<ForwardRule[]>;
@@ -80,6 +82,14 @@ export type AutostartDeps = {
    *  to refuse it. */
   hostOwnedBy: (ruleId: string) => number | undefined;
   claimHostOwned: (ruleId: string, entry: HostOwnedEntry) => void;
+  /** `runtime.ts`'s `markStopped` - the ONE write this module makes into the
+   *  page's store. Called only right after a claim whose post-bind
+   *  `runtimeStatus` read said `failed`: that entry's `error` described a page
+   *  Start this claim has just proven moot, and left in place it is only hidden
+   *  under "Running (with host)" until the tab closes. Safe: `markFailed`
+   *  retains no claim, so the reset loses nothing a Stop would need. Never for
+   *  `starting` - a live page dial resolves or fails on its own side. */
+  markPageStopped: (ruleId: string) => void;
   /**
    * Is the session these forwards are being opened on still alive? OPTIONAL,
    * defaulting to `() => true`, because only the caller's own scope can answer
@@ -105,6 +115,7 @@ export const defaultAutostartDeps: AutostartDeps = {
   runtimeStatus: (ruleId) => useForwardRuntime.getState().byRule[ruleId]?.status ?? "stopped",
   hostOwnedBy: (ruleId) => useHostOwnedForwards.getState().byRule[ruleId]?.sessionId,
   claimHostOwned: (ruleId, entry) => useHostOwnedForwards.getState().claim(ruleId, entry),
+  markPageStopped: (ruleId) => useForwardRuntime.getState().markStopped(ruleId),
   // Module scope knows of no session, so the default answers "alive" and the
   // real one is supplied per call site. A caller that forgets it gets today's
   // behaviour rather than a loop that stops on its first rule.
@@ -344,8 +355,10 @@ export async function startHostForwards(
         }
         // CLAIMED BEFORE THE BANNER. The banner is what the user sees; the claim
         // is what the page reads. Reversed, anything that threw in between would
-        // leave the user told about a forward the page cannot see.
+        // leave the user told about a forward the page cannot see. A `failed`
+        // page entry is reset here because the claim makes its error false.
         deps.claimHostOwned(rule.id, { sessionId, boundPort });
+        if (taken === "failed") deps.markPageStopped(rule.id);
         writeBanner(forwardingBanner(rule, boundPort));
       } catch (e) {
         // Per-rule and non-fatal: this rule says why, and the loop CONTINUES to

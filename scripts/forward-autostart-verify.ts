@@ -7,7 +7,7 @@
  * Run: `pnpm verify forward-autostart` (or `npx tsx
  * scripts/forward-autostart-verify.ts` to iterate).
  *
- * Sections 1-7 and 11-16 are BEHAVIOURAL: they drive the real
+ * Sections 1-7, 11-16 and 18 are BEHAVIOURAL: they drive the real
  * `startHostForwards` through the `AutostartDeps` seam that module exports for
  * exactly this purpose, so no Tauri IPC and no DOM is needed for the properties
  * that matter. Sections 8-10 are source pins, because a call site inside
@@ -127,9 +127,18 @@
  *    low stakes - but arms nothing exercises is the shape that has produced
  *    real defects against a green suite twice here.
  *
- * 16. AUTOSTART NEVER WRITES THE PAGE'S STORE. The load-bearing half of mutual
+ * 16. AUTOSTART NEVER WRITES THE PAGE'S STORE DIRECTLY. The load-bearing half of mutual
  *    exclusion, and the one thing the `AutostartDeps` seam cannot see: `claimHostOwned` is
  *    injected, a direct `useForwardRuntime.getState().markRunning(...)` is not.
+ *    Its one write, resetting a `failed` entry on takeover, goes through the
+ *    `markPageStopped` seam.
+ *
+ * 18. A TAKEOVER DISCARDS THE PAGE'S STALE FAILURE. A page Start that failed
+ *    leaves `{ status: "failed", error }`, and a terminal that then claimed the
+ *    rule only hid that error under "Running (with host)" - closing the tab
+ *    brought back a red line naming a port nothing held. The claim now resets
+ *    the entry through `markPageStopped`; driven here on the real stores with
+ *    the real default deps.
  */
 
 import { readFileSync, readdirSync, statSync } from "node:fs";
@@ -286,6 +295,7 @@ function world(over: {
   const closeCalls: CloseCall[] = [];
   const statusCalls: string[] = [];
   const claims: Array<{ ruleId: string; entry: HostOwnedEntry }> = [];
+  const pageResets: string[] = [];
   /** Generations handed out by this world's binds, per session id. */
   const generations = new Map<number, number>();
   const deps: AutostartDeps = {
@@ -317,6 +327,9 @@ function world(over: {
       claims.push({ ruleId, entry });
       useHostOwnedForwards.getState().claim(ruleId, entry);
     },
+    markPageStopped: (ruleId) => {
+      pageResets.push(ruleId);
+    },
     ...(over.stillLive ? { stillLive: over.stillLive } : {}),
   };
   return {
@@ -326,6 +339,7 @@ function world(over: {
     closeCalls,
     statusCalls,
     claims,
+    pageResets,
     writeBanner: (t: string) => banners.push(t),
   };
 }
@@ -392,7 +406,9 @@ console.log("[1. startWithHost] a rule that does not start with its host is neve
   // inside `startHostForwards` would satisfy every dep-injected check in this
   // file. If it ever happened the page would believe it can Stop a
   // terminal-owned rule, and would spend a claim nobody took. Read here rather
-  // than after a reset, because the claim is that autostart NEVER writes it.
+  // than after a reset, because the claim is that autostart NEVER writes it
+  // directly: its one write, resetting a `failed` entry, goes through the
+  // `markPageStopped` seam, which section 18 drives.
   check(
     "autostart left the PAGE's runtime store completely untouched",
     useForwardRuntime.getState().byRule,
@@ -486,6 +502,11 @@ for (const pageStatus of ["running", "starting"] as const) {
     "a failed or stopped rule is the terminal's to start",
     w.openCalls.map((c) => c.localPort),
     [18080, 18081],
+  );
+  check(
+    "the failed rule's stale page entry is reset at takeover, the stopped one's is not",
+    w.pageResets,
+    ["f-failed"],
   );
 }
 {
@@ -708,10 +729,20 @@ console.log("\n[wiring] defaultAutostartDeps is complete");
         "runtimeStatus",
         "hostOwnedBy",
         "claimHostOwned",
+        "markPageStopped",
         "stillLive",
       ] as const
     ).map((k) => typeof defaultAutostartDeps[k]),
-    ["function", "function", "function", "function", "function", "function", "function"],
+    [
+      "function",
+      "function",
+      "function",
+      "function",
+      "function",
+      "function",
+      "function",
+      "function",
+    ],
   );
   check(
     'runtimeStatus answers "stopped" for a rule the page has never heard of',
@@ -2236,6 +2267,11 @@ console.log(
   check("with the ordinary forwarding banner, not a yield", w.banners, [
     forwardingBanner(54321, "10.0.0.9:5432", "still dialling"),
   ]);
+  check(
+    "and the page's entry is NOT reset - a rule the page is still dialling resolves or fails on its own side",
+    w.pageResets,
+    [],
+  );
 }
 {
   // The paired control: both reads say "stopped", so nothing is closed and the
@@ -2294,17 +2330,21 @@ console.log("\n[15. describeError] the two FALLBACK arms, not only the two alrea
 }
 
 // ===========================================================================
-console.log("\n[16. mutual exclusion's load-bearing half] autostart never writes the PAGE's store");
+console.log(
+  "\n[16. mutual exclusion's load-bearing half] autostart never writes the PAGE's store directly",
+);
 // ===========================================================================
 {
   // Read after every section above has run, with NO reset in between - the
-  // claim is that `startHostForwards` never writes this store at all, on any
+  // claim is that `startHostForwards` never writes this store directly, on any
   // path: not the happy one, not the skip, not the yield, not the failure.
   // `claimHostOwned` is behind the `AutostartDeps` seam and every fixture
   // substitutes it; a direct `useForwardRuntime.getState().markRunning(...)`
   // is not, and `autostart.ts` already holds a live reference to that store.
   // If it ever happened the page would believe it can Stop a terminal-owned
-  // rule, and would spend a claim nobody took.
+  // rule, and would spend a claim nobody took. The one sanctioned write, the
+  // `markPageStopped` reset of a `failed` entry, is behind the seam and is
+  // recorded rather than applied by `world()`; section 18 drives the real one.
   check(
     "after every run in this file, the page's runtime store is still empty",
     useForwardRuntime.getState().byRule,
@@ -2376,6 +2416,39 @@ console.log(
       );
     }
   }
+}
+
+// ===========================================================================
+console.log(
+  "\n[18. a takeover discards the page's stale failure] the red line does not come back when the terminal tab closes",
+);
+// ===========================================================================
+{
+  resetHostOwned();
+  useForwardRuntime.setState({ byRule: {} });
+  useForwardRuntime
+    .getState()
+    .markFailed("f-takeover", "Port 18088 is already in use on this machine.");
+  const banners: string[] = [];
+  await startHostForwards("h-1", 7, (t: string) => void banners.push(t), {
+    ...defaultAutostartDeps,
+    listRules: async () => [rule({ id: "f-takeover", name: "takeover-1", localPort: 18088 })],
+    openForward: async () => ({ boundPort: 18088, generation: 1 }),
+    closeForward: async () => true,
+  });
+  check(
+    "the terminal claims the rule the page failed to start",
+    useHostOwnedForwards.getState().byRule["f-takeover"],
+    { sessionId: 7, boundPort: 18088 },
+  );
+  check("with the ordinary forwarding banner", banners, [
+    forwardingBanner(18088, "10.0.0.9:5432", "takeover-1"),
+  ]);
+  check(
+    "and the page's stale failure is gone at takeover, so closing the tab shows Stopped",
+    useForwardRuntime.getState().byRule["f-takeover"],
+    { status: "stopped" },
+  );
 }
 
 if (failed > 0) throw new Error(`forward-autostart-verify: ${failed} FAILED`);

@@ -23,10 +23,13 @@
  *   yields (closes its own just-bound listener) if the page has the rule
  *   RUNNING by then; `controller.ts`'s `startRule` refuses outright a rule that
  *   is already in here, and also yields - releasing the reference its own dial
- *   just received - when it finds one here on the way back. One rule, seen from
- *   two sides: whoever resolves SECOND gives up the duplicate it created, so
- *   neither side can take the other's listener down and leave the rule down on
- *   both.
+ *   just received, or marking the row `stopped` rather than `failed` if that
+ *   dial rejected instead - when it finds one here on the way back. One rule,
+ *   seen from two sides: whoever resolves SECOND gives up the duplicate it
+ *   created, so neither side can take the other's listener down and leave the
+ *   rule down on both. A claim over a page entry that reads `failed` resets it
+ *   to `stopped` (`autostart.ts`'s `markPageStopped`), since the claim proves
+ *   that error moot.
  * - **This map against ITSELF.** Two panes on one host are two sessions and two
  *   autostart runs (see `ssh/tunnel.ts`'s header, on what is NOT shared), with
  *   nothing serialising them, so

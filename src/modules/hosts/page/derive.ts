@@ -9,8 +9,9 @@ import type {
 import { rankHosts, type HostSearchRow } from "../search";
 import { isSshHost, type Host, type HostGroup } from "../types";
 
-// Everything the Hosts page derives from its three inputs - the host list, the
-// group list and a snapshot of the vault - as PURE FUNCTIONS over plain data.
+// Everything the Hosts page derives from its inputs - the host list, the group
+// list, a snapshot of the vault and, for the delete confirm, the forward rules -
+// as PURE FUNCTIONS over plain data.
 //
 // No React and no store access, which is the whole reason
 // `scripts/hosts-page-verify.ts` can exist: the correctness in this file (which
@@ -228,4 +229,26 @@ export function filterAndRank(input: HostsViewInput): HostSearchRow[] {
     matchesGroupFilter(row.host, input.group, input.knownGroupIds),
   );
   return rankHosts(byGroup, input.query);
+}
+
+/**
+ * What the host delete confirm says about the forward rules the delete
+ * cascades away: `deleteHost` runs `releaseRulesForHost`
+ * (`modules/forwards/controller.ts`), which drops every rule riding this host.
+ * `null` when no rule rides it. Takes a structural `{ hostId }` rather than
+ * `ForwardRule`, so this file imports nothing from `modules/forwards`.
+ *
+ * "this host" and not "it": the sentence before this one in the dialog can be
+ * about a vault identity, and a bare "it" would then read as the identity.
+ */
+export function deleteRulesNote(
+  hostId: string,
+  rules: Iterable<{ hostId: string }>,
+): string | null {
+  let count = 0;
+  for (const rule of rules) if (rule.hostId === hostId) count++;
+  if (count === 0) return null;
+  return count === 1
+    ? "The 1 forward rule that uses this host is deleted too."
+    : `The ${count} forward rules that use this host are deleted too.`;
 }

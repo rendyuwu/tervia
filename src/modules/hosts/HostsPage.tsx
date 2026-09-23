@@ -39,6 +39,7 @@ import { InputGroup, InputGroupAddon, InputGroupInput } from "@/components/ui/in
 import { paneCaret } from "@/lib/paneCaret";
 import { toast } from "@/components/ui/toast";
 import { releaseRulesForHost } from "@/modules/forwards/controller";
+import { useForwards } from "@/modules/forwards/useForwards";
 import { identityRows } from "@/modules/vault/page/derive";
 import { VaultInUseError } from "@/modules/vault/types";
 import { useVault } from "@/modules/vault/useVault";
@@ -50,6 +51,7 @@ import { Chip, GroupStrip } from "./page/GroupStrip";
 import { HostCard } from "./page/HostCard";
 import { HostsBackupActions } from "./page/HostsBackupActions";
 import {
+  deleteRulesNote,
   filterAndRank,
   groupCounts,
   identityName,
@@ -141,6 +143,7 @@ export function HostsPage({ onConnect, onScreen }: HostsPageProps): ReactNode {
   const hostsById = useHosts();
   const groups = useHostGroups();
   const vault = useVault();
+  const forwardsById = useForwards();
 
   const [query, setQuery] = useState("");
   const [protocol, setProtocol] = useState<ProtocolFilter>("all");
@@ -295,6 +298,9 @@ export function HostsPage({ onConnect, onScreen }: HostsPageProps): ReactNode {
   }, []);
 
   const filtering = query.trim().length > 0 || protocol !== "all" || group.kind !== "all";
+  const pendingRulesNote = pendingDelete
+    ? deleteRulesNote(pendingDelete.id, forwardsById.values())
+    : null;
 
   return (
     // `@container`: this page renders inside an independently resizable pane
@@ -535,7 +541,8 @@ export function HostsPage({ onConnect, onScreen }: HostsPageProps): ReactNode {
           <AlertDialogHeader>
             <AlertDialogTitle>Delete host &quot;{pendingDelete?.name}&quot;?</AlertDialogTitle>
             <AlertDialogDescription>
-              {pendingDelete ? deleteKeychainNote(pendingDelete) : null} This cannot be undone.
+              {pendingDelete ? deleteKeychainNote(pendingDelete) : null}
+              {pendingRulesNote ? ` ${pendingRulesNote}` : null} This cannot be undone.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
