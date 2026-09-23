@@ -497,6 +497,7 @@ export default function App() {
     pendingClose,
     handleClose,
     requestCloseLeaf,
+    requestCloseLeaves,
     confirmClose,
     cancelClose,
     cycleTab,
@@ -691,7 +692,6 @@ export default function App() {
   const {
     handleOpenDetectedPreview,
     handleHeaderSelectEntry,
-    handleHeaderCloseEntry,
     handleHeaderPinLeaf,
     handleHeaderOpenSettings,
     handleHeaderConnectSsh,
@@ -700,8 +700,6 @@ export default function App() {
   } = useHeaderActions({
     activePaneTab,
     detectedBrowserUrl,
-    handleClose,
-    requestCloseLeaf,
     setActiveId,
     focusPane,
     pinTab,
@@ -745,7 +743,8 @@ export default function App() {
             tabs={tabs}
             activeId={activeId}
             onSelectEntry={handleHeaderSelectEntry}
-            onCloseEntry={handleHeaderCloseEntry}
+            onCloseEntry={requestCloseLeaf}
+            onCloseLeaves={requestCloseLeaves}
             onNewTerminal={openNewTab}
             onRenameLeaf={renameLeaf}
             onOpenAgents={() => setAgentDialogOpen(true)}
@@ -804,7 +803,7 @@ export default function App() {
                 cachedTabsByWorkspace={liveTabsByWorkspace}
                 onFocusLeaf={focusLeafInTab}
                 onRenameLeaf={renameLeaf}
-                onCloseEntry={handleHeaderCloseEntry}
+                onCloseEntry={requestCloseLeaf}
                 activeLeafId={activePaneTab?.activeLeafId ?? null}
                 sshStatuses={sshStatuses}
                 openBoardTab={openBoardTab}
@@ -858,7 +857,7 @@ export default function App() {
                   cachedTabsByWorkspace: liveTabsByWorkspace,
                   onFocusLeaf: focusLeafInTab,
                   onRenameLeaf: renameLeaf,
-                  onCloseEntry: handleHeaderCloseEntry,
+                  onCloseEntry: requestCloseLeaf,
                   activeLeafId: activePaneTab?.activeLeafId ?? null,
                   sshStatuses,
                 }}

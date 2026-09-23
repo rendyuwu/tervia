@@ -12,7 +12,7 @@
 import type { Entry } from "./entries";
 
 /**
- * Activate a tab-strip entry. `leafId` is null for a standalone tab.
+ * The tab-strip chip's own click route into "activate this entry".
  *
  * Named once here rather than re-spelled at every hop: `TabBar`,
  * `SortableTabGroup` and `renderEntryBody` all thread the same callback down and
@@ -24,20 +24,7 @@ import type { Entry } from "./entries";
  * `tabs/lib`. Stated rather than left to be discovered - the reuse is real up to
  * the module boundary and stops there.
  */
-export type SelectEntry = (tabId: number, leafId: number | null) => void;
-
-/**
- * The `(tabId, leafId)` pair an entry selects. ONE expression, used by BOTH
- * routes below.
- *
- * `entry.kind === "pane-leaf" ? entry.leafId : null` was written out by hand at
- * each call site, which is exactly what let them drift - and the click route is
- * new, so leaving it hand-written would have added a second place to get a
- * standalone tab's `null` wrong.
- */
-export function entrySelectTarget(entry: Entry): { tabId: number; leafId: number | null } {
-  return { tabId: entry.tabId, leafId: entry.kind === "pane-leaf" ? entry.leafId : null };
-}
+export type SelectEntry = (tabId: number, leafId: number) => void;
 
 /**
  * The trigger's OWN click route, as props to spread onto it.
@@ -85,9 +72,6 @@ export function entrySelectHandlers(
   onSelectEntry: SelectEntry,
 ): { onClick: () => void } {
   return {
-    onClick: () => {
-      const { tabId, leafId } = entrySelectTarget(entry);
-      onSelectEntry(tabId, leafId);
-    },
+    onClick: () => onSelectEntry(entry.tabId, entry.leafId),
   };
 }

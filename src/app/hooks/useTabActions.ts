@@ -5,7 +5,9 @@ import {
   canCloseTab,
   leafCloseConfirmReason,
   MAX_PANES_PER_TAB,
+  splitBatchClose,
   tabCloseConfirmReason,
+  type CloseConfirmReason,
   type Tab,
 } from "@/modules/tabs";
 import {
@@ -50,11 +52,16 @@ type Params = {
  * AlertDialog in `AppDialogs`.
  */
 export type PendingClose = {
-  /** What to dispose once the user confirms. */
-  target: { kind: "tab"; tabId: number } | { kind: "leaf"; leafId: number };
-  /** Why we're asking - drives the modal copy. */
-  reason: "unsaved" | "running";
-  /** Tab title for the prompt, when known. */
+  /** What to dispose once the user confirms. `leaves` is a batch close
+   *  ("Close Tabs to the Right") with two or more leaves to confirm. */
+  target:
+    | { kind: "tab"; tabId: number }
+    | { kind: "leaf"; leafId: number }
+    | { kind: "leaves"; leafIds: number[] };
+  /** Why we're asking - drives the modal copy. `both` only on a `leaves`
+   *  target holding unsaved editors AND running terminals. */
+  reason: CloseConfirmReason | "both";
+  /** Tab title for the prompt, when known. Unset on a `leaves` target. */
   title?: string;
 };
 
@@ -88,6 +95,7 @@ export function useTabActions({
   pendingClose: PendingClose | null;
   handleClose: (id: number) => void;
   requestCloseLeaf: (leafId: number) => void;
+  requestCloseLeaves: (leafIds: number[]) => void;
   confirmClose: () => void;
   cancelClose: () => void;
   cycleTab: (delta: 1 | -1) => void;
@@ -143,12 +151,12 @@ export function useTabActions({
   );
 
   // Single-pane close (tab-strip leaf X, pane-header X on a split, Ctrl+W on a
-  // multi-pane tab, Ctrl+Shift+X, "Close Tabs to the Right"). Confirms on an
-  // unsaved editor or a busy terminal; otherwise drops the pane immediately.
+  // multi-pane tab, Ctrl+Shift+X). Confirms on an unsaved editor or a busy
+  // terminal; otherwise drops the pane immediately.
   const requestCloseLeaf = useCallback(
     (leafId: number) => {
       // Same two questions as `handleClose`, in the same order, from the same
-      // module - which is the point. This is the funnel for five affordances, so
+      // module - which is the point. This is the funnel for four affordances, so
       // a question it answers differently is one the user gets a different
       // answer to depending on which of them they used. It used to prompt only
       // on a busy terminal and drop a dirty editor buffer without a word, while
@@ -170,11 +178,35 @@ export function useTabActions({
     [leafHasRunningProcess, closePaneByLeaf],
   );
 
+  // "Close Tabs to the Right". `splitBatchClose` asks every leaf the same two
+  // questions `requestCloseLeaf` asks; the silent ones close at once and the
+  // rest share ONE prompt. Looping `requestCloseLeaf`, which this replaced,
+  // wrote each busy leaf over the last in the single `pendingClose` slot, so
+  // only the final one was asked about and the others silently stayed open.
+  const requestCloseLeaves = useCallback(
+    (leafIds: number[]) => {
+      const { silent, confirm } = splitBatchClose(tabsRef.current, leafIds, leafHasRunningProcess);
+      for (const leafId of silent) closePaneByLeaf(leafId);
+      if (confirm.length === 0) return;
+      // One leaf gets exactly today's single-leaf prompt, title and all.
+      if (confirm.length === 1) {
+        requestCloseLeaf(confirm[0].leafId);
+        return;
+      }
+      setPendingClose({
+        target: { kind: "leaves", leafIds: confirm.map((c) => c.leafId) },
+        reason: confirm.every((c) => c.reason === confirm[0].reason) ? confirm[0].reason : "both",
+      });
+    },
+    [leafHasRunningProcess, closePaneByLeaf, requestCloseLeaf],
+  );
+
   const confirmClose = useCallback(() => {
     if (!pendingClose) return;
     const { target } = pendingClose;
     if (target.kind === "tab") disposeTab(target.tabId);
-    else closePaneByLeaf(target.leafId);
+    else if (target.kind === "leaf") closePaneByLeaf(target.leafId);
+    else for (const leafId of target.leafIds) closePaneByLeaf(leafId);
     setPendingClose(null);
   }, [pendingClose, disposeTab, closePaneByLeaf]);
 
@@ -363,6 +395,7 @@ export function useTabActions({
     pendingClose,
     handleClose,
     requestCloseLeaf,
+    requestCloseLeaves,
     confirmClose,
     cancelClose,
     cycleTab,

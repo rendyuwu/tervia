@@ -56,7 +56,7 @@ import type {
   TerviaSpawnTabInput,
 } from "@/modules/terminal/lib/useTerminalSession";
 import { statusLabelClass, type SshConnectionBinding, type SshStatus } from "@/modules/ssh/status";
-import { type PaneEntry } from "@/modules/tabs/lib/entries";
+import { type Entry } from "@/modules/tabs/lib/entries";
 import type { Tab } from "@/modules/tabs";
 import { leafLabel } from "@/modules/tabs/lib/tabHelpers";
 import { HostsPage } from "@/modules/hosts/HostsPage";
@@ -269,7 +269,7 @@ function BoardLeafBody({ leafId }: { leafId: number }) {
   // Feed the float window. Stable so the board's mirror effect isn't re-run by
   // this callback's identity alone.
   const mirrorToFloat = useCallback(
-    (cards: PaneEntry[], titles: Record<number, string>) =>
+    (cards: Entry[], titles: Record<number, string>) =>
       pushBoardCards(leafId, { entries: cards, titles }),
     [leafId],
   );

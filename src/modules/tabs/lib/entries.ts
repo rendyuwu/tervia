@@ -13,11 +13,10 @@ import type { Tab } from "./useTabs";
 import { leafLabel, leafRenameSeed } from "./tabHelpers";
 
 /**
- * Tab strip entries: one per pane for pane tabs, one per tab otherwise.
- * Clicking a pane entry focuses that pane; clicking a standalone entry
- * activates that tab.
+ * Tab strip entries: one per pane leaf, in tab order. Clicking an entry
+ * focuses that pane.
  */
-type EntryBase = {
+export type Entry = {
   /** Composite key like "tab-3" or "leaf-7". */
   key: string;
   /** Owning tab id. */
@@ -28,10 +27,6 @@ type EntryBase = {
   italic?: boolean;
   /** Yellow dot for unsaved edits. */
   dirty?: boolean;
-};
-
-export type PaneEntry = EntryBase & {
-  kind: "pane-leaf";
   leafId: number;
   leafKind: "terminal" | "editor" | "rdp" | "board" | "page";
   /** 1-based FIFO badge number for terminal leaves - the same identifier the
@@ -61,12 +56,6 @@ export type PaneEntry = EntryBase & {
   renameSeed: string;
 };
 
-type StandaloneEntry = EntryBase & {
-  kind: "board";
-};
-
-export type Entry = PaneEntry | StandaloneEntry;
-
 /**
  * Background color for the per-tab accent stripe. Emerald for local shell,
  * sky for SSH and RDP, brand blue for editor, violet for the app's own surfaces
@@ -75,27 +64,24 @@ export type Entry = PaneEntry | StandaloneEntry;
  * strings as full literals for Tailwind's JIT.
  */
 export function tabAccentClass(e: Entry): string {
-  if (e.kind === "pane-leaf") {
-    if (e.leafKind === "terminal") {
-      return e.sshConnectionId
-        ? "bg-[color:var(--tervia-tab-ssh)]"
-        : "bg-[color:var(--tervia-tab-terminal)]";
-    }
-    // RDP reuses the SSH accent rather than adding a token of its own to all 20
-    // theme presets: both are "a session on another machine", which is exactly
-    // what the accent is distinguishing from a local shell and a file.
-    if (e.leafKind === "rdp") return "bg-[color:var(--tervia-tab-ssh)]";
-    // A board and a rail page are none of the three things this accent tells
-    // apart - not a local shell, not a remote session, not a file - so they
-    // share the violet rather than falling through to the editor colour and
-    // reading as a file. Reused rather than given tokens of their own, which
-    // would mean editing all 20 theme presets.
-    if (e.leafKind === "board" || e.leafKind === "page") {
-      return "bg-[color:var(--tervia-tab-ai-diff)]";
-    }
-    return "bg-[color:var(--tervia-tab-editor)]";
+  if (e.leafKind === "terminal") {
+    return e.sshConnectionId
+      ? "bg-[color:var(--tervia-tab-ssh)]"
+      : "bg-[color:var(--tervia-tab-terminal)]";
   }
-  return "bg-[color:var(--tervia-tab-ai-diff)]";
+  // RDP reuses the SSH accent rather than adding a token of its own to all 20
+  // theme presets: both are "a session on another machine", which is exactly
+  // what the accent is distinguishing from a local shell and a file.
+  if (e.leafKind === "rdp") return "bg-[color:var(--tervia-tab-ssh)]";
+  // A board and a rail page are none of the three things this accent tells
+  // apart - not a local shell, not a remote session, not a file - so they
+  // share the violet rather than falling through to the editor colour and
+  // reading as a file. Reused rather than given tokens of their own, which
+  // would mean editing all 20 theme presets.
+  if (e.leafKind === "board" || e.leafKind === "page") {
+    return "bg-[color:var(--tervia-tab-ai-diff)]";
+  }
+  return "bg-[color:var(--tervia-tab-editor)]";
 }
 
 /**
@@ -107,7 +93,7 @@ export function tabAccentClass(e: Entry): string {
  * green in both places instead of green in the strip and grey in the panel.
  */
 export function entryLabelClass(e: Entry): string {
-  return cn(e.kind === "pane-leaf" && e.sshConnectionId ? statusLabelClass(e.sshStatus) : null);
+  return cn(e.sshConnectionId ? statusLabelClass(e.sshStatus) : null);
 }
 
 export function buildEntries(
@@ -134,7 +120,6 @@ export function buildEntries(
             ? (leaf.sshHostLabel ?? "remote")
             : undefined;
         out.push({
-          kind: "pane-leaf",
           key: `leaf-${leaf.id}`,
           tabId: t.id,
           leafId: leaf.id,

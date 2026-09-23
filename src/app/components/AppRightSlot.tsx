@@ -47,7 +47,7 @@ type Props = {
     cachedTabsByWorkspace: RefObject<Map<string, { tabs: Tab[]; activeId: number | null }>>;
     onFocusLeaf: (tabId: number, leafId: number) => void;
     onRenameLeaf: (leafId: number, title: string | null) => void;
-    onCloseEntry: (tabId: number, leafId: number | null) => void;
+    onCloseEntry: (leafId: number) => void;
     activeLeafId: number | null;
     sshStatuses: Map<number, SshStatus>;
   };

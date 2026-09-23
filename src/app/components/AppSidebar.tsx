@@ -51,7 +51,7 @@ type Props = {
   onRenameLeaf: (leafId: number, title: string | null) => void;
   /** Close a tab listed in the Workspaces panel (same handler as the tab
    *  strip's X, so both share the busy / unsaved confirms). */
-  onCloseEntry: (tabId: number, leafId: number | null) => void;
+  onCloseEntry: (leafId: number) => void;
   /** Currently focused leaf id, to highlight its row in Workspaces. */
   activeLeafId: number | null;
   /** Live SSH status per leaf, so a connected host is green in Workspaces too. */
