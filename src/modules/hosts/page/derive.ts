@@ -10,8 +10,9 @@ import { rankHosts, type HostSearchRow } from "../search";
 import { isSshHost, type Host, type HostGroup } from "../types";
 
 // Everything the Hosts page derives from its inputs - the host list, the group
-// list, a snapshot of the vault and, for the delete confirm, the forward rules -
-// as PURE FUNCTIONS over plain data.
+// list, a snapshot of the vault, the forward rules for the delete confirm and,
+// for the grid's arrow keys, where focus moves - as PURE FUNCTIONS over plain
+// data.
 //
 // No React and no store access, which is the whole reason
 // `scripts/hosts-page-verify.ts` can exist: the correctness in this file (which
@@ -251,4 +252,44 @@ export function deleteRulesNote(
   return count === 1
     ? "The 1 forward rule that uses this host is deleted too."
     : `The ${count} forward rules that use this host are deleted too.`;
+}
+
+/**
+ * Where an arrow key moves focus in the Hosts grid, or `null` for nowhere: a
+ * key this does not own (Enter stays the card's connect), or a move off the
+ * grid's edge. Left/Right step through reading order, Up/Down move a whole
+ * row, Home/End jump to the ends. `cols` is read off the rendered grid by the
+ * page, because container queries on the pane's width decide it and nothing in
+ * React state knows it.
+ */
+export function cardFocusTarget(
+  key: string,
+  at: number,
+  count: number,
+  cols: number,
+): number | null {
+  let to: number;
+  switch (key) {
+    case "ArrowLeft":
+      to = at - 1;
+      break;
+    case "ArrowRight":
+      to = at + 1;
+      break;
+    case "ArrowUp":
+      to = at - cols;
+      break;
+    case "ArrowDown":
+      to = at + cols;
+      break;
+    case "Home":
+      to = 0;
+      break;
+    case "End":
+      to = count - 1;
+      break;
+    default:
+      return null;
+  }
+  return to >= 0 && to < count ? to : null;
 }

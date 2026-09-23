@@ -25,6 +25,7 @@ import { fileURLToPath } from "node:url";
 import ts from "typescript";
 
 import {
+  cardFocusTarget,
   filterAndRank,
   groupCounts,
   hostUsername,
@@ -43,6 +44,7 @@ import type {
   VaultKey,
 } from "../src/modules/vault/types";
 import { importSpecifiersOf } from "./lib/ast";
+import { stripComments } from "./lib/source";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -767,6 +769,33 @@ console.log("\n[filterAndRank] all three filters run, and ranking orders what su
     "db-prod",
     "adbox",
   ]);
+}
+
+// --- keys: arrow keys between host cards ---------------------------------
+// A 4-column grid of 6 cards: row 0 is 0..3, row 1 is 4..5.
+console.log("\n[keys] arrow keys move between host cards and stop at the grid's edge");
+{
+  const move = (key: string, at: number) => cardFocusTarget(key, at, 6, 4);
+  check("Right steps to the next card", move("ArrowRight", 0), 1);
+  check("Left steps back through reading order, across a row break", move("ArrowLeft", 4), 3);
+  check("Down moves a whole row", move("ArrowDown", 1), 5);
+  check("Up moves a whole row back", move("ArrowUp", 5), 1);
+  check("Home and End jump to the ends", [move("Home", 5), move("End", 0)], [0, 5]);
+  check(
+    "every move off the edge is refused, not clamped",
+    [move("ArrowLeft", 0), move("ArrowRight", 5), move("ArrowUp", 1), move("ArrowDown", 3)],
+    [null, null, null, null],
+  );
+  check("a key it does not own is left alone, so Enter still connects", move("Enter", 2), null);
+  check("a one-column grid moves one card per row", cardFocusTarget("ArrowDown", 0, 3, 1), 1);
+  const card = stripComments(
+    readFileSync(join(root, "src/modules/hosts/page/HostCard.tsx"), "utf8"),
+  );
+  ok("no card or card button is a fixed tab stop", !/tabIndex=\{0\}/.test(card));
+  ok(
+    "the card and its action button both follow tabStop",
+    (card.match(/tabIndex=\{tabStop \? 0 : -1\}/g) ?? []).length === 2,
+  );
 }
 
 // --- purity: derive.ts reaches nothing it is not allowed to reach --------

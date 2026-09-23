@@ -23,6 +23,10 @@ export type HostCardProps = {
    *  whose secret is absent. Renders as a warning pip. */
   missingSecret?: boolean;
   selected?: boolean;
+  /** This card is the grid's ONE tab stop (roving tabindex): it and its four
+   *  action buttons sit in the Tab order, every other card and its buttons at
+   *  -1. The page picks it; the arrow keys move it. */
+  tabStop: boolean;
   /** Single click. Optional, so a surface with no selection model can omit it. */
   onSelect?: () => void;
   onConnect: () => void;
@@ -49,6 +53,7 @@ export function HostCard({
   groupName,
   missingSecret,
   selected,
+  tabStop,
   onSelect,
   onConnect,
   onEdit,
@@ -60,7 +65,8 @@ export function HostCard({
 
   return (
     <div
-      tabIndex={0}
+      tabIndex={tabStop ? 0 : -1}
+      data-host-card=""
       role="group"
       aria-label={`${host.name}, ${host.protocol.toUpperCase()} host`}
       onClick={onSelect}
@@ -123,14 +129,33 @@ export function HostCard({
           onClick={(e) => e.stopPropagation()}
           onDoubleClick={(e) => e.stopPropagation()}
         >
-          <CardAction icon={Play} label="Connect" hostName={host.name} onClick={onConnect} />
-          <CardAction icon={Pencil} label="Edit" hostName={host.name} onClick={onEdit} />
-          <CardAction icon={Copy} label="Duplicate" hostName={host.name} onClick={onDuplicate} />
+          <CardAction
+            icon={Play}
+            label="Connect"
+            hostName={host.name}
+            onClick={onConnect}
+            tabStop={tabStop}
+          />
+          <CardAction
+            icon={Pencil}
+            label="Edit"
+            hostName={host.name}
+            onClick={onEdit}
+            tabStop={tabStop}
+          />
+          <CardAction
+            icon={Copy}
+            label="Duplicate"
+            hostName={host.name}
+            onClick={onDuplicate}
+            tabStop={tabStop}
+          />
           <CardAction
             icon={Trash2}
             label="Delete"
             hostName={host.name}
             onClick={onDelete}
+            tabStop={tabStop}
             destructive
           />
         </div>
@@ -156,12 +181,14 @@ function CardAction({
   label,
   hostName,
   onClick,
+  tabStop,
   destructive,
 }: {
   icon: LucideIcon;
   label: string;
   hostName: string;
   onClick: () => void;
+  tabStop: boolean;
   destructive?: boolean;
 }) {
   return (
@@ -170,6 +197,7 @@ function CardAction({
         type="button"
         variant="ghost"
         size="icon-xs"
+        tabIndex={tabStop ? 0 : -1}
         aria-label={`${label} ${hostName}`}
         onClick={onClick}
         className={cn(destructive && DESTRUCTIVE_ACTION)}
