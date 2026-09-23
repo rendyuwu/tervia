@@ -117,7 +117,7 @@ function savedRemoteEditor(leafId: number, path: string): PaneNode {
     path,
     dirty: false,
     preview: false,
-    sshConnectionId: "c-prod",
+    hostId: "c-prod",
     sshSessionId: 7,
     sshHostLabel: "u@h:22",
   };
@@ -278,11 +278,7 @@ function onlyLeaf(t: SavedTab): Extract<SavedPaneNode, { kind: "leaf" }> {
     throw new Error("expected a restored single-leaf pane tab");
   }
   const leaf = restored.paneTree;
-  check(
-    "restored leaf keeps the profile",
-    leaf.leafKind === "editor" && leaf.sshConnectionId,
-    "c-prod",
-  );
+  check("restored leaf keeps the profile", leaf.leafKind === "editor" && leaf.hostId, "c-prod");
   check(
     "restored leaf has no session to read through yet",
     leaf.leafKind === "editor" && leaf.sshSessionId,

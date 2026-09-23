@@ -205,9 +205,9 @@ other kinds. Tabs are never unmounted on switch.
 
 Remoteness is a property of a leaf, not of a tab kind:
 
-- a `terminal` leaf with `sshConnectionId` connects to that saved host instead of
+- a `terminal` leaf with `hostId` connects to that saved host instead of
   spawning a local PTY;
-- an `editor` leaf with `sshConnectionId` (stable, persisted) and/or
+- an `editor` leaf with `hostId` (stable, persisted) and/or
   `sshSessionId` (live, never persisted) reads and writes over SFTP.
 
 ## 5. Remote machines (`src-tauri/src/modules/{ssh,rdp}/`, `src/modules/{hosts,vault,ssh,rdp}/`)
@@ -508,7 +508,7 @@ For a remote leaf the same flow runs through `ssh_sftp_read_file` instead, on
 the session resolved from the leaf's connection id.
 
 **Connecting to a saved host.** The header's SSH menu opens a terminal leaf
-carrying `sshConnectionId` -> `openSshForSession` loads the row, reads its
+carrying `hostId` -> `openSshForSession` loads the row, reads its
 secrets, and resolves the ProxyJump chain (all at open time, so an edited chain
 is picked up on the next reconnect) -> `invoke("ssh_open", ...)` dials each hop
 in order -> the server presents its key; if the row has no pinned fingerprint

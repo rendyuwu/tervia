@@ -145,7 +145,7 @@ export function TabBar({
   useExplorerIconsReady();
   // dnd-kit drag id. `tab:<n>` for whole-group, `leaf:<n>` for in-group reorder. Prefix routes `handleDragEnd`.
   const [activeDragId, setActiveDragId] = useState<string | null>(null);
-  // Resolves a leaf's `sshConnectionId` / `rdpConnectionId` for the
+  // Resolves a leaf's `hostId` / `rdpConnectionId` for the
   // `ssh:<name>` / `rdp:<name>` label + tooltip.
   const hosts = useHosts();
 

@@ -46,7 +46,7 @@ const paneTab = (id: number, title: string, leaf: Record<string, unknown>): Tab 
 const sshTerminal = (leafId: number, cwd?: string) => ({
   id: leafId,
   leafKind: "terminal",
-  sshConnectionId: "c-prod",
+  hostId: "c-prod",
   ...(cwd ? { cwd } : {}),
 });
 const localTerminal = (leafId: number) => ({ id: leafId, leafKind: "terminal" });
@@ -117,7 +117,7 @@ const remoteEditorTab = paneTab(3, "file", {
   id: 30,
   leafKind: "editor",
   path: "/srv/app/src/main.rs",
-  sshConnectionId: "c-prod",
+  hostId: "c-prod",
   sshHostLabel: "prod-db",
 });
 const binding = new Map<string, SshConnectionBinding>([
@@ -159,7 +159,7 @@ check(
 );
 
 console.log("\n[fallback stickiness] two remotes must not flap when focus leaves both");
-const sshTabB = paneTab(5, "staging", { id: 50, leafKind: "terminal", sshConnectionId: "c-stg" });
+const sshTabB = paneTab(5, "staging", { id: 50, leafKind: "terminal", hostId: "c-stg" });
 const two = new Map<number, SshStatus>([
   [10, connected(77)],
   [50, connected(88)],

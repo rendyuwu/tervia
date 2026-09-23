@@ -102,7 +102,7 @@ function floatParamsFor(node: PaneLeaf, title: string): FloatLeafParams | null {
       leafId: node.id,
       kind: "terminal",
       title,
-      remotePty: node.sshConnectionId !== undefined,
+      remotePty: node.hostId !== undefined,
     };
   if (node.leafKind === "editor" && !isRemoteEditorLeaf(node))
     return {
@@ -354,7 +354,7 @@ function computeEdge(
 function leafIconInfo(node: PaneLeaf, aiCliStatuses?: Map<number, AiCliStatus>): LeafIconInfo {
   return {
     leafKind: node.leafKind,
-    isSsh: node.leafKind === "terminal" && !!node.sshConnectionId,
+    isSsh: node.leafKind === "terminal" && !!node.hostId,
     editorFileName: node.leafKind === "editor" ? basename(node.path) : undefined,
     editorRemote: isRemoteEditorLeaf(node),
     aiCliStatus: node.leafKind === "terminal" ? (aiCliStatuses?.get(node.id) ?? null) : null,
@@ -462,7 +462,7 @@ const LeafBody = memo(function LeafBody({
             visible={tabVisible}
             focused={focused}
             initialCwd={node.cwd}
-            sshConnectionId={node.sshConnectionId}
+            hostId={node.hostId}
             savedPtyId={node.savedPtyId}
             savedActiveTool={node.activeTool}
             terminalThemeId={node.terminalThemeId}
@@ -626,7 +626,7 @@ function PaneLeafFrame({
 
   const isSource = drag.sourceLeafId === node.id;
   const isOver = drag.overLeafId === node.id && drag.sourceLeafId !== node.id && drag.edge !== null;
-  const isSsh = node.leafKind === "terminal" && !!node.sshConnectionId;
+  const isSsh = node.leafKind === "terminal" && !!node.hostId;
   const sshStatus = isSsh ? sshStatuses?.get(node.id) : undefined;
   // Program-set terminal title (OSC 2), e.g. a running agent's task. Appended to
   // the folder label so the pane header reads identically to the Workspaces
@@ -647,7 +647,7 @@ function PaneLeafFrame({
   // restored leaf simply waits until its host is up.
   const remoteSession = useMemo<RemoteEditorBinding | undefined>(() => {
     if (node.leafKind !== "editor" || !isRemoteEditorLeaf(node)) return undefined;
-    const connId = node.sshConnectionId;
+    const connId = node.hostId;
     const conn = connId ? hosts?.get(connId) : undefined;
     const hostLabel = conn?.name.trim() || node.sshHostLabel || "remote";
     // Ad-hoc connection: no profile to re-resolve or reopen, so the session it

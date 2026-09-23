@@ -121,7 +121,7 @@ export function PaneStack({
   // that has the whole tab list, which the answer depends on.
   const canClosePaneLeaf = useCallback((leafId: number) => canCloseLeaf(tabs, leafId), [tabs]);
 
-  // Resolve a leaf's `sshConnectionId` / `rdpConnectionId` to a host for the
+  // Resolve a leaf's `hostId` / `rdpConnectionId` to a host for the
   // `ssh:<host>` / `rdp:<host>` header label. Read here (not per-leaf), from
   // the same hook the tab strip and the Workspaces panel use, so all three
   // read identically.

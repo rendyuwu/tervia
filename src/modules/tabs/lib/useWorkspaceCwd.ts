@@ -13,7 +13,7 @@ function activeTerminalCwd(tab: Tab | undefined): string | undefined {
   // SSH leaves report remote paths via OSC 7 - those drive the SSH file
   // tree, not the local explorer. Letting an SSH cwd leak in here would
   // root the local tree at a Linux path Windows can't resolve.
-  if (!leaf || leaf.leafKind !== "terminal" || leaf.sshConnectionId) return undefined;
+  if (!leaf || leaf.leafKind !== "terminal" || leaf.hostId) return undefined;
   return leaf.cwd;
 }
 
@@ -22,7 +22,7 @@ function terminalCwds(tabs: Tab[]): string[] {
   for (const t of tabs) {
     if (t.kind !== "pane") continue;
     for (const l of leaves(t.paneTree)) {
-      if (l.leafKind === "terminal" && !l.sshConnectionId && l.cwd) out.push(l.cwd);
+      if (l.leafKind === "terminal" && !l.hostId && l.cwd) out.push(l.cwd);
     }
   }
   return out;

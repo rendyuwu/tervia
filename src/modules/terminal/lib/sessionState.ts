@@ -74,7 +74,7 @@ export type Session = {
   onOutputTap?: ((bytes: Uint8Array) => void) | null;
   initialCwd: string | undefined;
   /** Bound saved SSH connection id, if any. */
-  sshConnectionId: string | undefined;
+  hostId: string | undefined;
   /**
    * Per-leaf terminal theme override palette (resolved from the leaf's
    * `terminalThemeId`). When set, `applyTheme` and the opacity-drag refresh

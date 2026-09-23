@@ -746,7 +746,7 @@ function EntryRowItem({
   // asking is the user's own doing. A pane bound to an SSH host is skipped until
   // its session is up: without one there is nothing to ask, and asking the local
   // git about a remote path would answer about the wrong machine.
-  const isSshLeaf = !!e.sshConnectionId;
+  const isSshLeaf = !!e.hostId;
   const isTerminal = e.leafKind === "terminal";
   const branch = useGitBranch(
     isTerminal && (!isSshLeaf || sshSessionId !== undefined) ? cwd : undefined,

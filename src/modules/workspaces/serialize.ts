@@ -40,20 +40,18 @@ function leafToSaved(leaf: PaneLeaf): SavedPaneNode {
       kind: "leaf",
       leafKind: "terminal",
       cwd: leaf.cwd,
-      sshConnectionId: leaf.sshConnectionId,
+      sshConnectionId: leaf.hostId,
       terminalOrdinal: leaf.terminalOrdinal,
       ...(leaf.customTitle ? { customTitle: leaf.customTitle } : {}),
       ...(leaf.terminalThemeId ? { terminalThemeId: leaf.terminalThemeId } : {}),
       ...(title ? { title } : {}),
       // Only local PTYs use the daemon backend; SSH leaves carry their
       // remote session id separately and aren't restored via pty_attach.
-      ...(leaf.ptyId && !leaf.sshConnectionId ? { ptyId: leaf.ptyId } : {}),
+      ...(leaf.ptyId && !leaf.hostId ? { ptyId: leaf.ptyId } : {}),
       // Persist the running agent kind only for reattachable local leaves
       // (same gate as ptyId). On restore it pre-activates the detector so a
       // still-running agent's badge survives.
-      ...(leaf.activeTool && leaf.ptyId && !leaf.sshConnectionId
-        ? { activeTool: leaf.activeTool }
-        : {}),
+      ...(leaf.activeTool && leaf.ptyId && !leaf.hostId ? { activeTool: leaf.activeTool } : {}),
     };
   }
   if (leaf.leafKind === "editor") {
@@ -62,9 +60,12 @@ function leafToSaved(leaf: PaneLeaf): SavedPaneNode {
       leafKind: "editor",
       path: leaf.path,
       // Only the STABLE half of a remote binding is persisted. `sshSessionId`
-      // is deliberately dropped: see `isUnrestorableEditorLeaf`.
-      ...(leaf.sshConnectionId ? { sshConnectionId: leaf.sshConnectionId } : {}),
-      ...(leaf.sshConnectionId && leaf.sshHostLabel ? { sshHostLabel: leaf.sshHostLabel } : {}),
+      // is deliberately dropped: see `isUnrestorableEditorLeaf`. The saved key
+      // stays `sshConnectionId`: it is the on-disk spelling of the in-memory
+      // `hostId`, frozen because every workspace file written by an earlier
+      // build carries that key (see KNOWN-LIMITS.md).
+      ...(leaf.hostId ? { sshConnectionId: leaf.hostId } : {}),
+      ...(leaf.hostId && leaf.sshHostLabel ? { sshHostLabel: leaf.sshHostLabel } : {}),
       ...(leaf.customTitle ? { customTitle: leaf.customTitle } : {}),
     };
   }
@@ -121,7 +122,7 @@ function leafToSaved(leaf: PaneLeaf): SavedPaneNode {
  * different host entirely). There is no saved profile to reconnect to, so the
  * leaf is dropped and its siblings kept.
  *
- * A leaf carrying `sshConnectionId` round-trips instead: the connection id is
+ * A leaf carrying `hostId` round-trips instead: the connection id is
  * stable across restarts and the pane re-resolves it to a live session, holding
  * the file unread until then. What must never happen is a remote leaf restored
  * as a LOCAL one, which is what a naive persist did: `useDocument` routed
@@ -129,11 +130,7 @@ function leafToSaved(leaf: PaneLeaf): SavedPaneNode {
  * from, and on the next save written to, the local filesystem.
  */
 function isUnrestorableEditorLeaf(leaf: PaneLeaf): boolean {
-  return (
-    leaf.leafKind === "editor" &&
-    leaf.sshSessionId !== undefined &&
-    leaf.sshConnectionId === undefined
-  );
+  return leaf.leafKind === "editor" && leaf.sshSessionId !== undefined && leaf.hostId === undefined;
 }
 
 /** Serialises a pane subtree, pruning leaves that cannot be restored.
@@ -270,7 +267,7 @@ function savedToNode(
         id,
         leafKind: "terminal",
         cwd: node.cwd,
-        sshConnectionId: node.sshConnectionId,
+        hostId: node.sshConnectionId,
         terminalOrdinal: node.terminalOrdinal,
         ...(node.terminalThemeId ? { terminalThemeId: node.terminalThemeId } : {}),
         // `savedPtyId` is the signal for `useTerminalSession.attachSession`
@@ -293,8 +290,10 @@ function savedToNode(
         // Remote leaves come back bound to the saved PROFILE only. No
         // `sshSessionId`: the pane resolves one from whichever session for this
         // connection is live, and shows a reconnect prompt until then, so an
-        // unbound remote path can never reach the local filesystem.
-        ...(node.sshConnectionId ? { sshConnectionId: node.sshConnectionId } : {}),
+        // unbound remote path can never reach the local filesystem. The saved
+        // key is `sshConnectionId`, the on-disk spelling of `hostId` (see
+        // `KNOWN-LIMITS.md`).
+        ...(node.sshConnectionId ? { hostId: node.sshConnectionId } : {}),
         ...(node.sshHostLabel ? { sshHostLabel: node.sshHostLabel } : {}),
         ...(node.customTitle ? { customTitle: node.customTitle } : {}),
       };

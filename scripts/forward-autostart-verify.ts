@@ -1083,7 +1083,7 @@ console.log("\n[8. ssh-session.ts] the call site, and the two releases");
       "it is handed the host id, the LIVE session id, a banner writer bound to this pane, and a session-scoped stillLive",
       call.arguments.map((a) => norm(a.getText(sf))),
       [
-        "sshConnectionId",
+        "hostId",
         "sshSession.id",
         "(text)=>writeSshBanner(s,text)",
         "{...defaultAutostartDeps,stillLive:()=>!sessionEnded}",
@@ -1157,7 +1157,7 @@ console.log("\n[8. ssh-session.ts] the call site, and the two releases");
       // is what a developer would actually commit:
       //
       //   sessionEnded &&
-      //     void startHostForwards(sshConnectionId, sshSession.id, ..., {
+      //     void startHostForwards(hostId, sshSession.id, ..., {
       //       ...defaultAutostartDeps,
       //       stillLive: () => !sessionEnded,
       //     }).catch(() => {});

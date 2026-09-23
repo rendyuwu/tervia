@@ -35,8 +35,9 @@ export type Entry = {
   /** Working directory of a terminal leaf. Only consumed by hover surfaces (the
    *  Workspaces panel's tooltip); the label itself is already derived. */
   cwd?: string;
-  /** Set on terminal leaves bound to a saved SSH host. */
-  sshConnectionId?: string;
+  /** Set only on terminal leaves bound to a saved SSH host. RDP leaves carry
+   *  their host reference separately, in `rdpConnectionId`. */
+  hostId?: string;
   /** Set on RDP leaves. Only consumed by hover surfaces; the label is already
    *  derived, and there is no per-leaf RDP status map yet. */
   rdpConnectionId?: string;
@@ -65,9 +66,7 @@ export type Entry = {
  */
 export function tabAccentClass(e: Entry): string {
   if (e.leafKind === "terminal") {
-    return e.sshConnectionId
-      ? "bg-[color:var(--tervia-tab-ssh)]"
-      : "bg-[color:var(--tervia-tab-terminal)]";
+    return e.hostId ? "bg-[color:var(--tervia-tab-ssh)]" : "bg-[color:var(--tervia-tab-terminal)]";
   }
   // RDP reuses the SSH accent rather than adding a token of its own to all 20
   // theme presets: both are "a session on another machine", which is exactly
@@ -93,7 +92,7 @@ export function tabAccentClass(e: Entry): string {
  * green in both places instead of green in the strip and grey in the panel.
  */
 export function entryLabelClass(e: Entry): string {
-  return cn(e.sshConnectionId ? statusLabelClass(e.sshStatus) : null);
+  return cn(e.hostId ? statusLabelClass(e.sshStatus) : null);
 }
 
 export function buildEntries(
@@ -107,7 +106,7 @@ export function buildEntries(
     if (t.kind === "pane") {
       for (const leaf of leaves(t.paneTree)) {
         const label = leafLabel(leaf, hosts, t.cwd);
-        const sshConnectionId = leaf.leafKind === "terminal" ? leaf.sshConnectionId : undefined;
+        const hostId = leaf.leafKind === "terminal" ? leaf.hostId : undefined;
         // FIFO ordinal assigned at leaf creation. Preserved through drag,
         // reorder, move-to-group, and workspace restarts. It is the same
         // number the AI sees in the per-turn `<env>` block.
@@ -132,9 +131,9 @@ export function buildEntries(
             (leaf as PaneLeaf & { preview?: boolean }).preview === true,
           dirty:
             leaf.leafKind === "editor" && (leaf as PaneLeaf & { dirty?: boolean }).dirty === true,
-          sshConnectionId,
+          hostId,
           rdpConnectionId: leaf.leafKind === "rdp" ? leaf.rdpConnectionId : undefined,
-          sshStatus: sshConnectionId ? sshStatuses?.get(leaf.id) : undefined,
+          sshStatus: hostId ? sshStatuses?.get(leaf.id) : undefined,
           // AI CLI status on SSH leaves too. Detector runs on the byte stream regardless of PTY locality.
           aiCliStatus: leaf.leafKind === "terminal" ? aiCliStatuses?.get(leaf.id) : undefined,
           remoteHost,

@@ -62,15 +62,15 @@ export function useFileActions({
       // number: the number dies with the app, the profile is what lets the tab
       // come back and rebind after a restart. Ad-hoc sessions have none, and
       // stay session-only.
-      let sshConnectionId: string | undefined;
+      let hostId: string | undefined;
       for (const [connId, binding] of sshBindingByConnection) {
         if (binding.sessionId === sessionId) {
-          sshConnectionId = connId;
+          hostId = connId;
           break;
         }
       }
       openFileTab(path, true, {
-        sshConnectionId,
+        hostId,
         sshSessionId: sessionId,
         sshHostLabel: hostLabel ?? "remote",
       });
