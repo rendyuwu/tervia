@@ -302,11 +302,11 @@ fn min_size_correction(current: (f64, f64), min: (f64, f64)) -> Option<(f64, f64
 /// echo it (enforced by `scripts/tauri-config-parity-verify.ts`) stay the only
 /// place the number is written.
 ///
-/// The early return below leaves one case uncorrected, and that case is an
-/// accepted state recorded in `KNOWN-LIMITS.md` under window sizing: a profile
-/// that quit maximized comes back maximized carrying a below-floor size, and
-/// the first un-maximize of every session shows it. Whoever removes or reworks
-/// that early return should retire the entry with it.
+/// The early return below leaves a maximized or fullscreen window alone, so a
+/// profile that quit maximized is restored over a below-floor size this
+/// setup-time call cannot correct. The main window's `Resized` handler in
+/// `run` calls this again, and the first time that window is sized normally -
+/// its un-maximize - is when the floor lands.
 fn enforce_configured_min_size(config: &tauri::Config, window: &tauri::WebviewWindow) {
     let Some(window_config) = config
         .app
@@ -828,6 +828,18 @@ pub fn run() {
                             let _ = w.unminimize();
                             let _ = w.show();
                         }
+                    }
+                    // The size floor, for the one case the setup-time clamp has
+                    // to skip: a profile that quit maximized comes back maximized
+                    // over a below-floor restored size, and this is the first
+                    // event where that size is on screen - the un-maximize.
+                    // `enforce_configured_min_size` still leaves a maximized or
+                    // fullscreen window alone, and the OS already clamps a user
+                    // resize, so every other Resized is a no-op. Not while
+                    // minimized: the size read then is not the restored one, and
+                    // `set_size` would bring the window back up.
+                    if !minimized {
+                        enforce_configured_min_size(app.config(), &main);
                     }
                 }
                 // Destroyed, not CloseRequested: the GUI can veto its own close
