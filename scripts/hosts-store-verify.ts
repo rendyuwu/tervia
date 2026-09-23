@@ -1142,6 +1142,28 @@ console.log("\n[accounts] no secret outlives the record naming it");
   check("and the secret that DID land is cleared again", broken.kept.size, 0);
   check("with no half-written row persisted", (await broken.hosts.listHosts()).length, 0);
 
+  // The rollback tries EVERY account even after one refuses. It used to stop at
+  // the first throw, and the fields after it - written a moment ago under an id
+  // no record will ever name - were never attempted.
+  const stuck = harness({
+    fail: { setAccount: "h-1::keyPassphrase", deleteAccount: "h-1::password" },
+  });
+  await rejects(
+    "a rollback that is itself refused still reports the write's own error",
+    () =>
+      stuck.hosts.upsertHost(sshHost({ id: "h-1" }), {
+        password: "pw",
+        privateKey: "PEM",
+        keyPassphrase: "pp",
+      }),
+    ["keychain refused h-1::keyPassphrase"],
+  );
+  check(
+    "and the account after the refused one is still cleared",
+    [...stuck.kept.keys()],
+    [at("h-1", "password")],
+  );
+
   // For a host that already exists the accounts stay reachable through
   // `deleteHost`, so clearing them would destroy a secret this layer cannot
   // restore - it never reads one.
@@ -1353,6 +1375,43 @@ console.log("\n[accounts] the release happens AFTER the record is written, never
     "the cleared account really is gone, and the failed one really is still there",
     [partial.kept.get(at("h-1", "privateKey")), partial.kept.get(at("h-1", "keyPassphrase"))],
     [undefined, "pp"],
+  );
+
+  // The FIRST stale field refusing no longer strands the second: every field is
+  // tried, so the message names only the one really left.
+  const firstFails = harness({
+    hosts: [
+      sshHost({
+        id: "h-1",
+        credential: {
+          kind: "inline",
+          hostId: "h-1",
+          user: "root",
+          authMode: "key",
+          hasPassword: false,
+          hasPrivateKey: true,
+          hasKeyPassphrase: true,
+        },
+      }),
+    ],
+    kept: { [at("h-1", "privateKey")]: "PEM", [at("h-1", "keyPassphrase")]: "pp" },
+    fail: { deleteAccount: "h-1::privateKey" },
+  });
+  let firstSaid = "";
+  try {
+    await firstFails.hosts.upsertHost(rdpHost({ id: "h-1" }));
+  } catch (e) {
+    firstSaid = e instanceof Error ? e.message : String(e);
+  }
+  assert(firstSaid.includes("privateKey"), "a refused first field is named");
+  assert(
+    !firstSaid.includes("keyPassphrase"),
+    "and the field after it is cleared, not stranded and named",
+  );
+  check(
+    "the refused field is still there and the one after it is gone",
+    [firstFails.kept.get(at("h-1", "privateKey")), firstFails.kept.get(at("h-1", "keyPassphrase"))],
+    ["PEM", undefined],
   );
 }
 

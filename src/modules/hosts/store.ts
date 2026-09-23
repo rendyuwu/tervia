@@ -662,16 +662,27 @@ export function createHostsStore(io: HostsIo): HostsStore {
    * nobody asked for, and because a fan-out that only works thanks to a lock two
    * layers down is a thing the next reader has to go and check.
    *
-   * The one behavioural difference from the `Promise.all` this replaces: a throw
-   * stops the run, so the accounts after it are not attempted. `rollbackNewHost`
-   * does not care - it swallows the error either way. `releaseStaleAccounts` does,
-   * because it names the unreachable accounts in a message, so it calls this one
-   * field at a time and counts.
+   * Every field is attempted even after one throws, and the FIRST error is
+   * rethrown once all have been tried. Stopping at the throw is harmless for
+   * `deleteHost` and the `applyRemote` landing - both keep the record on a
+   * throw, so a skipped account stays named and reachable - but not for
+   * `rollbackNewHost`, whose record never existed, or `releaseStaleAccounts`,
+   * whose new record no longer names these fields: there a skipped field is an
+   * account nothing names, found only by the Vault page's unreferenced-entry
+   * sweep.
    */
   async function deleteAccounts(hostId: string, fields: readonly HostSecretField[]): Promise<void> {
+    let failed = false;
+    let first: unknown;
     for (const field of fields) {
-      await io.secrets.delete(HOST_KEYRING_SERVICE, account(hostId, field));
+      try {
+        await io.secrets.delete(HOST_KEYRING_SERVICE, account(hostId, field));
+      } catch (e) {
+        if (!failed) first = e;
+        failed = true;
+      }
     }
+    if (failed) throw first;
   }
 
   /**
@@ -699,32 +710,31 @@ export function createHostsStore(io: HostsIo): HostsStore {
     const keeps = new Set(secretFieldsFor(host));
     const stale = secretFieldsFor(existing).filter((f) => !keeps.has(f));
     if (stale.length === 0) return;
-    // One field at a time and COUNTED, because the message below names what is
-    // unreachable and has to be true. `deleteAccounts` stops at the first throw,
-    // so the fields after it were never attempted while the ones before it are
-    // already gone - and naming the whole list would send the user looking for
-    // bytes that are not there, in a message whose whole job is saying where they
-    // are. `secrets_delete` reports an absent account as success, so a cleared
-    // field is cleared.
-    let cleared = 0;
-    try {
-      for (const field of stale) {
+    // One field at a time, because the message below names exactly what is left
+    // and has to be true: `deleteAccounts` tries every field it is given before
+    // it throws, so a single-field call is the only way to know WHICH one threw.
+    // `secrets_delete` reports an absent account as success, so a cleared field
+    // is cleared.
+    const left: HostSecretField[] = [];
+    let why = "";
+    for (const field of stale) {
+      try {
         await deleteAccounts(host.id, [field]);
-        cleared++;
+      } catch (e) {
+        if (left.length === 0) why = e instanceof Error ? e.message : String(e);
+        left.push(field);
       }
-    } catch (e) {
-      // Re-worded rather than rethrown, because the record IS saved and is
-      // accurate about what it owns: reporting the keychain's error alone would
-      // read as "your edit was not saved". Not swallowed either - what is left is
-      // bytes at an account no record names, and only a sweep the user goes
-      // looking for would find them.
-      const why = e instanceof Error ? e.message : String(e);
-      const left = stale.slice(cleared);
-      throw new Error(
-        `hosts: "${host.name}" was saved, but ${left.join(", ")} could not be cleared ` +
-          `from the keychain and is now unreachable: ${why}`,
-      );
     }
+    if (left.length === 0) return;
+    // Re-worded rather than rethrown, because the record IS saved and is
+    // accurate about what it owns: reporting the keychain's error alone would
+    // read as "your edit was not saved". Not swallowed either - what is left is
+    // bytes at an account no record names, and only a sweep the user goes
+    // looking for would find them.
+    throw new Error(
+      `hosts: "${host.name}" was saved, but ${left.join(", ")} could not be cleared ` +
+        `from the keychain and is now unreachable: ${why}`,
+    );
   }
 
   /**
