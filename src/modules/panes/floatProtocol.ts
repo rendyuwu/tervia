@@ -67,7 +67,7 @@ export type FloatSize = { cols: number; rows: number };
 /**
  * Board float payload. Unlike a terminal (a byte stream), a board is just a
  * list, so it mirrors as plain data
- * re-sent whenever it changes. The entries are `PaneEntry` objects verbatim -
+ * re-sent whenever it changes. The entries are `Entry` objects verbatim -
  * already serializable, and sending them whole is what lets the float render
  * with the SAME `EntryIcon` the main window uses instead of a lookalike.
  *

@@ -16,6 +16,7 @@ export {
   canCloseTab,
   leafCloseConfirmReason,
   leafCloseRefusal,
+  splitBatchClose,
   tabCloseConfirmReason,
   tabCloseRefusal,
   type CloseConfirmReason,

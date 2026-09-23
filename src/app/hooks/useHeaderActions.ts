@@ -9,22 +9,17 @@ import { type TabsApi } from "./tabsApi";
 type Params = {
   activePaneTab: PaneTab | null;
   detectedBrowserUrl: string | null;
-  handleClose: (id: number) => void;
-  requestCloseLeaf: (leafId: number) => void;
 } & Pick<TabsApi, "setActiveId" | "focusPane" | "pinTab" | "newSshTab" | "newRdpTab">;
 
 /**
  * Stable handlers for the memoised `<Header/>`. Each was previously an inline
  * arrow in the JSX, so the memo wrapper saw a fresh prop identity on every App
  * re-render. Bundled here verbatim with identical dependency arrays;
- * `handleClose` / `detectedBrowserUrl` are threaded in from
- * App.
+ * `detectedBrowserUrl` is threaded in from App.
  */
 export function useHeaderActions({
   activePaneTab,
   detectedBrowserUrl,
-  handleClose,
-  requestCloseLeaf,
   setActiveId,
   focusPane,
   pinTab,
@@ -32,8 +27,7 @@ export function useHeaderActions({
   newRdpTab,
 }: Params): {
   handleOpenDetectedPreview: () => void;
-  handleHeaderSelectEntry: (tabId: number, leafId: number | null) => void;
-  handleHeaderCloseEntry: (tabId: number, leafId: number | null) => void;
+  handleHeaderSelectEntry: (tabId: number, leafId: number) => void;
   handleHeaderPinLeaf: (tabId: number, leafId: number) => void;
   handleHeaderOpenSettings: () => void;
   handleHeaderConnectSsh: (conn: SshHost) => void;
@@ -47,21 +41,11 @@ export function useHeaderActions({
   }, [detectedBrowserUrl]);
 
   const handleHeaderSelectEntry = useCallback(
-    (tabId: number, leafId: number | null) => {
+    (tabId: number, leafId: number) => {
       setActiveId(tabId);
-      if (leafId !== null) focusPane(tabId, leafId);
+      focusPane(tabId, leafId);
     },
     [setActiveId, focusPane],
-  );
-  const handleHeaderCloseEntry = useCallback(
-    (tabId: number, leafId: number | null) => {
-      if (leafId !== null) {
-        requestCloseLeaf(leafId);
-      } else {
-        handleClose(tabId);
-      }
-    },
-    [requestCloseLeaf, handleClose],
   );
   const handleHeaderPinLeaf = useCallback(
     (tabId: number, leafId: number) => {
@@ -90,7 +74,6 @@ export function useHeaderActions({
   return {
     handleOpenDetectedPreview,
     handleHeaderSelectEntry,
-    handleHeaderCloseEntry,
     handleHeaderPinLeaf,
     handleHeaderOpenSettings,
     handleHeaderConnectSsh,

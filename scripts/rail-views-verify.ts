@@ -75,12 +75,8 @@ import type { Tab, useTabs } from "../src/modules/tabs/lib/useTabs";
 // the click route rather than pinning a substring of it, which is the half a
 // source-text sweep cannot do. The entry types beside it stay type-only -
 // `entries.ts` reaches `@/`-aliased modules this script has no bundler for.
-import {
-  entrySelectHandlers,
-  entrySelectTarget,
-  type SelectEntry,
-} from "../src/modules/tabs/lib/selectEntry";
-import type { Entry, PaneEntry } from "../src/modules/tabs/lib/entries";
+import { entrySelectHandlers, type SelectEntry } from "../src/modules/tabs/lib/selectEntry";
+import type { Entry } from "../src/modules/tabs/lib/entries";
 import {
   isPageKind,
   PAGE_KINDS,
@@ -1122,6 +1118,7 @@ console.log("\n[funnel] no route into the tab area writes activeId on its own");
       "closePaneByLeaf",
       "closeTab",
       "disposeTab",
+      "requestCloseLeaves",
     ];
     const CLOSING_CHORDS = ["tab.close", "terminal.close"];
     for (const id of CLOSING_CHORDS) {
@@ -1318,8 +1315,7 @@ console.log("\n[chip] a chip selects its own entry, even when it is already the 
   // The format is hand-copied here, so 9(ii) pins `TabBar`'s own `activeKey`
   // expression to keep the copy honest - see "TabBar still composes an
   // activeKey the way this fixture spells it" below.
-  const leafEntry: PaneEntry = {
-    kind: "pane-leaf",
+  const leafEntry: Entry = {
     key: "leaf-42",
     tabId: 7,
     leafId: 42,
@@ -1337,7 +1333,7 @@ console.log("\n[chip] a chip selects its own entry, even when it is already the 
     { key: leafEntry.key, activeKey },
   );
 
-  const calls: { tabId: number; leafId: number | null }[] = [];
+  const calls: { tabId: number; leafId: number }[] = [];
   const spy: SelectEntry = (tabId, leafId) => {
     calls.push({ tabId, leafId });
   };
@@ -1345,15 +1341,6 @@ console.log("\n[chip] a chip selects its own entry, even when it is already the 
   check("clicking it calls onSelectEntry exactly once", calls.length === 1, calls);
   check("with its own tab id", calls[0]?.tabId === leafEntry.tabId, calls[0]);
   check("and its own leaf id", calls[0]?.leafId === leafEntry.leafId, calls[0]);
-  const leafTarget = entrySelectTarget(leafEntry);
-  check(
-    // ONE expression for both routes. Asserted rather than assumed, because the
-    // pair was hand-written at each call site before, which is how they were
-    // free to drift.
-    "and the pair it passed is the one entrySelectTarget names",
-    calls[0]?.tabId === leafTarget.tabId && calls[0]?.leafId === leafTarget.leafId,
-    { click: calls[0], target: leafTarget },
-  );
   // `?? -1` so a handler that never fired fails the rows below rather than
   // throwing a TypeError out of the whole section - which would take 9(ii),
   // the source-text half, down with it and report nothing about the wiring.
@@ -1374,18 +1361,6 @@ console.log("\n[chip] a chip selects its own entry, even when it is already the 
       next,
     );
   }
-
-  // The standalone arm, so `leafId` cannot come back 0 or undefined for a tab
-  // that has no leaves - `onCloseEntry` and `onSelectEntry` both read `null` as
-  // "the whole tab".
-  const boardEntry: Entry = { kind: "board", key: "tab-9", tabId: 9, label: "Board" };
-  const boardCalls: { tabId: number; leafId: number | null }[] = [];
-  entrySelectHandlers(boardEntry, (tabId, leafId) => {
-    boardCalls.push({ tabId, leafId });
-  }).onClick();
-  check("a standalone chip selects its tab", boardCalls[0]?.tabId === boardEntry.tabId, boardCalls);
-  check("with no leaf at all, not leaf 0", boardCalls[0]?.leafId === null, boardCalls);
-  check("and entrySelectTarget agrees", entrySelectTarget(boardEntry).leafId === null);
 
   // ---- 9(ii) source text: the wiring is what was missing -----------------
   // These are POSITIVE checks over `.tsx` files, so they run on
@@ -1999,8 +1974,7 @@ console.log("\n[chip] a chip selects its own entry, even when it is already the 
     activeKeyMemo,
   );
   check(
-    // Both arms, because 9(i) fixtures both: `leaf-42` for the pane chip and
-    // `tab-9` for the standalone one.
+    // `leaf-42` is the arm 9(i) fixtures.
     "TabBar still composes an activeKey the way this fixture spells it",
     activeKeyMemo !== null &&
       activeKeyMemo.includes("return `leaf-${active.activeLeafId}`") &&
@@ -2018,9 +1992,7 @@ console.log("\n[chip] a chip selects its own entry, even when it is already the 
     // Both routes through one expression. Radix's route survives for the ARROW
     // keys - the roving tabindex moves focus, `TabsTrigger`'s `onFocus` sees
     // `!isSelected` under the default automatic activation, and that genuinely
-    // is a value change - so a second hand-written
-    // `entry.kind === "pane-leaf" ? ... : null` here is a second place to get a
-    // standalone tab's `null` wrong.
+    // is a value change.
     //
     // Enter and Space are NOT that route, which is worth stating because it
     // looks like they are: they go `onKeyDown` -> `onValueChange` and are
@@ -2028,13 +2000,8 @@ console.log("\n[chip] a chip selects its own entry, even when it is already the 
     // Radix renders a real `<button>` and the browser dispatches a native
     // `click`, so the chips' own handler runs - an accident of the element type
     // that an `asChild` onto a non-button would take away silently.
-    "onValueChange resolves its target through entrySelectTarget",
-    onValueChange !== null && /entrySelectTarget\(/.test(onValueChange),
-    onValueChange,
-  );
-  check(
-    "and keeps none of its own kind test, so the two routes cannot drift",
-    onValueChange !== null && !/pane-leaf/.test(onValueChange),
+    "onValueChange hands onSelectEntry the entry's own tab and leaf",
+    onValueChange !== null && /onSelectEntry\(entry\.tabId, entry\.leafId\)/.test(onValueChange),
     onValueChange,
   );
   check(

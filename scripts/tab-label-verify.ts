@@ -223,14 +223,8 @@ console.log("\nthe tab strip reads the same function");
       .map((e) => e.label)
       .join("|") === ["build", "ssh", "rdp"].join("|"),
   );
-  check(
-    "and the renamed one is flagged renamed",
-    entries[0].kind === "pane-leaf" && entries[0].renamed === true,
-  );
-  check(
-    "a terminal entry carries its cwd for the hover card",
-    entries[0].kind === "pane-leaf" && entries[0].cwd === "/srv/app",
-  );
+  check("and the renamed one is flagged renamed", entries[0].renamed === true);
+  check("a terminal entry carries its cwd for the hover card", entries[0].cwd === "/srv/app");
 }
 
 console.log("\na cold workspace keeps depth-first order");

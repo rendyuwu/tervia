@@ -5,7 +5,7 @@ import { Streamdown } from "streamdown";
 import { EditorPane, type EditorPaneHandle } from "@/modules/editor";
 import { decodeFloatParams, floatEv, type FloatCards } from "@/modules/panes/floatProtocol";
 import { BoardColumns } from "@/modules/workspaces/WorkspaceBoard";
-import type { PaneEntry } from "@/modules/tabs/lib/entries";
+import type { Entry } from "@/modules/tabs/lib/entries";
 import { FloatTableProvider, markdownComponents } from "@/components/markdown/markdown-code";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Toaster } from "@/components/ui/toast";
@@ -112,7 +112,7 @@ function FloatBoard({ leafId }: { leafId: number }) {
 
   return (
     <BoardColumns
-      cards={cards.entries as PaneEntry[]}
+      cards={cards.entries as Entry[]}
       titles={cards.titles}
       onOpen={(tabId, focusLeafId) =>
         void emit(floatEv.focus(leafId), { tabId, leafId: focusLeafId })

@@ -4,7 +4,7 @@ import { type Host } from "@/modules/hosts/types";
 import { horizontalListSortingStrategy, SortableContext, useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { useMemo } from "react";
-import { type Entry, type PaneEntry } from "../lib/entries";
+import { type Entry } from "../lib/entries";
 import { type SelectEntry } from "../lib/selectEntry";
 import { type PaneGroupForMove, type RenderEntryArgs, renderEntryBody } from "./renderEntryBody";
 import { EllipsisVertical } from "lucide-react";
@@ -37,7 +37,7 @@ type SortableTabGroupProps = {
    *  already the active one - the case that matters under a rail view. */
   onSelectEntry: SelectEntry;
   onPinLeaf: (tabId: number, leafId: number) => void;
-  onCloseEntry: (tabId: number, leafId: number | null) => void;
+  onCloseEntry: (leafId: number) => void;
   /** Close every entry to the right of `entry`. Lives in TabBar for the flattened entry list. */
   onCloseEntriesAfter: (entry: Entry) => void;
   /** Resolves a leaf's SSH/RDP host id to host metadata for tooltips. */
@@ -107,17 +107,13 @@ export function SortableTabGroup({
   };
 
   // Inner sortable items. Only consulted when `isSplit && leafSortable`; other tabs skip the inner SortableContext.
-  const leafItems = useMemo(
-    () =>
-      entries.filter((e): e is PaneEntry => e.kind === "pane-leaf").map((e) => `leaf:${e.leafId}`),
-    [entries],
-  );
+  const leafItems = useMemo(() => entries.map((e) => `leaf:${e.leafId}`), [entries]);
 
   const renderedEntries = entries.map((e, idx) => {
     const canClose = closableKeys.has(e.key);
     // Split group: each leaf carries its own drag handle. Single-leaf tab:
     // the first entry inherits the group-level drag listeners.
-    if (isSplit && leafSortable && e.kind === "pane-leaf") {
+    if (isSplit && leafSortable) {
       return (
         <SortableLeafEntry
           key={e.key}
@@ -228,7 +224,7 @@ type SortableLeafEntryProps = Omit<
   RenderEntryArgs,
   "dragAttrs" | "dragListeners" | "dragRef" | "dragStyle" | "selfDragging"
 > & {
-  entry: PaneEntry;
+  entry: Entry;
 };
 
 function SortableLeafEntry(props: SortableLeafEntryProps) {
