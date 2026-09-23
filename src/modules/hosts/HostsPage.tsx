@@ -44,13 +44,22 @@ import { identityRows } from "@/modules/vault/page/derive";
 import { VaultInUseError } from "@/modules/vault/types";
 import { useVault } from "@/modules/vault/useVault";
 import { ChevronDown, Monitor, Plus, Search, SquareTerminal, X } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent,
+  type ReactNode,
+} from "react";
 
 import { HostEditorDialog } from "./HostEditorDialog";
 import { Chip, GroupStrip } from "./page/GroupStrip";
 import { HostCard } from "./page/HostCard";
 import { HostsBackupActions } from "./page/HostsBackupActions";
 import {
+  cardFocusTarget,
   deleteRulesNote,
   filterAndRank,
   groupCounts,
@@ -98,6 +107,23 @@ const PROTOCOL_FILTERS: ReadonlyArray<{ value: ProtocolFilter; label: string }> 
 
 function errorText(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
+}
+
+/**
+ * Arrow keys between host cards. The grid is ONE tab stop (see `HostCard`'s
+ * `tabStop`), so this is how the keyboard gets from card to card. Only a key
+ * that lands on a card itself moves; on a card's action button it is the
+ * button's.
+ */
+function moveCardFocus(e: KeyboardEvent<HTMLDivElement>): void {
+  const card = e.target;
+  if (!(card instanceof HTMLElement) || !card.hasAttribute("data-host-card")) return;
+  const cards = [...e.currentTarget.querySelectorAll<HTMLElement>("[data-host-card]")];
+  const cols = getComputedStyle(e.currentTarget).gridTemplateColumns.split(" ").length;
+  const to = cardFocusTarget(e.key, cards.indexOf(card), cards.length, cols);
+  if (to === null) return;
+  e.preventDefault();
+  cards[to].focus();
 }
 
 /**
@@ -211,6 +237,12 @@ export function HostsPage({ onConnect, onScreen }: HostsPageProps): ReactNode {
     () => filterAndRank({ rows, protocol, group, knownGroupIds, query }),
     [rows, protocol, group, knownGroupIds, query],
   );
+
+  // The grid's one tab stop: the selected card while it is on screen, else the
+  // first. Without the fallback a filtered-out selection leaves no tab stop.
+  const tabStopId = visible.some(({ host }) => host.id === selectedId)
+    ? selectedId
+    : (visible[0]?.host.id ?? null);
 
   // A group deleted in another window (or by the strip below) leaves the filter
   // naming an id nothing has, which shows an empty grid with no way back to it -
@@ -503,7 +535,10 @@ export function HostsPage({ onConnect, onScreen }: HostsPageProps): ReactNode {
           // container ancestor of their own; it does not add containment to
           // `HostCard` itself, so its own `content-visibility: auto` /
           // `contain-intrinsic-size` (HostCard.tsx) are untouched.
-          <div className="grid grid-cols-1 gap-2 @[580px]:grid-cols-2 @[860px]:grid-cols-3 @[1140px]:grid-cols-4">
+          <div
+            className="grid grid-cols-1 gap-2 @[580px]:grid-cols-2 @[860px]:grid-cols-3 @[1140px]:grid-cols-4"
+            onKeyDown={moveCardFocus}
+          >
             {visible.map(({ host, groupName }) => (
               <HostCard
                 key={host.id}
@@ -512,6 +547,7 @@ export function HostsPage({ onConnect, onScreen }: HostsPageProps): ReactNode {
                 groupName={groupName}
                 missingSecret={missingSecret(host, vault)}
                 selected={host.id === selectedId}
+                tabStop={host.id === tabStopId}
                 onSelect={() => setSelectedId(host.id)}
                 onConnect={() => onConnect(host)}
                 onEdit={() => setEditorTarget({ mode: "edit", hostId: host.id })}

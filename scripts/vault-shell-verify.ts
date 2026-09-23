@@ -1252,15 +1252,15 @@ console.log("\n[16. layout parity] the containment pair and the responsive grid 
   // --- the responsive grid: two call sites on VaultPage, one on HostsPage,
   //     one on ForwardsPage ---
   //
-  // GRID_RE ONLY SEES A SINGLE-LINE `<div className="grid …">`, which is a
-  // shape rather than an accident: prettier (printWidth 100) never breaks a
-  // JSX element whose sole attribute is a string literal, so all four of these
-  // stay on one line at 114-116 columns. Give any of those divs a SECOND
-  // attribute and prettier splits it across lines, this regex stops seeing it,
-  // and the file's count drops. The counts below are what make that loud - a
-  // section that only compared the strings it found would go green on finding
-  // none, which is the failure mode this shape has to be paired with.
-  const GRID_RE = /<div className="(grid [^"]*)">/g;
+  // GRID_RE sees `<div className="grid …">` on one line or split across lines
+  // by prettier for a later attribute - HostsPage's grid carries `onKeyDown`
+  // for its arrow keys, so prettier splits that one. `className` has to be the
+  // div's FIRST attribute, and the rest may not contain a `>` (a handler passed
+  // by name, not an inline arrow). Break either and the regex stops seeing the
+  // div, and the file's count drops. The counts below are what make that loud -
+  // a section that only compared the strings it found would go green on finding
+  // none, which is the failure mode this regex has to be paired with.
+  const GRID_RE = /<div\s+className="(grid [^"]*)"[^>]*>/g;
   const vaultGridMatches = [...src.vaultPage.matchAll(GRID_RE)].map((m) => m[1]);
   const hostsGridMatches = [...src.hostsPage.matchAll(GRID_RE)].map((m) => m[1]);
   const forwardsGridMatches = [...src.forwardsPage.matchAll(GRID_RE)].map((m) => m[1]);
