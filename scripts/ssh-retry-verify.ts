@@ -77,7 +77,7 @@ import {
   SshLocalConnectError,
 } from "../src/modules/terminal/lib/ssh-exit-decision";
 import { stripCommentsNoJsx } from "./lib/source";
-import { scopeOf } from "./lib/scope";
+import { guardAt, guardAtSelfTest, scopeOf } from "./lib/scope";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const readRaw = (rel: string) => readFileSync(join(repoRoot, rel), "utf8");
@@ -777,30 +777,6 @@ function allIndexes(src: string, needle: string): number[] {
   return out;
 }
 
-/** The condition of the innermost `if` whose block contains `start`, or "". */
-function guardAt(src: string, start: number): string {
-  let at = start;
-  if (at < 0) return "";
-  // Bounded rather than `for (;;)`: eight levels is more nesting than anything
-  // here has, and a bound cannot spin on a source this does not expect.
-  for (let level = 0; level < 8; level++) {
-    const { block, before } = scopeOf(src, at);
-    const parts = before.split(";");
-    const stmt = (parts[parts.length - 1] ?? "")
-      .trim()
-      .replace(/\b(?:void|await|return)$/, "")
-      .trim();
-    const own = /^if \((.*)\)$/s.exec(stmt);
-    if (own) return own[1];
-    // Some other statement head - a `for`, an arrow declaration, a call whose
-    // argument list this needle sits inside. Not a guard, and not something to
-    // look past either.
-    if (stmt.length > 0 || block < 0) return "";
-    at = block;
-  }
-  return "";
-}
-
 /**
  * The statement list around the SOLE occurrence of `anchor`.
  *
@@ -957,6 +933,9 @@ console.log("\n[source-text] the dial's rejection cannot get past the boundary u
     `sshConnectErrorFrom appears exactly twice - its declaration and this one call (found ${calls})`,
   );
 }
+
+console.log("\n[guardAt] the shared guard walk the source-text sections below read");
+for (const t of guardAtSelfTest()) assert(t.ok, t.label);
 
 console.log("\n[source-text] the first attempt's catch: the park arm controls the ladder");
 checkLadderSite("first attempt", "src/modules/terminal/lib/session-lifecycle.ts");

@@ -304,6 +304,8 @@ function walkSrcFiles(dir: string): string[] {
 
   const SHARED_HELPERS = [
     "closesABlock",
+    "guardAt",
+    "guardAtSelfTest",
     "importSpecifiersOf",
     "isDirectlyInFunctionBody",
     "isUnguardedToItsFunctionBody",
