@@ -1,5 +1,6 @@
 /**
- * Self-check for App's `isDisabled` gate, in its two halves.
+ * Self-check for the raw-keyboard gate (`yieldsToRawKeyboard`), in its three
+ * parts.
  *
  *  1. WHICH CHORDS - `isTerminalControlChord` / `isTerminalMetaChord`: the ones
  *     a focused terminal keeps (readline editing, Ctrl+D EOF / screen detach,
@@ -10,8 +11,14 @@
  *     ACTIVE IN THE TAB while its own comment claimed to be about focus, so
  *     Ctrl+W was suppressed with the caret in the tab strip (closing no tab
  *     anywhere) and Ctrl+T / Ctrl+] / Ctrl+[ were eaten by a terminal a rail
- *     view had made invisible. Both halves must hold for the gate
- *     to fire, so both halves get a positive AND a negative case here.
+ *     view had made invisible. Both halves must hold for the gate to fire,
+ *     so both halves get a positive AND a negative case here.
+ *  3. EVERY CALLER, NOT JUST APP - `yieldsToRawKeyboard` itself, applied
+ *     inside `useGlobalShortcuts` so no caller can forget it. FileExplorer's
+ *     "Go to file" (Mod+P / Mod+G) collides with a focused terminal's
+ *     readline Ctrl+P (previous-history) and Ctrl+G (abort), which is
+ *     exactly the bug this gate exists to prevent: it had no gate of its
+ *     own before this.
  *
  * Run: `npx tsx scripts/keybindings-terminal-verify.ts`.
  */
@@ -22,6 +29,7 @@ import { isTerminalControlChord, isTerminalMetaChord } from "../src/modules/shor
 import {
   KEYBOARD_OWNING_SURFACES,
   ownsRawKeyboard,
+  yieldsToRawKeyboard,
   type FocusTarget,
 } from "../src/modules/shortcuts/lib/keyboardOwner";
 import { stripComments, stripperSelfTest } from "./lib/source";
@@ -33,16 +41,22 @@ type Ev = {
   altKey?: boolean;
   metaKey?: boolean;
 };
-// Mirrors App's gate: a focused terminal owns bare-Ctrl control codes AND
-// bare-Alt meta sequences, so both fall through to xterm.
-const ev = (e: Ev) => {
-  const k = {
+// The full KeyboardEvent-shaped fixture, defaulted then overridden - shared by
+// `ev` below (which chords) and the gate checks further down (who is
+// focused + every caller), so both sections build fixtures the same way.
+const toEvent = (e: Ev): KeyboardEvent =>
+  ({
     ctrlKey: false,
     shiftKey: false,
     altKey: false,
     metaKey: false,
     ...e,
-  } as KeyboardEvent;
+  }) as KeyboardEvent;
+// Mirrors the "which chords" half of the gate: a focused terminal owns
+// bare-Ctrl control codes AND bare-Alt meta sequences, so both fall through
+// to xterm.
+const ev = (e: Ev) => {
+  const k = toEvent(e);
   return isTerminalControlChord(k) || isTerminalMetaChord(k);
 };
 
@@ -95,7 +109,8 @@ expect("Cmd+D on macOS (meta, not ctrl)", { code: "KeyD", metaKey: true }, false
 expect("plain D (no modifier)", { code: "KeyD" }, false);
 
 // ---------------------------------------------------------------------------
-// The other half of the gate: who is holding the keys.
+// The other two-thirds of the gate: who is holding the keys, and whether
+// every caller actually asks.
 // ---------------------------------------------------------------------------
 
 // Self-test: both directions of the shared stripper's JSX-comment branch.
@@ -188,33 +203,91 @@ check(
   );
 }
 
-console.log("\n[gate wiring] App asks focus and the rail view, not the active leaf kind");
+console.log("\n[yieldsToRawKeyboard] the exact rule the FileExplorer bug needed and did not have");
+{
+  const terminal = focusedInside("data-terminal-leaf-id");
+  const rdp = focusedInside("data-rdp-leaf-id");
+  const tabStrip = focusedInside("data-pane-leaf");
+  const ctrlP = toEvent({ code: "KeyP", ctrlKey: true });
+  const ctrlG = toEvent({ code: "KeyG", ctrlKey: true });
+
+  check(
+    // Both are explorer.search's default bindings (Go to file) - and also a
+    // terminal's readline Ctrl+P (previous-history) and Ctrl+G (abort), which
+    // is the whole bug: FileExplorer had no gate, so these two never reached
+    // xterm.
+    "Ctrl+P and Ctrl+G (explorer.search) yield to a focused terminal",
+    yieldsToRawKeyboard("explorer.search", terminal, ctrlP, false) &&
+      yieldsToRawKeyboard("explorer.search", terminal, ctrlG, false),
+  );
+  check(
+    // THE ISSUE'S NEGATIVE CONTROL: focus is in the tab strip, not a raw-
+    // keyboard surface, so Go to file must still open from there.
+    "the same chords do NOT yield with focus in the tab strip",
+    !yieldsToRawKeyboard("explorer.search", tabStrip, ctrlP, false) &&
+      !yieldsToRawKeyboard("explorer.search", tabStrip, ctrlG, false),
+  );
+  check(
+    "Ctrl+P also yields to a focused RDP pane",
+    yieldsToRawKeyboard("explorer.search", rdp, ctrlP, false),
+  );
+  check(
+    "a covered tab area (rail view open) turns the gate off even in a terminal",
+    !yieldsToRawKeyboard("explorer.search", terminal, ctrlP, true),
+  );
+  check(
+    "Ctrl+D (pane.splitRight) keeps its documented exemption and never yields",
+    !yieldsToRawKeyboard(
+      "pane.splitRight",
+      terminal,
+      toEvent({ code: "KeyD", ctrlKey: true }),
+      false,
+    ),
+  );
+  check(
+    "a Shift chord (explorer.grep's Mod+Shift+F) is not a control chord, so it never yields",
+    !yieldsToRawKeyboard(
+      "explorer.grep",
+      terminal,
+      toEvent({ code: "KeyF", ctrlKey: true, shiftKey: true }),
+      false,
+    ),
+  );
+  check(
+    // The meta half of the predicate (bare-Alt), otherwise never exercised by
+    // a direct call to yieldsToRawKeyboard - every row above is a Ctrl chord.
+    "Alt+Z (editor.toggleWordWrap) also yields, via the meta branch",
+    yieldsToRawKeyboard(
+      "editor.toggleWordWrap",
+      terminal,
+      toEvent({ code: "KeyZ", altKey: true }),
+      false,
+    ),
+  );
+}
+
+console.log("\n[gate wiring] the hook applies the gate; railView reaches every caller");
 {
   const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-  // Stripped, and load-bearing: the gate's own comment block explains the fix by
-  // NAMING `activeLeafKindCurrent === "terminal"`, so the "does NOT decide from
-  // the active leaf kind" check below would fail against the correct code
-  // without this - and the positive checks would pass against a gutted gate
-  // whose expressions survived only as prose. Both directions, one stripper.
-  const app = stripComments(readFileSync(join(root, "src/app/App.tsx"), "utf8"));
-  const gate = /isDisabled:\s*\(id, e\) =>([\s\S]*?)\n\s*\}\);/.exec(app)?.[1] ?? "";
-  check("found the isDisabled gate", gate !== "");
+  const read = (p: string) => stripComments(readFileSync(join(root, p), "utf8"));
+
+  const hook = read("src/modules/shortcuts/lib/useGlobalShortcuts.ts");
+  const hookGateCall =
+    /yieldsToRawKeyboard\(\s*s\.id,\s*focusTargetOf\(e\),\s*e,\s*options\.tabAreaCovered,?\s*\)/;
   check(
-    "it calls ownsRawKeyboard on the event's own target",
-    /ownsRawKeyboard\(focusTargetOf\(e\)\)/.test(gate),
+    "the hook's onKey calls yieldsToRawKeyboard with the event's own target",
+    hookGateCall.test(hook),
+  );
+
+  const app = read("src/app/App.tsx");
+  const appGateCall = new RegExp(
+    "useGlobalShortcuts\\(\\s*shortcutHandlers,\\s*\\{\\s*tabAreaCovered:\\s*" +
+      "railView !== null,?\\s*\\},?\\s*\\)",
   );
   check(
-    // The straight revert, and the thing whose comment lied: leaf kind is not
-    // focus, so a gate that reads it suppresses Ctrl+W from the tab strip again.
-    "it does NOT decide from the active leaf kind",
-    !/activeLeafKindCurrent/.test(gate),
-    gate,
+    "App calls useGlobalShortcuts with tabAreaCovered derived from railView",
+    appGateCall.test(app),
   );
-  check(
-    "a rail view turns the gate off, so its chords reach the app",
-    /railView === null/.test(gate),
-  );
-  check("and Ctrl+D keeps its documented exemption", /id !== "pane\.splitRight"/.test(gate));
 }
 
 if (failed > 0) throw new Error(`${failed} check(s) failed`);
