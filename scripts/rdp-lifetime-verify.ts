@@ -98,7 +98,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { stripComments, stripperSelfTest } from "./lib/source";
-import { scopeOf } from "./lib/scope";
+import { guardAt, guardAtSelfTest, scopeOf } from "./lib/scope";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const read = (p: string) => readFileSync(join(root, p), "utf8");
@@ -139,19 +139,9 @@ function statementsBefore(src: string, at: number): string[] {
 }
 
 /**
- * The condition of the innermost `if` whose block `needle` sits inside, or of the
- * `if` attached to its own statement, or "" if neither exists.
- *
- * This is `host-editor-verify.ts`'s `guardFor` with its one-hop limit removed,
- * and the divergence is deliberate rather than drift: one hop reports NOTHING
- * for a write that is the second statement inside a correct guard, which is a
- * false alarm against a legitimate reordering. Walking out is only safe because
- * every assertion below compares the condition it gets against the one that has
- * to be there - a guard from further out than intended is not that string and
- * fails. Asking merely whether SOME guard exists is the unsound way to use this.
- *
- * The needle must name a STATEMENT (`setTest({`, not `kind: "ok"`) or the
- * statement text read back is a fragment of an argument list.
+ * `guardAt` for the first occurrence of `needle`. The needle must name a
+ * STATEMENT (`setTest({`, not `kind: "ok"`) or the statement text read back is
+ * a fragment of an argument list.
  */
 function enclosingGuard(region: string, needle: string): string {
   return guardAt(region, region.indexOf(needle));
@@ -175,34 +165,6 @@ function enclosingGuards(region: string, needle: string): string[] {
   return out;
 }
 
-/** The shared walk, from a position rather than a needle, so one implementation
- *  serves both forms above. */
-function guardAt(region: string, start: number): string {
-  let at = start;
-  if (at < 0) return "";
-  // Bounded rather than `for (;;)`: eight levels of nesting is already more than
-  // anything here has, and a bound cannot spin on a source this does not expect.
-  for (let level = 0; level < 8; level++) {
-    const { block, before } = scopeOf(region, at);
-    const parts = before.split(";");
-    const stmt = (parts[parts.length - 1] ?? "")
-      .trim()
-      // A statement may open with an operator keyword before the call a check
-      // names (`void pinFingerprint(…)`), and that is still the same statement.
-      // Dropped only at the END, so it cannot swallow a guard.
-      .replace(/\b(?:void|await|return)$/, "")
-      .trim();
-    const own = /^if \((.*)\)$/s.exec(stmt);
-    if (own) return own[1];
-    // Some other statement head - a `for`, an arrow declaration, a call whose
-    // argument list this needle is inside. Not a guard, and not something to
-    // look past either.
-    if (stmt.length > 0 || block < 0) return "";
-    at = block;
-  }
-  return "";
-}
-
 function count(src: string, re: RegExp): number {
   return [...src.matchAll(re)].length;
 }
@@ -217,70 +179,9 @@ const promptDialogSrc = stripComments(promptDialogRaw);
 // ---------------------------------------------------------------------------
 console.log("[0] the helpers the checks below depend on");
 {
-  check(
-    "enclosingGuard reads the condition of a block-bodied guard",
-    enclosingGuard("if (a === b) {\n  writeIt();\n}\n", "writeIt()") === "a === b",
-    enclosingGuard("if (a === b) {\n  writeIt();\n}\n", "writeIt()"),
-  );
-  check(
-    "and of a single-statement guard",
-    enclosingGuard("if (a === b) writeIt();\n", "writeIt()") === "a === b",
-  );
-  check(
-    "and of a guard whose body opens with void, which is how a fire-and-forget write reads",
-    enclosingGuard("if (a === b) {\n  void writeIt();\n}\n", "writeIt()") === "a === b",
-    enclosingGuard("if (a === b) {\n  void writeIt();\n}\n", "writeIt()"),
-  );
-  // The two failures this section exists to keep out. The fixed lookback's was a
-  // false PASS: it saw the previous statement's guard and called an ungated write
-  // gated. The `;`-rule's went the other way - it reported a correctly guarded
-  // SECOND statement as ungated, and the negative assertion built on that then
-  // passed against the exact regression it names.
-  check(
-    "but an unguarded write does not borrow the guard of the statement above it",
-    enclosingGuard("if (a === b) other();\nwriteIt();\n", "writeIt()") === "",
-    enclosingGuard("if (a === b) other();\nwriteIt();\n", "writeIt()"),
-  );
-  check(
-    "not even when that write opens with void",
-    enclosingGuard("if (a === b) other();\nvoid writeIt();\n", "writeIt()") === "",
-    enclosingGuard("if (a === b) other();\nvoid writeIt();\n", "writeIt()"),
-  );
-  check(
-    "while a write that IS the second statement inside a guard still reports it",
-    enclosingGuard("if (a === b) {\n  other();\n  void writeIt();\n}\n", "writeIt()") === "a === b",
-    enclosingGuard("if (a === b) {\n  other();\n  void writeIt();\n}\n", "writeIt()"),
-  );
-  check(
-    "and one AFTER that guard's block closes does not, however close it reads",
-    enclosingGuard("if (a === b) {\n  other();\n}\nwriteIt();\n", "writeIt()") === "",
-    enclosingGuard("if (a === b) {\n  other();\n}\nwriteIt();\n", "writeIt()"),
-  );
-  check(
-    "nor does one inside a block the guard does not control",
-    enclosingGuard(
-      "if (a === b) {\n  other();\n}\nfor (const x of xs) {\n  writeIt();\n}\n",
-      "writeIt()",
-    ) === "",
-    enclosingGuard(
-      "if (a === b) {\n  other();\n}\nfor (const x of xs) {\n  writeIt();\n}\n",
-      "writeIt()",
-    ),
-  );
-  check(
-    "the INNERMOST guard is the one reported, not the outermost",
-    enclosingGuard("if (a) {\n  if (b === c) {\n    writeIt();\n  }\n}\n", "writeIt()") ===
-      "b === c",
-    enclosingGuard("if (a) {\n  if (b === c) {\n    writeIt();\n  }\n}\n", "writeIt()"),
-  );
-  check(
-    "an unguarded write in a bare block reports nothing",
-    enclosingGuard("{\n  writeIt();\n}\n", "writeIt()") === "",
-  );
-  check(
-    "a missing needle reports nothing rather than throwing",
-    enclosingGuard("x();\n", "writeIt()") === "",
-  );
+  // The walk itself; its probes live with it in scripts/lib/scope.ts and the
+  // verdicts are counted here.
+  for (const t of guardAtSelfTest()) check(t.label, t.ok);
 
   // The all-matches form, and the false pass it exists to remove: a second write
   // of the same kind added beside a correctly guarded first one.
