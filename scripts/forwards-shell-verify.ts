@@ -2849,6 +2849,76 @@ console.log(
 
 // ---------------------------------------------------------------------------
 console.log(
+  "\n[C10r] startRule's dial REJECTS into a rule the TERMINAL claimed meanwhile - STOPPED, not failed, so no error survives to resurface when that tab closes",
+);
+// The rejecting half of C10. The terminal claims on `starting` and holds the
+// pinned port, so the page's own dial fails EADDRINUSE. `markFailed` there
+// parks an error `RuleCard` only hides under `hostOwned` - the red line comes
+// back the moment that tab closes.
+{
+  resetFakes();
+  resetStores();
+  const rule = fakeRule({ id: "c10r", localPort: 18080 });
+  autoAnswerFakeOpen = false;
+  const starting = startRule(rule, FAKE_RUNTIME);
+  await settle();
+  useHostOwnedForwards.setState({ byRule: { c10r: { sessionId: 41, boundPort: 18080 } } });
+  parkedFakeOpens[0].reject(
+    "ssh: bind 127.0.0.1:18080 failed: Address already in use (os error 98)",
+  );
+  await starting;
+  await settle();
+  check(
+    "C10r: the row is exactly { status: stopped } - no error left behind",
+    JSON.stringify(useForwardRuntime.getState().byRule["c10r"]) ===
+      JSON.stringify({ status: "stopped" }),
+    useForwardRuntime.getState().byRule["c10r"],
+  );
+  check(
+    "C10r: exactly one WARNING toast, the yield sentence naming the rule",
+    toastCalls.length === 1 &&
+      toastCalls[0]?.variant === "warning" &&
+      (toastCalls[0]?.message ?? "").includes(`"rule-c10r" came up on its terminal`),
+    toastCalls,
+  );
+  check(
+    "C10r: and nothing was closed - a rejected dial took no reference",
+    closeCalls.length === 0,
+    closeCalls,
+  );
+}
+{
+  // The paired control: the same parked reject with the terminal's map EMPTY is
+  // a real failure, and still says so.
+  resetFakes();
+  resetStores();
+  const rule = fakeRule({ id: "c10rb", localPort: 18080 });
+  autoAnswerFakeOpen = false;
+  const starting = startRule(rule, FAKE_RUNTIME);
+  await settle();
+  parkedFakeOpens[0].reject(
+    "ssh: bind 127.0.0.1:18080 failed: Address already in use (os error 98)",
+  );
+  await starting;
+  await settle();
+  check(
+    "C10r: with no terminal claim the same reject marks failed, with the port sentence",
+    JSON.stringify(useForwardRuntime.getState().byRule["c10rb"]) ===
+      JSON.stringify({
+        status: "failed",
+        error: "Port 18080 is already in use on this machine.",
+      }),
+    useForwardRuntime.getState().byRule["c10rb"],
+  );
+  check(
+    "C10r: and says so once, as an error",
+    toastCalls.length === 1 && toastCalls[0]?.variant === "error",
+    toastCalls,
+  );
+}
+
+// ---------------------------------------------------------------------------
+console.log(
   "\n[C11] pageMustStopFirst answers about NOW, over the real stores - every status in, both owners",
 );
 // The predicate `ForwardsPage.tsx`'s confirm and `RuleEditorDialog.tsx`'s save

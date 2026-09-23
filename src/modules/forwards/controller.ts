@@ -101,13 +101,15 @@ function hostOwnedRefusalText(rule: ForwardRule): string {
   return `"${rule.name}" is already open on its terminal. Close that terminal tab to stop it.`;
 }
 
-/** What a Start says when it dialled successfully and found, on the way back,
- *  that the rule had meanwhile come up on its TERMINAL. A different sentence
- *  from {@link hostOwnedRefusalText} because a different thing happened: that
- *  one never dialled, this one dialled and then gave the reference back. Not an
- *  error - nothing failed - so the row goes to `stopped` and this is a warning.
- *  Ends in the same sentence as the refusal, because the answer to "how do I
- *  stop it now" is the same. */
+/** What a Start says when its dial LANDED - resolved or rejected - into a rule
+ *  that had meanwhile come up on its TERMINAL. A different sentence from
+ *  {@link hostOwnedRefusalText} because a different thing happened: that one
+ *  never dialled, this one did and then stood down - giving the reference
+ *  back if the dial resolved, or discarding its failure if it rejected (most
+ *  often EADDRINUSE on the port the terminal now holds). A warning, not an
+ *  error, and the row goes to `stopped`: the forward the user asked for is
+ *  up. Ends in the same sentence as the refusal, because the answer to "how
+ *  do I stop it now" is the same. */
 function hostOwnedYieldText(rule: ForwardRule): string {
   return `"${rule.name}" came up on its terminal while this Start was dialling. Close that terminal tab to stop it.`;
 }
@@ -130,7 +132,8 @@ function hostOwnedYieldText(rule: ForwardRule): string {
  * where the dial does and it has to be read on BOTH sides of the await. First
  * claim wins: if the terminal's claim was already taken this never
  * dials, and if it lands during the dial this hands the reference it just
- * received straight back.
+ * received straight back. If its own dial rejects after such a claim, it marks
+ * the rule `stopped` rather than `failed`.
  */
 export async function startRule(
   rule: ForwardRule,
@@ -183,11 +186,12 @@ export async function startRule(
     //
     // The terminal now CLAIMS on `starting` rather than yielding
     // (`autostart.ts`'s note on that branch), which is what makes this side's
-    // yield the one that closes the window: without it the terminal keeps its
-    // listener, this dial's EADDRINUSE marks the row failed, and the row reads
-    // "Failed - port N is already in use" beside a forward that is up. With it,
-    // the reference this dial just took goes straight back and nothing is left
-    // that no store names.
+    // yield the one that closes the window: without it, a dial that RESOLVES
+    // after the terminal's claim publishes a second listener beside the
+    // terminal's. A dial that REJECTS instead - EADDRINUSE, because the
+    // terminal holds the pinned port - is the `catch` arm's half of this same
+    // yield. With this yield, the reference this dial just took goes straight
+    // back and nothing is left that no store names.
     //
     // `markStopped` and NOT `markFailed`: nothing failed. The forward the user
     // asked for is up; it is simply up somewhere this store cannot see, and
@@ -218,6 +222,18 @@ export async function startRule(
     // and "failed" on a row the user deliberately stopped is a wrong answer,
     // not a louder one.
     if (!isCurrentAttempt(rule.id, prompts)) return;
+    // THE REJECTING HALF OF THE SAME YIELD. The terminal claimed this rule
+    // mid-dial (`autostart.ts` claims on `starting`) and usually holds the very
+    // pinned port this dial just failed to bind, so the rejection is the
+    // forward the user asked for being up. `markFailed` here would park an
+    // error `RuleCard` hides under `hostOwned` and brings back when that tab
+    // closes. Same arm as the resolved yield above, minus the release: a
+    // rejected dial took no reference.
+    if (useHostOwnedForwards.getState().byRule[rule.id] !== undefined) {
+      useForwardRuntime.getState().markStopped(rule.id);
+      runtime.toast(hostOwnedYieldText(rule), { variant: "warning" });
+      return;
+    }
     // `rule.localPort`, not a bound port: a bind that failed bound nothing, and
     // the port these sentences name is the one that was asked for.
     const text = bindFailureText(describeError(e), rule.localPort);

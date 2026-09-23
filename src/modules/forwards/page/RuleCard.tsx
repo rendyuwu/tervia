@@ -135,7 +135,8 @@ function statusDotClass(status: ReturnType<typeof useForwardStatus>, hostOwned: 
   // A terminal-owned forward IS running, it is simply running somewhere this
   // store cannot see (`../hostOwned.ts`), so it gets the running tone. Checked
   // ahead of `status`, which for such a rule reads "stopped" - the page's
-  // runtime store never hears about a forward the terminal opened.
+  // runtime store holds nothing live for a forward the terminal opened; its one
+  // write there is the takeover reset to `stopped`.
   if (hostOwned) return "bg-icon-idle";
   switch (status) {
     case "starting":
@@ -294,7 +295,8 @@ export function RuleCard({ row, onEdit, onDelete }: RuleCardProps): ReactNode {
           a different mechanism from a conditional render, this page owns no
           error surface of its own, and the
           reachable window is narrow: the page yields to a mid-dial terminal
-          claim with `markStopped` and a warning rather than `markFailed`
+          claim, whether its dial resolves or rejects, with `markStopped` and a
+          warning rather than `markFailed`
           (`controller.ts`), so what is left is a page Start that genuinely
           failed on its own and a terminal that came up afterwards. */}
       {hostOwned ? (
