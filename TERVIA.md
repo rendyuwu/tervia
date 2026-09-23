@@ -586,7 +586,7 @@ nothing.
 #### Who owns the keyboard (`shortcuts/lib/keyboardOwner.ts`)
 
 A focused terminal owns every bare-Ctrl control code and every bare-Alt meta
-sequence, and a focused RDP pane owns the same; App's `isDisabled` gate lets them
+sequence, and a focused RDP pane owns the same; `yieldsToRawKeyboard` lets them
 fall through instead of firing an app chord. That is a claim about **focus**, and
 it was answered with `activeLeafKind(activeTab)`, which is a claim about which
 leaf is active **in the tab** - so the gate was wrong in both directions. With
@@ -597,10 +597,19 @@ so `Ctrl+T` / `Ctrl+]` / `Ctrl+[` were swallowed by a surface nobody could see.
 So the gate asks the DOM: `ownsRawKeyboard(focusTargetOf(e))` walks up from the
 keydown's own target to `[data-terminal-leaf-id]` or `[data-rdp-leaf-id]` -
 markers both panes already render for the file-drop hit-test and for focus. It
-also requires `railView === null`, because a covered surface does not own the
-keyboard by definition and that should not depend on whether the browser blurs a
-`visibility: hidden` subtree. `pane.splitRight` keeps its documented exemption
-(Ctrl+D always fires, taking `^D` from the shell).
+also takes a `tabAreaCovered` flag from the caller, because a covered surface
+does not own the keyboard by definition and that should not depend on whether
+the browser blurs a `visibility: hidden` subtree. `pane.splitRight` keeps its
+documented exemption (Ctrl+D always fires, taking `^D` from the shell).
+
+`yieldsToRawKeyboard` is applied inside `useGlobalShortcuts` itself, to every
+caller's matched chord before its handler runs - not an option a caller can
+forget to pass - so a caller with its own bindings (FileExplorer's Go to file,
+bound to Mod+P and Mod+G, the same chords a terminal's readline binds to
+Ctrl+P / Ctrl+G) cannot steal a focused terminal's control codes back by simply
+not asking. `tabAreaCovered: boolean` is required on every call for the same
+reason: a caller that forgets it fails to compile rather than silently
+yielding its chords to a terminal hidden under a rail view.
 
 The deciding half is a pure predicate over anything with `closest`, so
 `scripts/keybindings-terminal-verify.ts` runs it without a DOM - both directions,

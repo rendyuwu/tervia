@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import { SHORTCUTS, matchBinding, type ShortcutId } from "../shortcuts";
 import { registerCommand, unregisterCommand } from "./commandRegistry";
+import { focusTargetOf, yieldsToRawKeyboard } from "./keyboardOwner";
 import { COMMAND_PALETTE_MODAL, isModalOpen, isTopModal } from "./modalRegistry";
 
 export type ShortcutHandler = (e: KeyboardEvent) => void;
@@ -41,14 +42,15 @@ const MODAL_GATE_EXEMPT: ReadonlyMap<ShortcutId, string> = new Map([
   ["commandPalette.open", COMMAND_PALETTE_MODAL],
 ]);
 
+/**
+ * `tabAreaCovered`: a rail view (Vault, Port Forwarding, …) covers the tab area. Required so
+ * no caller can forget it and have its chords swallowed by a terminal a rail view has hidden.
+ */
 export type UseGlobalShortcutsOptions = {
-  isDisabled?: (id: ShortcutId, e: KeyboardEvent) => boolean;
+  tabAreaCovered: boolean;
 };
 
-export function useGlobalShortcuts(
-  handlers: ShortcutHandlers,
-  options?: UseGlobalShortcutsOptions,
-) {
+export function useGlobalShortcuts(handlers: ShortcutHandlers, options: UseGlobalShortcutsOptions) {
   const latest = useRef({ handlers, options });
   latest.current = { handlers, options };
 
@@ -83,7 +85,7 @@ export function useGlobalShortcuts(
         // modal is the one the user is actually looking at.
         const mayActOn = MODAL_GATE_EXEMPT.get(s.id);
         if (isModalOpen() && (mayActOn === undefined || !isTopModal(mayActOn))) return;
-        if (options?.isDisabled?.(s.id, e)) return;
+        if (yieldsToRawKeyboard(s.id, focusTargetOf(e), e, options.tabAreaCovered)) return;
         const h = handlers[s.id];
         if (!h) return;
         e.preventDefault();

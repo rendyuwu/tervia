@@ -848,8 +848,9 @@ export function RdpPane({ leafId, connectionId, visible, focused = true }: Props
         // (which would otherwise move focus out) and the browser's own
         // accelerators. App-level chords never reach here: `useGlobalShortcuts`
         // listens at window capture and stops propagation for the ones it
-        // owns, and App's `isDisabled` gate lets a focused RDP pane keep the
-        // bare-Ctrl and bare-Alt sequences exactly as a focused terminal does.
+        // owns, and `yieldsToRawKeyboard` (`shortcuts/lib/keyboardOwner.ts`) lets
+        // a focused RDP pane keep the bare-Ctrl and bare-Alt sequences exactly as
+        // a focused terminal does.
         e.preventDefault();
         e.stopPropagation();
         const scancode = scancodeFor(e.code);

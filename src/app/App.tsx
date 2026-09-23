@@ -31,14 +31,7 @@ import { type EditorPaneHandle } from "@/modules/editor";
 import { Header, type SearchInlineHandle } from "@/modules/header";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import { useSshRightPanelStore } from "@/modules/ssh/sshRightPanelStore";
-import {
-  focusTargetOf,
-  isTerminalControlChord,
-  isTerminalMetaChord,
-  ownsRawKeyboard,
-  useGlobalShortcuts,
-  type ShortcutHandlers,
-} from "@/modules/shortcuts";
+import { useGlobalShortcuts, type ShortcutHandlers } from "@/modules/shortcuts";
 import { StatusBar } from "@/modules/statusbar";
 import {
   activeLeafKind,
@@ -629,47 +622,7 @@ export default function App() {
     ],
   );
 
-  // The options object is read fresh each keydown (see useGlobalShortcuts), so
-  // closing over `railView` without a dep array is fine.
-  useGlobalShortcuts(shortcutHandlers, {
-    isDisabled: (id, e) =>
-      // A focused terminal owns every bare-Ctrl control code (Ctrl+E, Ctrl+W,
-      // Ctrl+K, Ctrl+L, Ctrl+[ Esc, Ctrl+I Tab, the tmux/screen prefix, …) and
-      // every bare-Alt meta sequence (readline M-b / M-f / M-d / M-1..9). On
-      // Win/Linux `Mod`=Ctrl, so those chords otherwise fire app actions (close
-      // tab, word-wrap, …) and the byte never reaches the shell. Let them fall
-      // through. Exception: pane.splitRight (Ctrl+D) always fires;
-      // pane.splitDown already passes because it carries Shift. Terminal-safe
-      // app chords keep Shift/Meta or add a second modifier (Ctrl+Shift+C copy,
-      // Ctrl+Shift+X close, Ctrl+Alt+P, Shift+Alt+F) and stay active; Ctrl+Tab /
-      // Ctrl+digit / zoom are not control codes either.
-      //
-      // A focused RDP pane is gated the same way and for the same reason: the
-      // remote desktop owns its own Ctrl and Alt chords, so Ctrl+W has to reach
-      // Windows rather than close the pane showing it. (Ctrl+Alt+Del is the one
-      // chord no gate can deliver - the OS eats it - which is why the pane
-      // header has a button for it.)
-      //
-      // "FOCUSED" IS ASKED OF THE DOM. This used to read
-      // `activeLeafKindCurrent === "terminal" || === "rdp"` - which is where
-      // the caret is *in the tab*, not where it is on screen - and its own
-      // comment justified it with "a FOCUSED terminal". The two differ exactly
-      // when the surface is not holding the keys: click the tab strip and
-      // Ctrl+W stayed suppressed, so it closed no tab anywhere; open a rail
-      // view and Ctrl+T / Ctrl+] / Ctrl+[ were eaten by a terminal that was
-      // invisible and pointer-events-none. `ownsRawKeyboard` asks the keydown's
-      // own target instead - see `shortcuts/lib/keyboardOwner.ts`.
-      //
-      // `railView === null` on top of that, rather than trusting the browser to
-      // blur what it hides: a covered surface does not own the keyboard by
-      // definition, and making that a state question rather than a focus
-      // question is what keeps the rail-view case from depending on whether
-      // Chromium happens to move focus off a `visibility: hidden` subtree.
-      id !== "pane.splitRight" &&
-      railView === null &&
-      ownsRawKeyboard(focusTargetOf(e)) &&
-      (isTerminalControlChord(e) || isTerminalMetaChord(e)),
-  });
+  useGlobalShortcuts(shortcutHandlers, { tabAreaCovered: railView !== null });
 
   const paneHandles = usePaneHandles({
     terminalRefs,
@@ -785,6 +738,7 @@ export default function App() {
               <AppSidebar
                 sidebarRef={sidebarRef}
                 explorerRoot={explorerRoot}
+                tabAreaCovered={railView !== null}
                 hasAnySshLeaf={hasAnySshLeaf}
                 onOpenFile={handleOpenFile}
                 onPathRenamed={handlePathRenamed}
@@ -837,6 +791,7 @@ export default function App() {
                 rightSections={rightSections}
                 sshRightOpen={sshRightOpen}
                 explorerRoot={explorerRoot}
+                tabAreaCovered={railView !== null}
                 onPathDeleted={handlePathDeleted}
                 closeSshRight={closeSshRight}
                 activeSshContext={activeSshContext}

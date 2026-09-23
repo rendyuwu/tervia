@@ -1,6 +1,6 @@
 /**
- * WHO OWNS THE RAW KEYBOARD RIGHT NOW - the question App's `isDisabled` gate
- * actually needs answered.
+ * WHO OWNS THE RAW KEYBOARD RIGHT NOW - the question `yieldsToRawKeyboard`
+ * below actually needs answered.
  *
  * A focused terminal owns every bare-Ctrl control code (Ctrl+E, Ctrl+W, Ctrl+K,
  * Ctrl+L, Ctrl+[ Esc, Ctrl+I Tab, the tmux/screen prefix) and every bare-Alt
@@ -31,6 +31,8 @@
  * the rule without a DOM: the predicate is the part that decides, and the part
  * that needs a browser is one line long.
  */
+
+import { isTerminalControlChord, isTerminalMetaChord, type ShortcutId } from "../shortcuts";
 
 /** The least this needs from a DOM node: ask an ancestor-or-self question. */
 export type FocusTarget = { closest(selectors: string): unknown } | null;
@@ -63,4 +65,47 @@ export function ownsRawKeyboard(target: FocusTarget): boolean {
 export function focusTargetOf(e: KeyboardEvent): FocusTarget {
   if (e.target instanceof Element) return e.target;
   return document.activeElement;
+}
+
+/**
+ * True when the keydown for shortcut `id` must be let through to the raw
+ * surface instead of firing the app action bound to it. Applied by
+ * `useGlobalShortcuts` to every caller's matched chord.
+ *
+ * A focused terminal owns every bare-Ctrl control code (Ctrl+E, Ctrl+W,
+ * Ctrl+K, Ctrl+L, Ctrl+[ Esc, Ctrl+I Tab, the tmux/screen prefix, …) and
+ * every bare-Alt meta sequence (readline M-b / M-f / M-d / M-1..9). On
+ * Win/Linux `Mod` is Ctrl, so those chords would otherwise fire an app
+ * action (close tab, word-wrap, explorer search, …) and the byte never
+ * reaches the shell. Exception: `pane.splitRight` (Ctrl+D) always fires;
+ * `pane.splitDown` already passes because it carries Shift. Terminal-safe
+ * app chords keep Shift/Meta or add a second modifier (Ctrl+Shift+C copy,
+ * Ctrl+Shift+X close, Ctrl+Alt+P, Shift+Alt+F) and stay active; Ctrl+Tab /
+ * Ctrl+digit / zoom are not control codes either.
+ *
+ * A focused RDP pane is gated the same way and for the same reason: the
+ * remote desktop owns its own Ctrl and Alt chords, so Ctrl+W has to reach
+ * Windows rather than close the pane showing it. (Ctrl+Alt+Del is the one
+ * chord no gate can deliver - the OS eats it - which is why the pane header
+ * has a button for it.)
+ *
+ * `tabAreaCovered` is the rail-view case, made explicit rather than trusted
+ * to the browser blurring what it hides: a covered surface does not own the
+ * keyboard by definition, and making that a state question the caller
+ * answers - not a focus question this function tries to infer - keeps it
+ * from depending on whether Chromium happens to move focus off a
+ * `visibility: hidden` subtree.
+ */
+export function yieldsToRawKeyboard(
+  id: ShortcutId,
+  target: FocusTarget,
+  e: KeyboardEvent,
+  tabAreaCovered: boolean,
+): boolean {
+  return (
+    id !== "pane.splitRight" &&
+    !tabAreaCovered &&
+    ownsRawKeyboard(target) &&
+    (isTerminalControlChord(e) || isTerminalMetaChord(e))
+  );
 }

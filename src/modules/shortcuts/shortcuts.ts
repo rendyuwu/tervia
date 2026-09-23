@@ -372,12 +372,13 @@ export function canonicalKeyFromEvent(e: KeyboardEvent): string {
  * Esc (0x1B), Ctrl+\ = FS/SIGQUIT (0x1C), Ctrl+] = GS (0x1D). On Windows/Linux
  * `Mod` is Ctrl, so the catalog's Mod+letter defaults (Ctrl+E, Ctrl+W, Ctrl+K,
  * Ctrl+L, Ctrl+B, …) otherwise steal readline editing keys and the GNU
- * screen / tmux prefix from a focused terminal. App's `useGlobalShortcuts`
- * `isDisabled` returns true for this while a terminal is focused, so the byte
- * falls through to xterm instead of firing an app action. Uses `e.code` so it
- * holds on non-US layouts (Ctrl+Shift+letter app chords keep Shift, so they are
- * excluded here and stay active). No-op on macOS: Mod is Cmd there, so no bare-
- * Ctrl chord matches an app shortcut in the first place.
+ * screen / tmux prefix from a focused terminal. `yieldsToRawKeyboard`
+ * (`shortcuts/lib/keyboardOwner.ts`) returns true for this while a terminal is
+ * focused, so the byte falls through to xterm instead of firing an app action.
+ * Uses `e.code` so it holds on non-US layouts (Ctrl+Shift+letter app chords
+ * keep Shift, so they are excluded here and stay active). No-op on macOS: Mod
+ * is Cmd there, so no bare-Ctrl chord matches an app shortcut in the first
+ * place.
  */
 export function isTerminalControlChord(e: KeyboardEvent): boolean {
   if (!e.ctrlKey || e.shiftKey || e.altKey || e.metaKey) return false;
@@ -391,7 +392,7 @@ export function isTerminalControlChord(e: KeyboardEvent): boolean {
  * letter or digit. xterm sends these to the shell as ESC-prefixed meta
  * sequences that readline uses: M-b / M-f word movement, M-d kill-word,
  * M-. last-arg, M-1..M-9 digit-argument, etc. Like [[isTerminalControlChord]]
- * this is gated on in App's `isDisabled` so a focused terminal owns them
+ * this is gated on by `yieldsToRawKeyboard` so a focused terminal owns them
  * instead of an app Alt+letter shortcut (only Alt+Z = word-wrap today, which
  * is an editor action with no meaning in a terminal anyway). Uses `e.code` for
  * layout independence; app chords that add Ctrl/Shift/Meta (Ctrl+Alt+P,

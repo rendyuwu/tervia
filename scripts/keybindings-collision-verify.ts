@@ -116,7 +116,9 @@ if (dupes === 0) console.log("  ok: no chord is bound to two different actions")
 // --- B. Terminal focus: every shell control code must fall through ---------
 console.log("\n[B] terminal focus: shell control codes must reach xterm, not fire an app action");
 // Which action (if any) fires for a chord when a terminal is focused. Mirrors
-// useGlobalShortcuts (first match in array order wins) + App's isDisabled gate.
+// useGlobalShortcuts (first match in array order wins) + its raw-keyboard gate
+// (yieldsToRawKeyboard, shortcuts/lib/keyboardOwner.ts), minus pane.splitRight's
+// exemption.
 function terminalAction(ev: KeyboardEvent): string | null {
   for (const s of SHORTCUTS) {
     const match = s.defaultBindings.some(
@@ -128,7 +130,8 @@ function terminalAction(ev: KeyboardEvent): string | null {
         b.key.toLowerCase() === ev.key.toLowerCase(),
     );
     if (!match) continue;
-    // App.tsx isDisabled: terminal focused + control/meta chord -> fall through.
+    // yieldsToRawKeyboard: terminal focused + control/meta chord -> fall through,
+    // minus pane.splitRight's exemption.
     if (isTerminalControlChord(ev) || isTerminalMetaChord(ev)) return null;
     // browser.* is gated off outside a browser pane -> fall through.
     if (s.id.startsWith("browser.")) return null;
