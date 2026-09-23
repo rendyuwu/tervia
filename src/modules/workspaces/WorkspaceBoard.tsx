@@ -175,7 +175,7 @@ function BoardCardItem({
   // one git call, not N.
   const sshSessionId = e.sshStatus?.kind === "connected" ? e.sshStatus.sessionId : undefined;
   const branch = useGitBranch(
-    !e.sshConnectionId || sshSessionId !== undefined ? e.cwd : undefined,
+    !e.hostId || sshSessionId !== undefined ? e.cwd : undefined,
     sshSessionId,
   );
   // The agent's own todo list, read from its store. Only asked for when an AI

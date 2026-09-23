@@ -11,7 +11,7 @@ import { type PaneTab, type Tab } from "./tabTypes";
  * `ssh:prod`, in the strip AND in the Workspaces panel.
  */
 export function leafKindTag(leaf: PaneLeaf): string | null {
-  if (leaf.leafKind === "terminal" && leaf.sshConnectionId) return "ssh";
+  if (leaf.leafKind === "terminal" && leaf.hostId) return "ssh";
   // Same reasoning as `ssh`: the name is a machine, and which protocol you are
   // holding it open with is not something a rename should be able to drop.
   if (leaf.leafKind === "rdp") return "rdp";
@@ -74,8 +74,8 @@ export function leafLabel(leaf: PaneLeaf, hosts?: Map<string, Host>, fallbackCwd
   }
   // SSH leaves: show "ssh:<name>" when the saved connection has a name, else
   // fall back to the host/IP. Bare "ssh" if the connection was deleted.
-  if (leaf.sshConnectionId) {
-    const host = hosts?.get(leaf.sshConnectionId);
+  if (leaf.hostId) {
+    const host = hosts?.get(leaf.hostId);
     if (!host) return "ssh";
     return `ssh:${host.name.trim() || host.host}`;
   }

@@ -1010,3 +1010,24 @@ CredSSP outward is already safe - `sspi::AuthIdentity.password` is a
 **Trigger.** An `ironrdp-connector` release whose `Credentials::UsernamePassword`
 carries a zeroizing password type; the pinned `=0.9.0` in
 `src-tauri/Cargo.toml` moves with it.
+
+## Workspaces
+
+### A workspace file still names a leaf's host `sshConnectionId`
+
+**Accepted state.** In memory a terminal or editor leaf's saved-host
+reference is `hostId`. On disk it is still written and read under the older
+key `sshConnectionId`, mapped between the two spellings on every save and
+restore. Renaming the on-disk key too would need a read-time fallback kept
+forever (every workspace file written by an earlier build carries the old
+key) and risks a downgraded build reading a renamed key and restoring a
+remote editor leaf as a LOCAL one - the exact hazard
+`isUnrestorableEditorLeaf` exists to prevent. Zero migration, zero data risk,
+at the cost of one name mismatch between memory and disk.
+
+**Carried by.** `SavedTerminalLeaf` and `SavedEditorLeaf` in
+`src/modules/workspaces/store.ts`, and the `leafToSaved` / `savedToNode`
+mapping in `src/modules/workspaces/serialize.ts`.
+
+**Trigger.** A workspace-file migration pass landing for some other reason -
+at that point the saved key can move to `hostId` alongside it.

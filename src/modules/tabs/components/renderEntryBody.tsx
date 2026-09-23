@@ -104,7 +104,7 @@ export function renderEntryBody(args: RenderEntryArgs): ReactNode {
     onSetRenaming,
     onRename,
   } = args;
-  const sshHostCandidate = e.sshConnectionId ? hosts.get(e.sshConnectionId) : undefined;
+  const sshHostCandidate = e.hostId ? hosts.get(e.hostId) : undefined;
   const sshHost = sshHostCandidate && isSshHost(sshHostCandidate) ? sshHostCandidate : undefined;
   // Declared before the trigger JSX below, which reads `renaming` to swap the
   // label for an edit field. Keeping them with the other right-click flags

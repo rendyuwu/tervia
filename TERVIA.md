@@ -396,13 +396,14 @@ talks about `Tab` everywhere and the layer used to carry other kinds. A
 `PaneTab` (`kind: "pane"`) holds a split tree whose leaves
 (`terminal/lib/panes.ts`) are one of three `leafKind`s:
 
-- `terminal` - local PTY, or a remote shell when `sshConnectionId` is set (`cwd`
+- `terminal` - local PTY, or a remote shell when `hostId` is set (`cwd`
   is then ignored). Carries `ptyId`/`savedPtyId` for daemon reattach,
   `terminalOrdinal` for the tab chip, `terminalThemeId` for a per-pane palette,
   and `activeTool` for the AI CLI badge.
-- `editor` - a file, local or remote. `sshConnectionId` is the _stable_ half of
-  a remote editor's identity and is persisted; `sshSessionId` is the live russh
-  session and is not.
+- `editor` - a file, local or remote. `hostId` is the _stable_ half of
+  a remote editor's identity and is persisted (under the on-disk key
+  `sshConnectionId`, kept frozen - see `KNOWN-LIMITS.md`); `sshSessionId` is the
+  live russh session and is not.
 - `board` - the kanban of the workspace's terminals grouped by what their AI CLI
   is doing. Stateless: rebuilt from the live tab tree every render.
 - `rdp` - one RDP session on a canvas. Holds a reference to a saved host, never a

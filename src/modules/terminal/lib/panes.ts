@@ -17,7 +17,7 @@ export type TerminalLeafState = {
    * Saved SSH connection id. When set, connects to that host instead of
    * spawning a local PTY; `cwd` is ignored.
    */
-  sshConnectionId?: string;
+  hostId?: string;
   /**
    * FIFO creation index. 1-based, shown on the tab chip and surfaced to the
    * AI in `<env>`. Set at creation, preserved across split/drag/restart.
@@ -85,7 +85,7 @@ export type EditorLeafState = {
    * is live at render time (see `sshSessionId`). Absent on local files and on
    * ad-hoc connections, which have no saved profile to rebind to.
    */
-  sshConnectionId?: string;
+  hostId?: string;
   /**
    * LIVE russh session this leaf currently reads and writes through (SFTP).
    * Frozen at open time for an ad-hoc connection (no saved profile, so nothing
@@ -228,8 +228,7 @@ export function isLeaf(n: PaneNode): n is PaneLeaf {
  */
 export function isRemoteEditorLeaf(leaf: PaneLeaf): boolean {
   return (
-    leaf.leafKind === "editor" &&
-    (leaf.sshConnectionId !== undefined || leaf.sshSessionId !== undefined)
+    leaf.leafKind === "editor" && (leaf.hostId !== undefined || leaf.sshSessionId !== undefined)
   );
 }
 
@@ -440,7 +439,7 @@ export function cloneLeafState(leaf: PaneLeaf): LeafState {
     return {
       leafKind: "terminal",
       cwd: leaf.cwd,
-      sshConnectionId: leaf.sshConnectionId,
+      hostId: leaf.hostId,
       terminalOrdinal: leaf.terminalOrdinal,
       ...(leaf.terminalThemeId ? { terminalThemeId: leaf.terminalThemeId } : {}),
       // Carry the live agent kind so a move/extract doesn't drop the badge
@@ -454,7 +453,7 @@ export function cloneLeafState(leaf: PaneLeaf): LeafState {
       path: leaf.path,
       dirty: leaf.dirty,
       preview: leaf.preview,
-      sshConnectionId: leaf.sshConnectionId,
+      hostId: leaf.hostId,
       sshSessionId: leaf.sshSessionId,
       sshHostLabel: leaf.sshHostLabel,
     };

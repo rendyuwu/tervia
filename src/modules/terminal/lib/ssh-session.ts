@@ -84,7 +84,7 @@ export function canRetrySsh(status: SshStatus): boolean {
 
 export async function openSshForSession(
   s: Session,
-  sshConnectionId: string,
+  hostId: string,
   cols: number,
   rows: number,
   onData: (bytes: Uint8Array) => void,
@@ -103,8 +103,8 @@ export async function openSshForSession(
   let jumps: SshJumpHop[];
   try {
     const list = await listHosts();
-    const found = list.find((h) => h.id === sshConnectionId);
-    if (!found) throw new Error(`ssh: connection "${sshConnectionId}" not found`);
+    const found = list.find((h) => h.id === hostId);
+    if (!found) throw new Error(`ssh: connection "${hostId}" not found`);
     // A saved id can now name an RDP host - the two used to be different id
     // spaces. Refused rather than cast: reading `proxyJumpId` off an RdpHost
     // would be a type error, not a narrowing that happens to be safe.
@@ -318,7 +318,7 @@ export async function openSshForSession(
           writeSshBanner(s, `\x1b[2m[tervia] server key ${fp}\x1b[0m\r\n`);
           pendingFingerprint = fp;
           // Fire-and-forget. Timestamp write failure shouldn't break the session.
-          void markConnected(sshConnectionId, fp).catch(() => {});
+          void markConnected(hostId, fp).catch(() => {});
           emitConnectedIfReady();
         },
         // First connect to a new host: pause for the user to verify the server
@@ -332,7 +332,7 @@ export async function openSshForSession(
           hostKeyPromptId = prompt.promptId;
           const owners = hostKeyOwners(
             prompt.host,
-            { host: conn.host, connectionId: sshConnectionId },
+            { host: conn.host, connectionId: hostId },
             jumps,
           );
           useHostKeyPrompt.getState().enqueue(
@@ -438,7 +438,7 @@ export async function openSshForSession(
   // the session it is binding on is still the one that started, and nothing at
   // that module's scope can answer. Everything else is spread straight off the
   // default.
-  void startHostForwards(sshConnectionId, sshSession.id, (text) => writeSshBanner(s, text), {
+  void startHostForwards(hostId, sshSession.id, (text) => writeSshBanner(s, text), {
     ...defaultAutostartDeps,
     stillLive: () => !sessionEnded,
   }).catch(() => {});
@@ -498,7 +498,7 @@ export async function forwardDetectedUrl(
 ): Promise<string | null> {
   // On an SSH leaf `pty` is the adapter returned by `openSshForSession`, whose
   // `id` IS the ssh session id - not a local PTY handle. Only ever reached with
-  // `s.sshConnectionId` set, which is what makes that true. Null while a
+  // `s.hostId` set, which is what makes that true. Null while a
   // reconnect is still resolving, and the caller retries on the next print.
   const sessionId = s.pty?.id;
   if (sessionId === undefined) return null;
@@ -562,7 +562,7 @@ export function parkSshConnectFailure(s: Session, message: string): void {
 
 export function scheduleSshReconnect(s: Session, reason: string): void {
   if (s.disposed || s.sshUserClose) return;
-  if (!s.sshConnectionId) return;
+  if (!s.hostId) return;
   if (s.sshReconnectTimer) {
     clearTimeout(s.sshReconnectTimer);
     s.sshReconnectTimer = null;
@@ -603,7 +603,7 @@ export function scheduleSshReconnect(s: Session, reason: string): void {
 
 async function runSshReconnect(s: Session): Promise<void> {
   if (s.disposed || s.sshUserClose) return;
-  if (!s.sshConnectionId) return;
+  if (!s.hostId) return;
   if (s.pty) return; // already alive
   if (s.ptyOpening) return;
   s.ptyOpening = true;
@@ -648,7 +648,7 @@ async function runSshReconnect(s: Session): Promise<void> {
 /** Manually re-arm a disconnected SSH leaf. Resets the attempt counter for a fresh 3-attempt window. */
 export async function retrySsh(s: Session): Promise<void> {
   if (s.disposed) return;
-  if (!s.sshConnectionId) return;
+  if (!s.hostId) return;
   if (s.pty) return;
   if (s.ptyOpening) return;
   if (s.sshReconnectTimer) {
@@ -667,7 +667,7 @@ export async function retrySsh(s: Session): Promise<void> {
 export async function disconnectSsh(leafId: number): Promise<void> {
   const s = sessions.get(leafId);
   if (!s) return;
-  if (!s.sshConnectionId) return;
+  if (!s.hostId) return;
   s.sshUserClose = true;
   if (s.sshReconnectTimer) {
     clearTimeout(s.sshReconnectTimer);
@@ -695,6 +695,6 @@ export async function disconnectSsh(leafId: number): Promise<void> {
 export async function reconnectSsh(leafId: number): Promise<void> {
   const s = sessions.get(leafId);
   if (!s) return;
-  if (!s.sshConnectionId) return;
+  if (!s.hostId) return;
   await retrySsh(s);
 }

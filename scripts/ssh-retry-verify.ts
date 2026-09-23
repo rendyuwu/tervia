@@ -782,7 +782,7 @@ function allIndexes(src: string, needle: string): number[] {
  *
  * `hits` is reported rather than swallowed because the cheap trap is an
  * anchor that matches twice and an `indexOf` that takes whichever came first:
- * this section's previous anchor, `if (s.sshConnectionId) {`, occurs TWICE in
+ * this section's previous anchor, `if (s.sshConnectionId) {`, occurred TWICE in
  * session-lifecycle.ts, and only source order put the spawn catch ahead of the
  * status re-emit at the bottom of `attachSession`. Reordering the file would
  * have silently pointed every assertion below at a block with no ladder in it -

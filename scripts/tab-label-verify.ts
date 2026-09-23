@@ -89,7 +89,7 @@ function paneTab(tree: PaneNode, activeLeafId: number): Tab {
 
 console.log("\nleaf labels");
 {
-  const ssh = term(undefined, { sshConnectionId: "c1" }) as PaneLeaf;
+  const ssh = term(undefined, { hostId: "c1" }) as PaneLeaf;
   check("an SSH leaf reads ssh:<connection name>", leafLabel(ssh, hosts) === "ssh:prod-db");
 
   const unnamed = new Map<string, Host>([["c1", { ...HOST, name: "  " }]]);
@@ -142,7 +142,7 @@ console.log("\nbut the KIND tag is not the user's to rename away");
     kind: "leaf",
     id: id(),
     leafKind: "terminal",
-    sshConnectionId: "c1",
+    hostId: "c1",
     customTitle: "build",
   } as PaneLeaf;
   check("a renamed SSH pane keeps its ssh tag", leafLabel(ssh, hosts) === "ssh:build");
@@ -155,7 +155,7 @@ console.log("\nbut the KIND tag is not the user's to rename away");
 
 console.log("\nthe rename field is seeded WITHOUT the tag");
 {
-  const ssh = term(undefined, { sshConnectionId: "c1" }) as PaneLeaf;
+  const ssh = term(undefined, { hostId: "c1" }) as PaneLeaf;
   // The bug this pins: both rename surfaces seeded from `label`, so keeping the
   // name and pressing Enter stored "ssh:prod-db" and the tab read ssh:ssh:...
   check(
@@ -195,7 +195,7 @@ console.log("\nthe rename field is seeded WITHOUT the tag");
 console.log("\nthe tab strip reads the same function");
 {
   const leaf = term("/srv/app", { customTitle: "build" }) as PaneLeaf;
-  const sshLeaf = term(undefined, { sshConnectionId: "c1" }) as PaneLeaf;
+  const sshLeaf = term(undefined, { hostId: "c1" }) as PaneLeaf;
   const remote = rdpLeaf();
   const tab = paneTab(
     { kind: "split", id: id(), dir: "row", children: [leaf, sshLeaf, remote] },

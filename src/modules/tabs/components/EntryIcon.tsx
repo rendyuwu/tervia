@@ -30,7 +30,7 @@ export function EntryIcon({ entry }: { entry: Entry }) {
     <LeafIcon
       info={{
         leafKind: entry.leafKind,
-        isSsh: !!entry.sshConnectionId,
+        isSsh: !!entry.hostId,
         editorFileName: entry.leafKind === "editor" ? entry.label : undefined,
         editorRemote: !!entry.remoteHost,
         aiCliStatus: entry.aiCliStatus,

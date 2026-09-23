@@ -65,8 +65,8 @@ export const MAX_PANES_PER_TAB = 6;
  * remote leaf that happens to share its path - including a restored remote leaf,
  * which has no session id yet and would otherwise read as local.
  */
-function editorRemoteKey(l: Pick<EditorLeafState, "sshConnectionId" | "sshSessionId">) {
-  return l.sshConnectionId ?? l.sshSessionId ?? null;
+function editorRemoteKey(l: Pick<EditorLeafState, "hostId" | "sshSessionId">) {
+  return l.hostId ?? l.sshSessionId ?? null;
 }
 
 export function useTabs() {
@@ -243,7 +243,7 @@ export function useTabs() {
 
   /** Open a tab whose initial terminal leaf is bound to a saved SSH connection. Routes through `ssh_open`. */
   const newSshTab = useCallback(
-    (sshConnectionId: string, title: string) => {
+    (hostId: string, title: string) => {
       const tabId = nextIdRef.current++;
       const leafId = nextIdRef.current++;
       setTabs((curr) => {
@@ -251,7 +251,7 @@ export function useTabs() {
           kind: "leaf",
           id: leafId,
           leafKind: "terminal",
-          sshConnectionId,
+          hostId,
           terminalOrdinal: allocOrdinal(curr),
         };
         return [
@@ -308,7 +308,7 @@ export function useTabs() {
       remote?: {
         /** Saved profile of the host, when the session came from one. Absent for
          *  an ad-hoc connection, which then cannot survive a restart. */
-        sshConnectionId?: string;
+        hostId?: string;
         sshSessionId: number;
         sshHostLabel: string;
       },
@@ -344,7 +344,7 @@ export function useTabs() {
             dirty: false,
             preview: false,
             ...(remote && {
-              ...(remote.sshConnectionId ? { sshConnectionId: remote.sshConnectionId } : {}),
+              ...(remote.hostId ? { hostId: remote.hostId } : {}),
               sshSessionId: remote.sshSessionId,
               sshHostLabel: remote.sshHostLabel,
             }),
@@ -405,7 +405,7 @@ export function useTabs() {
           dirty: false,
           preview: true,
           ...(remote && {
-            ...(remote.sshConnectionId ? { sshConnectionId: remote.sshConnectionId } : {}),
+            ...(remote.hostId ? { hostId: remote.hostId } : {}),
             sshSessionId: remote.sshSessionId,
             sshHostLabel: remote.sshHostLabel,
           }),
@@ -738,7 +738,7 @@ export function useTabs() {
               preview: false,
               // Carry the host with the path. Cloning the path alone would open
               // a REMOTE path against the local disk in the new pane.
-              ...(source.sshConnectionId ? { sshConnectionId: source.sshConnectionId } : {}),
+              ...(source.hostId ? { hostId: source.hostId } : {}),
               ...(source.sshSessionId !== undefined ? { sshSessionId: source.sshSessionId } : {}),
               ...(source.sshHostLabel ? { sshHostLabel: source.sshHostLabel } : {}),
             };
@@ -869,7 +869,7 @@ export function useTabs() {
         }
         const leaf = findLeaf(source.paneTree, leafId);
         if (!leaf) return curr;
-        // Reuse the leaf's state verbatim so cwd, sshConnectionId, ordinal,
+        // Reuse the leaf's state verbatim so cwd, hostId, ordinal,
         // dirty, and preview travel with it. Leaf id is preserved so App.tsx's
         // per-leaf refs keep their mapping.
         const state: LeafState = cloneLeafState(leaf);

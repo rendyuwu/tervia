@@ -70,7 +70,7 @@ export function useChromeDerivations({
     // Note: keys off the saved-profile id; a rare ad-hoc SSH leaf (no
     // profile) would still show the local root. Widen to live session state if
     // that case matters.
-    if (leaf.sshConnectionId) return leaf.cwd ?? null;
+    if (leaf.hostId) return leaf.cwd ?? null;
     // Local terminal: its own cwd, or the workspace root before OSC 7 lands.
     return leaf.cwd ?? explorerRoot;
   }, [activePaneTab, explorerRoot]);

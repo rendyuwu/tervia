@@ -40,7 +40,7 @@ type Props = {
   focused?: boolean;
   initialCwd?: string;
   /** When set, opens an SSH session instead of a local PTY. */
-  sshConnectionId?: string;
+  hostId?: string;
   /**
    * Daemon-side PTY UUID from a previously saved workspace. The terminal
    * session tries `pty_attach` first and falls back to a fresh spawn on
@@ -81,7 +81,7 @@ export function TerminalPane({
   visible,
   focused = true,
   initialCwd,
-  sshConnectionId,
+  hostId,
   savedPtyId,
   savedActiveTool,
   terminalThemeId,
@@ -124,7 +124,7 @@ export function TerminalPane({
     visible,
     focused,
     initialCwd,
-    sshConnectionId,
+    hostId,
     savedPtyId,
     savedActiveTool,
     terminalThemeId,
