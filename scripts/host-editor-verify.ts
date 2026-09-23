@@ -1742,6 +1742,70 @@ console.log("\n[8] the save hands the store the binding it loaded, and recovers 
     "the error text tells the user their edits survived",
     /edits are still here/.test(catchRegion),
   );
+
+  // The "press Save again" invitation is true only once `existing` has been
+  // re-read: the next stamp is `credentialStamp(existing)`, so a re-read that
+  // failed or came back empty leaves the second press refused the same way.
+  // The same statement-order property `vault-editor-verify.ts` section [17]
+  // pins for the vault editors.
+  const fragFn = recoveryFrag.statements[0];
+  const armStmts =
+    fragFn && ts.isFunctionDeclaration(fragFn) && fragFn.body ? [...fragFn.body.statements] : [];
+  check("the recovery arm's statements were parsed", armStmts.length > 0, armStmts.length);
+  const rereadIdx = armStmts.findIndex((s) => findCalls(s, recoveryFrag, ["findHost"]).length > 0);
+  const noFreshIdx = armStmts.findIndex(
+    (s) => ts.isIfStatement(s) && s.expression.getText(recoveryFrag).includes("!fresh"),
+  );
+  const refreshIdx = armStmts.findIndex(
+    (s) => norm(s.getText(recoveryFrag)) === norm("setExisting(fresh);"),
+  );
+  const inviteIdx = armStmts.findIndex(
+    (s) => !ts.isIfStatement(s) && /press save again/i.test(s.getText(recoveryFrag)),
+  );
+  check("the re-read findHost( was located", rereadIdx >= 0, rereadIdx);
+  check("the not-refreshed exit (!fresh) was located", noFreshIdx >= 0, noFreshIdx);
+  check(
+    "the refresh setExisting(fresh) is a direct statement of the arm",
+    refreshIdx >= 0,
+    refreshIdx,
+  );
+  check('the "press Save again" invitation was located', inviteIdx >= 0, inviteIdx);
+  if (noFreshIdx >= 0) {
+    const noFreshIf = armStmts[noFreshIdx] as ts.IfStatement;
+    const exit = noFreshIf.thenStatement;
+    check(
+      "the not-refreshed exit ends in return",
+      ts.isBlock(exit) &&
+        exit.statements.length > 0 &&
+        ts.isReturnStatement(exit.statements[exit.statements.length - 1]),
+    );
+    const exitText = noFreshIf.getText(recoveryFrag);
+    check(
+      "the not-refreshed exit does not invite a second press (save again / press Save / try again)",
+      !/save again|press save\b|try again/i.test(exitText),
+      exitText,
+    );
+    check(
+      'the not-refreshed exit says "close and reopen" - so an empty or gutted message fails this',
+      /close and reopen/i.test(exitText),
+      exitText,
+    );
+  }
+  if (rereadIdx >= 0 && noFreshIdx >= 0 && refreshIdx >= 0 && inviteIdx >= 0) {
+    check("the not-refreshed exit follows the re-read", rereadIdx < noFreshIdx, {
+      rereadIdx,
+      noFreshIdx,
+    });
+    check("the refresh sits after the not-refreshed exit", noFreshIdx < refreshIdx, {
+      noFreshIdx,
+      refreshIdx,
+    });
+    check(
+      "the invitation is reachable only after the not-refreshed exit and the refresh",
+      refreshIdx < inviteIdx,
+      { refreshIdx, inviteIdx },
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------

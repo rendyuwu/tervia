@@ -1296,49 +1296,59 @@ export function HostEditorDialog({
         // exact defect `sshTouched` exists to prevent. This path reads the record,
         // never a secret.
         const fresh = await findHost(e.hostId).catch(() => undefined);
-        if (fresh) {
-          setExisting(fresh);
-          // The one draft value this recovery does drop, and it has to: the arm
-          // below re-seeds `authMode` from `fresh`, so a record that is now on
-          // key auth would put the key textarea back on screen with the intent
-          // still set - the second press of Save would then delete the body the
-          // user is looking at, with the row that promised it nowhere in the
-          // form. Dropped in the safe direction: nothing has been deleted, the
-          // row renders again from `fresh`'s own flags with its button back, and
-          // its note still says what pressing it does.
-          setForgetKey(false);
-          // The most common way this refusal is reached now is the
-          // credential picker above, on ANOTHER open editor for the same host:
-          // this form loaded a row BOUND to an identity, that binding was
-          // detached in the meantime, and `boundIdentity` recomputes off
-          // `fresh` and goes null the instant it does. A form that loaded a
-          // bound row never had an editable user/username field to seed the
-          // draft from - it was blank the whole time, under
-          // `VaultBindingPanel` - so pressing Save again would write that
-          // blank draft as the record's plain `user`/`authMode` (or
-          // `username`/`domain`), silently overwriting the real values
-          // `fresh` just copied from the identity. Re-seeding those two
-          // fields from `fresh` closes it. The secret fields are written ""
-          // alongside them rather than left as whatever the blank draft
-          // already held, because nothing here has read them and a stale
-          // value must not be implied as current.
-          if (existing?.credential.kind !== "inline" && fresh.credential.kind === "inline") {
-            if (isSshHost(fresh)) {
-              const cred = fresh.credential;
-              if (cred.kind === "inline") {
-                setSshCred({
-                  user: cred.user,
-                  authMode: cred.authMode,
-                  password: "",
-                  privateKey: "",
-                  keyPassphrase: "",
-                });
-              }
-            } else if (isRdpHost(fresh)) {
-              const cred = fresh.credential;
-              if (cred.kind === "inline") {
-                setRdpCred({ username: cred.username, domain: cred.domain ?? "", password: "" });
-              }
+        // A re-read that failed or came back empty refreshed nothing: `existing` -
+        // and with it `boundIdentity` and the stamp the next Save sends - is still
+        // what the form loaded, so a second press is refused the same way.
+        // "Close and reopen" is the only instruction that is true there, the same
+        // exit the vault editors take for the same refusal.
+        if (!fresh) {
+          setError(
+            `${e.message} Close and reopen this host to edit it against what is stored now; ` +
+              `anything typed here has to be entered again.`,
+          );
+          return;
+        }
+        setExisting(fresh);
+        // The one draft value this recovery does drop, and it has to: the arm
+        // below re-seeds `authMode` from `fresh`, so a record that is now on
+        // key auth would put the key textarea back on screen with the intent
+        // still set - the second press of Save would then delete the body the
+        // user is looking at, with the row that promised it nowhere in the
+        // form. Dropped in the safe direction: nothing has been deleted, the
+        // row renders again from `fresh`'s own flags with its button back, and
+        // its note still says what pressing it does.
+        setForgetKey(false);
+        // The most common way this refusal is reached now is the
+        // credential picker above, on ANOTHER open editor for the same host:
+        // this form loaded a row BOUND to an identity, that binding was
+        // detached in the meantime, and `boundIdentity` recomputes off
+        // `fresh` and goes null the instant it does. A form that loaded a
+        // bound row never had an editable user/username field to seed the
+        // draft from - it was blank the whole time, under
+        // `VaultBindingPanel` - so pressing Save again would write that
+        // blank draft as the record's plain `user`/`authMode` (or
+        // `username`/`domain`), silently overwriting the real values
+        // `fresh` just copied from the identity. Re-seeding those two
+        // fields from `fresh` closes it. The secret fields are written ""
+        // alongside them rather than left as whatever the blank draft
+        // already held, because nothing here has read them and a stale
+        // value must not be implied as current.
+        if (existing?.credential.kind !== "inline" && fresh.credential.kind === "inline") {
+          if (isSshHost(fresh)) {
+            const cred = fresh.credential;
+            if (cred.kind === "inline") {
+              setSshCred({
+                user: cred.user,
+                authMode: cred.authMode,
+                password: "",
+                privateKey: "",
+                keyPassphrase: "",
+              });
+            }
+          } else if (isRdpHost(fresh)) {
+            const cred = fresh.credential;
+            if (cred.kind === "inline") {
+              setRdpCred({ username: cred.username, domain: cred.domain ?? "", password: "" });
             }
           }
         }
