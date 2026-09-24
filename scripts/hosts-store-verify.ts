@@ -1129,11 +1129,10 @@ console.log("\n[tags] normalised on every write: trimmed, deduped, capped, absen
   const created = await h.hosts.upsertHost(
     sshHost({ id: "h-1", tags: ["  Prod  ", "prod", "PROD", "db", ""] }),
   );
-  check(
-    "trimmed, blanks dropped, deduped case-insensitively, first spelling kept",
-    created.tags,
-    ["Prod", "db"],
-  );
+  check("trimmed, blanks dropped, deduped case-insensitively, first spelling kept", created.tags, [
+    "Prod",
+    "db",
+  ]);
   check("and that is what got persisted", (await h.hosts.findHost("h-1"))?.tags, ["Prod", "db"]);
 
   const long = "x".repeat(60);
@@ -1142,7 +1141,11 @@ console.log("\n[tags] normalised on every write: trimmed, deduped, capped, absen
 
   const many = Array.from({ length: 30 }, (_, i) => `tag-${i}`);
   const capped = await h.hosts.upsertHost(sshHost({ id: "h-1", tags: many }));
-  check("a host past the count cap keeps only the first 24, in order", capped.tags, many.slice(0, 24));
+  check(
+    "a host past the count cap keeps only the first 24, in order",
+    capped.tags,
+    many.slice(0, 24),
+  );
 
   const cleared = await h.hosts.upsertHost(sshHost({ id: "h-1", tags: ["   ", ""] }));
   check("tags left empty after normalising are absent, never []", cleared.tags, undefined);

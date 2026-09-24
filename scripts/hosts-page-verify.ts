@@ -835,11 +835,11 @@ console.log("\n[tagCounts] merges case-insensitively, keeps the first spelling, 
   const b: SshHost = { ...sshInline("h-91"), tags: ["prod", "staging"] };
   const c: SshHost = { ...sshInline("h-92") };
   const counts = tagCounts([a, b, c]);
-  check("sorted case-insensitively by spelling", counts.map((t) => t.tag), [
-    "db",
-    "Prod",
-    "staging",
-  ]);
+  check(
+    "sorted case-insensitively by spelling",
+    counts.map((t) => t.tag),
+    ["db", "Prod", "staging"],
+  );
   check("counts sum across hosts, merged case-insensitively", counts, [
     { tag: "db", count: 1 },
     { tag: "Prod", count: 2 },

@@ -231,11 +231,11 @@ console.log(
   const viaTag = row(ssh("h-4", "box-four", "10.0.0.4"), { tags: ["deploy-target"] });
   const noMatch = row(ssh("h-3", "box-three", "10.0.0.3"));
   const result = rankHosts([noMatch, viaUser, viaGroup, viaTag], "deploy");
-  check("all three match, the non-match is dropped (not sorted to the bottom)", names(result).sort(), [
-    "box-four",
-    "box-one",
-    "box-two",
-  ]);
+  check(
+    "all three match, the non-match is dropped (not sorted to the bottom)",
+    names(result).sort(),
+    ["box-four", "box-one", "box-two"],
+  );
 }
 // A vault-bound row carries no inline username. The version of this that was
 // here asserted `.length === 1` over a SINGLE-row input, which passes for any

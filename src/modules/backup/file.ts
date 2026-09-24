@@ -288,7 +288,9 @@ function baseOf(raw: Record<string, unknown>): HostBase | null {
   const description = str(raw.description).trim();
   const lastConnectedAt = raw.lastConnectedAt;
   const tags = normalizeHostTags(
-    Array.isArray(raw.tags) ? raw.tags.filter((t): t is string => typeof t === "string") : undefined,
+    Array.isArray(raw.tags)
+      ? raw.tags.filter((t): t is string => typeof t === "string")
+      : undefined,
   );
 
   return {

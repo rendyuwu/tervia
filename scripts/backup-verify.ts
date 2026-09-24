@@ -721,10 +721,16 @@ check(
   host(ssh({ tags: ["  Prod  ", "prod", "", "  "] })).tags,
   ["Prod"],
 );
-check("a non-string tag entry is dropped, not imported as-is", host(ssh({ tags: ["ok", 5, null] })).tags, [
-  "ok",
-]);
-check("a non-array tags value is dropped rather than crashing the import", host(ssh({ tags: "prod" })).tags, undefined);
+check(
+  "a non-string tag entry is dropped, not imported as-is",
+  host(ssh({ tags: ["ok", 5, null] })).tags,
+  ["ok"],
+);
+check(
+  "a non-array tags value is dropped rather than crashing the import",
+  host(ssh({ tags: "prod" })).tags,
+  undefined,
+);
 check("no tags field at all leaves tags absent", host(ssh({})).tags, undefined);
 check(
   "lastConnectedAt survives, but only as a real number",
