@@ -131,7 +131,9 @@ export function IdentityCard({
 
       <div className="flex min-h-6 flex-wrap items-center justify-between gap-x-2 gap-y-1">
         <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs">
-          <span className="text-muted-foreground truncate">{usageDetail(hostCount, groupCount)}</span>
+          <span className="text-muted-foreground truncate">
+            {usageDetail(hostCount, groupCount)}
+          </span>
           {keyName !== undefined ? (
             <span
               className={cn(

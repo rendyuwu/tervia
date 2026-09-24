@@ -1,5 +1,10 @@
 import { defaultIdentityFor } from "../groupTree";
-import { HOST_RDP_SECRET_FIELDS, HOST_SSH_SECRET_FIELDS, type Host, type HostGroup } from "../types";
+import {
+  HOST_RDP_SECRET_FIELDS,
+  HOST_SSH_SECRET_FIELDS,
+  type Host,
+  type HostGroup,
+} from "../types";
 import {
   HOST_RDP_PASSWORD_FIELD,
   HOST_SSH_KEY_PASSPHRASE_FIELD,

@@ -787,9 +787,7 @@ async function applyV3(payload: SealedBlob, passphrase: string): Promise<ImportR
     // check then refuses - losing the whole group row, and every new
     // sub-group under it, over one failed identity write.
     const groupIds = new Set(existingGroups.map((g) => g.id));
-    const landedIdentityIds = new Set(
-      [...existingIdentities, ...savedIdentities].map((i) => i.id),
-    );
+    const landedIdentityIds = new Set([...existingIdentities, ...savedIdentities].map((i) => i.id));
     for (const group of orderGroupWrites(
       resolveGroupDefaults(merged.groups, landedIdentityIds),
       existingGroups,

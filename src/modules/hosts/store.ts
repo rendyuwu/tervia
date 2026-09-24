@@ -14,7 +14,11 @@ import {
   type Tombstone,
 } from "@/lib/tombstones";
 import { tauriSecretsIo } from "@/modules/vault/adapters";
-import { GROUP_DEFAULT_SUFFIX, groupsUsingIdentity, hostsUsingIdentity } from "@/modules/vault/refs";
+import {
+  GROUP_DEFAULT_SUFFIX,
+  groupsUsingIdentity,
+  hostsUsingIdentity,
+} from "@/modules/vault/refs";
 import type { SshSecretValues } from "@/modules/vault/resolve";
 import { SECRET_ALREADY_STORED, vaultStore, type VaultSecretValue } from "@/modules/vault/store";
 import {
