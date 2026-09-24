@@ -817,7 +817,11 @@ pub async fn ssh_remote_forward_close(
         bind_address
     };
     ssh_runtime()
-        .spawn(async move { session.close_remote_forward(bind_address, bound_port, generation).await })
+        .spawn(async move {
+            session
+                .close_remote_forward(bind_address, bound_port, generation)
+                .await
+        })
         .await
         .map_err(|e| format!("ssh remote forward close task join failed: {e}"))?
 }

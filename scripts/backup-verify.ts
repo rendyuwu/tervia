@@ -2226,16 +2226,20 @@ check(
 );
 
 console.log("\n[rules type -D] a SOCKS port is the only field sanitizeRule cares about");
-check("a good -D row survives, with no remoteHost/remotePort refusal", sanitizeRule(rule({ type: "dynamic", localPort: 0, remoteHost: "", remotePort: 0 })), {
-  id: "f-1",
-  name: "postgres",
-  hostId: "h-1",
-  type: "dynamic",
-  localPort: 0,
-  remoteHost: "",
-  remotePort: 0,
-  startWithHost: false,
-});
+check(
+  "a good -D row survives, with no remoteHost/remotePort refusal",
+  sanitizeRule(rule({ type: "dynamic", localPort: 0, remoteHost: "", remotePort: 0 })),
+  {
+    id: "f-1",
+    name: "postgres",
+    hostId: "h-1",
+    type: "dynamic",
+    localPort: 0,
+    remoteHost: "",
+    remotePort: 0,
+    startWithHost: false,
+  },
+);
 check(
   "an invalid SOCKS port drops the row, same predicate as -L's localPort",
   [
@@ -2249,7 +2253,14 @@ console.log("\n[rules type -R] the local target host/port, and an optional bind 
 check(
   "a good -R row survives, remotePort read as the LOCAL TARGET port",
   sanitizeRule(
-    rule({ type: "remote", localPort: 0, remoteHost: "127.0.0.1", remotePort: 8080, bindAddress: "0.0.0.0", bindPort: 0 }),
+    rule({
+      type: "remote",
+      localPort: 0,
+      remoteHost: "127.0.0.1",
+      remotePort: 8080,
+      bindAddress: "0.0.0.0",
+      bindPort: 0,
+    }),
   ),
   {
     id: "f-1",
@@ -2266,7 +2277,10 @@ check(
 );
 check(
   "a -R row with no bindAddress/bindPort at all is still good - both are optional",
-  has(sanitizeRule(rule({ type: "remote", remoteHost: "127.0.0.1", remotePort: 22 })) ?? {}, "bindPort"),
+  has(
+    sanitizeRule(rule({ type: "remote", remoteHost: "127.0.0.1", remotePort: 22 })) ?? {},
+    "bindPort",
+  ),
   false,
 );
 check(
@@ -2291,11 +2305,7 @@ check(
   sanitizeRule(rule({ type: "streamlocal" })),
   null,
 );
-check(
-  "a non-string type is dropped the same way",
-  sanitizeRule(rule({ type: 1 })),
-  null,
-);
+check("a non-string type is dropped the same way", sanitizeRule(rule({ type: 1 })), null);
 
 console.log("\n[rule hosts] a rule rides an SSH session, so it needs one that will be there");
 // Two refusals, and both are `upsertRule`'s: a `hostId` naming no host at all, and

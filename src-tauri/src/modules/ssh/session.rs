@@ -762,7 +762,11 @@ impl SshSession {
         // Per `tcpip_forward`'s own doc: the server reports the bound port
         // only when 0 was requested, and 0 back otherwise - so a PINNED port
         // is never taken from the reply.
-        let bound = if bind_port == 0 { reported as u16 } else { bind_port };
+        let bound = if bind_port == 0 {
+            reported as u16
+        } else {
+            bind_port
+        };
         let generation = mint_forward_generation(&self.forward_seq);
         self.remote_forwards
             .lock()
@@ -1035,7 +1039,8 @@ where
     S: tokio::io::AsyncWrite + Unpin,
 {
     use tokio::io::AsyncWriteExt;
-    io.write_all(&[0x05, code, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await
+    io.write_all(&[0x05, code, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+        .await
 }
 
 /// One accepted SOCKS5 connection: negotiate, then either pipe it through a
@@ -2556,7 +2561,11 @@ mod socks_handshake_tests {
                     .await
                     .unwrap();
                 let result = socks_handshake(&mut server).await.unwrap();
-                assert_eq!(result, Err(0x07), "cmd {cmd:#04x} must be refused as unsupported");
+                assert_eq!(
+                    result,
+                    Err(0x07),
+                    "cmd {cmd:#04x} must be refused as unsupported"
+                );
             });
         }
     }
@@ -2587,7 +2596,6 @@ mod socks_handshake_tests {
         });
     }
 }
-
 
 #[cfg(test)]
 mod chain_tests {
@@ -3035,7 +3043,9 @@ mod remote_dynamic_forward_tests {
     /// the destination both tests dial THROUGH the SSH session, proving bytes
     /// actually crossed it in both directions.
     async fn spawn_echo_server() -> u16 {
-        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move {
             if let Ok((mut sock, _)) = listener.accept().await {

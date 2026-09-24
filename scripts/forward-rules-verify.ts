@@ -405,7 +405,9 @@ console.log("\n[type -R] the local target host/port, and, only when present, the
 }
 
 // ---------------------------------------------------------------------------
-console.log("\n[type undefined, i.e. -L] the original six refusals are untouched by the new branch");
+console.log(
+  "\n[type undefined, i.e. -L] the original six refusals are untouched by the new branch",
+);
 {
   const h = harness();
   const hosts = hostsOf([sshHost()]);
