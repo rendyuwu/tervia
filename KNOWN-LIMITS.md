@@ -78,6 +78,31 @@ pre-check 4 each state what they do and do not assert.
 prompt, or any change that lets this app notice a host's stored secret changing
 underneath an open editor.
 
+## Vault keys
+
+### A `hardware`-kind key is proven through a throwaway ssh-agent, never a real FIDO2 token
+
+**Accepted state.** No hardware FIDO2/U2F token exists in the environment this
+repository's checks run in. The end-to-end proof that a `hardware`-kind vault
+entry authenticates through `authenticate_agent` restricted to one ssh-agent
+identity (`hardware_kind_authenticates_only_through_the_matching_agent_identity`)
+loads an ordinary generated key into a throwaway `ssh-agent` rather than a real
+`sk-ssh-ed25519@openssh.com` identity. The path it proves - agent
+authentication restricted to one fingerprint - is identical either way, since
+Tervia never sees the private material behind a fingerprint regardless of what
+holds it. What is NOT exercised is a physical touch prompt, or a CTAP-specific
+error (device absent, touch timeout, PIN required) surfacing through this
+path: those errors reach `authenticate_agent` as an ordinary ssh-agent
+transport failure today, indistinguishable from any other signing error.
+
+**Carried by.** `hardware_kind_authenticates_only_through_the_matching_agent_identity`'s
+own doc comment in `src-tauri/src/modules/ssh/session.rs`, which names the
+substitution.
+
+**Trigger.** A FIDO2 token becoming available in the environment these checks
+run in, or CTAP-specific error handling being added to `authenticate_agent`'s
+path.
+
 ## Verify suite
 
 ### Exact-text anchors in verify scripts do not survive a reformat

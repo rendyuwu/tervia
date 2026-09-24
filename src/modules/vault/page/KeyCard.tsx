@@ -54,6 +54,23 @@ function usageDetail(identityCount: number): string {
   return identityCount === 1 ? "1 identity" : `${identityCount} identities`;
 }
 
+/** The `cert` kind's validity-window line: "Valid until <date>" while still
+ *  current, "Expired <date>" once `certValidBefore` is in the past, or
+ *  "Never expires" when it is absent - OpenSSH's own "forever" sentinel maps
+ *  to no upper bound at all ({@link VaultKey.certValidBefore}'s own doc
+ *  comment). `null` for every other kind. Computed at render with no
+ *  ticker, on the same terms `lastConnectedLabel` below already is. */
+function certValidityLabel(
+  vaultKey: VaultKey,
+  now: number,
+): { text: string; expired: boolean } | null {
+  if (vaultKey.kind !== "cert" || vaultKey.certValidAfter === undefined) return null;
+  if (vaultKey.certValidBefore === undefined) return { text: "Never expires", expired: false };
+  const expired = vaultKey.certValidBefore * 1000 < now;
+  const date = new Date(vaultKey.certValidBefore * 1000).toLocaleDateString();
+  return { text: expired ? `Expired ${date}` : `Valid until ${date}`, expired };
+}
+
 export function KeyCard({
   vaultKey,
   identityCount,
@@ -64,6 +81,7 @@ export function KeyCard({
   const needsPassphrase = keyNeedsPassphrase(vaultKey);
   // Read at render with no ticker - the ceiling HostCard's ponytail note names.
   const connectedLabel = lastConnectedLabel(vaultKey.lastConnectedAt, Date.now());
+  const validity = certValidityLabel(vaultKey, Date.now());
   return (
     <div
       role="group"
@@ -75,10 +93,17 @@ export function KeyCard({
     >
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
         <span className="min-w-0 flex-1 truncate text-sm font-medium">{vaultKey.name}</span>
+        {vaultKey.kind ? (
+          <Badge variant="outline" className="shrink-0">
+            {vaultKey.kind === "cert" ? "Certificate" : "Hardware key"}
+          </Badge>
+        ) : null}
         <Badge variant={missingPrivateKey ? "destructive" : "outline"} className="shrink-0">
           {missingPrivateKey && <CircleAlert size={11} strokeWidth={2} />}
           {missingPrivateKey
-            ? "Missing private key"
+            ? vaultKey.kind === "hardware"
+              ? "No agent key selected"
+              : "Missing private key"
             : vaultKey.keyType !== undefined
               ? vaultKey.keyType.toUpperCase()
               : "Unknown type"}
@@ -94,6 +119,19 @@ export function KeyCard({
       <div className="text-muted-foreground truncate font-mono text-[11px]">
         {vaultKey.fingerprint ?? "No fingerprint recorded"}
       </div>
+
+      {/* The `cert` kind's own validity window - see
+          `certValidityLabel`'s own doc comment above. */}
+      {validity ? (
+        <div
+          className={cn(
+            "truncate text-[11px]",
+            validity.expired ? "text-destructive" : "text-muted-foreground",
+          )}
+        >
+          {validity.text}
+        </div>
+      ) : null}
 
       {/* The one state the badge above cannot carry, because the badge holds the
           key type and there is exactly one of it. Said in full rather than as a

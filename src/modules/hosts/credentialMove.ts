@@ -261,6 +261,11 @@ function inlineAuthMode(host: Host): VaultAuthMode {
  * empty string), and `"" === ""` would otherwise make every unreadable key a
  * candidate for every other one.
  *
+ * `!k.kind` (plain `pem` only) excludes both newer kinds: a `hardware` key
+ * holds no private material to reuse at all, and a `cert` key's private half
+ * carries certificate baggage a raw inline host body has no business
+ * inheriting silently.
+ *
  * THE FIRST MATCH WINS when several records share one fingerprint. That state is
  * reachable - importing one key file twice is all it takes - and there is no
  * honest way to pick between them here, so the caller names the record it is
@@ -276,7 +281,7 @@ function inlineAuthMode(host: Host): VaultAuthMode {
 export function reusableVaultKey(keys: readonly VaultKey[], facts: VaultKeyFacts): VaultKey | null {
   const fingerprint = facts.fingerprint?.trim();
   if (!fingerprint) return null;
-  return keys.find((k) => k.hasPrivateKey && k.fingerprint?.trim() === fingerprint) ?? null;
+  return keys.find((k) => !k.kind && k.hasPrivateKey && k.fingerprint?.trim() === fingerprint) ?? null;
 }
 
 /**
@@ -570,8 +575,11 @@ export async function convertHostToVault(
   if (mintedKeyId !== null && newKey) {
     const keyDraft: KeyDraft = {
       name: newKey.name,
+      kind: "pem",
       privateKey: "",
       passphrase: "",
+      certificate: "",
+      publicKey: "",
       description: "",
     };
     const keySecrets: { privateKey?: VaultSecretValue; passphrase?: VaultSecretValue } = {};
@@ -582,7 +590,7 @@ export async function convertHostToVault(
     // turns "convert only ever creates" from a property of this code into a
     // refusal the store enforces.
     const upserted = await deps.vault.upsertKey(
-      keyRecordFrom(mintedKeyId, keyDraft, null, newKey.facts),
+      keyRecordFrom(mintedKeyId, keyDraft, null, newKey.facts, null),
       keySecrets,
       VAULT_STAMP_ABSENT,
     );

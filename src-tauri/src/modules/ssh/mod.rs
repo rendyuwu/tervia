@@ -23,7 +23,7 @@ use std::sync::{Arc, OnceLock};
 use getrandom::SysRng;
 use russh::keys::ssh_key::rand_core::UnwrapErr;
 use russh::keys::ssh_key::{LineEnding, PrivateKey};
-use russh::keys::{Algorithm, EcdsaCurve};
+use russh::keys::{Algorithm, Certificate, EcdsaCurve, HashAlg, PublicKey};
 use serde::{Deserialize, Serialize};
 use tauri::ipc::Channel;
 use tauri::AppHandle;
@@ -90,6 +90,14 @@ pub struct SshJumpHop {
     pub private_key: Option<SecretSource>,
     pub private_key_passphrase: Option<SecretSource>,
     pub expected_fingerprint: Option<String>,
+    /// OpenSSH certificate text for this hop, paired with `private_key` -
+    /// set only for a vault entry of the `cert` kind. Public, so unlike
+    /// every field above it never goes through `SecretSource`.
+    pub certificate: Option<String>,
+    /// Restrict `use_agent` to the ssh-agent identity with this SHA256
+    /// fingerprint - set for a vault entry of the `hardware` kind. `None`
+    /// means "any key the agent offers", today's behaviour.
+    pub agent_key_fingerprint: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -115,6 +123,14 @@ pub struct SshOpenInput {
     /// connections. `None` on first connect (TOFU) and on dialog-time
     /// test connections for brand-new hosts.
     pub expected_fingerprint: Option<String>,
+    /// OpenSSH certificate text, paired with `private_key` - set only for a
+    /// vault entry of the `cert` kind. Public, so unlike every secret field
+    /// above it never goes through `SecretSource`.
+    pub certificate: Option<String>,
+    /// Restrict `use_agent` to the ssh-agent identity with this SHA256
+    /// fingerprint - set for a vault entry of the `hardware` kind. `None`
+    /// means "any key the agent offers", today's behaviour.
+    pub agent_key_fingerprint: Option<String>,
     /// ProxyJump chain in connect order (publicly-reachable entry host first;
     /// the hop closest to the target last). Empty/absent = direct connection.
     #[serde(default)]
@@ -197,6 +213,12 @@ pub struct SshAgentKey {
     pub comment: String,
     /// `SHA256:...`, the same form `ssh-add -l` prints.
     pub fingerprint: String,
+    /// The `.pub` line (`to_openssh()`), empty when the crate could not build
+    /// one. Lets a vault `hardware` key editor fill its public-key field from
+    /// a picked agent identity, the same shape a pasted line classifies as
+    /// (`ssh_key_classify`), rather than the agent only ever naming a
+    /// fingerprint.
+    pub public_key: String,
 }
 
 /// Keys currently loaded in the local ssh-agent. Backs the connection dialog's
@@ -218,6 +240,7 @@ pub async fn ssh_agent_keys() -> Result<Vec<SshAgentKey>, String> {
                         algorithm: k.algorithm().to_string(),
                         comment: k.comment().to_string(),
                         fingerprint: k.fingerprint(russh::keys::HashAlg::Sha256).to_string(),
+                        public_key: k.to_openssh().unwrap_or_default(),
                     })
                     .collect(),
             )
@@ -552,6 +575,115 @@ fn ssh_key_inspect_inner(pem: &str, passphrase: Option<&str>) -> Result<SshKeyIn
         // both possibilities instead of picking.
         Err(_) if encrypted => Err(ERR_PASSPHRASE_OR_CORRUPT.into()),
         Err(_) => Err(ERR_UNREADABLE.into()),
+    }
+}
+
+const ERR_CERT_UNREADABLE: &str =
+    "ssh: could not read this OpenSSH certificate - the block looks truncated or altered";
+const ERR_PUBLIC_KEY_UNREADABLE: &str = "ssh: could not read this public key line";
+
+/// What `ssh_key_classify` reports pasted text as: a private key (unlock and
+/// describe it with `ssh_key_inspect`), an OpenSSH certificate (full
+/// metadata, here), a bare public-key line (also full metadata, here), or
+/// neither. Internally tagged the same way `SshEvent` (`session.rs`) is, so
+/// the frontend switches on one `kind` field rather than guessing a shape
+/// from which other fields are present.
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum SshTextClassification {
+    /// Says only that this is one - unlocking and describing it is
+    /// `ssh_key_inspect`'s job, unchanged, for both a `pem` key and a
+    /// `cert` key's signing half.
+    PrivateKey,
+    Certificate {
+        /// The signing CA's own fingerprint - `signature_key()`.
+        ca_fingerprint: String,
+        /// The CERTIFIED key's fingerprint - `public_key()`. Compared
+        /// against the signing key's `ssh_key_inspect` fingerprint at save
+        /// time, so a certificate pasted for the wrong key is refused
+        /// before it is stored.
+        fingerprint: String,
+        key_id: String,
+        principals: Vec<String>,
+        /// Unix seconds.
+        valid_after: u64,
+        /// Unix seconds, or `None` when the certificate never expires
+        /// (OpenSSH's `u64::MAX` "forever" sentinel).
+        valid_before: Option<u64>,
+    },
+    PublicKey {
+        algorithm: String,
+        fingerprint: String,
+        comment: Option<String>,
+        /// The `.pub` line, re-encoded - the same field
+        /// `SshAgentKey::public_key` carries, so a pasted line and a picked
+        /// ssh-agent identity produce one shape.
+        public_key: String,
+    },
+    Unsupported {
+        reason: String,
+    },
+}
+
+/// Classify pasted text as a private key, an OpenSSH certificate, a public
+/// key line, or neither - backs the vault key editor's `cert` and
+/// `hardware` kinds, which each need to know what the user just pasted
+/// without russh's own "Could not read key" collapsing every dead end into
+/// one message. Sync: parsing a certificate or a public-key line runs no
+/// KDF, unlike `ssh_key_inspect`'s async/`spawn_blocking` shape.
+#[tauri::command]
+pub fn ssh_key_classify(text: String) -> Result<SshTextClassification, String> {
+    ssh_key_classify_inner(&text)
+}
+
+fn ssh_key_classify_inner(text: &str) -> Result<SshTextClassification, String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Err(ERR_EMPTY.into());
+    }
+    // Checked before `classify()`'s own verdict: a cert line's algorithm
+    // token (`ssh-ed25519-cert-v01@openssh.com`) STARTS WITH a plain
+    // algorithm name (`ssh-ed25519`), so `classify()`'s substring match
+    // against `PUBLIC_KEY_PREFIXES` would otherwise misfile it as a bare
+    // public key.
+    let first_word = trimmed.split_whitespace().next().unwrap_or("");
+    if first_word.ends_with("-cert-v01@openssh.com") {
+        let cert = Certificate::from_openssh(trimmed).map_err(|_| ERR_CERT_UNREADABLE.to_string())?;
+        let valid_before = cert.valid_before();
+        return Ok(SshTextClassification::Certificate {
+            ca_fingerprint: cert.signature_key().fingerprint(HashAlg::Sha256).to_string(),
+            fingerprint: cert.public_key().fingerprint(HashAlg::Sha256).to_string(),
+            key_id: cert.key_id().to_string(),
+            principals: cert.valid_principals().to_vec(),
+            valid_after: cert.valid_after(),
+            valid_before: (valid_before < u64::MAX).then_some(valid_before),
+        });
+    }
+    let (format, key_text) = classify(trimmed);
+    match format {
+        KeyFormat::PublicKey => {
+            let key =
+                PublicKey::from_openssh(key_text).map_err(|_| ERR_PUBLIC_KEY_UNREADABLE.to_string())?;
+            let comment = key.comment().trim();
+            Ok(SshTextClassification::PublicKey {
+                algorithm: key.algorithm().to_string(),
+                fingerprint: key.fingerprint(HashAlg::Sha256).to_string(),
+                comment: (!comment.is_empty()).then(|| comment.to_string()),
+                public_key: key.to_openssh().unwrap_or_default(),
+            })
+        }
+        KeyFormat::Unknown => Ok(SshTextClassification::Unsupported {
+            reason: ERR_UNKNOWN.into(),
+        }),
+        // DSA, SEC1, an unsupported PEM cipher, PuTTY, PKCS#8, openssh-key-v1
+        // - every one of these is a private-key-shaped header. Whether it
+        // actually decodes (and whether it needs a passphrase) is
+        // `ssh_key_inspect`'s job, not this one's.
+        KeyFormat::Dsa
+        | KeyFormat::Sec1
+        | KeyFormat::UnsupportedPemCipher
+        | KeyFormat::OpenSsh
+        | KeyFormat::Other { .. } => Ok(SshTextClassification::PrivateKey),
     }
 }
 
@@ -1195,8 +1327,10 @@ pub async fn ssh_git(
 #[cfg(test)]
 mod tests {
     use super::{
-        last_line, shell_quote, ssh_key_generate_inner, ssh_key_inspect_inner, ERR_OPENSSH_BODY,
-        ERR_PASSPHRASE_OR_CORRUPT, ERR_UNREADABLE, ERR_WRONG_PASSPHRASE,
+        last_line, shell_quote, ssh_key_classify_inner, ssh_key_generate_inner,
+        ssh_key_inspect_inner, SshTextClassification, SysRng, UnwrapErr, ERR_EMPTY,
+        ERR_OPENSSH_BODY, ERR_PASSPHRASE_OR_CORRUPT, ERR_UNKNOWN, ERR_UNREADABLE,
+        ERR_WRONG_PASSPHRASE,
     };
 
     /// `ssh-keygen -t ed25519 -N '' -C tervia-test@localhost`.
@@ -1852,6 +1986,119 @@ Ym9ndXMgYm9keSwgbmV2ZXIgcmVhY2hlZA==
         );
         let reread = ssh_key_inspect_inner(&generated.pem, None).expect("round trip parses");
         assert_eq!(reread.comment.as_deref(), Some("tervia-test@localhost"));
+    }
+
+    /// Empty and whitespace-only input are refused the same way
+    /// `ssh_key_inspect` refuses them, before any of the three shapes below
+    /// is even considered.
+    #[test]
+    fn classify_refuses_empty_text() {
+        assert_eq!(ssh_key_classify_inner("").unwrap_err(), ERR_EMPTY);
+        assert_eq!(ssh_key_classify_inner("   \n\t").unwrap_err(), ERR_EMPTY);
+    }
+
+    /// A private key, its own `.pub` line, and garbage all classify
+    /// distinctly - the acceptance box this command exists for.
+    #[test]
+    fn classify_tells_a_private_key_a_public_key_and_garbage_apart() {
+        assert!(
+            matches!(
+                ssh_key_classify_inner(PLAIN_ED25519),
+                Ok(SshTextClassification::PrivateKey)
+            ),
+            "a private key must classify as PrivateKey"
+        );
+
+        let pub_line = ssh_key_inspect_inner(PLAIN_ED25519, None)
+            .expect("inspect the fixture")
+            .public_key
+            .expect("fixture has a public half");
+        match ssh_key_classify_inner(&pub_line) {
+            Ok(SshTextClassification::PublicKey {
+                algorithm,
+                fingerprint,
+                public_key,
+                ..
+            }) => {
+                assert_eq!(algorithm, "ssh-ed25519");
+                assert!(fingerprint.starts_with("SHA256:"));
+                assert_eq!(
+                    public_key.split_whitespace().next(),
+                    pub_line.split_whitespace().next(),
+                    "the re-encoded line names the same algorithm/key data"
+                );
+            }
+            other => panic!("a .pub line must classify as PublicKey, got {other:?}"),
+        }
+
+        match ssh_key_classify_inner("this is not a key") {
+            Ok(SshTextClassification::Unsupported { reason }) => {
+                assert_eq!(reason, ERR_UNKNOWN);
+            }
+            other => panic!("garbage must classify as Unsupported, got {other:?}"),
+        }
+    }
+
+    /// The full set of facts a `cert` vault entry needs, read straight off a
+    /// certificate this test signs itself - CA fingerprint, the CERTIFIED
+    /// key's own fingerprint (not the CA's), key id, principals and the
+    /// validity window. Mirrors `create_test_cert`, russh's own dev-only
+    /// test helper for signing a certificate, substituting this crate's own
+    /// `UnwrapErr(SysRng)` for the nonce RNG `ssh_key_generate_inner`
+    /// already uses, rather than the `rand` crate that helper reaches for
+    /// (not a `src-tauri` dependency).
+    #[test]
+    fn classify_reads_a_signed_certificate_s_own_facts() {
+        use russh::keys::ssh_key::certificate::{Builder, CertType};
+
+        let ca = russh::keys::decode_secret_key(
+            &ssh_key_generate_inner("ed25519", None, None)
+                .expect("generate ca key")
+                .pem,
+            None,
+        )
+        .expect("decode ca key");
+        let user = russh::keys::decode_secret_key(
+            &ssh_key_generate_inner("ed25519", None, None)
+                .expect("generate user key")
+                .pem,
+            None,
+        )
+        .expect("decode user key");
+        let ca_fingerprint = ca.fingerprint(russh::keys::HashAlg::Sha256).to_string();
+        let user_fingerprint = user.fingerprint(russh::keys::HashAlg::Sha256).to_string();
+
+        let mut builder = Builder::new_with_random_nonce(
+            &mut UnwrapErr(SysRng),
+            user.public_key(),
+            1_700_000_000,
+            1_800_000_000,
+        )
+        .expect("builder construction");
+        builder.key_id("tervia-test").expect("key id");
+        builder.cert_type(CertType::User).expect("cert type");
+        builder.valid_principal("tervia").expect("principal");
+        let cert = builder.sign(&ca).expect("sign");
+        let cert_text = cert.to_openssh().expect("serialize cert");
+
+        match ssh_key_classify_inner(&cert_text) {
+            Ok(SshTextClassification::Certificate {
+                ca_fingerprint: got_ca,
+                fingerprint: got_fp,
+                key_id,
+                principals,
+                valid_after,
+                valid_before,
+            }) => {
+                assert_eq!(got_ca, ca_fingerprint);
+                assert_eq!(got_fp, user_fingerprint);
+                assert_eq!(key_id, "tervia-test");
+                assert_eq!(principals, vec!["tervia".to_string()]);
+                assert_eq!(valid_after, 1_700_000_000);
+                assert_eq!(valid_before, Some(1_800_000_000));
+            }
+            other => panic!("a signed certificate must classify as Certificate, got {other:?}"),
+        }
     }
 
     /// The rc-noise guard: a chatty remote `~/.bashrc` prepends its own output

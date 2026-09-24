@@ -114,6 +114,7 @@ import type {
   VaultAuthMode,
   VaultIdentity,
   VaultKey,
+  VaultKeyKind,
   VaultKeyType,
 } from "@/modules/vault/types";
 
@@ -585,6 +586,12 @@ export function sanitizeIdentity(raw: unknown): VaultIdentity | null {
  * survive an export/import round trip: `buildBackup` seals the records
  * themselves, so the field travels out unaided, and this is the only gate on
  * the way back in.
+ *
+ * `kind` and, for a `"cert"` key, its certificate and parsed facts are
+ * carried the same way `fingerprint`/`publicKey` are - public, unvalidated
+ * strings, display data on this side. An unrecognised `kind` (a future kind
+ * this build does not know) drops the whole row rather than importing it as
+ * a `pem` key with fields missing that kind actually needs.
  */
 export function sanitizeKey(raw: unknown): VaultKey | null {
   if (!isRecord(raw)) return null;
@@ -592,14 +599,36 @@ export function sanitizeKey(raw: unknown): VaultKey | null {
   const name = str(raw.name).trim();
   if (!id || !name) return null;
 
+  // Unlike `keyType` below, an unrecognised `kind` is not merely omitted:
+  // it changes which fields the record even needs to be usable at all (a
+  // certificate, for `"cert"`; nothing secret, for `"hardware"`), so
+  // importing it as though `kind` were absent would silently promise a
+  // plain PEM key the row never was. Drop the whole row instead.
+  if (raw.kind !== undefined && raw.kind !== "cert" && raw.kind !== "hardware") return null;
+  const kind: VaultKeyKind | undefined =
+    raw.kind === "cert" || raw.kind === "hardware" ? raw.kind : undefined;
+
   const type = keyType(raw.keyType);
   const fingerprint = str(raw.fingerprint).trim();
   const publicKey = str(raw.publicKey).trim();
   const description = str(raw.description).trim();
+  // The certificate and its parsed facts: public data, carried like
+  // `fingerprint`/`publicKey` above - trimmed strings, not re-validated
+  // (`ssh_key_classify` already did that on the exporting machine), and
+  // only when `kind === "cert"`, since they name nothing outside it.
+  const certificate = str(raw.certificate).trim();
+  const certCaFingerprint = str(raw.certCaFingerprint).trim();
+  const certKeyId = str(raw.certKeyId).trim();
+  const certPrincipals = Array.isArray(raw.certPrincipals)
+    ? raw.certPrincipals.filter((p): p is string => typeof p === "string")
+    : [];
+  const certValidAfter = typeof raw.certValidAfter === "number" ? raw.certValidAfter : undefined;
+  const certValidBefore = typeof raw.certValidBefore === "number" ? raw.certValidBefore : undefined;
 
   return {
     id,
     name,
+    ...(kind ? { kind } : {}),
     ...(type ? { keyType: type } : {}),
     ...(fingerprint ? { fingerprint } : {}),
     ...(publicKey ? { publicKey } : {}),
@@ -614,6 +643,12 @@ export function sanitizeKey(raw: unknown): VaultKey | null {
     hasPrivateKey: false,
     hasPassphrase: false,
     ...(description ? { description } : {}),
+    ...(kind === "cert" && certificate ? { certificate } : {}),
+    ...(kind === "cert" && certCaFingerprint ? { certCaFingerprint } : {}),
+    ...(kind === "cert" && certKeyId ? { certKeyId } : {}),
+    ...(kind === "cert" && certPrincipals.length > 0 ? { certPrincipals } : {}),
+    ...(kind === "cert" && certValidAfter !== undefined ? { certValidAfter } : {}),
+    ...(kind === "cert" && certValidBefore !== undefined ? { certValidBefore } : {}),
   };
 }
 

@@ -105,6 +105,12 @@ export type SshJumpHop = {
   privateKey?: SecretSource;
   privateKeyPassphrase?: SecretSource;
   expectedFingerprint?: string;
+  /** OpenSSH certificate text, paired with `privateKey` - set only for a
+   *  vault entry of the `cert` kind. Public, unlike every field above it. */
+  certificate?: string;
+  /** Restrict `useAgent` to the ssh-agent identity with this SHA256
+   *  fingerprint - set for a vault entry of the `hardware` kind. */
+  agentKeyFingerprint?: string;
 };
 
 export type SshOpenInput = {
@@ -119,6 +125,12 @@ export type SshOpenInput = {
   privateKeyPassphrase?: SecretSource;
   /** SHA256 fingerprint from a previous connect. If set and the server key differs, the backend returns a `host key mismatch` error. */
   expectedFingerprint?: string;
+  /** OpenSSH certificate text, paired with `privateKey` - set only for a
+   *  vault entry of the `cert` kind. Public, unlike every field above it. */
+  certificate?: string;
+  /** Restrict `useAgent` to the ssh-agent identity with this SHA256
+   *  fingerprint - set for a vault entry of the `hardware` kind. */
+  agentKeyFingerprint?: string;
   /** ProxyJump chain in connect order (entry host first). Empty/absent = direct. */
   jumps?: SshJumpHop[];
   cols: number;
@@ -130,6 +142,11 @@ export type SshAgentKey = {
   algorithm: string;
   comment: string;
   fingerprint: string;
+  /** The `.pub` line, empty when the backend could not build one. Lets a
+   *  vault `hardware` key editor fill its public-key field from a picked
+   *  agent identity, the same shape `SshTextClassification`'s `publicKey`
+   *  variant already carries for a pasted line. */
+  publicKey: string;
 };
 
 /** Keys the local ssh-agent is holding. Rejects with a message naming what to
@@ -162,6 +179,33 @@ export type SshKeyInfo = {
  *  wrong passphrase. */
 export function inspectSshKey(pem: string, passphrase?: string): Promise<SshKeyInfo> {
   return invoke<SshKeyInfo>("ssh_key_inspect", { pem, passphrase: passphrase ?? null });
+}
+
+/** What `ssh_key_classify` resolves pasted text as - a private key
+ *  (`ssh_key_inspect` unlocks and describes it, unchanged), an OpenSSH
+ *  certificate, a bare public-key line, or neither. Backs the vault key
+ *  editor's `cert` and `hardware` kinds. */
+export type SshTextClassification =
+  | { kind: "privateKey" }
+  | {
+      kind: "certificate";
+      caFingerprint: string;
+      /** The CERTIFIED key's own fingerprint, not the CA's. */
+      fingerprint: string;
+      keyId: string;
+      principals: string[];
+      validAfter: number;
+      /** `null` when the certificate never expires. */
+      validBefore: number | null;
+    }
+  | { kind: "publicKey"; algorithm: string; fingerprint: string; comment: string | null; publicKey: string }
+  | { kind: "unsupported"; reason: string };
+
+/** Classify pasted text as a private key, an OpenSSH certificate, a public
+ *  key line, or neither - no passphrase, no unlocking, no KDF. Rejects on
+ *  empty text with the same message `ssh_key_inspect` uses. */
+export function classifySshText(text: string): Promise<SshTextClassification> {
+  return invoke<SshTextClassification>("ssh_key_classify", { text });
 }
 
 /** Algorithms `ssh_key_generate` accepts, matched exactly against the Rust
@@ -433,6 +477,8 @@ export async function openSsh(input: SshOpenInput, handlers: SshHandlers): Promi
       privateKey: input.privateKey ?? null,
       privateKeyPassphrase: input.privateKeyPassphrase ?? null,
       expectedFingerprint: input.expectedFingerprint ?? null,
+      certificate: input.certificate ?? null,
+      agentKeyFingerprint: input.agentKeyFingerprint ?? null,
       jumps: (input.jumps ?? []).map((j) => ({
         connectionId: j.connectionId,
         host: j.host,
@@ -443,6 +489,8 @@ export async function openSsh(input: SshOpenInput, handlers: SshHandlers): Promi
         privateKey: j.privateKey ?? null,
         privateKeyPassphrase: j.privateKeyPassphrase ?? null,
         expectedFingerprint: j.expectedFingerprint ?? null,
+        certificate: j.certificate ?? null,
+        agentKeyFingerprint: j.agentKeyFingerprint ?? null,
       })),
       cols: input.cols,
       rows: input.rows,

@@ -27,6 +27,27 @@ export type KeyInspectResult = {
   comment: string | null;
 };
 
+/**
+ * Structurally what `classifySshText` resolves with. Declared rather than
+ * imported, for the same reason {@link KeyInspectResult} is - see its own
+ * doc comment.
+ */
+export type SshTextClassification =
+  | { kind: "privateKey" }
+  | {
+      kind: "certificate";
+      caFingerprint: string;
+      /** The CERTIFIED key's own fingerprint, not the CA's. */
+      fingerprint: string;
+      keyId: string;
+      principals: string[];
+      validAfter: number;
+      /** `null` when the certificate never expires. */
+      validBefore: number | null;
+    }
+  | { kind: "publicKey"; algorithm: string; fingerprint: string; comment: string | null; publicKey: string }
+  | { kind: "unsupported"; reason: string };
+
 export type KeyInspectState =
   | { kind: "idle" }
   | { kind: "checking" }
@@ -78,6 +99,53 @@ export function describeKeyInfo(info: KeyInspectResult): KeyInspectState {
  * them here would put a second copy of that wording in the tree.
  */
 export function describeKeyError(err: unknown): KeyInspectState {
+  const raw = err instanceof Error ? err.message : String(err);
+  const message = raw.startsWith("ssh: ") ? raw.slice("ssh: ".length) : raw;
+  return { kind: "error", message };
+}
+
+/**
+ * What `classifySshText`'s answer means for the certificate panel in the
+ * key editor's `cert` kind - the same "translate the backend's classification
+ * into what a form renders" job {@link describeKeyInfo} does for a private
+ * key, over a different question ("what is this text") rather than "what did
+ * unlocking it find".
+ */
+export type CertInspectState =
+  | { kind: "idle" }
+  | { kind: "checking" }
+  | {
+      kind: "ok";
+      caFingerprint: string;
+      fingerprint: string;
+      keyId: string;
+      principals: string[];
+      validAfter: number;
+      validBefore: number | null;
+    }
+  /** The pasted text classified as something other than a certificate - a
+   *  private key, a public-key line, or unsupported. One state rather than
+   *  three: the panel this backs only ever needs to say "that is not a
+   *  certificate", not which of the other three it was. */
+  | { kind: "notACertificate" }
+  | { kind: "error"; message: string };
+
+export function describeCertClassification(classification: SshTextClassification): CertInspectState {
+  if (classification.kind !== "certificate") return { kind: "notACertificate" };
+  return {
+    kind: "ok",
+    caFingerprint: classification.caFingerprint,
+    fingerprint: classification.fingerprint,
+    keyId: classification.keyId,
+    principals: classification.principals,
+    validAfter: classification.validAfter,
+    validBefore: classification.validBefore,
+  };
+}
+
+/** {@link describeKeyError}, over a `ssh_key_classify` rejection instead of
+ *  an `ssh_key_inspect` one - same prefix-stripping rule, same reason. */
+export function describeCertError(err: unknown): CertInspectState {
   const raw = err instanceof Error ? err.message : String(err);
   const message = raw.startsWith("ssh: ") ? raw.slice("ssh: ".length) : raw;
   return { kind: "error", message };
@@ -171,5 +239,56 @@ export function vaultKeyFactsFrom(info: KeyInspectResult): VaultKeyFacts {
     fingerprint: info.fingerprint || undefined,
     publicKey: info.publicKey || undefined,
     encrypted: info.encrypted,
+  };
+}
+
+/**
+ * The five things a saved `cert`-kind {@link VaultKey} records about its
+ * certificate, from one `ssh_key_classify` answer over the certificate text.
+ * A sibling of {@link VaultKeyFacts}, over a different classification shape -
+ * this one has only one answer to translate ("certificate"), so there is no
+ * sealed/absent split to draw the way {@link vaultKeyFactsFrom} does.
+ */
+export type VaultCertFacts = {
+  certCaFingerprint: string;
+  certKeyId: string;
+  certPrincipals: string[];
+  certValidAfter: number;
+  /** Absent when the certificate never expires. */
+  certValidBefore?: number;
+};
+
+/** `null` when `classification` is not a certificate at all - the caller's
+ *  own refusal to save covers that case, using the specific wrong-kind
+ *  message the other three variants already carry. */
+export function vaultCertFactsFrom(classification: SshTextClassification): VaultCertFacts | null {
+  if (classification.kind !== "certificate") return null;
+  return {
+    certCaFingerprint: classification.caFingerprint,
+    certKeyId: classification.keyId,
+    certPrincipals: classification.principals,
+    certValidAfter: classification.validAfter,
+    ...(classification.validBefore !== null ? { certValidBefore: classification.validBefore } : {}),
+  };
+}
+
+/**
+ * A `hardware`-kind key's facts, from one `ssh_key_classify` answer over a
+ * pasted or agent-picked public-key line. Reuses {@link VaultKeyFacts} rather
+ * than a fourth "hardware facts" shape: `keyType`/`fingerprint`/`publicKey`
+ * mean exactly what they mean for a `pem` key, they just come from a
+ * public-key classification instead of an unlock. `encrypted` is explicitly
+ * `undefined` (not omitted) for the same "wholesale replace" reason
+ * {@link vaultKeyFactsFrom}'s own doc comment gives.
+ *
+ * `null` when `classification` is not a public-key line at all.
+ */
+export function hardwareFactsFrom(classification: SshTextClassification): VaultKeyFacts | null {
+  if (classification.kind !== "publicKey") return null;
+  return {
+    keyType: vaultKeyTypeFrom(classification.algorithm),
+    fingerprint: classification.fingerprint,
+    publicKey: classification.publicKey,
+    encrypted: undefined,
   };
 }

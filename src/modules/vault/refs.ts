@@ -84,9 +84,16 @@ export function identitiesUsingKey(
  *
  * `hasPassphrase` is deliberately not part of the answer: a key with no
  * passphrase is a key with no passphrase, not a key that is missing one.
+ *
+ * A `hardware` key never has a private half stored by this app at all -
+ * `hasPrivateKey` is permanently `false` for it, by design (see
+ * {@link VaultKeyKind} in `./types`) - so `hasPrivateKey` cannot be the
+ * question for that kind. What identifies a hardware entry is its
+ * `fingerprint`, matched against the OS ssh-agent at dial time; absent is
+ * the only way that entry can be broken.
  */
 export function keyMissingSecret(key: VaultKey): boolean {
-  return !key.hasPrivateKey;
+  return key.kind === "hardware" ? !key.fingerprint : !key.hasPrivateKey;
 }
 
 /**

@@ -11,7 +11,7 @@ use russh::client::{
 };
 use russh::keys::agent::client::{AgentClient, AgentStream};
 use russh::keys::agent::AgentIdentity;
-use russh::keys::{Algorithm, EcdsaCurve, HashAlg, PrivateKeyWithHashAlg, PublicKey};
+use russh::keys::{Algorithm, Certificate, EcdsaCurve, HashAlg, PrivateKeyWithHashAlg, PublicKey};
 use russh::AgentAuthError;
 use russh::{ChannelMsg, ChannelWriteHalf, Disconnect};
 use russh_sftp::client::SftpSession;
@@ -1527,6 +1527,11 @@ async fn authenticate_agent(
     handle: &mut Handle<HostKeyVerifier>,
     host: &str,
     user: &str,
+    // Restrict the offer to the ssh-agent identity with this SHA256
+    // fingerprint - set for a vault entry of the `hardware` kind, so THIS
+    // identity is what authenticates rather than whichever key the agent
+    // happens to offer first. `None` is today's behaviour: every key.
+    only_fingerprint: Option<&str>,
 ) -> Result<bool, SshConnectError> {
     // The kind comes from `agent_keys`, which knows which of its failures this
     // was and which transport arm it came through; only the host label is added.
@@ -1534,12 +1539,28 @@ async fn authenticate_agent(
     let (mut agent, keys) = agent_keys()
         .await
         .map_err(|e| e.map_message(|m| format!("ssh: [{host}] {m}")))?;
+    let keys: Vec<PublicKey> = match only_fingerprint {
+        Some(fp) => keys
+            .into_iter()
+            .filter(|k| k.fingerprint(HashAlg::Sha256).to_string() == fp)
+            .collect(),
+        None => keys,
+    };
     if keys.is_empty() {
-        // A running agent holding nothing is a state of this machine. Retrying
-        // does not add a key to it.
-        return Err(SshConnectError::config(format!(
-            "ssh: [{host}] ssh-agent is running but holds no usable key. Add one with `ssh-add`."
-        )));
+        // A running agent holding nothing USABLE - either nothing at all, or
+        // (with `only_fingerprint` set) not the one identity a `hardware`
+        // vault entry names - is a state of this machine. Retrying does not
+        // add a key to it.
+        return Err(SshConnectError::config(match only_fingerprint {
+            Some(fp) => format!(
+                "ssh: [{host}] ssh-agent does not hold the key {fp}. Add it with `ssh-add`, \
+                 or point the token/agent that does hold it at this machine."
+            ),
+            None => format!(
+                "ssh: [{host}] ssh-agent is running but holds no usable key. Add one with \
+                 `ssh-add`."
+            ),
+        }));
     }
     // Offered in the agent's own order, like OpenSSH does, stopping at the first
     // one the server takes. The loop caps nothing itself, so an agent holding
@@ -1593,9 +1614,42 @@ async fn authenticate_hop(
     password: Option<&str>,
     private_key: Option<&str>,
     passphrase: Option<&str>,
+    // OpenSSH certificate text paired with `private_key` - set only for a
+    // vault entry of the `cert` kind. Checked before the plain-key branch:
+    // a cert kind still carries its signing key in `private_key`, so the
+    // two must not be told apart by `private_key` alone.
+    certificate: Option<&str>,
+    // Restrict `use_agent` to one ssh-agent identity - see
+    // `authenticate_agent`'s own doc comment.
+    agent_key_fingerprint: Option<&str>,
 ) -> Result<bool, SshConnectError> {
     if use_agent {
-        authenticate_agent(handle, host, user).await
+        authenticate_agent(handle, host, user, agent_key_fingerprint).await
+    } else if let (Some(pk_text), Some(cert_text)) = (private_key, certificate) {
+        let key = russh::keys::decode_secret_key(pk_text, passphrase).map_err(|e| {
+            SshConnectError::config(format!("ssh: [{host}] parse private key failed: {e}"))
+        })?;
+        let cert = Certificate::from_openssh(cert_text).map_err(|e| {
+            SshConnectError::config(format!("ssh: [{host}] parse certificate failed: {e}"))
+        })?;
+        // The authoritative half of the pairing check - see
+        // `ssh_key_classify`'s doc comment (`mod.rs`) for the frontend's own
+        // check at save time, over fingerprints rather than key data. This
+        // one runs unconditionally, because a record can reach this point
+        // without ever passing through that check (hand-edited JSON, a sync
+        // landing, an older client).
+        if cert.public_key() != key.public_key().key_data() {
+            return Err(SshConnectError::config(format!(
+                "ssh: [{host}] this certificate does not certify the paired private key"
+            )));
+        }
+        Ok(handle
+            .authenticate_openssh_cert(user, Arc::new(key), cert)
+            .await
+            .map_err(|e| {
+                SshConnectError::transport(format!("ssh: [{host}] certificate auth error: {e}"))
+            })?
+            .success())
     } else if let Some(pk_text) = private_key {
         // Config, and this is the row the whole ladder fix turns on: a WRONG
         // PASSPHRASE fails here, before anything is sent, because the key never
@@ -1758,6 +1812,8 @@ pub async fn connect(
             plain(&hop_secrets.password),
             plain(&hop_secrets.private_key),
             plain(&hop_secrets.private_key_passphrase),
+            hop.certificate.as_deref(),
+            hop.agent_key_fingerprint.as_deref(),
         )
         .await?;
         if !ok {
@@ -1820,6 +1876,8 @@ pub async fn connect(
         plain(&secrets.target.password),
         plain(&secrets.target.private_key),
         plain(&secrets.target.private_key_passphrase),
+        input.certificate.as_deref(),
+        input.agent_key_fingerprint.as_deref(),
     )
     .await?;
 
@@ -2753,6 +2811,8 @@ mod chain_tests {
                 private_key: Some(SecretSource::Inline { value: key.clone() }),
                 private_key_passphrase: None,
                 expected_fingerprint: env_opt("TERVIA_IT_JUMP_FP"),
+                certificate: None,
+                agent_key_fingerprint: None,
             });
             jump_secrets.push(key_secret());
         }
@@ -2766,6 +2826,8 @@ mod chain_tests {
             private_key: Some(SecretSource::Inline { value: key.clone() }),
             private_key_passphrase: None,
             expected_fingerprint: env_opt("TERVIA_IT_TARGET_FP"),
+            certificate: None,
+            agent_key_fingerprint: None,
             jumps,
             cols: 80,
             rows: 24,
@@ -2809,6 +2871,8 @@ mod chain_tests {
             private_key: None,
             private_key_passphrase: None,
             expected_fingerprint: None,
+            certificate: None,
+            agent_key_fingerprint: None,
             jumps: Vec::new(),
             cols: 80,
             rows: 24,
@@ -3041,6 +3105,19 @@ mod chain_tests {
             })
     }
 
+    /// Kills and reaps a spawned child on drop - sshd in the existing test
+    /// below, and sshd/`ssh-agent` in the two new ones, so a panicking
+    /// assertion never leaves a background process running past the test.
+    #[cfg(unix)]
+    struct ChildGuard(std::process::Child);
+    #[cfg(unix)]
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
     /// Live end-to-end proof that a GENERATED key is not merely a PEM
     /// `ssh_key_inspect_inner` can parse back (`mod.rs`'s own unit tests cover
     /// that): it is a private key a real sshd accepts. `ssh_key_generate`
@@ -3131,14 +3208,7 @@ mod chain_tests {
                 .arg(&config_path)
                 .spawn()
                 .expect("spawn sshd - is /usr/sbin/sshd runnable by this user?");
-            struct SshdGuard(std::process::Child);
-            impl Drop for SshdGuard {
-                fn drop(&mut self) {
-                    let _ = self.0.kill();
-                    let _ = self.0.wait();
-                }
-            }
-            let _guard = SshdGuard(child);
+            let _guard = ChildGuard(child);
 
             // Poll for the listener - sshd's own startup (host key parse,
             // socket bind) is not instant, the same reason
@@ -3168,6 +3238,8 @@ mod chain_tests {
                 // never blocks on the first-connect dialog this test has no
                 // frontend to answer.
                 expected_fingerprint: host_key.info.fingerprint.clone(),
+                certificate: None,
+                agent_key_fingerprint: None,
                 jumps: Vec::new(),
                 cols: 80,
                 rows: 24,
@@ -3193,6 +3265,446 @@ mod chain_tests {
             session.close().await;
             eprintln!(
                 "[keygen_e2e] OK: a generated ed25519 key authenticated against a local sshd on 127.0.0.1:{port}"
+            );
+        });
+    }
+
+    /// Live end-to-end proof that a certificate vault entry authenticates
+    /// through `authenticate_openssh_cert` against a server that trusts ONLY
+    /// a CA - `TrustedUserCAKeys`, with an EMPTY `authorized_keys` - and that
+    /// the signing key ALONE, with no certificate, is refused by that same
+    /// server. `ssh_key_generate` mints the CA and the user key; the
+    /// certificate is built and signed with `certificate::Builder`,
+    /// mirroring `create_test_cert`, russh's own dev-only test helper for
+    /// signing a certificate, substituting this crate's own
+    /// `UnwrapErr(SysRng)` for the nonce RNG in place of the `rand` crate
+    /// that helper uses (not a `src-tauri` dependency).
+    ///
+    /// `#[ignore]`d for the reason the keygen test above is: no
+    /// `/usr/sbin/sshd` in CI. Run with:
+    ///   cargo test --manifest-path src-tauri/Cargo.toml cert_authenticates_against_a_real_sshd_trusting_only_the_ca -- --ignored --nocapture
+    #[test]
+    #[ignore = "needs /usr/sbin/sshd"]
+    #[cfg(unix)]
+    fn cert_authenticates_against_a_real_sshd_trusting_only_the_ca() {
+        use russh::keys::ssh_key::certificate::{Builder, CertType};
+        use russh::keys::ssh_key::rand_core::UnwrapErr;
+        use getrandom::SysRng;
+
+        let sshd_path = std::path::Path::new("/usr/sbin/sshd");
+        if !sshd_path.exists() {
+            eprintln!("[cert_e2e] skipped: {} not found", sshd_path.display());
+            return;
+        }
+
+        let scratch = ScratchDir::new("cert");
+        let port = std::net::TcpListener::bind(("127.0.0.1", 0))
+            .expect("bind an ephemeral port to find a free one")
+            .local_addr()
+            .expect("local_addr")
+            .port();
+        let user = current_username();
+
+        it_runtime().block_on(async move {
+            let host_key = crate::modules::ssh::ssh_key_generate("ed25519".into(), None, None)
+                .await
+                .expect("host key generation failed");
+            let ca_key = crate::modules::ssh::ssh_key_generate("ed25519".into(), None, None)
+                .await
+                .expect("ca key generation failed");
+            let user_key = crate::modules::ssh::ssh_key_generate("ed25519".into(), None, None)
+                .await
+                .expect("user key generation failed");
+
+            let ca = russh::keys::decode_secret_key(&ca_key.pem, None).expect("decode ca key");
+            let subject =
+                russh::keys::decode_secret_key(&user_key.pem, None).expect("decode user key");
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_secs();
+            let mut rng = UnwrapErr(SysRng);
+            let mut builder =
+                Builder::new_with_random_nonce(&mut rng, subject.public_key(), now - 3600, now + 3600)
+                    .expect("builder construction");
+            builder.key_id("tervia-cert-e2e").expect("key id");
+            builder.cert_type(CertType::User).expect("cert type");
+            builder.valid_principal(&user).expect("principal");
+            let cert = builder.sign(&ca).expect("sign certificate");
+            let cert_text = cert.to_openssh().expect("serialize certificate");
+
+            let host_key_path = scratch.path("host_key");
+            std::fs::write(&host_key_path, host_key.pem.as_bytes()).expect("write host key");
+            owner_only(&host_key_path);
+
+            let ca_pub_path = scratch.path("ca.pub");
+            std::fs::write(
+                &ca_pub_path,
+                format!(
+                    "{}\n",
+                    ca_key.info.public_key.clone().expect("ca public key recorded")
+                ),
+            )
+            .expect("write CA public key");
+
+            // Empty on purpose: the whole point of this test is that the
+            // signing key is trusted ONLY through `TrustedUserCAKeys`, never
+            // through an `authorized_keys` entry of its own.
+            let authorized_keys_path = scratch.path("authorized_keys");
+            std::fs::write(&authorized_keys_path, "").expect("write empty authorized_keys");
+            owner_only(&authorized_keys_path);
+
+            let config_path = scratch.path("sshd_config");
+            std::fs::write(
+                &config_path,
+                format!(
+                    "Port {port}\n\
+                     ListenAddress 127.0.0.1\n\
+                     HostKey {}\n\
+                     AuthorizedKeysFile {}\n\
+                     TrustedUserCAKeys {}\n\
+                     PidFile {}\n\
+                     UsePAM no\n\
+                     StrictModes no\n\
+                     PasswordAuthentication no\n\
+                     PubkeyAuthentication yes\n\
+                     KbdInteractiveAuthentication no\n\
+                     PermitRootLogin yes\n\
+                     LogLevel ERROR\n",
+                    host_key_path.display(),
+                    authorized_keys_path.display(),
+                    ca_pub_path.display(),
+                    scratch.path("sshd.pid").display(),
+                ),
+            )
+            .expect("write sshd_config");
+
+            let child = std::process::Command::new(sshd_path)
+                .arg("-D")
+                .arg("-e")
+                .arg("-f")
+                .arg(&config_path)
+                .spawn()
+                .expect("spawn sshd - is /usr/sbin/sshd runnable by this user?");
+            let _guard = ChildGuard(child);
+
+            let mut listening = false;
+            for _ in 0..50 {
+                if tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_ok() {
+                    listening = true;
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            assert!(listening, "sshd never started listening on 127.0.0.1:{port}");
+
+            let session = connect(
+                SshOpenInput {
+                    host: "127.0.0.1".into(),
+                    port,
+                    user: user.clone(),
+                    use_agent: false,
+                    password: None,
+                    private_key: Some(SecretSource::Inline {
+                        value: user_key.pem.to_string(),
+                    }),
+                    private_key_passphrase: None,
+                    expected_fingerprint: host_key.info.fingerprint.clone(),
+                    certificate: Some(cert_text),
+                    agent_key_fingerprint: None,
+                    jumps: Vec::new(),
+                    cols: 80,
+                    rows: 24,
+                },
+                SshSecrets {
+                    target: HopSecrets {
+                        private_key: Some(user_key.pem.clone()),
+                        ..Default::default()
+                    },
+                    jumps: Vec::new(),
+                },
+                IpcChannel::new(|_msg| Ok(())),
+            )
+            .await
+            .expect("certificate auth against the CA-trusting server failed");
+            let (host, _user, _cols, _rows, alive, _ts) = session.mirror_info();
+            assert_eq!(host, "127.0.0.1");
+            assert!(alive, "session should be live after certificate auth");
+            session.close().await;
+
+            // The signing key ALONE, no certificate: the server trusts the
+            // CA, not this key directly, and `authorized_keys` is empty.
+            let bare_result = connect(
+                SshOpenInput {
+                    host: "127.0.0.1".into(),
+                    port,
+                    user,
+                    use_agent: false,
+                    password: None,
+                    private_key: Some(SecretSource::Inline {
+                        value: user_key.pem.to_string(),
+                    }),
+                    private_key_passphrase: None,
+                    expected_fingerprint: host_key.info.fingerprint.clone(),
+                    certificate: None,
+                    agent_key_fingerprint: None,
+                    jumps: Vec::new(),
+                    cols: 80,
+                    rows: 24,
+                },
+                SshSecrets {
+                    target: HopSecrets {
+                        private_key: Some(user_key.pem.clone()),
+                        ..Default::default()
+                    },
+                    jumps: Vec::new(),
+                },
+                IpcChannel::new(|_msg| Ok(())),
+            )
+            .await;
+            assert!(
+                bare_result.is_err(),
+                "the bare signing key with no certificate must not authenticate against a CA-only server"
+            );
+
+            eprintln!(
+                "[cert_e2e] OK: certificate auth succeeded and bare-key auth was refused on 127.0.0.1:{port}"
+            );
+        });
+    }
+
+    /// Live end-to-end proof that a `hardware`-kind vault entry authenticates
+    /// through `authenticate_agent` restricted to ONE ssh-agent identity, and
+    /// that naming a DIFFERENT identity - held nowhere the agent can reach -
+    /// is refused locally rather than falling back to whichever key the
+    /// agent happens to offer. The server trusts BOTH keys, so the negative
+    /// case proves the AGENT restriction, not the server's own refusal.
+    ///
+    /// No physical FIDO2 token exists in this environment, so this loads an
+    /// ordinary generated key into a throwaway `ssh-agent` rather than a real
+    /// `sk-ssh-ed25519@openssh.com` identity - the path this proves (agent
+    /// auth restricted to one fingerprint) is identical either way, since
+    /// Tervia never sees the private material behind a fingerprint regardless
+    /// of what holds it. `KNOWN-LIMITS.md` records what that leaves
+    /// unexercised: a physical touch prompt, a CTAP-specific error.
+    ///
+    /// `#[ignore]`d like the other e2e tests here, and this one ALSO mutates
+    /// process-global `SSH_AUTH_SOCK` (restored on drop) - run alone. Run with:
+    ///   cargo test --manifest-path src-tauri/Cargo.toml hardware_kind_authenticates_only_through_the_matching_agent_identity -- --ignored --nocapture --test-threads=1
+    #[test]
+    #[ignore = "needs /usr/sbin/sshd"]
+    #[cfg(unix)]
+    fn hardware_kind_authenticates_only_through_the_matching_agent_identity() {
+        let sshd_path = std::path::Path::new("/usr/sbin/sshd");
+        if !sshd_path.exists() {
+            eprintln!("[hardware_e2e] skipped: {} not found", sshd_path.display());
+            return;
+        }
+
+        let scratch = ScratchDir::new("hwagent");
+        let port = std::net::TcpListener::bind(("127.0.0.1", 0))
+            .expect("bind an ephemeral port to find a free one")
+            .local_addr()
+            .expect("local_addr")
+            .port();
+        let user = current_username();
+        let agent_socket = scratch.path("agent.sock");
+
+        it_runtime().block_on(async move {
+            let host_key = crate::modules::ssh::ssh_key_generate("ed25519".into(), None, None)
+                .await
+                .expect("host key generation failed");
+            let held_key = crate::modules::ssh::ssh_key_generate("ed25519".into(), None, None)
+                .await
+                .expect("held key generation failed");
+            let absent_key = crate::modules::ssh::ssh_key_generate("ed25519".into(), None, None)
+                .await
+                .expect("absent key generation failed");
+
+            let host_key_path = scratch.path("host_key");
+            std::fs::write(&host_key_path, host_key.pem.as_bytes()).expect("write host key");
+            owner_only(&host_key_path);
+
+            // The server trusts BOTH keys - the restriction being proven is
+            // the AGENT's, not the server's.
+            let authorized_keys_path = scratch.path("authorized_keys");
+            std::fs::write(
+                &authorized_keys_path,
+                format!(
+                    "{}\n{}\n",
+                    held_key.info.public_key.clone().expect("held key public half"),
+                    absent_key.info.public_key.clone().expect("absent key public half"),
+                ),
+            )
+            .expect("write authorized_keys");
+            owner_only(&authorized_keys_path);
+
+            let config_path = scratch.path("sshd_config");
+            std::fs::write(
+                &config_path,
+                format!(
+                    "Port {port}\n\
+                     ListenAddress 127.0.0.1\n\
+                     HostKey {}\n\
+                     AuthorizedKeysFile {}\n\
+                     PidFile {}\n\
+                     UsePAM no\n\
+                     StrictModes no\n\
+                     PasswordAuthentication no\n\
+                     PubkeyAuthentication yes\n\
+                     KbdInteractiveAuthentication no\n\
+                     PermitRootLogin yes\n\
+                     LogLevel ERROR\n",
+                    host_key_path.display(),
+                    authorized_keys_path.display(),
+                    scratch.path("sshd.pid").display(),
+                ),
+            )
+            .expect("write sshd_config");
+
+            let sshd_child = std::process::Command::new(sshd_path)
+                .arg("-D")
+                .arg("-e")
+                .arg("-f")
+                .arg(&config_path)
+                .spawn()
+                .expect("spawn sshd - is /usr/sbin/sshd runnable by this user?");
+            let _sshd_guard = ChildGuard(sshd_child);
+
+            let mut listening = false;
+            for _ in 0..50 {
+                if tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_ok() {
+                    listening = true;
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            assert!(listening, "sshd never started listening on 127.0.0.1:{port}");
+
+            let agent_child = std::process::Command::new("ssh-agent")
+                .arg("-a")
+                .arg(&agent_socket)
+                .arg("-D")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("spawn ssh-agent - is `ssh-agent` on PATH?");
+            let _agent_guard = ChildGuard(agent_child);
+            for _ in 0..50 {
+                if agent_socket.canonicalize().is_ok() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            assert!(
+                agent_socket.canonicalize().is_ok(),
+                "ssh-agent never created its socket at {}",
+                agent_socket.display()
+            );
+
+            let held_key_path = scratch.path("held_key");
+            std::fs::write(&held_key_path, held_key.pem.as_bytes()).expect("write held key");
+            owner_only(&held_key_path);
+            let add_status = std::process::Command::new("ssh-add")
+                .arg(&held_key_path)
+                .env("SSH_AUTH_SOCK", &agent_socket)
+                .status()
+                .expect("run ssh-add - is `ssh-add` on PATH?");
+            assert!(add_status.success(), "ssh-add failed to load the held key");
+
+            // Restores whatever this process's `SSH_AUTH_SOCK` was before this
+            // test, on drop - including a panic unwind, not only the happy
+            // path. Global process state, so this test documents its own
+            // "run alone" requirement above rather than leaving it implicit.
+            struct AuthSockGuard(Option<std::ffi::OsString>);
+            impl Drop for AuthSockGuard {
+                fn drop(&mut self) {
+                    match &self.0 {
+                        Some(v) => unsafe { std::env::set_var("SSH_AUTH_SOCK", v) },
+                        None => unsafe { std::env::remove_var("SSH_AUTH_SOCK") },
+                    }
+                }
+            }
+            let _sock_guard = AuthSockGuard(std::env::var_os("SSH_AUTH_SOCK"));
+            // SAFETY (rather, soundness caveat `set_var` itself now enforces
+            // as `unsafe`): this test is `#[ignore]`d and documented to run
+            // with `--test-threads=1`, so no other thread reads the process
+            // environment concurrently with this write.
+            unsafe { std::env::set_var("SSH_AUTH_SOCK", &agent_socket) };
+
+            let held_fingerprint = held_key.info.fingerprint.clone().expect("held fingerprint");
+            let absent_fingerprint =
+                absent_key.info.fingerprint.clone().expect("absent fingerprint");
+
+            let session = connect(
+                SshOpenInput {
+                    host: "127.0.0.1".into(),
+                    port,
+                    user: user.clone(),
+                    use_agent: true,
+                    password: None,
+                    private_key: None,
+                    private_key_passphrase: None,
+                    expected_fingerprint: host_key.info.fingerprint.clone(),
+                    certificate: None,
+                    agent_key_fingerprint: Some(held_fingerprint),
+                    jumps: Vec::new(),
+                    cols: 80,
+                    rows: 24,
+                },
+                SshSecrets {
+                    target: HopSecrets::default(),
+                    jumps: Vec::new(),
+                },
+                IpcChannel::new(|_msg| Ok(())),
+            )
+            .await
+            .expect("agent auth restricted to the held identity failed");
+            let (host, _user, _cols, _rows, alive, _ts) = session.mirror_info();
+            assert_eq!(host, "127.0.0.1");
+            assert!(alive, "session should be live after agent auth");
+            session.close().await;
+
+            let Err(err) = connect(
+                SshOpenInput {
+                    host: "127.0.0.1".into(),
+                    port,
+                    user,
+                    use_agent: true,
+                    password: None,
+                    private_key: None,
+                    private_key_passphrase: None,
+                    expected_fingerprint: host_key.info.fingerprint.clone(),
+                    certificate: None,
+                    agent_key_fingerprint: Some(absent_fingerprint.clone()),
+                    jumps: Vec::new(),
+                    cols: 80,
+                    rows: 24,
+                },
+                SshSecrets {
+                    target: HopSecrets::default(),
+                    jumps: Vec::new(),
+                },
+                IpcChannel::new(|_msg| Ok(())),
+            )
+            .await
+            else {
+                panic!("naming an identity the agent does not hold must be refused");
+            };
+            assert_eq!(
+                err.kind,
+                SshConnectErrorKind::Config,
+                "a fingerprint the agent does not hold is a config fact, not the server's answer: {err}"
+            );
+            assert!(
+                err.message.contains(&absent_fingerprint),
+                "the refusal should name the fingerprint it could not find: {}",
+                err.message
+            );
+
+            eprintln!(
+                "[hardware_e2e] OK: agent auth succeeded for the held identity and was refused \
+                 before dialling for the absent one"
             );
         });
     }
