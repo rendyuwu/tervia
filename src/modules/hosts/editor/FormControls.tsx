@@ -19,7 +19,9 @@ export function Field({ label, children }: { label: string; children: ReactNode 
 /** One segment of a small exclusive group. `disabled` (optional, default
  *  `false`) is for a choice the CURRENT selection makes unavailable rather
  *  than one that never applies - `RuleEditorDialog.tsx`'s "with the host's
- *  terminal" option for a `-R`/`-D` rule. */
+ *  terminal" option for a `-R`/`-D` rule, explained by that dialog's own
+ *  caption rather than by a `title` here: this component is shared with the
+ *  host and vault editors' Type rows, which have no such copy to give it. */
 export function ToggleButton({
   active,
   onClick,
@@ -37,7 +39,6 @@ export function ToggleButton({
       onClick={onClick}
       aria-pressed={active}
       disabled={disabled}
-      title={disabled ? "Not available for this rule" : undefined}
       className={
         "flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-[11.5px] transition-colors " +
         (disabled

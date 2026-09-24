@@ -45,9 +45,10 @@ import {
   type SshJumpHop,
   type SshSession,
 } from "./bridge";
+import { describeError } from "@/lib/describeError";
 import { listHosts, pinFingerprint } from "@/modules/hosts/store";
 import { resolveJumpHops } from "@/modules/hosts/jumps";
-import { isSshHost } from "@/modules/hosts/types";
+import { isSshHost, type SshHost } from "@/modules/hosts/types";
 import { resolveSshAuth } from "@/modules/vault/resolve";
 import { hostKeyOwners, useHostKeyPrompt } from "./hostKeyPrompt";
 // Same carrier `bridge.ts` (this module's sibling) already imports across
@@ -329,39 +330,54 @@ async function dialSession(
   opts: SshForwardOptions,
   prompts: PromptFanout,
 ): Promise<SshSession> {
-  const list = await listHosts();
-  const found = list.find((h) => h.id === connectionId);
-  if (!found) throw new SshLocalConnectError(`ssh: connection "${connectionId}" not found`);
-  // A saved id can now name an RDP host. Refused rather than cast - there is
-  // nothing to tunnel through.
-  if (!isSshHost(found)) {
-    throw new SshLocalConnectError(
-      `ssh: "${found.name}" is an RDP host and cannot be tunnelled through`,
-    );
-  }
-  const conn = found;
-  const jumps: SshJumpHop[] = await resolveJumpHops(conn.proxyJumpId, conn.id, list);
-  if (!opts.promptForHostKey) {
-    // Refused rather than dialled, for a caller with no way to ask. Every hop is
-    // checked and not just the target: an unpinned JUMP host raises the prompt
-    // just as surely, from `resolveJumpHops`'s per-hop `expectedFingerprint`,
-    // and parking the backend on a question nobody can answer is worse than an
-    // error message.
-    const unverified = [
-      { pinned: !!conn.lastFingerprint, label: conn.name || conn.host },
-      ...jumps.map((j) => ({
-        pinned: !!j.expectedFingerprint,
-        label: list.find((c) => c.id === j.connectionId)?.name || j.host,
-      })),
-    ].find((c) => !c.pinned);
-    if (unverified) {
-      throw new SshLocalConnectError(
-        `ssh: "${unverified.label}" has no verified host key yet. Open it once as an SSH tab and accept the fingerprint, then try again.`,
-      );
+  let conn: SshHost;
+  let jumps: SshJumpHop[];
+  let user: string;
+  let credentialValues: Omit<Awaited<ReturnType<typeof resolveSshAuth>>, "user">;
+  try {
+    const list = await listHosts();
+    const found = list.find((h) => h.id === connectionId);
+    if (!found) throw new Error(`ssh: connection "${connectionId}" not found`);
+    // A saved id can now name an RDP host. Refused rather than cast - there is
+    // nothing to tunnel through.
+    if (!isSshHost(found)) {
+      throw new Error(`ssh: "${found.name}" is an RDP host and cannot be tunnelled through`);
     }
+    conn = found;
+    jumps = await resolveJumpHops(conn.proxyJumpId, conn.id, list);
+    if (!opts.promptForHostKey) {
+      // Refused rather than dialled, for a caller with no way to ask. Every hop is
+      // checked and not just the target: an unpinned JUMP host raises the prompt
+      // just as surely, from `resolveJumpHops`'s per-hop `expectedFingerprint`,
+      // and parking the backend on a question nobody can answer is worse than an
+      // error message.
+      const unverified = [
+        { pinned: !!conn.lastFingerprint, label: conn.name || conn.host },
+        ...jumps.map((j) => ({
+          pinned: !!j.expectedFingerprint,
+          label: list.find((c) => c.id === j.connectionId)?.name || j.host,
+        })),
+      ].find((c) => !c.pinned);
+      if (unverified) {
+        throw new Error(
+          `ssh: "${unverified.label}" has no verified host key yet. Open it once as an SSH tab and accept the fingerprint, then try again.`,
+        );
+      }
+    }
+    ({ user, ...credentialValues } = await resolveSshAuth(conn.credential));
+  } catch (e) {
+    // Re-wrapped WHOLE (via `cause`, so the original still reaches the
+    // console) instead of tagging each throw above individually - the same
+    // shape `terminal/lib/ssh-session.ts`'s own pre-connect block uses, and
+    // for the identical reason: everything this block can fail on is a fact
+    // about THIS machine (a saved id gone, an RDP host, an unpinned hop, a
+    // vault binding that no longer resolves), so a failure added here later
+    // is local by default rather than falling through to `controller.ts`'s
+    // ladder as `"transport"`.
+    throw e instanceof SshLocalConnectError
+      ? e
+      : new SshLocalConnectError(describeError(e), { cause: e });
   }
-
-  const { user, ...credentialValues } = await resolveSshAuth(conn.credential);
 
   return openSsh(
     {

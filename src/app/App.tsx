@@ -326,7 +326,7 @@ export default function App() {
   // -------- forward autostart --------
   // Brings every `startWithApp` rule up once the stores it needs have
   // hydrated - see the hook's own header for the launch-trigger and
-  // backoff-ladder reasoning (issue #77).
+  // backoff-ladder reasoning.
   useForwardsAutostart();
 
   // -------- workspaces wiring --------

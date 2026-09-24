@@ -782,10 +782,11 @@ console.log(
   const HOST_OWNED =
     "Deleting the rule does not stop its forward — that one dies with the terminal tab that opened it.";
   const START = "It will no longer start automatically with its host.";
-  // issue #77: the app-launch analog of START, mutually exclusive with it at
-  // every REACHABLE write (`store.ts`'s `upsertRule` refuses a rule naming
-  // both), so `deleteNote` never has to choose between the two in practice -
-  // it just reads whichever one this rule happens to carry.
+  // the app-launch analog of START, mutually exclusive with it at
+  // every REACHABLE write (`src/modules/forwards/store.ts`'s `upsertRule`
+  // refuses a rule naming both), so `deleteNote` never has to choose between
+  // the two in practice - it just reads whichever one this rule happens to
+  // carry.
   const START_APP = "It will no longer start automatically when Tervia starts.";
   const FALLBACK = "Deleting it changes nothing else.";
 
@@ -808,9 +809,10 @@ console.log(
   const hostOwnedAndStart = subject({ hostOwned: true, startWithHost: true });
   const hostOwnedAndPageStops = subject({ hostOwned: true, pageStops: true });
   const allThree = subject({ hostOwned: true, pageStops: true, startWithHost: true });
-  // issue #77: the same four cells `startWithHost` gets, for `startWithApp` -
-  // the two never coexist in a rule this app wrote (`store.ts`'s `upsertRule`
-  // refuses both true), so there is no "both start flags at once" cell to add;
+  // the same four cells `startWithHost` gets, for `startWithApp` -
+  // the two never coexist in a rule this app wrote
+  // (`src/modules/forwards/store.ts`'s `upsertRule` refuses both true), so
+  // there is no "both start flags at once" cell to add;
   // `hostOwnedAndStartApp` is reachable the same way `hostOwnedAndStart` is -
   // the rule was edited from `startWithHost` to `startWithApp` AFTER a
   // terminal already claimed it, and the confirm has to be right about both.

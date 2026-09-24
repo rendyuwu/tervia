@@ -390,11 +390,11 @@ Three callers, three shapes:
    SSH session, and forwards are memoized by `connId|host|port` so a repeat
    request reuses its port. A connection with no pinned host key is **refused**
    unless the caller passes `promptForHostKey` and has a dialog on screen to
-   answer with. Callers: the RDP dial path, `forwards/controller.ts`'s
-   page-owned Start/Stop (all three rule types), and
-   `app/hooks/useForwardsAutostart.ts`, which fires a `startWithApp` rule's
-   Start once at launch and re-enters `controller.ts`'s own backoff ladder on a
-   transport-class failure.
+   answer with. Callers: the RDP dial path, and `forwards/controller.ts`'s
+   page-owned Start/Stop (all three rule types) - including
+   `startForwardAutostart`, which `app/hooks/useForwardsAutostart.ts` calls
+   once per `startWithApp` rule at launch and which re-enters on a
+   transport-class failure through `controller.ts`'s own backoff ladder.
 
 ### SFTP and remote files
 

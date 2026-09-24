@@ -42,7 +42,10 @@ const KEY_KIND: &str = "key";
 /// a host arrives as an `SshHost` or an `RdpHost` under the one `"host"` kind
 /// either way. `pins` and `lastConnectedAt` come from `HostBase`,
 /// `lastFingerprint` from `SshHost` and `certFingerprint` from `RdpHost`, all
-/// in `src/modules/hosts/types.ts`.
+/// in `src/modules/hosts/types.ts`. `startWithApp` comes from `ForwardRule` in
+/// `src/modules/forwards/types.ts` for the same class of reason: it names what
+/// THIS device auto-binds, so it must never travel and silently open a
+/// listener/socket on another device that never asked for it.
 ///
 /// `lastConnectedAt` is here deliberately: it does not travel, so its meaning
 /// stays "last connected FROM THIS DEVICE". `VaultIdentity` and `VaultKey`
@@ -50,11 +53,12 @@ const KEY_KIND: &str = "key";
 /// Letting it travel later is additive and not a format break.
 ///
 /// `credentialStamp` needs no entry - it is a function, not a stored field.
-const DEVICE_LOCAL_FIELDS: [&str; 4] = [
+const DEVICE_LOCAL_FIELDS: [&str; 5] = [
     "pins",
     "lastConnectedAt",
     "lastFingerprint",
     "certFingerprint",
+    "startWithApp",
 ];
 
 /// One record, as it travels.
@@ -949,7 +953,7 @@ mod tests {
     }
 
     #[test]
-    fn strip_removes_exactly_the_four_device_local_fields() {
+    fn strip_removes_exactly_the_five_device_local_fields() {
         let mut record = json!({
             "id": "h-1",
             "name": "vps",
@@ -968,20 +972,23 @@ mod tests {
             "pins": {"example.com": "SHA256:aaa"},
             "lastConnectedAt": 1700,
             "lastFingerprint": "SHA256:aaa",
-            "certFingerprint": "SHA256:bbb"
+            "certFingerprint": "SHA256:bbb",
+            "startWithApp": true
         });
         // SPELLED OUT, not read back out of `DEVICE_LOCAL_FIELDS`. Iterating
         // the same constant the implementation iterates is an assertion that
         // cannot fail: a typo in the constant would remove nothing, the
         // mistyped name would drop out of the skip-list below, and the test
         // would confirm that the field it no longer strips is still present.
-        // These four literals are what a rename in
-        // `src/modules/hosts/types.ts` has to break.
+        // These five literals are what a rename has to break: the first four
+        // in `src/modules/hosts/types.ts`, the fifth (`startWithApp`) in
+        // `src/modules/forwards/types.ts`.
         let expected_gone = [
             "pins",
             "lastConnectedAt",
             "lastFingerprint",
             "certFingerprint",
+            "startWithApp",
         ];
         assert_eq!(
             expected_gone.len(),

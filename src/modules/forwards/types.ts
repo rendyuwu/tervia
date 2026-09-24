@@ -109,5 +109,5 @@ export const RULE_TOMBSTONE_KIND = "rule";
 // on this same record, adopted at read time rather than by a migration - the
 // same shape `hosts/types.ts`'s `hostPins` already uses for its own read-time
 // migration. See `type`'s own doc above for the vocabulary, and `store.ts`'s
-// `upsertRule` for what each type refuses. `startWithApp` (issue #77) is the
+// `upsertRule` for what each type refuses. `startWithApp` is the
 // same read-time-adoption shape again: absent reads as `false`, no migration.

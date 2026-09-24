@@ -1411,7 +1411,7 @@ session.
 
 ### A `startWithApp` rule's mid-session drop does not re-enter the backoff ladder
 
-**Accepted state.** `controller.ts`'s `startForwardAutostart` (issue #77)
+**Accepted state.** `controller.ts`'s `startForwardAutostart`
 ladders a `startWithApp` rule's INITIAL bind failure, and any retry's own
 failure, but not a session that drops AFTER a successful bind. `ssh/tunnel.ts`'s
 `dropSession` is the single function both a deliberate release
@@ -1439,7 +1439,7 @@ can subscribe per `hostId` and re-enter the ladder on a genuine drop.
 
 ### A local forward-bind conflict walks the ladder before parking
 
-**Accepted state.** `controller.ts`'s backoff ladder (issue #77) classifies a
+**Accepted state.** `controller.ts`'s backoff ladder classifies a
 Start failure through `classifySshConnectFailure`, which files anything that
 is not `SshLocalConnectError`/`SshAuthRejectedError` as `"transport"`
 (retry-eligible). `ssh_open`'s own rejection is structured
@@ -1451,8 +1451,8 @@ and wrapped into one of those two classes by `sshConnectErrorFrom`
 `String`, so a LOCAL bind conflict (the port this rule pins is already taken
 on this machine) and the session dying between the connect and the bind are
 indistinguishable on the wire. The ladder is bounded and self-terminating -
-five attempts over the ladder's own span, then the row parks `failed` with the
-last error - so a doomed pinned-port rule wastes that span once rather than
+the first attempt plus the ladder's 5 retries, then the row parks `failed`
+with the last error - so a doomed pinned-port rule wastes that span once rather than
 being recognised on the first attempt; it does not retry forever.
 
 **Carried by.** `attemptForwardAutostart` in

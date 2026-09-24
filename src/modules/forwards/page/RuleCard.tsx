@@ -192,11 +192,16 @@ export function RuleCard({ row, onEdit, onDelete }: RuleCardProps): ReactNode {
   // `running`. So a mid-dial row handed `running` alone told the user "Deleting
   // it changes nothing else." about a bind the confirm was about to close.
   //
-  // KEPT IN STEP WITH `pageMustStopFirst` BY NAME AND NOT BY LUCK: this is the
-  // flag captured at click time and that predicate is the live read, they are
-  // deliberately separate (`ForwardsPage.tsx`'s `PendingDelete`), and the two
-  // status sets have to match or the sentence goes false again. `failed` and
-  // `stopped` are out of both - neither retains a claim.
+  // KEPT IN STEP WITH `pageMustStopFirst` BY NAME WHERE A LIVE BIND IS AT
+  // STAKE, AND NOT BY LUCK: this is the flag captured at click time and that
+  // predicate is the live read, they are deliberately separate
+  // (`ForwardsPage.tsx`'s `PendingDelete`), and the two must agree on every
+  // row that HOLDS SOMETHING - `running`/`starting`. `pageMustStopFirst` ALSO
+  // answers `true` for a `failed` row with a pending backoff retry (a
+  // scheduled timer, not a bound port - `controller.ts`'s own header on the
+  // ladder), and `pageStops` here does NOT widen to match: a pending retry has
+  // nothing live to report, so "Deleting it changes nothing else." stays true
+  // of it, the same as it already was for `stopped`.
   //
   // A terminal-owned rule is stopped by closing its tab, which is why
   // `hostOwned` rides along as its own argument rather than being folded in
