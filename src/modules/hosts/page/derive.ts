@@ -6,6 +6,7 @@ import type {
   VaultKey,
 } from "@/modules/vault/types";
 
+import { buildGroupTree, descendantIds, type GroupNode } from "../groupTree";
 import { rankHosts, type HostSearchRow } from "../search";
 import { isSshHost, type Host, type HostGroup } from "../types";
 
@@ -157,36 +158,48 @@ export function identityName(
  * lands in neither, so the chips sum to less than All and the row itself is
  * reachable from no chip at all.
  *
- * {@link matchesGroupFilter} makes the same call, so the count on a chip is
- * always the number of cards clicking it shows.
+ * Selecting a group means "this group and its descendants" ({@link
+ * matchesGroupFilter} makes the same call), so a chip's count is its own
+ * hosts plus every descendant's - summed bottom-up over the SAME tree
+ * `GroupStrip.tsx` renders, not a second walk of `parentId` per host.
  */
 export function groupCounts(hosts: readonly Host[], groups: readonly HostGroup[]): GroupCounts {
   const known = new Set(groups.map((g) => g.id));
-  const byGroup: Record<string, number> = {};
+  const direct: Record<string, number> = {};
   // Seeded so an empty group renders its own 0 rather than relying on a caller's
   // fallback for a key that was never written.
-  for (const group of groups) byGroup[group.id] = 0;
+  for (const group of groups) direct[group.id] = 0;
 
   let ungrouped = 0;
   for (const host of hosts) {
-    if (host.groupId !== undefined && known.has(host.groupId)) byGroup[host.groupId] += 1;
+    if (host.groupId !== undefined && known.has(host.groupId)) direct[host.groupId] += 1;
     else ungrouped += 1;
   }
+
+  const byGroup: Record<string, number> = {};
+  function sum(node: GroupNode): number {
+    const total = direct[node.group.id] + node.children.reduce((acc, child) => acc + sum(child), 0);
+    byGroup[node.group.id] = total;
+    return total;
+  }
+  for (const root of buildGroupTree(groups)) sum(root);
   return { total: hosts.length, ungrouped, byGroup };
 }
 
 export function matchesGroupFilter(
   host: Host,
   filter: GroupFilter,
-  knownGroupIds: ReadonlySet<string>,
+  groups: readonly HostGroup[],
 ): boolean {
   switch (filter.kind) {
     case "all":
       return true;
-    case "ungrouped":
-      return host.groupId === undefined || !knownGroupIds.has(host.groupId);
+    case "ungrouped": {
+      const known = new Set(groups.map((g) => g.id));
+      return host.groupId === undefined || !known.has(host.groupId);
+    }
     case "group":
-      return host.groupId === filter.groupId;
+      return host.groupId !== undefined && descendantIds(filter.groupId, groups).has(host.groupId);
     default: {
       const unhandled: never = filter;
       throw new Error(`hosts: unhandled group filter ${JSON.stringify(unhandled)}`);
@@ -198,10 +211,11 @@ export type HostsViewInput = {
   rows: readonly HostSearchRow[];
   protocol: ProtocolFilter;
   group: GroupFilter;
-  /** The ids in the CURRENT group list. Passed in rather than derived from the
-   *  rows so {@link matchesGroupFilter} can tell "ungrouped" from "names a group
-   *  that is gone" - the rows themselves cannot say which. */
-  knownGroupIds: ReadonlySet<string>;
+  /** The CURRENT group list. Passed in rather than derived from the rows so
+   *  {@link matchesGroupFilter} can tell "ungrouped" from "names a group that
+   *  is gone", and can test "this group or a descendant" for the `"group"`
+   *  arm - the rows themselves cannot say either. */
+  groups: readonly HostGroup[];
   query: string;
 };
 
@@ -227,7 +241,7 @@ export function filterAndRank(input: HostsViewInput): HostSearchRow[] {
     (row) => input.protocol === "all" || row.host.protocol === input.protocol,
   );
   const byGroup = byProtocol.filter((row) =>
-    matchesGroupFilter(row.host, input.group, input.knownGroupIds),
+    matchesGroupFilter(row.host, input.group, input.groups),
   );
   return rankHosts(byGroup, input.query);
 }

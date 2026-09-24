@@ -294,7 +294,17 @@ macOS/Linux rely on `Drop for Session -> killer.kill()`.
   `deleteHost` clears the host's accounts plus every row that pointed at it.
 - `types.ts` is the `Host` union (`SshHost | RdpHost`) plus the per-protocol
   keychain field lists, so a caller that has to enumerate a host's accounts
-  cannot miss one. There is no `forwards` field: a forward rule is its own record.
+  cannot miss one. There is no `forwards` field: a forward rule is its own
+  record. `HostGroup.parentId` nests one group under another; a value that
+  dangles, names itself, or closes a cycle is read as root (`groupTree.ts`)
+  rather than refused, because sync can deliver one already merged.
+- `groupTree.ts`: `buildGroupTree` is the read-time forest `GroupStrip.tsx` and
+  `page/derive.ts` build on - a `parentId` that dangles, names itself, or
+  closes a cycle resolves to root instead of being refused, since sync can
+  land one already merged. `groupChain` is the STRICT counterpart `upsertGroup`
+  uses to REFUSE writing one of those in the first place, on `jumps.ts`'s
+  `jumpChain` pattern; `modules/backup/file.ts`'s `orderGroupWrites` is the
+  other consumer, ordering an import's group writes off `effectiveParents`.
 - `jumps.ts`: `jumpChain` is the pure walk (shared with the write guard),
   `resolveJumpHops` puts a credential on each hop and reverses into the backend's
   connect order. Cycle detection is seeded by the target's own id, and

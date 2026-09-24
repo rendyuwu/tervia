@@ -234,8 +234,8 @@ export function HostsPage({ onConnect, onScreen }: HostsPageProps): ReactNode {
   const rows = useMemo(() => searchRows(hosts, groups, vault), [hosts, groups, vault]);
   const counts = useMemo(() => groupCounts(hosts, groups), [hosts, groups]);
   const visible = useMemo(
-    () => filterAndRank({ rows, protocol, group, knownGroupIds, query }),
-    [rows, protocol, group, knownGroupIds, query],
+    () => filterAndRank({ rows, protocol, group, groups, query }),
+    [rows, protocol, group, groups, query],
   );
 
   // The grid's one tab stop: the selected card while it is on screen, else the
@@ -311,8 +311,8 @@ export function HostsPage({ onConnect, onScreen }: HostsPageProps): ReactNode {
     );
   }, []);
 
-  const createGroup = useCallback(async (name: string): Promise<void> => {
-    await upsertGroup({ id: newGroupId(), name });
+  const createGroup = useCallback(async (name: string, parentId?: string): Promise<void> => {
+    await upsertGroup({ id: newGroupId(), name, parentId });
   }, []);
 
   const renameGroup = useCallback(
@@ -321,6 +321,16 @@ export function HostsPage({ onConnect, onScreen }: HostsPageProps): ReactNode {
       if (!existing) return;
       // Spread, so `order` survives a rename.
       await upsertGroup({ ...existing, name });
+    },
+    [groups],
+  );
+
+  const moveGroup = useCallback(
+    async (id: string, parentId: string | undefined): Promise<void> => {
+      const existing = groups.find((g) => g.id === id);
+      if (!existing) return;
+      // Spread, so `order` survives a move - the same reason `renameGroup` spreads.
+      await upsertGroup({ ...existing, parentId });
     },
     [groups],
   );
@@ -511,6 +521,7 @@ export function HostsPage({ onConnect, onScreen }: HostsPageProps): ReactNode {
           onSelectGroup={(groupId) => setGroup({ kind: "group", groupId })}
           onCreateGroup={createGroup}
           onRenameGroup={renameGroup}
+          onMoveGroup={moveGroup}
           onDeleteGroup={removeGroup}
         />
       </div>

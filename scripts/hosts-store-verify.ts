@@ -1796,6 +1796,67 @@ console.log("\n[groups] deleting a group clears the label and keeps the rows");
 }
 
 // ---------------------------------------------------------------------------
+console.log("\n[groups] nesting: a parent round-trips, and a bad one is refused like a jump host");
+{
+  const h = harness();
+  await h.hosts.upsertGroup({ id: "g-1", name: "Production" });
+  const child = await h.hosts.upsertGroup({ id: "g-2", name: "Web", parentId: "g-1" });
+  check("a good parent round-trips", child.parentId, "g-1");
+
+  await rejects(
+    "a group cannot be its own parent",
+    () => h.hosts.upsertGroup({ id: "g-3", name: "Self", parentId: "g-3" }),
+    ["cannot be its own parent"],
+  );
+  await rejects(
+    "a parent that does not exist is refused",
+    () => h.hosts.upsertGroup({ id: "g-3", name: "Gap", parentId: "g-gone" }),
+    ["does not exist"],
+  );
+
+  // `assertSshTarget`'s transitive half, mirrored: `g-2`'s own 1-cycle refusal
+  // already caught the immediate case above, so this proves the WALK catches
+  // A -> B -> A instead of only the first hop.
+  await h.hosts.upsertGroup({ id: "g-4", name: "A" });
+  await h.hosts.upsertGroup({ id: "g-5", name: "B", parentId: "g-4" });
+  await rejects(
+    "reparenting A under its own descendant closes a cycle and is refused",
+    () => h.hosts.upsertGroup({ id: "g-4", name: "A", parentId: "g-5" }),
+    ["cycle"],
+  );
+  check("neither side of the attempted cycle moved", (await h.hosts.findGroup("g-4"))?.parentId, undefined);
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n[groups] deleting a group re-parents its children, never deletes them");
+{
+  const h = harness();
+  await h.hosts.upsertGroup({ id: "g-root", name: "Root" });
+  await h.hosts.upsertGroup({ id: "g-mid", name: "Mid", parentId: "g-root" });
+  await h.hosts.upsertGroup({ id: "g-leaf", name: "Leaf", parentId: "g-mid" });
+  await h.hosts.upsertGroup({ id: "g-solo", name: "Solo" });
+
+  await h.hosts.deleteGroup("g-mid");
+  check(
+    "the leaf moves up to the deleted group's own parent",
+    (await h.hosts.findGroup("g-leaf"))?.parentId,
+    "g-root",
+  );
+
+  await h.hosts.deleteGroup("g-root");
+  check(
+    "and a child of a ROOT group becomes root itself, not orphaned",
+    (await h.hosts.findGroup("g-leaf"))?.parentId,
+    undefined,
+  );
+  check(
+    "a group with no children of its own is untouched by either delete",
+    (await h.hosts.findGroup("g-solo"))?.parentId,
+    undefined,
+  );
+}
+
+// ---------------------------------------------------------------------------
 console.log("\n[pins] one pin per (host, address), in whichever field the protocol keeps it");
 {
   // h-3 is reserved for the credential-stability check at the end of this block:

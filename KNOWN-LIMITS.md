@@ -275,6 +275,52 @@ fixtures in `scripts/backup-verify.ts`.
 **Trigger.** The split gaining a second attachment point, or a host clause that
 can be produced without a host count.
 
+## Host groups
+
+### A group's name is unique across the whole tree, not per-parent
+
+**Accepted state.** `upsertGroup`'s collision check (`sameName`) compares an
+incoming group's name against every OTHER group's, regardless of nesting -
+two groups named "Servers" cannot coexist even when they sit under different
+parents. Nesting itself gave no reason to scope the check per-parent: the
+host editor's group picker (`Combobox` in `HostEditorDialog.tsx`) already
+lists every group by its flat name, with no parent path shown, so two
+same-named siblings would be indistinguishable there regardless of where the
+uniqueness rule is enforced.
+
+**Carried by.** `sameName` and the collision check in `upsertGroup`
+(`src/modules/hosts/store.ts`).
+
+**Trigger.** A request for same-named siblings under different parents -
+which would also need the host editor's group `Combobox` to grow a
+disambiguating path label, since "Servers" alone would no longer say which
+one a host is being filed under.
+
+### A reparent or a rename of the same group on two devices resolves last-write-wins, with no awareness of the OTHER record it changed
+
+**Accepted state.** `HostGroup.parentId` travels as an ordinary, opaque field
+on the group record - the same wire path `groupId` already proved carries an
+unparsed value untouched (`model.rs`'s
+`a_field_this_module_has_no_rules_for_survives_the_whole_trip`). `merge` in
+`model.rs` resolves two copies of ONE record by timestamp and content only; it
+has no notion that a `parentId` names another record, so it cannot detect that
+a merge just landed a cycle two devices each built independently while
+believing the tree was still acyclic, or that a group's parent was deleted on
+one device between the two devices' last sync. Nothing is lost - a dangling or
+cyclic `parentId` still renders and files hosts correctly - because
+`groupTree.ts`'s `buildGroupTree` resolves the read side of exactly this case
+to root, and `applyRemote` (`src/modules/hosts/store.ts`) lands a group
+landing with no reference check of its own, by design: a per-write refusal on
+a landing would drop a record another device already holds.
+
+**Carried by.** `groupTree.ts`'s `buildGroupTree`/`effectiveParents` (the read
+side) and `applyRemote` in `src/modules/hosts/store.ts` (the landing side,
+which runs no cycle check on purpose).
+
+**Trigger.** Cross-record awareness added to `merge` in `model.rs` - at which
+point a landed cycle could be refused or resolved at merge time instead of
+being tolerated at every later read.
+
 ## Shared UI
 
 ### A shared row/box layout is duplicated between the SSH credential section and the host editor, and only one copy is checked

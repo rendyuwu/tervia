@@ -79,6 +79,7 @@ import {
   clearDanglingTunnels,
   mergeGroups,
   normaliseIdentityKeys,
+  orderGroupWrites,
   orderHostWrites,
   parseBackupFile,
   refuseProtocolConflicts,
@@ -770,9 +771,13 @@ async function applyV3(payload: SealedBlob, passphrase: string): Promise<ImportR
       }
     }
 
-    // WRITE 3: the groups, before the hosts wearing them.
+    // WRITE 3: the groups, before the hosts wearing them. Ordered so a group
+    // new in this same file that is another new group's parent is written
+    // before it - `upsertGroup` checks `parentId` against what is already on
+    // disk, and `orderGroupWrites` is also what drops a dangling or cyclic
+    // reference to root before either row reaches that check.
     const groupIds = new Set(existingGroups.map((g) => g.id));
-    for (const group of merged.groups) {
+    for (const group of orderGroupWrites(merged.groups, existingGroups)) {
       try {
         await upsertGroup(group);
         tally(group.id, groupIds, groups);

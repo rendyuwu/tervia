@@ -35,6 +35,7 @@ import {
 } from "@/modules/vault/types";
 
 import { createTauriHostsStoreIo, defaultHostFiles, type HostsIo } from "./adapters";
+import { groupChain } from "./groupTree";
 import { jumpChain } from "./jumps";
 import { purgeLegacySecrets as runLegacyPurge, type LegacyPurgeResult } from "./legacyPurge";
 import {
@@ -978,6 +979,17 @@ export function createHostsStore(io: HostsIo): HostsStore {
       if (groups.some((g) => g.id !== group.id && sameName(g.name, group.name))) {
         throw new Error(`hosts: a group is already named "${group.name.trim()}"`);
       }
+      if (group.parentId) {
+        if (group.parentId === group.id) {
+          throw new Error(`hosts: "${group.name}" cannot be its own parent group`);
+        }
+        if (!groups.some((g) => g.id === group.parentId)) {
+          throw new Error(`hosts: "${group.name}" names a parent group that does not exist`);
+        }
+        // The TRANSITIVE half - `groupChain` catches A -> B -> A the same way
+        // `jumpChain` does for a jump host chain.
+        groupChain(group.parentId, group.id, groups);
+      }
       // Stamped and tombstone-cleared exactly as `writeHost` does, and for the
       // same two reasons.
       const at = now();
@@ -1159,7 +1171,8 @@ export function createHostsStore(io: HostsIo): HostsStore {
   async function deleteGroup(id: string): Promise<void> {
     return enqueueWrite(async () => {
       const [groups, hosts] = await Promise.all([listGroups(), listHosts()]);
-      if (!groups.some((g) => g.id === id)) return;
+      const target = groups.find((g) => g.id === id);
+      if (!target) return;
       const at = now();
       const graves = await readTombstones(at);
       // The one place a cascade is right: a group is a label, not an owner, so its
@@ -1181,16 +1194,29 @@ export function createHostsStore(io: HostsIo): HostsStore {
         members.push({ kind: HOST_TOMBSTONE_KIND, id: h.id });
         return { ...h, groupId: undefined, updatedAt: at };
       });
+      // A child group is not deleted with its parent either - re-parented to
+      // WHERE THE DELETED GROUP WAS, so it does not jump to root just because
+      // its own parent went away. Matched on the RAW `parentId`: `target`
+      // unambiguously existed and named nobody but itself as a candidate
+      // cycle, so there is no read-time fallback to apply here.
+      const children: DirtyId[] = [];
+      const nextGroups = groups
+        .filter((g) => g.id !== id)
+        .map((g) => {
+          if (g.parentId !== id) return g;
+          children.push({ kind: GROUP_TOMBSTONE_KIND, id: g.id });
+          return { ...g, parentId: target.parentId, updatedAt: at };
+        });
       await persist(
         [
-          [HOST_GROUPS_KEY, groups.filter((g) => g.id !== id)],
+          [HOST_GROUPS_KEY, nextGroups],
           [HOSTS_KEY, nextHosts],
           [
             TOMBSTONES_KEY,
             withTombstone(graves, [{ id, kind: GROUP_TOMBSTONE_KIND, deletedAt: at }], at),
           ],
         ],
-        [{ kind: GROUP_TOMBSTONE_KIND, id }, ...members],
+        [{ kind: GROUP_TOMBSTONE_KIND, id }, ...members, ...children],
       );
     });
   }

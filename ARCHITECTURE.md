@@ -222,9 +222,10 @@ There is **one record per machine**, a `Host` union discriminated on `protocol`,
 rather than a store per protocol: grouping, search and vault binding are then
 built once instead of twice, and the union keeps `desktopWidth` off an SSH row
 instead of making every consumer defensive about it. A row holds a name, host and
-port, an optional group, the last-seen server key or certificate, whichever
-reference its protocol uses to reach another saved host (`proxyJumpId` for SSH,
-`tunnel` for RDP), and a `credential`. It holds no forward rules: a rule is its
+port, an optional group (which may itself nest under another), the last-seen
+server key or certificate, whichever reference its protocol uses to reach
+another saved host (`proxyJumpId` for SSH, `tunnel` for RDP), and a `credential`.
+It holds no forward rules: a rule is its
 own record, so it is edited in one place whether or not its host is on screen.
 
 That credential is either **inline** — this host's own, with the secrets under

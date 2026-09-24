@@ -153,6 +153,7 @@ import {
   clearDanglingTunnels,
   mergeGroups,
   normaliseIdentityKeys,
+  orderGroupWrites,
   orderHostWrites,
   parseBackupFile,
   refuseProtocolConflicts,
@@ -1751,6 +1752,16 @@ check("a non-numeric order is ignored", sanitizeGroup({ id: "g-1", name: "prod",
 check("a blank name is dropped", sanitizeGroup({ id: "g-1", name: "   " }), null);
 check("so is a missing id", sanitizeGroup({ name: "prod" }), null);
 check("and a non-object", sanitizeGroup("g-1"), null);
+check(
+  "parentId travels, trimmed",
+  sanitizeGroup({ id: "g-1", name: "prod", parentId: " g-0 " })?.parentId,
+  "g-0",
+);
+check(
+  "a blank parentId is dropped rather than kept as an empty string",
+  sanitizeGroup({ id: "g-1", name: "prod", parentId: "  " }),
+  { id: "g-1", name: "prod" },
+);
 
 const collide = mergeGroups(
   [{ id: "g-file", name: "Prod" }],
@@ -1826,6 +1837,60 @@ check(
     .groupId,
   undefined,
 );
+check(
+  "a survivor's own parentId is repointed through the same remap its members get",
+  mergeGroups(
+    [
+      { id: "g-file", name: "Prod" },
+      { id: "g-child", name: "Web", parentId: "g-file" },
+    ],
+    [{ id: "g-local", name: " prod " }],
+    [],
+  ).groups.find((g) => g.id === "g-child")?.parentId,
+  "g-local",
+);
+
+console.log("\n[orderGroupWrites] a parent new in this same file is written before its child");
+check(
+  "a three-level chain, all new, lands parent-before-child",
+  orderGroupWrites(
+    [
+      { id: "g-leaf", name: "Leaf", parentId: "g-mid" },
+      { id: "g-mid", name: "Mid", parentId: "g-root" },
+      { id: "g-root", name: "Root" },
+    ],
+    [],
+  ).map((g) => g.id),
+  ["g-root", "g-mid", "g-leaf"],
+);
+check(
+  "a parent already saved here needs no reordering",
+  orderGroupWrites(
+    [{ id: "g-child", name: "Child", parentId: "g-saved" }],
+    [{ id: "g-saved", name: "Saved" }],
+  ).map((g) => g.id),
+  ["g-child"],
+);
+check(
+  "a parentId naming nothing on either side is dropped to root, not refused",
+  orderGroupWrites([{ id: "g-1", name: "A", parentId: "g-gone" }], [])[0].parentId,
+  undefined,
+);
+{
+  const cyclic = orderGroupWrites(
+    [
+      { id: "g-a", name: "A", parentId: "g-b" },
+      { id: "g-b", name: "B", parentId: "g-a" },
+    ],
+    [],
+  );
+  check("a cycle within one file's groups still terminates", cyclic.length, 2);
+  check(
+    "and both of its members land at root rather than looping",
+    cyclic.map((g) => g.parentId),
+    [undefined, undefined],
+  );
+}
 
 console.log("\n[identities] a bad row is wrong everywhere it is referenced, not just once");
 check("a good identity survives", sanitizeIdentity(identity()), {

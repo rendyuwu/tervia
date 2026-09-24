@@ -152,7 +152,10 @@ export type HostBase = {
   name: string;
   host: string;
   port: number;
-  /** At most one, and groups do not nest. */
+  /** At most one, directly. The group itself may nest under another
+   *  (`HostGroup.parentId`), but this field still names exactly one group -
+   *  an ancestor filter match runs through the chain of `HostGroup` records,
+   *  never through a path stored here. */
   groupId?: string;
   description?: string;
   /** Unix ms of the last successful connect. */
@@ -291,9 +294,23 @@ export type RdpHost = HostBase & {
 export type Host = SshHost | RdpHost;
 
 /** A label, not an owner - which is why deleting one clears `groupId` on its
- *  members instead of deleting them. `updatedAt` reads exactly as
- *  {@link HostBase.updatedAt} does, absent included. */
-export type HostGroup = { id: string; name: string; order?: number; updatedAt?: number };
+ *  members instead of deleting them, and re-parents its own child groups to
+ *  its OWN parent instead of deleting or orphaning them. `parentId` nests one
+ *  group under another; absent, it is a root group. A `parentId` naming a
+ *  group that no longer exists, naming itself, or sitting in a cycle with
+ *  another group's `parentId` is read as root rather than refused - see
+ *  `groupTree.ts`'s `buildGroupTree`, which every reader of this list goes
+ *  through. `upsertGroup` (`store.ts`) refuses all three at WRITE time
+ *  instead, on the pattern its jump-host chain check already set.
+ *  `updatedAt` reads exactly as {@link HostBase.updatedAt} does, absent
+ *  included. */
+export type HostGroup = {
+  id: string;
+  name: string;
+  parentId?: string;
+  order?: number;
+  updatedAt?: number;
+};
 
 export function isSshHost(host: Host): host is SshHost {
   return host.protocol === "ssh";
