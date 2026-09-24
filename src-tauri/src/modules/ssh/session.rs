@@ -1634,11 +1634,12 @@ async fn authenticate_hop(
             SshConnectError::config(format!("ssh: [{host}] parse certificate failed: {e}"))
         })?;
         // The authoritative half of the pairing check - see
-        // `ssh_key_classify`'s doc comment (`mod.rs`) for the frontend's own
-        // check at save time, over fingerprints rather than key data. This
-        // one runs unconditionally, because a record can reach this point
-        // without ever passing through that check (hand-edited JSON, a sync
-        // landing, an older client).
+        // `SshTextClassification::Certificate`'s `fingerprint` field doc
+        // (`mod.rs`) for the frontend's own check at save time, over
+        // fingerprints rather than key data. This one runs unconditionally,
+        // because a record can reach this point without ever passing
+        // through that check (hand-edited JSON, a sync landing, an older
+        // client).
         if cert.public_key() != key.public_key().key_data() {
             return Err(SshConnectError::config(format!(
                 "ssh: [{host}] this certificate does not certify the paired private key"

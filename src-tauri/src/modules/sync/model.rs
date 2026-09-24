@@ -411,7 +411,18 @@ pub fn merge(local: &Envelope, remote: &Envelope) -> Result<Merged, MergeError> 
         //
         // Re-deriving a fingerprint from a body the local keychain holds is
         // the apply path's job, not this one's - this layer has no keychain.
-        if !claims_private_key(&winner.record) {
+        //
+        // EXCEPT `kind: "hardware"` (`VaultKeyKind` in
+        // `src/modules/vault/types.ts`), which never claims a body at all -
+        // `hasPrivateKey` is permanently `false` for it by design. There the
+        // fingerprint names an ssh-agent IDENTITY, not a keychain body the
+        // "could describe a body nobody holds" argument is about, and it is
+        // the record's only identifying fact: strip it and nothing on any
+        // device can put it back (`rederive` in `src/modules/sync/scheduler.ts`
+        // restores a fingerprint from a keychain read, and a hardware key has
+        // no keychain account to read).
+        let hardware = winner.record.get("kind").and_then(Value::as_str) == Some("hardware");
+        if !claims_private_key(&winner.record) && !hardware {
             if let Some(obj) = winner.record.as_object_mut() {
                 obj.remove("fingerprint");
             }
@@ -715,6 +726,22 @@ mod tests {
                 "kept a fingerprint on a record claiming no body"
             );
         }
+    }
+
+    #[test]
+    fn a_hardware_keys_fingerprint_survives_a_merge_even_though_it_claims_no_body() {
+        // The one exception: `hasPrivateKey` is permanently `false` for a
+        // `kind: "hardware"` key by design (`VaultKeyKind` in
+        // `src/modules/vault/types.ts`), so the rule above would otherwise
+        // strip its only identifying fact on the very first sync round trip,
+        // with nothing anywhere able to put it back.
+        let winner = key_env(
+            2,
+            json!({"id": "k-1", "kind": "hardware", "hasPrivateKey": false, "fingerprint": "SHA256:hw"}),
+        );
+        let loser = key_env(1, json!({"id": "k-1", "kind": "hardware", "hasPrivateKey": false}));
+        let merged = merge(&winner, &loser).unwrap();
+        assert_eq!(merged.envelope.record["fingerprint"], "SHA256:hw");
     }
 
     #[test]

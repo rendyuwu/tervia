@@ -475,8 +475,12 @@ export function createScheduler(io: SchedulerIo): SyncScheduler {
       const key = stored.find((k) => k.id === id);
       // Read from the STORE rather than from the landing, so a landing the
       // apply refused - or one a local delete superseded - is never corrected
-      // into existence.
-      if (!key || (key.hasPrivateKey && key.fingerprint)) continue;
+      // into existence. A `hardware` key is skipped outright: it never has a
+      // body to read at all (`VaultKeyKind` in `src/modules/vault/types.ts`),
+      // so the read below would always come back empty and the loop would
+      // still hit its own `if (!body) continue` - this just skips the
+      // pointless keychain call to get there.
+      if (!key || key.kind === "hardware" || (key.hasPrivateKey && key.fingerprint)) continue;
       try {
         const secrets = await read(id);
         const body = secrets[KEY_PRIVATE_KEY_FIELD];

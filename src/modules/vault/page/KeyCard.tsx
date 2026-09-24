@@ -65,7 +65,17 @@ function certValidityLabel(
   now: number,
 ): { text: string; expired: boolean } | null {
   if (vaultKey.kind !== "cert" || vaultKey.certValidAfter === undefined) return null;
-  if (vaultKey.certValidBefore === undefined) return { text: "Never expires", expired: false };
+  // `> 8.64e15` (JavaScript's own `Date` range ceiling, +/-100,000,000 days
+  // from the epoch) is treated as "never expires" alongside an absent
+  // `certValidBefore`: a CA that writes something other than OpenSSH's own
+  // `u64::MAX` "forever" sentinel (`i64::MAX`, say) would otherwise render
+  // "Valid until Invalid Date" instead of the honest sentence.
+  if (
+    vaultKey.certValidBefore === undefined ||
+    vaultKey.certValidBefore * 1000 > 8.64e15
+  ) {
+    return { text: "Never expires", expired: false };
+  }
   const expired = vaultKey.certValidBefore * 1000 < now;
   const date = new Date(vaultKey.certValidBefore * 1000).toLocaleDateString();
   return { text: expired ? `Expired ${date}` : `Valid until ${date}`, expired };
@@ -93,9 +103,17 @@ export function KeyCard({
     >
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
         <span className="min-w-0 flex-1 truncate text-sm font-medium">{vaultKey.name}</span>
-        {vaultKey.kind ? (
+        {/* An unrecognised future `kind` (a hand-edited file, or a record an
+            older build cannot fully rebuild - see KNOWN-LIMITS.md) renders no
+            badge at all here, rather than defaulting to "Hardware key" for
+            anything that merely isn't "cert". */}
+        {vaultKey.kind === "cert" ? (
           <Badge variant="outline" className="shrink-0">
-            {vaultKey.kind === "cert" ? "Certificate" : "Hardware key"}
+            Certificate
+          </Badge>
+        ) : vaultKey.kind === "hardware" ? (
+          <Badge variant="outline" className="shrink-0">
+            Hardware key
           </Badge>
         ) : null}
         <Badge variant={missingPrivateKey ? "destructive" : "outline"} className="shrink-0">

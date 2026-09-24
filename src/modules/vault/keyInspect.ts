@@ -99,15 +99,22 @@ export function describeKeyInfo(info: KeyInspectResult): KeyInspectState {
 /**
  * The backend's message, with its `ssh: ` prefix removed.
  *
- * Stripped because the message is rendered inside a field already labelled as an
- * SSH private key, where the prefix is noise. The message itself is NOT rewritten:
- * every dead end has its own sentence naming what to do next, and paraphrasing
- * them here would put a second copy of that wording in the tree.
+ * Stripped because the message is rendered inside a field already labelled
+ * as an SSH credential, where the prefix is noise. The message itself is
+ * NOT rewritten: every dead end has its own sentence naming what to do
+ * next, and paraphrasing them here would put a second copy of that wording
+ * in the tree. The one shared strip behind {@link describeKeyError},
+ * {@link describeCertError} and {@link describeAgentKeyError} - three
+ * separate copies of this one-line rule is the kind of duplication that
+ * drifts the moment one of them is edited and the other two are not.
  */
-export function describeKeyError(err: unknown): KeyInspectState {
+export function sshErrorMessage(err: unknown): string {
   const raw = err instanceof Error ? err.message : String(err);
-  const message = raw.startsWith("ssh: ") ? raw.slice("ssh: ".length) : raw;
-  return { kind: "error", message };
+  return raw.startsWith("ssh: ") ? raw.slice("ssh: ".length) : raw;
+}
+
+export function describeKeyError(err: unknown): KeyInspectState {
+  return { kind: "error", message: sshErrorMessage(err) };
 }
 
 /**
@@ -154,9 +161,44 @@ export function describeCertClassification(
 /** {@link describeKeyError}, over a `ssh_key_classify` rejection instead of
  *  an `ssh_key_inspect` one - same prefix-stripping rule, same reason. */
 export function describeCertError(err: unknown): CertInspectState {
-  const raw = err instanceof Error ? err.message : String(err);
-  const message = raw.startsWith("ssh: ") ? raw.slice("ssh: ".length) : raw;
-  return { kind: "error", message };
+  return { kind: "error", message: sshErrorMessage(err) };
+}
+
+/**
+ * What `classifySshText`'s answer means for the `hardware` kind's own panel
+ * in the key editor - the picked-or-pasted public-key line's check result.
+ * A third sibling of {@link describeKeyInfo}/{@link describeCertClassification},
+ * over the same `"publicKey"` classification {@link hardwareFactsFrom}
+ * already reads for the SAVED fact; this is the DISPLAY translation of the
+ * identical answer, the same split {@link vaultKeyFactsFrom}/
+ * {@link describeKeyInfo} already hold for a `pem` key.
+ */
+export type AgentKeyInspectState =
+  | { kind: "idle" }
+  | { kind: "checking" }
+  | { kind: "ok"; algorithm: string; fingerprint: string; comment: string | null }
+  /** The pasted or picked text classified as something other than a public
+   *  key - a private key, a certificate, or unsupported. One state rather
+   *  than three, for the same reason {@link CertInspectState.notACertificate}
+   *  is one state: the panel this backs only ever needs to say "that is not
+   *  a public key line". */
+  | { kind: "notAPublicKey" }
+  | { kind: "error"; message: string };
+
+export function describeAgentKeyClassification(
+  classification: SshTextClassification,
+): AgentKeyInspectState {
+  if (classification.kind !== "publicKey") return { kind: "notAPublicKey" };
+  return {
+    kind: "ok",
+    algorithm: classification.algorithm,
+    fingerprint: classification.fingerprint,
+    comment: classification.comment,
+  };
+}
+
+export function describeAgentKeyError(err: unknown): AgentKeyInspectState {
+  return { kind: "error", message: sshErrorMessage(err) };
 }
 
 /**

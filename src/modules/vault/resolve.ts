@@ -291,11 +291,20 @@ export async function resolveSshAuth(
   });
   // A `cert` key's certificate is PUBLIC, so it travels alongside the
   // keychain references above instead of through one - this module makes
-  // no secret read of its own for anything, certificate included.
+  // no secret read of its own for anything, certificate included. A record
+  // with no certificate at all - reachable from a hand-edited vault file or
+  // a trimmed-empty import field - is refused by name here, the same way
+  // the hardware branch above refuses a missing fingerprint: dialling it
+  // silently as a bare key would authenticate as a DIFFERENT credential
+  // than the one this identity names, against whatever server still trusts
+  // the bare signing key.
+  if (key?.kind === "cert" && !key.certificate) {
+    throw new Error(`vault: certificate key "${key.name}" has no certificate`);
+  }
   return {
     user: identity.username,
     ...base,
-    ...(key?.kind === "cert" && key.certificate ? { certificate: key.certificate } : {}),
+    ...(key?.kind === "cert" ? { certificate: key.certificate } : {}),
   };
 }
 

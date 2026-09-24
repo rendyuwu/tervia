@@ -103,6 +103,86 @@ substitution.
 run in, or CTAP-specific error handling being added to `authenticate_agent`'s
 path.
 
+### A build without the hardware exemption still strips a hardware key's fingerprint during cross-version sync
+
+**Accepted state.** `sync/model.rs`'s `merge` now exempts `kind: "hardware"`
+from the rule that drops `fingerprint` whenever a record's own
+`hasPrivateKey` is false - a hardware key's `fingerprint` is its only
+identifying fact and is never backed by a keychain body, so stripping it is
+unrecoverable (`rederive` in `src/modules/sync/scheduler.ts` restores a
+fingerprint from a keychain read, and a hardware key has none). A syncing
+device running a build from BEFORE this exemption still applies the old,
+unexempted rule: on any merge where that older build's copy is chosen as the
+winner, the fingerprint is stripped and republished to every device,
+including ones already running the fix. Two syncing builds do not
+negotiate a shared rule - each merges with whatever rule its own binary
+carries.
+
+**Carried by.** The exemption itself, `merge` in
+`src-tauri/src/modules/sync/model.rs`, and its own doc comment naming the
+hardware case explicitly.
+
+**Trigger.** Every device in a sync group running a build with the
+exemption - at that point no copy of the old, unexempted rule is left to
+strip it, and this entry can be removed.
+
+### RSA certificates are unverified against a live OpenSSH server
+
+**Accepted state.** [INFERENCE] A `cert`-kind vault entry's certificate can
+be built over any algorithm `ssh_key_classify`/`ssh_key_inspect` accept,
+RSA included, and `authenticate_hop`'s certificate branch calls
+`Handle::authenticate_openssh_cert` with no hash-algorithm parameter -
+unlike the plain-key branch's `PrivateKeyWithHashAlg::new(.., Some(HashAlg::Sha256))`.
+For a parsed RSA certificate the pinned fork's own
+`Algorithm::to_certificate_type` maps to `ssh-rsa-cert-v01@openssh.com`,
+which OpenSSH 8.8 and later refuse under their default
+`PubkeyAcceptedAlgorithms` (the same SHA-1-signature retirement
+`HOST_KEY_ALGOS`'s own doc comment in `src-tauri/src/modules/ssh/session.rs`
+names for the plain-key case). The cert e2e test
+(`cert_authenticates_against_a_real_sshd_trusting_only_the_ca`) signs and
+dials with an Ed25519 certificate only, so this is read off the crate's
+source rather than exercised against a live server.
+
+**Carried by.** `authenticate_hop`'s certificate branch in
+`src-tauri/src/modules/ssh/session.rs`, which calls
+`authenticate_openssh_cert` with no hash algorithm.
+
+**Trigger.** A `russh` release whose `authenticate_openssh_cert` (or its
+certificate-signing path) becomes hash-algorithm-aware, or a user report of
+a refused RSA certificate against a default-configured OpenSSH server -
+either resolves this entry, the first by fixing the gap and the second by
+confirming it and turning this into a named refusal in `save` instead.
+
+### An older build editing a cert or hardware key silently rebuilds it as a plain PEM key
+
+**Accepted state.** `keyRecordFrom` (`src/modules/vault/editor/draft.ts`)
+builds the saved record entirely from the draft it is handed; an older
+build's `KeyDraft`/`keyRecordFrom` has no `kind`/`certificate` fields at
+all. If a user opens a `cert`- or `hardware`-kind record in an OLDER build
+of the key editor and presses Save, the older build's `keyDraftFrom` never
+read the new fields into its draft, so its `keyRecordFrom` writes a fresh
+object with no `kind` and no certificate - a working key becomes a
+body-less (or signing-key-only) PEM record, silently, with no refusal
+anywhere in that build's own code to catch it. Sync then propagates the
+result on the usual last-write-wins terms: a newer device that pulls it
+inherits the stripped record.
+
+This build itself is not silent about the reverse direction: an unknown
+future `kind` this build does not recognise is refused at save time
+(`validateKeyDraft`'s exhaustive switch, called inside `save`'s `try` so
+the refusal reaches the form rather than becoming an unhandled promise
+rejection) and renders no kind badge on the Vault page
+(`page/KeyCard.tsx`).
+
+**Carried by.** `keyRecordFrom` and `keyDraftFrom` in
+`src/modules/vault/editor/draft.ts`, which together are the whole of what
+an older build's editor would need to preserve the new fields and do not
+exist in a build before this branch.
+
+**Trigger.** Every device in a sync group running a build that knows
+`kind`, `certificate` and the parsed cert facts - at that point no older
+editor is left to strip them on save, and this entry can be removed.
+
 ## Verify suite
 
 ### Exact-text anchors in verify scripts do not survive a reformat

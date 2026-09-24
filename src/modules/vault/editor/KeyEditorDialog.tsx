@@ -36,6 +36,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { toast } from "@/components/ui/toast";
 import type { FsReadResult } from "@/lib/ipc";
+import { cn } from "@/lib/utils";
 import { Field, ToggleButton } from "@/modules/hosts/editor/FormControls";
 import { SECRET_STORE_LOCATIONS } from "@/modules/hosts/editor/secretStoreCopy";
 import {
@@ -51,6 +52,8 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 
 import {
+  describeAgentKeyClassification,
+  describeAgentKeyError,
   describeCertClassification,
   describeCertError,
   describeKeyError,
@@ -58,6 +61,7 @@ import {
   hardwareFactsFrom,
   vaultCertFactsFrom,
   vaultKeyFactsFrom,
+  type AgentKeyInspectState,
   type CertInspectState,
   type KeyInspectState,
   type VaultCertFacts,
@@ -102,17 +106,6 @@ type AgentKeysState =
   | { kind: "idle" }
   | { kind: "checking" }
   | { kind: "ok"; keys: SshAgentKey[] }
-  | { kind: "error"; message: string };
-
-/** What `checkPublicKey` found for the `hardware` kind's pasted or picked
- *  public-key line - a sibling of {@link CertInspectState}, over the
- *  `"publicKey"` classification instead of `"certificate"`. Local to this
- *  file: nothing else needs this translation. */
-type AgentKeyCheckState =
-  | { kind: "idle" }
-  | { kind: "checking" }
-  | { kind: "ok"; algorithm: string; fingerprint: string; comment: string | null }
-  | { kind: "notAPublicKey" }
   | { kind: "error"; message: string };
 
 /**
@@ -164,7 +157,7 @@ export function KeyEditorDialog({ target, onClose }: KeyEditorDialogProps): Reac
   // independently of the private-key field.
   const [certInspected, setCertInspected] = useState<CertInspectState>({ kind: "idle" });
   const certInspectGeneration = useRef(0);
-  const [hwInspected, setHwInspected] = useState<AgentKeyCheckState>({ kind: "idle" });
+  const [hwInspected, setHwInspected] = useState<AgentKeyInspectState>({ kind: "idle" });
   const hwInspectGeneration = useRef(0);
   const [agentKeys, setAgentKeys] = useState<AgentKeysState>({ kind: "idle" });
 
@@ -295,7 +288,10 @@ export function KeyEditorDialog({ target, onClose }: KeyEditorDialogProps): Reac
   };
 
   /** {@link checkKey}, over the `hardware` kind's public-key text, pasted or
-   *  filled in by picking a row from {@link agentKeys}. */
+   *  filled in by picking a row from {@link agentKeys}. Translation is
+   *  `describeAgentKeyClassification`/`describeAgentKeyError`
+   *  (`../keyInspect`), the same shared home `describeCertClassification`/
+   *  `describeCertError` give the certificate panel's twin. */
   const checkPublicKey = async (text: string) => {
     const generation = ++hwInspectGeneration.current;
     if (!text.trim()) {
@@ -304,24 +300,11 @@ export function KeyEditorDialog({ target, onClose }: KeyEditorDialogProps): Reac
     }
     setHwInspected({ kind: "checking" });
     try {
-      const classification = await classifySshText(text);
-      const result: AgentKeyCheckState =
-        classification.kind === "publicKey"
-          ? {
-              kind: "ok",
-              algorithm: classification.algorithm,
-              fingerprint: classification.fingerprint,
-              comment: classification.comment,
-            }
-          : { kind: "notAPublicKey" };
+      const result = describeAgentKeyClassification(await classifySshText(text));
       if (hwInspectGeneration.current === generation) setHwInspected(result);
     } catch (e) {
-      // Same prefix-strip `describeKeyError`/`describeCertError` apply -
-      // duplicated rather than reused across the three, the same accepted
-      // duplication `KeyInspectPanel`'s own doc comment names.
-      const raw = e instanceof Error ? e.message : String(e);
-      const message = raw.startsWith("ssh: ") ? raw.slice("ssh: ".length) : raw;
-      if (hwInspectGeneration.current === generation) setHwInspected({ kind: "error", message });
+      const result = describeAgentKeyError(e);
+      if (hwInspectGeneration.current === generation) setHwInspected(result);
     }
   };
 
@@ -441,13 +424,20 @@ export function KeyEditorDialog({ target, onClose }: KeyEditorDialogProps): Reac
   const save = async () => {
     setError(null);
     setKeyRefusal(null);
-    const invalid = validateKeyDraft(draft, mode);
-    if (invalid) {
-      setError(invalid);
-      return;
-    }
     setSaving(true);
     try {
+      // Moved inside the try (P2-6, Oracle review): `validateKeyDraft`'s
+      // `never` default throws for a `draft.kind` this build does not
+      // recognise - reachable if a load ever produced one - and `save` is
+      // called as `() => void save()`, so a throw BEFORE this try would
+      // reject the promise the `void` discards: an unhandled rejection, with
+      // nothing on screen saying why. Inside the try, the same `catch` below
+      // reports it like any other save-time refusal.
+      const invalid = validateKeyDraft(draft, mode);
+      if (invalid) {
+        setError(invalid);
+        return;
+      }
       // Inspected/classified HERE rather than read off `inspected`/
       // `certInspected`/`hwInspected`: this reads every field at the moment
       // the record is built, so there is no generation to compare and no way
@@ -488,10 +478,11 @@ export function KeyEditorDialog({ target, onClose }: KeyEditorDialogProps): Reac
             return;
           }
           // The frontend half of the pairing check - see
-          // `ssh_key_classify`'s doc comment (`src-tauri/src/modules/ssh/mod.rs`).
-          // `authenticate_hop` (`src-tauri/src/modules/ssh/session.rs`) makes
-          // the authoritative one at dial time, over key data rather than a
-          // fingerprint string, for a record this check never ran against.
+          // `SshTextClassification::Certificate`'s `fingerprint` field doc
+          // (`src-tauri/src/modules/ssh/mod.rs`). `authenticate_hop`
+          // (`src-tauri/src/modules/ssh/session.rs`) makes the authoritative
+          // one at dial time, over key data rather than a fingerprint
+          // string, for a record this check never ran against.
           const signingFingerprint = facts?.fingerprint ?? existing?.fingerprint;
           if (
             signingFingerprint &&
@@ -628,32 +619,47 @@ export function KeyEditorDialog({ target, onClose }: KeyEditorDialogProps): Reac
               </Field>
 
               <Field label="Kind">
-                <div className="flex gap-1.5">
-                  <ToggleButton
-                    active={draft.kind === "pem"}
-                    onClick={() => patch({ kind: "pem" })}
-                  >
-                    Private key
-                  </ToggleButton>
-                  <ToggleButton
-                    active={draft.kind === "cert"}
-                    onClick={() => patch({ kind: "cert" })}
-                  >
-                    Certificate
-                  </ToggleButton>
-                  <ToggleButton
-                    active={draft.kind === "hardware"}
-                    onClick={() => patch({ kind: "hardware" })}
-                  >
-                    Hardware key
-                  </ToggleButton>
-                </div>
+                {mode === "create" ? (
+                  <div className="flex gap-1.5" role="group" aria-label="Kind">
+                    <ToggleButton active={draft.kind === "pem"} onClick={() => patch({ kind: "pem" })}>
+                      Private key
+                    </ToggleButton>
+                    <ToggleButton
+                      active={draft.kind === "cert"}
+                      onClick={() => patch({ kind: "cert" })}
+                    >
+                      Certificate
+                    </ToggleButton>
+                    <ToggleButton
+                      active={draft.kind === "hardware"}
+                      onClick={() => patch({ kind: "hardware" })}
+                    >
+                      Hardware key
+                    </ToggleButton>
+                  </div>
+                ) : (
+                  // Read-only on edit (P1-1): switching an existing record's kind in
+                  // place is a different credential, not a rename - a `hardware`
+                  // draft's `keySecretsForSave` sends neither secret regardless of
+                  // what a stale `existing` body still holds, so a mid-edit switch
+                  // would leave a PEM sitting in the keychain under a record that
+                  // now says it stores none. A kind change is a new key.
+                  <div className="text-[12px]">
+                    {draft.kind === "cert"
+                      ? "Certificate"
+                      : draft.kind === "hardware"
+                        ? "Hardware key"
+                        : "Private key"}
+                  </div>
+                )}
                 <span className="text-muted-foreground text-[10.5px]">
-                  {draft.kind === "cert"
-                    ? "The signing private key below, plus an OpenSSH certificate for it."
-                    : draft.kind === "hardware"
-                      ? "No private key is stored: authentication goes through the OS ssh-agent, restricted to one identity."
-                      : "A plain private key, stored once and shared by every identity that uses it."}
+                  {mode === "edit"
+                    ? "Fixed once created - a different credential kind needs a new key."
+                    : draft.kind === "cert"
+                      ? "The signing private key below, plus an OpenSSH certificate for it."
+                      : draft.kind === "hardware"
+                        ? "No private key is stored: authentication goes through the OS ssh-agent, restricted to one identity."
+                        : "A plain private key, stored once and shared by every identity that uses it."}
                 </span>
               </Field>
 
@@ -825,25 +831,32 @@ export function KeyEditorDialog({ target, onClose }: KeyEditorDialogProps): Reac
                       <span className="text-destructive text-[10.5px]">{agentKeys.message}</span>
                     ) : agentKeys.kind === "ok" && agentKeys.keys.length > 0 ? (
                       <div className="flex flex-col gap-1">
-                        {agentKeys.keys.map((k) => (
-                          <button
-                            key={k.fingerprint}
-                            type="button"
-                            onClick={() => {
-                              patch({ publicKey: k.publicKey });
-                              void checkPublicKey(k.publicKey);
-                            }}
-                            className="border-border/60 hover:bg-muted/50 flex flex-col items-start rounded-md border px-2 py-1 text-left"
-                          >
-                            <span className="text-[11px]">
-                              {k.algorithm}
-                              {k.comment ? ` · ${k.comment}` : ""}
-                            </span>
-                            <span className="text-muted-foreground truncate font-mono text-[10px]">
-                              {k.fingerprint}
-                            </span>
-                          </button>
-                        ))}
+                        {agentKeys.keys.map((k) => {
+                          const picked = draft.publicKey.trim() === k.publicKey;
+                          return (
+                            <button
+                              key={k.fingerprint}
+                              type="button"
+                              aria-pressed={picked}
+                              onClick={() => {
+                                patch({ publicKey: k.publicKey });
+                                void checkPublicKey(k.publicKey);
+                              }}
+                              className={cn(
+                                "border-border/60 hover:bg-muted/50 flex flex-col items-start rounded-md border px-2 py-1 text-left",
+                                picked && "border-primary bg-muted/50",
+                              )}
+                            >
+                              <span className="text-[11px]">
+                                {k.algorithm}
+                                {k.comment ? ` · ${k.comment}` : ""}
+                              </span>
+                              <span className="text-muted-foreground truncate font-mono text-[10px]">
+                                {k.fingerprint}
+                              </span>
+                            </button>
+                          );
+                        })}
                       </div>
                     ) : (
                       <span className="text-muted-foreground text-[10.5px]">
@@ -880,6 +893,14 @@ export function KeyEditorDialog({ target, onClose }: KeyEditorDialogProps): Reac
                       Check key
                     </Button>
                     <AgentKeyPanel state={hwInspected} />
+                    {/* Same refusal `save` can produce for this kind (a private
+                        key or a certificate pasted into this box), rendered here
+                        for the same reason the Private key Field renders its own
+                        copy: without this, `save` stops and `saving` resets with
+                        nothing on screen saying why. */}
+                    {keyRefusal ? (
+                      <p className="text-destructive text-[10.5px]">{keyRefusal}</p>
+                    ) : null}
                   </div>
                   <span className="text-muted-foreground text-[10.5px]">
                     Authentication is restricted to this one identity - the agent, and whatever
@@ -1115,11 +1136,12 @@ function CertInspectPanel({ state }: { state: CertInspectState }): ReactNode {
 
 /**
  * What `checkPublicKey` found, rendered under the `hardware` kind's
- * paste/pick field. `AgentKeyCheckState`'s sibling to {@link KeyInspectPanel}
- * and {@link CertInspectPanel} - see `AgentKeyCheckState`'s own doc comment
- * for why this stays local rather than joining `keyInspect.ts`.
+ * paste/pick field. `AgentKeyInspectState`'s sibling to
+ * {@link KeyInspectPanel} and {@link CertInspectPanel}; its translation
+ * lives in `../keyInspect` beside `describeCertClassification`'s, so both
+ * kinds' panels are backed from one home.
  */
-function AgentKeyPanel({ state }: { state: AgentKeyCheckState }): ReactNode {
+function AgentKeyPanel({ state }: { state: AgentKeyInspectState }): ReactNode {
   if (state.kind === "idle") return null;
   if (state.kind === "checking") {
     return <span className="text-muted-foreground text-[10.5px]">Reading key…</span>;

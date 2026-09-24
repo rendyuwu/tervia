@@ -529,6 +529,18 @@ export async function convertHostToVault(
         `hosts: "${args.host.name}" cannot reuse vault key ${reuse.reuseKeyId}, which no longer exists`,
       );
     }
+    // The offer already excludes `cert`/`hardware` (`reusableVaultKey`'s own
+    // `!k.kind` requirement), and this re-check is that same requirement's
+    // other value: a key that BECAME a new kind between the offer and this
+    // call - or an id that never came from an offer at all - is refused here
+    // the same way a mismatched fingerprint is, rather than silently
+    // releasing the host's own copy onto a record that now authenticates
+    // differently.
+    if (reusedKey.kind) {
+      throw new Error(
+        `hosts: "${args.host.name}" cannot reuse vault key "${reusedKey.name}", which is a ${reusedKey.kind} key`,
+      );
+    }
     if (!reusedKey.hasPrivateKey) {
       throw new Error(
         `hosts: "${args.host.name}" cannot reuse vault key "${reusedKey.name}", which stores no private key, so this host's own copy would be released against a record that holds none`,
