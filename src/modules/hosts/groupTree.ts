@@ -116,10 +116,7 @@ function findNode(nodes: readonly GroupNode[], id: string): GroupNode | undefine
  * a group's own descendants or `groupChain` would refuse the move as a cycle
  * anyway. Empty when `groupId` names no group in `groups`.
  */
-export function descendantIds(
-  groupId: string,
-  groups: readonly HostGroup[],
-): ReadonlySet<string> {
+export function descendantIds(groupId: string, groups: readonly HostGroup[]): ReadonlySet<string> {
   const node = findNode(buildGroupTree(groups), groupId);
   const ids = new Set<string>();
   if (node) collectIds(node, ids);

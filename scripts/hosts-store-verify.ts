@@ -1824,7 +1824,11 @@ console.log("\n[groups] nesting: a parent round-trips, and a bad one is refused 
     () => h.hosts.upsertGroup({ id: "g-4", name: "A", parentId: "g-5" }),
     ["cycle"],
   );
-  check("neither side of the attempted cycle moved", (await h.hosts.findGroup("g-4"))?.parentId, undefined);
+  check(
+    "neither side of the attempted cycle moved",
+    (await h.hosts.findGroup("g-4"))?.parentId,
+    undefined,
+  );
 }
 
 // ---------------------------------------------------------------------------

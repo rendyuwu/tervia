@@ -100,7 +100,10 @@ function moveTargetsFor(
   function walk(nodes: readonly GroupNode[], depth: number): void {
     for (const node of nodes) {
       if (excluded.has(node.group.id)) continue;
-      options.push({ parentId: node.group.id, label: "\u00a0\u00a0".repeat(depth) + node.group.name });
+      options.push({
+        parentId: node.group.id,
+        label: "\u00a0\u00a0".repeat(depth) + node.group.name,
+      });
       walk(node.children, depth + 1);
     }
   }
@@ -129,9 +132,7 @@ export function GroupStrip({
   const [collapsedIds, setCollapsedIds] = useState<Set<string>>(() => new Set());
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<HostGroup | null>(null);
-  const [creatingUnder, setCreatingUnder] = useState<{ parentId: string | undefined } | null>(
-    null,
-  );
+  const [creatingUnder, setCreatingUnder] = useState<{ parentId: string | undefined } | null>(null);
 
   // Every one of the mutations can be refused by the store. Surface the
   // rejection here instead of letting it reach the console unhandled.
@@ -488,10 +489,7 @@ function GroupChip({
             </DropdownMenuSubTrigger>
             <DropdownMenuSubContent>
               {moveOptions.map((opt) => (
-                <DropdownMenuItem
-                  key={opt.parentId ?? ""}
-                  onSelect={() => onMove(opt.parentId)}
-                >
+                <DropdownMenuItem key={opt.parentId ?? ""} onSelect={() => onMove(opt.parentId)}>
                   {opt.label}
                 </DropdownMenuItem>
               ))}

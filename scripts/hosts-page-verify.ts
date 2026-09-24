@@ -650,7 +650,9 @@ console.log("\n[matchesGroupFilter] agrees with the counts, dangling row include
   );
 }
 
-console.log("\n[matchesGroupFilter/groupCounts] nesting: selecting a group keeps its descendants too");
+console.log(
+  "\n[matchesGroupFilter/groupCounts] nesting: selecting a group keeps its descendants too",
+);
 {
   // root -> mid -> leaf, one host on the leaf and a sibling under root.
   const groups = [
@@ -706,12 +708,16 @@ console.log(
     sshInline("h-72", {}, "g-a"),
     sshInline("h-73", {}, "g-b"),
   ];
-  check("every one of the four groups counts only its own direct host", groupCounts(hosts, groups).byGroup, {
-    "g-self": 1,
-    "g-gap": 1,
-    "g-a": 1,
-    "g-b": 1,
-  });
+  check(
+    "every one of the four groups counts only its own direct host",
+    groupCounts(hosts, groups).byGroup,
+    {
+      "g-self": 1,
+      "g-gap": 1,
+      "g-a": 1,
+      "g-b": 1,
+    },
+  );
   check(
     "and none of the four is reachable through another's filter, exactly as an ordinary root would be",
     hosts.map((h) => matchesGroupFilter(h, { kind: "group", groupId: "g-a" }, groups)),
