@@ -2026,11 +2026,16 @@ console.log("\n[pins] one pin per (host, address), in whichever field the protoc
 // one, because a jump-hop address a chain no longer uses can still carry a pin
 // nothing else names - so removing "the host's own address" must not be the only
 // case exercised.
-console.log("\n[pins] forgetPin removes one address, through the same withPins path pinFingerprint writes");
+console.log(
+  "\n[pins] forgetPin removes one address, through the same withPins path pinFingerprint writes",
+);
 {
   const h = harness({
     hosts: [
-      sshHost({ id: "h-1", pins: { "prod.example": "SHA256:PROD", "jump.example": "SHA256:JUMP" } }),
+      sshHost({
+        id: "h-1",
+        pins: { "prod.example": "SHA256:PROD", "jump.example": "SHA256:JUMP" },
+      }),
       rdpHost({ id: "h-2" }),
     ],
   });

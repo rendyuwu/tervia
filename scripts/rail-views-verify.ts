@@ -284,10 +284,7 @@ check(
 console.log("\n[saved] a page leaf that is not Hosts does not come back as a tab");
 check("a saved vault leaf is unrestorable", isUnrestorablePageLeaf(savedPage("vault")));
 check("a saved forwards leaf is unrestorable", isUnrestorablePageLeaf(savedPage("forwards")));
-check(
-  "and so is a saved known-hosts leaf",
-  isUnrestorablePageLeaf(savedPage("known-hosts")),
-);
+check("and so is a saved known-hosts leaf", isUnrestorablePageLeaf(savedPage("known-hosts")));
 check(
   // The case a two-name enumeration missed: not a rail view, not Hosts, and
   // turning it INTO Hosts is what minted the second permanent Hosts tab.

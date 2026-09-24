@@ -46,9 +46,8 @@ export function KnownHostsPage(): ReactNode {
     <div className="bg-background flex h-full w-full min-w-0 flex-col">
       <div className="border-b p-3">
         <p className="text-muted-foreground text-[11px] leading-relaxed">
-          Pins are stored on this device only, and never sync to another one.
-          Forgetting a pin here means the next connect to that address asks
-          you to trust its key or certificate again.
+          Pins are stored on this device only, and never sync to another one. Forgetting a pin here
+          means the next connect to that address asks you to trust its key or certificate again.
         </p>
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto p-3">
@@ -58,8 +57,7 @@ export function KnownHostsPage(): ReactNode {
               No pinned keys or certificates yet.
             </span>
             <span className="mx-auto max-w-72 text-[11px] leading-relaxed opacity-70">
-              A host earns one the first time you accept its server key or
-              certificate.
+              A host earns one the first time you accept its server key or certificate.
             </span>
           </div>
         ) : (
@@ -91,9 +89,7 @@ function KnownHostRowView({
         <div className="flex min-w-0 items-center gap-1.5 text-xs">
           <span className="truncate font-medium">{row.hostName}</span>
           <span className="text-muted-foreground">·</span>
-          <span className="text-muted-foreground truncate">
-            {PROTOCOL_LABEL[row.protocol]}
-          </span>
+          <span className="text-muted-foreground truncate">{PROTOCOL_LABEL[row.protocol]}</span>
         </div>
         <div className="flex min-w-0 flex-wrap items-baseline gap-x-2 text-[10.5px]">
           <span className="text-muted-foreground truncate">{row.address}</span>
