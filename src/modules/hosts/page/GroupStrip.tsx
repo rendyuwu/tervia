@@ -37,7 +37,15 @@ import {
   TRAILING_ICON_SIZE,
 } from "@/modules/tabs/components/TrailingIconButton";
 import type { VaultIdentity } from "@/modules/vault/types";
-import { ChevronRight, FolderInput, KeyRound, MoreHorizontal, Pencil, Plus, Trash2 } from "lucide-react";
+import {
+  ChevronRight,
+  FolderInput,
+  KeyRound,
+  MoreHorizontal,
+  Pencil,
+  Plus,
+  Trash2,
+} from "lucide-react";
 import { useMemo, useState, type ReactNode } from "react";
 import { buildGroupTree, collectIds, type GroupNode } from "../groupTree";
 import type { HostGroup } from "../types";

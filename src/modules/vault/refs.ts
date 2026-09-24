@@ -48,10 +48,7 @@ export function hostsUsingIdentity(hosts: readonly Host[], identityId: string): 
 /** Every group whose `defaultIdentityId` names one identity. The group-side
  *  counterpart of {@link hostsUsingIdentity}, and the reason `Host` above is
  *  already a type-only import: `HostGroup` travels the same way. */
-export function groupsUsingIdentity(
-  groups: readonly HostGroup[],
-  identityId: string,
-): VaultRef[] {
+export function groupsUsingIdentity(groups: readonly HostGroup[], identityId: string): VaultRef[] {
   return groups.filter((g) => g.defaultIdentityId === identityId).map(toVaultRef);
 }
 

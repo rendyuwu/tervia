@@ -1887,7 +1887,9 @@ export function HostEditorDialog({
                       // picked group's own default - never in edit mode,
                       // where `boundIdentity` does not read `choice` at all.
                       if (mode === "create" && !credentialTouched.current) {
-                        setChoice(groupId ? choiceForGroup(groupId, groups) : CREDENTIAL_CHOICE_INLINE);
+                        setChoice(
+                          groupId ? choiceForGroup(groupId, groups) : CREDENTIAL_CHOICE_INLINE,
+                        );
                       }
                     }}
                     searchPlaceholder="Search groups…"

@@ -1958,13 +1958,21 @@ console.log("\n[groups] defaultIdentityFor: own group wins, else the nearest anc
     { id: "g-leaf", name: "Leaf", parentId: "g-mid", defaultIdentityId: "i-leaf" },
     { id: "g-solo", name: "Solo" },
   ];
-  check("a group's own default wins over any ancestor's", defaultIdentityFor("g-leaf", groups), "i-leaf");
+  check(
+    "a group's own default wins over any ancestor's",
+    defaultIdentityFor("g-leaf", groups),
+    "i-leaf",
+  );
   check(
     "with no default of its own, the nearest ancestor's is used",
     defaultIdentityFor("g-mid", groups),
     "i-root",
   );
-  check("a group with no default anywhere on its chain answers undefined", defaultIdentityFor("g-solo", groups), undefined);
+  check(
+    "a group with no default anywhere on its chain answers undefined",
+    defaultIdentityFor("g-solo", groups),
+    undefined,
+  );
   check("no group selected answers undefined", defaultIdentityFor(undefined, groups), undefined);
   check(
     "a group id naming nothing in the list answers undefined",
@@ -2008,7 +2016,11 @@ console.log("\n[groups] a default identity must exist, and only when the field i
     hasPassword: true,
   };
   const h = harness({ identities: [identity] });
-  const group = await h.hosts.upsertGroup({ id: "g-1", name: "Production", defaultIdentityId: "i-1" });
+  const group = await h.hosts.upsertGroup({
+    id: "g-1",
+    name: "Production",
+    defaultIdentityId: "i-1",
+  });
   check("a live default round-trips", group.defaultIdentityId, "i-1");
 
   await rejects(
@@ -2028,7 +2040,11 @@ console.log("\n[groups] a default identity must exist, and only when the field i
   );
 
   const cleared = await h.hosts.upsertGroup({ ...renamed, defaultIdentityId: undefined });
-  check("clearing the default never needs the identity to exist", cleared.defaultIdentityId, undefined);
+  check(
+    "clearing the default never needs the identity to exist",
+    cleared.defaultIdentityId,
+    undefined,
+  );
 
   // Seeded directly, on the `[groups] a landed bad chain...` block's own
   // pattern above - state only a sync landing (`applyRemote`, no reference
@@ -2085,14 +2101,20 @@ console.log("\n[groups] identityHostRefs names a group's default alongside any h
     hasPassword: true,
   };
   const h = harness({
-    hosts: [sshHost({ id: "h-1", name: "web-1", credential: { kind: "identity", identityId: "i-1" } })],
+    hosts: [
+      sshHost({ id: "h-1", name: "web-1", credential: { kind: "identity", identityId: "i-1" } }),
+    ],
     groups: [{ id: "g-1", name: "Production", defaultIdentityId: "i-1" }],
     identities: [identity],
   });
-  check("both a host binding and a group default are named", await h.hosts.identityHostRefs("i-1"), [
-    { id: "h-1", name: "web-1" },
-    { id: "g-1", name: "Production (group default)" },
-  ]);
+  check(
+    "both a host binding and a group default are named",
+    await h.hosts.identityHostRefs("i-1"),
+    [
+      { id: "h-1", name: "web-1" },
+      { id: "g-1", name: "Production (group default)" },
+    ],
+  );
   check("an identity nothing names has no holders", await h.hosts.identityHostRefs("i-unused"), []);
 }
 

@@ -2135,7 +2135,8 @@ console.log(
   const inlineResets = loadBody
     ? findCalls(loadBody, editorSf, ["setChoice"]).filter(
         (c) =>
-          c.arguments.length === 1 && c.arguments[0].getText(editorSf).includes("CREDENTIAL_CHOICE_INLINE"),
+          c.arguments.length === 1 &&
+          c.arguments[0].getText(editorSf).includes("CREDENTIAL_CHOICE_INLINE"),
       )
     : [];
   check(
