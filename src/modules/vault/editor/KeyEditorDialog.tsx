@@ -546,8 +546,8 @@ export function KeyEditorDialog({ target, onClose }: KeyEditorDialogProps): Reac
                     </Button>
                   </div>
                   <span className="text-muted-foreground text-[10.5px]">
-                    Fill in the passphrase below first to encrypt the new key; generating
-                    replaces the stored key on Save.
+                    Fill in the passphrase below first to encrypt the new key; generating replaces
+                    the stored key on Save.
                   </span>
                   {replacingBody ? (
                     <span className="text-muted-foreground text-[10.5px]">

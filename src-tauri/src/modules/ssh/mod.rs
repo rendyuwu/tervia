@@ -1751,7 +1751,10 @@ Ym9ndXMgYm9keSwgbmV2ZXIgcmVhY2hlZA==
 
     #[test]
     fn unknown_algorithm_is_refused() {
-        let err = ssh_key_generate_inner("dsa", None, None).expect_err("dsa has no generate path");
+        // `SshKeyGenerated` has no `Debug` (its PEM is `Zeroizing`), so no `expect_err`.
+        let Err(err) = ssh_key_generate_inner("dsa", None, None) else {
+            panic!("dsa has no generate path");
+        };
         assert!(err.contains("unknown key algorithm"), "{err}");
     }
 
