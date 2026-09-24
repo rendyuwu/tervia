@@ -471,8 +471,8 @@ export function RuleEditorDialog({
                   // `KNOWN-LIMITS.md` - so the toggle is disabled here instead of
                   // offering a setting this rule cannot act on yet.
                   <span className="text-muted-foreground text-[10.5px]">
-                    Remote and dynamic rules cannot start with their host yet - start this one
-                    from the Port Forwarding page.
+                    Remote and dynamic rules cannot start with their host yet - start this one from
+                    the Port Forwarding page.
                   </span>
                 )}
               </Field>

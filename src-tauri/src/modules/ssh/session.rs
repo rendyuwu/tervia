@@ -774,10 +774,10 @@ impl SshSession {
             .ok_or_else(|| "ssh session is closed".to_string())?;
         let generation = mint_forward_generation(&self.forward_seq);
         if bind_port != 0 {
-            self.remote_forwards.lock().await.insert(
-                bind_port,
-                (generation, local_host.clone(), local_port),
-            );
+            self.remote_forwards
+                .lock()
+                .await
+                .insert(bind_port, (generation, local_host.clone(), local_port));
         }
         let reported = match handle
             .tcpip_forward(bind_address.clone(), u32::from(bind_port))

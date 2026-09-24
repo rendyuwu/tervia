@@ -2282,7 +2282,13 @@ check(
 check(
   "a -R row with no bindAddress/bindPort at all is still good - both are optional - asserted as the WHOLE object, not just bindPort's absence, so a dropped row (null) cannot pass the same way a kept one does",
   sanitizeRule(
-    rule({ type: "remote", remoteHost: "", remotePort: 0, targetHost: "127.0.0.1", targetPort: 22 }),
+    rule({
+      type: "remote",
+      remoteHost: "",
+      remotePort: 0,
+      targetHost: "127.0.0.1",
+      targetPort: 22,
+    }),
   ),
   {
     id: "f-1",

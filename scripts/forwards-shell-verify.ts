@@ -3841,16 +3841,20 @@ console.log(failed === 0 ? "\nAll forwards-shell checks passed." : `\n${failed} 
 // ----------------------------------------------------------------------------
 console.log("\n[draft.ts per-type] validateRuleDraft/ruleRecordFrom/ruleDraftFrom, behaviourally");
 {
-  const { EMPTY_RULE_DRAFT, ruleDraftFrom, ruleRecordFrom, validateRuleDraft } = await import(
-    "../src/modules/forwards/editor/draft"
-  );
+  const { EMPTY_RULE_DRAFT, ruleDraftFrom, ruleRecordFrom, validateRuleDraft } =
+    await import("../src/modules/forwards/editor/draft");
   const base = { ...EMPTY_RULE_DRAFT, name: "web tunnel", hostId: "h-1" };
 
   // -L (type "").
   check(
     "-L: a blank remote host is refused",
-    validateRuleDraft({ ...base, type: "", localPort: "8080", remoteHost: " ", remotePort: "80" }) ===
-      "Remote host is required",
+    validateRuleDraft({
+      ...base,
+      type: "",
+      localPort: "8080",
+      remoteHost: " ",
+      remotePort: "80",
+    }) === "Remote host is required",
   );
   const localRecord = ruleRecordFrom("f-1", {
     ...base,
@@ -3908,7 +3912,8 @@ console.log("\n[draft.ts per-type] validateRuleDraft/ruleRecordFrom/ruleDraftFro
   );
   check(
     "-R: passes with no bind fields at all",
-    validateRuleDraft({ ...base, type: "remote", targetHost: "10.0.0.9", targetPort: "22" }) === null,
+    validateRuleDraft({ ...base, type: "remote", targetHost: "10.0.0.9", targetPort: "22" }) ===
+      null,
   );
   const remoteRecord = ruleRecordFrom("f-3", {
     ...base,
