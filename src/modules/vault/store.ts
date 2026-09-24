@@ -111,11 +111,23 @@ export type VaultStore = {
   deleteIdentity(id: string, hostRefs: IdentityHostRefs): Promise<void>;
   deleteKey(id: string): Promise<void>;
   /**
+   * A successful connect authenticated as this identity: stamp its `lastConnectedAt`,
+   * and its key's when the connect was SSH under key auth - the one case
+   * `resolveSshAuth` hands the handshake the key (`resolveRdpAuth` never reads it).
+   *
+   * DOES NOT STAMP `updatedAt` AND MARKS NOTHING DIRTY, for the reason `patchHost`
+   * in `src/modules/hosts/store.ts` gives: per-machine history is not record content
+   * and does not sync. A missing identity writes nothing; a `keyId` naming no key
+   * stamps the identity alone - both are a record deleted or re-pointed mid-connect.
+   */
+  markIdentityConnected(identityId: string, protocol: "ssh" | "rdp"): Promise<void>;
+  /**
    * Land already-merged identities and keys, and their tombstones, at their
    * REMOTE timestamps in ONE commit, and report the ones that were not applied.
    *
    * The one writer here that does not originate what it writes, which is why it
-   * is the one that does not stamp: every other mutator overwrites its caller's
+   * does not stamp: every mutator but this one and `markIdentityConnected` (whose
+   * write is device-local history, not record content) overwrites its caller's
    * `updatedAt`, and doing that to a pulled record would have it outrank the copy
    * it came from, while a locally-stamped `deletedAt` restarts the expiry window
    * on every device that receives the delete.
@@ -228,8 +240,9 @@ export function createVaultStore(io: VaultIo): VaultStore {
    *
    * DIRTY IS REQUIRED, and per RECORD - `hosts/store.ts`'s copy of this doc
    * carries the full reasoning; it is the same parameter for the same reasons.
-   * `[]` is what `applyRemote` passes: a landing is what the remote already
-   * holds.
+   * `[]` is what `applyRemote` passes, because a landing is what the remote
+   * already holds, and what `markIdentityConnected` passes, because connect
+   * history does not sync.
    */
   async function persist(entries: [string, unknown][], dirty: DirtyId[]): Promise<void> {
     for (const [key, value] of entries) await io.store.set(key, value);
@@ -390,6 +403,12 @@ export function createVaultStore(io: VaultIo): VaultStore {
       // the caller supplied - an editor round-trips the record it loaded, so
       // honouring that value would mean a save never bumps the stamp.
       const at = now();
+      // `lastConnectedAt` is carried from the STORED record, never the caller's: it is
+      // this device's connect history and `markIdentityConnected` is its only writer.
+      // An editor builds from a draft without it, a backup describes the exporting
+      // machine, a landing arrives stripped of it - written through, each would erase
+      // or forge it. The same last property closes `upsertKey` and both `applyRemote`
+      // branches.
       const record: VaultIdentity = {
         ...identity,
         hasPassword: await writeSecret(
@@ -400,6 +419,7 @@ export function createVaultStore(io: VaultIo): VaultStore {
           existing?.hasPassword ?? false,
         ),
         updatedAt: at,
+        lastConnectedAt: existing?.lastConnectedAt,
       };
 
       const next = [...identities];
@@ -459,6 +479,7 @@ export function createVaultStore(io: VaultIo): VaultStore {
       const record: VaultKey = {
         ...(await writeKeySecrets(key, secrets, existing)),
         updatedAt: at,
+        lastConnectedAt: existing?.lastConnectedAt,
       };
 
       const next = [...keys];
@@ -544,6 +565,30 @@ export function createVaultStore(io: VaultIo): VaultStore {
         ],
         [{ kind: KEY_TOMBSTONE_KIND, id }],
       );
+    });
+  }
+
+  async function markIdentityConnected(identityId: string, protocol: "ssh" | "rdp"): Promise<void> {
+    return enqueueWrite(async () => {
+      const at = now();
+      const identities = await listIdentities();
+      const idx = identities.findIndex((i) => i.id === identityId);
+      if (idx < 0) return;
+      const identity = identities[idx];
+      const nextIdentities = [...identities];
+      nextIdentities[idx] = { ...identity, lastConnectedAt: at };
+      const entries: [string, unknown][] = [[VAULT_IDENTITIES_KEY, nextIdentities]];
+      if (protocol === "ssh" && identity.authMode === "key" && identity.keyId) {
+        const keys = await listKeys();
+        const k = keys.findIndex((x) => x.id === identity.keyId);
+        if (k >= 0) {
+          const nextKeys = [...keys];
+          nextKeys[k] = { ...keys[k], lastConnectedAt: at };
+          entries.push([VAULT_KEYS_KEY, nextKeys]);
+        }
+      }
+      // Nothing is owed a push - see the doc on `VaultStore.markIdentityConnected`.
+      await persist(entries, []);
     });
   }
 
@@ -663,8 +708,12 @@ export function createVaultStore(io: VaultIo): VaultStore {
         // account password is not one, so nothing attaches one on the way out
         // and nothing accepts one on the way in. The record's own `hasPassword`
         // is applied as the merge decided it.
-        const record: VaultIdentity = { ...landing.record, updatedAt: landing.updatedAt };
         const idx = nextIdentities.findIndex((i) => i.id === landing.id);
+        const record: VaultIdentity = {
+          ...landing.record,
+          updatedAt: landing.updatedAt,
+          lastConnectedAt: idx >= 0 ? nextIdentities[idx].lastConnectedAt : undefined,
+        };
         if (idx >= 0) nextIdentities[idx] = record;
         else nextIdentities.push(record);
         const buriedIdx = buried.findIndex((t) => t.id === landing.id);
@@ -737,8 +786,13 @@ export function createVaultStore(io: VaultIo): VaultStore {
         // The presence flags are raised PER FIELD ACTUALLY WRITTEN rather than
         // per landing: a landing carrying only a passphrase must not have the
         // record claim a private key nobody sent.
-        const record: VaultKey = { ...landing.record, ...landed, updatedAt: landing.updatedAt };
         const idx = nextKeys.findIndex((k) => k.id === landing.id);
+        const record: VaultKey = {
+          ...landing.record,
+          ...landed,
+          updatedAt: landing.updatedAt,
+          lastConnectedAt: idx >= 0 ? nextKeys[idx].lastConnectedAt : undefined,
+        };
         if (idx >= 0) nextKeys[idx] = record;
         else nextKeys.push(record);
         const buriedIdx = buried.findIndex((t) => t.id === landing.id);
@@ -771,6 +825,7 @@ export function createVaultStore(io: VaultIo): VaultStore {
     upsertKey,
     deleteIdentity,
     deleteKey,
+    markIdentityConnected,
     applyRemote,
     listTombstones: () => readTombstones(),
     onVaultChanged: (cb) => io.store.onChanged(cb),

@@ -24,13 +24,13 @@ import { fileURLToPath } from "node:url";
 
 import ts from "typescript";
 
+import { lastConnectedLabel } from "../src/lib/format";
 import {
   cardFocusTarget,
   filterAndRank,
   groupCounts,
   hostUsername,
   identityName,
-  lastConnectedLabel,
   matchesGroupFilter,
   missingSecret,
   searchRows,

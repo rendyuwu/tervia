@@ -37,15 +37,17 @@ const KEY_KIND: &str = "key";
 /// Fields a record carries that describe THIS MACHINE rather than the record,
 /// removed before a record is published.
 ///
-/// Keyed on the field names alone rather than on `kind`, because no other
-/// record kind reuses any of these names, and a host arrives as an `SshHost`
-/// or an `RdpHost` under the one `"host"` kind either way. `pins` and
-/// `lastConnectedAt` come from `HostBase`, `lastFingerprint` from `SshHost`
-/// and `certFingerprint` from `RdpHost`, all in `src/modules/hosts/types.ts`.
+/// Keyed on the field names alone rather than on `kind`, because every kind
+/// that reuses one of these names means the same device-local thing by it, and
+/// a host arrives as an `SshHost` or an `RdpHost` under the one `"host"` kind
+/// either way. `pins` and `lastConnectedAt` come from `HostBase`,
+/// `lastFingerprint` from `SshHost` and `certFingerprint` from `RdpHost`, all
+/// in `src/modules/hosts/types.ts`.
 ///
 /// `lastConnectedAt` is here deliberately: it does not travel, so its meaning
-/// stays "last connected FROM THIS DEVICE". Letting it travel later is
-/// additive and not a format break.
+/// stays "last connected FROM THIS DEVICE". `VaultIdentity` and `VaultKey`
+/// carry it too, with the same meaning, and are stripped by the same entry.
+/// Letting it travel later is additive and not a format break.
 ///
 /// `credentialStamp` needs no entry - it is a function, not a stored field.
 const DEVICE_LOCAL_FIELDS: [&str; 4] = [

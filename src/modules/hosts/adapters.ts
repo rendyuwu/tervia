@@ -3,7 +3,7 @@ import { tauriStoreFileIo, type StoreFileIo } from "@/lib/storeRecovery";
 import type { DirtyId } from "@/lib/tombstones";
 import type { SecretsIo } from "@/modules/vault/adapters";
 
-import { HOSTS_KEY, HOSTS_STORE_PATH } from "./types";
+import { HOSTS_KEY, HOSTS_STORE_PATH, type Host } from "./types";
 
 // The two things the host store layer reaches outside itself for, behind
 // interfaces - for the same reason `modules/vault` does it: `scripts/*-verify.ts`
@@ -63,6 +63,12 @@ export type HostsIo = {
    * owes is decided at the call site, by what it passes `persist`.
    */
   markDirty?: (dirty: DirtyId[]) => void;
+  /**
+   * Told the vault identity a successful connect authenticated as, after this host's
+   * own stamp has committed. Optional with a no-op default, on `markDirty`'s terms:
+   * omitting it means nothing records vault recency, never "skip the host stamp".
+   */
+  markIdentityConnected?: (identityId: string, protocol: Host["protocol"]) => Promise<void>;
 };
 
 /** The file port every caller gets unless a test hands one in. */

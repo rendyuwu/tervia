@@ -8,11 +8,11 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { IconTooltip } from "@/components/ui/icon-tooltip";
 import { DESTRUCTIVE_ACTION } from "@/lib/toolbarButton";
+import { lastConnectedLabel } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { CircleAlert, Copy, Pencil, Play, Trash2, type LucideIcon } from "lucide-react";
 import type { ReactNode } from "react";
 import { isSshHost, type Host } from "../types";
-import { lastConnectedLabel } from "./derive";
 
 export type HostCardProps = {
   host: Host;

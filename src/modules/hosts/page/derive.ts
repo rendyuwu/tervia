@@ -293,38 +293,3 @@ export function cardFocusTarget(
   }
   return to >= 0 && to < count ? to : null;
 }
-
-// Module-level, not one per call - see RELEASE_DATE_FORMAT in UpdaterDialog.
-const RELATIVE_TIME_FORMAT = new Intl.RelativeTimeFormat("en", { numeric: "always" });
-
-// Largest unit first: a host connected 400 days ago should read "1 year ago",
-// not "57 weeks ago".
-const RELATIVE_TIME_UNITS: ReadonlyArray<readonly [Intl.RelativeTimeFormatUnit, number]> = [
-  ["year", 365 * 24 * 60 * 60 * 1000],
-  ["month", 30 * 24 * 60 * 60 * 1000],
-  ["week", 7 * 24 * 60 * 60 * 1000],
-  ["day", 24 * 60 * 60 * 1000],
-  ["hour", 60 * 60 * 1000],
-  ["minute", 60 * 1000],
-];
-
-/**
- * "Connected 3 days ago", or undefined for a host never connected (renders
- * nothing). This is the only place the grid's recency-first order
- * (`rankHosts`, in `../search`) becomes visible to the user - without it a
- * long list is silently sorted and there is no way to tell why.
- *
- * `now` is a parameter, not `Date.now()` read in here, so the label stays
- * pure and deterministic.
- */
-export function lastConnectedLabel(at: number | undefined, now: number): string | undefined {
-  if (at === undefined) return undefined;
-  const elapsed = now - at;
-  for (const [unit, unitMs] of RELATIVE_TIME_UNITS) {
-    const count = Math.floor(elapsed / unitMs);
-    if (count >= 1) return `Connected ${RELATIVE_TIME_FORMAT.format(-count, unit)}`;
-  }
-  // Under a minute, a future stamp (negative elapsed), or NaN all fail every
-  // arm above and land here.
-  return "Connected just now";
-}
