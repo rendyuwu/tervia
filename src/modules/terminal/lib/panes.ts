@@ -137,9 +137,9 @@ export type RdpLeafState = {
   customTitle?: string;
 };
 
-/** The three pages the activity rail can show. Only one of them may be a pane
+/** The four pages the activity rail can show. Only one of them may be a pane
  *  LEAF - see {@link TabPageKind}. */
-export type PageKind = "hosts" | "vault" | "forwards";
+export type PageKind = "hosts" | "vault" | "forwards" | "known-hosts";
 
 /**
  * The page kinds that may live in a tab as a pane leaf. Hosts, and only Hosts.
@@ -157,7 +157,7 @@ export type PageKind = "hosts" | "vault" | "forwards";
  */
 export type TabPageKind = "hosts";
 
-export const PAGE_KINDS: readonly PageKind[] = ["hosts", "vault", "forwards"];
+export const PAGE_KINDS: readonly PageKind[] = ["hosts", "vault", "forwards", "known-hosts"];
 
 export function isPageKind(value: string): value is PageKind {
   return (PAGE_KINDS as readonly string[]).includes(value);
@@ -172,6 +172,7 @@ export const PAGE_LABELS: Record<PageKind, string> = {
   hosts: "Hosts",
   vault: "Vault",
   forwards: "Port Forwarding",
+  "known-hosts": "Known Hosts",
 };
 
 /**

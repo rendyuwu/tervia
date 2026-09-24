@@ -229,12 +229,16 @@ export type HostsStore = {
   getHostSshSecrets(id: string): Promise<SshSecretValues>;
   markConnected(id: string, fingerprint: string): Promise<void>;
   pinFingerprint(id: string, fingerprint: string): Promise<void>;
-  // No `clearFingerprint`. It existed for the editor's Forget button, which now
-  // records the intent in the DRAFT and lets Save apply it - because a Forget that
-  // wrote straight through left a cancelled dialog having silently put the host
-  // back on TOFU, with the pin unrecoverable since only that machine can present
-  // it. Nothing else ever cleared a pin, so keeping the method would have left a
-  // store write reachable that no UI path is allowed to make.
+  /**
+   * Remove the pin recorded for one address, straight through - unlike the
+   * editor's Forget button, which records the intent in the DRAFT and lets
+   * Save apply it (`HostEditorDialog.tsx`'s own `forgetPin`, which edits
+   * `setPins` and commits nothing on its own). The Known Hosts page has no
+   * draft to hold the intent in: its Forget button IS the commit, on the same
+   * terms {@link HostsStore.pinFingerprint} accepts one. A no-op - no write,
+   * no file rewrite - when the address carries no pin already.
+   */
+  forgetPin(id: string, address: string): Promise<void>;
   /**
    * The hosts bound to one vault identity, in the shape `deleteIdentity` refuses
    * with. This is the wiring {@link IdentityHostRefs} describes, and it lives
@@ -1529,6 +1533,27 @@ export function createHostsStore(io: HostsIo): HostsStore {
     );
   }
 
+  /**
+   * The Known Hosts page's revoke: {@link pinFingerprint} in reverse, at an
+   * address the caller names rather than one this record currently points
+   * at - a jump-hop address a chain no longer uses can still carry a pin
+   * nothing else names, so the address cannot be read off the record the
+   * way {@link withFingerprint} reads it. Through {@link patchHost}, so the
+   * write is serialized with every other write and the credential is
+   * re-asserted exactly as {@link pinFingerprint}'s is. Absent from the map
+   * already: a no-op, the same shape {@link pinFingerprint} takes on an
+   * unchanged key - no write, no file rewrite, no `updatedAt` bump.
+   */
+  async function forgetPin(id: string, address: string): Promise<void> {
+    await patchHost(id, (h) => {
+      const pins = hostPins(h);
+      if (!(address in pins)) return null;
+      const next = { ...pins };
+      delete next[address];
+      return withPins(h, next);
+    });
+  }
+
   // Through the shared lookup, so the hosts this refuses a delete over are exactly
   // the hosts the Vault page lists as holders. Two implementations of one question
   // is how a delete refused for reasons a page does not show gets shipped.
@@ -1551,6 +1576,7 @@ export function createHostsStore(io: HostsIo): HostsStore {
     getHostSshSecrets,
     markConnected,
     pinFingerprint,
+    forgetPin,
     identityHostRefs,
     listTombstones: () => readTombstones(),
     onHostsChanged: (cb) => io.store.onChanged(cb),
@@ -1593,6 +1619,7 @@ export const {
   getHostSshSecrets,
   markConnected,
   pinFingerprint,
+  forgetPin,
   identityHostRefs,
   listTombstones,
   onHostsChanged,

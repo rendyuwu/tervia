@@ -8,6 +8,7 @@ import {
   Monitor,
   Router,
   Server,
+  ShieldCheck,
   SquarePen,
   SquareTerminal,
   Vault,
@@ -43,6 +44,7 @@ export const PAGE_ICONS: Record<PageKind, LucideIcon> = {
   hosts: Router,
   vault: Vault,
   forwards: ArrowLeftRight,
+  "known-hosts": ShieldCheck,
 };
 
 /**
