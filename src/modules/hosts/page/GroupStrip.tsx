@@ -20,6 +20,8 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
   DropdownMenuSub,
   DropdownMenuSubContent,
   DropdownMenuSubTrigger,
@@ -34,7 +36,8 @@ import {
   TRAILING_BTN_VARIANT,
   TRAILING_ICON_SIZE,
 } from "@/modules/tabs/components/TrailingIconButton";
-import { ChevronRight, FolderInput, MoreHorizontal, Pencil, Plus, Trash2 } from "lucide-react";
+import type { VaultIdentity } from "@/modules/vault/types";
+import { ChevronRight, FolderInput, KeyRound, MoreHorizontal, Pencil, Plus, Trash2 } from "lucide-react";
 import { useMemo, useState, type ReactNode } from "react";
 import { buildGroupTree, collectIds, type GroupNode } from "../groupTree";
 import type { HostGroup } from "../types";
@@ -59,6 +62,13 @@ export type GroupStripProps = {
   /** "Move to…": `parentId` is the chosen new parent, or `undefined` for root. */
   onMoveGroup: (id: string, parentId: string | undefined) => void | Promise<void>;
   onDeleteGroup: (id: string) => void | Promise<void>;
+  /** The "Default identity" submenu's own options - every vault identity,
+   *  unfiltered, the same list `HostEditorDialog.tsx`'s credential picker
+   *  offers. */
+  identities: readonly VaultIdentity[];
+  /** "Default identity": `identityId` is the picked identity, or `undefined`
+   *  for "None". */
+  onSetDefaultIdentity: (id: string, identityId: string | undefined) => void | Promise<void>;
 };
 
 /** The one cascade in the host model that is correct: a group is a label, not
@@ -129,6 +139,8 @@ export function GroupStrip({
   onRenameGroup,
   onMoveGroup,
   onDeleteGroup,
+  identities,
+  onSetDefaultIdentity,
 }: GroupStripProps): ReactNode {
   const tree = useMemo(() => buildGroupTree(groups), [groups]);
   // No group anywhere has a child - every root's own `children` array is
@@ -212,6 +224,8 @@ export function GroupStrip({
     onCancelCreate: () => setCreatingUnder(null),
     onDelete: setDeleting,
     onMove: (id, parentId) => void runMutation(() => onMoveGroup(id, parentId)),
+    identities,
+    onSetDefault: (id, identityId) => void runMutation(() => onSetDefaultIdentity(id, identityId)),
   };
 
   const newGroupControl =
@@ -330,6 +344,8 @@ type GroupTreeRowProps = {
   onCancelCreate: () => void;
   onDelete: (group: HostGroup) => void;
   onMove: (id: string, parentId: string | undefined) => void;
+  identities: readonly VaultIdentity[];
+  onSetDefault: (id: string, identityId: string | undefined) => void;
 };
 
 /** The rename input, or the chip itself when not being renamed - shared by a
@@ -349,6 +365,8 @@ function GroupRow({
   onStartCreateChild,
   onDelete,
   onMove,
+  identities,
+  onSetDefault,
 }: {
   node: GroupNode;
   parentId: string | undefined;
@@ -365,6 +383,8 @@ function GroupRow({
   | "onStartCreateChild"
   | "onDelete"
   | "onMove"
+  | "identities"
+  | "onSetDefault"
 >): ReactNode {
   const { group } = node;
   return renamingId === group.id ? (
@@ -387,6 +407,8 @@ function GroupRow({
       tree={tree}
       currentParentId={parentId}
       onMove={(newParentId) => onMove(group.id, newParentId)}
+      identities={identities}
+      onSetDefault={(identityId) => onSetDefault(group.id, identityId)}
     />
   );
 }
@@ -512,6 +534,8 @@ function GroupChip({
   tree,
   currentParentId,
   onMove,
+  identities,
+  onSetDefault,
 }: {
   group: HostGroup;
   count: number;
@@ -524,6 +548,8 @@ function GroupChip({
   tree: readonly GroupNode[];
   currentParentId: string | undefined;
   onMove: (parentId: string | undefined) => void;
+  identities: readonly VaultIdentity[];
+  onSetDefault: (identityId: string | undefined) => void;
 }) {
   return (
     // Plain "group" (not a named group) so IconActionButton's own
@@ -593,6 +619,25 @@ function GroupChip({
                   {opt.label}
                 </DropdownMenuItem>
               ))}
+            </DropdownMenuSubContent>
+          </DropdownMenuSub>
+          <DropdownMenuSub>
+            <DropdownMenuSubTrigger>
+              <KeyRound size={14} strokeWidth={1.75} />
+              Default identity
+            </DropdownMenuSubTrigger>
+            <DropdownMenuSubContent>
+              <DropdownMenuRadioGroup
+                value={group.defaultIdentityId ?? ""}
+                onValueChange={(v) => onSetDefault(v || undefined)}
+              >
+                <DropdownMenuRadioItem value="">None</DropdownMenuRadioItem>
+                {identities.map((identity) => (
+                  <DropdownMenuRadioItem key={identity.id} value={identity.id}>
+                    {identity.name}
+                  </DropdownMenuRadioItem>
+                ))}
+              </DropdownMenuRadioGroup>
             </DropdownMenuSubContent>
           </DropdownMenuSub>
           <DropdownMenuItem variant="destructive" onSelect={onDelete}>

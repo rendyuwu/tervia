@@ -127,3 +127,26 @@ export function descendantIds(groupId: string, groups: readonly HostGroup[]): Re
   if (node) collectIds(node, ids);
   return ids;
 }
+
+/**
+ * The identity id a NEW host in `groupId` should be pre-bound to: this
+ * group's own {@link HostGroup.defaultIdentityId} if it has one, else the
+ * nearest ancestor's, walked through {@link effectiveParents} - so a
+ * dangling or cyclic `parentId` anywhere on the chain is tolerated the same
+ * way every other reader of this list tolerates it, rather than needing a
+ * second cycle guard here. `undefined` `groupId` (no group selected) and no
+ * default anywhere on the chain both answer `undefined`.
+ */
+export function defaultIdentityFor(
+  groupId: string | undefined,
+  groups: readonly HostGroup[],
+): string | undefined {
+  if (!groupId) return undefined;
+  const byId = new Map(groups.map((g) => [g.id, g]));
+  const parents = effectiveParents(groups);
+  for (let id: string | undefined = groupId; id !== undefined; id = parents.get(id)) {
+    const found = byId.get(id)?.defaultIdentityId;
+    if (found) return found;
+  }
+  return undefined;
+}

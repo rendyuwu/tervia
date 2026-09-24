@@ -14,7 +14,7 @@ import {
   type Tombstone,
 } from "@/lib/tombstones";
 import { tauriSecretsIo } from "@/modules/vault/adapters";
-import { hostsUsingIdentity } from "@/modules/vault/refs";
+import { groupsUsingIdentity, hostsUsingIdentity } from "@/modules/vault/refs";
 import type { SshSecretValues } from "@/modules/vault/resolve";
 import { SECRET_ALREADY_STORED, vaultStore, type VaultSecretValue } from "@/modules/vault/store";
 import {
@@ -1013,6 +1013,23 @@ export function createHostsStore(io: HostsIo): HostsStore {
           throw new Error("hosts: group parent chain has a cycle");
         }
       }
+      // The identity-side counterpart, on the SAME "only a changing edge is
+      // checked" rule - clearing it, leaving it alone, or a caller/test that
+      // never wired `io.findIdentity` all skip this block, so a dangling
+      // default that arrived through sync never blocks a rename either.
+      // `defaultIdentityFor` (`groupTree.ts`) is what SKIPS a dangling value
+      // at read time instead, the same way `effectiveParents` does for a bad
+      // `parentId`.
+      if (
+        group.defaultIdentityId !== undefined &&
+        group.defaultIdentityId !== stored?.defaultIdentityId &&
+        io.findIdentity
+      ) {
+        const identity = await io.findIdentity(group.defaultIdentityId);
+        if (!identity) {
+          throw new Error(`hosts: "${group.name}" names a default identity that does not exist`);
+        }
+      }
       // Stamped and tombstone-cleared exactly as `writeHost` does, and for the
       // same two reasons.
       const at = now();
@@ -1554,11 +1571,19 @@ export function createHostsStore(io: HostsIo): HostsStore {
     });
   }
 
-  // Through the shared lookup, so the hosts this refuses a delete over are exactly
-  // the hosts the Vault page lists as holders. Two implementations of one question
-  // is how a delete refused for reasons a page does not show gets shipped.
-  const identityHostRefs: IdentityHostRefs = async (identityId) =>
-    hostsUsingIdentity(await listHosts(), identityId);
+  // Through the shared lookups, so the holders this refuses a delete over are
+  // exactly the holders the Vault page lists. Two implementations of one
+  // question is how a delete refused for reasons a page does not show gets
+  // shipped. Group holders are suffixed so a mixed list reads unambiguously
+  // through the SAME rendering `deleteRefusalText` already does everywhere
+  // else - `holders.map(h => h.name || h.id)` - with no change to it.
+  const identityHostRefs: IdentityHostRefs = async (identityId) => [
+    ...hostsUsingIdentity(await listHosts(), identityId),
+    ...groupsUsingIdentity(await listGroups(), identityId).map((ref) => ({
+      ...ref,
+      name: `${ref.name} (group default)`,
+    })),
+  ];
 
   return {
     listHosts,
@@ -1601,6 +1626,7 @@ export const hostsStore = createHostsStore({
   // registered until `main` starts sync, and `markDirty` is a no-op until then.
   markDirty,
   markIdentityConnected: vaultStore.markIdentityConnected,
+  findIdentity: vaultStore.findIdentity,
 });
 
 export const {

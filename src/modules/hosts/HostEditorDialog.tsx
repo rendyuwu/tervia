@@ -81,6 +81,7 @@ import {
   type SshSecretTouched,
   type TestState,
 } from "./editor/types";
+import { defaultIdentityFor } from "./groupTree";
 import type { HostEditorTarget } from "./pendingEditor";
 import {
   findHost,
@@ -359,6 +360,18 @@ export function HostEditorDialog({
    */
   const sshSeeded = useRef<SshSecretSeeded>(NOTHING_SEEDED);
   /**
+   * Whether the CREDENTIAL PICKER has been changed by the user this sitting -
+   * not the inline fields beside it, the `choice` combobox itself.
+   *
+   * A ref, on `sshTouched`'s own terms: reset once per token at the top of the
+   * load effect, read (never rendered) by the group picker's `onChange` below
+   * to decide whether re-seeding `choice` for the newly picked group would
+   * discard a pick the user already made. Only matters in CREATE mode -
+   * `boundIdentity` in edit mode never reads `choice`, so nothing here can
+   * move an existing host's binding.
+   */
+  const credentialTouched = useRef(false);
+  /**
    * Whether the user has asked this host to forget the key material it still
    * stores under an auth mode that cannot use it - IN THE DRAFT.
    *
@@ -502,6 +515,22 @@ export function HostEditorDialog({
     [],
   );
 
+  /**
+   * The credential picker's value for a NEW host in `groupId`: the nearest
+   * ancestor's {@link HostGroup.defaultIdentityId} ({@link defaultIdentityFor}
+   * walks the chain), or the inline sentinel when there is none, or when the
+   * one there is names an identity that no longer exists - `identityRows` is
+   * this dialog's own live list, the same one the picker's own options come
+   * from, so a dangling default is never offered as a choice the picker
+   * cannot also show.
+   */
+  const choiceForGroup = (groupId: string, groupsList: HostGroup[]): string => {
+    const identityId = defaultIdentityFor(groupId || undefined, groupsList);
+    return identityId && identityRows.some((row) => row.identity.id === identityId)
+      ? identityChoice(identityId)
+      : CREDENTIAL_CHOICE_INLINE;
+  };
+
   // Reset and populate whenever the editor is pointed at a different row. Closing
   // deliberately leaves the draft alone: the next open resets it, and wiping it
   // here would empty every field behind the dialog's own close animation.
@@ -520,6 +549,9 @@ export function HostEditorDialog({
     // last row's seed would license clearing this one's secret.
     sshTouched.current = NO_SSH_SECRETS_TOUCHED;
     sshSeeded.current = NOTHING_SEEDED;
+    // Per row: a group re-seed for the row this editor was pointed away
+    // from must not carry an "already picked" mark onto a fresh create.
+    credentialTouched.current = false;
     // Per row for the same reason: the intent names the accounts of the row this
     // editor was pointed away from, and carrying it onto the next one would
     // delete a key nothing on screen has said a word about.
@@ -562,13 +594,14 @@ export function HostEditorDialog({
 
       if (target.mode === "create") {
         const prefill = target.prefill ?? {};
+        const seedGroupId = liveGroup(prefill.groupId);
         setProtocol(target.protocol);
         setPortTouched(prefill.port !== undefined);
         setShared({
           name: prefill.name ?? "",
           host: prefill.host ?? "",
           port: String(prefill.port ?? defaultPortFor(target.protocol)),
-          groupId: liveGroup(prefill.groupId),
+          groupId: seedGroupId,
           description: "",
         });
         setSshCred({ ...EMPTY_SSH_CRED, user: prefill.user ?? "" });
@@ -580,8 +613,11 @@ export function HostEditorDialog({
         setPins({});
         // The create arm returns before the `currentCredentialChoice(host)`
         // reset below is reached, so it gets its own: a choice left over from a
-        // previous EDIT sitting must not leak into a new host.
-        setChoice(CREDENTIAL_CHOICE_INLINE);
+        // previous EDIT sitting must not leak into a new host. Inherits the
+        // group's effective default identity when there is a group and a live
+        // one - `choiceForGroup` falls back to the inline sentinel otherwise,
+        // which is the prior behaviour unchanged.
+        setChoice(seedGroupId ? choiceForGroup(seedGroupId, allGroups) : CREDENTIAL_CHOICE_INLINE);
         setReady(true);
         return;
       }
@@ -1768,7 +1804,10 @@ export function HostEditorDialog({
                   <Combobox
                     options={credentialOptions}
                     value={choice}
-                    onChange={setChoice}
+                    onChange={(next) => {
+                      credentialTouched.current = true;
+                      setChoice(next);
+                    }}
                     searchPlaceholder="Search identities…"
                     emptyLabel="No identities found."
                   />
@@ -1842,7 +1881,15 @@ export function HostEditorDialog({
                   <Combobox
                     options={groupOptions}
                     value={shared.groupId}
-                    onChange={(groupId) => setShared({ ...shared, groupId })}
+                    onChange={(groupId) => {
+                      setShared({ ...shared, groupId });
+                      // Re-seeds the still-untouched picker for the newly
+                      // picked group's own default - never in edit mode,
+                      // where `boundIdentity` does not read `choice` at all.
+                      if (mode === "create" && !credentialTouched.current) {
+                        setChoice(groupId ? choiceForGroup(groupId, groups) : CREDENTIAL_CHOICE_INLINE);
+                      }
+                    }}
                     searchPlaceholder="Search groups…"
                     emptyLabel="No group found."
                   />

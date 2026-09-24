@@ -36,7 +36,8 @@ import {
   type IdentityRow,
   type KeyRow,
 } from "../src/modules/vault/page/derive";
-import type { RdpHost, SshHost } from "../src/modules/hosts/types";
+import type { HostGroup, RdpHost, SshHost } from "../src/modules/hosts/types";
+import { groupsUsingIdentity } from "../src/modules/vault/refs";
 import { VaultInUseError } from "../src/modules/vault/types";
 import type { VaultIdentity, VaultKey } from "../src/modules/vault/types";
 import { callsFunction, importSpecifiersOf, namedImportsFrom } from "./lib/ast";
@@ -786,13 +787,17 @@ console.log("\n[12] hosts/page/derive.ts imports the shared missing-secret check
 
 // --- 13. hosts/store.ts shares the identity-holder lookup --------------------
 
-console.log("\n[13] hosts/store.ts's identityHostRefs delegates to the shared lookup");
+console.log(
+  "\n[13] hosts/store.ts's identityHostRefs delegates to the shared lookups, both of them",
+);
 {
   const storeSrc = readFileSync(join(root, "src/modules/hosts/store.ts"), "utf8");
   ok("calls hostsUsingIdentity(", callsFunction("store.ts", storeSrc, "hostsUsingIdentity"));
+  ok("calls groupsUsingIdentity(", callsFunction("store.ts", storeSrc, "groupsUsingIdentity"));
   ok(
-    "does not re-derive the predicate inline",
-    !storeSrc.includes("credential.identityId === identityId"),
+    "does not re-derive either predicate inline",
+    !storeSrc.includes("credential.identityId === identityId") &&
+      !storeSrc.includes("defaultIdentityId === identityId"),
   );
 }
 
@@ -1225,6 +1230,30 @@ console.log(
       "db",
     ).map((r) => r.key.id),
     ["k-b", "k-a"],
+  );
+}
+
+// --- 21. groupsUsingIdentity -------------------------------------------------
+
+console.log("\n[21] groupsUsingIdentity: exactly the groups naming this identity as their default");
+{
+  const groups: HostGroup[] = [
+    { id: "g-1", name: "Production", defaultIdentityId: "i-1" },
+    { id: "g-2", name: "Staging" },
+    { id: "g-3", name: "Prod EU", defaultIdentityId: "i-1" },
+    { id: "g-4", name: "Prod APAC", defaultIdentityId: "i-2" },
+  ];
+  check("i-1 is used by exactly its two holders, named", groupsUsingIdentity(groups, "i-1"), [
+    { id: "g-1", name: "Production" },
+    { id: "g-3", name: "Prod EU" },
+  ]);
+  check("i-2 is used by exactly its one holder", groupsUsingIdentity(groups, "i-2"), [
+    { id: "g-4", name: "Prod APAC" },
+  ]);
+  check(
+    "an identity no group defaults to has no holders",
+    groupsUsingIdentity(groups, "i-unused"),
+    [],
   );
 }
 

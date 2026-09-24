@@ -83,6 +83,7 @@ import {
   orderHostWrites,
   parseBackupFile,
   refuseProtocolConflicts,
+  resolveGroupDefaults,
   resolveIdentityBindings,
   sanitizePayload,
   type BackupFile,
@@ -704,7 +705,13 @@ async function applyV3(payload: SealedBlob, passphrase: string): Promise<ImportR
     // nor its protocol, which are the only two fields this one reads.
     const ruled = clearDanglingRuleHosts(parsed.rules, pinned, existingHosts);
 
-    const merged = mergeGroups(parsed.groups, existingGroups, pinned);
+    // Dropped, not refused, when a `defaultIdentityId` names no identity
+    // that will exist after this import - `identityIds` is the exact set
+    // `resolveIdentityBindings` above already used, so a dangling default
+    // never reaches `upsertGroup`'s own existence check and never fails the
+    // whole group row over one stale reference.
+    const defaulted = resolveGroupDefaults(parsed.groups, identityIds);
+    const merged = mergeGroups(defaulted, existingGroups, pinned);
 
     // A jump host or a tunnel bastion may live in the file OR already be saved
     // here; both count as resolvable, which is why the saved list is passed in

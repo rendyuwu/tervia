@@ -86,6 +86,7 @@
 import { createWriteQueue } from "../src/lib/recoveredStore";
 import type { StoreFileIo, StoreFileRead, StoreRecovery } from "../src/lib/storeRecovery";
 import type { HostsStoreIo } from "../src/modules/hosts/adapters";
+import { defaultIdentityFor } from "../src/modules/hosts/groupTree";
 import { MAX_JUMP_HOPS, resolveJumpHops } from "../src/modules/hosts/jumps";
 import {
   createHostsStore,
@@ -341,7 +342,22 @@ function harness(
     },
   };
 
-  const hosts = createHostsStore({ store, secrets, files });
+  // Wired from the same `seed.identities` the `deps.vault` stub below reads,
+  // so a test that seeds an identity gets BOTH: `upsertGroup`'s existence
+  // check for `defaultIdentityId`, and a bindable identity for the resolve
+  // deps. UNWIRED (not merely empty) when `seed.identities` is omitted
+  // entirely, so a test that never mentions a vault can still exercise
+  // `upsertGroup`'s own "optional, omitting means the check never runs"
+  // contract for `findIdentity` - a wired stub that simply finds nothing
+  // would prove the wrong thing.
+  const hosts = createHostsStore({
+    store,
+    secrets,
+    files,
+    findIdentity: seed.identities
+      ? async (id) => seed.identities?.find((i) => i.id === id)
+      : undefined,
+  });
   // Just enough of a vault for `resolveSshAuth` to dereference an identity
   // binding. The real store satisfies the same two-method shape.
   const deps: ResolveDeps = {
@@ -1931,6 +1947,153 @@ console.log(
     (await h.hosts.findGroup("g-d"))?.parentId,
     undefined,
   );
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n[groups] defaultIdentityFor: own group wins, else the nearest ancestor's");
+{
+  const groups: HostGroup[] = [
+    { id: "g-root", name: "Root", defaultIdentityId: "i-root" },
+    { id: "g-mid", name: "Mid", parentId: "g-root" },
+    { id: "g-leaf", name: "Leaf", parentId: "g-mid", defaultIdentityId: "i-leaf" },
+    { id: "g-solo", name: "Solo" },
+  ];
+  check("a group's own default wins over any ancestor's", defaultIdentityFor("g-leaf", groups), "i-leaf");
+  check(
+    "with no default of its own, the nearest ancestor's is used",
+    defaultIdentityFor("g-mid", groups),
+    "i-root",
+  );
+  check("a group with no default anywhere on its chain answers undefined", defaultIdentityFor("g-solo", groups), undefined);
+  check("no group selected answers undefined", defaultIdentityFor(undefined, groups), undefined);
+  check(
+    "a group id naming nothing in the list answers undefined",
+    defaultIdentityFor("g-gone", groups),
+    undefined,
+  );
+
+  // Tolerant of a dangling or cyclic parent, on `effectiveParents`'s own
+  // terms: neither vanishes the answer nor hangs the walk.
+  const withBadEdges: HostGroup[] = [
+    { id: "g-a", name: "A", parentId: "g-b" },
+    { id: "g-b", name: "B", parentId: "g-a" },
+    { id: "g-dangling", name: "Dangling", parentId: "g-missing", defaultIdentityId: "i-x" },
+    { id: "g-child", name: "Child", parentId: "g-dangling" },
+  ];
+  check(
+    "a group ON a landed cycle has no ancestor to fall through to",
+    defaultIdentityFor("g-a", withBadEdges),
+    undefined,
+  );
+  check(
+    "a dangling parent does not stop the group's OWN default from answering",
+    defaultIdentityFor("g-dangling", withBadEdges),
+    "i-x",
+  );
+  check(
+    "a child of a dangling-parented group still falls through to it",
+    defaultIdentityFor("g-child", withBadEdges),
+    "i-x",
+  );
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n[groups] a default identity must exist, and only when the field is CHANGING");
+{
+  const identity: VaultIdentity = {
+    id: "i-1",
+    name: "root @ prod",
+    username: "vaulted",
+    authMode: "password",
+    hasPassword: true,
+  };
+  const h = harness({ identities: [identity] });
+  const group = await h.hosts.upsertGroup({ id: "g-1", name: "Production", defaultIdentityId: "i-1" });
+  check("a live default round-trips", group.defaultIdentityId, "i-1");
+
+  await rejects(
+    "a default naming no identity is refused",
+    () => h.hosts.upsertGroup({ id: "g-2", name: "Staging", defaultIdentityId: "i-gone" }),
+    ["does not exist"],
+  );
+
+  const renamed = await h.hosts.upsertGroup({
+    ...group,
+    name: "Production (renamed)",
+  });
+  check(
+    "leaving the default alone on an unrelated edit is not re-checked",
+    renamed.defaultIdentityId,
+    "i-1",
+  );
+
+  const cleared = await h.hosts.upsertGroup({ ...renamed, defaultIdentityId: undefined });
+  check("clearing the default never needs the identity to exist", cleared.defaultIdentityId, undefined);
+
+  // Seeded directly, on the `[groups] a landed bad chain...` block's own
+  // pattern above - state only a sync landing (`applyRemote`, no reference
+  // check by design) can produce. `upsertGroup` itself would have refused
+  // writing this value in the first place.
+  const landed = harness({
+    groups: [{ id: "g-dangling", name: "Dangling", defaultIdentityId: "i-nowhere" }],
+    // An explicit empty list, not an omitted one: `findIdentity` must be
+    // WIRED here (unlike the "no vault wired" case below), or the write
+    // this section proves DOES get refused would pass for the wrong reason.
+    identities: [],
+  });
+  const renamedDangling = await landed.hosts.upsertGroup({
+    id: "g-dangling",
+    name: "Renamed",
+    defaultIdentityId: "i-nowhere",
+  });
+  check(
+    "a landed dangling default refuses nothing UNTIL a write actually changes it",
+    renamedDangling.name,
+    "Renamed",
+  );
+  await rejects(
+    "and a write that DOES change it is refused, the same as if it had never landed",
+    () => landed.hosts.upsertGroup({ ...renamedDangling, defaultIdentityId: "i-also-nowhere" }),
+    ["does not exist"],
+  );
+
+  // No `identities` seeded at all: `io.findIdentity` is unwired, on
+  // `markIdentityConnected`'s own "optional, omitting means the check never
+  // runs" terms - so a caller/test with no vault behind it can still write
+  // any `defaultIdentityId` string.
+  const noVault = harness();
+  const unchecked = await noVault.hosts.upsertGroup({
+    id: "g-3",
+    name: "No vault wired",
+    defaultIdentityId: "i-whatever",
+  });
+  check(
+    "an unwired findIdentity skips the check rather than refusing everything",
+    unchecked.defaultIdentityId,
+    "i-whatever",
+  );
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n[groups] identityHostRefs names a group's default alongside any host binding");
+{
+  const identity: VaultIdentity = {
+    id: "i-1",
+    name: "root @ prod",
+    username: "vaulted",
+    authMode: "password",
+    hasPassword: true,
+  };
+  const h = harness({
+    hosts: [sshHost({ id: "h-1", name: "web-1", credential: { kind: "identity", identityId: "i-1" } })],
+    groups: [{ id: "g-1", name: "Production", defaultIdentityId: "i-1" }],
+    identities: [identity],
+  });
+  check("both a host binding and a group default are named", await h.hosts.identityHostRefs("i-1"), [
+    { id: "h-1", name: "web-1" },
+    { id: "g-1", name: "Production (group default)" },
+  ]);
+  check("an identity nothing names has no holders", await h.hosts.identityHostRefs("i-unused"), []);
 }
 
 // ---------------------------------------------------------------------------

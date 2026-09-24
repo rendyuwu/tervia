@@ -1,4 +1,4 @@
-import type { Host } from "@/modules/hosts/types";
+import type { Host, HostGroup } from "@/modules/hosts/types";
 
 import type { VaultIdentity, VaultKey, VaultRef } from "./types";
 
@@ -43,6 +43,16 @@ export function hostsUsingIdentity(hosts: readonly Host[], identityId: string): 
   return hosts
     .filter((h) => h.credential.kind === "identity" && h.credential.identityId === identityId)
     .map(toVaultRef);
+}
+
+/** Every group whose `defaultIdentityId` names one identity. The group-side
+ *  counterpart of {@link hostsUsingIdentity}, and the reason `Host` above is
+ *  already a type-only import: `HostGroup` travels the same way. */
+export function groupsUsingIdentity(
+  groups: readonly HostGroup[],
+  identityId: string,
+): VaultRef[] {
+  return groups.filter((g) => g.defaultIdentityId === identityId).map(toVaultRef);
 }
 
 /** Every identity that names one key. A key is only ever referenced by an

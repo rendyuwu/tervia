@@ -281,16 +281,18 @@ export function assertBindingOwner(
 export type VaultRef = { id: string; name: string };
 
 /**
- * The hosts that reference one identity.
+ * Every host bound to one identity, plus every group naming it as a default -
+ * everything `deleteIdentity` refuses to delete over.
  *
  * INJECTED, never imported. `modules/hosts` imports
  * {@link SshCredentialBinding} and {@link RdpCredentialBinding} from
  * this module, so a vault -> hosts import would close a cycle. The wiring is
- * `(id) => listHosts().then((hosts) => hosts.filter(usesIdentity(id)).map(toRef))`.
+ * `(id) => [...hostsUsingIdentity(hosts, id), ...groupsUsingIdentity(groups, id)]`
+ * (`modules/vault/refs.ts`).
  *
  * Required, never optional: a caller allowed to pass nothing would silently skip
  * the guard, and the guard is the only thing between one confirmed delete and a
- * host that can no longer connect.
+ * host - or a group's default - that can no longer name what it claims to.
  */
 export type IdentityHostRefs = (identityId: string) => VaultRef[] | Promise<VaultRef[]>;
 

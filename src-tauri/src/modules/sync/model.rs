@@ -897,6 +897,28 @@ mod tests {
     }
 
     #[test]
+    fn a_group_default_identity_field_survives_the_whole_trip() {
+        // `defaultIdentityId` (a per-group default vault identity) is never
+        // named in this module either, on the same "opaque by construction"
+        // terms as `groupId` above - a
+        // "group" kind record round-trips it unchanged, merges by the same
+        // last-write-wins rule, and this module never validates that the id it
+        // names still exists on either device.
+        let record = json!({"id": "g-1", "name": "n", "defaultIdentityId": "i-1"});
+        let sent = serde_json::to_string(&env("group", "g-1", Some(5), record.clone())).unwrap();
+        let received: Envelope = serde_json::from_str(&sent).unwrap();
+        let older = env(
+            "group",
+            "g-1",
+            Some(1),
+            json!({"id": "g-1", "name": "older"}),
+        );
+        let merged = merge(&received, &older).unwrap();
+        assert_eq!(merged.envelope.record["defaultIdentityId"], "i-1");
+        assert_eq!(serde_json::to_string(&merged.envelope).unwrap(), sent);
+    }
+
+    #[test]
     fn strip_removes_exactly_the_four_device_local_fields() {
         let mut record = json!({
             "id": "h-1",

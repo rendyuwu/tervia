@@ -2125,15 +2125,21 @@ console.log(
   // -------------------------------------------------------------------------
   const loadBody = hostEditorFnBody ? findConstArrowBody(hostEditorFnBody, "load") : null;
   check("the load effect's `load` arrow body was found (compiler API)", loadBody !== null);
+  // The argument only has to NAME the sentinel somewhere, not equal it
+  // exactly: the create arm now seeds `choice` from the picked group's
+  // effective default when there is one (issue #75's inheritance), so the
+  // reset is `seedGroupId ? choiceForGroup(...) : CREDENTIAL_CHOICE_INLINE`
+  // rather than the bare sentinel - the fallback branch is what this pin's
+  // original defect is actually about: a group-less create must still land
+  // on the sentinel, never a leftover value from the previous sitting.
   const inlineResets = loadBody
     ? findCalls(loadBody, editorSf, ["setChoice"]).filter(
         (c) =>
-          c.arguments.length === 1 &&
-          norm(c.arguments[0].getText(editorSf)) === "CREDENTIAL_CHOICE_INLINE",
+          c.arguments.length === 1 && c.arguments[0].getText(editorSf).includes("CREDENTIAL_CHOICE_INLINE"),
       )
     : [];
   check(
-    "the load effect resets choice to the inline sentinel EXACTLY ONCE - rooted at `load` so a decoy outside it is not counted, counted so a second one inside it is",
+    "the load effect resets choice, naming the inline sentinel, EXACTLY ONCE - rooted at `load` so a decoy outside it is not counted, counted so a second one inside it is",
     inlineResets.length === 1,
     inlineResets.length,
   );
@@ -2147,9 +2153,10 @@ console.log(
     // and only whitespace - Prettier owns the line breaks, everything else
     // here IS the claim.
     check(
-      "and the reset it makes is setChoice(CREDENTIAL_CHOICE_INLINE) - the sentinel, not some other draft value",
+      "and the reset it makes is setChoice(...), falling through to CREDENTIAL_CHOICE_INLINE when there is no seeded default - the sentinel, not some other draft value",
       norm(reset.expression.getText(editorSf)) === "setChoice" &&
-        norm(reset.arguments[0].getText(editorSf)) === "CREDENTIAL_CHOICE_INLINE",
+        (norm(reset.arguments[0].getText(editorSf)).endsWith(":CREDENTIAL_CHOICE_INLINE") ||
+          norm(reset.arguments[0].getText(editorSf)) === "CREDENTIAL_CHOICE_INLINE"),
       { callee: reset.expression.getText(editorSf), arg: reset.arguments[0].getText(editorSf) },
     );
     check(
@@ -4091,6 +4098,64 @@ console.log("\n[13] the key body says what BLANK does, and blank here is also th
   //          end anchor could have voided the check rather than tightened it;
   //          it still catches its own defect, and `keyBodyHelp` is now outside
   //          the region whose text can satisfy it.
+}
+
+// ---------------------------------------------------------------------------
+console.log(
+  "\n[14] a new host inherits its group's default identity, overridable before it is touched",
+);
+{
+  // The create-mode load block: `choiceForGroup` is what turns the seeded
+  // group into a picker value, so its OWN seed must call it rather than
+  // hard-coding the inline sentinel the way it did before this behaviour
+  // existed.
+  const createLoad = between(
+    editorSrc,
+    'if (target.mode === "create") {',
+    "const host = allHosts.find",
+  );
+  check("the create-mode load block was found", createLoad.length > 200, createLoad.length);
+  check(
+    "seeds the picker from the group's effective default, not a bare inline sentinel",
+    createLoad.includes("choiceForGroup(seedGroupId, allGroups)"),
+    createLoad,
+  );
+
+  // The credential picker: its own `onChange` is the only place
+  // `credentialTouched.current` may be set to `true` - a second write site
+  // would mean some OTHER interaction counts as "touched" undocumented here.
+  const credentialField = between(editorSrc, '<Field label="Credential">', "</Field>");
+  check("the Credential field was found", credentialField.length > 100, credentialField.length);
+  check(
+    "its onChange marks the picker touched before changing the choice",
+    /credentialTouched\.current\s*=\s*true;\s*setChoice\(next\);/.test(credentialField),
+    credentialField,
+  );
+  const touchWrites = editorSrc.match(/credentialTouched\.current\s*=\s*true/g) ?? [];
+  check(
+    "credentialTouched.current is set to true in exactly one place in the whole file",
+    touchWrites.length === 1,
+    touchWrites.length,
+  );
+
+  // The group picker: re-seeding the credential choice for the newly picked
+  // group must be gated on BOTH create mode and the picker being untouched,
+  // or it would silently discard an edit-mode field it does not own, or a
+  // create-mode pick the user already made.
+  const groupField = between(editorSrc, '<Field label="Group">', "</Field>");
+  check("the Group field was found", groupField.length > 100, groupField.length);
+  check(
+    'the re-seed is gated on mode === "create" && !credentialTouched.current',
+    /if \(mode === "create" && !credentialTouched\.current\)/.test(groupField),
+    groupField,
+  );
+  check(
+    "the re-seed calls choiceForGroup with the NEWLY picked group, not the stale one",
+    /setChoice\(groupId \? choiceForGroup\(groupId, groups\) : CREDENTIAL_CHOICE_INLINE\)/.test(
+      groupField,
+    ),
+    groupField,
+  );
 }
 
 console.log(failed === 0 ? "\nAll host-editor checks passed." : `\n${failed} check(s) FAILED.`);
