@@ -39,7 +39,8 @@
  *
  *   A RULE is a saved port-forward riding an SSH host, of one of three TYPES -
  *   `-L` (`type` absent), `-R` (`"remote"`) or `-D` (`"dynamic"`) - and
- *   `upsertRule`'s refusals are TYPE-CONDITIONAL to match: see `types.ts`'s
+ *   `upsertRule`'s refusals are TYPE-CONDITIONAL to match: see
+ *   `src/modules/forwards/types.ts`'s
  *   doc on `ForwardRule` for which type uses which field. A `hostId` naming
  *   anything but a saved SSH host and a blank name are refused for every
  *   type; every other refusal here mirrors one of `upsertRule`'s own, so

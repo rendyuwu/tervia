@@ -267,7 +267,7 @@ export async function startRule(
  * to read rather than easier: a `-D` rule opens `tunnel.ts`'s
  * `openSocksForConnection`, a `-R` rule opens its
  * `openRemoteForwardForConnection`, and neither reads `rule.remotePort`/
- * `localPort` quite the way `-L` does - see `../types.ts`'s field-by-field
+ * `localPort` quite the way `-L` does - see `src/modules/forwards/types.ts`'s field-by-field
  * doc on `ForwardRule`.
  *
  * Repeats `-L`'s own refusal/yield shape (terminal-owned refusal, the
