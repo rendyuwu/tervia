@@ -664,8 +664,9 @@ export default function App() {
   // `host.protocol` rather than a narrowing cast: a merged host list can
   // return either arm for a given id, and `isSshHost`/`isRdpHost` are what
   // keep a stray RDP row from being read as an SSH one or vice versa. Backs
-  // BOTH the header quick-connect and the page-leaf body (via PaneTreeView's
-  // context) - one path, not two copies of the same routing.
+  // the header quick-connect, the command palette's `#` mode and the page-leaf
+  // body (via PaneTreeView's context) - one path, not three copies of the same
+  // routing.
   const handleConnectHost = useCallback(
     (host: Host) => {
       if (isSshHost(host)) handleHeaderConnectSsh(host);
@@ -841,6 +842,7 @@ export default function App() {
             onOpenChange={setCommandPaletteOpen}
             explorerRoot={explorerRoot ?? null}
             onOpenFile={handleOpenFile}
+            onConnectHost={handleConnectHost}
           />
 
           <AppDialogs

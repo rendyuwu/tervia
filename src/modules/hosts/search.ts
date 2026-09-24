@@ -3,12 +3,12 @@ import type { VaultIdentity } from "@/modules/vault/types";
 
 import type { Host, HostGroup } from "./types";
 
-// One ranking function, two mount points: the Hosts page search box and the
-// header quick-connect both filter the same saved-host
-// list and MUST agree on what the top match is - a user who sees one answer in
-// the header and a different one on the page for the identical query has no
-// way to tell which is "right". Building this once in `modules/hosts` and
-// having both callers import it is what makes that impossible instead of
+// One ranking function, three mount points: the Hosts page search box, the
+// header quick-connect and the command palette's `#` mode all filter the same
+// saved-host list and MUST agree on what the top match is - a user who sees one
+// answer in the header and a different one on the page for the identical query
+// has no way to tell which is "right". Building this once in `modules/hosts` and
+// having every caller import it is what makes that impossible instead of
 // merely unlikely.
 //
 // The ROW BUILDER lives here for the same reason, and it has to: sharing only
@@ -22,7 +22,7 @@ import type { Host, HostGroup } from "./types";
 //
 // This module is pure: no store read, no React, no Tauri. It resolves a vault
 // binding when handed the identity map, which is a lookup over plain data, not a
-// vault operation - `useVault()` gives both callers that map synchronously.
+// vault operation - `useVault()` gives every caller that map synchronously.
 
 /** One searchable row: a host plus the two fields {@link matchTier} cannot work
  *  out from the host alone, because a vault-bound host's username lives on its
@@ -146,12 +146,12 @@ export function hostUsername(
 /**
  * Every host as a searchable row - THE row builder, for every mount point.
  *
- * Both surfaces call this rather than mapping the host list themselves, which is
+ * Every surface calls this rather than mapping the host list themselves, which is
  * the fix for the divergence at the top of this file. The two hand-written loops
  * it replaced disagreed on more than the username, too: one treated `groupId` as
  * falsy-or-set and the other as `undefined`-or-set, so an empty-string group id
  * resolved differently in each. One builder means a new searchable field, or a
- * new opinion about a blank id, lands on both surfaces or neither.
+ * new opinion about a blank id, lands on every surface or none.
  */
 export function searchRows(
   hosts: readonly Host[],
