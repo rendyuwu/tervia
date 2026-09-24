@@ -739,7 +739,10 @@ mod tests {
             2,
             json!({"id": "k-1", "kind": "hardware", "hasPrivateKey": false, "fingerprint": "SHA256:hw"}),
         );
-        let loser = key_env(1, json!({"id": "k-1", "kind": "hardware", "hasPrivateKey": false}));
+        let loser = key_env(
+            1,
+            json!({"id": "k-1", "kind": "hardware", "hasPrivateKey": false}),
+        );
         let merged = merge(&winner, &loser).unwrap();
         assert_eq!(merged.envelope.record["fingerprint"], "SHA256:hw");
     }

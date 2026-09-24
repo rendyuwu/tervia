@@ -70,10 +70,7 @@ function certValidityLabel(
   // `certValidBefore`: a CA that writes something other than OpenSSH's own
   // `u64::MAX` "forever" sentinel (`i64::MAX`, say) would otherwise render
   // "Valid until Invalid Date" instead of the honest sentence.
-  if (
-    vaultKey.certValidBefore === undefined ||
-    vaultKey.certValidBefore * 1000 > 8.64e15
-  ) {
+  if (vaultKey.certValidBefore === undefined || vaultKey.certValidBefore * 1000 > 8.64e15) {
     return { text: "Never expires", expired: false };
   }
   const expired = vaultKey.certValidBefore * 1000 < now;

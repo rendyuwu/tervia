@@ -621,7 +621,10 @@ export function KeyEditorDialog({ target, onClose }: KeyEditorDialogProps): Reac
               <Field label="Kind">
                 {mode === "create" ? (
                   <div className="flex gap-1.5" role="group" aria-label="Kind">
-                    <ToggleButton active={draft.kind === "pem"} onClick={() => patch({ kind: "pem" })}>
+                    <ToggleButton
+                      active={draft.kind === "pem"}
+                      onClick={() => patch({ kind: "pem" })}
+                    >
                       Private key
                     </ToggleButton>
                     <ToggleButton

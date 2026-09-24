@@ -533,10 +533,13 @@ console.log(
       described,
     );
   }
-  const agentStripped = describeAgentKeyError(new Error("ssh: could not read this public key line"));
+  const agentStripped = describeAgentKeyError(
+    new Error("ssh: could not read this public key line"),
+  );
   check(
     "describeAgentKeyError strips the ssh: prefix the same way describeKeyError/describeCertError do",
-    agentStripped.kind === "error" && agentStripped.message === "could not read this public key line",
+    agentStripped.kind === "error" &&
+      agentStripped.message === "could not read this public key line",
     agentStripped,
   );
 }

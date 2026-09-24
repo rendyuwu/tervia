@@ -569,7 +569,9 @@ console.log("\n[3. save inspects fields] KeyEditorDialog's save reads draft.priv
     );
     const FACTS_SOURCES = ["vaultKeyFactsFrom", "hardwareFactsFrom"];
     for (const a of factsAssignments) {
-      const callee = ts.isCallExpression(a.right) ? a.right.expression.getText(keySfForFacts) : null;
+      const callee = ts.isCallExpression(a.right)
+        ? a.right.expression.getText(keySfForFacts)
+        : null;
       check(
         `every assignment to facts calls vaultKeyFactsFrom( or hardwareFactsFrom( - not a fallback source`,
         callee !== null && FACTS_SOURCES.includes(callee),

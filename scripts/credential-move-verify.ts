@@ -1877,7 +1877,11 @@ console.log(
     };
     pinArgs(
       "deps.vault.upsertKey",
-      ["keyRecordFrom(mintedKeyId, keyDraft, null, newKey.facts, null)", "keySecrets", "VAULT_STAMP_ABSENT"],
+      [
+        "keyRecordFrom(mintedKeyId, keyDraft, null, newKey.facts, null)",
+        "keySecrets",
+        "VAULT_STAMP_ABSENT",
+      ],
       "keyRecordFrom",
     );
     pinArgs("deps.vault.upsertIdentity", [
