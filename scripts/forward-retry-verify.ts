@@ -501,7 +501,7 @@ console.log(
   );
   check("the yield never calls onFailure, so the ladder schedules nothing", timers.length, 0);
   check(
-    "the yield's own warning toast still passes through the silenced runtime - only \"error\" is dropped",
+    'the yield\'s own warning toast still passes through the silenced runtime - only "error" is dropped',
     [toastCalls.length, toastCalls[0]?.variant],
     [1, "warning"],
   );
