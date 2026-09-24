@@ -419,6 +419,22 @@ secrets)` is the mode-to-wire mapping for the one case with nothing to
   is refused. Records are written **before** the credentials so every account
   belongs to a host that is already in the store, and one refused row is counted
   in `ImportResult` rather than abandoning the rest of the file.
+- `src/modules/backup/sshConfigImport.ts` and `puttyRegImport.ts` are pure
+  (no Tauri import, loadable under plain node) grammar parsers for
+  `~/.ssh/config` and a PuTTY `.reg` export - stanza/directive splitting only,
+  no store access. `src/modules/backup/foreignImport.ts` is the Tauri-dependent
+  layer on top: it resolves `IdentityFile`/`ProxyJump` against `listHosts()`,
+  reads and inspects a key file (`fs_read_file` + `ssh_key_inspect`, the same
+  calls the key editor's own picker makes), and reuses `clearDanglingJumps`/
+  `refuseProtocolConflicts`/`orderHostWrites` from `file.ts` unchanged before
+  writing through the ordinary `upsertHost`/`upsertKey`/`upsertIdentity`
+  calls - not `applyV3`, since a plaintext source file never holds a sealed
+  blob to decrypt. `ForeignImportDialog.tsx` is the preview-then-confirm UI,
+  surfaced from `HostsBackupActions.tsx`'s "Import from..." menu. Termius is
+  not offered - see `KNOWN-LIMITS.md`. `fs_read_file`'s `classify_bytes`
+  (`src-tauri/src/modules/fs/file.rs`) gained a UTF-16LE/BE BOM decode ahead of
+  its null-byte sniff, so a `regedit.exe`-exported `.reg` file (UTF-16LE by
+  default) reads as text instead of `Binary`.
 - `status.ts` models the per-leaf handshake state including per-hop progress;
   `SshRoutePill` renders the chain in the status bar. `hostKeyPrompt.ts` queues
   first-connect confirmations and pins the fingerprint at the moment of trust.

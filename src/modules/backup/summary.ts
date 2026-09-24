@@ -1,4 +1,5 @@
 import type { ImportResult } from "./apply";
+import type { ForeignImportResult, ForeignRefusalReason } from "./foreignImport";
 
 // What the backup dialog SAYS about an export it just wrote and an import it just
 // applied. The sentences only - nothing here renders one.
@@ -248,6 +249,60 @@ export function summarize(r: ImportResult): ImportSummary {
   // apart are exactly the ones IMPORT_FIELDS_LEFT_UNSAID records as deliberately
   // unread, so saying which would mean promoting one of them, not wording this
   // better.
+  return {
+    line: `Imported: ${parts.length > 0 ? parts.join(", ") : "nothing"}.`,
+    problems: [...r.problems],
+  };
+}
+
+/** Every {@link ForeignRefusalReason} in one human sentence fragment, read at
+ *  the point of use the same discipline this file's own header asks of
+ *  `ImportResult`'s fields - a reason a later build adds here without a label
+ *  falls back to its own key rather than going unsaid. Exported so
+ *  `ForeignImportDialog.tsx` can show the same wording in its PREVIEW state,
+ *  before `summarizeForeignImport` ever runs - the whole point of a preview
+ *  is showing the refusal breakdown before the user confirms, not only after. */
+export const FOREIGN_REFUSAL_LABELS: Partial<Record<ForeignRefusalReason, string>> = {
+  match: "used a Match block",
+  wildcardHost: "used a wildcard or negated Host pattern",
+  include: "used Include",
+  proxyCommand: "used ProxyCommand",
+  chainUnresolved: "a ProxyJump chain could not be resolved to saved hosts",
+  keyUnreadable: "an IdentityFile could not be read",
+  nonSsh: "not an SSH session",
+  proxyMethodSet: "used a PuTTY proxy",
+  protocolConflicts: "the host saved here under that id speaks the other protocol",
+};
+
+/**
+ * {@link summarize}'s counterpart for an `ssh_config`/PuTTY `.reg` import
+ * (`foreignImport.ts`). A SEPARATE function over a SEPARATE type rather than
+ * a branch inside `summarize`: `ImportResult` has no `refused`-by-reason axis
+ * and no source that is ever RDP, and folding the two would mean either type
+ * grows fields the other never uses. `scripts/backup-verify.ts`'s exhaustive
+ * partition check walks `ImportResult`'s own leaves specifically, so this
+ * function and its type sit outside that check entirely rather than needing
+ * to satisfy it.
+ */
+export function summarizeForeignImport(r: ForeignImportResult): ImportSummary {
+  const parts: string[] = [];
+  if (r.hosts.added > 0) parts.push(`${r.hosts.added} added`);
+  if (r.hosts.replaced > 0) parts.push(`${r.hosts.replaced} updated`);
+  if (r.skipped > 0) parts.push(`${r.skipped} skipped as unreadable`);
+  const identityCount = r.identities.added + r.identities.replaced;
+  const keyCount = r.keys.added + r.keys.replaced;
+  if (identityCount > 0) parts.push(plural(identityCount, "identity", "identities"));
+  if (keyCount > 0) parts.push(plural(keyCount, "vault key"));
+
+  const failed = r.hosts.failed + r.identities.failed + r.keys.failed;
+  if (failed > 0) parts.push(`${plural(failed, "record")} the store refused`);
+
+  for (const [reasonKey, count] of Object.entries(r.refused)) {
+    if (!count) continue;
+    const label = FOREIGN_REFUSAL_LABELS[reasonKey as ForeignRefusalReason] ?? reasonKey;
+    parts.push(`${plural(count, "row")} refused (${label})`);
+  }
+
   return {
     line: `Imported: ${parts.length > 0 ? parts.join(", ") : "nothing"}.`,
     problems: [...r.problems],

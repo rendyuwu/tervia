@@ -953,6 +953,45 @@ check(
 );
 
 console.log(
+  "\n[foreign import] the merge machinery reads Host[], not provenance - ssh_config/PuTTY import",
+);
+// Every fixture above this line reaches `clearDanglingJumps`/`orderHostWrites`
+// through `host(ssh(...))`, which is `sanitizeHost` under the hood - so none of
+// them proves these functions work on a row that never passed through it.
+// `sshConfigImport.ts`/`foreignImport.ts` build an `SshHost` literal directly
+// (no raw JSON, no sanitizer), and this is the one place that shape is
+// actually constructed and run through the same three passes, so a hidden
+// dependency on something `sanitizeHost` happens to populate (a default, a
+// field order) would redden here and nowhere else.
+const handTyped: SshHost = {
+  id: "h-cfg-1",
+  name: "prod",
+  host: "prod.example.com",
+  port: 22,
+  protocol: "ssh",
+  credential: { kind: "inline", hostId: "h-cfg-1", user: "deploy", authMode: "password", hasPassword: false, hasPrivateKey: false, hasKeyPassphrase: false },
+  proxyJumpId: "h-cfg-missing",
+};
+check(
+  "a hand-typed SshHost's dangling proxyJumpId is cleared exactly like a sanitizeHost row's",
+  clearDanglingJumps([handTyped], [])[0].proxyJumpId,
+  undefined,
+);
+const handTypedConflict: SshHost = { ...handTyped, id: "h-existing-rdp" };
+check(
+  "a hand-typed SshHost is still refused for an id an existing RDP host owns",
+  refuseProtocolConflicts([handTypedConflict], [host(rdp({ id: "h-existing-rdp" }))]).conflicts,
+  1,
+);
+const bastion: SshHost = { ...handTyped, id: "h-cfg-bastion", proxyJumpId: undefined };
+const target: SshHost = { ...handTyped, id: "h-cfg-target", proxyJumpId: "h-cfg-bastion" };
+check(
+  "orderHostWrites puts a hand-typed bastion ahead of the target that jumps through it",
+  orderHostWrites([target, bastion], []).map((h) => h.id),
+  ["h-cfg-bastion", "h-cfg-target"],
+);
+
+console.log(
   "\n[vault bindings] a v3 payload carries a vault, so this is a DECISION, not a refusal",
 );
 // THREE OUTCOMES, and the third one covers two rows that are conservative for

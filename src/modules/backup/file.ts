@@ -231,8 +231,11 @@ const isRecord = (v: unknown): v is Record<string, unknown> =>
 
 const str = (v: unknown): string => (typeof v === "string" ? v : "");
 
-/** A port is only usable if it is a whole number in range; 0 is not valid to dial. */
-function port(v: unknown): number | null {
+/** A port is only usable if it is a whole number in range; 0 is not valid to
+ *  dial. Exported for `sshConfigImport.ts`/`puttyRegImport.ts`, which validate
+ *  a `Port`/`PortNumber` directive against the same rule a backup row's port
+ *  already goes through. */
+export function port(v: unknown): number | null {
   return typeof v === "number" && Number.isInteger(v) && v >= 1 && v <= 65535 ? v : null;
 }
 
