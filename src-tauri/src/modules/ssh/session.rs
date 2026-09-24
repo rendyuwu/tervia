@@ -3087,7 +3087,7 @@ mod chain_tests {
                 .expect("client key generation failed");
 
             let host_key_path = scratch.path("host_key");
-            std::fs::write(&host_key_path, &host_key.pem).expect("write host key");
+            std::fs::write(&host_key_path, host_key.pem.as_bytes()).expect("write host key");
             owner_only(&host_key_path);
 
             let authorized_keys_path = scratch.path("authorized_keys");
@@ -3161,7 +3161,7 @@ mod chain_tests {
                 use_agent: false,
                 password: None,
                 private_key: Some(SecretSource::Inline {
-                    value: client_key.pem.clone(),
+                    value: client_key.pem.to_string(),
                 }),
                 private_key_passphrase: None,
                 // Pinned to the throwaway server's own key, so the handshake
@@ -3174,7 +3174,7 @@ mod chain_tests {
             };
             let secrets = SshSecrets {
                 target: HopSecrets {
-                    private_key: Some(Zeroizing::new(client_key.pem.clone())),
+                    private_key: Some(client_key.pem.clone()),
                     ..Default::default()
                 },
                 jumps: Vec::new(),

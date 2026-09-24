@@ -288,15 +288,22 @@ export function KeyEditorDialog({ target, onClose }: KeyEditorDialogProps): Reac
   const generateKey = async () => {
     const generation = ++inspectGeneration.current;
     setGenerating(true);
+    // A freshly generated key is a DIFFERENT key from whatever file status line
+    // was showing before it, the same reason `pickKeyFile` resets this on a fresh pick.
+    setImported({ kind: "idle" });
     try {
       const generated = await generateSshKey(
         algorithm,
         draft.passphrase || undefined,
         draft.name.trim() || undefined,
       );
+      // Discard rather than write if a newer call - or the load effect reopening
+      // this dialog on a different key - has since moved the generation on. Without
+      // this, a slow RSA-4096 generation could silently overwrite a body the user
+      // pasted or imported in the meantime, or land in a different key's draft.
+      if (inspectGeneration.current !== generation) return;
       patch({ privateKey: generated.pem });
-      const result = describeKeyInfo(generated);
-      if (inspectGeneration.current === generation) setInspected(result);
+      setInspected(describeKeyInfo(generated));
     } catch (e) {
       const result = describeKeyError(e);
       if (inspectGeneration.current === generation) setInspected(result);
@@ -538,6 +545,10 @@ export function KeyEditorDialog({ target, onClose }: KeyEditorDialogProps): Reac
                       {generating ? "Generating…" : "Generate"}
                     </Button>
                   </div>
+                  <span className="text-muted-foreground text-[10.5px]">
+                    Fill in the passphrase below first to encrypt the new key; generating
+                    replaces the stored key on Save.
+                  </span>
                   {replacingBody ? (
                     <span className="text-muted-foreground text-[10.5px]">
                       Clear the key field above to generate a new pair instead.

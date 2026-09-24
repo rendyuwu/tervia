@@ -255,13 +255,17 @@ pub struct SshKeyInfo {
 /// `describeKeyInfo`/`vaultKeyFactsFrom` (`src/modules/vault/keyInspect.ts`)
 /// exactly as it already does for a pasted key, with no second translation
 /// for a generated one.
-#[derive(Debug, Serialize)]
+///
+/// No `Debug` derive: `pem` is `Zeroizing<String>`, which does not implement
+/// it (the same reason `HopSecrets`/`SshSecrets` above derive no `Debug`
+/// either) - a stray `{:?}` must not become a place a private key leaks.
+#[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SshKeyGenerated {
     /// OpenSSH `openssh-key-v1` PEM, LF line endings, encrypted when a
     /// passphrase was given. The only place the private key material leaves
     /// this function - the caller stores it exactly as a pasted key's body.
-    pub pem: String,
+    pub pem: Zeroizing<String>,
     #[serde(flatten)]
     pub info: SshKeyInfo,
 }
@@ -600,8 +604,9 @@ fn ssh_key_generate_inner(
 ) -> Result<SshKeyGenerated, String> {
     let algo = parse_key_generate_algorithm(algorithm)?;
     // `SysRng::try_fill_bytes` only fails if the OS RNG itself is unavailable;
-    // `UnwrapErr` turns that failure into a panic, which `spawn_blocking`
-    // above turns into a join error rather than a silently bad key returned.
+    // `UnwrapErr` turns that failure into a panic, which aborts the process
+    // under the release profile's `panic = "abort"` (a join error only in
+    // dev), rather than returning a key built from a failed RNG.
     let mut rng = UnwrapErr(SysRng);
     let mut key = PrivateKey::random(&mut rng, algo)
         .map_err(|e| format!("ssh: could not generate key: {e}"))?;
@@ -612,11 +617,12 @@ fn ssh_key_generate_inner(
     // Computed on `key` BEFORE it is (maybe) encrypted, and `encrypted` names
     // the STORED form rather than `key`'s own (always-unencrypted) state:
     // `PrivateKey::encrypt` (below) returns a value whose own public half is
-    // rebuilt from bare key data and carries no comment - the pinned fork's
-    // `encrypt_with` constructs it as `self.public_key.key_data.clone().into()`,
-    // which drops the comment field entirely. That is the same asymmetry
-    // `ssh_key_inspect_inner` already relies on for an `openssh-key-v1`
-    // container inspected without its passphrase.
+    // rebuilt from bare key data and carries no comment - `internal-russh-forked-ssh-key`
+    // 0.6.18's `PrivateKey::encrypt_with` constructs it as
+    // `self.public_key.key_data.clone().into()`, which drops the comment field
+    // entirely. That is the same asymmetry `ssh_key_inspect_inner` already
+    // relies on for an `openssh-key-v1` container inspected without its
+    // passphrase.
     let info = key_info(&key, pass.is_some())?;
     let stored = match pass {
         Some(pass) => key
@@ -626,8 +632,7 @@ fn ssh_key_generate_inner(
     };
     let pem = stored
         .to_openssh(LineEnding::LF)
-        .map_err(|e| format!("ssh: could not serialize generated key: {e}"))?
-        .to_string();
+        .map_err(|e| format!("ssh: could not serialize generated key: {e}"))?;
     Ok(SshKeyGenerated { pem, info })
 }
 
@@ -1815,10 +1820,15 @@ Ym9ndXMgYm9keSwgbmV2ZXIgcmVhY2hlZA==
             fingerprint
         );
 
-        // The inspect path reports the same thing a saved-then-reopened key
-        // would: locked without the passphrase, and matching once supplied.
-        let locked = ssh_key_inspect_inner(&generated.pem, None).expect("locked, not an error");
-        assert!(!locked.parsed);
+        // openssh-key-v1 keeps the public half in cleartext, so the facts read
+        // out without the passphrase - the contract
+        // `locked_openssh_key_reports_metadata_without_a_passphrase` pins for an
+        // imported key.
+        let locked = ssh_key_inspect_inner(&generated.pem, None)
+            .expect("metadata readable without the passphrase");
+        assert!(locked.parsed);
+        assert!(locked.encrypted);
+        assert_eq!(locked.fingerprint.as_deref(), Some(fingerprint.as_str()));
         let unlocked = ssh_key_inspect_inner(&generated.pem, Some("correct horse"))
             .expect("right passphrase unlocks");
         assert_eq!(unlocked.fingerprint, Some(fingerprint));
