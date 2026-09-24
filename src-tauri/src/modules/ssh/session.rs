@@ -1606,6 +1606,7 @@ async fn authenticate_agent(
 /// hop and the final target so the auth posture stays identical down the whole
 /// chain. `host` only labels error messages, so a failing jump names itself
 /// instead of reading as if it were the target.
+#[allow(clippy::too_many_arguments)]
 async fn authenticate_hop(
     handle: &mut Handle<HostKeyVerifier>,
     host: &str,

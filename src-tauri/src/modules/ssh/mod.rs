@@ -629,11 +629,13 @@ pub enum SshTextClassification {
 /// key line, or neither - backs the vault key editor's `cert` and
 /// `hardware` kinds, which each need to know what the user just pasted
 /// without russh's own "Could not read key" collapsing every dead end into
-/// one message. Sync: parsing a certificate or a public-key line runs no
-/// KDF, unlike `ssh_key_inspect`'s async/`spawn_blocking` shape.
+/// one message. Async like `ssh_key_inspect`: the text is user-supplied and
+/// may be a private key, so parsing stays off the WebView2 UI thread.
 #[tauri::command]
-pub fn ssh_key_classify(text: String) -> Result<SshTextClassification, String> {
-    ssh_key_classify_inner(&text)
+pub async fn ssh_key_classify(text: String) -> Result<SshTextClassification, String> {
+    tauri::async_runtime::spawn_blocking(move || ssh_key_classify_inner(&text))
+        .await
+        .map_err(|e| format!("ssh_key_classify join error: {e}"))?
 }
 
 fn ssh_key_classify_inner(text: &str) -> Result<SshTextClassification, String> {
