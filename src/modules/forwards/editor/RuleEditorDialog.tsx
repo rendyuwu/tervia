@@ -477,8 +477,7 @@ export function RuleEditorDialog({
                   <span className="text-muted-foreground text-[10.5px]">
                     &quot;With the host&apos;s terminal&quot; rides that terminal&apos;s own SSH
                     session and closes with the tab. &quot;When Tervia starts&quot; binds once at
-                    launch, with no tab required, and retries on a backoff ladder if the bind
-                    fails.
+                    launch, with no tab required, and retries on a backoff ladder if the bind fails.
                   </span>
                 ) : (
                   // `startHostForwards` (`../autostart.ts`) skips every `-R`/`-D`

@@ -362,15 +362,8 @@ console.log(
 
   const appOnly = await h.forwards.upsertRule(rule({ startWithApp: true }), hosts);
   check("the paired positive: startWithApp alone is accepted", appOnly.startWithApp, true);
-  const hostOnly = await h.forwards.upsertRule(
-    rule({ id: "f-2", startWithHost: true }),
-    hosts,
-  );
-  check(
-    "and startWithHost alone, unaffected by the new guard",
-    hostOnly.startWithHost,
-    true,
-  );
+  const hostOnly = await h.forwards.upsertRule(rule({ id: "f-2", startWithHost: true }), hosts);
+  check("and startWithHost alone, unaffected by the new guard", hostOnly.startWithHost, true);
 }
 
 // ---------------------------------------------------------------------------

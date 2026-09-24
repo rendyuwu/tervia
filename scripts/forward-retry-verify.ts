@@ -28,7 +28,10 @@
  * already carries: `-R`/`-D` dial `ssh/tunnel.ts` directly and cannot be
  * driven through `RuntimeDeps` under plain node.
  */
-import { SshAuthRejectedError, SshLocalConnectError } from "../src/modules/terminal/lib/ssh-exit-decision";
+import {
+  SshAuthRejectedError,
+  SshLocalConnectError,
+} from "../src/modules/terminal/lib/ssh-exit-decision";
 
 let failed = 0;
 function check(label: string, got: unknown, want: unknown): void {
@@ -211,9 +214,17 @@ console.log(
   queueRejections(LADDER_MS.length + 1, new Error("transport blip"));
 
   await startForwardAutostart(rule, FAKE_RUNTIME);
-  check("the row is failed after the first attempt", useForwardRuntime.getState().byRule["r2"]?.status, "failed");
+  check(
+    "the row is failed after the first attempt",
+    useForwardRuntime.getState().byRule["r2"]?.status,
+    "failed",
+  );
   check("exactly one open call so far", openCallCount, 1);
-  check("one retry pending, at the FIRST rung", timers.length === 1 && timers[0]?.delay, LADDER_MS[0]);
+  check(
+    "one retry pending, at the FIRST rung",
+    timers.length === 1 && timers[0]?.delay,
+    LADDER_MS[0],
+  );
 
   for (let rung = 1; rung < LADDER_MS.length; rung++) {
     await fireRetry();
@@ -279,7 +290,11 @@ console.log("\n[stop] a manual Stop cancels a pending retry");
 
   await stopRule(rule, FAKE_RUNTIME);
   check("the pending retry is gone", timers.length, 0);
-  check("the row reads stopped, not failed", useForwardRuntime.getState().byRule["r5"]?.status, "stopped");
+  check(
+    "the row reads stopped, not failed",
+    useForwardRuntime.getState().byRule["r5"]?.status,
+    "stopped",
+  );
 
   // The cancelled retry, if it somehow still fired, must not resurrect the
   // rule - proving the timer itself is gone (above) is the real guarantee;
@@ -301,7 +316,11 @@ console.log("\n[start] a manual Start cancels and does not resume the old attemp
   outcomes.push({ kind: "resolve" });
   await startRule(rule, FAKE_RUNTIME);
   check("the old ladder's retry is gone", timers.length, 0);
-  check("the manual Start itself succeeded", useForwardRuntime.getState().byRule["r6"]?.status, "running");
+  check(
+    "the manual Start itself succeeded",
+    useForwardRuntime.getState().byRule["r6"]?.status,
+    "running",
+  );
 
   // A LATER failure starts a fresh ladder at the FIRST rung, not wherever the
   // cancelled one left off - there is no attempt counter left to resume from,
@@ -317,19 +336,18 @@ console.log("\n[start] a manual Start cancels and does not resume the old attemp
 }
 
 // ---------------------------------------------------------------------------
-console.log(
-  "\n[delete/edit] releaseRule cancels a pending retry even on an already-failed row",
-);
+console.log("\n[delete/edit] releaseRule cancels a pending retry even on an already-failed row");
 {
   resetFakes();
   resetStores();
   const rule = fakeRule("r7");
   queueRejections(1, new Error("transport blip"));
   await startForwardAutostart(rule, FAKE_RUNTIME);
-  check("the row is failed, with a retry pending", [
-    useForwardRuntime.getState().byRule["r7"]?.status,
-    timers.length,
-  ], ["failed", 1]);
+  check(
+    "the row is failed, with a retry pending",
+    [useForwardRuntime.getState().byRule["r7"]?.status, timers.length],
+    ["failed", 1],
+  );
 
   // `pageMustStopFirst` answers false for a `failed` row, so `releaseRule`
   // alone reaching `stopRule` is NOT what has to cancel this - the property

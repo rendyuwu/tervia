@@ -742,9 +742,12 @@ async function attemptForwardAutostart(
   }
   const attempt = priorAttempts + 1;
   if (attempt > FORWARD_RECONNECT_BACKOFF_MS.length) return;
-  const timer = setTimeout(() => {
-    forwardRetries.delete(rule.id);
-    void attemptForwardAutostart(rule, runtime, attempt);
-  }, FORWARD_RECONNECT_BACKOFF_MS[attempt - 1]);
+  const timer = setTimeout(
+    () => {
+      forwardRetries.delete(rule.id);
+      void attemptForwardAutostart(rule, runtime, attempt);
+    },
+    FORWARD_RECONNECT_BACKOFF_MS[attempt - 1],
+  );
   forwardRetries.set(rule.id, { timer, attempt });
 }
