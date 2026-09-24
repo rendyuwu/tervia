@@ -631,11 +631,13 @@ const KNOWN_RULE_TYPES: Record<string, true> = { remote: true, dynamic: true };
  * THE REST IS TYPE-CONDITIONAL, mirroring `upsertRule`'s own per-type
  * refusals (`src/modules/forwards/store.ts`): `-D` needs only a valid
  * `localPort` (its SOCKS port; `0` legal, "let the OS pick"); `-R` needs a
- * non-blank `remoteHost` (its LOCAL target) and a valid `remotePort`
- * (`1-65535`, never `0` - it is dialled), plus - only when the file names one
- * - a valid `bindPort` (`0` legal, "let the SERVER pick"); `-L` is unchanged
- * from before this type existed: a non-blank `remoteHost`, `localPort` `0` or
- * `1-65535`, `remotePort` `1-65535`.
+ * non-blank `targetHost` (its OWN dial-target field, never `remoteHost` -
+ * see `ForwardRule.remoteHost`'s own doc on why it is forced blank instead)
+ * and a valid `targetPort` (`1-65535`, never `0` - it is dialled), plus -
+ * only when the file names one - a valid `bindPort` (`0` legal, "let the
+ * SERVER pick"); `-L` is unchanged from before this type existed: a
+ * non-blank `remoteHost`, `localPort` `0` or `1-65535`, `remotePort`
+ * `1-65535`.
  *
  * `startWithHost` is `true` only when the file literally says `true`. A missing
  * or non-boolean value falls to `false`, which is the safe direction: a rule
@@ -671,9 +673,9 @@ export function sanitizeRule(raw: unknown): ForwardRule | null {
   }
 
   if (type === "remote") {
-    const remoteHost = str(raw.remoteHost).trim();
-    const remote = port(raw.remotePort);
-    if (!remoteHost || remote === null) return null;
+    const targetHost = str(raw.targetHost).trim();
+    const target = port(raw.targetPort);
+    if (!targetHost || target === null) return null;
     const bindAddress = str(raw.bindAddress).trim();
     const rawBindPort = raw.bindPort;
     const bindPort = rawBindPort === undefined ? undefined : localPort(rawBindPort);
@@ -682,8 +684,10 @@ export function sanitizeRule(raw: unknown): ForwardRule | null {
       ...base,
       type,
       localPort: 0,
-      remoteHost,
-      remotePort: remote,
+      remoteHost: "",
+      remotePort: 0,
+      targetHost,
+      targetPort: target,
       ...(bindAddress ? { bindAddress } : {}),
       ...(bindPort !== undefined && bindPort !== null ? { bindPort } : {}),
     };

@@ -368,28 +368,35 @@ console.log("\n[type -R] the local target host/port, and, only when present, the
       id: "f-remote",
       type: "remote",
       localPort: 0,
-      remoteHost: "127.0.0.1",
-      remotePort: 80,
+      remoteHost: "",
+      remotePort: 0,
+      targetHost: "127.0.0.1",
+      targetPort: 80,
     }),
     ...over,
   });
 
   await rejectsWith(
     "a blank local target host is refused, and the message says LOCAL TARGET",
-    () => h.forwards.upsertRule(remoteRule({ remoteHost: " " }), hosts),
+    () => h.forwards.upsertRule(remoteRule({ targetHost: " " }), hosts),
     'forwards: "web tunnel" needs a local target host',
   );
   await rejectsWith(
     "target port 0 is refused - it is dialled, the same as -L's remotePort",
-    () => h.forwards.upsertRule(remoteRule({ remotePort: 0 }), hosts),
+    () => h.forwards.upsertRule(remoteRule({ targetPort: 0 }), hosts),
     'forwards: "web tunnel" has an invalid target port 0 - must be 1-65535',
+  );
+  await rejectsWith(
+    "an absent target port is refused too, not read as 0",
+    () => h.forwards.upsertRule(remoteRule({ targetPort: undefined }), hosts),
+    'forwards: "web tunnel" has an invalid target port undefined - must be 1-65535',
   );
   await rejectsWith(
     "an invalid bindPort is refused, only when one is present",
     () => h.forwards.upsertRule(remoteRule({ bindPort: 65536 }), hosts),
     'forwards: "web tunnel" has an invalid bind port 65536 - must be 0, or 1-65535',
   );
-  check("none of the three refusals wrote anything", (h.data.rules as ForwardRule[]).length, 0);
+  check("none of the four refusals wrote anything", (h.data.rules as ForwardRule[]).length, 0);
 
   const noBindPort = await h.forwards.upsertRule(remoteRule(), hosts);
   check(
@@ -397,30 +404,16 @@ console.log("\n[type -R] the local target host/port, and, only when present, the
     noBindPort.bindPort,
     undefined,
   );
+  check(
+    "remoteHost/remotePort stay forced blank on a -R row - an older build refuses it instead of reading it as a working -L (issue 78's field-mapping fix)",
+    [noBindPort.remoteHost, noBindPort.remotePort],
+    ["", 0],
+  );
   const autoBind = await h.forwards.upsertRule(
     remoteRule({ id: "f-remote-2", bindPort: 0 }),
     hosts,
   );
   check("bindPort 0 (let the server pick) is accepted", autoBind.bindPort, 0);
-}
-
-// ---------------------------------------------------------------------------
-console.log(
-  "\n[type undefined, i.e. -L] the original six refusals are untouched by the new branch",
-);
-{
-  const h = harness();
-  const hosts = hostsOf([sshHost()]);
-  await rejectsWith(
-    "a blank remoteHost on a type-less rule still gets -L's own message, not -R's",
-    () => h.forwards.upsertRule(rule({ remoteHost: " " }), hosts),
-    'forwards: "web tunnel" needs a remote host',
-  );
-  await rejectsWith(
-    "remotePort 0 on a type-less rule still gets -L's own message, not -R's",
-    () => h.forwards.upsertRule(rule({ remotePort: 0 }), hosts),
-    'forwards: "web tunnel" has an invalid remote port 0 - must be 1-65535',
-  );
 }
 
 // ---------------------------------------------------------------------------

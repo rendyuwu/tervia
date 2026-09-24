@@ -34,16 +34,25 @@ export type ForwardRule = {
   /**
    * `-L`: the host each accepted connection is dialled to, resolved by the
    *  SSH SERVER.
-   * `-R`: the host THIS MACHINE dials for each connection the server
-   *  accepts - same ROLE as `-L`'s (the thing dialled once a connection
-   *  arrives), just dialled by the other party. Never blank.
-   * `-D`: unused - a SOCKS5 CONNECT names its own destination per connection.
+   * `-R`/`-D`: unused - forced to `""`. A `-R` rule's own dial target is
+   *  {@link targetHost}, in a field `-L` never wrote, so an older build that
+   *  does not know `type` reads this row through its own unconditional `-L`
+   *  refusal (blank `remoteHost`) and drops it instead of silently opening
+   *  it as a working `-L`.
    */
   remoteHost: string;
-  /** Paired with {@link remoteHost}; never 0 on either `-L` or `-R` - the
-   *  side that is DIALLED is never "let something else pick". Unused for
-   *  `-D`. */
+  /** Paired with {@link remoteHost}; never 0 on `-L` - the side that is
+   *  DIALLED is never "let something else pick". Forced to `0` for `-R`/`-D`,
+   *  for the same older-build-refusal reason {@link remoteHost} is forced
+   *  blank. */
   remotePort: number;
+  /** `-R` only: the host THIS MACHINE dials for each connection the server
+   *  accepts - same ROLE `-L`'s {@link remoteHost} has, just dialled by the
+   *  other party. Never blank when `type === "remote"`. Absent for `-L`/`-D`. */
+  targetHost?: string;
+  /** Paired with {@link targetHost}; never 0 when `type === "remote"` - a
+   *  dial target is never "let something else pick". Absent for `-L`/`-D`. */
+  targetPort?: number;
   /** `-R` only: the address the SERVER's listener binds to. Blank behaves
    *  as "localhost" - normalised where a rule is actually opened, not here -
    *  and `GatewayPorts no` on an ordinary server restricts the bind to

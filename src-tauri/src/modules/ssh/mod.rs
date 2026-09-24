@@ -741,6 +741,20 @@ pub async fn ssh_forward_close(
     Ok(session.close_forward(bound_port, generation).await)
 }
 
+/// Blank `bind_address` - an empty field left on the form, or the frontend's
+/// own default - means "let the server pick its own bind address", the same
+/// as a blank OpenSSH `-R` bind address, so it is normalised to `"localhost"`
+/// once here rather than in each of `ssh_remote_forward_open` and
+/// `ssh_remote_forward_close` separately.
+fn normalize_bind_address(bind_address: String) -> String {
+    let trimmed = bind_address.trim();
+    if trimmed.is_empty() {
+        "localhost".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 /// `ssh -R`: ask the server to listen on `bind_address:bind_port`
 /// (`bind_port` 0 lets the SERVER pick) and route every connection it accepts
 /// back to `local_host:local_port` on THIS machine, over the live session
@@ -758,12 +772,7 @@ pub async fn ssh_remote_forward_open(
     local_host: String,
     local_port: u16,
 ) -> Result<SshForwardHandle, String> {
-    let bind_address = bind_address.trim().to_string();
-    let bind_address = if bind_address.is_empty() {
-        "localhost".to_string()
-    } else {
-        bind_address
-    };
+    let bind_address = normalize_bind_address(bind_address);
     let local_host = local_host.trim().to_string();
     if local_host.is_empty() {
         return Err("ssh: remote forward needs a local target host".into());
@@ -810,12 +819,7 @@ pub async fn ssh_remote_forward_close(
         log::debug!("ssh_remote_forward_close: unknown id={id}");
         return Ok(false);
     };
-    let bind_address = bind_address.trim().to_string();
-    let bind_address = if bind_address.is_empty() {
-        "localhost".to_string()
-    } else {
-        bind_address
-    };
+    let bind_address = normalize_bind_address(bind_address);
     ssh_runtime()
         .spawn(async move {
             session

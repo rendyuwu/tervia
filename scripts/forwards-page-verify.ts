@@ -180,6 +180,63 @@ console.log("[1] ruleRows: hostName and hostDangling resolve independently, rout
     )[0].route,
     "Auto → bastion → 10.0.0.9:5432",
   );
+  check(
+    "route for a -D rule: 'SOCKS <label> -> hostName', never a blank host/zero port",
+    ruleRows(
+      [
+        rule("r-socks", {
+          hostId: "h-bastion",
+          type: "dynamic",
+          localPort: 1080,
+          remoteHost: "",
+          remotePort: 0,
+        }),
+      ],
+      hosts,
+      true,
+    )[0].route,
+    "SOCKS localhost:1080 → bastion",
+  );
+  check(
+    "route for a -R rule: '<bindAddress or localhost>:<bindPort or Auto> on hostName -> targetHost:targetPort'",
+    ruleRows(
+      [
+        rule("r-remote", {
+          hostId: "h-bastion",
+          type: "remote",
+          localPort: 0,
+          remoteHost: "",
+          remotePort: 0,
+          targetHost: "10.0.0.9",
+          targetPort: 5432,
+          bindAddress: "0.0.0.0",
+          bindPort: 2222,
+        }),
+      ],
+      hosts,
+      true,
+    )[0].route,
+    "0.0.0.0:2222 on bastion → 10.0.0.9:5432",
+  );
+  check(
+    "route for a -R rule with no bindAddress/bindPort: falls back to localhost/Auto, never bastion's own remoteHost/remotePort (which are forced blank)",
+    ruleRows(
+      [
+        rule("r-remote-auto", {
+          hostId: "h-bastion",
+          type: "remote",
+          localPort: 0,
+          remoteHost: "",
+          remotePort: 0,
+          targetHost: "10.0.0.9",
+          targetPort: 5432,
+        }),
+      ],
+      hosts,
+      true,
+    )[0].route,
+    "localhost:Auto on bastion → 10.0.0.9:5432",
+  );
 
   // N2: `hostDangling` must never mean "the hosts have not loaded yet".
   // `useForwards()` and `useHosts()` are two INDEPENDENT async loads that both
@@ -506,6 +563,28 @@ console.log("\n[6] localPortLabel: auto, pinned, bound, and the pinned-vs-bound-
     "pinned and bound differ: shows the bound port, never the requested one",
     localPortLabel(rule("r-4", { localPort: 8080 }), 9090),
     "localhost:9090",
+  );
+  // `-R`'s live label names the SERVER, never `localhost` - the port shown
+  // is one THIS MACHINE never bound.
+  check(
+    "-R, not bound, bindPort pinned: '<hostName>:<bindPort>'",
+    localPortLabel(rule("r-5", { type: "remote", bindPort: 2222 }), undefined, "bastion"),
+    "bastion:2222",
+  );
+  check(
+    "-R, not bound, bindPort absent: Auto",
+    localPortLabel(rule("r-6", { type: "remote" }), undefined, "bastion"),
+    "Auto",
+  );
+  check(
+    "-R, bound: '<hostName>:<boundPort>', the SERVER's port and never localhost's",
+    localPortLabel(rule("r-7", { type: "remote", bindPort: 2222 }), 54321, "bastion"),
+    "bastion:54321",
+  );
+  check(
+    "-R with no hostName supplied falls back to a generic word, never blames localhost",
+    localPortLabel(rule("r-8", { type: "remote" }), 54321),
+    "server:54321",
   );
 }
 

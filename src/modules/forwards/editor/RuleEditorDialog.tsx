@@ -420,8 +420,8 @@ export function RuleEditorDialog({
 
                   <Field label="Local target host">
                     <Input
-                      value={draft.remoteHost}
-                      onChange={(e) => patch({ remoteHost: e.target.value })}
+                      value={draft.targetHost}
+                      onChange={(e) => patch({ targetHost: e.target.value })}
                       placeholder="10.0.0.9 or localhost"
                       spellCheck={false}
                       className="h-8 font-mono text-[12px]"
@@ -430,8 +430,8 @@ export function RuleEditorDialog({
 
                   <Field label="Local target port">
                     <Input
-                      value={draft.remotePort}
-                      onChange={(e) => patch({ remotePort: e.target.value })}
+                      value={draft.targetPort}
+                      onChange={(e) => patch({ targetPort: e.target.value })}
                       inputMode="numeric"
                       className="h-8 font-mono text-[12px]"
                     />
@@ -453,17 +453,28 @@ export function RuleEditorDialog({
               )}
 
               <Field label="Start with host">
-                <label className="flex items-start gap-2 text-[12px]">
-                  <Checkbox
-                    checked={draft.startWithHost}
-                    onCheckedChange={(checked) => patch({ startWithHost: checked === true })}
-                    className="mt-0.5"
-                  />
-                  <span>
-                    Bring this rule up when this host&apos;s terminal connects. It closes with that
-                    tab.
+                {draft.type === "" ? (
+                  <label className="flex items-start gap-2 text-[12px]">
+                    <Checkbox
+                      checked={draft.startWithHost}
+                      onCheckedChange={(checked) => patch({ startWithHost: checked === true })}
+                      className="mt-0.5"
+                    />
+                    <span>
+                      Bring this rule up when this host&apos;s terminal connects. It closes with
+                      that tab.
+                    </span>
+                  </label>
+                ) : (
+                  // `startHostForwards` (`../autostart.ts`) skips every `-R`/`-D`
+                  // rule with a banner rather than starting it - see
+                  // `KNOWN-LIMITS.md` - so the toggle is disabled here instead of
+                  // offering a setting this rule cannot act on yet.
+                  <span className="text-muted-foreground text-[10.5px]">
+                    Remote and dynamic rules cannot start with their host yet - start this one
+                    from the Port Forwarding page.
                   </span>
-                </label>
+                )}
               </Field>
 
               <Field label="Description (optional)">

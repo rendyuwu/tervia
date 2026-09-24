@@ -2251,13 +2251,15 @@ check(
 
 console.log("\n[rules type -R] the local target host/port, and an optional bind address/port");
 check(
-  "a good -R row survives, remotePort read as the LOCAL TARGET port",
+  "a good -R row survives, targetHost/targetPort read as the LOCAL TARGET",
   sanitizeRule(
     rule({
       type: "remote",
       localPort: 0,
-      remoteHost: "127.0.0.1",
-      remotePort: 8080,
+      remoteHost: "",
+      remotePort: 0,
+      targetHost: "127.0.0.1",
+      targetPort: 8080,
       bindAddress: "0.0.0.0",
       bindPort: 0,
     }),
@@ -2268,35 +2270,84 @@ check(
     hostId: "h-1",
     type: "remote",
     localPort: 0,
-    remoteHost: "127.0.0.1",
-    remotePort: 8080,
+    remoteHost: "",
+    remotePort: 0,
+    targetHost: "127.0.0.1",
+    targetPort: 8080,
     bindAddress: "0.0.0.0",
     bindPort: 0,
     startWithHost: false,
   },
 );
 check(
-  "a -R row with no bindAddress/bindPort at all is still good - both are optional",
-  has(
-    sanitizeRule(rule({ type: "remote", remoteHost: "127.0.0.1", remotePort: 22 })) ?? {},
-    "bindPort",
+  "a -R row with no bindAddress/bindPort at all is still good - both are optional - asserted as the WHOLE object, not just bindPort's absence, so a dropped row (null) cannot pass the same way a kept one does",
+  sanitizeRule(
+    rule({ type: "remote", remoteHost: "", remotePort: 0, targetHost: "127.0.0.1", targetPort: 22 }),
   ),
-  false,
+  {
+    id: "f-1",
+    name: "postgres",
+    hostId: "h-1",
+    type: "remote",
+    localPort: 0,
+    remoteHost: "",
+    remotePort: 0,
+    targetHost: "127.0.0.1",
+    targetPort: 22,
+    startWithHost: false,
+  },
 );
 check(
   "a -R row's target port 0 is refused - it is dialled, same as -L's remotePort",
-  sanitizeRule(rule({ type: "remote", remoteHost: "127.0.0.1", remotePort: 0 })),
+  sanitizeRule(
+    rule({ type: "remote", remoteHost: "", remotePort: 0, targetHost: "127.0.0.1", targetPort: 0 }),
+  ),
   null,
 );
 check(
   "a -R row's blank target host is refused",
-  sanitizeRule(rule({ type: "remote", remoteHost: "  ", remotePort: 22 })),
+  sanitizeRule(
+    rule({ type: "remote", remoteHost: "", remotePort: 0, targetHost: "  ", targetPort: 22 }),
+  ),
   null,
 );
 check(
   "a -R row's invalid bindPort is refused, only when one is present",
-  sanitizeRule(rule({ type: "remote", remoteHost: "127.0.0.1", remotePort: 22, bindPort: 65536 })),
+  sanitizeRule(
+    rule({
+      type: "remote",
+      remoteHost: "",
+      remotePort: 0,
+      targetHost: "127.0.0.1",
+      targetPort: 22,
+      bindPort: 65536,
+    }),
+  ),
   null,
+);
+check(
+  "a -R row's remoteHost/remotePort are forced blank even when the file supplies real values - the field-mapping fix for issue 78: an older build must refuse this row, not read it as a working -L",
+  sanitizeRule(
+    rule({
+      type: "remote",
+      remoteHost: "should-be-ignored",
+      remotePort: 9999,
+      targetHost: "127.0.0.1",
+      targetPort: 22,
+    }),
+  ),
+  {
+    id: "f-1",
+    name: "postgres",
+    hostId: "h-1",
+    type: "remote",
+    localPort: 0,
+    remoteHost: "",
+    remotePort: 0,
+    targetHost: "127.0.0.1",
+    targetPort: 22,
+    startWithHost: false,
+  },
 );
 
 console.log("\n[rules unknown type] a type this build does not recognise drops just that row");

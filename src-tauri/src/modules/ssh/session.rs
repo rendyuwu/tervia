@@ -394,8 +394,15 @@ impl Handler for HostKeyVerifier {
     /// see `KNOWN-LIMITS.md`.
     ///
     /// An unknown port - no `-R` rule bound it, or it was since closed - is
-    /// REFUSED rather than accepted and silently dropped, which is the
-    /// default trait body's behaviour and the one this override replaces.
+    /// still ACCEPTED, not refused: russh's `client::encrypted` confirms the
+    /// channel open before this handler ever runs, so by the time
+    /// `remote_forwards` comes up empty the peer already has an open
+    /// channel. What it gets instead is a connect immediately followed by
+    /// EOF, via `session.close(channel.id())` below - the closest this
+    /// override can get to a refusal after the fact. Synchronous rather than
+    /// `channel`'s own async `close()`, which sends across the same mpsc
+    /// this session loop is the one draining - calling it from here would be
+    /// asking the loop to unblock itself.
     async fn server_channel_open_forwarded_tcpip(
         &mut self,
         channel: russh::Channel<Msg>,
@@ -403,7 +410,7 @@ impl Handler for HostKeyVerifier {
         connected_port: u32,
         _originator_address: &str,
         _originator_port: u32,
-        _session: &mut client::Session,
+        session: &mut client::Session,
     ) -> Result<(), Self::Error> {
         let target = {
             let map = self.remote_forwards.lock().await;
@@ -414,7 +421,7 @@ impl Handler for HostKeyVerifier {
             log::warn!(
                 "ssh -R: forwarded-tcpip on port {connected_port} names no local target; closing"
             );
-            let _ = channel.close().await;
+            let _ = session.close(channel.id());
             return Ok(());
         };
         tokio::spawn(async move {
@@ -744,6 +751,16 @@ impl SshSession {
     /// `Handle::tcpip_forward` is the wire call. `GatewayPorts no` on an
     /// ordinary server restricts the bind to loopback regardless of
     /// `bind_address`.
+    ///
+    /// A PINNED `bind_port` (non-zero) is registered in `remote_forwards`
+    /// BEFORE `tcpip_forward` is even sent, and rolled back if the request
+    /// errors - otherwise a connection the server accepts in that round-trip
+    /// window would find no registry entry and get closed by
+    /// `server_channel_open_forwarded_tcpip`. Port 0 cannot get the same
+    /// treatment: the bound port isn't known until the reply comes back, so
+    /// a connection accepted in that window is unavoidably unroutable and is
+    /// dropped the same as any other unknown port - there is no port to
+    /// register under before asking.
     pub async fn open_remote_forward(
         &self,
         bind_address: String,
@@ -755,10 +772,27 @@ impl SshSession {
         let handle = guard
             .as_ref()
             .ok_or_else(|| "ssh session is closed".to_string())?;
-        let reported = handle
+        let generation = mint_forward_generation(&self.forward_seq);
+        if bind_port != 0 {
+            self.remote_forwards.lock().await.insert(
+                bind_port,
+                (generation, local_host.clone(), local_port),
+            );
+        }
+        let reported = match handle
             .tcpip_forward(bind_address.clone(), u32::from(bind_port))
             .await
-            .map_err(|e| format!("ssh: remote listen on {bind_address}:{bind_port} failed: {e}"))?;
+        {
+            Ok(v) => v,
+            Err(e) => {
+                if bind_port != 0 {
+                    self.remote_forwards.lock().await.remove(&bind_port);
+                }
+                return Err(format!(
+                    "ssh: remote listen on {bind_address}:{bind_port} failed: {e}"
+                ));
+            }
+        };
         // Per `tcpip_forward`'s own doc: the server reports the bound port
         // only when 0 was requested, and 0 back otherwise - so a PINNED port
         // is never taken from the reply.
@@ -767,11 +801,12 @@ impl SshSession {
         } else {
             bind_port
         };
-        let generation = mint_forward_generation(&self.forward_seq);
-        self.remote_forwards
-            .lock()
-            .await
-            .insert(bound, (generation, local_host, local_port));
+        if bind_port == 0 {
+            self.remote_forwards
+                .lock()
+                .await
+                .insert(bound, (generation, local_host, local_port));
+        }
         log::info!("ssh -R {bind_address}:{bound}");
         Ok((bound, generation))
     }
@@ -1048,12 +1083,25 @@ where
 /// `open_forward` makes for `-L`, just driven by a SOCKS handshake instead of
 /// a fixed `remote_host`/`remote_port` - or answer the refusal
 /// `socks_handshake` decided (skipped for `0xFF`, whose reply already went
-/// out inside `socks_handshake`) and let the connection close.
+/// out inside `socks_handshake`) and let the connection close. The handshake
+/// itself is bounded to 10s: a peer that sends nothing, or an incomplete
+/// greeting, must not park this task and its socket forever.
 async fn serve_socks_connection(
     mut sock: tokio::net::TcpStream,
     session: std::sync::Weak<SshSession>,
 ) -> std::io::Result<()> {
-    let (host, port) = match socks_handshake(&mut sock).await? {
+    let handshake = match tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        socks_handshake(&mut sock),
+    )
+    .await
+    {
+        Ok(result) => result?,
+        // Deadline elapsed: no reply code to send back, just drop the socket
+        // the same as any other handshake failure.
+        Err(_) => return Ok(()),
+    };
+    let (host, port) = match handshake {
         Ok(v) => v,
         Err(code) => {
             if code != 0xFF {
@@ -1062,11 +1110,15 @@ async fn serve_socks_connection(
             return Ok(());
         }
     };
-    let Some(session) = session.upgrade() else {
-        socks_reply(&mut sock, 0x01).await?;
-        return Ok(());
-    };
+    // Hold the session only across the channel open, exactly like
+    // `open_forward`'s own `opened` block: a long-lived tunnel that kept the
+    // Arc would keep this listener bound after the session is evicted, so the
+    // next reconnect's bind would fail with "address already in use".
     let opened = {
+        let Some(session) = session.upgrade() else {
+            socks_reply(&mut sock, 0x01).await?;
+            return Ok(());
+        };
         let guard = session.handle.lock().await;
         let Some(handle) = guard.as_ref() else {
             socks_reply(&mut sock, 0x01).await?;
@@ -2595,6 +2647,63 @@ mod socks_handshake_tests {
             assert_eq!(result, Ok(("::1".to_string(), 22)));
         });
     }
+
+    #[test]
+    fn refuses_an_unsupported_address_type() {
+        rt().block_on(async {
+            let (mut client, mut server) = tokio::io::duplex(256);
+            client.write_all(&[0x05, 0x01, 0x00]).await.unwrap();
+            // atyp 0x02 is unassigned by RFC 1928 - never IPv4/domain/IPv6.
+            client.write_all(&[0x05, 0x01, 0x00, 0x02]).await.unwrap();
+            let result = socks_handshake(&mut server).await.unwrap();
+            assert_eq!(result, Err(0x08));
+        });
+    }
+
+    #[test]
+    fn refuses_a_request_whose_version_byte_is_not_five() {
+        rt().block_on(async {
+            let (mut client, mut server) = tokio::io::duplex(256);
+            client.write_all(&[0x05, 0x01, 0x00]).await.unwrap();
+            // The greeting was SOCKS5; the request claims SOCKS4.
+            client
+                .write_all(&[0x04, 0x01, 0x00, 0x01, 127, 0, 0, 1, 0, 80])
+                .await
+                .unwrap();
+            let result = socks_handshake(&mut server).await.unwrap();
+            assert_eq!(result, Err(0x01));
+        });
+    }
+
+    #[test]
+    fn refuses_a_zero_method_greeting() {
+        rt().block_on(async {
+            let (mut client, mut server) = tokio::io::duplex(256);
+            // NMETHODS 0: no method offered at all, not even no-auth.
+            client.write_all(&[0x05, 0x00]).await.unwrap();
+            let result = socks_handshake(&mut server).await.unwrap();
+            assert_eq!(result, Err(0xFF));
+            let mut reply = [0u8; 2];
+            client.read_exact(&mut reply).await.unwrap();
+            assert_eq!(reply, [0x05, 0xFF]);
+        });
+    }
+
+    #[test]
+    fn eof_mid_request_is_an_err_not_a_panic() {
+        rt().block_on(async {
+            let (mut client, mut server) = tokio::io::duplex(256);
+            client.write_all(&[0x05, 0x01, 0x00]).await.unwrap();
+            // Only 2 of the fixed 4 request header bytes, then hang up.
+            client.write_all(&[0x05, 0x01]).await.unwrap();
+            drop(client);
+            let result = socks_handshake(&mut server).await;
+            assert!(
+                result.is_err(),
+                "a request cut short by EOF must return Err, not panic"
+            );
+        });
+    }
 }
 
 #[cfg(test)]
@@ -2900,6 +3009,11 @@ mod remote_dynamic_forward_tests {
         port: u16,
         user: String,
         client_key_path: std::path::PathBuf,
+        /// SHA256 fingerprint of `host_key`'s public half, computed the same
+        /// way `HostKeyVerifier::check_server_key` computes the live one, so
+        /// `connect_input` can pin `expected_fingerprint` and the handshake
+        /// never parks on a `HostKeyPrompt` nothing in this test answers.
+        host_fingerprint: String,
     }
 
     impl TestSshd {
@@ -2937,6 +3051,12 @@ mod remote_dynamic_forward_tests {
                     return None;
                 }
             }
+            let host_fingerprint = PublicKey::from_openssh(
+                &std::fs::read_to_string(host_key.with_extension("pub")).ok()?,
+            )
+            .ok()?
+            .fingerprint(HashAlg::Sha256)
+            .to_string();
             let authorized_keys = dir.join("authorized_keys");
             std::fs::copy(client_key.with_extension("pub"), &authorized_keys).ok()?;
 
@@ -2965,7 +3085,7 @@ mod remote_dynamic_forward_tests {
                 .args(["-D", "-e", "-f"])
                 .arg(&config)
                 .stdout(Stdio::null())
-                .stderr(Stdio::null())
+                .stderr(Stdio::inherit())
                 .spawn()
                 .ok()?;
 
@@ -2975,6 +3095,7 @@ mod remote_dynamic_forward_tests {
                 port,
                 user,
                 client_key_path: client_key,
+                host_fingerprint,
             };
             if sshd.wait_ready() {
                 Some(sshd)
@@ -3025,7 +3146,7 @@ mod remote_dynamic_forward_tests {
             password: None,
             private_key: Some(SecretSource::Inline { value: key }),
             private_key_passphrase: None,
-            expected_fingerprint: None,
+            expected_fingerprint: Some(sshd.host_fingerprint.clone()),
             jumps: Vec::new(),
             cols: 80,
             rows: 24,

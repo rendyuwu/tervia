@@ -41,10 +41,16 @@ export type RuleDraft = {
   /** "" or "0" both mean auto - see {@link parseLocalPort}. `-L`'s local bind
    *  port, or `-D`'s SOCKS port; unused for `-R`. */
   localPort: string;
-  /** `-L`/`-R`'s dial target host; unused for `-D`. */
+  /** `-L`'s dial target host; unused for `-R`/`-D` - `-R`'s own is
+   *  {@link targetHost}. */
   remoteHost: string;
-  /** `-L`/`-R`'s dial target port; unused for `-D`. */
+  /** `-L`'s dial target port; unused for `-R`/`-D`. */
   remotePort: string;
+  /** `-R` only: the host THIS MACHINE dials for each connection the server
+   *  accepts; unused for `-L`/`-D`. */
+  targetHost: string;
+  /** `-R` only: paired with {@link targetHost}; unused for `-L`/`-D`. */
+  targetPort: string;
   /** `-R` only: the address the SERVER's listener binds to. Blank means
    *  "localhost", the same way `-L`'s blank `localPort` means "auto" - see
    *  {@link ruleRecordFrom}. */
@@ -65,6 +71,8 @@ export const EMPTY_RULE_DRAFT: RuleDraft = {
   localPort: "",
   remoteHost: "",
   remotePort: "",
+  targetHost: "",
+  targetPort: "",
   bindAddress: "",
   bindPort: "",
   startWithHost: false,
@@ -82,6 +90,8 @@ export function ruleDraftFrom(rule: ForwardRule): RuleDraft {
     localPort: rule.localPort === 0 ? "" : String(rule.localPort),
     remoteHost: rule.remoteHost,
     remotePort: rule.remotePort === 0 ? "" : String(rule.remotePort),
+    targetHost: rule.targetHost ?? "",
+    targetPort: rule.targetPort === undefined ? "" : String(rule.targetPort),
     bindAddress: rule.bindAddress ?? "",
     bindPort: rule.bindPort === undefined || rule.bindPort === 0 ? "" : String(rule.bindPort),
     startWithHost: rule.startWithHost,
@@ -147,8 +157,8 @@ export function validateRuleDraft(draft: RuleDraft): string | null {
     return null;
   }
   if (draft.type === "remote") {
-    if (!draft.remoteHost.trim()) return "Local target host is required";
-    if (!isValidRemotePort(parseRemotePort(draft.remotePort))) {
+    if (!draft.targetHost.trim()) return "Local target host is required";
+    if (!isValidRemotePort(parseRemotePort(draft.targetPort))) {
       return "Local target port must be 1–65535";
     }
     if (draft.bindPort.trim() && !isValidLocalPort(parseLocalPort(draft.bindPort))) {
@@ -207,8 +217,10 @@ export function ruleRecordFrom(id: string, draft: RuleDraft): ForwardRule {
       hostId: draft.hostId,
       type: "remote",
       localPort: 0,
-      remoteHost: draft.remoteHost.trim(),
-      remotePort: parseRemotePort(draft.remotePort),
+      remoteHost: "",
+      remotePort: 0,
+      targetHost: draft.targetHost.trim(),
+      targetPort: parseRemotePort(draft.targetPort),
       ...(bindAddress ? { bindAddress } : {}),
       ...(bindPort !== undefined ? { bindPort } : {}),
       startWithHost: draft.startWithHost,

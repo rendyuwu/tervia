@@ -180,10 +180,11 @@ export function createForwardStore(io: ForwardsIo): ForwardsStore {
       }
       // Every port/host refusal below is TYPE-CONDITIONAL: `-D` only binds a
       // local SOCKS5 port and has no dial target at all; `-R` dials its
-      // target LOCALLY (so `remoteHost`/`remotePort` are refused the same way
-      // `-L`'s are) but binds its listener on the SERVER (`bindPort`, which
-      // may legally be 0 - the opposite of `-L`'s `remotePort`). See
-      // `types.ts`'s field-by-field doc on `ForwardRule` for the mapping.
+      // target LOCALLY (so `targetHost`/`targetPort` are refused, its own
+      // fields rather than `-L`'s `remoteHost`/`remotePort`) but binds its
+      // listener on the SERVER (`bindPort`, which may legally be 0 - the
+      // opposite of `-L`'s `remotePort`). See `types.ts`'s field-by-field doc
+      // on `ForwardRule` for the mapping.
       if (rule.type === "dynamic") {
         if (!isValidLocalPort(rule.localPort)) {
           throw new Error(
@@ -191,12 +192,12 @@ export function createForwardStore(io: ForwardsIo): ForwardsStore {
           );
         }
       } else if (rule.type === "remote") {
-        if (!rule.remoteHost.trim()) {
+        if (!rule.targetHost?.trim()) {
           throw new Error(`forwards: "${rule.name}" needs a local target host`);
         }
-        if (!isValidRemotePort(rule.remotePort)) {
+        if (rule.targetPort === undefined || !isValidRemotePort(rule.targetPort)) {
           throw new Error(
-            `forwards: "${rule.name}" has an invalid target port ${rule.remotePort} - must be 1-65535`,
+            `forwards: "${rule.name}" has an invalid target port ${rule.targetPort} - must be 1-65535`,
           );
         }
         if (rule.bindPort !== undefined && !isValidLocalPort(rule.bindPort)) {

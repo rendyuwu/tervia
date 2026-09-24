@@ -3828,4 +3828,149 @@ console.log(failed === 0 ? "\nAll forwards-shell checks passed." : `\n${failed} 
 //           scripts read                                    control, as predicted.
 // ----------------------------------------------------------------------------
 
+// ----------------------------------------------------------------------------
+// [draft.ts per-type] validateRuleDraft/ruleRecordFrom/ruleDraftFrom, BEHAVIOURALLY,
+// per `rule.type`. Everything above this line reads `draft.ts` as SOURCE TEXT
+// (`FILES.draft`); nothing calls its exported functions with real values. This
+// is the gap: that `-R` writes `localPort: 0` and a blank/`0` `remoteHost`/
+// `remotePort` (never the -L dial-target pair) and omits `bindPort` when the
+// field was left blank, and that a `-D` record is written with a blank
+// `remoteHost` too - both only provable by calling the functions, not by
+// reading their text. `draft.ts` is pure (its own header), so a plain import
+// needs no Tauri/window stand-in, unlike the C-series above.
+// ----------------------------------------------------------------------------
+console.log("\n[draft.ts per-type] validateRuleDraft/ruleRecordFrom/ruleDraftFrom, behaviourally");
+{
+  const { EMPTY_RULE_DRAFT, ruleDraftFrom, ruleRecordFrom, validateRuleDraft } = await import(
+    "../src/modules/forwards/editor/draft"
+  );
+  const base = { ...EMPTY_RULE_DRAFT, name: "web tunnel", hostId: "h-1" };
+
+  // -L (type "").
+  check(
+    "-L: a blank remote host is refused",
+    validateRuleDraft({ ...base, type: "", localPort: "8080", remoteHost: " ", remotePort: "80" }) ===
+      "Remote host is required",
+  );
+  const localRecord = ruleRecordFrom("f-1", {
+    ...base,
+    type: "",
+    localPort: "",
+    remoteHost: "10.0.0.9",
+    remotePort: "5432",
+  });
+  check(
+    "-L record: type absent, localPort auto (0), remoteHost/remotePort carry the dial target, targetHost/targetPort absent",
+    localRecord.type === undefined &&
+      localRecord.localPort === 0 &&
+      localRecord.remoteHost === "10.0.0.9" &&
+      localRecord.remotePort === 5432 &&
+      !("targetHost" in localRecord),
+    localRecord,
+  );
+
+  // -D (dynamic).
+  check(
+    "-D: an invalid SOCKS port is refused",
+    validateRuleDraft({ ...base, type: "dynamic", localPort: "70000" }) ===
+      "SOCKS port must be 0 (auto), or 1–65535",
+  );
+  const socksRecord = ruleRecordFrom("f-2", { ...base, type: "dynamic", localPort: "1080" });
+  check(
+    "-D record: written with a blank remoteHost and remotePort 0 - an older build's own unconditional -L refusal drops it rather than reading it as a working -L",
+    socksRecord.type === "dynamic" &&
+      socksRecord.localPort === 1080 &&
+      socksRecord.remoteHost === "" &&
+      socksRecord.remotePort === 0,
+    socksRecord,
+  );
+
+  // -R (remote).
+  check(
+    "-R: a blank local target host is refused",
+    validateRuleDraft({ ...base, type: "remote", targetHost: " ", targetPort: "22" }) ===
+      "Local target host is required",
+  );
+  check(
+    "-R: an invalid local target port is refused",
+    validateRuleDraft({ ...base, type: "remote", targetHost: "10.0.0.9", targetPort: "0" }) ===
+      "Local target port must be 1–65535",
+  );
+  check(
+    "-R: an invalid bind port is refused, only when one is present",
+    validateRuleDraft({
+      ...base,
+      type: "remote",
+      targetHost: "10.0.0.9",
+      targetPort: "22",
+      bindPort: "70000",
+    }) === "Bind port must be 0 (auto), or 1–65535",
+  );
+  check(
+    "-R: passes with no bind fields at all",
+    validateRuleDraft({ ...base, type: "remote", targetHost: "10.0.0.9", targetPort: "22" }) === null,
+  );
+  const remoteRecord = ruleRecordFrom("f-3", {
+    ...base,
+    type: "remote",
+    targetHost: "10.0.0.9",
+    targetPort: "22",
+  });
+  check(
+    "-R record: writes localPort 0 and a blank remoteHost/remotePort:0 - never -L's dial-target fields - while targetHost/targetPort carry the real target",
+    remoteRecord.type === "remote" &&
+      remoteRecord.localPort === 0 &&
+      remoteRecord.remoteHost === "" &&
+      remoteRecord.remotePort === 0 &&
+      remoteRecord.targetHost === "10.0.0.9" &&
+      remoteRecord.targetPort === 22,
+    remoteRecord,
+  );
+  check(
+    "-R record: bindPort is OMITTED entirely when the field is left blank, not written as 0",
+    !("bindPort" in remoteRecord),
+    remoteRecord,
+  );
+  const remoteRecordWithBind = ruleRecordFrom("f-4", {
+    ...base,
+    type: "remote",
+    targetHost: "10.0.0.9",
+    targetPort: "22",
+    bindAddress: "0.0.0.0",
+    bindPort: "0",
+  });
+  check(
+    "-R record: a bind port explicitly typed as 0 (auto) IS written, unlike an untouched blank field",
+    remoteRecordWithBind.bindAddress === "0.0.0.0" && remoteRecordWithBind.bindPort === 0,
+    remoteRecordWithBind,
+  );
+
+  // ruleDraftFrom round-trip, per type.
+  const draftFromRemote = ruleDraftFrom({
+    id: "f-5",
+    name: "web tunnel",
+    hostId: "h-1",
+    type: "remote",
+    localPort: 0,
+    remoteHost: "",
+    remotePort: 0,
+    targetHost: "10.0.0.9",
+    targetPort: 22,
+    bindAddress: "0.0.0.0",
+    bindPort: 2222,
+    startWithHost: false,
+  });
+  check(
+    "ruleDraftFrom: a -R record round-trips into targetHost/targetPort, never remoteHost/remotePort",
+    draftFromRemote.type === "remote" &&
+      draftFromRemote.remoteHost === "" &&
+      draftFromRemote.remotePort === "" &&
+      draftFromRemote.targetHost === "10.0.0.9" &&
+      draftFromRemote.targetPort === "22" &&
+      draftFromRemote.bindAddress === "0.0.0.0" &&
+      draftFromRemote.bindPort === "2222",
+    draftFromRemote,
+  );
+}
+
 process.exit(failed === 0 ? 0 : 1);

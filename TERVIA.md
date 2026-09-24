@@ -176,9 +176,8 @@ runtime (`ssh_runtime()`); the Tauri commands hop onto it and back.
   tunnels to the given remote host and port as resolved from the server, over
   the live session (so a jump chain applies for free). A `local_port` of 0
   picks a free port and returns it.
-  There is deliberately **no close command**: forwards are declared on the saved
-  connection and re-opened per connect, so session teardown is their whole
-  lifecycle.
+  `ssh_forward_close(id, bound_port, generation)` closes one listener without
+  touching the session or its other forwards.
 - **Remote (`-R`) and dynamic/SOCKS (`-D`) forwarding**: `ssh_remote_forward_open`
   asks the server to listen on `bind_address:bind_port` (`0` lets the SERVER
   pick) and dials `local_host:local_port` on this machine for every connection
