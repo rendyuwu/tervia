@@ -171,10 +171,10 @@ function ruleMatchTier(row: ForwardRuleRow, query: string): number | null {
 
 /**
  * Filter and rank rules, case-insensitively, over name, remote host, the
- * bound host's name and (substring tier only) both ports. Same default-order
- * and drop-non-matches rules as `rankIdentities`: an empty or whitespace-only
- * query returns every row in its default order (name, then id), and a row
- * matching no tier is DROPPED, not sorted to the bottom.
+ * bound host's name and (substring tier only) both ports. Same drop-non-matches
+ * rule as `rankIdentities`: an empty or whitespace-only query returns every row
+ * in its default order (name, then id), and a row matching no tier is DROPPED,
+ * not sorted to the bottom.
  */
 export function rankRules(rows: readonly ForwardRuleRow[], query: string): ForwardRuleRow[] {
   const trimmed = query.trim().toLowerCase();

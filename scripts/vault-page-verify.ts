@@ -1161,6 +1161,72 @@ console.log(
   }
 }
 
+console.log(
+  "\n[20] default order is lastConnectedAt descending (never-connected last), then name, then id",
+);
+{
+  // Names chosen so name order alone (aaa, bbb, ccc, zzz) is a different
+  // permutation: a comparator that ignored recency, or read it ascending, fails.
+  const rowOf = (i: VaultIdentity): IdentityRow => ({
+    identity: i,
+    keyName: undefined,
+    keyDangling: false,
+    hostCount: 0,
+    missingSecret: false,
+  });
+  const rows = [
+    identity("i-never", { name: "aaa" }),
+    identity("i-older", { name: "bbb", lastConnectedAt: 100 }),
+    identity("i-newer", { name: "zzz", lastConnectedAt: 200 }),
+    identity("i-tie", { name: "ccc", lastConnectedAt: 100 }),
+  ].map(rowOf);
+  check(
+    "identities: newest first, a tie falls to name, never-connected last",
+    rankIdentities(rows, "").map((r) => r.identity.id),
+    ["i-newer", "i-older", "i-tie", "i-never"],
+  );
+  // Both are tier-2 prefix matches for "db", so recency decides within the tier.
+  check(
+    "identities: recency orders rows within one query tier",
+    rankIdentities(
+      [
+        rowOf(identity("i-a", { name: "db-a" })),
+        rowOf(identity("i-b", { name: "db-b", lastConnectedAt: 5 })),
+      ],
+      "db",
+    ).map((r) => r.identity.id),
+    ["i-b", "i-a"],
+  );
+
+  const keyRowOf = (k: VaultKey): KeyRow => ({
+    key: k,
+    identityCount: 0,
+    missingPrivateKey: false,
+  });
+  const kRows = [
+    key("k-never", { name: "aaa" }),
+    key("k-older", { name: "bbb", lastConnectedAt: 100 }),
+    key("k-newer", { name: "zzz", lastConnectedAt: 200 }),
+    key("k-tie", { name: "ccc", lastConnectedAt: 100 }),
+  ].map(keyRowOf);
+  check(
+    "keys: newest first, a tie falls to name, never-connected last",
+    rankKeys(kRows, "").map((r) => r.key.id),
+    ["k-newer", "k-older", "k-tie", "k-never"],
+  );
+  check(
+    "keys: recency orders rows within one query tier",
+    rankKeys(
+      [
+        keyRowOf(key("k-a", { name: "db-a" })),
+        keyRowOf(key("k-b", { name: "db-b", lastConnectedAt: 5 })),
+      ],
+      "db",
+    ).map((r) => r.key.id),
+    ["k-b", "k-a"],
+  );
+}
+
 console.log(failed === 0 ? "\nAll vault-page checks passed." : `\n${failed} check(s) FAILED.`);
 process.exit(failed === 0 ? 0 : 1);
 

@@ -154,12 +154,20 @@ export function keyRows(keys: readonly VaultKey[], identities: readonly VaultIde
 }
 
 /**
+ * `lastConnectedAt` descending, never-connected last, and 0 when the two agree -
+ * the recency term `compareRows` in `src/modules/hosts/search.ts` leads with, so
+ * the Vault page is ordered the way the Hosts page is.
+ */
+function byRecency(at: number | undefined, bt: number | undefined): number {
+  if (at === bt) return 0;
+  if (at === undefined) return 1;
+  if (bt === undefined) return -1;
+  return bt - at;
+}
+
+/**
  * The shared tail of the ordering for both row types: `name` case-insensitively,
  * then `id`.
- *
- * Vault records have no `lastConnectedAt` - there is no recency term here, unlike
- * `compareRows` in `modules/hosts/search.ts`, and its absence is a deliberate
- * difference rather than an oversight.
  *
  * The `id` tie-break is what makes the order TOTAL. Without it, two rows equal on
  * name would keep whatever relative order the input happened to have, so two
@@ -173,11 +181,17 @@ function byNameThenId(aName: string, aId: string, bName: string, bId: string): n
 }
 
 function compareIdentityRows(a: IdentityRow, b: IdentityRow): number {
-  return byNameThenId(a.identity.name, a.identity.id, b.identity.name, b.identity.id);
+  return (
+    byRecency(a.identity.lastConnectedAt, b.identity.lastConnectedAt) ||
+    byNameThenId(a.identity.name, a.identity.id, b.identity.name, b.identity.id)
+  );
 }
 
 function compareKeyRows(a: KeyRow, b: KeyRow): number {
-  return byNameThenId(a.key.name, a.key.id, b.key.name, b.key.id);
+  return (
+    byRecency(a.key.lastConnectedAt, b.key.lastConnectedAt) ||
+    byNameThenId(a.key.name, a.key.id, b.key.name, b.key.id)
+  );
 }
 
 /**
@@ -214,10 +228,10 @@ function identityMatchTier(row: IdentityRow, query: string): number | null {
 /**
  * Filter and rank identities, case-insensitively, over name, username, domain
  * and key name. An empty or whitespace-only query returns every row in its
- * default order (name, then id). Rows matching no tier are DROPPED, not sorted
- * to the bottom - a non-match has no place in a ranked list of results, and
- * keeping it would make "how many hits" a manual scan instead of the array's
- * length.
+ * default order (`lastConnectedAt` descending, then name, then id). Rows matching
+ * no tier are DROPPED, not sorted to the bottom - a non-match has no place in a
+ * ranked list of results, and keeping it would make "how many hits" a manual
+ * scan instead of the array's length.
  */
 export function rankIdentities(rows: readonly IdentityRow[], query: string): IdentityRow[] {
   const trimmed = query.trim().toLowerCase();

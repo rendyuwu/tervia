@@ -55,6 +55,11 @@
  *    between the two, and only the apply can see it. The fixtures run BOTH
  *    directions: a newer local delete wins, an older one loses.
  *
+ * 9. A CONNECT THAT PUBLISHES, OR AN EDIT OR LANDING THAT ERASES, VAULT RECENCY.
+ *    A vault identity's and key's `lastConnectedAt` is this device's history on
+ *    the host's terms: a connect writes it without a stamp or a dirty mark, and
+ *    no upsert or landing may overwrite it with the caller's value or none.
+ *
  * THE CLOCK IS INJECTED and the fake store BUFFERS `set` - both for the reasons
  * `sync-prereq-verify.ts` states at length. The commit COUNT and the keys a
  * commit carried are questions only a buffering fake can answer, and half the
@@ -221,19 +226,22 @@ function harness(
     forwards: [],
   };
 
+  const vault = createVaultStore({
+    store: vaultPort.store,
+    secrets: vaultSecrets.io,
+    now,
+    markDirty: (d) => dirty.vault.push(d),
+  });
+
   return {
     hosts: createHostsStore({
       store: hostsPort.store,
       secrets: hostSecrets.io,
       now,
       markDirty: (d) => dirty.hosts.push(d),
+      markIdentityConnected: vault.markIdentityConnected,
     }),
-    vault: createVaultStore({
-      store: vaultPort.store,
-      secrets: vaultSecrets.io,
-      now,
-      markDirty: (d) => dirty.vault.push(d),
-    }),
+    vault,
     forwards: createForwardStore({
       store: forwardsPort.store,
       now,
@@ -499,6 +507,40 @@ const lastKeys = (p: Port): string[] => p.keyLog()[p.keyLog().length - 1] ?? [];
   const first = (await fresh.hosts.listHosts())[0] as SshHost;
   check("a host with no stored pins lands unpinned", first.pins, undefined);
   check("and with no flat fingerprint", first.lastFingerprint, undefined);
+
+  // The vault half: an identity and a key keep this device's connect history
+  // across a landing, whether the landing carries none (the stripped wire) or a
+  // foreign one.
+  const vh = harness({
+    identities: [identity({ lastConnectedAt: 1_700_000_000_000 })],
+    vaultKeys: [vaultKey({ lastConnectedAt: 1_700_000_000_002 })],
+  });
+  await vh.vault.applyRemote(
+    [landed(identity({ name: "renamed" }))],
+    [landed(vaultKey({ name: "renamed", lastConnectedAt: 9 }))],
+  );
+  const landedIdentity = (await vh.vault.listIdentities())[0];
+  const landedKey = (await vh.vault.listKeys())[0];
+  check(
+    "a landed identity keeps 1_700_000_000_000",
+    landedIdentity.lastConnectedAt,
+    1_700_000_000_000,
+  );
+  check("and its content landed", landedIdentity.name, "renamed");
+  check(
+    "a landed key keeps 1_700_000_000_002, not the carried 9",
+    landedKey.lastConnectedAt,
+    1_700_000_000_002,
+  );
+  check("and its content landed", landedKey.name, "renamed");
+
+  const vfresh = harness();
+  await vfresh.vault.applyRemote([landed(identity({ id: "i-new", lastConnectedAt: 9 }))], []);
+  check(
+    "a new identity does not take a carried stamp",
+    (await vfresh.vault.findIdentity("i-new"))?.lastConnectedAt,
+    undefined,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -967,6 +1009,62 @@ const lastKeys = (p: Port): string[] => p.keyLog()[p.keyLog().length - 1] ?? [];
     },
     { hosts: [], graves: ["h-1"] },
   );
+}
+
+// ---------------------------------------------------------------------------
+// A14. A connect stamps the vault identity it authenticated as
+// ---------------------------------------------------------------------------
+{
+  console.log(
+    "\n[A14] a connect stamps the vault identity it authenticated as, and its key only over SSH key auth",
+  );
+  const h = harness({
+    hosts: [
+      host(),
+      rdpHost(),
+      host({ id: "h-pw", credential: { kind: "identity", identityId: "i-pw" } }),
+    ],
+    // `i-pw` holds a stale `keyId` under password auth, which is legal: `keyId` is
+    // independent of `authMode`, and password auth never hands the key over.
+    identities: [
+      identity({ authMode: "key", keyId: "k-1" }),
+      identity({ id: "i-pw", authMode: "password", keyId: "k-1" }),
+    ],
+    vaultKeys: [vaultKey()],
+  });
+  const identityAt = async (id: string) => (await h.vault.findIdentity(id))?.lastConnectedAt;
+  const keyAt = async () => (await h.vault.findKey("k-1"))?.lastConnectedAt;
+
+  await h.hosts.markConnected("r-1", "SHA256:cert");
+  check("an RDP connect stamps its identity", await identityAt("i-1"), START);
+  check("but not the key, which RDP never reads", await keyAt(), undefined);
+
+  await h.hosts.markConnected("h-pw", "SHA256:pw");
+  check("a password-auth SSH connect stamps its identity", await identityAt("i-pw"), START);
+  check("but not the key its stale keyId names", await keyAt(), undefined);
+
+  await h.hosts.markConnected("h-1", "SHA256:aaa");
+  check("a key-auth SSH connect stamps the key", await keyAt(), START);
+
+  check(
+    "no connect moved either record's updatedAt",
+    [(await h.vault.findIdentity("i-1"))?.updatedAt, (await h.vault.findKey("k-1"))?.updatedAt],
+    [WRONG, WRONG],
+  );
+  check("and none marked anything dirty", h.dirty.vault, [[], [], []]);
+  check("while each really did commit", h.vaultPort.commits(), 3);
+
+  await h.vault.markIdentityConnected("i-gone", "ssh");
+  check("a missing identity writes nothing", h.vaultPort.commits(), 3);
+
+  // An editor saves a record built from a draft that has no stamp, or one
+  // carrying a stale or foreign value: the stored stamp wins either way.
+  await h.vault.upsertIdentity(identity({ authMode: "key", keyId: "k-1", name: "renamed" }), {});
+  check("an identity edit keeps the stamp", await identityAt("i-1"), START);
+  await h.vault.upsertKey(vaultKey({ name: "renamed", lastConnectedAt: 9 }), {});
+  check("a key edit keeps the stamp, not the caller's 9", await keyAt(), START);
+  await h.vault.upsertIdentity(identity({ id: "i-new", lastConnectedAt: 9 }), {});
+  check("a new identity does not take the caller's stamp", await identityAt("i-new"), undefined);
 }
 
 if (failed > 0) throw new Error(`sync-apply-verify: ${failed} FAILED`);

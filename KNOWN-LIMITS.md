@@ -697,6 +697,28 @@ is working over. The trigger for closing it is a report of a rule whose row and
 running forward disagree, or an edit path that can change `localPort` from
 another device.
 
+### A vault record's last-connected stamp is not restored by a backup import, and a forward-only tunnel sets none
+
+**Accepted state.** A backup export seals the raw identity and key records, so
+it carries their `lastConnectedAt`. The import drops it, and the vault store
+never takes the stamp from a caller, so a restored vault starts with no recency
+while a restored host keeps its own. A forward-only tunnel - including the SSH
+tunnel under an RDP host - stamps neither its bastion host nor that host's
+identity.
+
+Accepted because the stamp is this device's history, not record content: it
+orders the Vault page and labels its cards, and nothing connects differently
+without it. The next connect through each identity puts it back.
+
+**Carried by.** `markIdentityConnected` and the four record literals in
+`src/modules/vault/store.ts` that carry `existing?.lastConnectedAt`;
+`sanitizeIdentity` and `sanitizeKey` in `src/modules/backup/file.ts`; and
+`markConnected` in `src/modules/hosts/store.ts`, which `src/modules/ssh/tunnel.ts`
+never calls.
+
+**Trigger.** A user asking a restored vault to keep its recency, or a forward
+being counted as a use of its bastion.
+
 ## Cross-device sync
 
 ### Sync's on/off switch is enforced in TypeScript only

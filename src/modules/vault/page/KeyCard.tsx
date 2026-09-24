@@ -12,18 +12,22 @@
  * this app has shipped before (a header drag that silently does nothing under a
  * rail view).
  *
- * ONE EXCEPTION to "the row builder resolves every value", and it is called out
+ * TWO EXCEPTIONS to "the row builder resolves every value", called out
  * rather than left to be noticed: the needs-a-passphrase line below is derived
  * HERE, by calling `keyNeedsPassphrase` on the record this card already holds,
  * instead of arriving as a prop like `missingPrivateKey` does. It is the same
  * shape of question, off the same record, through the same shared predicate
  * module - so the two cannot disagree - and it costs no new prop on a row
- * builder that would only be forwarding a pure function of `vaultKey`.
+ * builder that would only be forwarding a pure function of `vaultKey`. The
+ * second is the connected label: `lastConnectedLabel` over
+ * `vaultKey.lastConnectedAt` and the render-time clock, derived here on the same
+ * terms.
  */
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { IconTooltip } from "@/components/ui/icon-tooltip";
 import { DESTRUCTIVE_ACTION } from "@/lib/toolbarButton";
+import { lastConnectedLabel } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { CircleAlert, Pencil, Trash2 } from "lucide-react";
 import type { ReactNode } from "react";
@@ -58,6 +62,8 @@ export function KeyCard({
   onDelete,
 }: KeyCardProps): ReactNode {
   const needsPassphrase = keyNeedsPassphrase(vaultKey);
+  // Read at render with no ticker - the ceiling HostCard's ponytail note names.
+  const connectedLabel = lastConnectedLabel(vaultKey.lastConnectedAt, Date.now());
   return (
     <div
       role="group"
@@ -108,8 +114,15 @@ export function KeyCard({
       )}
 
       <div className="flex min-h-6 flex-wrap items-center justify-between gap-x-2 gap-y-1">
-        <span className="text-muted-foreground min-w-0 truncate text-xs">
-          {usageDetail(identityCount)}
+        <span
+          className="text-muted-foreground min-w-0 flex-1 truncate text-xs"
+          title={
+            vaultKey.lastConnectedAt !== undefined
+              ? `Last connected ${new Date(vaultKey.lastConnectedAt).toLocaleString()}`
+              : undefined
+          }
+        >
+          {[usageDetail(identityCount), connectedLabel].filter(Boolean).join(" · ")}
         </span>
         <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100">
           <IconTooltip label="Edit">

@@ -2,7 +2,9 @@
  * One vault identity in the Vault page list. Pure presentation: every value it
  * shows arrives as a prop, exactly as `hosts/page/HostCard.tsx` does it, so the
  * page owns the data (the row builder, the reference counts, the missing-secret
- * answer) and this file owns only the rendering.
+ * answer) and this file owns only the rendering. The one value derived here is
+ * the connected label: `lastConnectedLabel` over `identity.lastConnectedAt` and
+ * the render-time clock.
  *
  * Edit opens the identity editor. There is no selection, no connect
  * action and no card-level `onClick`: this card is a static row, not the
@@ -19,6 +21,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { IconTooltip } from "@/components/ui/icon-tooltip";
 import { DESTRUCTIVE_ACTION } from "@/lib/toolbarButton";
+import { lastConnectedLabel } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { CircleAlert, KeyRound, Pencil, Trash2 } from "lucide-react";
 import type { ReactNode } from "react";
@@ -79,6 +82,9 @@ export function IdentityCard({
   onEdit,
   onDelete,
 }: IdentityCardProps): ReactNode {
+  // Read at render with no ticker - the ceiling HostCard's ponytail note names.
+  const connectedLabel = lastConnectedLabel(identity.lastConnectedAt, Date.now());
+
   return (
     <div
       role="group"
@@ -102,7 +108,16 @@ export function IdentityCard({
         </Badge>
       </div>
 
-      <div className="text-muted-foreground truncate text-xs">{accountDetail(identity)}</div>
+      <div
+        className="text-muted-foreground truncate text-xs"
+        title={
+          identity.lastConnectedAt !== undefined
+            ? `Last connected ${new Date(identity.lastConnectedAt).toLocaleString()}`
+            : undefined
+        }
+      >
+        {[accountDetail(identity), connectedLabel].filter(Boolean).join(" · ")}
+      </div>
 
       <div className="flex min-h-6 flex-wrap items-center justify-between gap-x-2 gap-y-1">
         <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs">

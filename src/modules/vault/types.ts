@@ -111,6 +111,12 @@ export type VaultIdentity = {
    *  `modules/hosts/types.ts` carries the full reasoning, and this field means
    *  exactly the same thing. */
   updatedAt?: number;
+  /** Unix ms of the last successful connect that authenticated as this identity,
+   *  FROM THIS DEVICE. Written only by `markIdentityConnected` in
+   *  `src/modules/vault/store.ts`. Never synced (`DEVICE_LOCAL_FIELDS` strips it by
+   *  name), never folded into `updatedAt`, and not restored by a backup import
+   *  (KNOWN-LIMITS.md). */
+  lastConnectedAt?: number;
 };
 
 /** What `ssh_key_inspect` reports. Display only. */
@@ -167,6 +173,9 @@ export type VaultKey = {
   /** Unix ms of the last change, on the same terms as
    *  {@link VaultIdentity.updatedAt}. */
   updatedAt?: number;
+  /** The last successful SSH connect that authenticated with this key, on the
+   *  terms of {@link VaultIdentity.lastConnectedAt}. */
+  lastConnectedAt?: number;
 };
 
 /**

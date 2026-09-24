@@ -16,7 +16,7 @@ import {
 import { tauriSecretsIo } from "@/modules/vault/adapters";
 import { hostsUsingIdentity } from "@/modules/vault/refs";
 import type { SshSecretValues } from "@/modules/vault/resolve";
-import { SECRET_ALREADY_STORED, type VaultSecretValue } from "@/modules/vault/store";
+import { SECRET_ALREADY_STORED, vaultStore, type VaultSecretValue } from "@/modules/vault/store";
 import {
   assertBindingOwner,
   HOST_KEYRING_SERVICE,
@@ -1399,13 +1399,16 @@ export function createHostsStore(io: HostsIo): HostsStore {
    * every first-connect prompt onto the push path, so a machine that merely
    * reconnects would outrank a real edit made elsewhere.
    */
-  async function patchHost(id: string, patch: (current: Host) => Host | null): Promise<void> {
+  async function patchHost(
+    id: string,
+    patch: (current: Host) => Host | null,
+  ): Promise<Host | null> {
     return enqueueWrite(async () => {
       const hosts = await listHosts();
       const idx = hosts.findIndex((h) => h.id === id);
-      if (idx < 0) return;
+      if (idx < 0) return null;
       const next = patch(hosts[idx]);
-      if (!next) return;
+      if (!next) return null;
       // Against `id`, not `next.id`: a patch that rewrote both would otherwise
       // agree with itself while landing at this index.
       assertBindingOwner(next.credential, id);
@@ -1417,20 +1420,29 @@ export function createHostsStore(io: HostsIo): HostsStore {
       // neither is published, so a push scheduled from here would be a push of
       // unchanged record content on every connect and every first-connect prompt.
       await persist([[HOSTS_KEY, list]], []);
+      return next;
     });
   }
 
   /** Marks a successful connect: the timestamp, and the key or certificate the
-   *  server actually presented, recorded against the address that record names. */
+   *  server actually presented, recorded against the address that record names.
+   *  For a vault-bound host it then stamps the identity the connect authenticated
+   *  as, through `HostsIo.markIdentityConnected`. */
   async function markConnected(id: string, fingerprint: string): Promise<void> {
     const at = Date.now();
     // An empty fingerprint leaves the pin alone rather than clearing it: a
     // reconnect that could not report one must not discard the key an earlier
     // connect recorded.
-    return patchHost(id, (h) => ({
+    const written = await patchHost(id, (h) => ({
       ...withFingerprint(h, fingerprint || hostPins(h)[h.host]),
       lastConnectedAt: at,
     }));
+    // After the host's own commit, so a vault that refuses the write costs only the
+    // vault stamp. Read off the record just written, so a hop stamps the hop's own
+    // identity.
+    if (written?.credential.kind === "identity") {
+      await io.markIdentityConnected?.(written.credential.identityId, written.protocol);
+    }
   }
 
   /**
@@ -1455,7 +1467,7 @@ export function createHostsStore(io: HostsIo): HostsStore {
     if (!fingerprint) return;
     // Against the pin for THIS record's address, so an unchanged key writes
     // nothing - including the file rewrite a no-op patch would still cost.
-    return patchHost(id, (h) =>
+    await patchHost(id, (h) =>
       hostPins(h)[h.host] === fingerprint ? null : withFingerprint(h, fingerprint),
     );
   }
@@ -1505,6 +1517,7 @@ export const hostsStore = createHostsStore({
   // import edge on a network module - see `src/lib/dirtySink.ts`. Nothing is
   // registered until `main` starts sync, and `markDirty` is a no-op until then.
   markDirty,
+  markIdentityConnected: vaultStore.markIdentityConnected,
 });
 
 export const {
