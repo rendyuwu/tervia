@@ -331,6 +331,50 @@ console.log("\n[refusals] name and remoteHost may not be blank");
 
 // ---------------------------------------------------------------------------
 console.log(
+  "\n[refusals] startWithHost and startWithApp are mutually exclusive, for every type (issue #77)",
+);
+{
+  const h = harness();
+  const hosts = hostsOf([sshHost()]);
+
+  await rejectsWith(
+    "both true on a -L rule is refused",
+    () => h.forwards.upsertRule(rule({ startWithHost: true, startWithApp: true }), hosts),
+    'forwards: "web tunnel" cannot start with both its host\'s terminal and the app - choose one',
+  );
+  await rejectsWith(
+    "both true on a -D rule is refused too - the guard runs before the type branch",
+    () =>
+      h.forwards.upsertRule(
+        rule({
+          id: "f-socks",
+          type: "dynamic",
+          remoteHost: "",
+          remotePort: 0,
+          startWithHost: true,
+          startWithApp: true,
+        }),
+        hosts,
+      ),
+    'forwards: "web tunnel" cannot start with both its host\'s terminal and the app - choose one',
+  );
+  check("neither refusal wrote anything", (h.data.rules as ForwardRule[]).length, 0);
+
+  const appOnly = await h.forwards.upsertRule(rule({ startWithApp: true }), hosts);
+  check("the paired positive: startWithApp alone is accepted", appOnly.startWithApp, true);
+  const hostOnly = await h.forwards.upsertRule(
+    rule({ id: "f-2", startWithHost: true }),
+    hosts,
+  );
+  check(
+    "and startWithHost alone, unaffected by the new guard",
+    hostOnly.startWithHost,
+    true,
+  );
+}
+
+// ---------------------------------------------------------------------------
+console.log(
   "\n[type -D] the SOCKS port is the only refusal, and it shares -L's localPort predicate",
 );
 {

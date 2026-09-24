@@ -50,6 +50,15 @@ import { resolveJumpHops } from "@/modules/hosts/jumps";
 import { isSshHost } from "@/modules/hosts/types";
 import { resolveSshAuth } from "@/modules/vault/resolve";
 import { hostKeyOwners, useHostKeyPrompt } from "./hostKeyPrompt";
+// Same carrier `bridge.ts` (this module's sibling) already imports across
+// this alias, off `ssh_open`'s own "config" kind - reused here so a fact this
+// function already knows structurally (a saved id that does not exist, an
+// RDP host, an unpinned bastion with no way to ask) files as "local" rather
+// than falling through `classifySshConnectFailure`'s default "transport",
+// which would otherwise walk `controller.ts`'s backoff ladder on a failure no
+// retry can fix. See that file's own doc for why this is attribution, not a
+// message match.
+import { SshLocalConnectError } from "@/modules/terminal/lib/ssh-exit-decision";
 
 export type SshForward = {
   /** Runtime SSH session id, as used by `ssh_list_sessions` / `ssh_close`. */
@@ -322,11 +331,13 @@ async function dialSession(
 ): Promise<SshSession> {
   const list = await listHosts();
   const found = list.find((h) => h.id === connectionId);
-  if (!found) throw new Error(`ssh: connection "${connectionId}" not found`);
+  if (!found) throw new SshLocalConnectError(`ssh: connection "${connectionId}" not found`);
   // A saved id can now name an RDP host. Refused rather than cast - there is
   // nothing to tunnel through.
   if (!isSshHost(found)) {
-    throw new Error(`ssh: "${found.name}" is an RDP host and cannot be tunnelled through`);
+    throw new SshLocalConnectError(
+      `ssh: "${found.name}" is an RDP host and cannot be tunnelled through`,
+    );
   }
   const conn = found;
   const jumps: SshJumpHop[] = await resolveJumpHops(conn.proxyJumpId, conn.id, list);
@@ -344,7 +355,7 @@ async function dialSession(
       })),
     ].find((c) => !c.pinned);
     if (unverified) {
-      throw new Error(
+      throw new SshLocalConnectError(
         `ssh: "${unverified.label}" has no verified host key yet. Open it once as an SSH tab and accept the fingerprint, then try again.`,
       );
     }

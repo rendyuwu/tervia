@@ -688,6 +688,12 @@ const KNOWN_RULE_TYPES: Record<string, true> = { remote: true, dynamic: true };
  * or non-boolean value falls to `false`, which is the safe direction: a rule
  * that does not start itself is visible and one click from running, where one
  * that starts unasked opens a listening socket the user did not ask for.
+ * `startWithApp` (issue #77) reads the same three-state way and is OMITTED
+ * from the record when `false`, matching `bindAddress`/`bindPort` below - the
+ * read-time-adoption shape `types.ts`'s own doc commits to. A file naming
+ * both `startWithHost` and `startWithApp` `true` drops the row, mirroring
+ * `upsertRule`'s own refusal - this function's own header says every refusal
+ * here mirrors one of that function's.
  */
 export function sanitizeRule(raw: unknown): ForwardRule | null {
   if (!isRecord(raw)) return null;
@@ -702,12 +708,17 @@ export function sanitizeRule(raw: unknown): ForwardRule | null {
   }
   const type = rawType as ForwardRuleType | undefined;
 
+  const startWithHost = raw.startWithHost === true;
+  const startWithApp = raw.startWithApp === true;
+  if (startWithHost && startWithApp) return null;
+
   const description = str(raw.description).trim();
   const base = {
     id,
     name,
     hostId,
-    startWithHost: raw.startWithHost === true,
+    startWithHost,
+    ...(startWithApp ? { startWithApp } : {}),
     ...(description ? { description } : {}),
   };
 

@@ -383,6 +383,10 @@ export type DeleteNoteSubject = {
    */
   pageStops: boolean;
   startWithHost: boolean;
+  /** See {@link startWithHost}'s own doc - the two are mutually exclusive
+   *  (`store.ts`'s `upsertRule` refuses a rule naming both), so at most one
+   *  of the two `startNote` sentences below ever fires. */
+  startWithApp: boolean;
   /** A TERMINAL owns this rule's forward (`modules/forwards/hostOwned.ts`).
    *  Its own field and not folded into `pageStops`, because the two describe
    *  different owners and only one of them is stopped by this delete - which is
@@ -423,7 +427,9 @@ export function deleteNote(subject: DeleteNoteSubject): string {
       : null;
   const startNote = subject.startWithHost
     ? "It will no longer start automatically with its host."
-    : null;
+    : subject.startWithApp
+      ? "It will no longer start automatically when Tervia starts."
+      : null;
 
   if (runningNote && startNote) return `${runningNote} ${startNote}`;
   if (runningNote) return runningNote;

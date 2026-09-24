@@ -75,8 +75,25 @@ export type ForwardRule = {
    * `-R`/`-D` rules do not ride this path yet - `autostart.ts`'s
    * `startHostForwards` skips them with a banner rather than starting them;
    * see `KNOWN-LIMITS.md`.
+   *
+   * Mutually exclusive with {@link startWithApp} - `store.ts`'s `upsertRule`
+   * refuses a rule with both `true`.
    */
   startWithHost: boolean;
+  /**
+   * Bring this rule up once, when the app itself finishes starting - no
+   * terminal tab required, dialled headless through `ssh/tunnel.ts` by
+   * `src/app/hooks/useForwardsAutostart.ts`, the same call `controller.ts`'s
+   * `startRule` already makes for a page Start. A bind that fails here re-enters
+   * `controller.ts`'s own backoff ladder (`FORWARD_RECONNECT_BACKOFF_MS`)
+   * instead of being left down; see that file's header for the classification
+   * that gates it.
+   *
+   * Absent means `false` - the read-time-adoption shape the footer describes.
+   * Mutually exclusive with {@link startWithHost}; `store.ts`'s `upsertRule`
+   * refuses a rule with both `true`.
+   */
+  startWithApp?: boolean;
   description?: string;
   /** Unix ms of the last change, stamped by the store on every write. Absent is
    *  not zero and is never backfilled on read - the read-time adoption the note
@@ -92,4 +109,5 @@ export const RULE_TOMBSTONE_KIND = "rule";
 // on this same record, adopted at read time rather than by a migration - the
 // same shape `hosts/types.ts`'s `hostPins` already uses for its own read-time
 // migration. See `type`'s own doc above for the vocabulary, and `store.ts`'s
-// `upsertRule` for what each type refuses.
+// `upsertRule` for what each type refuses. `startWithApp` (issue #77) is the
+// same read-time-adoption shape again: absent reads as `false`, no migration.

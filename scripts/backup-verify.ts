@@ -2444,6 +2444,35 @@ check(
   has(sanitizeRule(rule({ description: " " })) ?? {}, "description"),
   false,
 );
+// issue #77: same three-state read as startWithHost, and OMITTED from the
+// record when false rather than carried as an explicit `false` - matching
+// bindAddress/bindPort above, the read-time-adoption shape `types.ts` commits
+// to.
+check(
+  "startWithApp is true only for a literal true",
+  [
+    sanitizeRule(rule({ startWithApp: true }))?.startWithApp,
+    sanitizeRule(rule({ startWithApp: "true" }))?.startWithApp,
+    sanitizeRule(rule({ startWithApp: 1 }))?.startWithApp,
+    sanitizeRule(rule({ startWithApp: undefined }))?.startWithApp,
+  ],
+  [true, undefined, undefined, undefined],
+);
+check(
+  "and startWithApp is OMITTED from the record when false, not carried as false",
+  has(sanitizeRule(rule({})) ?? {}, "startWithApp"),
+  false,
+);
+check(
+  "a row naming both startWithHost and startWithApp true is dropped, mirroring upsertRule's refusal",
+  sanitizeRule(rule({ startWithHost: true, startWithApp: true })),
+  null,
+);
+check(
+  "and a blank description is omitted",
+  has(sanitizeRule(rule({ description: " " })) ?? {}, "description"),
+  false,
+);
 
 console.log("\n[rules type -D] a SOCKS port is the only field sanitizeRule cares about");
 check(

@@ -28,6 +28,26 @@
  * blocks - a displaced runtime thread. And it must leave the arriving forward
  * with no owner, so the Start that eventually resolves gives the reference
  * straight back instead of publishing a rule the user has already stopped.
+ *
+ * # Autostart and the backoff ladder (issue #77)
+ *
+ * {@link startForwardAutostart} is the ONLY caller that keeps retrying after a
+ * Start that never rejects: `src/app/hooks/useForwardsAutostart.ts` calls it
+ * once per `startWithApp` rule after the stores it needs have hydrated, and it
+ * re-calls itself, through a `setTimeout` on `FORWARD_RECONNECT_BACKOFF_MS`,
+ * whenever the failure `startRule`'s new `onFailure` hook handed it classifies
+ * as `"reconnect"` - the exact `classifySshConnectFailure`/
+ * `decideSshConnectFailure` pair `ssh-session.ts`'s own terminal ladder uses
+ * (`@/modules/terminal/lib/ssh-exit-decision`), reused rather than mirrored so
+ * a local/rejected failure (bad credential, host removed, host key declined)
+ * parks on the FIRST attempt exactly as it does there. Bounded at
+ * `FORWARD_RECONNECT_BACKOFF_MS.length` attempts, then the row is left
+ * `failed` with the last error - no poll loop.
+ *
+ * `cancelForwardRetry` runs at the top of `startRule` (a manual Start resets
+ * the ladder), `stopRule` (a manual Stop cancels it) and `releaseRule` (delete
+ * and the editor's save cancel it even from an already-`failed` row, where
+ * `pageMustStopFirst` would not otherwise call `stopRule` at all).
  */
 
 import { toast } from "@/components/ui/toast";
@@ -41,6 +61,13 @@ import {
   openRemoteForwardForConnection,
   openSocksForConnection,
 } from "@/modules/ssh/tunnel";
+// The pair `ssh-session.ts`'s own terminal ladder classifies a connect
+// failure with, imported the same way `bridge.ts` (a sibling `ssh` module)
+// already imports this file's two carrier classes - see this file's header.
+import {
+  classifySshConnectFailure,
+  decideSshConnectFailure,
+} from "@/modules/terminal/lib/ssh-exit-decision";
 
 import { useHostOwnedForwards } from "./hostOwned";
 import { bindFailureText } from "./page/derive";
@@ -73,6 +100,40 @@ export const defaultRuntimeDeps: RuntimeDeps = {
   closeForward: closeForwardForConnection,
   toast,
 };
+
+/**
+ * The retry ladder {@link startForwardAutostart} walks on a transport-class
+ * failure - longer than `ssh-session.ts`'s own `RECONNECT_BACKOFF_MS` because
+ * nobody is watching a terminal tab for it to give up sooner.
+ */
+const FORWARD_RECONNECT_BACKOFF_MS = [1_000, 3_000, 7_000, 15_000, 30_000] as const;
+
+/**
+ * A `setTimeout` handle. Named once and reused below rather than inlined at
+ * each site, portable the same way `sessionState.ts`'s `sshReconnectTimer`
+ * field is typed identically: the browser and Node disagree on what
+ * `setTimeout` itself returns.
+ */
+type ForwardRetryTimer = ReturnType<typeof setTimeout>;
+
+/**
+ * One pending retry per rule id: the timer {@link cancelForwardRetry} clears,
+ * and how many attempts this ladder run has already made (so the next delay
+ * and the give-up point both read off one number). Entries live only while a
+ * retry is SCHEDULED, never while a dial is in flight - {@link
+ * attemptForwardAutostart} deletes its own entry before it calls `startRule`.
+ */
+const forwardRetries = new Map<string, { timer: ForwardRetryTimer; attempt: number }>();
+
+/** Cancel `ruleId`'s pending retry, if it has one. Idempotent - safe to call
+ *  from every site that ends a rule's autostart lifecycle whether or not one
+ *  is actually pending. */
+function cancelForwardRetry(ruleId: string): void {
+  const pending = forwardRetries.get(ruleId);
+  if (!pending) return;
+  clearTimeout(pending.timer);
+  forwardRetries.delete(ruleId);
+}
 
 /**
  * Host-key questions raised by each rule's IN-FLIGHT Start, keyed by rule id.
@@ -131,6 +192,10 @@ function hostOwnedYieldText(rule: ForwardRule): string {
  *
  * NEVER REJECTS. The caller is a click handler with nowhere to put an
  * exception, so a failure reports through the store and a toast instead.
+ * `onFailure`, if given, sees the RAW error anyway - {@link
+ * startForwardAutostart} is the one caller that passes it, to classify a real
+ * failure (never a hostOwned yield, which is not one) for its own retry
+ * ladder.
  *
  * REFUSES A TERMINAL-OWNED RULE, ahead of everything else, AND YIELDS TO ONE
  * THAT ARRIVES MID-DIAL. `RuleCard` disables the button for one, but a disabled
@@ -141,17 +206,25 @@ function hostOwnedYieldText(rule: ForwardRule): string {
  * dials, and if it lands during the dial this hands the reference it just
  * received straight back. If its own dial rejects after such a claim, it marks
  * the rule `stopped` rather than `failed`.
+ *
+ * CANCELS ANY PENDING RETRY FIRST, unconditionally - the one line this
+ * function shares with {@link stopRule} and {@link releaseRule}. A manual
+ * Start (the ordinary caller) resets the ladder; the ladder's OWN re-entry
+ * (`startForwardAutostart`) cancels its own already-fired timer, a harmless
+ * no-op against an entry that is already gone.
  */
 export async function startRule(
   rule: ForwardRule,
   runtime: RuntimeDeps = defaultRuntimeDeps,
+  onFailure?: (e: unknown) => void,
 ): Promise<void> {
+  cancelForwardRetry(rule.id);
   // `-R`/`-D` are a SEPARATE code path, not routed through `RuntimeDeps`:
   // nothing in this codebase drives them through a fake yet (see
   // `KNOWN-LIMITS.md`). Kept as an early branch so every statement below this
   // one is the ORIGINAL `-L` body, untouched.
   if (rule.type) {
-    await startTypedRule(rule, runtime);
+    await startTypedRule(rule, runtime, onFailure);
     return;
   }
   // `useHostOwnedForwards` imported directly rather than routed through
@@ -251,6 +324,7 @@ export async function startRule(
     }
     // `rule.localPort`, not a bound port: a bind that failed bound nothing, and
     // the port these sentences name is the one that was asked for.
+    onFailure?.(e);
     const text = bindFailureText(describeError(e), rule.localPort);
     useForwardRuntime.getState().markFailed(rule.id, text);
     runtime.toast(text, { variant: "error" });
@@ -337,7 +411,11 @@ function openTypedRule(
  * open and close each spelled with every one of their own five/six
  * arguments a second time.
  */
-async function startTypedRule(rule: ForwardRule, runtime: RuntimeDeps): Promise<void> {
+async function startTypedRule(
+  rule: ForwardRule,
+  runtime: RuntimeDeps,
+  onFailure?: (e: unknown) => void,
+): Promise<void> {
   if (useHostOwnedForwards.getState().byRule[rule.id] !== undefined) {
     runtime.toast(hostOwnedRefusalText(rule), { variant: "warning" });
     return;
@@ -371,6 +449,7 @@ async function startTypedRule(rule: ForwardRule, runtime: RuntimeDeps): Promise<
       return;
     }
     const text = describeError(e);
+    onFailure?.(e);
     useForwardRuntime.getState().markFailed(rule.id, text);
     runtime.toast(text, { variant: "error" });
   } finally {
@@ -457,11 +536,16 @@ export function pageMustStopFirst(ruleId: string): boolean {
  * stopped. Either it was never started or the store has forgotten it, and
  * spending a reference that was never taken is how another consumer's session
  * gets closed - see `SshForward.claim`.
+ *
+ * CANCELS A PENDING RETRY FIRST, unconditionally - see this file's header on
+ * the backoff ladder. A no-op for a rule with none.
  */
 export async function stopRule(
   rule: ForwardRule,
   runtime: RuntimeDeps = defaultRuntimeDeps,
 ): Promise<void> {
+  cancelForwardRetry(rule.id);
+
   // DEFENCE IN DEPTH, AND UNREACHABLE TODAY - said here so the next reader does
   // not delete it as dead. A forward a TERMINAL opened is never this page's to
   // stop: this side holds no claim it could spend, so a close issued from here
@@ -548,8 +632,15 @@ export async function stopRule(
  * a terminal owns, and one already `stopped` or `failed`, the guard says no and
  * nothing is spent - which is the whole of why the guard is inside this
  * function rather than at each caller.
+ *
+ * ALSO CANCELS A PENDING RETRY, unconditionally and ahead of the guard above:
+ * the delete confirm and the editor's save are the two callers issue #77's
+ * ladder must never survive, and a `failed` row with one pending is exactly
+ * the status {@link pageMustStopFirst} answers `false` for - `stopRule` alone
+ * would never run for it.
  */
 export async function releaseRule(rule: ForwardRule): Promise<void> {
+  cancelForwardRetry(rule.id);
   if (pageMustStopFirst(rule.id)) await stopRule(rule);
 }
 
@@ -597,4 +688,63 @@ export async function releaseRulesForHost(hostId: string): Promise<void> {
   const riding = (await listRules()).filter((r) => r.hostId === hostId);
   for (const rule of riding) await releaseRule(rule);
   await dropRulesForHost(hostId);
+}
+
+/**
+ * Start `rule` and, on a transport-class failure, keep retrying it on
+ * {@link FORWARD_RECONNECT_BACKOFF_MS} until it succeeds, a local/rejected
+ * failure parks it, or the ladder runs out - see this file's header. The
+ * launch trigger (`src/app/hooks/useForwardsAutostart.ts`) is the only
+ * production caller, once per `startWithApp` rule; a rule missing its host or
+ * naming an RDP one needs no separate pre-check here, because `dialSession`
+ * (`ssh/tunnel.ts`) already raises that as a `SshLocalConnectError`, which
+ * {@link decideSshConnectFailure} parks on the first attempt the same as a bad
+ * credential.
+ */
+export async function startForwardAutostart(
+  rule: ForwardRule,
+  runtime: RuntimeDeps = defaultRuntimeDeps,
+): Promise<void> {
+  await attemptForwardAutostart(rule, runtime, 0);
+}
+
+/**
+ * One rung of {@link startForwardAutostart}'s ladder. `priorAttempts` is how
+ * many retries have already run in THIS ladder walk (0 for the first, real
+ * call `startForwardAutostart` makes); the attempt this call is making is
+ * `priorAttempts + 1`, which is also the index `FORWARD_RECONNECT_BACKOFF_MS`
+ * is read at for the NEXT one, if there is one.
+ *
+ * REUSES THE SAME `rule` OBJECT across every rung rather than re-reading the
+ * store - safe because {@link cancelForwardRetry} in `stopRule` and
+ * `releaseRule` already clears the pending timer BEFORE a Stop, delete or
+ * edit can land, so a rung that fires has always been wanted for the whole
+ * wait; a re-read would buy nothing here and would cost the ladder its
+ * `RuntimeDeps`-only testability (`findRule` reaches the real store, which
+ * needs a live Tauri bridge under plain node).
+ */
+async function attemptForwardAutostart(
+  rule: ForwardRule,
+  runtime: RuntimeDeps,
+  priorAttempts: number,
+): Promise<void> {
+  let failure: unknown;
+  let failed = false;
+  await startRule(rule, runtime, (e) => {
+    failed = true;
+    failure = e;
+  });
+  // Resolved, or yielded to a terminal/page owner that beat it - neither is a
+  // failure this ladder should react to.
+  if (!failed) return;
+  if (decideSshConnectFailure(classifySshConnectFailure(failure, "")).action !== "reconnect") {
+    return;
+  }
+  const attempt = priorAttempts + 1;
+  if (attempt > FORWARD_RECONNECT_BACKOFF_MS.length) return;
+  const timer = setTimeout(() => {
+    forwardRetries.delete(rule.id);
+    void attemptForwardAutostart(rule, runtime, attempt);
+  }, FORWARD_RECONNECT_BACKOFF_MS[attempt - 1]);
+  forwardRetries.set(rule.id, { timer, attempt });
 }

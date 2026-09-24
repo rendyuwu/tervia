@@ -333,17 +333,18 @@ export function ForwardsPage(): ReactNode {
           <AlertDialogHeader>
             <AlertDialogTitle>Delete rule &quot;{shownDelete?.rule.name}&quot;?</AlertDialogTitle>
             <AlertDialogDescription>
-              {/* The three `deleteNote` inputs spelled out rather than
-                  `deleteNote(shownDelete)`: `startWithHost` lives on the
-                  captured RULE and the other two are the runtime flags the
-                  row handed over, so one source of truth per field and no
-                  copy of `startWithHost` kept beside the record it came
+              {/* The four `deleteNote` inputs spelled out rather than
+                  `deleteNote(shownDelete)`: `startWithHost`/`startWithApp` live
+                  on the captured RULE and the other two are the runtime flags
+                  the row handed over, so one source of truth per field and no
+                  copy of either start flag kept beside the record it came
                   from. */}
               {shownDelete
                 ? deleteNote({
                     pageStops: shownDelete.pageStops,
                     hostOwned: shownDelete.hostOwned,
                     startWithHost: shownDelete.rule.startWithHost,
+                    startWithApp: shownDelete.rule.startWithApp === true,
                   })
                 : null}{" "}
               This cannot be undone.

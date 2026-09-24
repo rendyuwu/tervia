@@ -178,6 +178,16 @@ export function createForwardStore(io: ForwardsIo): ForwardsStore {
       if (!rule.name.trim()) {
         throw new Error("forwards: a rule needs a name");
       }
+      // Independent of `type`: a rule cannot ride BOTH a terminal's own
+      // session and the app-launch trigger - `types.ts`'s doc on each flag
+      // says why they are two different owners with two different
+      // lifetimes. Checked ahead of the type-conditional block below since
+      // it applies to every type equally.
+      if (rule.startWithHost && rule.startWithApp) {
+        throw new Error(
+          `forwards: "${rule.name}" cannot start with both its host's terminal and the app - choose one`,
+        );
+      }
       // Every port/host refusal below is TYPE-CONDITIONAL: `-D` only binds a
       // local SOCKS5 port and has no dial target at all; `-R` dials its
       // target LOCALLY (so `targetHost`/`targetPort` are refused, its own

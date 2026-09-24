@@ -16,14 +16,19 @@ export function Field({ label, children }: { label: string; children: ReactNode 
   );
 }
 
-/** One segment of a small exclusive group. */
+/** One segment of a small exclusive group. `disabled` (optional, default
+ *  `false`) is for a choice the CURRENT selection makes unavailable rather
+ *  than one that never applies - `RuleEditorDialog.tsx`'s "with the host's
+ *  terminal" option for a `-R`/`-D` rule. */
 export function ToggleButton({
   active,
   onClick,
+  disabled,
   children,
 }: {
   active: boolean;
   onClick: () => void;
+  disabled?: boolean;
   children: ReactNode;
 }) {
   return (
@@ -31,11 +36,16 @@ export function ToggleButton({
       type="button"
       onClick={onClick}
       aria-pressed={active}
+      disabled={disabled}
+      title={disabled ? "Not available for this rule" : undefined}
       className={
-        "flex cursor-pointer items-center gap-1.5 rounded-md border px-2.5 py-1 text-[11.5px] transition-colors " +
-        (active
-          ? "border-accent bg-accent/60"
-          : "border-border/60 hover:bg-accent/30 bg-transparent")
+        "flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-[11.5px] transition-colors " +
+        (disabled
+          ? "border-border/40 text-muted-foreground cursor-not-allowed bg-transparent opacity-60"
+          : "cursor-pointer " +
+            (active
+              ? "border-accent bg-accent/60"
+              : "border-border/60 hover:bg-accent/30 bg-transparent"))
       }
     >
       {children}
