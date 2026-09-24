@@ -14,7 +14,11 @@ import { Kbd } from "@/components/ui/kbd";
 import { KEY_SEP } from "@/lib/platform";
 import { fileIconUrl } from "@/modules/explorer/lib/iconResolver";
 import { invoke } from "@tauri-apps/api/core";
-import { File, Search, X } from "lucide-react";
+import { File, Monitor, Search, Server, X } from "lucide-react";
+import { useHostGroups, useHosts } from "@/modules/hosts/useHosts";
+import { rankHosts, searchRows, type HostSearchRow } from "@/modules/hosts/search";
+import type { Host } from "@/modules/hosts/types";
+import { useVault } from "@/modules/vault/useVault";
 
 /** The `fs_search` row shape. Mirrors `ExplorerSearch`, same Rust command. */
 type SearchHit = {
@@ -27,15 +31,29 @@ type SearchHit = {
 /** Typing this as the first character searches files instead of commands. */
 const FILE_SIGIL = "@";
 
+/** Typing this as the first character searches saved hosts instead of commands.
+ *  Ranked by `rankHosts` over `searchRows`, the pair the header quick-connect and
+ *  the Hosts page use, so all three agree on the top match for a query. */
+const HOST_SIGIL = "#";
+
 type Props = {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   /** Root of the opened folder, or null when no folder is open. */
   explorerRoot: string | null;
   onOpenFile: (path: string) => void;
+  /** App's `handleConnectHost`: the one saved-host dispatcher, routed by
+   *  `host.protocol`, that the header quick-connect and the Hosts page also use. */
+  onConnectHost: (host: Host) => void;
 };
 
-function CommandPaletteImpl({ open, onOpenChange, explorerRoot, onOpenFile }: Props) {
+function CommandPaletteImpl({
+  open,
+  onOpenChange,
+  explorerRoot,
+  onOpenFile,
+  onConnectHost,
+}: Props) {
   const [query, setQuery] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
   // What to do once the dialog has closed, run from onCloseAutoFocus so it
@@ -47,6 +65,18 @@ function CommandPaletteImpl({ open, onOpenChange, explorerRoot, onOpenFile }: Pr
 
   const fileMode = query.startsWith(FILE_SIGIL);
   const fileQuery = fileMode ? query.slice(FILE_SIGIL.length).trim() : "";
+  const hostMode = query.startsWith(HOST_SIGIL);
+  const hostQuery = hostMode ? query.slice(HOST_SIGIL.length) : "";
+  // Read while closed too, like the header's quick-connect: a list that only
+  // started loading when `#` was typed would flash "No saved hosts" first.
+  const hosts = useHosts();
+  const groups = useHostGroups();
+  const vault = useVault();
+  const rankedHosts = useMemo(
+    () =>
+      hostMode ? rankHosts(searchRows(Array.from(hosts.values()), groups, vault), hostQuery) : [],
+    [hostMode, hostQuery, hosts, groups, vault],
+  );
   const [hits, setHits] = useState<SearchHit[]>([]);
   const [searching, setSearching] = useState(false);
 
@@ -156,9 +186,10 @@ function CommandPaletteImpl({ open, onOpenChange, explorerRoot, onOpenFile }: Pr
       className="sm:max-w-lg"
       showCloseButton={false}
       onCloseAutoFocus={runPending}
-      // `fs_search` already ranked the hits; letting cmdk filter them again
-      // against a query that still carries the "@" would hide every one.
-      shouldFilter={!fileMode}
+      // `fs_search` and `rankHosts` already ranked their rows; letting cmdk filter
+      // them again against a query that still carries the sigil would hide every
+      // one, and re-sort the hosts away from the order the header shows.
+      shouldFilter={!fileMode && !hostMode}
     >
       <div className="flex items-center justify-between gap-2 px-2 pt-1.5 pb-0.5">
         <span className="text-muted-foreground px-1 text-[11px] font-medium tracking-tight">
@@ -184,7 +215,7 @@ function CommandPaletteImpl({ open, onOpenChange, explorerRoot, onOpenFile }: Pr
             data-slot="command-input"
             value={query}
             onValueChange={setQuery}
-            placeholder="Type a command, or @ to find a file…"
+            placeholder="Type a command, @ to find a file, # to connect to a host…"
             className="placeholder:text-muted-foreground w-full text-sm outline-hidden disabled:cursor-not-allowed disabled:opacity-50"
           />
           {query ? (
@@ -213,6 +244,12 @@ function CommandPaletteImpl({ open, onOpenChange, explorerRoot, onOpenFile }: Pr
             query={fileQuery}
             hasRoot={!!explorerRoot}
             onPick={(path) => select(() => onOpenFile(path))}
+          />
+        ) : hostMode ? (
+          <HostResults
+            ranked={rankedHosts}
+            hasHosts={hosts.size > 0}
+            onPick={(host) => select(() => onConnectHost(host))}
           />
         ) : (
           <>
@@ -290,6 +327,48 @@ function FileResults({
           <span className="text-muted-foreground ml-auto truncate pl-3 text-[11px]">{hit.rel}</span>
         </CommandItem>
       ))}
+    </CommandGroup>
+  );
+}
+
+/**
+ * The `#` branch of the list, on `FileResults`' pattern. Rows arrive in
+ * `rankHosts` order and must stay in it: the palette turns cmdk's own filter off
+ * in this mode, so DOM order is rank order and Enter connects the top match, the
+ * same host the header quick-connect would. No ad-hoc `user@host` create path
+ * here; that stays `HeaderQuickConnect`'s.
+ */
+function HostResults({
+  ranked,
+  hasHosts,
+  onPick,
+}: {
+  ranked: HostSearchRow[];
+  hasHosts: boolean;
+  onPick: (host: Host) => void;
+}) {
+  if (ranked.length === 0) {
+    return (
+      <div className="text-muted-foreground px-3 py-6 text-center text-sm">
+        {hasHosts ? "No matching host" : "No saved hosts"}
+      </div>
+    );
+  }
+  return (
+    <CommandGroup heading="Hosts">
+      {ranked.map((row) => {
+        const Icon = row.host.protocol === "ssh" ? Server : Monitor;
+        return (
+          <CommandItem key={row.host.id} value={row.host.id} onSelect={() => onPick(row.host)}>
+            <Icon size={14} strokeWidth={1.75} className="text-muted-foreground shrink-0" />
+            <span className="truncate">{row.host.name}</span>
+            <span className="text-muted-foreground ml-auto truncate pl-3 text-[11px]">
+              {row.username ? `${row.username}@` : ""}
+              {row.host.host}
+            </span>
+          </CommandItem>
+        );
+      })}
     </CommandGroup>
   );
 }
