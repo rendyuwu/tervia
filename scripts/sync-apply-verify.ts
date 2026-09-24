@@ -548,6 +548,58 @@ const lastKeys = (p: Port): string[] => p.keyLog()[p.keyLog().length - 1] ?? [];
 }
 
 // ---------------------------------------------------------------------------
+// A3f. A landed forward rule keeps this device's own startWithApp - it is
+// device-local (`sync/envelope.ts`'s `DEVICE_LOCAL_FIELDS`), the same class
+// of fact A3 already proves for the four host fields.
+// ---------------------------------------------------------------------------
+{
+  console.log(
+    "\n[A3f] a landed rule keeps this device's startWithApp, and a landing that switches it to startWithHost drops the carried flag",
+  );
+  const stored = rule({ startWithApp: true, startWithHost: false });
+  const h = harness({ rules: [stored] });
+
+  // The wire strips startWithApp before an envelope is sealed, so an ordinary
+  // landing carries none of it - the same guarantee A3 exercises for hosts.
+  await h.forwards.applyRemote([landed(rule({ name: "renamed", startWithApp: false }))]);
+  const after = (await h.forwards.listRules())[0];
+  check("startWithApp survives a stripped landing", after.startWithApp, true);
+  check("and the landing's own content did land", after.name, "renamed");
+
+  // The other direction, which no stripped fixture can see: a landing that DOES
+  // carry startWithApp true must not file it - a foreign device's choice is not
+  // this device's to inherit.
+  const foreign = harness({ rules: [rule({ startWithApp: false, startWithHost: false })] });
+  await foreign.forwards.applyRemote([landed(rule({ startWithApp: true }))]);
+  check(
+    "a carried startWithApp does not overwrite this device's (false)",
+    (await foreign.forwards.listRules())[0].startWithApp,
+    undefined,
+  );
+
+  // Mutual exclusion, re-enforced by hand: a landing that switches the rule to
+  // startWithHost must drop this device's carried startWithApp, or the write
+  // would recreate `upsertRule`'s own refused both-true row - a refusal this
+  // apply path bypasses.
+  const switching = harness({ rules: [rule({ startWithApp: true, startWithHost: false })] });
+  await switching.forwards.applyRemote([
+    landed(rule({ startWithHost: true, startWithApp: false })),
+  ]);
+  const afterSwitch = (await switching.forwards.listRules())[0];
+  check("startWithHost true drops the carried startWithApp", afterSwitch.startWithApp, undefined);
+  check("and startWithHost itself lands", afterSwitch.startWithHost, true);
+
+  // A rule with no stored startWithApp must not grow one out of nothing.
+  const fresh = harness();
+  await fresh.forwards.applyRemote([landed(rule({ id: "f-new" }))]);
+  check(
+    "a new rule with nothing stored lands with no startWithApp",
+    (await fresh.forwards.listRules())[0].startWithApp,
+    undefined,
+  );
+}
+
+// ---------------------------------------------------------------------------
 // A4. A record landing clears a living tombstone naming its id, same commit
 // ---------------------------------------------------------------------------
 {

@@ -1437,6 +1437,36 @@ subscriber-notification hook today.
 prove against a real close/exit race - at that point `startForwardAutostart`
 can subscribe per `hostId` and re-enter the ladder on a genuine drop.
 
+### A remote edit landing while its retry is pending re-dials the OLD endpoints
+
+**Accepted state.** `attemptForwardAutostart` deliberately reuses the SAME
+`rule` object across every rung of its own backoff ladder (`controller.ts`'s
+"REUSES THE SAME `rule` OBJECT" doc on that function) - a Stop, Delete or
+Save cancels the ladder outright (`pageMustStopFirst`'s `forwardRetries.has`
+check), but a sync LANDING that only *rewrites* the rule's record does not:
+`sync/scheduler.ts`'s landing-side `release` hands `releaseRule` only
+DELETED landings, so an edit that lands elsewhere - a renamed target, a
+changed port - never reaches the cancel at all. If that edit lands during
+one of the ladder's waits (up to 30 s), the timer that fires next still
+dials the OLD endpoints captured when the ladder started. The row then
+reads `Running` for the NEW record, and its Stop names a key nothing is
+stored under - the same leak P0-1 fixed for Delete and Edit, arriving
+through the sync door instead of a click. The window is narrow (a landing
+has to arrive during an in-flight wait, not merely at any point after the
+edit), and the same class of leak already exists on the base for a page-
+`running` rule a landing rewrites, so this is not a new hazard, only a new
+way to reach an old one.
+
+**Carried by.** `attemptForwardAutostart` in
+`src/modules/forwards/controller.ts`, which has no subscription to a sync
+landing to cancel itself against.
+
+**Trigger.** `sync/scheduler.ts`'s landing-side release growing a REWRITE
+case (not only a delete) that cancels a rule's pending retry the same way
+`stopRule` already does - at that point this entry can close alongside the
+mid-session-drop one above, since both need the same kind of landing
+subscription.
+
 ### A local forward-bind conflict walks the ladder before parking
 
 **Accepted state.** `controller.ts`'s backoff ladder classifies a

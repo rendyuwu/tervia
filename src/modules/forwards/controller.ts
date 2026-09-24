@@ -113,14 +113,6 @@ export const defaultRuntimeDeps: RuntimeDeps = {
 const FORWARD_RECONNECT_BACKOFF_MS = [1_000, 3_000, 7_000, 15_000, 30_000] as const;
 
 /**
- * A `setTimeout` handle. Named once and reused below rather than inlined at
- * each site, portable the same way `sessionState.ts`'s `sshReconnectTimer`
- * field is typed identically: the browser and Node disagree on what
- * `setTimeout` itself returns.
- */
-type ForwardRetryTimer = ReturnType<typeof setTimeout>;
-
-/**
  * One pending retry's timer, per rule id - the handle {@link
  * cancelForwardRetry} clears and {@link pageMustStopFirst} checks for.
  * Entries live only while a retry is SCHEDULED, never while a dial is in
@@ -129,7 +121,7 @@ type ForwardRetryTimer = ReturnType<typeof setTimeout>;
  * travels as {@link attemptForwardAutostart}'s own `priorAttempts` parameter
  * instead of living here, since nothing outside that recursion ever reads it.
  */
-const forwardRetries = new Map<string, ForwardRetryTimer>();
+const forwardRetries = new Map<string, ReturnType<typeof setTimeout>>();
 
 /** Cancel `ruleId`'s pending retry, if it has one. Idempotent - safe to call
  *  from every site that ends a rule's autostart lifecycle whether or not one

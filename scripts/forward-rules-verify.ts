@@ -331,7 +331,7 @@ console.log("\n[refusals] name and remoteHost may not be blank");
 
 // ---------------------------------------------------------------------------
 console.log(
-  "\n[refusals] startWithHost and startWithApp are mutually exclusive, for every type (issue #77)",
+  "\n[refusals] startWithHost and startWithApp are mutually exclusive, for every type",
 );
 {
   const h = harness();

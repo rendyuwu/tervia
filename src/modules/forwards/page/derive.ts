@@ -373,13 +373,17 @@ export type DeleteNoteSubject = {
    * ("Deleting it changes nothing else.") to a dialog that was about to close a
    * live bind - a destructive confirm saying the opposite of what it does.
    *
-   * SO THE TWO MUST NAME THE SAME STATUSES. This is the CAPTURED half (what the
-   * user was told when the dialog opened) and `pageMustStopFirst` is the LIVE
-   * half (what the confirm does); they are separate on purpose
-   * (`ForwardsPage.tsx`'s `PendingDelete`), and drift between the two status
-   * sets is exactly how the sentence becomes false again. `failed` and
-   * `stopped` are out of both, for the reason `pageMustStopFirst`'s own doc
-   * gives: neither retains a claim, so there is nothing to stop.
+   * KEPT IN STEP WITH `pageMustStopFirst` WHERE A LIVE BIND IS AT STAKE, and
+   * not on every status it answers `true` for. This is the CAPTURED half
+   * (what the user was told when the dialog opened) and `pageMustStopFirst`
+   * is the LIVE half (what the confirm does); they are separate on purpose
+   * (`ForwardsPage.tsx`'s `PendingDelete`), and the two must agree on every
+   * row that HOLDS SOMETHING - `running`/`starting`. `pageMustStopFirst` ALSO
+   * answers `true` for a `failed` row with a pending backoff retry (a
+   * scheduled timer, not a bound port - `controller.ts`'s own header on the
+   * ladder), and this field does NOT widen to match: a pending retry has
+   * nothing live to report, so "Deleting it changes nothing else." stays true
+   * of it, the same as it already was for `stopped`.
    */
   pageStops: boolean;
   startWithHost: boolean;

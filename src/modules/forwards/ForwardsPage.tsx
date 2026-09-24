@@ -81,11 +81,17 @@ import { useForwards } from "./useForwards";
  * and goes through `getState()`, the idiom `controller.ts` and `runtime.ts`
  * both spell out.
  *
- * SEPARATE, BUT NOT FREE TO DISAGREE ABOUT WHICH STATUSES COUNT. Captured and
- * live answer about different MOMENTS, which is the split; they answer the same
- * QUESTION, so `pageStops` and `pageMustStopFirst` name the same two statuses.
- * A `pageStops` that had stayed at `running` alone would have the dialog say
- * "Deleting it changes nothing else." while the confirm below closed a bind.
+ * SEPARATE, BUT NOT FREE TO DISAGREE ABOUT WHICH STATUSES COUNT WHERE A LIVE
+ * BIND IS AT STAKE. Captured and live answer about different MOMENTS, which
+ * is the split; they answer the same QUESTION about a row that HOLDS
+ * SOMETHING - `running`/`starting` - so `pageStops` and `pageMustStopFirst`
+ * must agree there. A `pageStops` that had stayed at `running` alone would
+ * have the dialog say "Deleting it changes nothing else." while the confirm
+ * below closed a bind. `pageMustStopFirst` ALSO answers `true` for a
+ * `failed` row with a pending backoff retry (`controller.ts`'s own header on
+ * the ladder); `pageStops` deliberately does NOT widen to match, because a
+ * pending retry is a scheduled timer, not a bound port, so the dialog's
+ * "changes nothing else" stays true of it.
  */
 type PendingDelete = { rule: ForwardRule; pageStops: boolean; hostOwned: boolean };
 
