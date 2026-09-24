@@ -45,7 +45,7 @@ import { InputGroup, InputGroupAddon, InputGroupInput } from "@/components/ui/in
 import { toast } from "@/components/ui/toast";
 import { paneCaret } from "@/lib/paneCaret";
 import { fileState as hostsFileState, identityHostRefs, listHosts } from "@/modules/hosts/store";
-import { useHosts } from "@/modules/hosts/useHosts";
+import { useHostGroups, useHosts } from "@/modules/hosts/useHosts";
 import { KeyRound, Plus, Search, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
@@ -103,6 +103,7 @@ type PendingDelete =
 export function VaultPage(): ReactNode {
   const vault = useVault();
   const hostsById = useHosts();
+  const groups = useHostGroups();
 
   const [query, setQuery] = useState("");
   const [pendingDelete, setPendingDelete] = useState<PendingDelete | null>(null);
@@ -187,8 +188,8 @@ export function VaultPage(): ReactNode {
   const keys = useMemo(() => Array.from(vault.keys.values()), [vault.keys]);
 
   const identityRowList = useMemo(
-    () => identityRows(identities, vault.keys, hosts),
-    [identities, vault.keys, hosts],
+    () => identityRows(identities, vault.keys, hosts, groups),
+    [identities, vault.keys, hosts, groups],
   );
   const keyRowList = useMemo(() => keyRows(keys, identities), [keys, identities]);
 
@@ -403,6 +404,7 @@ export function VaultPage(): ReactNode {
                   keyName={row.keyName}
                   keyDangling={row.keyDangling}
                   hostCount={row.hostCount}
+                  groupCount={row.groupCount}
                   missingSecret={row.missingSecret}
                   onEdit={() => setIdentityTarget({ mode: "edit", identityId: row.identity.id })}
                   onDelete={() =>

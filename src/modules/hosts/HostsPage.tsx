@@ -227,8 +227,8 @@ export function HostsPage({ onConnect, onScreen }: HostsPageProps): ReactNode {
   // bearing, not an optimisation (see `identityRows` in
   // `src/modules/vault/page/derive.ts`).
   const identityRowList = useMemo(
-    () => identityRows(Array.from(vault.identities.values()), vault.keys, hosts),
-    [vault.identities, vault.keys, hosts],
+    () => identityRows(Array.from(vault.identities.values()), vault.keys, hosts, groups),
+    [vault.identities, vault.keys, hosts, groups],
   );
   const knownGroupIds = useMemo(() => new Set(groups.map((g) => g.id)), [groups]);
   const rows = useMemo(() => searchRows(hosts, groups, vault), [hosts, groups, vault]);

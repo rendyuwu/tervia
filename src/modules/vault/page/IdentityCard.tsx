@@ -45,6 +45,9 @@ export type IdentityCardProps = {
    *  what the delete refusal carries, and the page reads them from
    *  `hostsUsingIdentity` when it needs them. */
   hostCount: number;
+  /** How many groups name this identity as their default. Same reasoning as
+   *  `hostCount` - a count, not a list. */
+  groupCount: number;
   /** The record names a secret it does not have. Renders as a warning pip. */
   missingSecret?: boolean;
   /** Open the editor for this record. Required, not optional: no surface lists
@@ -66,11 +69,17 @@ function accountDetail(identity: VaultIdentity): string {
   return identity.domain ? `${identity.domain}\\${identity.username}` : identity.username;
 }
 
-/** "3 hosts" / "1 host" / the honest zero. A row nothing uses is the row a
- *  delete succeeds on, so saying so is useful rather than noise. */
-function usageDetail(hostCount: number): string {
-  if (hostCount === 0) return "No hosts";
-  return hostCount === 1 ? "1 host" : `${hostCount} hosts`;
+/** "3 hosts", "1 host · default for 1 group", "default for 2 groups", or the
+ *  honest "No hosts" - said only when BOTH counts are zero, since a group
+ *  holder is as real a reason a delete is refused as a host holder is. */
+function usageDetail(hostCount: number, groupCount: number): string {
+  if (hostCount === 0 && groupCount === 0) return "No hosts";
+  const parts: string[] = [];
+  if (hostCount > 0) parts.push(hostCount === 1 ? "1 host" : `${hostCount} hosts`);
+  if (groupCount > 0) {
+    parts.push(groupCount === 1 ? "default for 1 group" : `default for ${groupCount} groups`);
+  }
+  return parts.join(" · ");
 }
 
 export function IdentityCard({
@@ -78,6 +87,7 @@ export function IdentityCard({
   keyName,
   keyDangling,
   hostCount,
+  groupCount,
   missingSecret,
   onEdit,
   onDelete,
@@ -121,7 +131,7 @@ export function IdentityCard({
 
       <div className="flex min-h-6 flex-wrap items-center justify-between gap-x-2 gap-y-1">
         <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs">
-          <span className="text-muted-foreground truncate">{usageDetail(hostCount)}</span>
+          <span className="text-muted-foreground truncate">{usageDetail(hostCount, groupCount)}</span>
           {keyName !== undefined ? (
             <span
               className={cn(

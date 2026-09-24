@@ -316,8 +316,9 @@ export type Host = SshHost | RdpHost;
  *  narrow on. `upsertGroup` refuses a value naming no identity, but only
  *  when this field is the one changing - on `parentId`'s own pattern, so a
  *  dangling value arriving through sync never blocks a rename, and
- *  `defaultIdentityFor` simply skips a dangling value at read time instead
- *  of refusing anything. */
+ *  `defaultIdentityFor` skips a dangling value at read time and falls
+ *  through to a live ancestor's instead of refusing anything or shadowing
+ *  one further up the chain. */
 export type HostGroup = {
   id: string;
   name: string;

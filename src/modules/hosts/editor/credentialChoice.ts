@@ -1,4 +1,5 @@
-import { HOST_RDP_SECRET_FIELDS, HOST_SSH_SECRET_FIELDS, type Host } from "../types";
+import { defaultIdentityFor } from "../groupTree";
+import { HOST_RDP_SECRET_FIELDS, HOST_SSH_SECRET_FIELDS, type Host, type HostGroup } from "../types";
 import {
   HOST_RDP_PASSWORD_FIELD,
   HOST_SSH_KEY_PASSPHRASE_FIELD,
@@ -37,6 +38,25 @@ const IDENTITY_CHOICE_PREFIX = "identity:";
  */
 export function identityChoice(identityId: string): string {
   return `${IDENTITY_CHOICE_PREFIX}${identityId}`;
+}
+
+/**
+ * The credential picker's value for a NEW host being created in `groupId`:
+ * {@link identityChoice} for the effective default {@link defaultIdentityFor}
+ * finds walking `groupId` and its ancestors (skipping any that names an
+ * identity `liveIdentityIds` does not have, so a dangling default falls
+ * through to a live ancestor's instead of shadowing it), or
+ * {@link CREDENTIAL_CHOICE_INLINE} when there is no live default anywhere on
+ * the chain. An empty `groupId` (no group selected) answers inline too,
+ * since `defaultIdentityFor` returns `undefined` for a falsy id.
+ */
+export function credentialChoiceForGroup(
+  groupId: string,
+  groups: readonly HostGroup[],
+  liveIdentityIds: ReadonlySet<string>,
+): string {
+  const identityId = defaultIdentityFor(groupId || undefined, groups, liveIdentityIds);
+  return identityId ? identityChoice(identityId) : CREDENTIAL_CHOICE_INLINE;
 }
 
 /**

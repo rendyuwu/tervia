@@ -14,7 +14,7 @@ import {
   type Tombstone,
 } from "@/lib/tombstones";
 import { tauriSecretsIo } from "@/modules/vault/adapters";
-import { groupsUsingIdentity, hostsUsingIdentity } from "@/modules/vault/refs";
+import { GROUP_DEFAULT_SUFFIX, groupsUsingIdentity, hostsUsingIdentity } from "@/modules/vault/refs";
 import type { SshSecretValues } from "@/modules/vault/resolve";
 import { SECRET_ALREADY_STORED, vaultStore, type VaultSecretValue } from "@/modules/vault/store";
 import {
@@ -1018,8 +1018,9 @@ export function createHostsStore(io: HostsIo): HostsStore {
       // never wired `io.findIdentity` all skip this block, so a dangling
       // default that arrived through sync never blocks a rename either.
       // `defaultIdentityFor` (`groupTree.ts`) is what SKIPS a dangling value
-      // at read time instead, the same way `effectiveParents` does for a bad
-      // `parentId`.
+      // at read time instead, continuing to a live ancestor's default rather
+      // than shadowing it - the same tolerance `effectiveParents` gives a
+      // bad `parentId`.
       if (
         group.defaultIdentityId !== undefined &&
         group.defaultIdentityId !== stored?.defaultIdentityId &&
@@ -1574,14 +1575,15 @@ export function createHostsStore(io: HostsIo): HostsStore {
   // Through the shared lookups, so the holders this refuses a delete over are
   // exactly the holders the Vault page lists. Two implementations of one
   // question is how a delete refused for reasons a page does not show gets
-  // shipped. Group holders are suffixed so a mixed list reads unambiguously
-  // through the SAME rendering `deleteRefusalText` already does everywhere
-  // else - `holders.map(h => h.name || h.id)` - with no change to it.
+  // shipped. Group holders are suffixed with `GROUP_DEFAULT_SUFFIX` so a mixed
+  // list is unambiguous both in the raw holder-name join `deleteRefusalText`
+  // still uses, and as the signal `deleteRefusalText` reads to swap in
+  // noun-neutral copy when any holder is a group.
   const identityHostRefs: IdentityHostRefs = async (identityId) => [
     ...hostsUsingIdentity(await listHosts(), identityId),
     ...groupsUsingIdentity(await listGroups(), identityId).map((ref) => ({
       ...ref,
-      name: `${ref.name} (group default)`,
+      name: `${ref.name}${GROUP_DEFAULT_SUFFIX}`,
     })),
   ];
 

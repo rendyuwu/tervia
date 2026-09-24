@@ -52,6 +52,14 @@ export function groupsUsingIdentity(groups: readonly HostGroup[], identityId: st
   return groups.filter((g) => g.defaultIdentityId === identityId).map(toVaultRef);
 }
 
+/** The suffix `identityHostRefs` (`hosts/store.ts`) appends to a GROUP
+ *  holder's name, so the existing holder-name rendering
+ *  (`holders.map(h => h.name || h.id)`, in both `deleteRefusalText` copies)
+ *  reads a mixed host/group list unambiguously - and so `deleteRefusalText`
+ *  in `vault/page/derive.ts` can tell "any holder is a group" from that same
+ *  signal instead of needing a `VaultRef.kind` field. */
+export const GROUP_DEFAULT_SUFFIX = " (group default)";
+
 /** Every identity that names one key. A key is only ever referenced by an
  *  identity, never by a host directly. */
 export function identitiesUsingKey(

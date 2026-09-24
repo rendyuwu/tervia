@@ -1260,19 +1260,21 @@ export function carryPins(incoming: Host[], existing: Host[]): Host[] {
 }
 
 /**
- * Drop a `defaultIdentityId` that names no identity that will exist after
+ * Drop a `defaultIdentityId` that names no identity that actually LANDED in
  * this import - the identity-side counterpart of {@link resolveIdentityBindings},
  * much smaller because there is no secret at stake: a group's default owns
  * no keychain account, so honouring one that travelled costs nothing the
- * way applying a host's vault binding can. The only question worth asking is
- * existence, which is `identityIds` - built once by `applyV3` from
- * {@link normaliseIdentityKeys}'s own return plus what is already saved,
- * the exact set outcome 2 there uses.
+ * way applying a host's vault binding can.
  *
- * Run BEFORE {@link mergeGroups}, so a dangling value never reaches
- * `upsertGroup`'s own existence check and never fails the whole group row -
- * it is dropped here instead, silently, the same way an unreadable field
- * anywhere else in this file is dropped rather than refused.
+ * Called at `applyV3`'s own WRITE 3, against the union of the identities
+ * already on disk and the ones `WRITE 2` actually saved - NOT the pre-write
+ * `identityIds` set `resolveIdentityBindings` above uses, which counts an
+ * identity whose write FAILED as existing. Filtering with that earlier,
+ * wider set here would leave a group naming an identity that never landed,
+ * which `upsertGroup`'s own existence check then refuses outright - losing
+ * the whole group row, and every new sub-group under it, over one failed
+ * identity write. Filtering against what actually landed instead is what
+ * keeps this drop, never a refusal, true regardless of WRITE 2's outcome.
  */
 export function resolveGroupDefaults(
   groups: HostGroup[],
