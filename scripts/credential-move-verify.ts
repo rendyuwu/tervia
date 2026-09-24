@@ -3131,7 +3131,7 @@ console.log("\n[16] credentialChoice.ts, by value");
   );
 
   // credentialChoiceForGroup, by value - the pure helper both the create-mode
-  // load and the group picker's re-seed call, per issue #75's group-default
+  // load and the group picker's re-seed call, per the group-default
   // fix-up. Nested so an own default that is DEAD still falls through to a
   // LIVE ancestor's, rather than shadowing it.
   const groups: HostGroup[] = [

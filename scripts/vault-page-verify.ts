@@ -345,6 +345,7 @@ console.log("\n[5] rankIdentities and rankKeys: tiers, drops, empty and whitespa
     keyName: undefined,
     keyDangling: false,
     hostCount: 0,
+    groupCount: 0,
     missingSecret: false,
   });
   const rows = [alpha, bravo, charlie, delta, echo, foxtrot].map(rowOf);
@@ -389,6 +390,7 @@ console.log("\n[5] rankIdentities and rankKeys: tiers, drops, empty and whitespa
     keyName: "deploy-key",
     keyDangling: false,
     hostCount: 0,
+    groupCount: 0,
     missingSecret: false,
   };
   const namePrefixCompetitor: IdentityRow = {
@@ -396,6 +398,7 @@ console.log("\n[5] rankIdentities and rankKeys: tiers, drops, empty and whitespa
     keyName: undefined,
     keyDangling: false,
     hostCount: 0,
+    groupCount: 0,
     missingSecret: false,
   };
   check(
@@ -415,6 +418,7 @@ console.log("\n[5] rankIdentities and rankKeys: tiers, drops, empty and whitespa
     keyName: undefined,
     keyDangling: false,
     hostCount: 0,
+    groupCount: 0,
     missingSecret: false,
   };
   const domainCompetitor: IdentityRow = {
@@ -422,6 +426,7 @@ console.log("\n[5] rankIdentities and rankKeys: tiers, drops, empty and whitespa
     keyName: undefined,
     keyDangling: false,
     hostCount: 0,
+    groupCount: 0,
     missingSecret: false,
   };
   check(
@@ -504,6 +509,7 @@ console.log("\n[6] two rows equal on name break the tie on id, both input orders
     keyName: undefined,
     keyDangling: false,
     hostCount: 0,
+    groupCount: 0,
     missingSecret: false,
   };
   const b: IdentityRow = {
@@ -511,6 +517,7 @@ console.log("\n[6] two rows equal on name break the tie on id, both input orders
     keyName: undefined,
     keyDangling: false,
     hostCount: 0,
+    groupCount: 0,
     missingSecret: false,
   };
   check(
@@ -555,6 +562,7 @@ console.log("\n[7] mixed-case name vs lowercase query, and the reverse, both fol
     keyName: undefined,
     keyDangling: false,
     hostCount: 0,
+    groupCount: 0,
     missingSecret: false,
   };
   check(
@@ -567,6 +575,7 @@ console.log("\n[7] mixed-case name vs lowercase query, and the reverse, both fol
     keyName: undefined,
     keyDangling: false,
     hostCount: 0,
+    groupCount: 0,
     missingSecret: false,
   };
   check(
@@ -1204,6 +1213,7 @@ console.log(
     keyName: undefined,
     keyDangling: false,
     hostCount: 0,
+    groupCount: 0,
     missingSecret: false,
   });
   const rows = [
