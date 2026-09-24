@@ -43,6 +43,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
+  describeAgentKeyClassification,
+  describeAgentKeyError,
   describeCertClassification,
   describeCertError,
   describeKeyError,
@@ -508,6 +510,34 @@ console.log(
     "and a plain thrown value still becomes an error state with a message",
     certFromString.kind === "error" && certFromString.message.length > 0,
     certFromString,
+  );
+
+  // `describeAgentKeyClassification`/`describeAgentKeyError` - the
+  // `hardware` kind's own panel translation, merged here from a local
+  // KeyEditorDialog.tsx copy so it shares one home with
+  // `describeCertClassification`'s twin.
+  const okPub = describeAgentKeyClassification(pub());
+  check(
+    "describeAgentKeyClassification reports ok with algorithm/fingerprint/comment for a public-key classification",
+    okPub.kind === "ok" &&
+      okPub.algorithm === "ssh-ed25519" &&
+      okPub.fingerprint === "SHA256:pub" &&
+      okPub.comment === "rendy@host",
+    okPub,
+  );
+  for (const classification of notPublicKey) {
+    const described = describeAgentKeyClassification(classification);
+    check(
+      `describeAgentKeyClassification(${classification.kind}) reports notAPublicKey, not which of the other three it was`,
+      described.kind === "notAPublicKey",
+      described,
+    );
+  }
+  const agentStripped = describeAgentKeyError(new Error("ssh: could not read this public key line"));
+  check(
+    "describeAgentKeyError strips the ssh: prefix the same way describeKeyError/describeCertError do",
+    agentStripped.kind === "error" && agentStripped.message === "could not read this public key line",
+    agentStripped,
   );
 }
 

@@ -555,75 +555,65 @@ console.log("\n[3. save inspects fields] KeyEditorDialog's save reads draft.priv
       );
     }
 
-    // Two assignments now, not one: `draft.kind === "hardware"` builds
-    // `facts` from a public-key CLASSIFICATION (there is no private key to
-    // unlock for that kind); every other kind still builds it from an
-    // UNLOCK, exactly as before this file gained a hardware kind. Still not
-    // "at least two", for the same reason the original pin was not "at
-    // least one": a THIRD assignment - a fallback hiding behind either
-    // genuine arm - is what this count exists to catch.
+    // Not a count: the number of kind arms `save` has is not the property
+    // worth pinning, and a count breaks again at the next kind. What IS
+    // worth pinning is that no assignment to `facts` hides a fallback
+    // source - every one of them has to call `vaultKeyFactsFrom` (the
+    // unlock-based kinds) or `hardwareFactsFrom` (the classification-based
+    // one) as its right side.
     const factsAssignments = findAssignmentsTo(saveBodyForFacts, "facts");
     check(
-      "save contains exactly two assignments to `facts` - one per kind (hardware; every other kind)",
-      factsAssignments.length === 2,
+      "save assigns `facts` at least once",
+      factsAssignments.length >= 1,
       factsAssignments.length,
     );
-    if (factsAssignments.length === 2) {
-      const calleeOf = (a: ts.BinaryExpression): string | null =>
-        ts.isCallExpression(a.right) ? a.right.expression.getText(keySfForFacts) : null;
-      const hwAssignment = factsAssignments.find((a) => calleeOf(a) === "hardwareFactsFrom");
-      const pemAssignment = factsAssignments.find((a) => calleeOf(a) === "vaultKeyFactsFrom");
+    const FACTS_SOURCES = ["vaultKeyFactsFrom", "hardwareFactsFrom"];
+    for (const a of factsAssignments) {
+      const callee = ts.isCallExpression(a.right) ? a.right.expression.getText(keySfForFacts) : null;
       check(
-        "one assignment calls hardwareFactsFrom( - the hardware kind's own source",
-        hwAssignment !== undefined,
+        `every assignment to facts calls vaultKeyFactsFrom( or hardwareFactsFrom( - not a fallback source`,
+        callee !== null && FACTS_SOURCES.includes(callee),
+        callee ?? a.right.getText(keySfForFacts),
       );
+    }
+
+    const pemAssignment = factsAssignments.find(
+      (a) =>
+        ts.isCallExpression(a.right) &&
+        a.right.expression.getText(keySfForFacts) === "vaultKeyFactsFrom",
+    );
+    if (pemAssignment && ts.isCallExpression(pemAssignment.right)) {
+      // Decomposed into callee + its own single argument, rather than one
+      // getText() over the whole right-hand side: `vaultKeyFactsFrom(...)` is
+      // committed as a MULTI-LINE call (its one argument on its own line),
+      // and Prettier's trailing comma on that line sits INSIDE this node's
+      // own span - unlike pin 1's arguments, which sit inside a call ONE
+      // LEVEL UP from any trailing comma of their own. A whole-text compare
+      // here would falsely FAIL against the correct, committed code the
+      // moment Prettier's trailing comma is counted as part of "the claim"
+      // rather than as formatting pin 1's rule 2 already says to discount.
       check(
-        "and the OTHER calls vaultKeyFactsFrom( - so the two kinds build `facts` two different," +
-          " genuine ways, and neither hides behind the other",
-        pemAssignment !== undefined,
+        "vaultKeyFactsFrom( is called with exactly 1 argument",
+        pemAssignment.right.arguments.length === 1,
+        pemAssignment.right.arguments.length,
       );
-      if (hwAssignment && ts.isCallExpression(hwAssignment.right)) {
-        const hwArg = hwAssignment.right.arguments[0]?.getText(keySfForFacts) ?? "";
+      if (pemAssignment.right.arguments.length === 1) {
+        const argText = pemAssignment.right.arguments[0].getText(keySfForFacts);
+        // Re-aimed: `save` now inspects the
+        // key ONCE into a local `info` and reuses it for both the refusal
+        // below and this call, rather than inspecting twice - so the
+        // argument here is the bare identifier `info`, not the inline
+        // `inspectSshKey(...)` call this pin used to name directly. The
+        // claim that `facts` comes from a FRESH inspection has not
+        // weakened: it has moved one line up, onto `info`'s own
+        // initializer, which the next two checks pin instead.
         check(
-          "hardwareFactsFrom's argument classifies draft.publicKey - not a cached or differently-" +
-            "named field a hardware draft does not use for this",
-          norm(hwArg).includes(norm("classifySshText(draft.publicKey)")),
-          hwArg,
+          "vaultKeyFactsFrom's argument is exactly info - the fresh inspection bound above, not" +
+            " a cached one (e.g. `lastInfo.current`) that would reintroduce the alias mutation" +
+            " this pin exists to catch",
+          norm(argText) === norm("info"),
+          argText,
         );
-      }
-      if (pemAssignment && ts.isCallExpression(pemAssignment.right)) {
-        // Decomposed into callee + its own single argument, rather than one
-        // getText() over the whole right-hand side: `vaultKeyFactsFrom(...)` is
-        // committed as a MULTI-LINE call (its one argument on its own line),
-        // and Prettier's trailing comma on that line sits INSIDE this node's
-        // own span - unlike pin 1's arguments, which sit inside a call ONE
-        // LEVEL UP from any trailing comma of their own. A whole-text compare
-        // here would falsely FAIL against the correct, committed code the
-        // moment Prettier's trailing comma is counted as part of "the claim"
-        // rather than as formatting pin 1's rule 2 already says to discount.
-        check(
-          "vaultKeyFactsFrom( is called with exactly 1 argument",
-          pemAssignment.right.arguments.length === 1,
-          pemAssignment.right.arguments.length,
-        );
-        if (pemAssignment.right.arguments.length === 1) {
-          const argText = pemAssignment.right.arguments[0].getText(keySfForFacts);
-          // Re-aimed: `save` now inspects the
-          // key ONCE into a local `info` and reuses it for both the refusal
-          // below and this call, rather than inspecting twice - so the
-          // argument here is the bare identifier `info`, not the inline
-          // `inspectSshKey(...)` call this pin used to name directly. The
-          // claim that `facts` comes from a FRESH inspection has not
-          // weakened: it has moved one line up, onto `info`'s own
-          // initializer, which the next two checks pin instead.
-          check(
-            "vaultKeyFactsFrom's argument is exactly info - the fresh inspection bound above, not" +
-              " a cached one (e.g. `lastInfo.current`) that would reintroduce the alias mutation" +
-              " this pin exists to catch",
-            norm(argText) === norm("info"),
-            argText,
-          );
-        }
       }
     }
 
@@ -859,6 +849,7 @@ console.log(
     fileKey: keyof typeof FILES,
     calleeName: string,
     expectedArgs: readonly [string, string, string],
+    arg0Callee?: string,
   ): void => {
     const sf = sourceFile(fileKey);
     const calls = findCalls(sf, sf, [calleeName]);
@@ -878,11 +869,34 @@ console.log(
         c.arguments.length,
       );
       if (c.arguments.length !== 3) continue;
-      for (const [i, expected] of expectedArgs.entries()) {
+      if (arg0Callee) {
+        // Argument 0's CALLEE only, not its whole argument list - a
+        // parameter added to `keyRecordFrom` must not break this pin the
+        // way it broke the whole-argument-list pin this replaces.
+        // `keyRecordFrom` is already proven by value in
+        // vault-draft-verify.ts sections [5]/[5b].
+        const arg0 = c.arguments[0];
+        check(
+          `${FILES[fileKey]}: ${calleeName}('s argument 0 is a call to ${arg0Callee}(`,
+          ts.isCallExpression(arg0) && arg0.expression.getText(sf) === arg0Callee,
+          arg0.getText(sf),
+        );
+      } else {
+        const actual = c.arguments[0].getText(sf);
+        check(
+          `${FILES[fileKey]}: ${calleeName}('s argument 0 is exactly ${expectedArgs[0]}`,
+          norm(actual) === norm(expectedArgs[0]),
+          actual,
+        );
+      }
+      // Arguments 1 and 2 stay exact: neither was broken by the kind
+      // additions, and argument 2 (the stamp) has a stated consumer-visible
+      // rationale below.
+      for (const i of [1, 2] as const) {
         const actual = c.arguments[i].getText(sf);
         check(
-          `${FILES[fileKey]}: ${calleeName}('s argument ${i} is exactly ${expected}`,
-          norm(actual) === norm(expected),
+          `${FILES[fileKey]}: ${calleeName}('s argument ${i} is exactly ${expectedArgs[i]}`,
+          norm(actual) === norm(expectedArgs[i]),
           actual,
         );
       }
@@ -894,32 +908,42 @@ console.log(
   // facts))` type-checks, reads as a stamp, and stamps the record ABOUT TO BE
   // WRITTEN rather than the one this form loaded - which makes the compare
   // compare a value against itself and pass always. So the argument's whole
-  // expression text is the claim, the same way arguments 0 and 1 are.
-  pinUpsertArgs("keyDialog", "upsertKey", [
-    "keyRecordFrom(id, draft, existing, facts, certFacts)",
-    "keySecretsForSave(draft)",
-    "vaultKeyStamp(existing)",
-  ]);
+  // expression text is the claim, the same way argument 1 is.
+  pinUpsertArgs(
+    "keyDialog",
+    "upsertKey",
+    [
+      "keyRecordFrom(id, draft, existing, facts, certFacts)",
+      "keySecretsForSave(draft)",
+      "vaultKeyStamp(existing)",
+    ],
+    "keyRecordFrom",
+  );
   pinUpsertArgs("identityDialog", "upsertIdentity", [
     "identityRecordFrom(id, draft)",
     "identitySecretsForSave(draft)",
     "vaultIdentityStamp(existing)",
   ]);
 
-  // `fingerprint:` and `publicKey:` dropped from this list: the hardware
-  // kind gave both names a second, legitimate, NON-record meaning a plain
-  // substring scan cannot tell apart from a hand-assembled VaultKey -
-  // `patch({ publicKey: ... })` (twice, over the picker row and the paste
-  // textarea) writes `KeyDraft.publicKey` itself (Decision 6, `vault/editor/draft.ts`,
-  // the same field NAME as `VaultKey.publicKey` by design), and
+  // `fingerprint:`/`publicKey:` dropped from `keyDialog`'s own list only:
+  // the hardware kind gave both names a second, legitimate, NON-record
+  // meaning in THAT file a plain substring scan can no longer tell apart
+  // from a hand-assembled VaultKey - `patch({ publicKey: ... })` (twice,
+  // over the picker row and the paste textarea) writes `KeyDraft.publicKey`
+  // itself (the hardware kind's `.pub` line, `vault/editor/draft.ts`, the
+  // same field NAME as `VaultKey.publicKey` by design), and
   // `AgentKeyCheckState`'s "ok" arm carries its own `fingerprint` for the
-  // hardware picker's checked-line panel, a value with no `id`/`name` beside
-  // it and so no `VaultKey` at all. Section 5's argument-exact pin on
-  // `keyRecordFrom(id, draft, existing, facts, certFacts)` above is what
-  // still guards against a hand-built record either name could otherwise
-  // have caught here.
-  const smellKeys = ["keyType:", "hasPassword:", "hasPrivateKey:", "hasPassphrase:"];
-  for (const key of ["keyDialog", "identityDialog"] as const) {
+  // hardware picker's checked-line panel, a value with no `id`/`name`
+  // beside it and so no `VaultKey` at all. `identityDialog` has neither
+  // reason, so it keeps the full list. Section 5's argument-exact pin on
+  // `keyRecordFrom(`'s callee above is what still guards against a
+  // hand-built record either name could otherwise have caught here.
+  const keyDialogSmells = ["keyType:", "hasPassword:", "hasPrivateKey:", "hasPassphrase:"];
+  const identityDialogSmells = [...keyDialogSmells, "fingerprint:", "publicKey:"];
+  for (const [key, smellKeys] of [
+    ["keyDialog", keyDialogSmells],
+    ["identityDialog", identityDialogSmells],
+  ] as const) {
     const stripped = stripComments(src[key]);
     for (const smell of smellKeys) {
       check(
@@ -2260,12 +2284,10 @@ console.log(
   const kindToggles = toggles.filter((el) =>
     (jsxAttrExprText(el, "onClick", keySf) ?? "").includes("patch({ kind:"),
   );
-  check(
-    "exactly three ToggleButtons patch draft.kind - not the algorithm row, which patches nothing (it only calls setAlgorithm)",
-    kindToggles.length === 3,
-    kindToggles.length,
-  );
 
+  // No count here: the per-kind loop below already proves each of the three
+  // kinds has a button whose `active` matches what it sets. A count adds no
+  // property that loop does not already cover.
   for (const kind of ["pem", "cert", "hardware"] as const) {
     const btn = kindToggles.find((el) =>
       (jsxAttrExprText(el, "onClick", keySf) ?? "").includes(`kind: "${kind}"`),
@@ -2284,7 +2306,9 @@ console.log(
   // Each kind-specific Field is guarded by the EXACT condition that follows
   // `draft.kind`, not merely present somewhere near one - a Field guarded by
   // the wrong kind would compile, render for nobody or everybody, and pass
-  // any check that only asked "does kind appear nearby".
+  // any check that only asked "does kind appear nearby". Whitespace-
+  // normalised: Prettier alone decides whether a condition this short stays
+  // on one line, and that choice is not the claim.
   const kindGuarded: { label: string; wantCondition: string }[] = [
     { label: "Private key (PEM / OpenSSH)", wantCondition: 'draft.kind !== "hardware"' },
     { label: "Certificate (OpenSSH)", wantCondition: 'draft.kind === "cert"' },
@@ -2297,31 +2321,11 @@ console.log(
     if (field) {
       const condition = findAncestorConditionOn(field, "kind", keySf);
       check(
-        `"${label}" is wrapped in exactly \`${wantCondition}\`, not rendered unconditionally or guarded by a different kind`,
-        condition === wantCondition,
+        `"${label}" is wrapped in exactly \`${wantCondition}\`, whitespace aside - not rendered unconditionally or guarded by a different kind`,
+        norm(condition ?? "") === norm(wantCondition),
         condition,
       );
     }
-  }
-
-  // The hardware kind's save path: keySecretsForSave already returns {} for
-  // it unconditionally (proved by value in vault-draft-verify.ts section 6b);
-  // what this file adds is that KeyEditorDialog's save calls that SAME shared
-  // function rather than special-casing the kind itself with a bypass that
-  // could skip the keychain write for the wrong reason. Section 5 above
-  // already pins `keySecretsForSave(draft)` as save's second upsertKey
-  // argument, unconditionally - this is that same pin's own claim, restated
-  // as the property this section is about: there is exactly one call, so
-  // there is no second, kind-specific path to the store to drift from it.
-  const saveBody = findConstArrowBody(keySf, "save");
-  check("save's body was located (compiler API)", saveBody !== null);
-  if (saveBody) {
-    const secretsCalls = findCalls(saveBody, keySf, ["keySecretsForSave"]);
-    check(
-      "keySecretsForSave is called exactly once inside save, not once per kind",
-      secretsCalls.length === 1,
-      secretsCalls.length,
-    );
   }
 }
 

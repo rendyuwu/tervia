@@ -1017,9 +1017,9 @@ console.log(
   );
 
   // `hardware` reads a DIFFERENT flag (`fingerprint`, matched against
-  // ssh-agent at dial time - Decision 3): `hasPrivateKey` stays `false`
-  // forever for this kind, so an unbranched predicate would flag every
-  // working hardware entry as broken.
+  // ssh-agent at dial time): `hasPrivateKey` stays `false` forever for this
+  // kind by design (`VaultKeyKind` in `src/modules/vault/types.ts`), so an
+  // unbranched predicate would flag every working hardware entry as broken.
   ok(
     'a hardware key WITH a fingerprint is not missing its secret - "missing" means no agent identity to match',
     keyMissingSecret(aKey({ kind: "hardware", fingerprint: "SHA256:hw", hasPrivateKey: false })) ===

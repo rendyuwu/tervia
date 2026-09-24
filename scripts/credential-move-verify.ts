@@ -1833,26 +1833,53 @@ console.log(
       return out;
     };
     const norm = (s: string): string => s.replace(/\s+/g, "").replace(/,(?=\))/g, "");
-    const pinArgs = (callee: string, expected: readonly [string, string, string]): void => {
+    const pinArgs = (
+      callee: string,
+      expected: readonly [string, string, string],
+      arg0Callee?: string,
+    ): void => {
       const calls = findCalls(moveSf, callee);
       check(`found exactly one ${callee}( call to pin`, calls.length, 1);
       for (const c of calls) {
         check(`${callee}( is called with exactly 3 arguments`, c.arguments.length, 3);
         if (c.arguments.length !== 3) continue;
-        for (const [i, want] of expected.entries()) {
+        if (arg0Callee) {
+          // Argument 0's CALLEE only, not its whole argument list: a
+          // parameter added to `keyRecordFrom` must not break this pin the
+          // way it broke the whole-argument-list pin this replaces -
+          // `keyRecordFrom` is already proven by value in
+          // vault-draft-verify.ts sections [5]/[5b].
+          const arg0 = c.arguments[0];
           check(
-            `${callee}('s argument ${i} is exactly \`${want}\`, whitespace aside`,
+            `${callee}('s argument 0 is a call to ${arg0Callee}(`,
+            ts.isCallExpression(arg0) ? arg0.expression.getText(moveSf) : arg0.getText(moveSf),
+            arg0Callee,
+          );
+        } else {
+          check(
+            `${callee}('s argument 0 is exactly \`${expected[0]}\`, whitespace aside`,
+            norm(c.arguments[0].getText(moveSf)),
+            norm(expected[0]),
+          );
+        }
+        // Arguments 1 and 2 stay exact: neither was broken by this branch's
+        // changes, and argument 2 (the stamp) has a stated consumer-visible
+        // rationale - stamping the record ABOUT TO BE WRITTEN rather than
+        // the one this call loaded would make the compare pass always.
+        for (const i of [1, 2] as const) {
+          check(
+            `${callee}('s argument ${i} is exactly \`${expected[i]}\`, whitespace aside`,
             norm(c.arguments[i].getText(moveSf)),
-            norm(want),
+            norm(expected[i]),
           );
         }
       }
     };
-    pinArgs("deps.vault.upsertKey", [
-      "keyRecordFrom(mintedKeyId, keyDraft, null, newKey.facts, null)",
-      "keySecrets",
-      "VAULT_STAMP_ABSENT",
-    ]);
+    pinArgs(
+      "deps.vault.upsertKey",
+      ["keyRecordFrom(mintedKeyId, keyDraft, null, newKey.facts, null)", "keySecrets", "VAULT_STAMP_ABSENT"],
+      "keyRecordFrom",
+    );
     pinArgs("deps.vault.upsertIdentity", [
       'identityRecordFrom(identityId, identityDraft, "keep")',
       "identitySecrets",

@@ -870,8 +870,8 @@ console.log(
 {
   const h = harness();
   // A `cert` key still stores its SIGNING key inline, exactly like a `pem`
-  // key (Decision 2) - the certificate itself is a PLAIN field, never in the
-  // keychain.
+  // key - the certificate itself is a PLAIN field, never in the keychain
+  // (`VaultKeyKind` in `src/modules/vault/types.ts`).
   await h.vault.upsertKey(
     vaultKey({
       id: "k-cert",
@@ -890,8 +890,9 @@ console.log(
     }),
     {},
   );
-  // A `hardware` key stores NO secret at all (Decision 3) - `fingerprint` is
-  // the identifying fact matched against ssh-agent at dial time.
+  // A `hardware` key stores NO secret at all (`VaultKeyKind` in
+  // `src/modules/vault/types.ts`) - `fingerprint` is the identifying fact
+  // matched against ssh-agent at dial time.
   await h.vault.upsertKey(vaultKey({ id: "k-hw", kind: "hardware", fingerprint: "SHA256:hw" }), {});
   await h.vault.upsertIdentity(
     identity({
@@ -915,6 +916,24 @@ console.log(
       username: "frank",
       authMode: "key",
       keyId: "k-hw-blank",
+    }),
+    {},
+  );
+  // A `cert` record with no certificate at all - reachable from a
+  // hand-edited vault file or a trimmed-empty import field - the same
+  // "refused, not dialled silently" shape the hardware fixture above
+  // exercises for its own missing fact.
+  await h.vault.upsertKey(vaultKey({ id: "k-cert-blank", kind: "cert" }), {
+    privateKey: "PRIVATE-PEM",
+    passphrase: "pp",
+  });
+  await h.vault.upsertIdentity(
+    identity({
+      id: "i-cert-blank",
+      name: "cert, no certificate",
+      username: "grace",
+      authMode: "key",
+      keyId: "k-cert-blank",
     }),
     {},
   );
@@ -950,6 +969,12 @@ console.log(
     "a hardware-kind identity whose key records no fingerprint is refused, not dialled with no restriction",
     () => resolveSshAuth({ kind: "identity", identityId: "i-hw-blank" }, h.deps()),
     ["hardware", "fingerprint"],
+  );
+
+  await rejects(
+    "a cert-kind identity whose key records no certificate is refused, not dialled as a bare key",
+    () => resolveSshAuth({ kind: "identity", identityId: "i-cert-blank" }, h.deps()),
+    ["certificate"],
   );
 }
 
