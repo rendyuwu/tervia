@@ -45,7 +45,13 @@ export type SshTextClassification =
       /** `null` when the certificate never expires. */
       validBefore: number | null;
     }
-  | { kind: "publicKey"; algorithm: string; fingerprint: string; comment: string | null; publicKey: string }
+  | {
+      kind: "publicKey";
+      algorithm: string;
+      fingerprint: string;
+      comment: string | null;
+      publicKey: string;
+    }
   | { kind: "unsupported"; reason: string };
 
 export type KeyInspectState =
@@ -130,7 +136,9 @@ export type CertInspectState =
   | { kind: "notACertificate" }
   | { kind: "error"; message: string };
 
-export function describeCertClassification(classification: SshTextClassification): CertInspectState {
+export function describeCertClassification(
+  classification: SshTextClassification,
+): CertInspectState {
   if (classification.kind !== "certificate") return { kind: "notACertificate" };
   return {
     kind: "ok",

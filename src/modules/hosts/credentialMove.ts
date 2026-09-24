@@ -281,7 +281,9 @@ function inlineAuthMode(host: Host): VaultAuthMode {
 export function reusableVaultKey(keys: readonly VaultKey[], facts: VaultKeyFacts): VaultKey | null {
   const fingerprint = facts.fingerprint?.trim();
   if (!fingerprint) return null;
-  return keys.find((k) => !k.kind && k.hasPrivateKey && k.fingerprint?.trim() === fingerprint) ?? null;
+  return (
+    keys.find((k) => !k.kind && k.hasPrivateKey && k.fingerprint?.trim() === fingerprint) ?? null
+  );
 }
 
 /**

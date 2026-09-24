@@ -2325,7 +2325,6 @@ console.log(
   }
 }
 
-
 console.log(`\n${checked - failed}/${checked} vault-editor checks passed`);
 if (failed > 0) console.error(`${failed} check(s) FAILED.`);
 process.exit(failed === 0 ? 0 : 1);

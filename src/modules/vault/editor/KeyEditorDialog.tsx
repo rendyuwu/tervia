@@ -461,7 +461,9 @@ export function KeyEditorDialog({ target, onClose }: KeyEditorDialogProps): Reac
         if (draft.publicKey.trim() !== "") {
           facts = hardwareFactsFrom(await classifySshText(draft.publicKey));
           if (facts === null) {
-            setKeyRefusal("That is not a public key line. Pick a key from ssh-agent, or paste its `.pub` line.");
+            setKeyRefusal(
+              "That is not a public key line. Pick a key from ssh-agent, or paste its `.pub` line.",
+            );
             return;
           }
         }
@@ -627,10 +629,16 @@ export function KeyEditorDialog({ target, onClose }: KeyEditorDialogProps): Reac
 
               <Field label="Kind">
                 <div className="flex gap-1.5">
-                  <ToggleButton active={draft.kind === "pem"} onClick={() => patch({ kind: "pem" })}>
+                  <ToggleButton
+                    active={draft.kind === "pem"}
+                    onClick={() => patch({ kind: "pem" })}
+                  >
                     Private key
                   </ToggleButton>
-                  <ToggleButton active={draft.kind === "cert"} onClick={() => patch({ kind: "cert" })}>
+                  <ToggleButton
+                    active={draft.kind === "cert"}
+                    onClick={() => patch({ kind: "cert" })}
+                  >
                     Certificate
                   </ToggleButton>
                   <ToggleButton
@@ -651,103 +659,107 @@ export function KeyEditorDialog({ target, onClose }: KeyEditorDialogProps): Reac
 
               {draft.kind !== "hardware" ? (
                 <Field label="Private key (PEM / OpenSSH)">
-                <div className="flex flex-col gap-1">
-                  <Textarea
-                    value={draft.privateKey}
-                    onChange={(e) => {
-                      patch({ privateKey: e.target.value });
-                      // A stale panel must not sit under a body that has since
-                      // been edited - what it shows would describe the old text.
-                      invalidateInspection();
-                    }}
-                    placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
-                    spellCheck={false}
-                    className="h-32 font-mono text-[11px]"
-                  />
-                  <div className="flex items-center justify-between gap-2">
+                  <div className="flex flex-col gap-1">
+                    <Textarea
+                      value={draft.privateKey}
+                      onChange={(e) => {
+                        patch({ privateKey: e.target.value });
+                        // A stale panel must not sit under a body that has since
+                        // been edited - what it shows would describe the old text.
+                        invalidateInspection();
+                      }}
+                      placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
+                      spellCheck={false}
+                      className="h-32 font-mono text-[11px]"
+                    />
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-1.5">
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="h-7 px-2 text-[11px]"
+                          onClick={() => void pickKeyFile()}
+                        >
+                          Import from file…
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="h-7 px-2 text-[11px]"
+                          onClick={() => void checkKey(draft.privateKey, draft.passphrase)}
+                          disabled={inspected.kind === "checking" || !replacingBody}
+                        >
+                          Check key
+                        </Button>
+                      </div>
+                      {imported.kind === "loaded" ? (
+                        <span className="text-muted-foreground truncate text-[10.5px]">
+                          Loaded {imported.path}
+                        </span>
+                      ) : imported.kind === "error" ? (
+                        <span className="text-destructive truncate text-[10.5px]">
+                          {imported.message}
+                        </span>
+                      ) : (
+                        <span className="text-muted-foreground text-[10.5px]">
+                          Paste, or import a .pem / key file
+                        </span>
+                      )}
+                    </div>
                     <div className="flex items-center gap-1.5">
+                      <ToggleButton
+                        active={algorithm === "ed25519"}
+                        onClick={() => setAlgorithm("ed25519")}
+                      >
+                        Ed25519
+                      </ToggleButton>
+                      <ToggleButton
+                        active={algorithm === "ecdsa-p256"}
+                        onClick={() => setAlgorithm("ecdsa-p256")}
+                      >
+                        ECDSA P-256
+                      </ToggleButton>
+                      <ToggleButton
+                        active={algorithm === "rsa-4096"}
+                        onClick={() => setAlgorithm("rsa-4096")}
+                      >
+                        RSA-4096
+                      </ToggleButton>
                       <Button
                         type="button"
                         variant="outline"
                         size="sm"
                         className="h-7 px-2 text-[11px]"
-                        onClick={() => void pickKeyFile()}
+                        onClick={() => void generateKey()}
+                        disabled={generating || replacingBody}
                       >
-                        Import from file…
-                      </Button>
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        className="h-7 px-2 text-[11px]"
-                        onClick={() => void checkKey(draft.privateKey, draft.passphrase)}
-                        disabled={inspected.kind === "checking" || !replacingBody}
-                      >
-                        Check key
+                        {generating ? "Generating…" : "Generate"}
                       </Button>
                     </div>
-                    {imported.kind === "loaded" ? (
-                      <span className="text-muted-foreground truncate text-[10.5px]">
-                        Loaded {imported.path}
-                      </span>
-                    ) : imported.kind === "error" ? (
-                      <span className="text-destructive truncate text-[10.5px]">
-                        {imported.message}
-                      </span>
-                    ) : (
+                    <span className="text-muted-foreground text-[10.5px]">
+                      Fill in the passphrase below first to encrypt the new key; generating replaces
+                      the stored key on Save.
+                    </span>
+                    {replacingBody ? (
                       <span className="text-muted-foreground text-[10.5px]">
-                        Paste, or import a .pem / key file
+                        Clear the key field above to generate a new pair instead.
                       </span>
-                    )}
-                  </div>
-                  <div className="flex items-center gap-1.5">
-                    <ToggleButton
-                      active={algorithm === "ed25519"}
-                      onClick={() => setAlgorithm("ed25519")}
-                    >
-                      Ed25519
-                    </ToggleButton>
-                    <ToggleButton
-                      active={algorithm === "ecdsa-p256"}
-                      onClick={() => setAlgorithm("ecdsa-p256")}
-                    >
-                      ECDSA P-256
-                    </ToggleButton>
-                    <ToggleButton
-                      active={algorithm === "rsa-4096"}
-                      onClick={() => setAlgorithm("rsa-4096")}
-                    >
-                      RSA-4096
-                    </ToggleButton>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      className="h-7 px-2 text-[11px]"
-                      onClick={() => void generateKey()}
-                      disabled={generating || replacingBody}
-                    >
-                      {generating ? "Generating…" : "Generate"}
-                    </Button>
+                    ) : null}
+                    <KeyInspectPanel state={inspected} />
                   </div>
                   <span className="text-muted-foreground text-[10.5px]">
-                    Fill in the passphrase below first to encrypt the new key; generating replaces
-                    the stored key on Save.
+                    {privateKeyHelp(mode)}
                   </span>
-                  {replacingBody ? (
-                    <span className="text-muted-foreground text-[10.5px]">
-                      Clear the key field above to generate a new pair instead.
-                    </span>
-                  ) : null}
-                  <KeyInspectPanel state={inspected} />
-                </div>
-                <span className="text-muted-foreground text-[10.5px]">{privateKeyHelp(mode)}</span>
-                {/* The encrypted-key refusal from `save`, not the generic
+                  {/* The encrypted-key refusal from `save`, not the generic
                     `error` line at the bottom - it names this field, and its
                     "Enter it below" points at the passphrase field right
                     under this one. */}
-                {keyRefusal ? <p className="text-destructive text-[10.5px]">{keyRefusal}</p> : null}
-              </Field>
+                  {keyRefusal ? (
+                    <p className="text-destructive text-[10.5px]">{keyRefusal}</p>
+                  ) : null}
+                </Field>
               ) : null}
 
               {draft.kind === "cert" ? (
@@ -806,7 +818,9 @@ export function KeyEditorDialog({ target, onClose }: KeyEditorDialogProps): Reac
                 <Field label="Hardware key (ssh-agent)">
                   <div className="flex flex-col gap-1.5">
                     {agentKeys.kind === "checking" ? (
-                      <span className="text-muted-foreground text-[10.5px]">Checking ssh-agent…</span>
+                      <span className="text-muted-foreground text-[10.5px]">
+                        Checking ssh-agent…
+                      </span>
                     ) : agentKeys.kind === "error" ? (
                       <span className="text-destructive text-[10.5px]">{agentKeys.message}</span>
                     ) : agentKeys.kind === "ok" && agentKeys.keys.length > 0 ? (
@@ -869,8 +883,8 @@ export function KeyEditorDialog({ target, onClose }: KeyEditorDialogProps): Reac
                   </div>
                   <span className="text-muted-foreground text-[10.5px]">
                     Authentication is restricted to this one identity - the agent, and whatever
-                    holds this fingerprint for it (a hardware token, or another key), is what
-                    signs the handshake. Nothing here is stored in the keychain.
+                    holds this fingerprint for it (a hardware token, or another key), is what signs
+                    the handshake. Nothing here is stored in the keychain.
                   </span>
                 </Field>
               ) : null}
@@ -1056,7 +1070,9 @@ function CertInspectPanel({ state }: { state: CertInspectState }): ReactNode {
     return <span className="text-muted-foreground text-[10.5px]">Reading certificate…</span>;
   }
   if (state.kind === "notACertificate") {
-    return <span className="text-destructive text-[10.5px]">That is not an OpenSSH certificate.</span>;
+    return (
+      <span className="text-destructive text-[10.5px]">That is not an OpenSSH certificate.</span>
+    );
   }
   if (state.kind === "error") {
     return <span className="text-destructive text-[10.5px]">{state.message}</span>;
@@ -1084,7 +1100,11 @@ function CertInspectPanel({ state }: { state: CertInspectState }): ReactNode {
           Principals {state.principals.join(", ")}
         </span>
       ) : null}
-      <span className={expired ? "text-destructive text-[10.5px]" : "text-muted-foreground text-[10.5px]"}>
+      <span
+        className={
+          expired ? "text-destructive text-[10.5px]" : "text-muted-foreground text-[10.5px]"
+        }
+      >
         {state.validBefore === null
           ? "Never expires"
           : `Valid until ${new Date(state.validBefore * 1000).toLocaleString()}${expired ? " (expired)" : ""}`}

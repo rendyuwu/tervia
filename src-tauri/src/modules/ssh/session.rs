@@ -3287,9 +3287,9 @@ mod chain_tests {
     #[ignore = "needs /usr/sbin/sshd"]
     #[cfg(unix)]
     fn cert_authenticates_against_a_real_sshd_trusting_only_the_ca() {
+        use getrandom::SysRng;
         use russh::keys::ssh_key::certificate::{Builder, CertType};
         use russh::keys::ssh_key::rand_core::UnwrapErr;
-        use getrandom::SysRng;
 
         let sshd_path = std::path::Path::new("/usr/sbin/sshd");
         if !sshd_path.exists() {

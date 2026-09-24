@@ -648,10 +648,14 @@ fn ssh_key_classify_inner(text: &str) -> Result<SshTextClassification, String> {
     // public key.
     let first_word = trimmed.split_whitespace().next().unwrap_or("");
     if first_word.ends_with("-cert-v01@openssh.com") {
-        let cert = Certificate::from_openssh(trimmed).map_err(|_| ERR_CERT_UNREADABLE.to_string())?;
+        let cert =
+            Certificate::from_openssh(trimmed).map_err(|_| ERR_CERT_UNREADABLE.to_string())?;
         let valid_before = cert.valid_before();
         return Ok(SshTextClassification::Certificate {
-            ca_fingerprint: cert.signature_key().fingerprint(HashAlg::Sha256).to_string(),
+            ca_fingerprint: cert
+                .signature_key()
+                .fingerprint(HashAlg::Sha256)
+                .to_string(),
             fingerprint: cert.public_key().fingerprint(HashAlg::Sha256).to_string(),
             key_id: cert.key_id().to_string(),
             principals: cert.valid_principals().to_vec(),
@@ -662,8 +666,8 @@ fn ssh_key_classify_inner(text: &str) -> Result<SshTextClassification, String> {
     let (format, key_text) = classify(trimmed);
     match format {
         KeyFormat::PublicKey => {
-            let key =
-                PublicKey::from_openssh(key_text).map_err(|_| ERR_PUBLIC_KEY_UNREADABLE.to_string())?;
+            let key = PublicKey::from_openssh(key_text)
+                .map_err(|_| ERR_PUBLIC_KEY_UNREADABLE.to_string())?;
             let comment = key.comment().trim();
             Ok(SshTextClassification::PublicKey {
                 algorithm: key.algorithm().to_string(),

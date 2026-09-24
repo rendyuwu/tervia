@@ -198,7 +198,13 @@ export type SshTextClassification =
       /** `null` when the certificate never expires. */
       validBefore: number | null;
     }
-  | { kind: "publicKey"; algorithm: string; fingerprint: string; comment: string | null; publicKey: string }
+  | {
+      kind: "publicKey";
+      algorithm: string;
+      fingerprint: string;
+      comment: string | null;
+      publicKey: string;
+    }
   | { kind: "unsupported"; reason: string };
 
 /** Classify pasted text as a private key, an OpenSSH certificate, a public
