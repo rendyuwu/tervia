@@ -104,11 +104,11 @@ export function HostCard({
         // this covers the unfiltered case); without contain-intrinsic-size
         // an off-screen card lays out at 0px and the scrollbar jumps while
         // the user scrolls - it looks like dead weight and is load-bearing.
-        // 124px, not 100px, is the estimate below: a tagged single-line card
-        // is the more common shape this covers, and overshooting an
-        // untagged card's real height is a smaller visible jump than
-        // undershooting a tagged one's.
-        "[contain-intrinsic-size:auto_124px] [content-visibility:auto]",
+        // The estimate stays at the untagged 100px: an under-estimate only
+        // grows the scrollbar as tagged cards paint in, while an over-estimate
+        // jumps it backwards, and `auto` remembers each card's real size once
+        // it has painted.
+        "[contain-intrinsic-size:auto_100px] [content-visibility:auto]",
       )}
     >
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
