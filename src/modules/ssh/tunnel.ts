@@ -37,8 +37,11 @@
 
 import {
   closeSshForward,
+  closeSshRemoteForward,
   openSsh,
   openSshForward,
+  openSshRemoteForward,
+  openSshSocks,
   type SshJumpHop,
   type SshSession,
 } from "./bridge";
@@ -396,6 +399,12 @@ function dropSession(connectionId: string): void {
   for (const key of [...forwards.keys()]) {
     if (key.startsWith(`${connectionId}|`)) forwards.delete(key);
   }
+  for (const key of [...remoteForwards.keys()]) {
+    if (key.startsWith(`${connectionId}|`)) remoteForwards.delete(key);
+  }
+  for (const key of [...socksForwards.keys()]) {
+    if (key.startsWith(`${connectionId}|`)) socksForwards.delete(key);
+  }
 }
 
 /**
@@ -576,6 +585,213 @@ export async function closeForwardForConnection(
     //
     // The `.catch` stays: a dial that died has no listener to close, and that is
     // not a failure for whoever is letting go of it.
+    await entry.forward
+      .then((f) => closeSshForward(f.sessionId, f.localPort, f.generation))
+      .catch(() => {});
+  }
+  releaseSession(connectionId);
+}
+
+/**
+ * A live `-R` remote forward: the port the SERVER bound, and the token this
+ * module needs back to release it. Mirrors {@link SshForward}'s shape - the
+ * pair (`sessionId`, `claim`) means the same thing here it does there - the
+ * one difference is that `boundPort` names a port on the SERVER rather than
+ * on this machine.
+ */
+export type SshRemoteForward = {
+  sessionId: number;
+  boundPort: number;
+  generation: number;
+  claim: number;
+};
+
+/** `-R` forwards already open on a session, keyed by
+ *  `connId|bindAddress|bindPort|localHost|localPort` - the same
+ *  every-component-of-the-target reasoning {@link forwardKey} gives for `-L`,
+ *  except the port that may legally be 0 here is `bindPort` (the SERVER lets
+ *  the OS pick), not the local one. */
+const remoteForwards = new Map<
+  string,
+  { forward: Promise<SshRemoteForward>; refs: number; claim: number }
+>();
+
+function remoteForwardKey(
+  connectionId: string,
+  bindAddress: string,
+  bindPort: number,
+  localHost: string,
+  localPort: number,
+): string {
+  return `${connectionId}|${bindAddress}|${bindPort}|${localHost}|${localPort}`;
+}
+
+/**
+ * Ask `connectionId`'s SSH server to listen on `bindAddress:bindPort`
+ * (`bindPort` 0 lets the SERVER pick) and route every connection it accepts
+ * back to `localHost:localPort` on THIS machine. Shares {@link sessionFor}'s
+ * session pool and host-key handling with {@link openForwardForConnection} -
+ * see that function's own doc for the reference-counting contract this one
+ * follows identically, one port-ownership swap aside.
+ */
+export function openRemoteForwardForConnection(
+  connectionId: string,
+  bindAddress: string,
+  bindPort: number,
+  localHost: string,
+  localPort: number,
+  opts: SshForwardOptions = {},
+): Promise<SshRemoteForward> {
+  const host = localHost.trim();
+  if (!host) return Promise.reject(new Error("ssh: remote forward needs a local target host"));
+  if (!Number.isInteger(localPort) || localPort <= 0 || localPort > 65535) {
+    return Promise.reject(new Error("ssh: remote forward needs a valid local target port"));
+  }
+  const address = bindAddress.trim() || "localhost";
+  const key = remoteForwardKey(connectionId, address, bindPort, host, localPort);
+
+  const claimed = (pending: Promise<SshRemoteForward>): Promise<SshRemoteForward> =>
+    pending.catch((e: unknown) => {
+      if (remoteForwards.get(key)?.forward === pending) remoteForwards.delete(key);
+      releaseSession(connectionId);
+      throw e;
+    });
+
+  const existing = remoteForwards.get(key);
+  const liveSession = sessions.get(connectionId);
+  if (existing && liveSession) {
+    liveSession.refs += 1;
+    existing.refs += 1;
+    watchPrompts(liveSession.prompts, opts.onHostKeyPrompt);
+    return claimed(existing.forward);
+  }
+  if (existing) remoteForwards.delete(key);
+
+  const session = sessionFor(connectionId, opts);
+  const claim = nextClaim++;
+  const pending = (async () => {
+    const live = await session;
+    const { boundPort, generation } = await openSshRemoteForward(
+      live.id,
+      address,
+      bindPort,
+      host,
+      localPort,
+    );
+    return { sessionId: live.id, boundPort, generation, claim };
+  })();
+  remoteForwards.set(key, { forward: pending, refs: 1, claim });
+  return claimed(pending);
+}
+
+/** Release the tunnel a caller opened with {@link openRemoteForwardForConnection},
+ *  naming it with `claim` and every field that formed its key - mirrors
+ *  {@link closeForwardForConnection}'s own contract exactly, `bindPort` in
+ *  place of the local port. */
+export async function closeRemoteForwardForConnection(
+  connectionId: string,
+  bindAddress: string,
+  bindPort: number,
+  localHost: string,
+  localPort: number,
+  claim: number,
+): Promise<void> {
+  const address = bindAddress.trim() || "localhost";
+  const key = remoteForwardKey(connectionId, address, bindPort, localHost.trim(), localPort);
+  const entry = remoteForwards.get(key);
+  if (!entry) return;
+  if (entry.claim !== claim) return;
+  if (entry.refs === 0) return;
+  entry.refs -= 1;
+  if (entry.refs === 0) {
+    if (remoteForwards.get(key) === entry) remoteForwards.delete(key);
+    await entry.forward
+      .then((f) => closeSshRemoteForward(f.sessionId, address, f.boundPort, f.generation))
+      .catch(() => {});
+  }
+  releaseSession(connectionId);
+}
+
+/** A live `-D` SOCKS5 listener - mirrors {@link SshForward}'s shape exactly;
+ *  `localPort` is the SOCKS5 listen port THIS MACHINE bound. */
+export type SshSocksForward = {
+  sessionId: number;
+  localPort: number;
+  generation: number;
+  claim: number;
+};
+
+/** `-D` listeners already open on a session, keyed by `connId|socks|localPort` -
+ *  a `-D` rule has no dial target of its own (a SOCKS5 CONNECT names one per
+ *  connection), so the port is the whole target this map needs to key on. */
+const socksForwards = new Map<
+  string,
+  { forward: Promise<SshSocksForward>; refs: number; claim: number }
+>();
+
+function socksKey(connectionId: string, localPort: number): string {
+  return `${connectionId}|socks|${localPort}`;
+}
+
+/**
+ * Start a `-D` SOCKS5 listener on `connectionId`'s SSH session, on
+ * `127.0.0.1:localPort` (0 lets the OS pick). Shares {@link sessionFor}'s
+ * session pool and host-key handling with {@link openForwardForConnection} -
+ * see that function's own doc for the reference-counting contract this one
+ * follows identically.
+ */
+export function openSocksForConnection(
+  connectionId: string,
+  localPort: number,
+  opts: SshForwardOptions = {},
+): Promise<SshSocksForward> {
+  const key = socksKey(connectionId, localPort);
+
+  const claimed = (pending: Promise<SshSocksForward>): Promise<SshSocksForward> =>
+    pending.catch((e: unknown) => {
+      if (socksForwards.get(key)?.forward === pending) socksForwards.delete(key);
+      releaseSession(connectionId);
+      throw e;
+    });
+
+  const existing = socksForwards.get(key);
+  const liveSession = sessions.get(connectionId);
+  if (existing && liveSession) {
+    liveSession.refs += 1;
+    existing.refs += 1;
+    watchPrompts(liveSession.prompts, opts.onHostKeyPrompt);
+    return claimed(existing.forward);
+  }
+  if (existing) socksForwards.delete(key);
+
+  const session = sessionFor(connectionId, opts);
+  const claim = nextClaim++;
+  const pending = (async () => {
+    const live = await session;
+    const { boundPort, generation } = await openSshSocks(live.id, localPort);
+    return { sessionId: live.id, localPort: boundPort, generation, claim };
+  })();
+  socksForwards.set(key, { forward: pending, refs: 1, claim });
+  return claimed(pending);
+}
+
+/** Release the tunnel a caller opened with {@link openSocksForConnection},
+ *  naming it with `claim` - mirrors {@link closeForwardForConnection}'s own
+ *  contract exactly. Closes through the SAME `closeSshForward` `-L` uses: a
+ *  SOCKS5 listener lives in the backend's identical per-session forward map. */
+export async function closeSocksForConnection(
+  connectionId: string,
+  localPort: number,
+  claim: number,
+): Promise<void> {
+  const key = socksKey(connectionId, localPort);
+  const entry = socksForwards.get(key);
+  if (!entry) return;
+  if (entry.claim !== claim) return;
+  if (entry.refs === 0) return;
+  entry.refs -= 1;
+  if (entry.refs === 0) {
+    if (socksForwards.get(key) === entry) socksForwards.delete(key);
     await entry.forward
       .then((f) => closeSshForward(f.sessionId, f.localPort, f.generation))
       .catch(() => {});

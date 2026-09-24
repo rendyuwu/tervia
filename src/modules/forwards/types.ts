@@ -10,6 +10,8 @@
 export const FORWARDS_STORE_PATH = "tervia-forwards.json";
 export const FORWARDS_KEY = "rules";
 
+export type ForwardRuleType = "remote" | "dynamic";
+
 export type ForwardRule = {
   /** Opaque, `f-` prefixed. */
   id: string;
@@ -17,11 +19,40 @@ export type ForwardRule = {
   /** The SSH host this rides. Refused at the write unless it names a saved host
    *  whose protocol is "ssh" - see `store.ts`'s `upsertRule`. */
   hostId: string;
-  /** 0 means "let the OS pick", which the page then shows once bound. Legal only
-   *  here - `remotePort` has no such meaning and refuses 0 at the write. */
+  /** Absent means a local (`-L`) forward - the shape every field below this
+   *  one already had, unchanged. `"remote"` is `-R`, `"dynamic"` is `-D`.
+   *  Adopted at read time, no migration - see the footer. */
+  type?: ForwardRuleType;
+  /**
+   * `-L`: the local port THIS MACHINE binds; 0 means "let the OS pick", which
+   *  the page then shows once bound.
+   * `-D`: the local SOCKS5 listen port THIS MACHINE binds; the same 0-means-
+   *  auto convention as `-L`'s.
+   * `-R`: unused - the port `-R` binds is on the SERVER; see `bindPort`.
+   */
   localPort: number;
+  /**
+   * `-L`: the host each accepted connection is dialled to, resolved by the
+   *  SSH SERVER.
+   * `-R`: the host THIS MACHINE dials for each connection the server
+   *  accepts - same ROLE as `-L`'s (the thing dialled once a connection
+   *  arrives), just dialled by the other party. Never blank.
+   * `-D`: unused - a SOCKS5 CONNECT names its own destination per connection.
+   */
   remoteHost: string;
+  /** Paired with {@link remoteHost}; never 0 on either `-L` or `-R` - the
+   *  side that is DIALLED is never "let something else pick". Unused for
+   *  `-D`. */
   remotePort: number;
+  /** `-R` only: the address the SERVER's listener binds to. Blank behaves
+   *  as "localhost" - normalised where a rule is actually opened, not here -
+   *  and `GatewayPorts no` on an ordinary server restricts the bind to
+   *  loopback regardless of what is asked for. Absent for `-L`/`-D`. */
+  bindAddress?: string;
+  /** `-R` only: the port the SERVER listens on; 0 means "let the SERVER
+   *  pick", surfaced once bound the same way `-L`'s auto `localPort` is.
+   *  Absent for `-L`/`-D`. */
+  bindPort?: number;
   /**
    * Bring this rule up when that host's terminal connects, on the TERMINAL's own
    * session - which dies with the tab.
@@ -31,6 +62,10 @@ export type ForwardRule = {
    * to ride the connection record itself, and splitting rules into their own
    * store is what makes a rule editable without the host it rides
    * being on screen, at the cost of needing this flag to say when it starts.
+   *
+   * `-R`/`-D` rules do not ride this path yet - `autostart.ts`'s
+   * `startHostForwards` skips them with a banner rather than starting them;
+   * see `KNOWN-LIMITS.md`.
    */
   startWithHost: boolean;
   description?: string;
@@ -44,7 +79,8 @@ export type ForwardRule = {
 /** What a rule is called in a tombstone's `kind`. */
 export const RULE_TOMBSTONE_KIND = "rule";
 
-// No `type: "local"` field: only a local-to-remote forward is modelled today.
-// A remote or dynamic variant would arrive by read-time adoption rather than a
-// migration - the same shape `hosts/types.ts`'s `hostPins` already uses for its
-// own read-time migration.
+// A remote (`-R`) or dynamic (`-D`) forward is `type: "remote"` / `"dynamic"`
+// on this same record, adopted at read time rather than by a migration - the
+// same shape `hosts/types.ts`'s `hostPins` already uses for its own read-time
+// migration. See `type`'s own doc above for the vocabulary, and `store.ts`'s
+// `upsertRule` for what each type refuses.

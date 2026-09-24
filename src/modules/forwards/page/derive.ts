@@ -114,7 +114,15 @@ export function ruleRows(
       rule,
       hostName,
       hostDangling: hostsLoaded && host === undefined,
-      route: `${localPortLabel(rule, undefined)} → ${hostName} → ${rule.remoteHost}:${rule.remotePort}`,
+      // `-D` HAS NO DIAL TARGET AT ALL - a SOCKS5 CONNECT names one per
+      // connection - so the shared `-L`/`-R` formula below would print a
+      // blank host and `:0` for it, which reads as broken rather than merely
+      // incomplete. `-R`'s `remoteHost`/`remotePort` keep the shared formula:
+      // they hold its LOCAL dial target, the same role `-L`'s hold.
+      route:
+        rule.type === "dynamic"
+          ? `SOCKS ${localPortLabel(rule, undefined)} → ${hostName}`
+          : `${localPortLabel(rule, undefined)} → ${hostName} → ${rule.remoteHost}:${rule.remotePort}`,
     };
   });
 }

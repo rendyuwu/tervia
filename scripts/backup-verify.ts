@@ -2225,6 +2225,78 @@ check(
   false,
 );
 
+console.log("\n[rules type -D] a SOCKS port is the only field sanitizeRule cares about");
+check("a good -D row survives, with no remoteHost/remotePort refusal", sanitizeRule(rule({ type: "dynamic", localPort: 0, remoteHost: "", remotePort: 0 })), {
+  id: "f-1",
+  name: "postgres",
+  hostId: "h-1",
+  type: "dynamic",
+  localPort: 0,
+  remoteHost: "",
+  remotePort: 0,
+  startWithHost: false,
+});
+check(
+  "an invalid SOCKS port drops the row, same predicate as -L's localPort",
+  [
+    sanitizeRule(rule({ type: "dynamic", localPort: -1 })),
+    sanitizeRule(rule({ type: "dynamic", localPort: 65536 })),
+  ],
+  [null, null],
+);
+
+console.log("\n[rules type -R] the local target host/port, and an optional bind address/port");
+check(
+  "a good -R row survives, remotePort read as the LOCAL TARGET port",
+  sanitizeRule(
+    rule({ type: "remote", localPort: 0, remoteHost: "127.0.0.1", remotePort: 8080, bindAddress: "0.0.0.0", bindPort: 0 }),
+  ),
+  {
+    id: "f-1",
+    name: "postgres",
+    hostId: "h-1",
+    type: "remote",
+    localPort: 0,
+    remoteHost: "127.0.0.1",
+    remotePort: 8080,
+    bindAddress: "0.0.0.0",
+    bindPort: 0,
+    startWithHost: false,
+  },
+);
+check(
+  "a -R row with no bindAddress/bindPort at all is still good - both are optional",
+  has(sanitizeRule(rule({ type: "remote", remoteHost: "127.0.0.1", remotePort: 22 })) ?? {}, "bindPort"),
+  false,
+);
+check(
+  "a -R row's target port 0 is refused - it is dialled, same as -L's remotePort",
+  sanitizeRule(rule({ type: "remote", remoteHost: "127.0.0.1", remotePort: 0 })),
+  null,
+);
+check(
+  "a -R row's blank target host is refused",
+  sanitizeRule(rule({ type: "remote", remoteHost: "  ", remotePort: 22 })),
+  null,
+);
+check(
+  "a -R row's invalid bindPort is refused, only when one is present",
+  sanitizeRule(rule({ type: "remote", remoteHost: "127.0.0.1", remotePort: 22, bindPort: 65536 })),
+  null,
+);
+
+console.log("\n[rules unknown type] a type this build does not recognise drops just that row");
+check(
+  "a future build's fourth type is dropped, not a hard failure of anything else",
+  sanitizeRule(rule({ type: "streamlocal" })),
+  null,
+);
+check(
+  "a non-string type is dropped the same way",
+  sanitizeRule(rule({ type: 1 })),
+  null,
+);
+
 console.log("\n[rule hosts] a rule rides an SSH session, so it needs one that will be there");
 // Two refusals, and both are `upsertRule`'s: a `hostId` naming no host at all, and
 // a `hostId` naming an RDP host, which has no session for a forward to ride. Both
