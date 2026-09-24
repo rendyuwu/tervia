@@ -295,6 +295,27 @@ which names the decision and its reason.
 calculus in the doc comment is no longer about two call sites and should be
 re-run.
 
+### The command palette's `#` mode finds a saved host but cannot create one, and no check sees how it builds its rows
+
+**Accepted state.** `#` in the Command Palette ranks saved hosts with the same
+`rankHosts` over `searchRows` the header quick-connect uses. A query that
+matches no saved host only shows "No matching host": the header's ad-hoc path,
+where a parseable `user@host` opens the host editor prefilled, is not offered
+there. Separately, `[two surfaces]` in `hosts-search-verify.ts` reads only
+`HeaderQuickConnect.tsx` and `HostsPage.tsx`, so a palette that stopped calling
+`searchRows` and mapped hosts by hand would drift from the header with no check
+failing. Nothing in the suite mounts a component, so the palette's rows cannot
+be checked by rendering them.
+
+**Carried by.** `HostResults`' doc comment and the `rankedHosts` memo in
+`CommandPalette.tsx`.
+
+**Trigger.** A request for the header's create path from the palette: reuse
+`parseAdHocTarget` and `requestHostEditor` as `HeaderQuickConnect`'s
+`handleKeyDown` does, behind an `onOpenHostsPage` prop like the header's. For
+the unchecked row assembly: a component-test harness landing, at which point
+the palette's rows can be checked by rendering.
+
 ## Keychain and secrets
 
 ### The orphan sweep cannot see a legacy Windows credential, and on macOS it can see another install's

@@ -184,7 +184,7 @@ modules.
 | `statusbar/`      | Bottom bar, cwd breadcrumb, SSH route pill, zoom control, right-column toggles.                                                                                                         |
 | `rightPanel/`     | Which sidebar sections are currently docked into the right column, and where each section is placed.                                                                                    |
 | `shortcuts/`      | Keymap catalog, global shortcut dispatch, and the shared command registry the palette runs against.                                                                                     |
-| `commandPalette/` | Ctrl+Shift+P palette over that registry, with `@` switching it to `fs_search` file search.                                                                                              |
+| `commandPalette/` | Ctrl+Shift+P palette over that registry, with `@` switching it to `fs_search` file search and `#` to saved-host search (`rankHosts` over `searchRows`).                                 |
 | `settings/`       | Shared settings store and preferences (state layer read by every window).                                                                                                               |
 | `theme/`          | `next-themes`-style provider plus the custom-theme runtime.                                                                                                                             |
 | `scm/`            | Thin frontend for the Rust `git_*` commands: status, ignored list, branch, log. No panel — the explorer's decorations and the workspaces panel's branch display are the only consumers. |

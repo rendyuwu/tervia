@@ -1,6 +1,12 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Command as CommandPrimitive } from "cmdk";
-import { CommandDialog, CommandEmpty, CommandGroup, CommandItem } from "@/components/ui/command";
+import {
+  CommandDialog,
+  CommandEmpty,
+  CommandGroup,
+  CommandItem,
+  CommandShortcut,
+} from "@/components/ui/command";
 import { InputGroup, InputGroupAddon } from "@/components/ui/input-group";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import {
@@ -85,6 +91,12 @@ function CommandPaletteImpl({
       setQuery("");
       return;
     }
+    // Reopened inside the close animation: the content never unmounted, so
+    // `onCloseAutoFocus` never fired and the action picked on the way out is
+    // still waiting. Run it now rather than on whichever close comes next.
+    const run = pending.current;
+    pending.current = null;
+    run?.();
     const t = setTimeout(() => inputRef.current?.focus(), 0);
     return () => clearTimeout(t);
   }, [open]);
@@ -324,7 +336,9 @@ function FileResults({
         <CommandItem key={hit.path} value={hit.path} onSelect={() => onPick(hit.path)}>
           <FileGlyph name={hit.name} />
           <span className="truncate">{hit.name}</span>
-          <span className="text-muted-foreground ml-auto truncate pl-3 text-[11px]">{hit.rel}</span>
+          <CommandShortcut className="truncate pl-3 text-[11px] tracking-normal">
+            {hit.rel}
+          </CommandShortcut>
         </CommandItem>
       ))}
     </CommandGroup>
@@ -336,7 +350,7 @@ function FileResults({
  * `rankHosts` order and must stay in it: the palette turns cmdk's own filter off
  * in this mode, so DOM order is rank order and Enter connects the top match, the
  * same host the header quick-connect would. No ad-hoc `user@host` create path
- * here; that stays `HeaderQuickConnect`'s.
+ * here; that stays `HeaderQuickConnect`'s (accepted in KNOWN-LIMITS.md).
  */
 function HostResults({
   ranked,
@@ -360,12 +374,12 @@ function HostResults({
         const Icon = row.host.protocol === "ssh" ? Server : Monitor;
         return (
           <CommandItem key={row.host.id} value={row.host.id} onSelect={() => onPick(row.host)}>
-            <Icon size={14} strokeWidth={1.75} className="text-muted-foreground shrink-0" />
+            <Icon strokeWidth={1.75} className="text-muted-foreground size-3.5 shrink-0" />
             <span className="truncate">{row.host.name}</span>
-            <span className="text-muted-foreground ml-auto truncate pl-3 text-[11px]">
+            <CommandShortcut className="truncate pl-3 text-[11px] tracking-normal">
               {row.username ? `${row.username}@` : ""}
               {row.host.host}
-            </span>
+            </CommandShortcut>
           </CommandItem>
         );
       })}

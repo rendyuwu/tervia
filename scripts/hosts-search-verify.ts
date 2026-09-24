@@ -1,20 +1,21 @@
 /**
- * Self-check for the host search ranking shared by the Hosts page search box
- * and the header quick-connect.
+ * Self-check for the host search ranking shared by the Hosts page search box,
+ * the header quick-connect and the command palette's `#` mode.
  * Run: `pnpm verify` (or `npx tsx scripts/hosts-search-verify.ts` to iterate).
  *
- * The whole point of ONE ranking function with two mount points is that the
- * page and the header can never show a different "top match" for the same
- * query. That guarantee has two halves, and the tier checks are neither of them:
+ * The whole point of ONE ranking function shared by every mount point is that
+ * no two of them can show a different "top match" for the same query. That
+ * guarantee has two halves, and the tier checks are neither of them:
  *
  *   The tie-break chain is TOTAL, so a shuffled input produces the identical
  *   output order every time. [totality] below.
  *
- *   Both mount points build their ROWS the same way. They did not - the header
- *   resolved a username inline and the page resolved it through the vault - which
- *   is the whole of [two surfaces] below and the reason `searchRows` moved into
- *   `search.ts`. Sharing `rankHosts` alone was never enough: it cannot see a
- *   difference in what it was handed.
+ *   Every mount point builds its ROWS the same way. The header and the page did
+ *   not - the header resolved a username inline and the page resolved it through
+ *   the vault - which is the whole of [two surfaces] below (it reads those two
+ *   files only) and the reason `searchRows` moved into `search.ts`. Sharing
+ *   `rankHosts` alone was never enough: it cannot see a difference in what it
+ *   was handed.
  */
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
