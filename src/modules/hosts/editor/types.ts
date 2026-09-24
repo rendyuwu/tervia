@@ -17,6 +17,10 @@ export type SharedDraft = {
   /** "" = no group. A group is CHOSEN here and created on the Hosts page. */
   groupId: string;
   description: string;
+  /** Unnormalised: `TagsInput` keeps whatever the user has added so far, and
+   *  the save path runs it through `normalizeHostTags` once, the same as
+   *  every other writer. */
+  tags: readonly string[];
 };
 
 export type SshCredentialDraft = {

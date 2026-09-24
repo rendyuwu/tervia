@@ -1123,6 +1123,35 @@ console.log("\n[flags] presence flags track writes, and never read a secret back
 }
 
 // ---------------------------------------------------------------------------
+console.log("\n[tags] normalised on every write: trimmed, deduped, capped, absent not []");
+{
+  const h = harness();
+  const created = await h.hosts.upsertHost(
+    sshHost({ id: "h-1", tags: ["  Prod  ", "prod", "PROD", "db", ""] }),
+  );
+  check(
+    "trimmed, blanks dropped, deduped case-insensitively, first spelling kept",
+    created.tags,
+    ["Prod", "db"],
+  );
+  check("and that is what got persisted", (await h.hosts.findHost("h-1"))?.tags, ["Prod", "db"]);
+
+  const long = "x".repeat(60);
+  const truncated = await h.hosts.upsertHost(sshHost({ id: "h-1", tags: [long] }));
+  check("an over-length tag is truncated, not dropped", truncated.tags?.[0]?.length, 40);
+
+  const many = Array.from({ length: 30 }, (_, i) => `tag-${i}`);
+  const capped = await h.hosts.upsertHost(sshHost({ id: "h-1", tags: many }));
+  check("a host past the count cap keeps only the first 24, in order", capped.tags, many.slice(0, 24));
+
+  const cleared = await h.hosts.upsertHost(sshHost({ id: "h-1", tags: ["   ", ""] }));
+  check("tags left empty after normalising are absent, never []", cleared.tags, undefined);
+
+  const untouched = await h.hosts.upsertHost(sshHost({ id: "h-1" }));
+  check("no tags field at all is also absent, not an empty array", untouched.tags, undefined);
+}
+
+// ---------------------------------------------------------------------------
 console.log("\n[flags] an RDP row owns one account and refuses key material");
 {
   const h = harness();

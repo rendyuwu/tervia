@@ -715,6 +715,17 @@ check(
 check("proxyJumpId survives", jumpOf(host(ssh({ proxyJumpId: "h-2" }))), "h-2");
 check("groupId survives", host(ssh({ groupId: "g-1" })).groupId, "g-1");
 check("description survives", host(ssh({ description: "note" })).description, "note");
+check("tags survive", host(ssh({ tags: ["prod", "db"] })).tags, ["prod", "db"]);
+check(
+  "an imported tag array is normalised the same way a live write is",
+  host(ssh({ tags: ["  Prod  ", "prod", "", "  "] })).tags,
+  ["Prod"],
+);
+check("a non-string tag entry is dropped, not imported as-is", host(ssh({ tags: ["ok", 5, null] })).tags, [
+  "ok",
+]);
+check("a non-array tags value is dropped rather than crashing the import", host(ssh({ tags: "prod" })).tags, undefined);
+check("no tags field at all leaves tags absent", host(ssh({})).tags, undefined);
 check(
   "lastConnectedAt survives, but only as a real number",
   [

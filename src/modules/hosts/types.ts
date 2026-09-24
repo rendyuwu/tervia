@@ -157,6 +157,16 @@ export type HostBase = {
    *  an ancestor filter match runs through the chain of `HostGroup` records,
    *  never through a path stored here. */
   groupId?: string;
+  /**
+   * Free-form labels, cross-cutting rather than exclusive: unlike `groupId`
+   * (at most one), a host can carry several. Normalised by
+   * {@link normalizeHostTags} on every write, so a reader never sees a blank
+   * entry, a duplicate spelling, or an over-length or over-count array.
+   * `undefined` means "no tags", never `[]` - the store never persists an
+   * empty array, the same convention `pins` and `updatedAt` already use for
+   * "not written yet".
+   */
+  tags?: readonly string[];
   description?: string;
   /** Unix ms of the last successful connect. */
   lastConnectedAt?: number;
@@ -215,6 +225,47 @@ export type HostBase = {
    */
   updatedAt?: number;
 };
+
+/** A tag longer than this is truncated, not refused - a tag is a short label,
+ *  not a place for prose (`description` already exists for that). */
+export const HOST_TAG_MAX_LENGTH = 40;
+
+/** A host past this many tags keeps its first `HOST_TAG_MAX_COUNT`, in the
+ *  order given, and drops the rest: the tag strip (`page/TagStrip.tsx`) has no
+ *  overflow affordance, so this bounds how wide one host's own contribution to
+ *  it can grow. */
+export const HOST_TAG_MAX_COUNT = 24;
+
+/**
+ * `tags` normalised the one way every writer must agree on: trimmed, blanks
+ * dropped, truncated to {@link HOST_TAG_MAX_LENGTH}, deduped case-insensitively
+ * with the FIRST spelling kept (the same rule `sameName` in `store.ts` already
+ * applies to a group's name), and capped at {@link HOST_TAG_MAX_COUNT}.
+ *
+ * Every writer means every writer: `store.ts`'s `writeHost`, the host editor's
+ * save path, and `modules/backup/file.ts`'s `sanitizeHost` all call this
+ * rather than each keeping its own idea of what counts as a valid tag.
+ *
+ * Returns `undefined` for "no tags left after normalising", never `[]` - see
+ * {@link HostBase.tags}.
+ */
+export function normalizeHostTags(
+  tags: readonly string[] | undefined,
+): readonly string[] | undefined {
+  if (!tags) return undefined;
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of tags) {
+    const trimmed = raw.trim().slice(0, HOST_TAG_MAX_LENGTH);
+    if (!trimmed) continue;
+    const key = trimmed.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(trimmed);
+    if (out.length >= HOST_TAG_MAX_COUNT) break;
+  }
+  return out.length > 0 ? out : undefined;
+}
 
 /**
  * A machine reached over SSH.

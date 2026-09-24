@@ -120,6 +120,16 @@ export function HostCard({
         {host.protocol.toUpperCase()} · {detail}
       </div>
 
+      {host.tags && host.tags.length > 0 ? (
+        <div className="flex flex-wrap gap-1">
+          {host.tags.map((tag) => (
+            <Badge key={tag} variant="outline" className="h-4 px-1.5 text-[10px] font-normal">
+              {tag}
+            </Badge>
+          ))}
+        </div>
+      ) : null}
+
       <div className="flex min-h-6 flex-wrap items-center justify-between gap-x-2 gap-y-1">
         {groupName || connectedLabel ? (
           <span

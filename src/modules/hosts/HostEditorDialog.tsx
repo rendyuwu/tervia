@@ -74,6 +74,7 @@ import {
 import { SshCredentialSection, validateSshCredential } from "./editor/SshCredentialSection";
 import { SshOptions } from "./editor/SshOptions";
 import { runSshProbe } from "./editor/sshProbe";
+import { TagsInput } from "./editor/TagsInput";
 import {
   NO_SSH_SECRETS_TOUCHED,
   type RdpCredentialDraft,
@@ -99,6 +100,7 @@ import {
   HostBindingChangedError,
   isRdpHost,
   isSshHost,
+  normalizeHostTags,
   presetById,
   presetIdFor,
   RDP_DEFAULT_PORT,
@@ -143,7 +145,14 @@ export type HostEditorDialogProps = {
   identityRows: IdentityRow[];
 };
 
-const EMPTY_SHARED: SharedDraft = { name: "", host: "", port: "", groupId: "", description: "" };
+const EMPTY_SHARED: SharedDraft = {
+  name: "",
+  host: "",
+  port: "",
+  groupId: "",
+  description: "",
+  tags: [],
+};
 
 const EMPTY_SSH_CRED: SshCredentialDraft = {
   user: "",
@@ -603,6 +612,7 @@ export function HostEditorDialog({
           port: String(prefill.port ?? defaultPortFor(target.protocol)),
           groupId: seedGroupId,
           description: "",
+          tags: [],
         });
         setSshCred({ ...EMPTY_SSH_CRED, user: prefill.user ?? "" });
         setRdpCred({ ...EMPTY_RDP_CRED, username: prefill.user ?? "" });
@@ -641,6 +651,7 @@ export function HostEditorDialog({
         port: String(host.port),
         groupId: liveGroup(host.groupId),
         description: host.description ?? "",
+        tags: host.tags ?? [],
       });
       // Through `hostPins`, never off the flat field: it is the one place a record
       // written before pins were keyed adopts its pin onto the address that record
@@ -831,6 +842,10 @@ export function HostEditorDialog({
     { value: "", label: "None", search: "none no group ungrouped" },
     ...groups.map((g) => ({ value: g.id, label: g.name, search: `${g.name} ${g.id}` })),
   ];
+  // Every tag already used across saved hosts, exact spellings, offered as
+  // `TagsInput`'s datalist suggestions - `normalizeHostTags` is what actually
+  // dedupes, this is only a typing aid.
+  const allTags: string[] = [...new Set(hosts.flatMap((h) => h.tags ?? []))];
 
   // The credential picker's options. Each identity option carries the id in
   // `search` too, not only in `label` - `ComboboxOption.search` in
@@ -1200,6 +1215,7 @@ export function HostEditorDialog({
         port,
         groupId: shared.groupId || undefined,
         description: shared.description.trim() || undefined,
+        tags: normalizeHostTags(shared.tags),
         lastConnectedAt: existing?.lastConnectedAt,
         // The whole draft map, addresses and all. The store decides which of them
         // is the flat pin every consumer reads, so `lastFingerprint` /
@@ -1918,6 +1934,14 @@ export function HostEditorDialog({
                     placeholder="What this machine is for"
                     spellCheck={false}
                     className="h-16 text-[12px]"
+                  />
+                </Field>
+
+                <Field label="Tags (optional)">
+                  <TagsInput
+                    tags={shared.tags}
+                    onChange={(tags) => setShared({ ...shared, tags })}
+                    suggestions={allTags}
                   />
                 </Field>
 
