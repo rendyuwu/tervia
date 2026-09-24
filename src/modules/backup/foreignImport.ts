@@ -29,7 +29,14 @@ import { listHosts, upsertHost } from "@/modules/hosts/store";
 import type { SshHost } from "@/modules/hosts/types";
 import { inspectSshKey } from "@/modules/ssh/bridge";
 import { vaultKeyFactsFrom, type VaultKeyFacts } from "@/modules/vault/keyInspect";
-import { listIdentities, listKeys, newIdentityId, newKeyId, upsertIdentity, upsertKey } from "@/modules/vault/store";
+import {
+  listIdentities,
+  listKeys,
+  newIdentityId,
+  newKeyId,
+  upsertIdentity,
+  upsertKey,
+} from "@/modules/vault/store";
 import type { SshCredentialBinding, VaultIdentity, VaultKey } from "@/modules/vault/types";
 
 import type { ImportCounts, ImportIdentityCounts, ImportKeyCounts } from "./apply";
@@ -74,7 +81,10 @@ export type ForeignImportResult = {
   problems: string[];
 };
 
-function bump(refused: Partial<Record<ForeignRefusalReason, number>>, reasonKey: ForeignRefusalReason): void {
+function bump(
+  refused: Partial<Record<ForeignRefusalReason, number>>,
+  reasonKey: ForeignRefusalReason,
+): void {
   refused[reasonKey] = (refused[reasonKey] ?? 0) + 1;
 }
 
@@ -102,7 +112,9 @@ async function resolveIdentityFilePath(raw: string, configDir: string): Promise<
  *  PRIVATE KEY`). An encrypted key with no stored passphrase is NOT this
  *  case: `inspectSshKey` answers `parsed:false` rather than rejecting, and
  *  the key still imports - see `vaultKeyFactsFrom`. */
-async function buildVaultKeyFromFile(path: string): Promise<{ record: VaultKey; privateKey: string } | null> {
+async function buildVaultKeyFromFile(
+  path: string,
+): Promise<{ record: VaultKey; privateKey: string } | null> {
   let result: FsReadResult;
   try {
     result = await invoke<FsReadResult>("fs_read_file", { path });
@@ -144,7 +156,9 @@ export async function previewSshConfigImport(
 
   const lookupSaved = (token: string): { id: string; proxyJumpId?: string } | undefined => {
     const saved = existingByAlias.get(token);
-    return saved && saved.protocol === "ssh" ? { id: saved.id, proxyJumpId: saved.proxyJumpId } : undefined;
+    return saved && saved.protocol === "ssh"
+      ? { id: saved.id, proxyJumpId: saved.proxyJumpId }
+      : undefined;
   };
 
   // Pass 1: every host's OWN single-hop ProxyJump, needed below as the
@@ -217,11 +231,16 @@ export async function previewSshConfigImport(
     identityIdByHostId.set(h.id, identityId);
   }
 
-  const hosts: SshHost[] = parsed.hosts.map((h) => hostRecordFrom(h, proxyJumpByHostId.get(h.id), identityIdByHostId.get(h.id)));
+  const hosts: SshHost[] = parsed.hosts.map((h) =>
+    hostRecordFrom(h, proxyJumpByHostId.get(h.id), identityIdByHostId.get(h.id)),
+  );
 
   const conflicts = refuseProtocolConflicts(hosts, existingHosts);
   if (conflicts.conflicts > 0) refused.protocolConflicts = conflicts.conflicts;
-  const ordered = orderHostWrites(clearDanglingJumps(conflicts.hosts, existingHosts), existingHosts);
+  const ordered = orderHostWrites(
+    clearDanglingJumps(conflicts.hosts, existingHosts),
+    existingHosts,
+  );
 
   return { hosts: ordered, identities, keys, refused, skipped };
 }
@@ -242,7 +261,10 @@ export async function previewPuttyImport(parsed: PuttyParseResult): Promise<Fore
   // no-op here - run anyway, matching decision 11's reasoning for
   // refuseProtocolConflicts: the row-checking machinery is shared, not
   // special-cased out per source.
-  const ordered = orderHostWrites(clearDanglingJumps(conflicts.hosts, existingHosts), existingHosts);
+  const ordered = orderHostWrites(
+    clearDanglingJumps(conflicts.hosts, existingHosts),
+    existingHosts,
+  );
   return { hosts: ordered, identities: [], keys: [], refused, skipped: parsed.skipped };
 }
 
@@ -286,7 +308,9 @@ function reason(e: unknown): string {
  * and a failure is counted and reported without abandoning the rest, matching
  * `applyV3`'s own containment.
  */
-export async function applyForeignImport(preview: ForeignImportPreview): Promise<ForeignImportResult> {
+export async function applyForeignImport(
+  preview: ForeignImportPreview,
+): Promise<ForeignImportResult> {
   const [existingHosts, existingIdentities, existingKeys] = await Promise.all([
     listHosts(),
     listIdentities(),

@@ -73,11 +73,15 @@ Host prod
 `;
   const r = parseSshConfig(cfg);
   check("one Host stanza -> one host", r.hosts.length, 1);
-  check("HostName/Port/User mapped", {
-    host: r.hosts[0].host,
-    port: r.hosts[0].port,
-    user: r.hosts[0].user,
-  }, { host: "prod.example.com", port: 2222, user: "deploy" });
+  check(
+    "HostName/Port/User mapped",
+    {
+      host: r.hosts[0].host,
+      port: r.hosts[0].port,
+      user: r.hosts[0].user,
+    },
+    { host: "prod.example.com", port: 2222, user: "deploy" },
+  );
   check("no refusals for a clean stanza", r.refused, {
     match: 0,
     wildcardHost: 0,
@@ -105,8 +109,16 @@ Host prod
   const cfg = "Host prod prod.internal\n  HostName prod.example.com\n";
   const r = parseSshConfig(cfg);
   check("Host with two aliases -> two host records", r.hosts.length, 2);
-  check("both share the same HostName", r.hosts.map((h) => h.host), ["prod.example.com", "prod.example.com"]);
-  check("aliases preserved, in order", r.hosts.map((h) => h.alias), ["prod", "prod.internal"]);
+  check(
+    "both share the same HostName",
+    r.hosts.map((h) => h.host),
+    ["prod.example.com", "prod.example.com"],
+  );
+  check(
+    "aliases preserved, in order",
+    r.hosts.map((h) => h.alias),
+    ["prod", "prod.internal"],
+  );
   check("each alias gets its own id", r.hosts[0].id === r.hosts[1].id, false);
 }
 
@@ -137,13 +149,17 @@ Host ok3
   HostName ok3.example.com
 `;
   const r = parseSshConfig(cfg);
-  check("Match, wildcard Host, Include and ProxyCommand each refuse their own stanza; ok1/ok3 still import", {
-    aliases: r.hosts.map((h) => h.alias),
-    refused: r.refused,
-  }, {
-    aliases: ["ok1", "ok3"],
-    refused: { match: 1, wildcardHost: 1, include: 1, proxyCommand: 1 },
-  });
+  check(
+    "Match, wildcard Host, Include and ProxyCommand each refuse their own stanza; ok1/ok3 still import",
+    {
+      aliases: r.hosts.map((h) => h.alias),
+      refused: r.refused,
+    },
+    {
+      aliases: ["ok1", "ok3"],
+      refused: { match: 1, wildcardHost: 1, include: 1, proxyCommand: 1 },
+    },
+  );
 }
 
 {
@@ -161,10 +177,14 @@ Host ok3
 
 {
   const r = parseSshConfig("Host badport\n  HostName x\n  Port 0\n");
-  check("an invalid Port skips just that host, counted", { hosts: r.hosts.length, skipped: r.skipped }, {
-    hosts: 0,
-    skipped: 1,
-  });
+  check(
+    "an invalid Port skips just that host, counted",
+    { hosts: r.hosts.length, skipped: r.skipped },
+    {
+      hosts: 0,
+      skipped: 1,
+    },
+  );
 }
 
 // --- ssh_config: ProxyJump token extraction ---------------------------------
@@ -181,18 +201,20 @@ Host ok3
 
 {
   const r = parseSshConfig("Host t\n  HostName x\n  ProxyJump a, b\n");
-  check("a comma-separated ProxyJump chain, whitespace trimmed", r.hosts[0].proxyJumpTokens, ["a", "b"]);
+  check("a comma-separated ProxyJump chain, whitespace trimmed", r.hosts[0].proxyJumpTokens, [
+    "a",
+    "b",
+  ]);
 }
 
 // --- resolveProxyJumpChain: single hop and chain consistency ---------------
 
 {
   const lookup = (t: string) => (t === "known" ? { id: "h-known" } : undefined);
-  check(
-    "single token resolves",
-    resolveProxyJumpChain(["known"], lookup),
-    { proxyJumpId: "h-known", chainUnresolved: false },
-  );
+  check("single token resolves", resolveProxyJumpChain(["known"], lookup), {
+    proxyJumpId: "h-known",
+    chainUnresolved: false,
+  });
   check(
     "single unresolved token silently drops (no chainUnresolved)",
     resolveProxyJumpChain(["missing"], lookup),
@@ -257,13 +279,17 @@ const REG_HEADER = "Windows Registry Editor Version 5.00";
 `;
   const r = parsePuttyReg(reg);
   check("Default Settings is silently skipped, not counted", r.skipped, 0);
-  check("one real session imports, PortNumber dword decoded, name percent-decoded", {
-    count: r.hosts.length,
-    alias: r.hosts[0]?.alias,
-    host: r.hosts[0]?.host,
-    port: r.hosts[0]?.port,
-    user: r.hosts[0]?.user,
-  }, { count: 1, alias: "my box", host: "box.example.com", port: 22, user: "root" });
+  check(
+    "one real session imports, PortNumber dword decoded, name percent-decoded",
+    {
+      count: r.hosts.length,
+      alias: r.hosts[0]?.alias,
+      host: r.hosts[0]?.host,
+      port: r.hosts[0]?.port,
+      user: r.hosts[0]?.user,
+    },
+    { count: 1, alias: "my box", host: "box.example.com", port: 22, user: "root" },
+  );
 }
 
 {
@@ -275,10 +301,14 @@ const REG_HEADER = "Windows Registry Editor Version 5.00";
 "Protocol"="telnet"
 `;
   const r = parsePuttyReg(reg);
-  check("a non-ssh Protocol is refused and counted under nonSsh", { hosts: r.hosts.length, refused: r.refused }, {
-    hosts: 0,
-    refused: { nonSsh: 1, proxyMethodSet: 0 },
-  });
+  check(
+    "a non-ssh Protocol is refused and counted under nonSsh",
+    { hosts: r.hosts.length, refused: r.refused },
+    {
+      hosts: 0,
+      refused: { nonSsh: 1, proxyMethodSet: 0 },
+    },
+  );
 }
 
 {
@@ -291,15 +321,27 @@ const REG_HEADER = "Windows Registry Editor Version 5.00";
 "ProxyMethod"=dword:00000001
 `;
   const r = parsePuttyReg(reg);
-  check("a ProxyMethod other than 0 is refused and counted under proxyMethodSet", {
-    hosts: r.hosts.length,
-    refused: r.refused,
-  }, { hosts: 0, refused: { nonSsh: 0, proxyMethodSet: 1 } });
+  check(
+    "a ProxyMethod other than 0 is refused and counted under proxyMethodSet",
+    {
+      hosts: r.hosts.length,
+      refused: r.refused,
+    },
+    { hosts: 0, refused: { nonSsh: 0, proxyMethodSet: 1 } },
+  );
 }
 
 {
-  check("isPuttyPrivateKeyFile recognises the .ppk header", isPuttyPrivateKeyFile("PuTTY-User-Key-File-3: ssh-ed25519\n..."), true);
-  check("isPuttyPrivateKeyFile is false for an ordinary .reg export", isPuttyPrivateKeyFile(`${REG_HEADER}\n`), false);
+  check(
+    "isPuttyPrivateKeyFile recognises the .ppk header",
+    isPuttyPrivateKeyFile("PuTTY-User-Key-File-3: ssh-ed25519\n..."),
+    true,
+  );
+  check(
+    "isPuttyPrivateKeyFile is false for an ordinary .reg export",
+    isPuttyPrivateKeyFile(`${REG_HEADER}\n`),
+    false,
+  );
 }
 
 console.log(failed === 0 ? "\nAll foreign-import checks passed." : `\n${failed} check(s) FAILED.`);

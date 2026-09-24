@@ -85,7 +85,12 @@ export type SshConfigParseResult = {
  *  alongside a wildcard is still a pattern-matching rule, not a request to
  *  import one host under two names. */
 function isConcreteAlias(pattern: string): boolean {
-  return pattern.length > 0 && !pattern.includes("*") && !pattern.includes("?") && !pattern.startsWith("!");
+  return (
+    pattern.length > 0 &&
+    !pattern.includes("*") &&
+    !pattern.includes("?") &&
+    !pattern.startsWith("!")
+  );
 }
 
 /** One `Keyword value` / `Keyword=value` line (comment and blank already

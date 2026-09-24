@@ -969,7 +969,15 @@ const handTyped: SshHost = {
   host: "prod.example.com",
   port: 22,
   protocol: "ssh",
-  credential: { kind: "inline", hostId: "h-cfg-1", user: "deploy", authMode: "password", hasPassword: false, hasPrivateKey: false, hasKeyPassphrase: false },
+  credential: {
+    kind: "inline",
+    hostId: "h-cfg-1",
+    user: "deploy",
+    authMode: "password",
+    hasPassword: false,
+    hasPrivateKey: false,
+    hasKeyPassphrase: false,
+  },
   proxyJumpId: "h-cfg-missing",
 };
 check(
