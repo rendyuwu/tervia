@@ -3830,13 +3830,14 @@ console.log(failed === 0 ? "\nAll forwards-shell checks passed." : `\n${failed} 
 
 // ----------------------------------------------------------------------------
 // [draft.ts per-type] validateRuleDraft/ruleRecordFrom/ruleDraftFrom, BEHAVIOURALLY,
-// per `rule.type`. Everything above this line reads `draft.ts` as SOURCE TEXT
+// per `rule.type`. Everything above this line reads
+// `src/modules/forwards/editor/draft.ts` as SOURCE TEXT
 // (`FILES.draft`); nothing calls its exported functions with real values. This
 // is the gap: that `-R` writes `localPort: 0` and a blank/`0` `remoteHost`/
 // `remotePort` (never the -L dial-target pair) and omits `bindPort` when the
 // field was left blank, and that a `-D` record is written with a blank
 // `remoteHost` too - both only provable by calling the functions, not by
-// reading their text. `draft.ts` is pure (its own header), so a plain import
+// reading their text. The draft module is pure (its own header), so a plain import
 // needs no Tauri/window stand-in, unlike the C-series above.
 // ----------------------------------------------------------------------------
 console.log("\n[draft.ts per-type] validateRuleDraft/ruleRecordFrom/ruleDraftFrom, behaviourally");

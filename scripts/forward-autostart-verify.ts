@@ -1646,12 +1646,24 @@ console.log("\n[9. RuleCard.tsx] the read-only row a terminal-owned forward gets
   const cases: Array<[string, string]> = [
     ["startDisabled", "hostOwned||row.hostDangling||starting"],
     ["toggleLabel", 'hostOwned?"Stop":starting?"Starting…":running?"Stop":"Start"'],
-    ["localLabel", "localPortLabel(rule,hostOwnedPort??boundPort)"],
   ];
   for (const [name, want] of cases) {
     const init = findConstInitializer(sf, name);
     check(`found ${name}`, init !== null, true);
     if (init) check(`${name} is ${want}`, norm((init as ts.Expression).getText(sf)), want);
+  }
+  // The PRECEDENCE is what this pins (a terminal-owned port wins over the page's
+  // bound port), not the argument list: `-R` rows pass the host name as a third
+  // argument, and that tail is not this check's business.
+  const localLabel = findConstInitializer(sf, "localLabel");
+  check("found localLabel", localLabel !== null, true);
+  if (localLabel) {
+    const text = norm((localLabel as ts.Expression).getText(sf));
+    assert(
+      text.startsWith("localPortLabel(rule,hostOwnedPort??boundPort"),
+      "localLabel prefers the terminal-owned port over the page's bound port",
+      text,
+    );
   }
   const tooltip = findConstInitializer(sf, "toggleTooltip");
   check("found toggleTooltip", tooltip !== null, true);
