@@ -1443,7 +1443,7 @@ can subscribe per `hostId` and re-enter the ladder on a genuine drop.
 `rule` object across every rung of its own backoff ladder (`controller.ts`'s
 "REUSES THE SAME `rule` OBJECT" doc on that function) - a Stop, Delete or
 Save cancels the ladder outright (`pageMustStopFirst`'s `forwardRetries.has`
-check), but a sync LANDING that only *rewrites* the rule's record does not:
+check), but a sync LANDING that only _rewrites_ the rule's record does not:
 `sync/scheduler.ts`'s landing-side `release` hands `releaseRule` only
 DELETED landings, so an edit that lands elsewhere - a renamed target, a
 changed port - never reaches the cancel at all. If that edit lands during

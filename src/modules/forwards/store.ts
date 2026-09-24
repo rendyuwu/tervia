@@ -380,8 +380,7 @@ export function createForwardStore(io: ForwardsIo): ForwardsStore {
         // own exclusivity refusal, which this apply path bypasses and so has
         // to re-enforce by hand.
         const { startWithApp: _, ...incoming } = landing.record;
-        const keepStartWithApp =
-          existing?.startWithApp === true && incoming.startWithHost !== true;
+        const keepStartWithApp = existing?.startWithApp === true && incoming.startWithHost !== true;
         const record: ForwardRule = {
           ...incoming,
           ...(keepStartWithApp ? { startWithApp: true } : {}),
