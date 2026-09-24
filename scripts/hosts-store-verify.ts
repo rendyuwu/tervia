@@ -1139,6 +1139,26 @@ console.log("\n[tags] normalised on every write: trimmed, deduped, capped, absen
   const truncated = await h.hosts.upsertHost(sshHost({ id: "h-1", tags: [long] }));
   check("an over-length tag is truncated, not dropped", truncated.tags?.[0]?.length, 40);
 
+  const trailingSpaceAtCut = "a".repeat(39) + " b";
+  const cutDropsTrailingSpace = await h.hosts.upsertHost(
+    sshHost({ id: "h-1", tags: [trailingSpaceAtCut] }),
+  );
+  check(
+    "a cut landing on a space trims it, rather than keeping a trailing space",
+    cutDropsTrailingSpace.tags,
+    ["a".repeat(39)],
+  );
+
+  const surrogatePairAtCut = "a".repeat(39) + "\u{1F600}";
+  const cutIsCodePointSafe = await h.hosts.upsertHost(
+    sshHost({ id: "h-1", tags: [surrogatePairAtCut] }),
+  );
+  check(
+    "the cut counts Unicode code points, so a surrogate pair at the boundary survives whole",
+    cutIsCodePointSafe.tags,
+    [surrogatePairAtCut],
+  );
+
   const many = Array.from({ length: 30 }, (_, i) => `tag-${i}`);
   const capped = await h.hosts.upsertHost(sshHost({ id: "h-1", tags: many }));
   check(

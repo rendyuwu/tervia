@@ -851,12 +851,13 @@ console.log("\n[tagCounts] merges case-insensitively, keeps the first spelling, 
 
 // --- filterAndRank ------------------------------------------------------
 //
-// Protocol, then group, then ranking. Note what this can and cannot pin: a
-// predicate and a stable total sort COMMUTE, so no output can distinguish
-// filter-then-rank from rank-then-filter. What it does pin is that all three
-// run, that ranking is what orders the survivors, and that the order does not
-// depend on the input order - which is what a regression actually breaks (a
-// top-N slice taken before a filter, or a filter dropped entirely).
+// Protocol, then group, then tag, then ranking. Note what this can and cannot
+// pin: a predicate and a stable total sort COMMUTE, so no output can
+// distinguish filter-then-rank from rank-then-filter. What it does pin is
+// that all four run, that ranking is what orders the survivors, and that the
+// order does not depend on the input order - which is what a regression
+// actually breaks (a top-N slice taken before a filter, or a filter dropped
+// entirely).
 //
 // `filterAndRank`'s own doc comment used to disagree with this, claiming the
 // alternative order would make "the visible order whatever survived rather than
@@ -865,7 +866,7 @@ console.log("\n[tagCounts] merges case-insensitively, keeps the first spelling, 
 // function contradicting each other is worse than either being wrong alone,
 // because a reader has no way to tell which one was checked.
 
-console.log("\n[filterAndRank] all three filters run, and ranking orders what survives");
+console.log("\n[filterAndRank] all four filters run, and ranking orders what survives");
 {
   const groups = [group("g-1", "Production")];
   const v = vault([identity("i-1", { username: "ansible" })]);
@@ -920,13 +921,15 @@ console.log("\n[filterAndRank] all three filters run, and ranking orders what su
     ),
     ["h-45"],
   );
+  // h-45 is also in g-1, and it carries no "prod" tag, so it is removed only
+  // by the tag stage, not the group stage above.
   check(
-    "the tag stage narrows too, composing with protocol and group",
+    "the tag stage narrows too, composing with the group stage",
     ids(
       filterAndRank({
         rows,
         protocol: "all",
-        group: { kind: "all" },
+        group: { kind: "group", groupId: "g-1" },
         groups,
         tags: new Set(["prod"]),
         query: "",

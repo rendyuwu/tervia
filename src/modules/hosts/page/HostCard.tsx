@@ -95,14 +95,20 @@ export function HostCard({
         "group flex cursor-default flex-col gap-2 rounded-lg border p-3 text-left transition-colors outline-none",
         "focus-visible:ring-ring/50 focus-visible:ring-2",
         selected ? "border-primary bg-accent/30" : "border-border hover:bg-muted/30",
-        // ~100px: p-3 padding (24) + name/pip row (20) + detail row (16) +
-        // group/actions row (24) + two 8px gaps (16). content-visibility:auto
-        // skips layout/paint for off-screen cards (search-first keeps the
-        // steady-state DOM small, this covers the unfiltered case); without
-        // contain-intrinsic-size an off-screen card lays out at 0px and the
-        // scrollbar jumps while the user scrolls - it looks like dead weight
-        // and is load-bearing.
-        "[contain-intrinsic-size:auto_100px] [content-visibility:auto]",
+        // 100px is the UNTAGGED size: p-3 padding (24) + name/pip row (20) +
+        // detail row (16) + group/actions row (24) + two 8px gaps (16). A
+        // host with tags adds the optional row below (h-4, 16px) plus one
+        // more 8px gap, so ~124px there - more still if the tags wrap onto a
+        // second line. content-visibility:auto skips layout/paint for
+        // off-screen cards (search-first keeps the steady-state DOM small,
+        // this covers the unfiltered case); without contain-intrinsic-size
+        // an off-screen card lays out at 0px and the scrollbar jumps while
+        // the user scrolls - it looks like dead weight and is load-bearing.
+        // 124px, not 100px, is the estimate below: a tagged single-line card
+        // is the more common shape this covers, and overshooting an
+        // untagged card's real height is a smaller visible jump than
+        // undershooting a tagged one's.
+        "[contain-intrinsic-size:auto_124px] [content-visibility:auto]",
       )}
     >
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1">

@@ -676,7 +676,7 @@ function EmptyState({ filtering, hasHosts }: { filtering: boolean; hasHosts: boo
       </span>
       <span className="max-w-72 text-[11px] leading-relaxed opacity-70">
         {hasHosts && filtering
-          ? "Clear the search box or widen the protocol and group filters."
+          ? "Clear the search box or widen the protocol, group and tag filters."
           : "Use New host to save an SSH or RDP machine, or Import to bring one over."}
       </span>
     </div>

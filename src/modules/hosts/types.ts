@@ -160,11 +160,18 @@ export type HostBase = {
   /**
    * Free-form labels, cross-cutting rather than exclusive: unlike `groupId`
    * (at most one), a host can carry several. Normalised by
-   * {@link normalizeHostTags} on every write, so a reader never sees a blank
-   * entry, a duplicate spelling, or an over-length or over-count array.
-   * `undefined` means "no tags", never `[]` - the store never persists an
-   * empty array, the same convention `pins` and `updatedAt` already use for
-   * "not written yet".
+   * {@link normalizeHostTags} on every LOCAL write - the store, the host
+   * editor, the backup importer - so a reader coming from one of those never
+   * sees a blank entry, a duplicate spelling, or an over-length or
+   * over-count array. A sync landing is carried as-is, like every other host
+   * field, so that guarantee does not extend to a record another device
+   * wrote. `undefined` means "no tags", never `[]` - the store never
+   * persists an empty array, the same convention `pins` and `updatedAt`
+   * already use for "not written yet".
+   *
+   * No managed tag record backs this, so there is no rename- or
+   * delete-everywhere across the hosts that carry a tag - `KNOWN-LIMITS.md`
+   * carries it, under "Host tags".
    */
   tags?: readonly string[];
   description?: string;
@@ -231,32 +238,43 @@ export type HostBase = {
 export const HOST_TAG_MAX_LENGTH = 40;
 
 /** A host past this many tags keeps its first `HOST_TAG_MAX_COUNT`, in the
- *  order given, and drops the rest: the tag strip (`page/TagStrip.tsx`) has no
- *  overflow affordance, so this bounds how wide one host's own contribution to
- *  it can grow. */
+ *  order given, and drops the rest: `HostCard`'s badge row has no
+ *  overflow affordance, so this bounds how many badges one card can grow.
+ *  It does not bound `page/TagStrip.tsx`, which shows one chip per tag in
+ *  use across the whole fleet, not per host. */
 export const HOST_TAG_MAX_COUNT = 24;
 
 /**
- * `tags` normalised the one way every writer must agree on: trimmed, blanks
- * dropped, truncated to {@link HOST_TAG_MAX_LENGTH}, deduped case-insensitively
- * with the FIRST spelling kept (the same rule `sameName` in `store.ts` already
- * applies to a group's name), and capped at {@link HOST_TAG_MAX_COUNT}.
+ * `tags` normalised the one way every writer must agree on: trimmed, cut to
+ * {@link HOST_TAG_MAX_LENGTH} Unicode CODE POINTS (not UTF-16 units, so a
+ * surrogate pair straddling the cut survives whole rather than splitting)
+ * with any trailing space the cut left behind trimmed too, blanks dropped,
+ * deduped case-insensitively with the FIRST spelling kept (the same rule
+ * `sameName` in `store.ts` already applies to a group's name), and capped at
+ * {@link HOST_TAG_MAX_COUNT}.
  *
- * Every writer means every writer: `store.ts`'s `writeHost`, the host editor's
- * save path, and `modules/backup/file.ts`'s `sanitizeHost` all call this
- * rather than each keeping its own idea of what counts as a valid tag.
+ * TOTAL: `tags` is `unknown` rather than `readonly string[] | undefined`
+ * because a landed sync record was never run through this (see
+ * {@link HostBase.tags}) and is read by the same code paths a local record
+ * is, so a non-array value or a non-string entry is dropped rather than
+ * thrown on - the shape every other reader of a landed record already
+ * tolerates.
+ *
+ * Every LOCAL writer means every local writer: `store.ts`'s `writeHost`, the
+ * host editor's save path, and `modules/backup/file.ts`'s `sanitizeHost` all
+ * call this rather than each keeping its own idea of what counts as a valid
+ * tag. `applyRemote` does not - see {@link HostBase.tags}.
  *
  * Returns `undefined` for "no tags left after normalising", never `[]` - see
  * {@link HostBase.tags}.
  */
-export function normalizeHostTags(
-  tags: readonly string[] | undefined,
-): readonly string[] | undefined {
-  if (!tags) return undefined;
+export function normalizeHostTags(tags: unknown): readonly string[] | undefined {
+  if (!Array.isArray(tags)) return undefined;
   const seen = new Set<string>();
   const out: string[] = [];
   for (const raw of tags) {
-    const trimmed = raw.trim().slice(0, HOST_TAG_MAX_LENGTH);
+    if (typeof raw !== "string") continue;
+    const trimmed = Array.from(raw.trim()).slice(0, HOST_TAG_MAX_LENGTH).join("").trimEnd();
     if (!trimmed) continue;
     const key = trimmed.toLowerCase();
     if (seen.has(key)) continue;

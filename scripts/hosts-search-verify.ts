@@ -629,6 +629,22 @@ console.log("\n[two surfaces] one row builder, so the page and the header cannot
     }).map((r) => r.groupName),
     ["Blank"],
   );
+  // `searchRows` is the one place `row.tags` is populated from `host.tags` -
+  // every tag-matching check above builds its rows with the `row()` fixture
+  // helper instead, which passes `tags` straight through `extra`, so it can
+  // never catch `searchRows` itself dropping that line.
+  check(
+    "searchRows carries a host's tags into the row, so a tag-only query finds it",
+    names(
+      rankHosts(
+        searchRows([{ ...ssh("h-7", "box-seven", "10.0.0.7"), tags: ["Deploy-Ring"] }], [], {
+          identities,
+        }),
+        "deploy",
+      ),
+    ),
+    ["box-seven"],
+  );
 }
 
 // The structural half. A behavioural check cannot see which builder a React

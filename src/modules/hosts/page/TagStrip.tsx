@@ -22,9 +22,8 @@ export type TagStripProps = {
   onClear: () => void;
 };
 
-/** `null` rather than an empty strip: the issue asks for this row to exist
- *  only once a host actually carries a tag, so a fleet with none never shows
- *  an empty bar of chrome above the grid. */
+/** `null` rather than an empty strip, so a fleet with no tags shows no empty
+ *  bar above the grid. */
 export function TagStrip({ tags, selected, onToggle, onClear }: TagStripProps): ReactNode {
   if (tags.length === 0) return null;
   return (
