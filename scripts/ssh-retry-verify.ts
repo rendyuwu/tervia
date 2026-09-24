@@ -589,10 +589,15 @@ console.log("\n[parity] each failure site still names the kind its category dema
     /decode_secret_key\([^)]*\)\s*\.map_err\(\|e\|\s*\{\s*SshConnectError::config\(/.test(hop),
     "decode_secret_key's map_err builds ::config - a key that will not decode here is fixed until the user changes something",
   );
+  // Two now, not one: the `cert` kind's branch decodes the SAME signing-key
+  // text before pairing it against the certificate, and a decode failure
+  // there is exactly the same "this machine cannot read it" fact the plain-
+  // key branch already reports - so it reuses the identical message and
+  // ::config kind rather than inventing a second sentence for one fact.
   const parse = kindsOf(hop, '"ssh: [{host}] parse private key failed');
   assert(
-    parse.length === 1 && parse[0] === "config",
-    `one parse-key failure in authenticate_hop, still ::config (found ${JSON.stringify(parse)})`,
+    parse.length === 2 && parse.every((k) => k === "config"),
+    `two parse-key failures in authenticate_hop (cert branch, plain-key branch), both still ::config (found ${JSON.stringify(parse)})`,
   );
 
   // THE pair a future edit is most likely to "correct" to `auth`, because they

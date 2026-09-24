@@ -1802,7 +1802,7 @@ console.log(
     // not.
     //
     // Argument-wise is NOT SUFFICIENT ON ITS OWN, and the `--print-width 60`
-    // control is what showed it: argument 0 here is ITSELF a four-argument call,
+    // control is what showed it: argument 0 here is ITSELF a five-argument call,
     // so at a narrow width Prettier wraps that inner call and puts a trailing
     // comma inside the argument's own span, where whitespace-stripping alone
     // does not reach. Measured: this section went to 1 FAIL over unchanged code.
@@ -1849,7 +1849,7 @@ console.log(
       }
     };
     pinArgs("deps.vault.upsertKey", [
-      "keyRecordFrom(mintedKeyId, keyDraft, null, newKey.facts)",
+      "keyRecordFrom(mintedKeyId, keyDraft, null, newKey.facts, null)",
       "keySecrets",
       "VAULT_STAMP_ABSENT",
     ]);

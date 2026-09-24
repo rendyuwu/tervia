@@ -2164,6 +2164,114 @@ check(
   [false, false],
 );
 
+// `kind`, and for `"cert"` its certificate text and parsed facts, carried
+// like `fingerprint`/`publicKey` above - public, display-only fields on
+// this side (`ssh_key_classify` already validated them on the exporting
+// machine).
+check(
+  'a cert-kind key round-trips kind: "cert", its certificate text and every parsed fact',
+  sanitizeKey(
+    key({
+      id: "k-cert",
+      kind: "cert",
+      certificate: "ssh-ed25519-cert-v01@openssh.com AAAA...",
+      certCaFingerprint: "SHA256:ca",
+      certKeyId: "tervia",
+      certPrincipals: ["rendy", "root"],
+      certValidAfter: 1_700_000_000,
+      certValidBefore: 1_800_000_000,
+    }),
+  ),
+  {
+    id: "k-cert",
+    name: "laptop",
+    kind: "cert",
+    keyType: "ed25519",
+    fingerprint: "SHA256:FPR",
+    publicKey: "ssh-ed25519 AAAAC3Nz",
+    hasPrivateKey: false,
+    hasPassphrase: false,
+    certificate: "ssh-ed25519-cert-v01@openssh.com AAAA...",
+    certCaFingerprint: "SHA256:ca",
+    certKeyId: "tervia",
+    certPrincipals: ["rendy", "root"],
+    certValidAfter: 1_700_000_000,
+    certValidBefore: 1_800_000_000,
+  },
+);
+check(
+  "a certificate that never expires carries no certValidBefore at all - OpenSSH's forever sentinel, absent rather than a giant number",
+  has(
+    keyOf(
+      key({
+        kind: "cert",
+        certificate: "ssh-ed25519-cert-v01@openssh.com AAAA...",
+        certCaFingerprint: "SHA256:ca",
+        certKeyId: "tervia",
+        certPrincipals: ["rendy"],
+        certValidAfter: 1,
+      }),
+    ),
+    "certValidBefore",
+  ),
+  false,
+);
+check(
+  "certPrincipals entries are coerced/filtered to strings, the same way the rest of a payload row is",
+  sanitizeKey(
+    key({
+      kind: "cert",
+      certificate: "x",
+      certCaFingerprint: "x",
+      certKeyId: "x",
+      certPrincipals: ["rendy", 5, null, "root"],
+      certValidAfter: 1,
+    }),
+  )?.certPrincipals,
+  ["rendy", "root"],
+);
+check(
+  'a hardware-kind key round-trips kind: "hardware" and carries no cert field at all - it has none to carry',
+  sanitizeKey(key({ id: "k-hw", kind: "hardware", fingerprint: "SHA256:HW" })),
+  {
+    id: "k-hw",
+    name: "laptop",
+    kind: "hardware",
+    keyType: "ed25519",
+    fingerprint: "SHA256:HW",
+    publicKey: "ssh-ed25519 AAAAC3Nz",
+    hasPrivateKey: false,
+    hasPassphrase: false,
+  },
+);
+check(
+  'cert fields on a PEM (kind-absent) row are dropped - they name nothing outside kind === "cert"',
+  sanitizeKey(key({ certificate: "ssh-ed25519-cert-v01@openssh.com AAAA..." })),
+  {
+    id: "k-1",
+    name: "laptop",
+    keyType: "ed25519",
+    fingerprint: "SHA256:FPR",
+    publicKey: "ssh-ed25519 AAAAC3Nz",
+    hasPrivateKey: false,
+    hasPassphrase: false,
+  },
+);
+// UNLIKE `keyType`, whose unrecognised value is merely OMITTED (the row
+// still imports as a working, unlabelled PEM key): an unrecognised `kind`
+// changes which fields the record even NEEDS to be usable, so it drops the
+// WHOLE row rather than importing it as if `kind` were absent.
+check(
+  "an unrecognised kind string drops the whole row, not merely the field",
+  sanitizeKey(key({ kind: "fido2" })),
+  null,
+);
+check(
+  "kind: null also drops the row - the file said something, and it names neither kind this build knows",
+  sanitizeKey(key({ kind: null })),
+  null,
+);
+
 console.log("\n[identity keys] a keyId may never dangle: upsertIdentity throws on one either way");
 // SKIPPED, never downgraded, and the downgrade is the tempting wrong answer: every
 // host bound to this identity would quietly start offering a password where it used

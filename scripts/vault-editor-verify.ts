@@ -555,40 +555,59 @@ console.log("\n[3. save inspects fields] KeyEditorDialog's save reads draft.priv
       );
     }
 
-    // Exactly one, not merely "at least one": a second assignment in a later
-    // arm of `save` is how a fallback hides behind this pin's positive.
+    // Two assignments now, not one: `draft.kind === "hardware"` builds
+    // `facts` from a public-key CLASSIFICATION (there is no private key to
+    // unlock for that kind); every other kind still builds it from an
+    // UNLOCK, exactly as before this file gained a hardware kind. Still not
+    // "at least two", for the same reason the original pin was not "at
+    // least one": a THIRD assignment - a fallback hiding behind either
+    // genuine arm - is what this count exists to catch.
     const factsAssignments = findAssignmentsTo(saveBodyForFacts, "facts");
     check(
-      "save contains exactly one assignment to `facts`",
-      factsAssignments.length === 1,
+      "save contains exactly two assignments to `facts` - one per kind (hardware; every other kind)",
+      factsAssignments.length === 2,
       factsAssignments.length,
     );
-    if (factsAssignments.length === 1) {
-      // Decomposed into callee + its own single argument, rather than one
-      // getText() over the whole right-hand side: `vaultKeyFactsFrom(...)` is
-      // committed as a MULTI-LINE call (its one argument on its own line),
-      // and Prettier's trailing comma on that line sits INSIDE this node's
-      // own span - unlike pin 1's arguments, which sit inside a call ONE
-      // LEVEL UP from any trailing comma of their own. A whole-text compare
-      // here would falsely FAIL against the correct, committed code the
-      // moment Prettier's trailing comma is counted as part of "the claim"
-      // rather than as formatting pin 1's rule 2 already says to discount.
-      const rhs = factsAssignments[0].right;
-      const rhsIsVaultKeyFactsFromCall =
-        ts.isCallExpression(rhs) && rhs.expression.getText(keySfForFacts) === "vaultKeyFactsFrom";
+    if (factsAssignments.length === 2) {
+      const calleeOf = (a: ts.BinaryExpression): string | null =>
+        ts.isCallExpression(a.right) ? a.right.expression.getText(keySfForFacts) : null;
+      const hwAssignment = factsAssignments.find((a) => calleeOf(a) === "hardwareFactsFrom");
+      const pemAssignment = factsAssignments.find((a) => calleeOf(a) === "vaultKeyFactsFrom");
       check(
-        "the single assignment to `facts` calls vaultKeyFactsFrom(",
-        rhsIsVaultKeyFactsFromCall,
-        rhs.getText(keySfForFacts),
+        "one assignment calls hardwareFactsFrom( - the hardware kind's own source",
+        hwAssignment !== undefined,
       );
-      if (rhsIsVaultKeyFactsFromCall && ts.isCallExpression(rhs)) {
+      check(
+        "and the OTHER calls vaultKeyFactsFrom( - so the two kinds build `facts` two different," +
+          " genuine ways, and neither hides behind the other",
+        pemAssignment !== undefined,
+      );
+      if (hwAssignment && ts.isCallExpression(hwAssignment.right)) {
+        const hwArg = hwAssignment.right.arguments[0]?.getText(keySfForFacts) ?? "";
+        check(
+          "hardwareFactsFrom's argument classifies draft.publicKey - not a cached or differently-" +
+            "named field a hardware draft does not use for this",
+          norm(hwArg).includes(norm("classifySshText(draft.publicKey)")),
+          hwArg,
+        );
+      }
+      if (pemAssignment && ts.isCallExpression(pemAssignment.right)) {
+        // Decomposed into callee + its own single argument, rather than one
+        // getText() over the whole right-hand side: `vaultKeyFactsFrom(...)` is
+        // committed as a MULTI-LINE call (its one argument on its own line),
+        // and Prettier's trailing comma on that line sits INSIDE this node's
+        // own span - unlike pin 1's arguments, which sit inside a call ONE
+        // LEVEL UP from any trailing comma of their own. A whole-text compare
+        // here would falsely FAIL against the correct, committed code the
+        // moment Prettier's trailing comma is counted as part of "the claim"
+        // rather than as formatting pin 1's rule 2 already says to discount.
         check(
           "vaultKeyFactsFrom( is called with exactly 1 argument",
-          rhs.arguments.length === 1,
-          rhs.arguments.length,
+          pemAssignment.right.arguments.length === 1,
+          pemAssignment.right.arguments.length,
         );
-        if (rhs.arguments.length === 1) {
-          const argText = rhs.arguments[0].getText(keySfForFacts);
+        if (pemAssignment.right.arguments.length === 1) {
+          const argText = pemAssignment.right.arguments[0].getText(keySfForFacts);
           // Re-aimed: `save` now inspects the
           // key ONCE into a local `info` and reuses it for both the refusal
           // below and this call, rather than inspecting twice - so the
@@ -877,7 +896,7 @@ console.log(
   // compare a value against itself and pass always. So the argument's whole
   // expression text is the claim, the same way arguments 0 and 1 are.
   pinUpsertArgs("keyDialog", "upsertKey", [
-    "keyRecordFrom(id, draft, existing, facts)",
+    "keyRecordFrom(id, draft, existing, facts, certFacts)",
     "keySecretsForSave(draft)",
     "vaultKeyStamp(existing)",
   ]);
@@ -887,14 +906,19 @@ console.log(
     "vaultIdentityStamp(existing)",
   ]);
 
-  const smellKeys = [
-    "keyType:",
-    "fingerprint:",
-    "publicKey:",
-    "hasPassword:",
-    "hasPrivateKey:",
-    "hasPassphrase:",
-  ];
+  // `fingerprint:` and `publicKey:` dropped from this list: the hardware
+  // kind gave both names a second, legitimate, NON-record meaning a plain
+  // substring scan cannot tell apart from a hand-assembled VaultKey -
+  // `patch({ publicKey: ... })` (twice, over the picker row and the paste
+  // textarea) writes `KeyDraft.publicKey` itself (Decision 6, `vault/editor/draft.ts`,
+  // the same field NAME as `VaultKey.publicKey` by design), and
+  // `AgentKeyCheckState`'s "ok" arm carries its own `fingerprint` for the
+  // hardware picker's checked-line panel, a value with no `id`/`name` beside
+  // it and so no `VaultKey` at all. Section 5's argument-exact pin on
+  // `keyRecordFrom(id, draft, existing, facts, certFacts)` above is what
+  // still guards against a hand-built record either name could otherwise
+  // have caught here.
+  const smellKeys = ["keyType:", "hasPassword:", "hasPrivateKey:", "hasPassphrase:"];
   for (const key of ["keyDialog", "identityDialog"] as const) {
     const stripped = stripComments(src[key]);
     for (const smell of smellKeys) {
@@ -2217,6 +2241,90 @@ console.log(
     );
   }
 }
+
+// ============================================================================
+// 19. The kind toggle - three ToggleButtons pick pem/cert/hardware, and the
+//    kind-specific fields follow that choice rather than always rendering.
+// ============================================================================
+// Structural, the same reason section 11 reads authMode conditionals off the
+// compiler API rather than a substring scan: "is this Field wrapped in a
+// conditional mentioning draft.kind" is a nesting question, and a regex
+// cannot tell a Field genuinely guarded by kind from one merely mentioning
+// the word in a neighbouring comment.
+console.log(
+  "\n[19. kind toggle] three ToggleButtons pick pem/cert/hardware, and the kind-specific fields follow it",
+);
+{
+  const keySf = sourceFile("keyDialog");
+  const toggles = findOpeningElementsByTag(keySf, "ToggleButton", keySf);
+  const kindToggles = toggles.filter((el) =>
+    (jsxAttrExprText(el, "onClick", keySf) ?? "").includes("patch({ kind:"),
+  );
+  check(
+    "exactly three ToggleButtons patch draft.kind - not the algorithm row, which patches nothing (it only calls setAlgorithm)",
+    kindToggles.length === 3,
+    kindToggles.length,
+  );
+
+  for (const kind of ["pem", "cert", "hardware"] as const) {
+    const btn = kindToggles.find((el) =>
+      (jsxAttrExprText(el, "onClick", keySf) ?? "").includes(`kind: "${kind}"`),
+    );
+    check(`a ToggleButton sets draft.kind to "${kind}"`, btn !== undefined);
+    if (btn) {
+      const activeExpr = jsxAttrExprText(btn, "active", keySf) ?? "";
+      check(
+        `its active= state reflects the SAME kind it sets, not a different one`,
+        activeExpr.includes(`draft.kind === "${kind}"`),
+        activeExpr,
+      );
+    }
+  }
+
+  // Each kind-specific Field is guarded by the EXACT condition that follows
+  // `draft.kind`, not merely present somewhere near one - a Field guarded by
+  // the wrong kind would compile, render for nobody or everybody, and pass
+  // any check that only asked "does kind appear nearby".
+  const kindGuarded: { label: string; wantCondition: string }[] = [
+    { label: "Private key (PEM / OpenSSH)", wantCondition: 'draft.kind !== "hardware"' },
+    { label: "Certificate (OpenSSH)", wantCondition: 'draft.kind === "cert"' },
+    { label: "Key passphrase (optional)", wantCondition: 'draft.kind !== "hardware"' },
+    { label: "Hardware key (ssh-agent)", wantCondition: 'draft.kind === "hardware"' },
+  ];
+  for (const { label, wantCondition } of kindGuarded) {
+    const field = findJsxElementByTagAndLabel(keySf, "Field", label, keySf);
+    check(`the "${label}" Field was located`, field !== null);
+    if (field) {
+      const condition = findAncestorConditionOn(field, "kind", keySf);
+      check(
+        `"${label}" is wrapped in exactly \`${wantCondition}\`, not rendered unconditionally or guarded by a different kind`,
+        condition === wantCondition,
+        condition,
+      );
+    }
+  }
+
+  // The hardware kind's save path: keySecretsForSave already returns {} for
+  // it unconditionally (proved by value in vault-draft-verify.ts section 6b);
+  // what this file adds is that KeyEditorDialog's save calls that SAME shared
+  // function rather than special-casing the kind itself with a bypass that
+  // could skip the keychain write for the wrong reason. Section 5 above
+  // already pins `keySecretsForSave(draft)` as save's second upsertKey
+  // argument, unconditionally - this is that same pin's own claim, restated
+  // as the property this section is about: there is exactly one call, so
+  // there is no second, kind-specific path to the store to drift from it.
+  const saveBody = findConstArrowBody(keySf, "save");
+  check("save's body was located (compiler API)", saveBody !== null);
+  if (saveBody) {
+    const secretsCalls = findCalls(saveBody, keySf, ["keySecretsForSave"]);
+    check(
+      "keySecretsForSave is called exactly once inside save, not once per kind",
+      secretsCalls.length === 1,
+      secretsCalls.length,
+    );
+  }
+}
+
 
 console.log(`\n${checked - failed}/${checked} vault-editor checks passed`);
 if (failed > 0) console.error(`${failed} check(s) FAILED.`);
