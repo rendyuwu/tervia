@@ -2991,8 +2991,8 @@ mod chain_tests {
     #[cfg(unix)]
     impl ScratchDir {
         fn new(tag: &str) -> Self {
-            let dir =
-                std::env::temp_dir().join(format!("tervia-keygen-e2e-{tag}-{}", std::process::id()));
+            let dir = std::env::temp_dir()
+                .join(format!("tervia-keygen-e2e-{tag}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).expect("create scratch dir");
             Self(dir)
@@ -3014,7 +3014,9 @@ mod chain_tests {
     #[cfg(unix)]
     fn owner_only(path: &std::path::Path) {
         use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(path).expect("stat scratch file").permissions();
+        let mut perms = std::fs::metadata(path)
+            .expect("stat scratch file")
+            .permissions();
         perms.set_mode(0o600);
         std::fs::set_permissions(path, perms).expect("chmod scratch file");
     }
@@ -3032,7 +3034,10 @@ mod chain_tests {
                     .arg("-un")
                     .output()
                     .expect("`id -un` failed");
-                String::from_utf8(out.stdout).expect("`id -un` printed non-utf8").trim().into()
+                String::from_utf8(out.stdout)
+                    .expect("`id -un` printed non-utf8")
+                    .trim()
+                    .into()
             })
     }
 

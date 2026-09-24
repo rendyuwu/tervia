@@ -1767,7 +1767,11 @@ Ym9ndXMgYm9keSwgbmV2ZXIgcmVhY2hlZA==
                 .unwrap_or_else(|e| panic!("{algorithm}: generated key did not decode: {e}"));
             assert_eq!(
                 reread.fingerprint(russh::keys::HashAlg::Sha256).to_string(),
-                generated.info.fingerprint.clone().expect("fingerprint recorded"),
+                generated
+                    .info
+                    .fingerprint
+                    .clone()
+                    .expect("fingerprint recorded"),
                 "{algorithm}: round-tripped key reports a different fingerprint"
             );
 
@@ -1776,7 +1780,10 @@ Ym9ndXMgYm9keSwgbmV2ZXIgcmVhY2hlZA==
             // compiling.
             let inspected = ssh_key_inspect_inner(&generated.pem, None)
                 .unwrap_or_else(|e| panic!("{algorithm}: did not inspect clean: {e}"));
-            assert_eq!(inspected.fingerprint, generated.info.fingerprint, "{algorithm}");
+            assert_eq!(
+                inspected.fingerprint, generated.info.fingerprint,
+                "{algorithm}"
+            );
             assert_eq!(inspected.key_type, generated.info.key_type, "{algorithm}");
         }
     }
@@ -1792,7 +1799,11 @@ Ym9ndXMgYm9keSwgbmV2ZXIgcmVhY2hlZA==
         let generated = ssh_key_generate_inner("ed25519", Some("correct horse"), None)
             .expect("generation should succeed");
         assert!(generated.info.encrypted);
-        let fingerprint = generated.info.fingerprint.clone().expect("fingerprint recorded");
+        let fingerprint = generated
+            .info
+            .fingerprint
+            .clone()
+            .expect("fingerprint recorded");
 
         russh::keys::decode_secret_key(&generated.pem, None)
             .expect_err("an encrypted key must not decode with no passphrase");
