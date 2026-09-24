@@ -1227,15 +1227,14 @@ the copy line both need to be re-decided together, not just the field list.
 
 ### Nothing mounts KnownHostsPage, so its Forget wiring and copy are source-pinned only
 
-**Accepted state.** `scripts/hosts-store-verify.ts` proves `forgetPin` itself
-
-- what it removes, what it leaves alone, its no-op cases - and
-  `scripts/rail-views-verify.ts` proves the page is wired in as a rail view.
-  Neither mounts `KnownHostsPage.tsx`, so nothing asserts that its Forget
-  button's `onClick` actually calls `forgetPin` with the row's own address, that
-  the accessible label really names the host and address on screen, or that the
-  empty-state and device-local copy render at all. The same gap the "Vault
-  editors" entry above already carries for a different page.
+**Accepted state.** `scripts/hosts-store-verify.ts` proves `forgetPin` itself -
+what it removes, what it leaves alone, its no-op cases - and
+`scripts/rail-views-verify.ts` proves the page is wired in as a rail view.
+Neither mounts `KnownHostsPage.tsx`, so nothing asserts that its Forget
+button's `onClick` actually calls `forgetPin` with the row's own address, that
+the accessible label really names the host and address on screen, or that the
+empty-state and device-local copy render at all. The same gap the "Vault
+editors" entry above already carries for a different page.
 
 **Carried by.** `KnownHostsPage.tsx` itself - there is no file that checks it.
 

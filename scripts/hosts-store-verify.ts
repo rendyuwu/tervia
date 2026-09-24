@@ -98,6 +98,7 @@ import {
   CREDENTIAL_STAMP_INLINE,
   hostFingerprint,
   hostPins,
+  knownHostRows,
   HostBindingChangedError,
   isRdpHost,
   isSshHost,
@@ -2093,6 +2094,37 @@ console.log(
     "the next host-key check sees no pin for the forgotten address",
     afterHost ? hostPins(afterHost)["jump.example"] : "MISSING-HOST",
     undefined,
+  );
+}
+
+// The Known Hosts page's whole read path: one row per (host, address), never one
+// per host, sorted by host name then address. The RDP host carries only the flat
+// `certFingerprint` a pre-keying build wrote, so it also proves the page reads
+// through `hostPins`'s adoption rather than the raw map.
+console.log("\n[pins] knownHostRows lists one row per pinned address, sorted");
+{
+  const rows = knownHostRows([
+    sshHost({
+      id: "h-web",
+      name: "web",
+      pins: { "prod.example": "SHA256:PROD", "jump.example": "SHA256:JUMP" },
+    }),
+    sshHost({ id: "h-bare", name: "bare", host: "bare.example" }),
+    rdpHost({ id: "h-desk", name: "Desk", certFingerprint: "SHA256:CERT" }),
+  ]);
+  check(
+    "a host with two pinned addresses gives two rows, a host with none gives none",
+    rows.map((r) => `${r.hostName}|${r.address}|${r.fingerprint}`),
+    [
+      "Desk|vps.example|SHA256:CERT",
+      "web|jump.example|SHA256:JUMP",
+      "web|prod.example|SHA256:PROD",
+    ],
+  );
+  check(
+    "each row carries its own host id and protocol",
+    rows.map((r) => `${r.hostId}:${r.protocol}`),
+    ["h-desk:rdp", "h-web:ssh", "h-web:ssh"],
   );
 }
 
