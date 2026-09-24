@@ -39,8 +39,11 @@ import { port } from "./file";
  *  own `newHostId` - importing that would pull the whole Tauri-backed store
  *  into a module that has to stay loadable under plain node. Same shape as
  *  the three existing copies of this helper (`hosts/store.ts`,
- *  `vault/store.ts`, `forwards/store.ts`), each duplicated for that reason. */
-function newId(prefix: string): string {
+ *  `vault/store.ts`, `forwards/store.ts`), each duplicated for that reason -
+ *  but shared between the two PURE parsers rather than duplicated a fourth
+ *  time, since `puttyRegImport.ts` already imports `ParsedForeignHost` from
+ *  this module and neither reaches Tauri. */
+export function newId(prefix: string): string {
   return `${prefix}-${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36)}`;
 }
 
@@ -173,7 +176,20 @@ export function parseSshConfig(text: string): SshConfigParseResult {
     if (!d) continue;
 
     if (d.keyword === "include") {
-      refused.include++;
+      // A stanza that pulls in a file this reader never opened is refused
+      // whole, the same treatment ProxyCommand gets below: a directive this
+      // stanza is missing (or one it already has, wrongly) may live in the
+      // included file. Top-level (no stanza open yet) is still counted -
+      // it names a directive this reader refuses to honor even though
+      // nothing is being discarded. Already inside a refused block, it is
+      // not counted again: that stanza's single refusal already covers it.
+      if (current) {
+        refused.include++;
+        current = null;
+        inRefusedBlock = true;
+      } else if (!inRefusedBlock) {
+        refused.include++;
+      }
       continue;
     }
 

@@ -262,7 +262,7 @@ export function summarize(r: ImportResult): ImportSummary {
  *  `ForeignImportDialog.tsx` can show the same wording in its PREVIEW state,
  *  before `summarizeForeignImport` ever runs - the whole point of a preview
  *  is showing the refusal breakdown before the user confirms, not only after. */
-export const FOREIGN_REFUSAL_LABELS: Partial<Record<ForeignRefusalReason, string>> = {
+export const FOREIGN_REFUSAL_LABELS: Record<ForeignRefusalReason, string> = {
   match: "used a Match block",
   wildcardHost: "used a wildcard or negated Host pattern",
   include: "used Include",

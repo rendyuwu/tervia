@@ -803,8 +803,13 @@ function chainOf(startId: string, byId: Map<string, Host>): string[] {
  * ITSELF, and a cycle. A cycle clears the reference on every member rather than
  * picking a survivor - there is no principled winner, and keeping one would mean
  * this pass decided which of two hosts the user meant.
+ *
+ * GENERIC over `T extends Host` so a caller narrower than `Host` (an
+ * `SshHost[]`, e.g. `foreignImport.ts`'s preview rows) gets its own narrower
+ * type back rather than the `Host` union - the function only maps/filters, so
+ * `T` flows straight through.
  */
-export function clearDanglingJumps(incoming: Host[], existing: Host[]): Host[] {
+export function clearDanglingJumps<T extends Host>(incoming: T[], existing: Host[]): T[] {
   const byId = hostIndex(incoming, existing);
   return incoming.map((h) =>
     h.protocol === "ssh" && h.proxyJumpId && !chainResolves(h.id, h.proxyJumpId, byId)
@@ -844,13 +849,15 @@ export function clearDanglingTunnels(incoming: Host[], existing: Host[]): Host[]
  * Run AFTER both clearing passes: this assumes every remaining reference
  * resolves and no chain loops. The `walking` guard is belt-and-braces, so a
  * cycle that somehow survived yields a bad order rather than a hang.
+ *
+ * GENERIC over `T extends Host`, same reason as {@link clearDanglingJumps}.
  */
-export function orderHostWrites(incoming: Host[], existing: Host[]): Host[] {
+export function orderHostWrites<T extends Host>(incoming: T[], existing: Host[]): T[] {
   const byId = hostIndex(incoming, existing);
   const pending = new Map(incoming.map((h) => [h.id, h]));
   const emitted = new Set<string>();
   const walking = new Set<string>();
-  const out: Host[] = [];
+  const out: T[] = [];
 
   const visit = (id: string): void => {
     const host = pending.get(id);
@@ -925,11 +932,13 @@ export function orderGroupWrites(incoming: HostGroup[], existing: HostGroup[]): 
  * REFUSED rather than repaired, because there is no version of the row that is
  * both the file's and the saved one's. Deleting the saved host first is a
  * decision only its owner can make.
+ *
+ * GENERIC over `T extends Host`, same reason as {@link clearDanglingJumps}.
  */
-export function refuseProtocolConflicts(
-  incoming: Host[],
+export function refuseProtocolConflicts<T extends Host>(
+  incoming: T[],
   existing: Host[],
-): { hosts: Host[]; conflicts: number } {
+): { hosts: T[]; conflicts: number } {
   const byId = new Map(existing.map((h) => [h.id, h]));
   const hosts = incoming.filter((h) => (byId.get(h.id)?.protocol ?? h.protocol) === h.protocol);
   return { hosts, conflicts: incoming.length - hosts.length };

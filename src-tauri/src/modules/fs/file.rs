@@ -153,12 +153,12 @@ pub(crate) fn classify_bytes(path: &Path, bytes: Vec<u8>) -> ReadResult {
     // null-byte/UTF-8 path unchanged rather than erroring - the BOM alone is
     // not a strong enough claim to refuse the file outright.
     if bytes.len() >= 2 {
-        let pairs = bytes[2..].chunks_exact(2);
+        let (pairs, _) = bytes[2..].as_chunks::<2>();
         let content = if bytes[0] == 0xFF && bytes[1] == 0xFE {
-            let units: Vec<u16> = pairs.map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+            let units: Vec<u16> = pairs.iter().map(|c| u16::from_le_bytes(*c)).collect();
             String::from_utf16(&units).ok()
         } else if bytes[0] == 0xFE && bytes[1] == 0xFF {
-            let units: Vec<u16> = pairs.map(|c| u16::from_be_bytes([c[0], c[1]])).collect();
+            let units: Vec<u16> = pairs.iter().map(|c| u16::from_be_bytes(*c)).collect();
             String::from_utf16(&units).ok()
         } else {
             None

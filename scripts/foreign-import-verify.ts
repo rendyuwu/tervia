@@ -128,8 +128,14 @@ Host prod
   // The stanza carrying `ProxyCommand` is itself the one refused whole - `bad`
   // never surfaces a `host` field, only the count. `ok1` (before it) and `ok3`
   // (after it) both still import, which is the property under test: one
-  // refused stanza does not abandon the rest of the file.
+  // refused stanza does not abandon the rest of the file. `Include` sits
+  // TOP-LEVEL here (before the first `Host`/`Match` line) - still counted
+  // even though nothing is being discarded, since no stanza is open yet;
+  // the in-stanza case (Include discarding an otherwise-good stanza) is its
+  // own test below.
   const cfg = `
+Include other.conf
+
 Match host prod
   User someone
 
@@ -138,8 +144,6 @@ Host ok1
 
 Host prod*
   HostName wild.example.com
-
-Include other.conf
 
 Host bad
   HostName bad.example.com
@@ -165,6 +169,44 @@ Host ok3
 {
   const r = parseSshConfig("Host neg\n  HostName x\nHost !neg\n  HostName y\n");
   check("a negated Host pattern (!alias) is refused as wildcardHost", r.refused.wildcardHost, 1);
+}
+
+{
+  // Include appearing INSIDE an otherwise-good, still-open stanza refuses
+  // that whole stanza rather than importing it partially (the acceptance
+  // box's own wording) - `HostName`/`Port` around it are just as
+  // unverifiable once the stanza admits it did not read everything it
+  // depends on. `ok1`/`ok2` still import.
+  const cfg = `
+Host ok1
+  HostName ok1.example.com
+
+Host web
+  HostName web.example.com
+  Include ~/.ssh/web.conf
+  Port 2222
+
+Host ok2
+  HostName ok2.example.com
+`;
+  const r = parseSshConfig(cfg);
+  check(
+    "an Include inside an active stanza refuses that whole stanza, not just the directive",
+    { aliases: r.hosts.map((h) => h.alias), refused: r.refused.include },
+    { aliases: ["ok1", "ok2"], refused: 1 },
+  );
+}
+
+{
+  // The stanza is already gone after the FIRST Include - a second one inside
+  // the same now-refused block must not count twice.
+  const cfg = "Host dup\n  HostName dup.example.com\n  Include one.conf\n  Include two.conf\n";
+  const r = parseSshConfig(cfg);
+  check(
+    "a second Include inside an already-refused stanza does not double count",
+    r.refused.include,
+    1,
+  );
 }
 
 // --- ssh_config: Port validation reuses port() ------------------------------
@@ -328,6 +370,25 @@ const REG_HEADER = "Windows Registry Editor Version 5.00";
       refused: r.refused,
     },
     { hosts: 0, refused: { nonSsh: 0, proxyMethodSet: 1 } },
+  );
+}
+
+{
+  // A session that parses fine (SSH, no proxy) but has no `HostName` at all -
+  // the same "skip and count, never abort the file" treatment an invalid
+  // `ssh_config` Port gets, not a refusal (nothing about the session itself
+  // is being refused, it just has nothing to dial).
+  const reg = `${REG_HEADER}
+
+[HKEY_CURRENT_USER\\Software\\SimonTatham\\PuTTY\\Sessions\\nohost]
+"Protocol"="ssh"
+"PortNumber"=dword:00000016
+`;
+  const r = parsePuttyReg(reg);
+  check(
+    "a session with no usable HostName is skipped, not refused or imported",
+    { hosts: r.hosts.length, skipped: r.skipped, refused: r.refused },
+    { hosts: 0, skipped: 1, refused: { nonSsh: 0, proxyMethodSet: 0 } },
   );
 }
 

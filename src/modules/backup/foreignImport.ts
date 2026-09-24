@@ -307,6 +307,16 @@ function reason(e: unknown): string {
  * always names a record already on disk. Each record is tried independently
  * and a failure is counted and reported without abandoning the rest, matching
  * `applyV3`'s own containment.
+ *
+ * ONE FAILURE CANNOT CASCADE AS A DIFFERENT ONE. A key `upsertKey` refuses
+ * would otherwise still be handed to `upsertIdentity`, which always throws
+ * "names a key that does not exist" - one keychain failure would then surface
+ * as N identity failures blaming the identities themselves, and the hosts
+ * bound to those identities would still write with a dangling `identityId`
+ * (`assertReferences` checks `proxyJumpId`, not `credential.identityId`).
+ * `failedKeyIds`/`failedIdentityIds` name what already failed so the next
+ * pass SKIPS rather than attempts a write already known to be wrong, with a
+ * problem line naming the real cause instead of the symptom.
  */
 export async function applyForeignImport(
   preview: ForeignImportPreview,
@@ -332,6 +342,7 @@ export async function applyForeignImport(
   const hosts: ImportCounts = { added: 0, replaced: 0, withoutSecrets: 0, failed: 0 };
   const problems: string[] = [];
 
+  const failedKeyIds = new Set<string>();
   for (const { record, privateKey } of preview.keys) {
     try {
       await upsertKey(record, { privateKey });
@@ -339,22 +350,36 @@ export async function applyForeignImport(
       else keys.added++;
     } catch (e) {
       keys.failed++;
+      failedKeyIds.add(record.id);
       problems.push(`key "${record.name}" could not be saved: ${reason(e)}`);
     }
   }
 
+  const failedIdentityIds = new Set<string>();
   for (const identity of preview.identities) {
+    if (identity.keyId && failedKeyIds.has(identity.keyId)) {
+      identities.failed++;
+      failedIdentityIds.add(identity.id);
+      problems.push(`identity "${identity.name}" skipped: its key could not be saved`);
+      continue;
+    }
     try {
       await upsertIdentity(identity, {});
       if (existingIdentityIds.has(identity.id)) identities.replaced++;
       else identities.added++;
     } catch (e) {
       identities.failed++;
+      failedIdentityIds.add(identity.id);
       problems.push(`identity "${identity.name}" could not be saved: ${reason(e)}`);
     }
   }
 
   for (const host of preview.hosts) {
+    if (host.credential.kind === "identity" && failedIdentityIds.has(host.credential.identityId)) {
+      hosts.failed++;
+      problems.push(`"${host.name}" skipped: its identity could not be saved`);
+      continue;
+    }
     try {
       await upsertHost(host, {});
       if (existingHostIds.has(host.id)) hosts.replaced++;

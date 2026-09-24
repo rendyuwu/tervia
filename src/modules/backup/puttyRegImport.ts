@@ -12,11 +12,7 @@
  * `ParsedForeignHost`, reused here unchanged.
  */
 import { port } from "./file";
-import type { ParsedForeignHost } from "./sshConfigImport";
-
-function newId(prefix: string): string {
-  return `${prefix}-${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36)}`;
-}
+import { newId, type ParsedForeignHost } from "./sshConfigImport";
 
 export type PuttyRefusalReason = "nonSsh" | "proxyMethodSet";
 

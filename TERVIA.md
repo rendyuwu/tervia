@@ -426,9 +426,12 @@ secrets)` is the mode-to-wire mapping for the one case with nothing to
   layer on top: it resolves `IdentityFile`/`ProxyJump` against `listHosts()`,
   reads and inspects a key file (`fs_read_file` + `ssh_key_inspect`, the same
   calls the key editor's own picker makes), and reuses `clearDanglingJumps`/
-  `refuseProtocolConflicts`/`orderHostWrites` from `file.ts` unchanged before
-  writing through the ordinary `upsertHost`/`upsertKey`/`upsertIdentity`
-  calls - not `applyV3`, since a plaintext source file never holds a sealed
+  `refuseProtocolConflicts`/`orderHostWrites` from `file.ts` with the same
+  behaviour as the backup path - all three are generic over `T extends Host`
+  so a caller narrower than `Host` gets its own row type back rather than
+  the widened union - before writing through the ordinary
+  `upsertHost`/`upsertKey`/`upsertIdentity` calls - not `applyV3`, since a
+  plaintext source file never holds a sealed
   blob to decrypt. `ForeignImportDialog.tsx` is the preview-then-confirm UI,
   surfaced from `HostsBackupActions.tsx`'s "Import from..." menu. Termius is
   not offered - see `KNOWN-LIMITS.md`. `fs_read_file`'s `classify_bytes`

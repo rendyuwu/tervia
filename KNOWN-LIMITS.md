@@ -312,6 +312,30 @@ not a one-off - at which point a stable identity key (alias, or resolved
 `IdentityFile` path) would need to be chosen and merge semantics designed
 around it.
 
+### The line-range file reader still refuses a BOM'd UTF-16 file `fs_read_file` now decodes
+
+**Accepted state.** `classify_bytes` gained a BOM-aware UTF-16LE/BE decode
+ahead of its null-byte sniff, so `fs_read_file` now reads a PuTTY `.reg`
+export (or any other BOM'd Windows-authored text file) as text.
+`fs_read_file_portion_inner` - the AI read tool's line-range reader - still
+refuses the same bytes as `Binary`: its own null-byte sniff has no BOM check
+at all. Not part of this import's acceptance boxes - the importer calls only
+`fs_read_file` - and not a two-line fix either. `fs_read_file_portion_inner`
+is byte-oriented (`BufReader::read_line` line by line, assuming each line is
+valid UTF-8 on its own), so decoding UTF-16 would mean buffering and decoding
+the whole file into a `String` first and then re-deriving the
+offset/limit/`total_lines` slicing against it - a second, parallel
+line-splitting path, not a peephole added to the existing streaming loop.
+
+**Carried by.** `fs_read_file_portion_inner` and `classify_bytes` in
+`src-tauri/src/modules/fs/file.rs` - the two commands' now-diverging verdict
+on the same byte-for-byte input.
+
+**Trigger.** A user or an AI tool asking to open a slice of a UTF-16 file
+through the line-range reader specifically, or a decision to give
+`fs_read_file_portion_inner` its own buffered UTF-16 decode path rather than
+its current streamed one.
+
 ## Host groups
 
 ### A group's name is unique across the whole tree, not per-parent

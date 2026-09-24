@@ -982,8 +982,8 @@ const handTyped: SshHost = {
 };
 check(
   "a hand-typed SshHost's dangling proxyJumpId is cleared exactly like a sanitizeHost row's",
-  clearDanglingJumps([handTyped], [])[0].proxyJumpId,
-  undefined,
+  jumpOf(clearDanglingJumps([handTyped], [])[0]),
+  null,
 );
 const handTypedConflict: SshHost = { ...handTyped, id: "h-existing-rdp" };
 check(
