@@ -312,9 +312,10 @@ console.log("\n[4] identityRows and keyRows: counts and key-name resolution agre
 console.log("\n[5] rankIdentities and rankKeys: tiers, drops, empty and whitespace queries");
 {
   // Six rows, all matched against the query "db", chosen so the DEFAULT order
-  // (name, then id) is a genuine permutation of the tier order below - not the
-  // identity permutation - so a comparator that returned the input unsorted, or
-  // a filter that did not run, would still fail this section.
+  // (no stamps, so name, then id - recency is section 20's) is a genuine
+  // permutation of the tier order below - not the identity permutation - so a
+  // comparator that returned the input unsorted, or a filter that did not run,
+  // would still fail this section.
   //
   //   name           username     tier for "db"
   //   -------------  -----------  -------------------------------------------
@@ -343,7 +344,7 @@ console.log("\n[5] rankIdentities and rankKeys: tiers, drops, empty and whitespa
 
   // Default order by name: adbox, db, db-prod, nothing, prod-db-01, zzzzzz.
   check(
-    "empty query returns every row in default (name, then id) order",
+    "empty query, no stamps: every row in default (name, then id) order",
     rankIdentities(rows, "").map((r) => r.identity.id),
     ["i-alpha", "i-charlie", "i-delta", "i-foxtrot", "i-bravo", "i-echo"],
   );
@@ -452,7 +453,7 @@ console.log("\n[5] rankIdentities and rankKeys: tiers, drops, empty and whitespa
 
   // Default order by name: adbox, db, db-prod-key, nothing, prod-db-01, zzzzzz.
   check(
-    "rankKeys: empty query returns every row in default (name, then id) order",
+    "rankKeys: empty query, no stamps: every row in default (name, then id) order",
     rankKeys(kRows, "").map((r) => r.key.id),
     ["k-alpha", "k-charlie", "k-bravo", "k-nomatch", "k-delta", "k-echo"],
   );

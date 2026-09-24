@@ -643,6 +643,48 @@ async function b2b3b4(): Promise<void> {
     [],
   );
   check("B4: and this side names no device", edit.pushed[0]?.envelopes[0]?.device ?? null, null);
+
+  // The vault kinds go through the same strip: this device's connect history on
+  // an identity or a key must not ride out with either.
+  const stamped = harness({
+    identities: [
+      {
+        id: "i-1",
+        name: "root",
+        username: "root",
+        authMode: "password",
+        hasPassword: false,
+        updatedAt: START - 1000,
+        lastConnectedAt: START - 100,
+      },
+    ],
+    vaultKeys: [
+      {
+        id: "k-1",
+        name: "id_ed25519",
+        hasPrivateKey: false,
+        hasPassphrase: false,
+        updatedAt: START - 1000,
+        lastConnectedAt: START - 100,
+      },
+    ],
+    dirty: [`${IDENTITY_TOMBSTONE_KIND}:i-1`, `${KEY_TOMBSTONE_KIND}:k-1`],
+  });
+  await stamped.scheduler.pushNow();
+  await settle();
+  const vaultEnvelopes = stamped.pushed[0]?.envelopes ?? [];
+  check(
+    "B4: a stamped identity and key both push",
+    vaultEnvelopes.map((e) => `${e.kind}:${e.id}`).sort(),
+    [`${IDENTITY_TOMBSTONE_KIND}:i-1`, `${KEY_TOMBSTONE_KIND}:k-1`],
+  );
+  check(
+    "B4: and neither carries its lastConnectedAt",
+    vaultEnvelopes
+      .filter((e) => (e.record as Record<string, unknown>).lastConnectedAt !== undefined)
+      .map((e) => e.id),
+    [],
+  );
 }
 
 async function b5(): Promise<void> {

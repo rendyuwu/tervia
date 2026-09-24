@@ -535,12 +535,16 @@ const lastKeys = (p: Port): string[] => p.keyLog()[p.keyLog().length - 1] ?? [];
   check("and its content landed", landedKey.name, "renamed");
 
   const vfresh = harness();
-  await vfresh.vault.applyRemote([landed(identity({ id: "i-new", lastConnectedAt: 9 }))], []);
+  await vfresh.vault.applyRemote(
+    [landed(identity({ id: "i-new", lastConnectedAt: 9 }))],
+    [landed(vaultKey({ id: "k-new", lastConnectedAt: 9 }))],
+  );
   check(
     "a new identity does not take a carried stamp",
     (await vfresh.vault.findIdentity("i-new"))?.lastConnectedAt,
     undefined,
   );
+  check("nor does a new key", (await vfresh.vault.findKey("k-new"))?.lastConnectedAt, undefined);
 }
 
 // ---------------------------------------------------------------------------
@@ -1045,6 +1049,25 @@ const lastKeys = (p: Port): string[] => p.keyLog()[p.keyLog().length - 1] ?? [];
 
   await h.hosts.markConnected("h-1", "SHA256:aaa");
   check("a key-auth SSH connect stamps the key", await keyAt(), START);
+
+  // In its own harness, because the RDP connect above already left `i-1` at the
+  // same constant clock: a key branch that REPLACED the identity write instead of
+  // adding to it would pass every row above.
+  const keyAuth = harness({
+    hosts: [host()],
+    identities: [identity({ authMode: "key", keyId: "k-1" })],
+    vaultKeys: [vaultKey()],
+  });
+  await keyAuth.hosts.markConnected("h-1", "SHA256:aaa");
+  check(
+    "a key-auth SSH connect alone stamps both the identity and the key",
+    [
+      (await keyAuth.vault.findIdentity("i-1"))?.lastConnectedAt,
+      (await keyAuth.vault.findKey("k-1"))?.lastConnectedAt,
+    ],
+    [START, START],
+  );
+  check("in one commit", keyAuth.vaultPort.commits(), 1);
 
   check(
     "no connect moved either record's updatedAt",

@@ -2,9 +2,9 @@
  * One vault identity in the Vault page list. Pure presentation: every value it
  * shows arrives as a prop, exactly as `hosts/page/HostCard.tsx` does it, so the
  * page owns the data (the row builder, the reference counts, the missing-secret
- * answer) and this file owns only the rendering. The one value derived here is
- * the connected label: `lastConnectedLabel` over `identity.lastConnectedAt` and
- * the render-time clock.
+ * answer) and this file owns only the rendering. The one input that is not a
+ * prop is the render-time clock, which `lastConnectedLabel` reads alongside
+ * `identity.lastConnectedAt` for the connected label.
  *
  * Edit opens the identity editor. There is no selection, no connect
  * action and no card-level `onClick`: this card is a static row, not the

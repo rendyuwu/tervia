@@ -126,7 +126,8 @@ export type VaultStore = {
    * REMOTE timestamps in ONE commit, and report the ones that were not applied.
    *
    * The one writer here that does not originate what it writes, which is why it
-   * is the one that does not stamp: every other mutator overwrites its caller's
+   * does not stamp: every mutator but this one and `markIdentityConnected` (whose
+   * write is device-local history, not record content) overwrites its caller's
    * `updatedAt`, and doing that to a pulled record would have it outrank the copy
    * it came from, while a locally-stamped `deletedAt` restarts the expiry window
    * on every device that receives the delete.
@@ -239,8 +240,9 @@ export function createVaultStore(io: VaultIo): VaultStore {
    *
    * DIRTY IS REQUIRED, and per RECORD - `hosts/store.ts`'s copy of this doc
    * carries the full reasoning; it is the same parameter for the same reasons.
-   * `[]` is what `applyRemote` passes: a landing is what the remote already
-   * holds.
+   * `[]` is what `applyRemote` passes, because a landing is what the remote
+   * already holds, and what `markIdentityConnected` passes, because connect
+   * history does not sync.
    */
   async function persist(entries: [string, unknown][], dirty: DirtyId[]): Promise<void> {
     for (const [key, value] of entries) await io.store.set(key, value);

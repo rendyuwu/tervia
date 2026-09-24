@@ -701,8 +701,9 @@ another device.
 
 **Accepted state.** A backup export seals the raw identity and key records, so
 it carries their `lastConnectedAt`. The import drops it, and the vault store
-never takes the stamp from a caller, so a restored vault starts with no recency
-while a restored host keeps its own. A forward-only tunnel - including the SSH
+never takes the stamp from a caller, so an identity or key the import creates
+starts with no recency. One this device already holds keeps its own stamp, and a
+restored host keeps its own too. A forward-only tunnel - including the SSH
 tunnel under an RDP host - stamps neither its bastion host nor that host's
 identity.
 
