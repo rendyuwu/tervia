@@ -1950,7 +1950,9 @@ console.log(
 }
 
 // ---------------------------------------------------------------------------
-console.log("\n[groups] defaultIdentityFor: own group wins, else the nearest ancestor's");
+console.log(
+  "\n[groups] defaultIdentityFor: own group wins, else the nearest ancestor's - and a dead default is skipped",
+);
 {
   const groups: HostGroup[] = [
     { id: "g-root", name: "Root", defaultIdentityId: "i-root" },
@@ -1958,25 +1960,40 @@ console.log("\n[groups] defaultIdentityFor: own group wins, else the nearest anc
     { id: "g-leaf", name: "Leaf", parentId: "g-mid", defaultIdentityId: "i-leaf" },
     { id: "g-solo", name: "Solo" },
   ];
+  const live = new Set(["i-root", "i-leaf", "i-x"]);
   check(
     "a group's own default wins over any ancestor's",
-    defaultIdentityFor("g-leaf", groups),
+    defaultIdentityFor("g-leaf", groups, live),
     "i-leaf",
   );
   check(
     "with no default of its own, the nearest ancestor's is used",
-    defaultIdentityFor("g-mid", groups),
+    defaultIdentityFor("g-mid", groups, live),
     "i-root",
   );
   check(
     "a group with no default anywhere on its chain answers undefined",
-    defaultIdentityFor("g-solo", groups),
+    defaultIdentityFor("g-solo", groups, live),
     undefined,
   );
-  check("no group selected answers undefined", defaultIdentityFor(undefined, groups), undefined);
+  check(
+    "no group selected answers undefined",
+    defaultIdentityFor(undefined, groups, live),
+    undefined,
+  );
   check(
     "a group id naming nothing in the list answers undefined",
-    defaultIdentityFor("g-gone", groups),
+    defaultIdentityFor("g-gone", groups, live),
+    undefined,
+  );
+  check(
+    "an OWN default naming an identity that is not live is skipped, falling through to a live ancestor",
+    defaultIdentityFor("g-leaf", groups, new Set(["i-root"])),
+    "i-root",
+  );
+  check(
+    "a dead own default with no live ancestor answers undefined, not the dead id",
+    defaultIdentityFor("g-leaf", groups, new Set()),
     undefined,
   );
 
@@ -1990,17 +2007,17 @@ console.log("\n[groups] defaultIdentityFor: own group wins, else the nearest anc
   ];
   check(
     "a group ON a landed cycle has no ancestor to fall through to",
-    defaultIdentityFor("g-a", withBadEdges),
+    defaultIdentityFor("g-a", withBadEdges, live),
     undefined,
   );
   check(
     "a dangling parent does not stop the group's OWN default from answering",
-    defaultIdentityFor("g-dangling", withBadEdges),
+    defaultIdentityFor("g-dangling", withBadEdges, live),
     "i-x",
   );
   check(
     "a child of a dangling-parented group still falls through to it",
-    defaultIdentityFor("g-child", withBadEdges),
+    defaultIdentityFor("g-child", withBadEdges, live),
     "i-x",
   );
 }

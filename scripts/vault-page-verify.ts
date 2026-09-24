@@ -37,7 +37,7 @@ import {
   type KeyRow,
 } from "../src/modules/vault/page/derive";
 import type { HostGroup, RdpHost, SshHost } from "../src/modules/hosts/types";
-import { groupsUsingIdentity } from "../src/modules/vault/refs";
+import { GROUP_DEFAULT_SUFFIX, groupsUsingIdentity } from "../src/modules/vault/refs";
 import { VaultInUseError } from "../src/modules/vault/types";
 import type { VaultIdentity, VaultKey } from "../src/modules/vault/types";
 import { callsFunction, importSpecifiersOf, namedImportsFrom } from "./lib/ast";
@@ -267,8 +267,9 @@ console.log("\n[4] identityRows and keyRows: counts and key-name resolution agre
     identity("i-4", { authMode: "key", keyId: "k-2" }),
   ];
   const hosts = [sshBound("h-1", "i-1"), rdpBound("h-2", "i-1"), sshBound("h-3", "i-3")];
+  const groups: HostGroup[] = [{ id: "g-1", name: "Group 1", defaultIdentityId: "i-4" }];
 
-  const rows = identityRows(identities, keyMap, hosts);
+  const rows = identityRows(identities, keyMap, hosts, groups);
 
   // Literal expected values, not `hosts.map(...).length)`-shaped expressions
   // built from the same lookups the rows are built from: i-1 is bound by h-1
@@ -282,6 +283,11 @@ console.log("\n[4] identityRows and keyRows: counts and key-name resolution agre
     "hostCount: literal count per identity - i-1 has two holders, i-2/i-3/i-4 none",
     rows.map((r) => r.hostCount),
     [2, 0, 1, 0],
+  );
+  check(
+    "groupCount: literal count per identity - only i-4 is a group's default",
+    rows.map((r) => r.groupCount),
+    [0, 0, 0, 1],
   );
   check(
     "keyName: live key's name, UNKNOWN_KEY_LABEL for dangling, undefined for none",
@@ -787,17 +793,13 @@ console.log("\n[12] hosts/page/derive.ts imports the shared missing-secret check
 
 // --- 13. hosts/store.ts shares the identity-holder lookup --------------------
 
-console.log(
-  "\n[13] hosts/store.ts's identityHostRefs delegates to the shared lookups, both of them",
-);
+console.log("\n[13] hosts/store.ts's identityHostRefs delegates to the shared lookup");
 {
   const storeSrc = readFileSync(join(root, "src/modules/hosts/store.ts"), "utf8");
   ok("calls hostsUsingIdentity(", callsFunction("store.ts", storeSrc, "hostsUsingIdentity"));
-  ok("calls groupsUsingIdentity(", callsFunction("store.ts", storeSrc, "groupsUsingIdentity"));
   ok(
-    "does not re-derive either predicate inline",
-    !storeSrc.includes("credential.identityId === identityId") &&
-      !storeSrc.includes("defaultIdentityId === identityId"),
+    "does not re-derive the predicate inline",
+    !storeSrc.includes("credential.identityId === identityId"),
   );
 }
 
@@ -830,7 +832,7 @@ console.log("\n[15] keyDangling and missingPrivateKey: separate facts, literal p
     identity("i-4", { authMode: "password", keyId: undefined }),
     identity("i-5", { authMode: "key", keyId: "k-3" }),
   ];
-  const rows = identityRows(identities, keyMap, []);
+  const rows = identityRows(identities, keyMap, [], []);
 
   // i-5 is the case a label cannot express: it names a key that EXISTS and is
   // called "Unknown key", so its keyName is identical to i-2's and its
@@ -918,6 +920,30 @@ console.log("\n[17] deleteRefusalText: names the holders and the edit that clear
     deleteRefusalText('identity "Prod root"', "host", twoHosts),
     'Cannot delete identity "Prod root": 2 hosts still use it (web-1, db-1). ' +
       "Point each of them at another credential first.",
+  );
+
+  // A GROUP holder (`identityHostRefs` in `hosts/store.ts` suffixes its name
+  // with GROUP_DEFAULT_SUFFIX) makes the copy noun-neutral - it is not a
+  // host, and "point it at another credential" is not the edit that clears a
+  // group's default.
+  const mixedHolders = new VaultInUseError('identity "root"', "host", [
+    { id: "h-1", name: "web-1" },
+    { id: "g-1", name: `Production${GROUP_DEFAULT_SUFFIX}` },
+  ]);
+  check(
+    "a mixed host+group holder list reads noun-neutral and names both remedies",
+    deleteRefusalText('identity "root"', "host", mixedHolders),
+    'Cannot delete identity "root": still in use by web-1, Production (group default). ' +
+      "Point each host at another credential and set each group's default identity to None first.",
+  );
+  const groupOnly = new VaultInUseError('identity "root"', "host", [
+    { id: "g-1", name: `Production${GROUP_DEFAULT_SUFFIX}` },
+  ]);
+  check(
+    "a group-only holder gets the same noun-neutral copy, not the singular host phrasing",
+    deleteRefusalText('identity "root"', "host", groupOnly),
+    'Cannot delete identity "root": still in use by Production (group default). ' +
+      "Point each host at another credential and set each group's default identity to None first.",
   );
 
   const oneIdentity = new VaultInUseError('key "id_ed25519"', "identity", [

@@ -115,6 +115,7 @@ import {
   HOST_GROUPS_KEY,
   HostBindingChangedError,
   type Host,
+  type HostGroup,
   type RdpHost,
   type SshHost,
 } from "../src/modules/hosts/types";
@@ -123,6 +124,7 @@ import {
   CREDENTIAL_CHOICE_NEW_IDENTITY,
   credentialChangeFor,
   credentialChangeNote,
+  credentialChoiceForGroup,
   hostOwnedSecretNames,
   identityChoice,
   identityIdFromChoice,
@@ -3126,6 +3128,51 @@ console.log("\n[16] credentialChoice.ts, by value");
       '"i-9"',
     ),
     "bind note falls back to the id when no name is known",
+  );
+
+  // credentialChoiceForGroup, by value - the pure helper both the create-mode
+  // load and the group picker's re-seed call, per issue #75's group-default
+  // fix-up. Nested so an own default that is DEAD still falls through to a
+  // LIVE ancestor's, rather than shadowing it.
+  const groups: HostGroup[] = [
+    { id: "g-root", name: "Root", defaultIdentityId: "i-root" },
+    { id: "g-mid", name: "Mid", parentId: "g-root" },
+    { id: "g-leaf", name: "Leaf", parentId: "g-mid", defaultIdentityId: "i-leaf" },
+    { id: "g-dangling", name: "Dangling", parentId: "g-root", defaultIdentityId: "i-gone" },
+  ];
+  const rootless: HostGroup[] = [
+    { id: "g-dangling", name: "Dangling", defaultIdentityId: "i-gone" },
+  ];
+  const live = new Set(["i-root", "i-leaf"]);
+  check(
+    "empty group id -> inline, no group selected",
+    credentialChoiceForGroup("", groups, live),
+    CREDENTIAL_CHOICE_INLINE,
+  );
+  check(
+    "own live default -> identityChoice(id)",
+    credentialChoiceForGroup("g-leaf", groups, live),
+    identityChoice("i-leaf"),
+  );
+  check(
+    "no default of its own falls through to the nearest ancestor's",
+    credentialChoiceForGroup("g-mid", groups, live),
+    identityChoice("i-root"),
+  );
+  check(
+    "a dangling own default falls through to a live ancestor's",
+    credentialChoiceForGroup("g-dangling", groups, live),
+    identityChoice("i-root"),
+  );
+  check(
+    "a dangling own default with no live ancestor -> inline",
+    credentialChoiceForGroup("g-dangling", rootless, live),
+    CREDENTIAL_CHOICE_INLINE,
+  );
+  check(
+    "an unknown group id -> inline",
+    credentialChoiceForGroup("g-ghost", groups, live),
+    CREDENTIAL_CHOICE_INLINE,
   );
 }
 
