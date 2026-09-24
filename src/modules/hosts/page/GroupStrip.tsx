@@ -252,7 +252,13 @@ export function GroupStrip({
         />
         {isFlat &&
           tree.map((node) => (
-            <GroupRow key={node.group.id} node={node} parentId={undefined} tree={tree} {...rowProps} />
+            <GroupRow
+              key={node.group.id}
+              node={node}
+              parentId={undefined}
+              tree={tree}
+              {...rowProps}
+            />
           ))}
         {isFlat && newGroupControl}
       </div>
@@ -397,13 +403,7 @@ function GroupTreeRow({
   parentId: string | undefined;
   tree: readonly GroupNode[];
 }): ReactNode {
-  const {
-    collapsedIds,
-    onToggleExpand,
-    creatingUnder,
-    onCommitCreate,
-    onCancelCreate,
-  } = actions;
+  const { collapsedIds, onToggleExpand, creatingUnder, onCommitCreate, onCancelCreate } = actions;
   const { group, children } = node;
   const hasChildren = children.length > 0;
   const expanded = !collapsedIds.has(group.id);

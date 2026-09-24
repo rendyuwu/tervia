@@ -127,4 +127,3 @@ export function descendantIds(groupId: string, groups: readonly HostGroup[]): Re
   if (node) collectIds(node, ids);
   return ids;
 }
-

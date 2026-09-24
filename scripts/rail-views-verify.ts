@@ -1874,7 +1874,8 @@ console.log("\n[chip] a chip selects its own entry, even when it is already the 
   const iconActionPath = "src/components/IconActionButton.tsx";
   const stripAst = existsSync(join(root, stripPath)) ? parseTsx(stripPath) : null;
   const stripTags = stripAst === null ? [] : jsxDescendantTags(stripAst);
-  const iconActionUses = stripAst === null ? -1 : stripTags.filter((t) => t === "IconActionButton").length;
+  const iconActionUses =
+    stripAst === null ? -1 : stripTags.filter((t) => t === "IconActionButton").length;
   const iconActionSpec = stripAst === null ? null : importSpecifierOf(stripAst, "IconActionButton");
   check(
     // Non-vacuity, and the row that stops the next check from passing over a
