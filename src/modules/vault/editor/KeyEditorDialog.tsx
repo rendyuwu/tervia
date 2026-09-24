@@ -36,9 +36,9 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { toast } from "@/components/ui/toast";
 import type { FsReadResult } from "@/lib/ipc";
-import { Field } from "@/modules/hosts/editor/FormControls";
+import { Field, ToggleButton } from "@/modules/hosts/editor/FormControls";
 import { SECRET_STORE_LOCATIONS } from "@/modules/hosts/editor/secretStoreCopy";
-import { inspectSshKey } from "@/modules/ssh/bridge";
+import { generateSshKey, inspectSshKey, type SshKeyAlgorithm } from "@/modules/ssh/bridge";
 import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { useEffect, useRef, useState, type ReactNode } from "react";
@@ -113,6 +113,11 @@ export function KeyEditorDialog({ target, onClose }: KeyEditorDialogProps): Reac
   const [keyRefusal, setKeyRefusal] = useState<string | null>(null);
   const [inspected, setInspected] = useState<KeyInspectState>({ kind: "idle" });
   const [imported, setImported] = useState<ImportState>({ kind: "idle" });
+  // The key editor's Generate action. Local to this dialog, not part of
+  // `KeyDraft`: the algorithm choice steers what the NEXT generate call
+  // builds, it is not itself a fact `upsertKey` saves.
+  const [algorithm, setAlgorithm] = useState<SshKeyAlgorithm>("ed25519");
+  const [generating, setGenerating] = useState(false);
   // What `inspected` currently describes: the (body, passphrase) pair as of the
   // last `checkKey` call still allowed to write to it. Bumped by `checkKey`
   // itself, so a second call outruns a first still in flight; by
@@ -140,6 +145,8 @@ export function KeyEditorDialog({ target, onClose }: KeyEditorDialogProps): Reac
     setSaving(false);
     setInspected({ kind: "idle" });
     setImported({ kind: "idle" });
+    setAlgorithm("ed25519");
+    setGenerating(false);
     inspectGeneration.current += 1;
     setExisting(null);
     setReady(false);
@@ -262,6 +269,39 @@ export function KeyEditorDialog({ target, onClose }: KeyEditorDialogProps): Reac
       await checkKey(result.content, "");
     } catch (e) {
       setImported({ kind: "error", message: e instanceof Error ? e.message : String(e) });
+    }
+  };
+
+  /**
+   * Fill this form's own fields with a freshly generated key pair - the same
+   * draft `save` already turns into a record via `keyRecordFrom`/
+   * `keySecretsForSave`, so a generated key takes no second path to the
+   * store. Disabled in the JSX below while `draft.privateKey` is non-blank,
+   * so a pasted or imported body is never silently replaced.
+   *
+   * Reuses whatever is already in the passphrase field as the encryption
+   * passphrase (so ticking one in before pressing Generate returns an
+   * already-encrypted key, consistent with `save`'s own read of that field)
+   * and the Name field as the key's comment - both fields this form already
+   * asks for, rather than two more inputs that ask the same questions again.
+   */
+  const generateKey = async () => {
+    const generation = ++inspectGeneration.current;
+    setGenerating(true);
+    try {
+      const generated = await generateSshKey(
+        algorithm,
+        draft.passphrase || undefined,
+        draft.name.trim() || undefined,
+      );
+      patch({ privateKey: generated.pem });
+      const result = describeKeyInfo(generated);
+      if (inspectGeneration.current === generation) setInspected(result);
+    } catch (e) {
+      const result = describeKeyError(e);
+      if (inspectGeneration.current === generation) setInspected(result);
+    } finally {
+      setGenerating(false);
     }
   };
 
@@ -468,6 +508,41 @@ export function KeyEditorDialog({ target, onClose }: KeyEditorDialogProps): Reac
                       </span>
                     )}
                   </div>
+                  <div className="flex items-center gap-1.5">
+                    <ToggleButton
+                      active={algorithm === "ed25519"}
+                      onClick={() => setAlgorithm("ed25519")}
+                    >
+                      Ed25519
+                    </ToggleButton>
+                    <ToggleButton
+                      active={algorithm === "ecdsa-p256"}
+                      onClick={() => setAlgorithm("ecdsa-p256")}
+                    >
+                      ECDSA P-256
+                    </ToggleButton>
+                    <ToggleButton
+                      active={algorithm === "rsa-4096"}
+                      onClick={() => setAlgorithm("rsa-4096")}
+                    >
+                      RSA-4096
+                    </ToggleButton>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="h-7 px-2 text-[11px]"
+                      onClick={() => void generateKey()}
+                      disabled={generating || replacingBody}
+                    >
+                      {generating ? "Generating…" : "Generate"}
+                    </Button>
+                  </div>
+                  {replacingBody ? (
+                    <span className="text-muted-foreground text-[10.5px]">
+                      Clear the key field above to generate a new pair instead.
+                    </span>
+                  ) : null}
                   <KeyInspectPanel state={inspected} />
                 </div>
                 <span className="text-muted-foreground text-[10.5px]">{privateKeyHelp(mode)}</span>
@@ -602,6 +677,23 @@ function KeyInspectPanel({ state }: { state: KeyInspectState }): ReactNode {
           {state.fingerprint}
         </span>
       </div>
+      {state.publicKey ? (
+        <div className="flex min-w-0 items-center gap-1.5 font-mono text-[10.5px]">
+          <span className="text-muted-foreground shrink-0">Public key</span>
+          <span className="truncate" title={state.publicKey}>
+            {state.publicKey}
+          </span>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="h-5 shrink-0 px-1.5 text-[10px]"
+            onClick={() => void navigator.clipboard.writeText(state.publicKey).catch(() => {})}
+          >
+            Copy
+          </Button>
+        </div>
+      ) : null}
       {state.comment ? (
         <span className="text-muted-foreground truncate text-[10.5px]" title={state.comment}>
           {state.comment}

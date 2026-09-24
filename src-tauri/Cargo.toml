@@ -143,6 +143,22 @@ url = "2"
 # RDP dependency set.
 russh = { version = "=0.60.1", default-features = false, features = ["ring", "flate2", "rsa"] }
 russh-sftp = "2.1"
+# `PrivateKey::random`/`PrivateKey::encrypt` (`ssh_key_generate` in
+# `src-tauri/src/modules/ssh/mod.rs`) need a `rand_core::CryptoRng`, and the
+# fork's own `rand_core` (0.10, pulled in transitively by the `ed25519`/
+# `p256`/`encryption`/`rsa` features russh's `ssh-key` dependency requests)
+# ships no `OsRng` at this release - only the `CryptoRng`/`RngCore` traits and
+# the `UnwrapErr` adapter that turns a fallible source into an infallible one.
+# `getrandom`'s `sys_rng` feature is that source: `SysRng`, a zero-sized OS
+# RNG, implements the fallible `TryCryptoRng` rand_core itself defines, and
+# `UnwrapErr(SysRng)` is what gets handed to `PrivateKey::random`.
+#
+# Already in the tree at this major version - `crypto-bigint`, one of the
+# `ssh-key` fork's own dependencies, already resolves `getrandom` 0.4 - so
+# this promotes a transitive dependency's feature flag rather than adding a
+# crate, and `sys_rng`'s own `rand_core` dependency unifies with the same
+# 0.10 release already in the tree rather than compiling a second copy.
+getrandom = { version = "0.4", default-features = false, features = ["sys_rng"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "net"] }
 # PBKDF2 + AES-256-GCM + CSPRNG for the passphrase-encrypted SSH connection
 # backup (`modules/backup.rs`). Already in the tree as russh's crypto backend

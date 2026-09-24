@@ -89,11 +89,11 @@ Six invariants (rationale in
 
 ```
 src-tauri/                      Backend (Rust)
-  src/lib.rs                    invoke_handler (all 92 commands) + boot + CLI dispatch
+  src/lib.rs                    invoke_handler (all 102 commands) + boot + CLI dispatch
   src/main.rs                   thin shim
   src/modules/
     ssh/{mod,session,sftp}.rs             russh sessions, ProxyJump, -L forwards, SFTP,
-                                          ssh_key_inspect
+                                          ssh_key_inspect, ssh_key_generate
     rdp/{mod,session,frame,tls}.rs        ironrdp sessions, certificate pinning, frames
     pty/{mod,session,shell_init,job,path_probe}.rs + scripts/   interactive PTYs
     pty_daemon/{mod,protocol,transport,paths,server,client,spawn}.rs   sidecar
@@ -127,7 +127,7 @@ src/                            Frontend (React webview), alias @/* -> src/*
 
 | Module         | Key commands / role                                                                                                                                                                                                                                                                                                                                  |
 | -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ssh/`         | The product. `ssh_open/write/resize/close/attach/list_sessions`, `ssh_confirm_host_key`, `ssh_agent_keys`, `ssh_forward_open/close`, `ssh_remote_forward_open/close`, `ssh_socks_open`, `ssh_git_status`, `ssh_git`, `ssh_sftp_*` (see below), `ssh_key_inspect`.                                                                                    |
+| `ssh/`         | The product. `ssh_open/write/resize/close/attach/list_sessions`, `ssh_confirm_host_key`, `ssh_agent_keys`, `ssh_forward_open/close`, `ssh_remote_forward_open/close`, `ssh_socks_open`, `ssh_git_status`, `ssh_git`, `ssh_sftp_*` (see below), `ssh_key_inspect`, `ssh_key_generate`.                                                                |
 | `rdp/`         | `rdp_open/input/close/attach/list_sessions/snapshot`, `rdp_confirm_cert`, `rdp_clipboard_focus`. Certificate pinning mirrors SSH's host-key flow; the password arrives as a keychain **reference**, never a value.                                                                                                                                   |
 | `pty/`         | `pty_open/attach/write/resize/close/list_sessions/kill_all`, `terminal_probe_path`. Two backends: daemon (default) falls back to in-process.                                                                                                                                                                                                         |
 | `pty_daemon/`  | Sidecar owning PTYs across GUI restarts (`--pty-daemon` flag, no Tauri commands).                                                                                                                                                                                                                                                                    |
@@ -371,6 +371,11 @@ secrets)` is the mode-to-wire mapping for the one case with nothing to
   an **encrypted** OpenSSH key because that container keeps the public part in the
   clear. It reports `parsed: false` rather than an error when only the passphrase
   is missing, so a key editor can prompt instead of showing a failure.
+- `ssh_key_generate(algorithm, passphrase?, comment?)` is the other half: it mints
+  a key pair in Rust (`ed25519` / `ecdsa-p256` / `rsa-4096`) and returns the PEM
+  plus exactly the metadata shape `ssh_key_inspect` reports, flattened onto one
+  struct (`SshKeyGenerated`), so `KeyEditorDialog.tsx`'s Generate action treats a
+  minted key the same way it treats an inspected one - one draft, one save path.
 
 ### SSH (`src/modules/ssh/`)
 

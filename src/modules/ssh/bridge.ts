@@ -164,6 +164,35 @@ export function inspectSshKey(pem: string, passphrase?: string): Promise<SshKeyI
   return invoke<SshKeyInfo>("ssh_key_inspect", { pem, passphrase: passphrase ?? null });
 }
 
+/** Algorithms `ssh_key_generate` accepts, matched exactly against the Rust
+ *  side's own list in `src-tauri/src/modules/ssh/mod.rs`. */
+export type SshKeyAlgorithm = "ed25519" | "ecdsa-p256" | "rsa-4096";
+
+/** `ssh_key_generate`'s answer: the new PEM plus exactly what `SshKeyInfo`
+ *  reports for it (the Rust side flattens the two), so a generated key
+ *  describes itself the same way an inspected one does and `describeKeyInfo`/
+ *  `vaultKeyFactsFrom` (`src/modules/vault/keyInspect.ts`) need no second
+ *  translation for it. */
+export type SshKeyGenerated = SshKeyInfo & { pem: string };
+
+/** Generate a new SSH key pair - the vault's other half of "only import one".
+ *  The private key is built and serialized entirely in Rust, for the same two
+ *  reasons {@link inspectSshKey}'s own comment gives; this returns the PEM the
+ *  caller stores exactly as a pasted key's body, never anything less final.
+ *  RSA-4096 generation can take a few seconds - the same `spawn_blocking` cost
+ *  `inspectSshKey` already pays for bcrypt-pbkdf. */
+export function generateSshKey(
+  algorithm: SshKeyAlgorithm,
+  passphrase?: string,
+  comment?: string,
+): Promise<SshKeyGenerated> {
+  return invoke<SshKeyGenerated>("ssh_key_generate", {
+    algorithm,
+    passphrase: passphrase ?? null,
+    comment: comment ?? null,
+  });
+}
+
 /** Prefix used by the Rust side for host-key-mismatch errors. Callers check for this to offer a "trust new key" prompt instead of auto-reconnecting. */
 export const HOST_KEY_MISMATCH_PREFIX = "ssh: host key mismatch:";
 

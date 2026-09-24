@@ -2982,6 +2982,215 @@ mod chain_tests {
             }
         });
     }
+
+    /// A private directory under the system temp dir, removed on drop -
+    /// same shape as `TempDir` in `src-tauri/src/modules/fs/atomic.rs`, a
+    /// separate copy because that one is private to its own test module.
+    #[cfg(unix)]
+    struct ScratchDir(std::path::PathBuf);
+    #[cfg(unix)]
+    impl ScratchDir {
+        fn new(tag: &str) -> Self {
+            let dir =
+                std::env::temp_dir().join(format!("tervia-keygen-e2e-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("create scratch dir");
+            Self(dir)
+        }
+        fn path(&self, name: &str) -> std::path::PathBuf {
+            self.0.join(name)
+        }
+    }
+    #[cfg(unix)]
+    impl Drop for ScratchDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// sshd itself refuses a host key file it can read as anything wider than
+    /// owner-only, and `StrictModes no` in the config below only relaxes its
+    /// check on the home directory / `authorized_keys`, not this one.
+    #[cfg(unix)]
+    fn owner_only(path: &std::path::Path) {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(path).expect("stat scratch file").permissions();
+        perms.set_mode(0o600);
+        std::fs::set_permissions(path, perms).expect("chmod scratch file");
+    }
+
+    /// sshd cannot switch to a different account without running as root, so
+    /// the only user an unprivileged instance can authenticate is whichever
+    /// one started it - this machine's own login, not a name chosen by the
+    /// test.
+    #[cfg(unix)]
+    fn current_username() -> String {
+        std::env::var("USER")
+            .or_else(|_| std::env::var("LOGNAME"))
+            .unwrap_or_else(|_| {
+                let out = std::process::Command::new("id")
+                    .arg("-un")
+                    .output()
+                    .expect("`id -un` failed");
+                String::from_utf8(out.stdout).expect("`id -un` printed non-utf8").trim().into()
+            })
+    }
+
+    /// Live end-to-end proof that a GENERATED key is not merely a PEM
+    /// `ssh_key_inspect_inner` can parse back (`mod.rs`'s own unit tests cover
+    /// that): it is a private key a real sshd accepts. `ssh_key_generate`
+    /// mints an ed25519 key pair, its public line is installed in a
+    /// throwaway, unprivileged `/usr/sbin/sshd`'s `authorized_keys`, and
+    /// `connect` above - the same function `ssh_open` calls, which is what
+    /// runs `authenticate_hop` - authenticates with the PEM this command
+    /// returned. A second `ssh_key_generate` call mints the throwaway
+    /// server's OWN host key, so the connect's `expected_fingerprint` can
+    /// pin it and the handshake never needs the interactive host-key dialog
+    /// this test has no frontend to answer.
+    ///
+    /// `#[ignore]`d: CI does not carry `/usr/sbin/sshd`, and an unprivileged
+    /// sshd can only authenticate the account that started it, so this also
+    /// will not run as a different user than whoever invokes it. Skips
+    /// itself (rather than panicking) when the binary is missing, for a
+    /// manual `cargo test -- --ignored` run on a machine that lacks it too.
+    /// Run with:
+    ///   cargo test --manifest-path src-tauri/Cargo.toml generated_key_authenticates_against_a_real_sshd -- --ignored --nocapture
+    #[test]
+    #[ignore = "needs /usr/sbin/sshd"]
+    #[cfg(unix)]
+    fn generated_key_authenticates_against_a_real_sshd() {
+        let sshd_path = std::path::Path::new("/usr/sbin/sshd");
+        if !sshd_path.exists() {
+            eprintln!("[keygen_e2e] skipped: {} not found", sshd_path.display());
+            return;
+        }
+
+        let scratch = ScratchDir::new("sshd");
+        let port = std::net::TcpListener::bind(("127.0.0.1", 0))
+            .expect("bind an ephemeral port to find a free one")
+            .local_addr()
+            .expect("local_addr")
+            .port();
+        let user = current_username();
+
+        it_runtime().block_on(async move {
+            let host_key = crate::modules::ssh::ssh_key_generate("ed25519".into(), None, None)
+                .await
+                .expect("host key generation failed");
+            let client_key = crate::modules::ssh::ssh_key_generate("ed25519".into(), None, None)
+                .await
+                .expect("client key generation failed");
+
+            let host_key_path = scratch.path("host_key");
+            std::fs::write(&host_key_path, &host_key.pem).expect("write host key");
+            owner_only(&host_key_path);
+
+            let authorized_keys_path = scratch.path("authorized_keys");
+            std::fs::write(
+                &authorized_keys_path,
+                format!(
+                    "{}\n",
+                    client_key.info.public_key.clone().expect("public key recorded")
+                ),
+            )
+            .expect("write authorized_keys");
+            owner_only(&authorized_keys_path);
+
+            let config_path = scratch.path("sshd_config");
+            std::fs::write(
+                &config_path,
+                format!(
+                    "Port {port}\n\
+                     ListenAddress 127.0.0.1\n\
+                     HostKey {}\n\
+                     AuthorizedKeysFile {}\n\
+                     PidFile {}\n\
+                     UsePAM no\n\
+                     StrictModes no\n\
+                     PasswordAuthentication no\n\
+                     PubkeyAuthentication yes\n\
+                     KbdInteractiveAuthentication no\n\
+                     PermitRootLogin yes\n\
+                     LogLevel ERROR\n",
+                    host_key_path.display(),
+                    authorized_keys_path.display(),
+                    scratch.path("sshd.pid").display(),
+                ),
+            )
+            .expect("write sshd_config");
+
+            let child = std::process::Command::new(sshd_path)
+                .arg("-D")
+                .arg("-e")
+                .arg("-f")
+                .arg(&config_path)
+                .spawn()
+                .expect("spawn sshd - is /usr/sbin/sshd runnable by this user?");
+            struct SshdGuard(std::process::Child);
+            impl Drop for SshdGuard {
+                fn drop(&mut self) {
+                    let _ = self.0.kill();
+                    let _ = self.0.wait();
+                }
+            }
+            let _guard = SshdGuard(child);
+
+            // Poll for the listener - sshd's own startup (host key parse,
+            // socket bind) is not instant, the same reason
+            // `port_rebinds_within_a_second` above polls rather than sleeps
+            // a fixed amount.
+            let mut listening = false;
+            for _ in 0..50 {
+                if tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_ok() {
+                    listening = true;
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            assert!(listening, "sshd never started listening on 127.0.0.1:{port}");
+
+            let input = SshOpenInput {
+                host: "127.0.0.1".into(),
+                port,
+                user,
+                use_agent: false,
+                password: None,
+                private_key: Some(SecretSource::Inline {
+                    value: client_key.pem.clone(),
+                }),
+                private_key_passphrase: None,
+                // Pinned to the throwaway server's own key, so the handshake
+                // never blocks on the first-connect dialog this test has no
+                // frontend to answer.
+                expected_fingerprint: host_key.info.fingerprint.clone(),
+                jumps: Vec::new(),
+                cols: 80,
+                rows: 24,
+            };
+            let secrets = SshSecrets {
+                target: HopSecrets {
+                    private_key: Some(Zeroizing::new(client_key.pem.clone())),
+                    ..Default::default()
+                },
+                jumps: Vec::new(),
+            };
+
+            let channel = IpcChannel::new(|_msg| Ok(()));
+            let session = connect(input, secrets, channel)
+                .await
+                .expect("connect with the generated key failed");
+            let (host, _user, _cols, _rows, alive, _ts) = session.mirror_info();
+            assert_eq!(host, "127.0.0.1");
+            assert!(
+                alive,
+                "session should be live after authenticating with a generated key"
+            );
+            session.close().await;
+            eprintln!(
+                "[keygen_e2e] OK: a generated ed25519 key authenticated against a local sshd on 127.0.0.1:{port}"
+            );
+        });
+    }
 }
 
 /// Live end-to-end checks for `-R` and `-D`, against a throwaway

@@ -2168,6 +2168,81 @@ console.log(
   }
 }
 
+// ============================================================================
+// 18. Generate fills the draft; it does not save, and a non-empty draft
+//     disables it. (COMPILER API to locate `generateKey`'s body and the
+//     Generate button; SOURCE-TEXT over each region's content.)
+// ============================================================================
+// Protects two structural properties a generate action has to hold: the
+// generated key takes no path to the store but the draft `save` already
+// reads (`keyRecordFrom`/`keySecretsForSave`, both covered by section 5 once
+// the body they read is non-blank), and generating over a pasted body is
+// guarded rather than silently overwriting it.
+console.log(
+  "\n[18. generate] KeyEditorDialog's Generate action fills the draft, and is disabled over a non-empty body",
+);
+{
+  const keySf = sourceFile("keyDialog");
+  const generateBody = findConstArrowBody(keySf, "generateKey");
+  check("generateKey's body was located (compiler API)", generateBody !== null);
+
+  if (generateBody) {
+    const generateRegion = generateBody.getText(keySf);
+    check(
+      "generateKey calls the real bridge function, not a stand-in",
+      /\bgenerateSshKey\(/.test(generateRegion),
+      generateRegion,
+    );
+    check(
+      "generateKey claims a generation before its first await - the same race-safety checkKey holds itself to (section 2)",
+      /const generation = \+\+inspectGeneration\.current;\s*\n\s*setGenerating\(true\);/.test(
+        generateRegion,
+      ),
+      generateRegion,
+    );
+    check(
+      "generateKey fills the draft through patch(), not a second setter",
+      norm(generateRegion).includes(norm("patch({ privateKey: generated.pem })")),
+      generateRegion,
+    );
+    // Negative: the whole file's upsertKey calls (section 4 already asserts
+    // each is inside `save`) must not ALSO include one inside `generateKey` -
+    // a call could be lexically inside both if `generateKey` ever called
+    // `save` itself, which section 4 alone would not catch.
+    const upsertCalls = findCalls(keySf, keySf, ["upsertKey", "upsertIdentity"]);
+    for (const c of upsertCalls) {
+      check(
+        `${c.getText(keySf)} is not inside generateKey - Generate takes no path to the store`,
+        !(c.getStart(keySf) >= generateBody.getStart(keySf) && c.end <= generateBody.end),
+        c.getText(keySf),
+      );
+    }
+  }
+
+  const importClause = /import\s*\{([^}]*)\}\s*from\s*"@\/modules\/ssh\/bridge";/.exec(
+    src.keyDialog,
+  );
+  check(
+    "generateSshKey is imported from the ssh bridge",
+    importClause !== null && /\bgenerateSshKey\b/.test(importClause[1]),
+    importClause?.[1],
+  );
+
+  const buttons = findOpeningElementsByTag(keySf, "Button", keySf);
+  const generateButton = buttons.find((el) =>
+    (jsxAttrExprText(el, "onClick", keySf) ?? "").includes("generateKey()"),
+  );
+  check("the Generate button was located", generateButton !== undefined);
+  if (generateButton) {
+    const disabledExpr = jsxAttrExprText(generateButton, "disabled", keySf) ?? "";
+    check(
+      "the Generate button is disabled while the draft's private key is non-blank, so a pasted or imported body is never silently replaced",
+      disabledExpr.includes("replacingBody"),
+      disabledExpr,
+    );
+  }
+}
+
 console.log(`\n${checked - failed}/${checked} vault-editor checks passed`);
 if (failed > 0) console.error(`${failed} check(s) FAILED.`);
 process.exit(failed === 0 ? 0 : 1);
