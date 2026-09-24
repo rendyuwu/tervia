@@ -2021,7 +2021,7 @@ console.log("\n[pins] one pin per (host, address), in whichever field the protoc
 }
 
 // ---------------------------------------------------------------------------
-// The Known Hosts page's revoke (#90). One property beyond what pinFingerprint
+// The Known Hosts page's revoke. One property beyond what pinFingerprint
 // above already covers: forgetPin takes an ADDRESS, not the record's own current
 // one, because a jump-hop address a chain no longer uses can still carry a pin
 // nothing else names - so removing "the host's own address" must not be the only

@@ -1,7 +1,7 @@
 /**
  * The Known Hosts page: every pinned SSH host key and every pinned RDP
  * certificate, across every saved host, in one list - the read side of
- * `HostPins` (`types.ts`) that nothing before this page ever needed, because
+ * `HostPins` (`src/modules/hosts/types.ts`) that nothing before this page ever needed, because
  * every earlier reader already held one host's own record in hand.
  *
  * A RAIL VIEW, not a pane leaf. `WorkspaceArea.tsx`'s `railView !== null`
