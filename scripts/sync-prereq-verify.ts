@@ -559,9 +559,12 @@ const lastKeys = (p: Port): string[] => p.keyLog()[p.keyLog().length - 1] ?? [];
 // 7. `deleteGroup` bumps the members it rewrites, and only those
 // ---------------------------------------------------------------------------
 {
-  console.log("\n[cascade] deleteGroup stamps the members whose groupId it cleared");
+  console.log(
+    "\n[cascade] deleteGroup stamps the members whose groupId it cleared, and the children it re-parents",
+  );
   const h = harness();
   await h.hosts.upsertGroup(group());
+  await h.hosts.upsertGroup(group({ id: "g-child", name: "child", parentId: "g-1" }));
   await h.hosts.upsertHost(host({ id: "h-member", groupId: "g-1" }));
   await h.hosts.upsertHost(host({ id: "h-loner" }));
   const before = h.at();
@@ -571,10 +574,17 @@ const lastKeys = (p: Port): string[] => p.keyLog()[p.keyLog().length - 1] ?? [];
   const hosts = await h.hosts.listHosts();
   const member = hosts.find((x) => x.id === "h-member");
   const loner = hosts.find((x) => x.id === "h-loner");
+  const child = (await h.hosts.listGroups()).find((g) => g.id === "g-child");
 
   check("the member's groupId is cleared", member?.groupId, undefined);
   check("and its updatedAt moves with the clear", member?.updatedAt, h.at());
   check("the non-member is left exactly as it was", loner?.updatedAt, before);
+  check(
+    "the re-parented child moves up to the deleted group's own parent",
+    child?.parentId,
+    undefined,
+  );
+  check("and its updatedAt moves with the reparent", child?.updatedAt, h.at());
 }
 
 // ---------------------------------------------------------------------------

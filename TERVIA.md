@@ -299,12 +299,14 @@ macOS/Linux rely on `Drop for Session -> killer.kill()`.
   dangles, names itself, or closes a cycle is read as root (`groupTree.ts`)
   rather than refused, because sync can deliver one already merged.
 - `groupTree.ts`: `buildGroupTree` is the read-time forest `GroupStrip.tsx` and
-  `page/derive.ts` build on - a `parentId` that dangles, names itself, or
-  closes a cycle resolves to root instead of being refused, since sync can
-  land one already merged. `groupChain` is the STRICT counterpart `upsertGroup`
-  uses to REFUSE writing one of those in the first place, on `jumps.ts`'s
-  `jumpChain` pattern; `modules/backup/file.ts`'s `orderGroupWrites` is the
-  other consumer, ordering an import's group writes off `effectiveParents`.
+  `page/derive.ts` build on - only the group whose OWN parent is missing, or
+  which itself sits on a cycle, resolves to root; a group further down an
+  otherwise-valid chain keeps its raw parent, so one bad ancestor never
+  flattens the subtree beneath it. `store.ts`'s `upsertGroup` REFUSES writing
+  one of those in the first place, checking a candidate edge against this
+  same resolution rather than a second walk; `modules/backup/file.ts`'s
+  `orderGroupWrites` is the other consumer, ordering an import's group writes
+  off `effectiveParents`.
 - `jumps.ts`: `jumpChain` is the pure walk (shared with the write guard),
   `resolveJumpHops` puts a credential on each hop and reverses into the backend's
   connect order. Cycle detection is seeded by the target's own id, and

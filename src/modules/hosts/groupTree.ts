@@ -10,9 +10,9 @@ import type { HostGroup } from "./types";
 // this device deleted, naming itself, or - two devices reparenting the same
 // pair in opposite directions - a cycle. `effectiveParents` is the read-time
 // tolerance for all three: the offending group resolves to root instead of
-// vanishing or hanging a walk. `groupChain`, by contrast, is what
-// `upsertGroup` uses to REFUSE writing one of those in the first place, on the
-// pattern `jumps.ts`'s `jumpChain` already set for a jump-host chain.
+// vanishing or hanging a walk. `store.ts`'s `upsertGroup` is what REFUSES
+// writing one of those in the first place, checking the candidate write
+// against this same resolution rather than a second, stricter walk.
 
 /** One node in the forest {@link buildGroupTree} returns. */
 export type GroupNode = {
@@ -32,27 +32,28 @@ function byOrderThenName(a: HostGroup, b: HostGroup): number {
 
 /**
  * This group's resolved parent id, or `undefined` (root) when `parentId` is
- * absent, names no group in `byId`, or the chain followed from here repeats an
- * id before it reaches a group with none.
+ * absent, names no group in `byId`, or `id` itself sits on the cycle reached
+ * by walking up from its own parent.
  *
- * Self-reference and a two-group cycle are both a repeat, of length one and
- * two. A group hanging off a cycle it is not itself part of also lands at
- * root here: nothing walking outward from it can give it a finite depth
- * either, so treating only the cycle's own members as root would leave this
- * one's ancestor walk looping forever the first time something tries to read
- * it.
+ * Only `id`'s OWN parent is checked for existing; a group further up an
+ * otherwise-valid chain that happens to be missing does not pull THIS
+ * group to root too - it keeps its raw `parentId`, so a bad ancestor does
+ * not flatten every descendant beneath it. Likewise, only a group ON the
+ * cycle (the walk from its own parent comes back to `id`) resolves to
+ * root; a group that merely HANGS OFF a cycle member keeps that member as
+ * its parent, the same way it would keep any other valid parent.
  */
 function effectiveParentId(id: string, byId: ReadonlyMap<string, HostGroup>): string | undefined {
   const raw = byId.get(id)?.parentId;
-  if (raw === undefined) return undefined;
-  const seen = new Set<string>([id]);
-  let cursor: string | undefined = raw;
-  while (cursor !== undefined) {
-    if (seen.has(cursor)) return undefined;
-    const target = byId.get(cursor);
-    if (!target) return undefined;
+  if (raw === undefined || !byId.has(raw)) return undefined;
+  const seen = new Set<string>();
+  for (
+    let cursor: string | undefined = raw;
+    cursor !== undefined && !seen.has(cursor);
+    cursor = byId.get(cursor)?.parentId
+  ) {
+    if (cursor === id) return undefined;
     seen.add(cursor);
-    cursor = target.parentId;
   }
   return raw;
 }
@@ -63,7 +64,8 @@ function effectiveParentId(id: string, byId: ReadonlyMap<string, HostGroup>): st
  * `modules/backup/file.ts`'s `orderGroupWrites` walks to decide which of an
  * import's rows has to be WRITTEN first - `upsertGroup` checks a `parentId`
  * against whatever is already on disk, so a parent that is itself new in the
- * same file must land before the child naming it.
+ * same file must land before the child naming it. The cross-device merge
+ * caveat this resolves at read time is recorded in `KNOWN-LIMITS.md`.
  */
 export function effectiveParents(
   groups: readonly HostGroup[],
@@ -75,7 +77,8 @@ export function effectiveParents(
 /**
  * The group list as a forest, children ordered under each parent by
  * {@link byOrderThenName}. `GroupStrip.tsx` renders this directly;
- * `page/derive.ts`'s `groupCounts` sums it bottom-up.
+ * `page/derive.ts`'s `groupCounts` sums it bottom-up. `KNOWN-LIMITS.md`
+ * carries the same cross-device merge caveat {@link effectiveParents} does.
  */
 export function buildGroupTree(groups: readonly HostGroup[]): GroupNode[] {
   const parents = effectiveParents(groups);
@@ -94,7 +97,11 @@ export function buildGroupTree(groups: readonly HostGroup[]): GroupNode[] {
   return build(undefined);
 }
 
-function collectIds(node: GroupNode, into: Set<string>): void {
+/** `node`'s own id plus every id in its subtree, collected into `into`.
+ *  Exported for `GroupStrip.tsx`'s "Move to…" picker, which already has the
+ *  node in hand from the tree it renders and so has no reason to re-find it
+ *  through {@link descendantIds}. */
+export function collectIds(node: GroupNode, into: Set<string>): void {
   into.add(node.group.id);
   for (const child of node.children) collectIds(child, into);
 }
@@ -110,11 +117,9 @@ function findNode(nodes: readonly GroupNode[], id: string): GroupNode | undefine
 
 /**
  * `groupId` itself plus every id in its subtree, by {@link buildGroupTree}'s
- * effective-parent resolution. Two callers: `page/derive.ts`'s
+ * effective-parent resolution. Used by `page/derive.ts`'s
  * `matchesGroupFilter` - selecting a group means "this group and its
- * descendants" - and `GroupStrip.tsx`'s "Move to…" picker, which must exclude
- * a group's own descendants or `groupChain` would refuse the move as a cycle
- * anyway. Empty when `groupId` names no group in `groups`.
+ * descendants". Empty when `groupId` names no group in `groups`.
  */
 export function descendantIds(groupId: string, groups: readonly HostGroup[]): ReadonlySet<string> {
   const node = findNode(buildGroupTree(groups), groupId);
@@ -123,33 +128,3 @@ export function descendantIds(groupId: string, groups: readonly HostGroup[]): Re
   return ids;
 }
 
-/**
- * The chain from `startParentId` outward, collected `[nearest, ..., root]`.
- * Cycle detection is seeded with `selfId`, so a group reparented into a cycle
- * that runs back through itself throws instead of looping - `upsertGroup`'s
- * refusal, on the SAME pattern `jumps.ts`'s `jumpChain` already set for a
- * jump-host chain, including the one thing a same-record immediate check
- * cannot: A -> B -> A, which would otherwise save on both sides and only fail
- * once something tries to render it.
- */
-export function groupChain(
-  startParentId: string | undefined,
-  selfId: string | undefined,
-  groups: readonly HostGroup[],
-): HostGroup[] {
-  if (!startParentId) return [];
-  const byId = new Map(groups.map((g) => [g.id, g]));
-  const visited = new Set<string>();
-  if (selfId) visited.add(selfId);
-  const chain: HostGroup[] = [];
-  let cursor: string | undefined = startParentId;
-  while (cursor) {
-    if (visited.has(cursor)) throw new Error("hosts: group parent chain has a cycle");
-    visited.add(cursor);
-    const hop = byId.get(cursor);
-    if (!hop) throw new Error("hosts: a parent group in the chain no longer exists");
-    chain.push(hop);
-    cursor = hop.parentId;
-  }
-  return chain;
-}

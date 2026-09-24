@@ -816,9 +816,10 @@ export function orderHostWrites(incoming: Host[], existing: Host[]): Host[] {
  * resolves it to over the COMBINED `existing ∪ incoming` universe - a
  * dangling or cyclic reference lands on root here, before any row is
  * written, rather than reaching `upsertGroup`'s own (stricter, throwing)
- * check. The `walking` guard is belt-and-braces exactly as `orderHostWrites`'s
- * is: `effectiveParents` has already ruled out a cycle surviving into this
- * walk, so it can only ever prevent a bad order, never break one.
+ * check. No `walking` re-entrancy guard here, unlike `orderHostWrites`:
+ * `effectiveParents` has already resolved every row's `parentId` to a value
+ * that cannot cycle back through this walk, so `emitted` alone is enough to
+ * terminate it.
  */
 export function orderGroupWrites(incoming: HostGroup[], existing: HostGroup[]): HostGroup[] {
   const byId = new Map(existing.map((g) => [g.id, g]));
@@ -828,18 +829,15 @@ export function orderGroupWrites(incoming: HostGroup[], existing: HostGroup[]): 
     incoming.map((g) => [g.id, { ...g, parentId: resolved.get(g.id) }] as const),
   );
   const emitted = new Set<string>();
-  const walking = new Set<string>();
   const out: HostGroup[] = [];
 
   const visit = (id: string): void => {
     const group = pending.get(id);
-    if (!group || emitted.has(id) || walking.has(id)) return;
-    walking.add(id);
+    if (!group || emitted.has(id)) return;
     // Only a parent that is ALSO in this batch needs ordering - one already on
     // disk needs none, and `resolved` has already ruled out this reaching a
     // cycle or a dangling id.
     if (group.parentId && pending.has(group.parentId)) visit(group.parentId);
-    walking.delete(id);
     emitted.add(id);
     out.push(group);
   };
@@ -1266,15 +1264,11 @@ export function mergeGroups(
   }
 
   const merged = remap.size;
-  const groups =
-    merged === 0
-      ? survivors
-      : survivors.map((g) =>
-          g.parentId && remap.has(g.parentId) ? { ...g, parentId: remap.get(g.parentId) } : g,
-        );
-  if (merged === 0) return { groups, hosts, merged, keptNames };
+  if (merged === 0) return { groups: survivors, hosts, merged, keptNames };
   return {
-    groups,
+    groups: survivors.map((g) =>
+      g.parentId && remap.has(g.parentId) ? { ...g, parentId: remap.get(g.parentId) } : g,
+    ),
     merged,
     keptNames,
     hosts: hosts.map((h) => {

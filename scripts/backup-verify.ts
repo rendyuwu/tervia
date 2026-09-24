@@ -1892,6 +1892,32 @@ check(
   );
 }
 
+// The combined universe is the reason `existing` is a parameter at all: a
+// within-file-only cycle or dangling parent is already covered above, but a
+// bad edge can equally SPAN the two sides of a merge.
+{
+  const crossCycle = orderGroupWrites(
+    [{ id: "g-x", name: "X", parentId: "g-saved-cyclic" }],
+    [{ id: "g-saved-cyclic", name: "SavedCyclic", parentId: "g-x" }],
+  );
+  check(
+    "an incoming row that closes a cycle WITH an on-disk row resolves to root, not just a within-file cycle",
+    crossCycle[0]!.parentId,
+    undefined,
+  );
+}
+{
+  const acrossDangling = orderGroupWrites(
+    [{ id: "g-new-child", name: "New child", parentId: "g-saved-anc" }],
+    [{ id: "g-saved-anc", name: "Saved ancestor", parentId: "g-missing" }],
+  );
+  check(
+    "an incoming child of a saved group whose OWN ancestor dangles keeps its saved parent, not root",
+    acrossDangling.map((g) => ({ id: g.id, parentId: g.parentId })),
+    [{ id: "g-new-child", parentId: "g-saved-anc" }],
+  );
+}
+
 console.log("\n[identities] a bad row is wrong everywhere it is referenced, not just once");
 check("a good identity survives", sanitizeIdentity(identity()), {
   id: "i-1",

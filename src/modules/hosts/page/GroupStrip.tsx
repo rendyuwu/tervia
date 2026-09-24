@@ -36,7 +36,7 @@ import {
 } from "@/modules/tabs/components/TrailingIconButton";
 import { ChevronRight, FolderInput, MoreHorizontal, Pencil, Plus, Trash2 } from "lucide-react";
 import { useMemo, useState, type ReactNode } from "react";
-import { buildGroupTree, descendantIds, type GroupNode } from "../groupTree";
+import { buildGroupTree, collectIds, type GroupNode } from "../groupTree";
 import type { HostGroup } from "../types";
 // One definition, in the module that computes it - a second one here would let
 // the chips and the counts drift apart without `tsc` noticing.
@@ -82,32 +82,38 @@ function deleteDescription(hostCount: number, childGroupCount: number): string {
 }
 
 /**
- * Where a group can move to: Root, plus every group that is not itself or one
- * of its own descendants - reparenting into either would be a cycle
- * `store.ts`'s `groupChain` refuses anyway, so this list never offers one.
- * Depth-first over the SAME tree the strip renders, so the order a user reads
- * in the submenu matches the order the rows above it appear in, and each
- * label is indented to show where in the tree it sits.
+ * Where a group can move to: Root, plus every group that is not itself, one
+ * of its own descendants, or its CURRENT parent - reparenting into a
+ * descendant would be a cycle `store.ts`'s write-time check refuses anyway,
+ * and reparenting onto the current parent (or picking Root for a group
+ * already at root) is a no-op the store would accept and stamp regardless,
+ * costing a sync push for nothing. `node` and `tree` are the strip's own
+ * memoized tree, passed in rather than re-derived, so opening this submenu
+ * costs one walk of an already-built tree instead of two more full builds.
+ * Depth-first, so the order a user reads in the submenu matches the order
+ * the rows above it appear in, and each label is indented to show where in
+ * the tree it sits.
  */
 function moveTargetsFor(
-  groupId: string,
-  groups: readonly HostGroup[],
+  node: GroupNode,
+  tree: readonly GroupNode[],
+  currentParentId: string | undefined,
 ): { parentId: string | undefined; label: string }[] {
-  const excluded = descendantIds(groupId, groups);
-  const options: { parentId: string | undefined; label: string }[] = [
-    { parentId: undefined, label: "Root" },
-  ];
+  const excluded = new Set<string>();
+  collectIds(node, excluded);
+  const options: { parentId: string | undefined; label: string }[] = [];
+  if (currentParentId !== undefined) options.push({ parentId: undefined, label: "Root" });
   function walk(nodes: readonly GroupNode[], depth: number): void {
-    for (const node of nodes) {
-      if (excluded.has(node.group.id)) continue;
+    for (const n of nodes) {
+      if (excluded.has(n.group.id) || n.group.id === currentParentId) continue;
       options.push({
-        parentId: node.group.id,
-        label: "\u00a0\u00a0".repeat(depth) + node.group.name,
+        parentId: n.group.id,
+        label: "\u00a0\u00a0".repeat(depth) + n.group.name,
       });
-      walk(node.children, depth + 1);
+      walk(n.children, depth + 1);
     }
   }
-  walk(buildGroupTree(groups), 0);
+  walk(tree, 0);
   return options;
 }
 
@@ -125,10 +131,16 @@ export function GroupStrip({
   onDeleteGroup,
 }: GroupStripProps): ReactNode {
   const tree = useMemo(() => buildGroupTree(groups), [groups]);
-  // Collapsed ids, not expanded ones - so a flat install (every group a root
-  // with no children) has an empty Set, no chevron anywhere, and looks exactly
-  // like the strip did before this - the "existing flat groups behave exactly
-  // as before" line, made true by the default rather than asserted about it.
+  // No group anywhere has a child - every root's own `children` array is
+  // empty, which (since every non-root group is some root's descendant) can
+  // only be true when the whole forest is one flat level. That is the case
+  // this strip renders exactly as it did before nesting existed: one
+  // `flex-wrap` row, no chevrons, no tree container to bound.
+  const isFlat = tree.every((node) => node.children.length === 0);
+  // Collapsed ids, not expanded ones - so a fresh render of a flat install
+  // starts with an empty Set and no chevron anywhere regardless. The LAYOUT
+  // itself is `isFlat` above, not this default: `collapsedIds` only decides
+  // which already-nested subtree renders closed.
   const [collapsedIds, setCollapsedIds] = useState<Set<string>>(() => new Set());
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<HostGroup | null>(null);
@@ -161,8 +173,16 @@ export function GroupStrip({
       return next;
     });
 
+  // Shared by the root "New group" control and a sub-group creator - one
+  // commit path rather than two copies of clear/trim/skip-empty/mutate.
+  const commitCreate = (parentId: string | undefined, name: string) => {
+    setCreatingUnder(null);
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    void runMutation(() => onCreateGroup(trimmed, parentId));
+  };
+
   const rowProps: GroupTreeRowProps = {
-    groups,
     counts,
     selectedGroupId,
     collapsedIds,
@@ -177,16 +197,43 @@ export function GroupStrip({
     },
     onCancelRename: () => setRenamingId(null),
     creatingUnder,
-    onStartCreateChild: (parentId) => setCreatingUnder({ parentId }),
-    onCommitCreate: (parentId, name) => {
-      setCreatingUnder(null);
-      if (!name) return;
-      void runMutation(() => onCreateGroup(name, parentId));
+    onStartCreateChild: (parentId) => {
+      setCreatingUnder({ parentId });
+      // Otherwise the new row would be created into a subtree the collapse
+      // above just hid, invisible the moment it exists.
+      setCollapsedIds((prev) => {
+        if (!prev.has(parentId)) return prev;
+        const next = new Set(prev);
+        next.delete(parentId);
+        return next;
+      });
     },
+    onCommitCreate: commitCreate,
     onCancelCreate: () => setCreatingUnder(null),
     onDelete: setDeleting,
     onMove: (id, parentId) => void runMutation(() => onMoveGroup(id, parentId)),
   };
+
+  const newGroupControl =
+    creatingUnder && creatingUnder.parentId === undefined ? (
+      <InlineInput
+        initial=""
+        placeholder="Group name"
+        onCommit={(value) => commitCreate(undefined, value)}
+        onCancel={() => setCreatingUnder(null)}
+      />
+    ) : (
+      <Button
+        type="button"
+        variant="ghost"
+        size="xs"
+        onClick={() => setCreatingUnder({ parentId: undefined })}
+        className="w-fit gap-1"
+      >
+        <Plus size={12} strokeWidth={2} />
+        New group
+      </Button>
+    );
 
   return (
     <div className="flex flex-col gap-1.5">
@@ -203,37 +250,30 @@ export function GroupStrip({
           selected={ungroupedSelected}
           onClick={onSelectUngrouped}
         />
+        {isFlat &&
+          tree.map((node) => (
+            <GroupRow key={node.group.id} node={node} parentId={undefined} tree={tree} {...rowProps} />
+          ))}
+        {isFlat && newGroupControl}
       </div>
 
-      <div className="flex flex-col gap-0.5">
-        {tree.map((node) => (
-          <GroupTreeRow key={node.group.id} node={node} depth={0} {...rowProps} />
-        ))}
-        {creatingUnder && creatingUnder.parentId === undefined ? (
-          <InlineInput
-            initial=""
-            placeholder="Group name"
-            onCommit={(value) => {
-              setCreatingUnder(null);
-              const trimmed = value.trim();
-              if (!trimmed) return;
-              void runMutation(() => onCreateGroup(trimmed));
-            }}
-            onCancel={() => setCreatingUnder(null)}
-          />
-        ) : (
-          <Button
-            type="button"
-            variant="ghost"
-            size="xs"
-            onClick={() => setCreatingUnder({ parentId: undefined })}
-            className="w-fit gap-1"
-          >
-            <Plus size={12} strokeWidth={2} />
-            New group
-          </Button>
-        )}
-      </div>
+      {!isFlat && (
+        <div className="flex max-h-48 flex-col gap-0.5 overflow-y-auto">
+          <ul className="flex flex-col gap-0.5">
+            {tree.map((node) => (
+              <GroupTreeRow
+                key={node.group.id}
+                node={node}
+                depth={0}
+                parentId={undefined}
+                tree={tree}
+                {...rowProps}
+              />
+            ))}
+          </ul>
+          {newGroupControl}
+        </div>
+      )}
 
       <AlertDialog open={deleting !== null} onOpenChange={(open) => !open && setDeleting(null)}>
         <AlertDialogContent>
@@ -241,7 +281,7 @@ export function GroupStrip({
             <AlertDialogTitle>Delete group &quot;{deleting?.name}&quot;?</AlertDialogTitle>
             <AlertDialogDescription>
               {deleteDescription(
-                deleting ? (counts.byGroup[deleting.id] ?? 0) : 0,
+                deleting ? (counts.direct[deleting.id] ?? 0) : 0,
                 deleting ? groups.filter((g) => g.parentId === deleting.id).length : 0,
               )}
             </AlertDialogDescription>
@@ -265,11 +305,10 @@ export function GroupStrip({
   );
 }
 
-/** Everything one {@link GroupTreeRow} needs beside its own `node`/`depth` -
- *  bundled so the recursion threads one object down instead of a dozen
- *  positional props, on `FileTreeNode.tsx`'s `depth`+`tree` threading. */
+/** Everything one row needs beside its own `node`/`parentId`/`tree` - bundled
+ *  so the recursion threads one object down instead of a dozen positional
+ *  props, on `FileTreeNode.tsx`'s `depth`+`tree` threading. */
 type GroupTreeRowProps = {
-  groups: HostGroup[];
   counts: GroupCounts;
   selectedGroupId: string | null;
   collapsedIds: ReadonlySet<string>;
@@ -281,34 +320,89 @@ type GroupTreeRowProps = {
   onCancelRename: () => void;
   creatingUnder: { parentId: string | undefined } | null;
   onStartCreateChild: (parentId: string) => void;
-  onCommitCreate: (parentId: string, name: string) => void;
+  onCommitCreate: (parentId: string | undefined, name: string) => void;
   onCancelCreate: () => void;
   onDelete: (group: HostGroup) => void;
   onMove: (id: string, parentId: string | undefined) => void;
 };
 
+/** The rename input, or the chip itself when not being renamed - shared by a
+ *  tree row and the flat-install wrap row, which skips the chevron and depth
+ *  indent below but renders the same chip. */
+function GroupRow({
+  node,
+  parentId,
+  tree,
+  counts,
+  selectedGroupId,
+  onSelect,
+  renamingId,
+  onStartRename,
+  onCommitRename,
+  onCancelRename,
+  onStartCreateChild,
+  onDelete,
+  onMove,
+}: {
+  node: GroupNode;
+  parentId: string | undefined;
+  tree: readonly GroupNode[];
+} & Pick<
+  GroupTreeRowProps,
+  | "counts"
+  | "selectedGroupId"
+  | "onSelect"
+  | "renamingId"
+  | "onStartRename"
+  | "onCommitRename"
+  | "onCancelRename"
+  | "onStartCreateChild"
+  | "onDelete"
+  | "onMove"
+>): ReactNode {
+  const { group } = node;
+  return renamingId === group.id ? (
+    <InlineInput
+      initial={group.name}
+      placeholder="Group name"
+      onCommit={(value) => onCommitRename(group.id, value.trim(), group.name)}
+      onCancel={onCancelRename}
+    />
+  ) : (
+    <GroupChip
+      group={group}
+      count={counts.byGroup[group.id] ?? 0}
+      selected={selectedGroupId === group.id}
+      onSelect={() => onSelect(group.id)}
+      onRename={() => onStartRename(group.id)}
+      onDelete={() => onDelete(group)}
+      onCreateChild={() => onStartCreateChild(group.id)}
+      node={node}
+      tree={tree}
+      currentParentId={parentId}
+      onMove={(newParentId) => onMove(group.id, newParentId)}
+    />
+  );
+}
+
 function GroupTreeRow({
   node,
   depth,
+  parentId,
+  tree,
   ...actions
-}: GroupTreeRowProps & { node: GroupNode; depth: number }): ReactNode {
+}: GroupTreeRowProps & {
+  node: GroupNode;
+  depth: number;
+  parentId: string | undefined;
+  tree: readonly GroupNode[];
+}): ReactNode {
   const {
-    groups,
-    counts,
-    selectedGroupId,
     collapsedIds,
     onToggleExpand,
-    onSelect,
-    renamingId,
-    onStartRename,
-    onCommitRename,
-    onCancelRename,
     creatingUnder,
-    onStartCreateChild,
     onCommitCreate,
     onCancelCreate,
-    onDelete,
-    onMove,
   } = actions;
   const { group, children } = node;
   const hasChildren = children.length > 0;
@@ -316,7 +410,7 @@ function GroupTreeRow({
   const creatingHere = creatingUnder?.parentId === group.id;
 
   return (
-    <div>
+    <li>
       <div className="flex items-center gap-0.5" style={{ paddingLeft: depth * 16 }}>
         {hasChildren ? (
           <button
@@ -335,42 +429,33 @@ function GroupTreeRow({
         ) : (
           <span className="size-4 shrink-0" />
         )}
-        {renamingId === group.id ? (
-          <InlineInput
-            initial={group.name}
-            placeholder="Group name"
-            onCommit={(value) => onCommitRename(group.id, value.trim(), group.name)}
-            onCancel={onCancelRename}
-          />
-        ) : (
-          <GroupChip
-            group={group}
-            count={counts.byGroup[group.id] ?? 0}
-            selected={selectedGroupId === group.id}
-            onSelect={() => onSelect(group.id)}
-            onRename={() => onStartRename(group.id)}
-            onDelete={() => onDelete(group)}
-            onCreateChild={() => onStartCreateChild(group.id)}
-            moveOptions={moveTargetsFor(group.id, groups)}
-            onMove={(parentId) => onMove(group.id, parentId)}
-          />
-        )}
+        <GroupRow node={node} parentId={parentId} tree={tree} {...actions} />
       </div>
       {creatingHere ? (
         <div style={{ paddingLeft: (depth + 1) * 16 + 18 }}>
           <InlineInput
             initial=""
             placeholder="Sub-group name"
-            onCommit={(value) => onCommitCreate(group.id, value.trim())}
+            onCommit={(value) => onCommitCreate(group.id, value)}
             onCancel={onCancelCreate}
           />
         </div>
       ) : null}
-      {expanded &&
-        children.map((child) => (
-          <GroupTreeRow key={child.group.id} node={child} depth={depth + 1} {...actions} />
-        ))}
-    </div>
+      {expanded && hasChildren ? (
+        <ul className="flex flex-col gap-0.5">
+          {children.map((child) => (
+            <GroupTreeRow
+              key={child.group.id}
+              node={child}
+              depth={depth + 1}
+              parentId={group.id}
+              tree={tree}
+              {...actions}
+            />
+          ))}
+        </ul>
+      ) : null}
+    </li>
   );
 }
 
@@ -423,7 +508,9 @@ function GroupChip({
   onRename,
   onDelete,
   onCreateChild,
-  moveOptions,
+  node,
+  tree,
+  currentParentId,
   onMove,
 }: {
   group: HostGroup;
@@ -433,7 +520,9 @@ function GroupChip({
   onRename: () => void;
   onDelete: () => void;
   onCreateChild: () => void;
-  moveOptions: { parentId: string | undefined; label: string }[];
+  node: GroupNode;
+  tree: readonly GroupNode[];
+  currentParentId: string | undefined;
   onMove: (parentId: string | undefined) => void;
 }) {
   return (
@@ -471,7 +560,18 @@ function GroupChip({
             <button
               type="button"
               aria-label="More group actions"
-              className={cn(TRAILING_BTN_BASE, TRAILING_BTN_VARIANT.default)}
+              className={cn(
+                TRAILING_BTN_BASE,
+                TRAILING_BTN_VARIANT.default,
+                // Radix moves focus into the menu portal the instant it opens,
+                // so `group-focus-within:`/`focus-visible:` above both stop
+                // matching and the trigger fades to `opacity-0` while its own
+                // menu is on screen. `aria-expanded` is the one attribute Radix
+                // keeps current on the trigger itself regardless of where focus
+                // lands, so it is what keeps this control visible for exactly
+                // as long as the menu it opens is.
+                "aria-expanded:opacity-100",
+              )}
             >
               <MoreHorizontal size={TRAILING_ICON_SIZE} strokeWidth={2} />
             </button>
@@ -488,7 +588,7 @@ function GroupChip({
               Move to…
             </DropdownMenuSubTrigger>
             <DropdownMenuSubContent>
-              {moveOptions.map((opt) => (
+              {moveTargetsFor(node, tree, currentParentId).map((opt) => (
                 <DropdownMenuItem key={opt.parentId ?? ""} onSelect={() => onMove(opt.parentId)}>
                   {opt.label}
                 </DropdownMenuItem>

@@ -782,7 +782,10 @@ const lastKeys = (p: Port): string[] => p.keyLog()[p.keyLog().length - 1] ?? [];
 // ---------------------------------------------------------------------------
 {
   console.log("\n[A9] every committed write names the records it owes a push");
-  const h = harness({ groups: [group()], hosts: [host({ id: "h-member", groupId: "g-1" })] });
+  const h = harness({
+    groups: [group(), group({ id: "g-child", name: "child", parentId: "g-1" })],
+    hosts: [host({ id: "h-member", groupId: "g-1" })],
+  });
 
   await h.hosts.upsertHost(host());
   await h.hosts.upsertGroup(group({ id: "g-2", name: "staging" }));
@@ -792,11 +795,13 @@ const lastKeys = (p: Port): string[] => p.keyLog()[p.keyLog().length - 1] ?? [];
     [{ kind: HOST_TOMBSTONE_KIND, id: "h-1" }],
     [{ kind: GROUP_TOMBSTONE_KIND, id: "g-2" }],
     [{ kind: HOST_TOMBSTONE_KIND, id: "h-1" }],
-    // The group AND the member whose `groupId` the cascade cleared: that clear is
-    // real content under a new stamp, so it owes a push of its own.
+    // The group, the member whose `groupId` the cascade cleared, AND the
+    // child group it re-parented: both clears are real content under a new
+    // stamp, so each owes a push of its own.
     [
       { kind: GROUP_TOMBSTONE_KIND, id: "g-1" },
       { kind: HOST_TOMBSTONE_KIND, id: "h-member" },
+      { kind: GROUP_TOMBSTONE_KIND, id: "g-child" },
     ],
   ]);
 

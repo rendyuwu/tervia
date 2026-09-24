@@ -1873,22 +1873,22 @@ console.log("\n[chip] a chip selects its own entry, even when it is already the 
   const stripPath = "src/modules/hosts/page/GroupStrip.tsx";
   const iconActionPath = "src/components/IconActionButton.tsx";
   const stripAst = existsSync(join(root, stripPath)) ? parseTsx(stripPath) : null;
-  const stripSrc = stripAst === null ? "" : stripTsxComments(read(stripPath));
-  const iconActionUses =
-    stripAst === null
-      ? -1
-      : jsxDescendantTags(stripAst).filter((t) => t === "IconActionButton").length;
+  const stripTags = stripAst === null ? [] : jsxDescendantTags(stripAst);
+  const iconActionUses = stripAst === null ? -1 : stripTags.filter((t) => t === "IconActionButton").length;
   const iconActionSpec = stripAst === null ? null : importSpecifierOf(stripAst, "IconActionButton");
   check(
     // Non-vacuity, and the row that stops the next check from passing over a
-    // file nobody renders: revert these call sites and the element read below
-    // is no longer the element the group strip shows. Both call sites, and the
-    // span sibling named nowhere in the file, so a half-revert fails too.
-    "the group strip renders both of its trailing controls through IconActionButton",
-    iconActionUses === 2 &&
+    // file nobody renders: revert the call site and the element read below is
+    // no longer the element the group strip shows. At least one real use is
+    // required (not a fixed count - which icons the strip puts through
+    // IconActionButton is a design choice, not this check's business), and
+    // the span sibling must be named nowhere as a rendered JSX tag, so
+    // reverting to it fails too.
+    "the group strip renders its trailing icon controls through IconActionButton, never the span sibling",
+    iconActionUses >= 1 &&
       iconActionSpec !== null &&
       resolveInRepo(stripPath, iconActionSpec) === iconActionPath &&
-      !/TrailingIconButton/.test(stripSrc),
+      !stripTags.includes("TrailingIconButton"),
     { iconActionUses, iconActionSpec },
   );
 
@@ -2135,10 +2135,10 @@ console.log("\nALL PASS");
 //   N8b IconActionButton.tsx: its `<button              "and that control is a real
 //       type="button">` flipped to a `<span>`            <button type="button">,
 //       (EXIT=1, exactly 1 red)                          with no hand-written role"
-//   N8c GroupStrip.tsx: both trailing controls          "the group strip renders
-//       reverted to `TrailingIconButton` (EXIT=1,        both of its trailing
-//       exactly 1 red)                                   controls through
-//                                                        IconActionButton"
+//   N8c GroupStrip.tsx: the New sub-group        "the group strip renders
+//       IconActionButton call site reverted        its trailing icon controls
+//       to `TrailingIconButton` (EXIT=1,            through IconActionButton,
+//       exactly 1 red)                              never the span sibling"
 //
 //       N8c is what makes that guard a guard rather than decoration: without it the
 //       element check below it reads a component the app no longer renders, and

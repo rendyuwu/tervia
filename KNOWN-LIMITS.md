@@ -309,17 +309,44 @@ believing the tree was still acyclic, or that a group's parent was deleted on
 one device between the two devices' last sync. Nothing is lost - a dangling or
 cyclic `parentId` still renders and files hosts correctly - because
 `groupTree.ts`'s `buildGroupTree` resolves the read side of exactly this case
-to root, and `applyRemote` (`src/modules/hosts/store.ts`) lands a group
-landing with no reference check of its own, by design: a per-write refusal on
-a landing would drop a record another device already holds.
+to root: only the group whose OWN parent is missing or itself sits on the
+cycle, never a descendant further down an otherwise-valid chain, which keeps
+its place and its hosts. `applyRemote` (`src/modules/hosts/store.ts`) lands a
+group landing with no reference check of its own, by design: a per-write
+refusal on a landing would drop a record another device already holds.
+`upsertGroup` leaves a landed bad edge alone too, for the same reason: it
+validates a `parentId` only when a LOCAL write actually changes that edge, so
+a rename or a sub-group creation elsewhere in the tree is never refused for a
+chain this device did not create.
 
 **Carried by.** `groupTree.ts`'s `buildGroupTree`/`effectiveParents` (the read
-side) and `applyRemote` in `src/modules/hosts/store.ts` (the landing side,
-which runs no cycle check on purpose).
+side), and `src/modules/hosts/store.ts`'s `applyRemote` (the landing side,
+which runs no cycle check on purpose) and `upsertGroup` (the local-write
+side, which checks only a changing edge).
 
 **Trigger.** Cross-record awareness added to `merge` in `model.rs` - at which
 point a landed cycle could be refused or resolved at merge time instead of
 being tolerated at every later read.
+
+### Importing a pre-nesting backup moves every group it names back to root
+
+**Accepted state.** `orderGroupWrites`'s "file wins" rule rewrites every
+incoming group's `parentId` to what `effectiveParents` resolves over the
+combined `existing ∪ incoming` universe before any row is written. A backup
+written before `HostGroup.parentId` existed carries no `parentId` field at
+all on any of its rows, which is indistinguishable on the wire from an
+ordinary root group - so importing one flattens every group it names back to
+root, even one that is currently nested locally. Not fixable in code: there
+is no way to tell "absent because pre-nesting" from "absent because root"
+once the field has been read.
+
+**Carried by.** `orderGroupWrites` and `sanitizeGroup` in
+`src/modules/backup/file.ts`.
+
+**Trigger.** A versioned backup format that can record "this group's parent
+field was not written by this build" as distinct from "this group is a
+root" - at which point an old file could keep the local nesting instead of
+overwriting it.
 
 ## Shared UI
 

@@ -63,7 +63,17 @@ export type VaultSnapshot = {
  */
 export const UNKNOWN_IDENTITY_LABEL = "Unknown identity";
 
-export type GroupCounts = { total: number; ungrouped: number; byGroup: Record<string, number> };
+export type GroupCounts = {
+  total: number;
+  ungrouped: number;
+  /** This group's OWN hosts only (`host.groupId === group.id`), before
+   *  descendants are summed in. `GroupStrip.tsx`'s delete confirm uses this,
+   *  not `byGroup`: `deleteGroup` clears `groupId` only on DIRECT members, so
+   *  a count that included descendants would overstate what becomes
+   *  ungrouped. */
+  direct: Record<string, number>;
+  byGroup: Record<string, number>;
+};
 
 export type ProtocolFilter = "all" | "ssh" | "rdp";
 
@@ -154,12 +164,13 @@ export function identityName(
  * UNGROUPED, and that is the case worth stating: it happens whenever a group is
  * deleted in another window between two renders here, and it is the difference
  * between the chips adding up and quietly not. The invariant is
- * `total === ungrouped + sum(byGroup)` - without the fallback a dangling row
- * lands in neither, so the chips sum to less than All and the row itself is
- * reachable from no chip at all.
+ * `total === ungrouped + sum(direct)`, NOT `sum(byGroup)`: `byGroup` sums a
+ * group's own hosts plus every descendant's, so a host under a 3-level chain
+ * is counted once per ancestor and the two would double-count on any nested
+ * fixture.
  *
  * Selecting a group means "this group and its descendants" ({@link
- * matchesGroupFilter} makes the same call), so a chip's count is its own
+ * matchesGroupFilter} makes the same call), so `byGroup`'s count is its own
  * hosts plus every descendant's - summed bottom-up over the SAME tree
  * `GroupStrip.tsx` renders, not a second walk of `parentId` per host.
  */
@@ -183,23 +194,31 @@ export function groupCounts(hosts: readonly Host[], groups: readonly HostGroup[]
     return total;
   }
   for (const root of buildGroupTree(groups)) sum(root);
-  return { total: hosts.length, ungrouped, byGroup };
+  return { total: hosts.length, ungrouped, direct, byGroup };
 }
 
+/**
+ * A predicate for one filter, built ONCE rather than re-derived per host: the
+ * `"group"` arm's {@link descendantIds} is a full `buildGroupTree` plus a
+ * sort, and the `"ungrouped"` arm's `known` Set was being rebuilt from
+ * `groups` on every call too - both cheap once, expensive `hosts.length`
+ * times, which is what {@link filterAndRank} was paying on every keystroke.
+ */
 export function matchesGroupFilter(
-  host: Host,
   filter: GroupFilter,
   groups: readonly HostGroup[],
-): boolean {
+): (host: Host) => boolean {
   switch (filter.kind) {
     case "all":
-      return true;
+      return () => true;
     case "ungrouped": {
       const known = new Set(groups.map((g) => g.id));
-      return host.groupId === undefined || !known.has(host.groupId);
+      return (host) => host.groupId === undefined || !known.has(host.groupId);
     }
-    case "group":
-      return host.groupId !== undefined && descendantIds(filter.groupId, groups).has(host.groupId);
+    case "group": {
+      const ids = descendantIds(filter.groupId, groups);
+      return (host) => host.groupId !== undefined && ids.has(host.groupId);
+    }
     default: {
       const unhandled: never = filter;
       throw new Error(`hosts: unhandled group filter ${JSON.stringify(unhandled)}`);
@@ -240,9 +259,8 @@ export function filterAndRank(input: HostsViewInput): HostSearchRow[] {
   const byProtocol = input.rows.filter(
     (row) => input.protocol === "all" || row.host.protocol === input.protocol,
   );
-  const byGroup = byProtocol.filter((row) =>
-    matchesGroupFilter(row.host, input.group, input.groups),
-  );
+  const inGroup = matchesGroupFilter(input.group, input.groups);
+  const byGroup = byProtocol.filter((row) => inGroup(row.host));
   return rankHosts(byGroup, input.query);
 }
 
