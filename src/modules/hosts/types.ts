@@ -174,6 +174,19 @@ export type HostBase = {
    * carries it, under "Host tags".
    */
   tags?: readonly string[];
+  /**
+   * One of {@link HOST_ICON_IDS}, drawn beside the name on the host card.
+   * Typed `string`, not `HostIconId`: no writer checks it against this build's
+   * ids (the editor and store carry it as-is, a backup import only trims it),
+   * so an id a later build wrote survives an unrelated edit here, and
+   * {@link hostIconId} is where a reader turns it into something drawable.
+   * Absent = no glyph, which is the card as it was before this field existed.
+   */
+  icon?: string;
+  /** One of {@link HOST_COLOR_IDS}. Same terms as `icon`, resolved through
+   *  {@link hostColorId}. Never the card's only distinguishing mark: the host
+   *  name is always rendered beside it. */
+  color?: string;
   description?: string;
   /** Unix ms of the last successful connect. */
   lastConnectedAt?: number;
@@ -283,6 +296,49 @@ export function normalizeHostTags(tags: unknown): readonly string[] | undefined 
     if (out.length >= HOST_TAG_MAX_COUNT) break;
   }
   return out.length > 0 ? out : undefined;
+}
+
+/**
+ * The glyphs a host can wear on its card, by the id that is STORED. Lucide's own
+ * kebab-case names, so an id reads as the icon it draws. `appearance.tsx` maps
+ * each to its component through a `Record<HostIconId, ...>`, which is what keeps
+ * the two lists from drifting.
+ */
+export const HOST_ICON_IDS = [
+  "server",
+  "database",
+  "globe",
+  "cloud",
+  "monitor",
+  "laptop",
+  "terminal",
+  "shield",
+  "router",
+  "container",
+] as const;
+export type HostIconId = (typeof HOST_ICON_IDS)[number];
+
+/**
+ * A fixed palette, not a free picker. Each id names an ANSI slot of the active
+ * theme (`--tervia-ansi-<id>`), which `appearance.tsx` paints with, so a host
+ * colour follows every theme preset and custom theme on both light and dark
+ * instead of needing its own contrast check - and `scripts/theme-verify.ts`
+ * forbids raw Tailwind hues in `src/` regardless.
+ */
+export const HOST_COLOR_IDS = ["red", "yellow", "green", "cyan", "blue", "magenta"] as const;
+export type HostColorId = (typeof HOST_COLOR_IDS)[number];
+
+/** `value` as an icon id this build can draw, else `undefined`. TOTAL, for the
+ *  reason `normalizeHostTags` is: a landed sync record, or one a later build
+ *  wrote with an id this build does not know, reaches the card unchecked. */
+export function hostIconId(value: unknown): HostIconId | undefined {
+  return HOST_ICON_IDS.find((id) => id === value);
+}
+
+/** `value` as a colour id this build can paint, else `undefined`. Same terms as
+ *  {@link hostIconId}. */
+export function hostColorId(value: unknown): HostColorId | undefined {
+  return HOST_COLOR_IDS.find((id) => id === value);
 }
 
 /**

@@ -26,11 +26,14 @@ export function ToggleButton({
   active,
   onClick,
   disabled,
+  title,
   children,
 }: {
   active: boolean;
   onClick: () => void;
   disabled?: boolean;
+  /** Hover name for a segment whose only visible content is an icon. */
+  title?: string;
   children: ReactNode;
 }) {
   return (
@@ -39,6 +42,7 @@ export function ToggleButton({
       onClick={onClick}
       aria-pressed={active}
       disabled={disabled}
+      title={title}
       className={
         "flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-[11.5px] transition-colors " +
         (disabled

@@ -22,6 +22,11 @@ export type SharedDraft = {
    *  the save path runs the whole draft through it again (`writeHost` a third
    *  time), the same layered normalisation every other writer gets. */
   tags: readonly string[];
+  /** "" = none. Carried verbatim, including an id this build has no glyph
+   *  for (a later build's), so saving an unrelated edit does not erase it. */
+  icon: string;
+  /** "" = none. Same terms as `icon`. */
+  color: string;
 };
 
 export type SshCredentialDraft = {

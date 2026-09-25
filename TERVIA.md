@@ -314,7 +314,12 @@ macOS/Linux rely on `Drop for Session -> killer.kill()`.
   `normalizeHostTags` is the one normaliser every LOCAL writer (`store.ts`,
   the host editor, `modules/backup/file.ts`'s `sanitizeHost`) runs a tag
   array through; a sync landing is carried as-is, like every other host
-  field.
+  field. `HostBase.icon`/`HostBase.color` are optional ids from
+  `HOST_ICON_IDS`/`HOST_COLOR_IDS`, stored as plain strings that no writer
+  checks - so an id a later build wrote survives an edit here - and resolved
+  only on read (`hostIconId`/`hostColorId`) by `appearance.tsx`, which paints
+  a colour with the theme's `--tervia-ansi-*` slot rather than a hue of its
+  own.
 - `groupTree.ts`: `buildGroupTree` is the read-time forest `GroupStrip.tsx` and
   `page/derive.ts` build on - only the group whose OWN parent is missing, or
   which itself sits on a cycle, resolves to root; a group further down an
