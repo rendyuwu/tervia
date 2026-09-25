@@ -250,8 +250,8 @@ for (const page of PAGE_KINDS) {
 }
 check("Hosts is the tab page", isTabPageKind(TAB_PAGE_KIND) && TAB_PAGE_KIND === "hosts");
 check(
-  "the rail views are Vault and Port Forwarding, in that order",
-  RAIL_VIEW_KINDS.join(",") === "vault,forwards",
+  "the rail views are Vault, Port Forwarding and Known Hosts, in that order",
+  RAIL_VIEW_KINDS.join(",") === "vault,forwards,known-hosts",
   RAIL_VIEW_KINDS,
 );
 check(
@@ -284,6 +284,7 @@ check(
 console.log("\n[saved] a page leaf that is not Hosts does not come back as a tab");
 check("a saved vault leaf is unrestorable", isUnrestorablePageLeaf(savedPage("vault")));
 check("a saved forwards leaf is unrestorable", isUnrestorablePageLeaf(savedPage("forwards")));
+check("and so is a saved known-hosts leaf", isUnrestorablePageLeaf(savedPage("known-hosts")));
 check(
   // The case a two-name enumeration missed: not a rail view, not Hosts, and
   // turning it INTO Hosts is what minted the second permanent Hosts tab.
@@ -348,9 +349,11 @@ console.log("\n[migrate] a snapshot holding a Vault tab restores without one in 
   );
 }
 {
-  // Everything the workspace had was a rail view. An empty window is not an
+  // Everything the workspace had was a rail view - all THREE kinds, not just
+  // the original two, so a third rail view is covered by this fixture rather
+  // than by an update nobody remembers to make. An empty window is not an
   // option, so it lands where a fresh profile does.
-  const saved: SavedTab[] = [savedTab(savedPage("vault")), savedTab(savedPage("forwards"))];
+  const saved: SavedTab[] = RAIL_VIEW_KINDS.map((view) => savedTab(savedPage(view)));
   const tabs = restoreSavedTabs(saved, allocId);
   check("falls back to a single tab", tabs.length === 1, leafKinds(tabs));
   check("and it is the Hosts page", leafKinds(tabs).join(",") === "page:hosts", leafKinds(tabs));

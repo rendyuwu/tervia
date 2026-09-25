@@ -97,6 +97,8 @@ import {
   CREDENTIAL_STAMP_ABSENT,
   CREDENTIAL_STAMP_INLINE,
   hostFingerprint,
+  hostPins,
+  knownHostRows,
   HostBindingChangedError,
   isRdpHost,
   isSshHost,
@@ -2017,6 +2019,113 @@ console.log("\n[pins] one pin per (host, address), in whichever field the protoc
     beforePins,
   );
   check("and the binding still names its own host", await ownerOf("h-3"), "h-3");
+}
+
+// ---------------------------------------------------------------------------
+// The Known Hosts page's revoke. One property beyond what pinFingerprint
+// above already covers: forgetPin takes an ADDRESS, not the record's own current
+// one, because a jump-hop address a chain no longer uses can still carry a pin
+// nothing else names - so removing "the host's own address" must not be the only
+// case exercised.
+console.log(
+  "\n[pins] forgetPin removes one address, through the same withPins path pinFingerprint writes",
+);
+{
+  const h = harness({
+    hosts: [
+      sshHost({
+        id: "h-1",
+        pins: { "prod.example": "SHA256:PROD", "jump.example": "SHA256:JUMP" },
+      }),
+      rdpHost({ id: "h-2" }),
+    ],
+  });
+  const pin = async (id: string): Promise<string | undefined> => {
+    const host = await h.hosts.findHost(id);
+    return host ? hostFingerprint(host) : undefined;
+  };
+  const keys = (id: string): Record<string, string> | "MISSING" =>
+    h.rows().find((x) => x.id === id)?.pins ?? "MISSING";
+
+  await h.hosts.pinFingerprint("h-2", "SHA256:CERT");
+
+  // A jump-hop address, not the record's own `host` - the mirror field must be
+  // untouched, because withPins recomputes it from `pins[host.host]` alone.
+  await h.hosts.forgetPin("h-1", "jump.example");
+  check("the named address is gone, the other kept", keys("h-1"), {
+    "prod.example": "SHA256:PROD",
+  });
+  check(
+    "and the record's own pin (the mirror field) is untouched, since the forgotten address was a jump hop",
+    await pin("h-1"),
+    "SHA256:PROD",
+  );
+
+  // The record's OWN address, on the RDP arm: the mirror (certFingerprint) must
+  // follow the map down to nothing, same as pinFingerprint's own mirror write.
+  await h.hosts.forgetPin("h-2", "vps.example");
+  check("the RDP pin is gone too", keys("h-2"), "MISSING");
+  check("and its mirror field (certFingerprint) follows it", await pin("h-2"), undefined);
+  check("the unrelated SSH host was not touched", await pin("h-1"), "SHA256:PROD");
+
+  const rowsBefore = JSON.stringify(h.rows());
+  const commitsBefore = h.commits();
+  await h.hosts.forgetPin("h-1", "jump.example");
+  check(
+    "forgetting an address that is already gone writes nothing",
+    JSON.stringify(h.rows()),
+    rowsBefore,
+  );
+  check("and commits nothing - no updatedAt bump, no file rewrite", h.commits(), commitsBefore);
+
+  await h.hosts.forgetPin("h-x", "nowhere.example");
+  check(
+    "forgetting a pin on a host that no longer exists writes nothing either",
+    JSON.stringify(h.rows()),
+    rowsBefore,
+  );
+
+  // The seam the acceptance box actually cares about: the next host-key check
+  // reads `hostPins`/`hostFingerprint`, exactly as the accept-path attribution and
+  // the connect's fingerprint comparison do, so an address with no pin here is an
+  // address that re-triggers the trust-on-first-use prompt on the next connect.
+  const afterHost = await h.hosts.findHost("h-1");
+  check(
+    "the next host-key check sees no pin for the forgotten address",
+    afterHost ? hostPins(afterHost)["jump.example"] : "MISSING-HOST",
+    undefined,
+  );
+}
+
+// The Known Hosts page's whole read path: one row per (host, address), never one
+// per host, sorted by host name then address. The RDP host carries only the flat
+// `certFingerprint` a pre-keying build wrote, so it also proves the page reads
+// through `hostPins`'s adoption rather than the raw map.
+console.log("\n[pins] knownHostRows lists one row per pinned address, sorted");
+{
+  const rows = knownHostRows([
+    sshHost({
+      id: "h-web",
+      name: "web",
+      pins: { "prod.example": "SHA256:PROD", "jump.example": "SHA256:JUMP" },
+    }),
+    sshHost({ id: "h-bare", name: "bare", host: "bare.example" }),
+    rdpHost({ id: "h-desk", name: "Desk", certFingerprint: "SHA256:CERT" }),
+  ]);
+  check(
+    "a host with two pinned addresses gives two rows, a host with none gives none",
+    rows.map((r) => `${r.hostName}|${r.address}|${r.fingerprint}`),
+    [
+      "Desk|vps.example|SHA256:CERT",
+      "web|jump.example|SHA256:JUMP",
+      "web|prod.example|SHA256:PROD",
+    ],
+  );
+  check(
+    "each row carries its own host id and protocol",
+    rows.map((r) => `${r.hostId}:${r.protocol}`),
+    ["h-desk:rdp", "h-web:ssh", "h-web:ssh"],
+  );
 }
 
 // ---------------------------------------------------------------------------

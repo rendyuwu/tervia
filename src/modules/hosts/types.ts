@@ -352,6 +352,49 @@ export function hostPins(host: Host): HostPins {
   return flat ? { [host.host]: flat } : {};
 }
 
+/**
+ * One row for the Known Hosts page: one pinned key or certificate, at one
+ * address, on one host. {@link hostPins} above is per-host and keyed by
+ * address; this flattens every host's map into the shape a page listing
+ * every pin across the whole store wants, one row per (host, address).
+ */
+export type KnownHostRow = {
+  hostId: string;
+  hostName: string;
+  protocol: Host["protocol"];
+  address: string;
+  fingerprint: string;
+};
+
+/**
+ * Every pinned key or certificate across every host, sorted by host name
+ * then address (both case-insensitively), with the host id as a final
+ * tie-break so two hosts sharing a name still sort the same way twice -
+ * the read side of {@link HostPins} that nothing before the Known Hosts
+ * page ever needed, because every earlier reader already held one host's
+ * own record.
+ */
+export function knownHostRows(hosts: readonly Host[]): KnownHostRow[] {
+  const rows: KnownHostRow[] = [];
+  for (const host of hosts) {
+    for (const [address, fingerprint] of Object.entries(hostPins(host))) {
+      rows.push({
+        hostId: host.id,
+        hostName: host.name,
+        protocol: host.protocol,
+        address,
+        fingerprint,
+      });
+    }
+  }
+  return rows.sort(
+    (a, b) =>
+      a.hostName.toLowerCase().localeCompare(b.hostName.toLowerCase()) ||
+      a.address.toLowerCase().localeCompare(b.address.toLowerCase()) ||
+      a.hostId.localeCompare(b.hostId),
+  );
+}
+
 /** The value {@link credentialStamp} reports for a host that is not in the store. */
 export const CREDENTIAL_STAMP_ABSENT = "absent";
 /** The value {@link credentialStamp} reports for a host that owns its credentials. */

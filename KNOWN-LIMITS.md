@@ -1206,3 +1206,37 @@ two different addresses at once and route by address, which is not how
 **Trigger.** A server-side forwarding mode this app starts supporting where
 one port is legitimately bound on more than one address within a single
 session.
+
+## Known Hosts
+
+### The Known Hosts page's Forget button has no "every device" option
+
+**Accepted state.** `KnownHostsPage.tsx`'s Forget button revokes a pin on
+THIS device only, and offers no choice, because there is nothing else to
+revoke: `DEVICE_LOCAL_FIELDS` (`src/modules/sync/envelope.ts`, mirrored in
+`src-tauri/src/modules/sync/model.rs`) already strips `pins` from every
+record before it leaves the device, so a pin never exists anywhere else to
+be cleared. The page's own copy line says this rather than leaving a reader
+to infer it from what the button does not offer.
+
+**Carried by.** `KnownHostsPage.tsx`'s copy paragraph, and `DEVICE_LOCAL_FIELDS`
+in `src/modules/sync/envelope.ts` / `src-tauri/src/modules/sync/model.rs`.
+
+**Trigger.** Pins becoming synced content - at which point this entry and
+the copy line both need to be re-decided together, not just the field list.
+
+### Nothing mounts KnownHostsPage, so its Forget wiring and copy are source-pinned only
+
+**Accepted state.** `scripts/hosts-store-verify.ts` proves `forgetPin` itself -
+what it removes, what it leaves alone, its no-op cases - and
+`scripts/rail-views-verify.ts` proves the page is wired in as a rail view.
+Neither mounts `KnownHostsPage.tsx`, so nothing asserts that its Forget
+button's `onClick` actually calls `forgetPin` with the row's own address, that
+the accessible label really names the host and address on screen, or that the
+empty-state and device-local copy render at all. The same gap the "Vault
+editors" entry above already carries for a different page.
+
+**Carried by.** `KnownHostsPage.tsx` itself - there is no file that checks it.
+
+**Trigger.** A component test runner existing in this repository, able to
+mount a rail view and assert on its rendered text and click handlers.

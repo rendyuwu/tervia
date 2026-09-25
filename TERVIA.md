@@ -345,6 +345,15 @@ macOS/Linux rely on `Drop for Session -> killer.kill()`.
   power cut. It recovers from a `.bak`, then snapshots on every commit, and hands
   back one notice for the UI to show once. Writes go through
   `src/lib/fileKeyValueStore.ts`, so a commit is one atomic whole-file replacement.
+- `KnownHostsPage.tsx` is the rail view (`known-hosts` in `PageKind`/`RAIL_VIEW_KINDS`)
+  listing every pinned SSH host key and RDP certificate across every host. It reads
+  `knownHostRows` (`types.ts`), a pure flatten of every host's `hostPins` into one row
+  per (host, address), and its Forget button calls `forgetPin(id, address)`
+  (`store.ts`) - `pinFingerprint` in reverse, through the same `withPins`/`patchHost`
+  path, so the mirror field and the draft-editing `PinnedKeyRow` in
+  `HostEditorDialog.tsx` stay looking at the one `pins` map. Commits immediately
+  (unlike `PinnedKeyRow`'s Forget, which edits a draft Save applies), and is a no-op
+  - no write, no `updatedAt` bump - when the address carries no pin already.
 
 ### The vault (`src/modules/vault/`)
 
