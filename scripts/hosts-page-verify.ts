@@ -213,8 +213,8 @@ function vault(identities: VaultIdentity[] = [], keys: VaultKey[] = []): VaultSn
  *  the end of the run - see the guard just before the summary. */
 const NO_VAULT = vault();
 
-function group(id: string, name: string, order?: number): HostGroup {
-  return { id, name, order };
+function group(id: string, name: string, order?: number, parentId?: string): HostGroup {
+  return { id, name, order, parentId };
 }
 
 // --- missingSecret: SSH, inline -----------------------------------------
@@ -577,6 +577,9 @@ console.log("\n[groupCounts] every host lands somewhere, and total keeps countin
 }
 // The invariant the chips depend on: without the dangling-groupId fallback the
 // chips sum to less than All and that row is reachable from no chip at all.
+// Stated over `direct`, NOT `byGroup`: nesting makes `byGroup` sum a host once
+// per ANCESTOR, so only `direct` (each host counted exactly once, under its
+// own group) partitions `total` the way `ungrouped` does.
 //
 // Checked over a fixture whose counts are pinned NOWHERE, which is the whole
 // point of the separate block. Asserted against the three literals above it read
@@ -596,31 +599,59 @@ console.log("\n[groupCounts] every host lands somewhere, and total keeps countin
         : sshInline(`h-c${i}`, {}, `g-${(i % 3) + 1}`),
   );
   const counts = groupCounts(hosts, groups);
-  const summed = Object.values(counts.byGroup).reduce((a, b) => a + b, 0);
-  ok("total === ungrouped + sum(byGroup)", counts.ungrouped + summed === counts.total);
+  const summedDirect = Object.values(counts.direct).reduce((a, b) => a + b, 0);
+  ok("total === ungrouped + sum(direct)", counts.ungrouped + summedDirect === counts.total);
   ok("and total is every host, not just the placeable ones", counts.total === hosts.length);
   // The other half of "every host lands somewhere": each chip's count is the
   // number of cards clicking it shows, so the two must be derived consistently.
   // `matchesGroupFilter` is the click; `groupCounts` is the label.
-  const known = new Set(groups.map((g) => g.id));
-  const viaFilter = groups.map(
-    (g) =>
-      hosts.filter((h) => matchesGroupFilter(h, { kind: "group", groupId: g.id }, known)).length,
-  );
+  const viaFilter = groups.map((g) => {
+    const matches = matchesGroupFilter({ kind: "group", groupId: g.id }, groups);
+    return hosts.filter((h) => matches(h)).length;
+  });
   check(
     "every chip's label equals what clicking it keeps",
     viaFilter,
     groups.map((g) => counts.byGroup[g.id]),
   );
+  const matchesUngrouped = matchesGroupFilter({ kind: "ungrouped" }, groups);
   ok(
     "and the Ungrouped chip's label equals what it keeps",
-    hosts.filter((h) => matchesGroupFilter(h, { kind: "ungrouped" }, known)).length ===
-      counts.ungrouped,
+    hosts.filter((h) => matchesUngrouped(h)).length === counts.ungrouped,
+  );
+}
+// The invariant restated over a NESTED fixture: `byGroup` double-counts under
+// nesting (a host under a 3-level chain is counted once for its own group and
+// once for every ancestor above it), which is what the flat fixture above
+// could not exhibit - `direct` and `byGroup` agree whenever nothing nests.
+{
+  const groups = [
+    group("g-root", "Root"),
+    group("g-mid", "Mid", undefined, "g-root"),
+    group("g-leaf", "Leaf", undefined, "g-mid"),
+  ];
+  const hosts = [
+    sshInline("h-80", {}, "g-root"),
+    sshInline("h-81", {}, "g-mid"),
+    sshInline("h-82", {}, "g-leaf"),
+    sshInline("h-83"), // ungrouped
+  ];
+  const counts = groupCounts(hosts, groups);
+  const summedDirect = Object.values(counts.direct).reduce((a, b) => a + b, 0);
+  const summedByGroup = Object.values(counts.byGroup).reduce((a, b) => a + b, 0);
+  ok(
+    "total === ungrouped + sum(direct) holds under nesting",
+    counts.ungrouped + summedDirect === counts.total,
+  );
+  ok(
+    "sum(byGroup) does NOT hold under nesting - it double-counts a host once per ancestor",
+    counts.ungrouped + summedByGroup !== counts.total,
   );
 }
 check("no hosts and no groups is all zeroes", groupCounts([], []), {
   total: 0,
   ungrouped: 0,
+  direct: {},
   byGroup: {},
 });
 
@@ -628,26 +659,134 @@ check("no hosts and no groups is all zeroes", groupCounts([], []), {
 
 console.log("\n[matchesGroupFilter] agrees with the counts, dangling row included");
 {
-  const known = new Set(["g-1"]);
+  const known = [group("g-1", "Known")];
   const inGroup = sshInline("h-42", {}, "g-1");
   const ungrouped = sshInline("h-43");
   const dangling = sshInline("h-44", {}, "g-deleted");
+  const matchesAll = matchesGroupFilter({ kind: "all" }, known);
   check(
     "All keeps everything",
-    [inGroup, ungrouped, dangling].map((h) => matchesGroupFilter(h, { kind: "all" }, known)),
+    [inGroup, ungrouped, dangling].map((h) => matchesAll(h)),
     [true, true, true],
   );
+  const matchesUngrouped = matchesGroupFilter({ kind: "ungrouped" }, known);
   check(
     "Ungrouped keeps the ungrouped and the dangling, not the grouped",
-    [inGroup, ungrouped, dangling].map((h) => matchesGroupFilter(h, { kind: "ungrouped" }, known)),
+    [inGroup, ungrouped, dangling].map((h) => matchesUngrouped(h)),
     [false, true, true],
   );
+  const matchesG1 = matchesGroupFilter({ kind: "group", groupId: "g-1" }, known);
   check(
     "a group chip keeps only its own members",
-    [inGroup, ungrouped, dangling].map((h) =>
-      matchesGroupFilter(h, { kind: "group", groupId: "g-1" }, known),
-    ),
+    [inGroup, ungrouped, dangling].map((h) => matchesG1(h)),
     [true, false, false],
+  );
+}
+
+console.log(
+  "\n[matchesGroupFilter/groupCounts] nesting: selecting a group keeps its descendants too",
+);
+{
+  // root -> mid -> leaf, one host on the leaf and a sibling under root.
+  const groups = [
+    group("g-root", "Root"),
+    group("g-mid", "Mid", undefined, "g-root"),
+    group("g-leaf", "Leaf", undefined, "g-mid"),
+  ];
+  const onLeaf = sshInline("h-60", {}, "g-leaf");
+  const onRoot = sshInline("h-61", {}, "g-root");
+  const known = groups;
+  const matchesLeaf = matchesGroupFilter({ kind: "group", groupId: "g-leaf" }, known);
+  check(
+    "the leaf's own filter keeps only the leaf's host",
+    [onLeaf, onRoot].map((h) => matchesLeaf(h)),
+    [true, false],
+  );
+  const matchesMid = matchesGroupFilter({ kind: "group", groupId: "g-mid" }, known);
+  check(
+    "the mid group's filter keeps the leaf's host too, not just its own",
+    [onLeaf, onRoot].map((h) => matchesMid(h)),
+    [true, false],
+  );
+  const matchesRoot = matchesGroupFilter({ kind: "group", groupId: "g-root" }, known);
+  check(
+    "the root's filter keeps every descendant",
+    [onLeaf, onRoot].map((h) => matchesRoot(h)),
+    [true, true],
+  );
+  const counts = groupCounts([onLeaf, onRoot], groups);
+  check("a chip's count includes every descendant's hosts, summed bottom-up", counts.byGroup, {
+    "g-root": 2,
+    "g-mid": 1,
+    "g-leaf": 1,
+  });
+}
+
+console.log(
+  "\n[matchesGroupFilter/groupCounts] read-time fallback: only the group with the bad edge goes to root",
+);
+{
+  // Four ways a stored `parentId` can be unusable, per group: names itself,
+  // names nothing in the list, sits ON a 2-cycle with another stored record,
+  // or has an ANCESTOR with one of those problems without being one of them
+  // itself. Sync can deliver any of these already merged. Only the group
+  // whose OWN edge is bad is read as root; a group further down an otherwise
+  // valid chain, or hanging off a cycle member rather than being part of it,
+  // keeps its raw parent - the fixture that would have caught P1-1, which
+  // pulled the whole subtree under a bad edge to root instead of just the
+  // group at the bad edge itself.
+  const groups = [
+    group("g-self", "Self", undefined, "g-self"),
+    group("g-gap", "Gap", undefined, "g-nowhere"),
+    group("g-a", "A", undefined, "g-b"),
+    group("g-b", "B", undefined, "g-a"),
+    // g-anc's own parent is missing; g-under-anc's parent (g-anc) EXISTS, so
+    // g-under-anc must keep its place under g-anc rather than also going root.
+    group("g-anc", "Ancestor with a dangling parent", undefined, "g-missing-anc"),
+    group("g-under-anc", "Child of a dangling ancestor", undefined, "g-anc"),
+    // g-hangs's parent (g-a) is a cycle member, but g-hangs is not ITSELF on
+    // the cycle - it must keep g-a as its parent, not go root.
+    group("g-hangs", "Hangs off a cycle member", undefined, "g-a"),
+  ];
+  const hosts = [
+    sshInline("h-70", {}, "g-self"),
+    sshInline("h-71", {}, "g-gap"),
+    sshInline("h-72", {}, "g-a"),
+    sshInline("h-73", {}, "g-b"),
+    sshInline("h-74", {}, "g-under-anc"),
+    sshInline("h-75", {}, "g-hangs"),
+  ];
+  const counts = groupCounts(hosts, groups);
+  check(
+    "the three groups whose OWN edge is bad each count only their own direct host",
+    {
+      "g-self": counts.byGroup["g-self"],
+      "g-gap": counts.byGroup["g-gap"],
+      "g-b": counts.byGroup["g-b"],
+    },
+    { "g-self": 1, "g-gap": 1, "g-b": 1 },
+  );
+  check(
+    "a dangling ancestor's count still includes its own child's host, not just its own",
+    counts.byGroup["g-anc"],
+    1,
+  );
+  check(
+    "a cycle member's count still includes the host of a group hanging off it, not just its own",
+    counts.byGroup["g-a"],
+    2,
+  );
+  const matchesA = matchesGroupFilter({ kind: "group", groupId: "g-a" }, groups);
+  check(
+    "filtering by a cycle member reaches its own host and a group hanging off it, nothing else",
+    hosts.map((h) => matchesA(h)),
+    [false, false, true, false, false, true],
+  );
+  const matchesAnc = matchesGroupFilter({ kind: "group", groupId: "g-anc" }, groups);
+  check(
+    "filtering by a dangling-ancestor group reaches its own child's host, not just its own",
+    hosts.map((h) => matchesAnc(h)),
+    [false, false, false, false, true, false],
   );
 }
 
@@ -687,7 +826,7 @@ console.log("\n[filterAndRank] all three filters run, and ranking orders what su
         rows,
         protocol: "ssh",
         group: { kind: "all" },
-        knownGroupIds: new Set(["g-1"]),
+        groups,
         query: "",
       }),
     ),
@@ -700,7 +839,7 @@ console.log("\n[filterAndRank] all three filters run, and ranking orders what su
         rows,
         protocol: "rdp",
         group: { kind: "all" },
-        knownGroupIds: new Set(["g-1"]),
+        groups,
         query: "",
       }),
     ),
@@ -713,7 +852,7 @@ console.log("\n[filterAndRank] all three filters run, and ranking orders what su
         rows,
         protocol: "ssh",
         group: { kind: "group", groupId: "g-1" },
-        knownGroupIds: new Set(["g-1"]),
+        groups,
         query: "",
       }),
     ),
@@ -726,7 +865,7 @@ console.log("\n[filterAndRank] all three filters run, and ranking orders what su
         rows,
         protocol: "all",
         group: { kind: "all" },
-        knownGroupIds: new Set(["g-1"]),
+        groups,
         query: "h-45",
       }),
     ),
@@ -738,7 +877,7 @@ console.log("\n[filterAndRank] all three filters run, and ranking orders what su
       rows,
       protocol: "all",
       group: { kind: "all" },
-      knownGroupIds: new Set(["g-1"]),
+      groups,
       query: "zzzz",
     }).length,
     0,
@@ -751,13 +890,12 @@ console.log("\n[filterAndRank] all three filters run, and ranking orders what su
   const exact: SshHost = { ...sshInline("h-49"), name: "db" };
   const prefix: SshHost = { ...sshInline("h-50"), name: "db-prod" };
   const buried: SshHost = { ...sshInline("h-51"), name: "adbox" };
-  const known = new Set<string>();
   const order = (hosts: SshHost[]) =>
     filterAndRank({
       rows: searchRows(hosts, [], NO_VAULT),
       protocol: "all",
       group: { kind: "all" },
-      knownGroupIds: known,
+      groups: [],
       query: "db",
     }).map((r) => r.host.name);
   check("output is ranked, not input-ordered", order([buried, prefix, exact]), [
@@ -881,10 +1019,16 @@ console.log("\n[lastConnectedLabel] HostCard actually renders it");
 // source, so prose naming one turns them red - fail-closed, and the direction
 // that costs a round rather than a defect.
 
-console.log("\n[purity] page/derive.ts imports exactly its four pure modules, and nothing else");
+console.log("\n[purity] page/derive.ts imports exactly its five pure modules, and nothing else");
 {
   const deriveSrc = readFileSync(join(root, "src/modules/hosts/page/derive.ts"), "utf8");
-  const pinned = ["../search", "../types", "@/modules/vault/refs", "@/modules/vault/types"];
+  const pinned = [
+    "../groupTree",
+    "../search",
+    "../types",
+    "@/modules/vault/refs",
+    "@/modules/vault/types",
+  ];
   const found = importSpecifiersOf(
     ts.createSourceFile("derive.ts", deriveSrc, ts.ScriptTarget.ESNext, true, ts.ScriptKind.TS),
   );

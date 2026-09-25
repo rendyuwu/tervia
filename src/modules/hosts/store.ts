@@ -35,6 +35,7 @@ import {
 } from "@/modules/vault/types";
 
 import { createTauriHostsStoreIo, defaultHostFiles, type HostsIo } from "./adapters";
+import { effectiveParents } from "./groupTree";
 import { jumpChain } from "./jumps";
 import { purgeLegacySecrets as runLegacyPurge, type LegacyPurgeResult } from "./legacyPurge";
 import {
@@ -469,7 +470,9 @@ function hostRef(host: Host): VaultRef {
 }
 
 /** Group names are compared the way a person reads them, so `" prod"` and
- *  `"PROD"` are the collision they look like. */
+ *  `"PROD"` are the collision they look like. Global across the whole tree,
+ *  not scoped per-parent - `KNOWN-LIMITS.md` carries the reason and the
+ *  trigger that would change it. */
 function sameName(a: string, b: string): boolean {
   return a.trim().toLowerCase() === b.trim().toLowerCase();
 }
@@ -978,6 +981,34 @@ export function createHostsStore(io: HostsIo): HostsStore {
       if (groups.some((g) => g.id !== group.id && sameName(g.name, group.name))) {
         throw new Error(`hosts: a group is already named "${group.name.trim()}"`);
       }
+      const stored = groups.find((g) => g.id === group.id);
+      // Only an EDGE THAT IS CHANGING is checked. A `parentId` already on the
+      // stored record - however it got there, including a sync landing this
+      // device never validated - is left alone by a write that does not touch
+      // it, so a rename or a sub-group creation elsewhere in the tree is never
+      // refused for a chain it did not create. Clearing `parentId` (moving to
+      // root) can never close a cycle either, so it skips this block too.
+      // `KNOWN-LIMITS.md` carries what a landed bad chain costs until
+      // something tries to move it.
+      if (group.parentId !== undefined && group.parentId !== stored?.parentId) {
+        if (group.parentId === group.id) {
+          throw new Error(`hosts: "${group.name}" cannot be its own parent group`);
+        }
+        if (!groups.some((g) => g.id === group.parentId)) {
+          throw new Error(`hosts: "${group.name}" names a parent group that does not exist`);
+        }
+        // The TRANSITIVE half: resolve the candidate list - this record with
+        // the NEW edge applied - through the SAME walk `groupTree.ts` uses at
+        // read time. It comes back `undefined` for `group.id` only when the
+        // new edge closes a cycle back through this record; every other bad
+        // edge above is already refused by name.
+        const candidate = stored
+          ? groups.map((g) => (g.id === group.id ? { ...g, parentId: group.parentId } : g))
+          : [...groups, group];
+        if (effectiveParents(candidate).get(group.id) !== group.parentId) {
+          throw new Error("hosts: group parent chain has a cycle");
+        }
+      }
       // Stamped and tombstone-cleared exactly as `writeHost` does, and for the
       // same two reasons.
       const at = now();
@@ -1159,7 +1190,8 @@ export function createHostsStore(io: HostsIo): HostsStore {
   async function deleteGroup(id: string): Promise<void> {
     return enqueueWrite(async () => {
       const [groups, hosts] = await Promise.all([listGroups(), listHosts()]);
-      if (!groups.some((g) => g.id === id)) return;
+      const target = groups.find((g) => g.id === id);
+      if (!target) return;
       const at = now();
       const graves = await readTombstones(at);
       // The one place a cascade is right: a group is a label, not an owner, so its
@@ -1181,16 +1213,33 @@ export function createHostsStore(io: HostsIo): HostsStore {
         members.push({ kind: HOST_TOMBSTONE_KIND, id: h.id });
         return { ...h, groupId: undefined, updatedAt: at };
       });
+      // A child group is not deleted with its parent either - re-parented to
+      // WHERE THE DELETED GROUP WAS. `newParent` is `target`'s own RESOLVED
+      // parent, via `effectiveParents`, not the raw `target.parentId`: a
+      // dangling or cyclic `target` (something sync can land, not something
+      // this write can create - see `upsertGroup`) resolves to root the same
+      // way any other reader of this list would, rather than handing a child
+      // a `parentId` that points at nothing, or at `target` (now gone), or
+      // through `target` right back to itself.
+      const newParent = effectiveParents(groups).get(id);
+      const children: DirtyId[] = [];
+      const nextGroups = groups
+        .filter((g) => g.id !== id)
+        .map((g) => {
+          if (g.parentId !== id) return g;
+          children.push({ kind: GROUP_TOMBSTONE_KIND, id: g.id });
+          return { ...g, parentId: newParent, updatedAt: at };
+        });
       await persist(
         [
-          [HOST_GROUPS_KEY, groups.filter((g) => g.id !== id)],
+          [HOST_GROUPS_KEY, nextGroups],
           [HOSTS_KEY, nextHosts],
           [
             TOMBSTONES_KEY,
             withTombstone(graves, [{ id, kind: GROUP_TOMBSTONE_KIND, deletedAt: at }], at),
           ],
         ],
-        [{ kind: GROUP_TOMBSTONE_KIND, id }, ...members],
+        [{ kind: GROUP_TOMBSTONE_KIND, id }, ...members, ...children],
       );
     });
   }
@@ -1324,7 +1373,12 @@ export function createHostsStore(io: HostsIo): HostsStore {
           // device cleared their `groupId` and stamped them, so those rows arrive
           // as host landings of their own. A member whose record has not landed
           // yet names a group that is gone, which renders as ungrouped - the same
-          // visible, recoverable state `assertReferences` already accepts.
+          // visible, recoverable state `assertReferences` already accepts. Child
+          // GROUPS follow the same rule: `deleteGroup`'s own cascade re-parented
+          // and stamped them on the origin device, so they arrive as group
+          // landings of their own, and one that has not landed yet still names
+          // the deleted parent - which `groupTree.ts`'s read-time fallback reads
+          // as root rather than losing the row.
           buried.push(landing.tombstone);
           continue;
         }
@@ -1332,6 +1386,9 @@ export function createHostsStore(io: HostsIo): HostsStore {
           (t) => t.id === landing.id && t.kind === GROUP_TOMBSTONE_KIND,
         );
         if (supersedingGroup && supersedingGroup.deletedAt > landing.updatedAt) continue;
+        // No reference check on `parentId` here, on purpose: a per-write
+        // refusal on a landing would drop a record another device already
+        // holds. `KNOWN-LIMITS.md` carries what that costs.
         const record: HostGroup = { ...landing.record, updatedAt: landing.updatedAt };
         const idx = nextGroups.findIndex((g) => g.id === landing.id);
         if (idx >= 0) nextGroups[idx] = record;

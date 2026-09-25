@@ -1796,6 +1796,142 @@ console.log("\n[groups] deleting a group clears the label and keeps the rows");
 }
 
 // ---------------------------------------------------------------------------
+console.log("\n[groups] nesting: a parent round-trips, and a bad one is refused like a jump host");
+{
+  const h = harness();
+  await h.hosts.upsertGroup({ id: "g-1", name: "Production" });
+  const child = await h.hosts.upsertGroup({ id: "g-2", name: "Web", parentId: "g-1" });
+  check("a good parent round-trips", child.parentId, "g-1");
+
+  await rejects(
+    "a group cannot be its own parent",
+    () => h.hosts.upsertGroup({ id: "g-3", name: "Self", parentId: "g-3" }),
+    ["cannot be its own parent"],
+  );
+  await rejects(
+    "a parent that does not exist is refused",
+    () => h.hosts.upsertGroup({ id: "g-3", name: "Gap", parentId: "g-gone" }),
+    ["does not exist"],
+  );
+
+  // `assertSshTarget`'s transitive half, mirrored: `g-2`'s own 1-cycle refusal
+  // already caught the immediate case above, so this proves the WALK catches
+  // A -> B -> A instead of only the first hop.
+  await h.hosts.upsertGroup({ id: "g-4", name: "A" });
+  await h.hosts.upsertGroup({ id: "g-5", name: "B", parentId: "g-4" });
+  await rejects(
+    "reparenting A under its own descendant closes a cycle and is refused",
+    () => h.hosts.upsertGroup({ id: "g-4", name: "A", parentId: "g-5" }),
+    ["cycle"],
+  );
+  check(
+    "neither side of the attempted cycle moved",
+    (await h.hosts.findGroup("g-4"))?.parentId,
+    undefined,
+  );
+}
+
+// ---------------------------------------------------------------------------
+console.log(
+  "\n[groups] a landed bad chain refuses nothing UNTIL a write actually touches the bad edge",
+);
+{
+  // Seeded directly, bypassing `upsertGroup` - this is state only a sync
+  // landing (`applyRemote`, no reference check by design) can produce.
+  // `upsertGroup` itself would have refused every one of these three edges.
+  const h = harness({
+    groups: [
+      { id: "g-dangling", name: "Dangling", parentId: "g-missing" },
+      { id: "g-a", name: "A", parentId: "g-b" },
+      { id: "g-b", name: "B", parentId: "g-a" },
+    ],
+  });
+  const renamed = await h.hosts.upsertGroup({
+    id: "g-dangling",
+    name: "Renamed",
+    parentId: "g-missing",
+  });
+  check(
+    "renaming a group whose stored parent dangles succeeds - the edge did not change",
+    renamed.name,
+    "Renamed",
+  );
+  const child = await h.hosts.upsertGroup({ id: "g-child", name: "Child", parentId: "g-dangling" });
+  check(
+    "creating a sub-group under a group whose OWN parent dangles succeeds - `g-dangling` itself exists",
+    child.parentId,
+    "g-dangling",
+  );
+  const renamedCycleMember = await h.hosts.upsertGroup({
+    id: "g-a",
+    name: "Also renamed",
+    parentId: "g-b",
+  });
+  check(
+    "renaming a group stuck in a landed cycle succeeds too, for the same reason",
+    renamedCycleMember.name,
+    "Also renamed",
+  );
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n[groups] deleting a group re-parents its children, never deletes them");
+{
+  const h = harness();
+  await h.hosts.upsertGroup({ id: "g-root", name: "Root" });
+  await h.hosts.upsertGroup({ id: "g-mid", name: "Mid", parentId: "g-root" });
+  await h.hosts.upsertGroup({ id: "g-leaf", name: "Leaf", parentId: "g-mid" });
+  const solo = await h.hosts.upsertGroup({ id: "g-solo", name: "Solo" });
+
+  await h.hosts.deleteGroup("g-mid");
+  check(
+    "the leaf moves up to the deleted group's own parent",
+    (await h.hosts.findGroup("g-leaf"))?.parentId,
+    "g-root",
+  );
+
+  await h.hosts.deleteGroup("g-root");
+  check(
+    "and a child of a ROOT group becomes root itself, not orphaned",
+    (await h.hosts.findGroup("g-leaf"))?.parentId,
+    undefined,
+  );
+  // `g-solo` never had a parent, so a check that its `parentId` is still
+  // `undefined` can never fail - it would pass even if EVERY group got
+  // touched. `updatedAt` is the row that actually distinguishes "left alone"
+  // from "rewritten to the same value", on the `[cascade]` block's
+  // "non-member is left exactly as it was" pattern in `sync-prereq-verify.ts`.
+  check(
+    "a group with no children of its own is untouched by either delete",
+    (await h.hosts.findGroup("g-solo"))?.updatedAt,
+    solo.updatedAt,
+  );
+}
+
+// ---------------------------------------------------------------------------
+console.log(
+  "\n[groups] deleting a group re-parents a child through a landed cycle to root, not to itself",
+);
+{
+  // Seeded directly: `upsertGroup` would refuse this pair, but a sync landing
+  // can still merge it. `target`'s raw `parentId` (`g-d`) is itself part of
+  // the cycle being deleted out from under it, so a child re-parented to the
+  // raw value would land on itself.
+  const h = harness({
+    groups: [
+      { id: "g-c", name: "C", parentId: "g-d" },
+      { id: "g-d", name: "D", parentId: "g-c" },
+    ],
+  });
+  await h.hosts.deleteGroup("g-c");
+  check(
+    "D's new parent is D's own EFFECTIVE parent (root - its cycle partner is gone), not itself",
+    (await h.hosts.findGroup("g-d"))?.parentId,
+    undefined,
+  );
+}
+
+// ---------------------------------------------------------------------------
 console.log("\n[pins] one pin per (host, address), in whichever field the protocol keeps it");
 {
   // h-3 is reserved for the credential-stability check at the end of this block:

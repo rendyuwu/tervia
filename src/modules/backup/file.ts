@@ -82,12 +82,14 @@
  * Kept free of the Tauri runtime so `scripts/backup-verify.ts` can exercise the
  * parser under plain node. That constraint matters more now: the value imports
  * below (`RDP_DEFAULT_PRESET`, `hostPins`) come from `@/modules/hosts/types`,
- * alongside type-only imports from `@/modules/vault/types` and
- * `@/modules/forwards/types` - all three plain TypeScript with no IPC of their
- * own, which is why those imports are safe; anything reaching a store or an
- * `invoke` belongs in `apply.ts` instead.
+ * `effectiveParents` from `@/modules/hosts/groupTree`, alongside type-only
+ * imports from `@/modules/vault/types` and `@/modules/forwards/types` - all
+ * four plain TypeScript with no IPC of their own, which is why those imports
+ * are safe; anything reaching a store or an `invoke` belongs in `apply.ts`
+ * instead.
  */
 import type { ForwardRule } from "@/modules/forwards/types";
+import { effectiveParents } from "@/modules/hosts/groupTree";
 import {
   RDP_CLIPBOARD_MODES,
   RDP_DEFAULT_PRESET,
@@ -467,6 +469,12 @@ export function sanitizeHost(raw: unknown): Host | null {
 /**
  * Validate one group. Null when it could not be a pickable label: `upsertGroup`
  * refuses a blank name, because a group is chosen by name from a dropdown.
+ *
+ * `parentId` travels only as a trimmed, non-empty string, same as every other
+ * id-shaped field this function reads - whether it names a group that will
+ * actually exist after this import is `orderGroupWrites`'s question, not
+ * this one's: a dangling or cyclic reference is read as root there rather
+ * than refused here.
  */
 export function sanitizeGroup(raw: unknown): HostGroup | null {
   if (!isRecord(raw)) return null;
@@ -474,9 +482,11 @@ export function sanitizeGroup(raw: unknown): HostGroup | null {
   const name = str(raw.name).trim();
   if (!id || !name) return null;
   const order = raw.order;
+  const parentId = str(raw.parentId).trim();
   return {
     id,
     name,
+    ...(parentId ? { parentId } : {}),
     ...(typeof order === "number" && Number.isFinite(order) ? { order } : {}),
   };
 }
@@ -793,6 +803,46 @@ export function orderHostWrites(incoming: Host[], existing: Host[]): Host[] {
   };
 
   for (const host of incoming) visit(host.id);
+  return out;
+}
+
+/**
+ * The order groups have to be WRITTEN in: a group's parent, if it is one of
+ * THESE rows, before the group that names it - `upsertGroup` re-reads the
+ * store on every write and refuses a `parentId` it cannot find there, on
+ * `orderHostWrites`'s exact reasoning for a jump-host chain.
+ *
+ * Every row's `parentId` is first rewritten to what {@link effectiveParents}
+ * resolves it to over the COMBINED `existing ∪ incoming` universe - a
+ * dangling or cyclic reference lands on root here, before any row is
+ * written, rather than reaching `upsertGroup`'s own (stricter, throwing)
+ * check. No `walking` re-entrancy guard here, unlike `orderHostWrites`:
+ * `effectiveParents` has already resolved every row's `parentId` to a value
+ * that cannot cycle back through this walk, so `emitted` alone is enough to
+ * terminate it.
+ */
+export function orderGroupWrites(incoming: HostGroup[], existing: HostGroup[]): HostGroup[] {
+  const byId = new Map(existing.map((g) => [g.id, g]));
+  for (const g of incoming) byId.set(g.id, g);
+  const resolved = effectiveParents([...byId.values()]);
+  const pending = new Map(
+    incoming.map((g) => [g.id, { ...g, parentId: resolved.get(g.id) }] as const),
+  );
+  const emitted = new Set<string>();
+  const out: HostGroup[] = [];
+
+  const visit = (id: string): void => {
+    const group = pending.get(id);
+    if (!group || emitted.has(id)) return;
+    // Only a parent that is ALSO in this batch needs ordering - one already on
+    // disk needs none, and `resolved` has already ruled out this reaching a
+    // cycle or a dangling id.
+    if (group.parentId && pending.has(group.parentId)) visit(group.parentId);
+    emitted.add(id);
+    out.push(group);
+  };
+
+  for (const group of incoming) visit(group.id);
   return out;
 }
 
@@ -1176,6 +1226,11 @@ export function carryPins(incoming: Host[], existing: Host[]): Host[] {
  *
  * Returned together because applying one half without the other is the bug: a
  * repoint nobody applies leaves the host naming a group that was never written.
+ * A survivor's own `parentId` gets the SAME repoint `hosts[].groupId` does,
+ * for the reason it has to: `parentId` is the other field that can name a
+ * group id, and a child left naming a group this pass just remapped away
+ * would point at nothing `orderGroupWrites` can find on either side of the
+ * merge.
  */
 export function mergeGroups(
   incoming: HostGroup[],
@@ -1187,7 +1242,7 @@ export function mergeGroups(
   const key = (name: string): string => name.trim().toLowerCase();
   const owner = new Map(existing.map((g) => [key(g.name), g.id]));
   const savedName = new Map(existing.map((g) => [g.id, g.name]));
-  const groups: HostGroup[] = [];
+  const survivors: HostGroup[] = [];
   const remap = new Map<string, string>();
   let keptNames = 0;
 
@@ -1205,13 +1260,15 @@ export function mergeGroups(
       continue;
     }
     owner.set(key(group.name), group.id);
-    groups.push(group);
+    survivors.push(group);
   }
 
   const merged = remap.size;
-  if (merged === 0) return { groups, hosts, merged, keptNames };
+  if (merged === 0) return { groups: survivors, hosts, merged, keptNames };
   return {
-    groups,
+    groups: survivors.map((g) =>
+      g.parentId && remap.has(g.parentId) ? { ...g, parentId: remap.get(g.parentId) } : g,
+    ),
     merged,
     keptNames,
     hosts: hosts.map((h) => {

@@ -275,6 +275,79 @@ fixtures in `scripts/backup-verify.ts`.
 **Trigger.** The split gaining a second attachment point, or a host clause that
 can be produced without a host count.
 
+## Host groups
+
+### A group's name is unique across the whole tree, not per-parent
+
+**Accepted state.** `upsertGroup`'s collision check (`sameName`) compares an
+incoming group's name against every OTHER group's, regardless of nesting -
+two groups named "Servers" cannot coexist even when they sit under different
+parents. Nesting itself gave no reason to scope the check per-parent: the
+host editor's group picker (`Combobox` in `HostEditorDialog.tsx`) already
+lists every group by its flat name, with no parent path shown, so two
+same-named siblings would be indistinguishable there regardless of where the
+uniqueness rule is enforced.
+
+**Carried by.** `sameName` and the collision check in `upsertGroup`
+(`src/modules/hosts/store.ts`).
+
+**Trigger.** A request for same-named siblings under different parents -
+which would also need the host editor's group `Combobox` to grow a
+disambiguating path label, since "Servers" alone would no longer say which
+one a host is being filed under.
+
+### A reparent or a rename of the same group on two devices resolves last-write-wins, with no awareness of the OTHER record it changed
+
+**Accepted state.** `HostGroup.parentId` travels as an ordinary, opaque field
+on the group record - the same wire path `groupId` already proved carries an
+unparsed value untouched (`model.rs`'s
+`a_field_this_module_has_no_rules_for_survives_the_whole_trip`). `merge` in
+`model.rs` resolves two copies of ONE record by timestamp and content only; it
+has no notion that a `parentId` names another record, so it cannot detect that
+a merge just landed a cycle two devices each built independently while
+believing the tree was still acyclic, or that a group's parent was deleted on
+one device between the two devices' last sync. Nothing is lost - a dangling or
+cyclic `parentId` still renders and files hosts correctly - because
+`groupTree.ts`'s `buildGroupTree` resolves the read side of exactly this case
+to root: only the group whose OWN parent is missing or itself sits on the
+cycle, never a descendant further down an otherwise-valid chain, which keeps
+its place and its hosts. `applyRemote` (`src/modules/hosts/store.ts`) lands a
+group landing with no reference check of its own, by design: a per-write
+refusal on a landing would drop a record another device already holds.
+`upsertGroup` leaves a landed bad edge alone too, for the same reason: it
+validates a `parentId` only when a LOCAL write actually changes that edge, so
+a rename or a sub-group creation elsewhere in the tree is never refused for a
+chain this device did not create.
+
+**Carried by.** `groupTree.ts`'s `buildGroupTree`/`effectiveParents` (the read
+side), and `src/modules/hosts/store.ts`'s `applyRemote` (the landing side,
+which runs no cycle check on purpose) and `upsertGroup` (the local-write
+side, which checks only a changing edge).
+
+**Trigger.** Cross-record awareness added to `merge` in `model.rs` - at which
+point a landed cycle could be refused or resolved at merge time instead of
+being tolerated at every later read.
+
+### Importing a pre-nesting backup moves every group it names back to root
+
+**Accepted state.** `orderGroupWrites`'s "file wins" rule rewrites every
+incoming group's `parentId` to what `effectiveParents` resolves over the
+combined `existing ∪ incoming` universe before any row is written. A backup
+written before `HostGroup.parentId` existed carries no `parentId` field at
+all on any of its rows, which is indistinguishable on the wire from an
+ordinary root group - so importing one flattens every group it names back to
+root, even one that is currently nested locally. Not fixable in code: there
+is no way to tell "absent because pre-nesting" from "absent because root"
+once the field has been read.
+
+**Carried by.** `orderGroupWrites` and `sanitizeGroup` in
+`src/modules/backup/file.ts`.
+
+**Trigger.** A versioned backup format that can record "this group's parent
+field was not written by this build" as distinct from "this group is a
+root" - at which point an old file could keep the local nesting instead of
+overwriting it.
+
 ## Shared UI
 
 ### A shared row/box layout is duplicated between the SSH credential section and the host editor, and only one copy is checked

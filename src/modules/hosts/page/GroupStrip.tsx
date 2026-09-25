@@ -1,7 +1,8 @@
 /**
- * The Hosts page's group filter strip: All / Ungrouped / one chip per
- * `HostGroup`, plus create, rename and delete. Pure presentation over the
- * counts and callbacks the page hands it - no store access of its own.
+ * The Hosts page's group filter strip: All / Ungrouped chips, then the group
+ * list as a depth-indented tree - create, rename, reparent ("Move to…") and
+ * delete, plus a sub-group under any group. Pure presentation over the counts
+ * and callbacks the page hands it - no store access of its own.
  */
 import { IconActionButton } from "@/components/IconActionButton";
 import {
@@ -15,11 +16,27 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { IconTooltip } from "@/components/ui/icon-tooltip";
 import { toast } from "@/components/ui/toast";
 import { cn } from "@/lib/utils";
 import { InlineInput } from "@/modules/explorer/InlineInput";
-import { Pencil, Plus, Trash2 } from "lucide-react";
+import {
+  TRAILING_BTN_BASE,
+  TRAILING_BTN_VARIANT,
+  TRAILING_ICON_SIZE,
+} from "@/modules/tabs/components/TrailingIconButton";
+import { ChevronRight, FolderInput, MoreHorizontal, Pencil, Plus, Trash2 } from "lucide-react";
 import { useMemo, useState, type ReactNode } from "react";
+import { buildGroupTree, collectIds, type GroupNode } from "../groupTree";
 import type { HostGroup } from "../types";
 // One definition, in the module that computes it - a second one here would let
 // the chips and the counts drift apart without `tsc` noticing.
@@ -34,37 +51,70 @@ export type GroupStripProps = {
   onSelectAll: () => void;
   onSelectUngrouped: () => void;
   onSelectGroup: (groupId: string) => void;
-  onCreateGroup: (name: string) => void | Promise<void>;
+  /** `parentId` is the sub-group's direct parent, or `undefined` for a root
+   *  group - "New group" on the strip and "New sub-group" on a chip's menu are
+   *  the same call with a different second argument. */
+  onCreateGroup: (name: string, parentId?: string) => void | Promise<void>;
   onRenameGroup: (id: string, name: string) => void | Promise<void>;
+  /** "Move to…": `parentId` is the chosen new parent, or `undefined` for root. */
+  onMoveGroup: (id: string, parentId: string | undefined) => void | Promise<void>;
   onDeleteGroup: (id: string) => void | Promise<void>;
 };
 
-/** Ordered groups first (by `order`, ascending), then unordered ones by name.
- *  Stable regardless of the array's incoming order, so the strip does not
- *  reshuffle between renders. */
-function sortGroups(groups: HostGroup[]): HostGroup[] {
-  return [...groups].sort((a, b) => {
-    if (a.order !== undefined && b.order !== undefined) return a.order - b.order;
-    if (a.order !== undefined) return -1;
-    if (b.order !== undefined) return 1;
-    return a.name.localeCompare(b.name);
-  });
-}
-
 /** The one cascade in the host model that is correct: a group is a label, not
- *  an owner, so deleting it only clears `groupId` on its members. Said plainly
- *  here because the failure mode runs both ways - read as "delete these
- *  hosts" and a user who should confirm won't, read the other way when it
- *  really would delete them and a user who confirms loses data. */
-function deleteDescription(hostCount: number): string {
+ *  an owner, so deleting it only clears `groupId` on its members and hands its
+ *  own child groups up to ITS parent, rather than deleting either. Said
+ *  plainly here because the failure mode runs both ways - read as "delete
+ *  these hosts" and a user who should confirm won't, read the other way when
+ *  it really would delete them and a user who confirms loses data. */
+function deleteDescription(hostCount: number, childGroupCount: number): string {
   // The empty case gets its own sentence rather than reading "The 0 hosts in
   // this group are not deleted", which is true and unreadable.
-  if (hostCount === 0) {
-    return "This group has no hosts, so nothing else changes. This cannot be undone.";
+  const hostSentence =
+    hostCount === 0
+      ? "This group has no hosts, so nothing else changes."
+      : `The ${hostCount} ${hostCount === 1 ? "host" : "hosts"} in this group ${hostCount === 1 ? "is" : "are"} not deleted - they become ungrouped.`;
+  const childSentence =
+    childGroupCount === 0
+      ? ""
+      : ` Its ${childGroupCount} sub-${childGroupCount === 1 ? "group" : "groups"} ${childGroupCount === 1 ? "moves" : "move"} up to take its place.`;
+  return `${hostSentence}${childSentence} This cannot be undone.`;
+}
+
+/**
+ * Where a group can move to: Root, plus every group that is not itself, one
+ * of its own descendants, or its CURRENT parent - reparenting into a
+ * descendant would be a cycle `store.ts`'s write-time check refuses anyway,
+ * and reparenting onto the current parent (or picking Root for a group
+ * already at root) is a no-op the store would accept and stamp regardless,
+ * costing a sync push for nothing. `node` and `tree` are the strip's own
+ * memoized tree, passed in rather than re-derived, so opening this submenu
+ * costs one walk of an already-built tree instead of two more full builds.
+ * Depth-first, so the order a user reads in the submenu matches the order
+ * the rows above it appear in, and each label is indented to show where in
+ * the tree it sits.
+ */
+function moveTargetsFor(
+  node: GroupNode,
+  tree: readonly GroupNode[],
+  currentParentId: string | undefined,
+): { parentId: string | undefined; label: string }[] {
+  const excluded = new Set<string>();
+  collectIds(node, excluded);
+  const options: { parentId: string | undefined; label: string }[] = [];
+  if (currentParentId !== undefined) options.push({ parentId: undefined, label: "Root" });
+  function walk(nodes: readonly GroupNode[], depth: number): void {
+    for (const n of nodes) {
+      if (excluded.has(n.group.id) || n.group.id === currentParentId) continue;
+      options.push({
+        parentId: n.group.id,
+        label: "\u00a0\u00a0".repeat(depth) + n.group.name,
+      });
+      walk(n.children, depth + 1);
+    }
   }
-  const noun = hostCount === 1 ? "host" : "hosts";
-  const verb = hostCount === 1 ? "is" : "are";
-  return `The ${hostCount} ${noun} in this group ${verb} not deleted - they become ungrouped. This cannot be undone.`;
+  walk(tree, 0);
+  return options;
 }
 
 export function GroupStrip({
@@ -77,14 +127,26 @@ export function GroupStrip({
   onSelectGroup,
   onCreateGroup,
   onRenameGroup,
+  onMoveGroup,
   onDeleteGroup,
 }: GroupStripProps): ReactNode {
-  const sorted = useMemo(() => sortGroups(groups), [groups]);
-  const [creating, setCreating] = useState(false);
+  const tree = useMemo(() => buildGroupTree(groups), [groups]);
+  // No group anywhere has a child - every root's own `children` array is
+  // empty, which (since every non-root group is some root's descendant) can
+  // only be true when the whole forest is one flat level. That is the case
+  // this strip renders exactly as it did before nesting existed: one
+  // `flex-wrap` row, no chevrons, no tree container to bound.
+  const isFlat = tree.every((node) => node.children.length === 0);
+  // Collapsed ids, not expanded ones - so a fresh render of a flat install
+  // starts with an empty Set and no chevron anywhere regardless. The LAYOUT
+  // itself is `isFlat` above, not this default: `collapsedIds` only decides
+  // which already-nested subtree renders closed.
+  const [collapsedIds, setCollapsedIds] = useState<Set<string>>(() => new Set());
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<HostGroup | null>(null);
+  const [creatingUnder, setCreatingUnder] = useState<{ parentId: string | undefined } | null>(null);
 
-  // Every one of the three mutations can be refused by the store. Surface the
+  // Every one of the mutations can be refused by the store. Surface the
   // rejection here instead of letting it reach the console unhandled.
   //
   // This used to be its own persistent inline `error` state with no
@@ -103,6 +165,76 @@ export function GroupStrip({
     }
   };
 
+  const toggleExpand = (id: string) =>
+    setCollapsedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+
+  // Shared by the root "New group" control and a sub-group creator - one
+  // commit path rather than two copies of clear/trim/skip-empty/mutate.
+  const commitCreate = (parentId: string | undefined, name: string) => {
+    setCreatingUnder(null);
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    void runMutation(() => onCreateGroup(trimmed, parentId));
+  };
+
+  const rowProps: GroupTreeRowProps = {
+    counts,
+    selectedGroupId,
+    collapsedIds,
+    onToggleExpand: toggleExpand,
+    onSelect: onSelectGroup,
+    renamingId,
+    onStartRename: setRenamingId,
+    onCommitRename: (id, name, previousName) => {
+      setRenamingId(null);
+      if (!name || name === previousName) return;
+      void runMutation(() => onRenameGroup(id, name));
+    },
+    onCancelRename: () => setRenamingId(null),
+    creatingUnder,
+    onStartCreateChild: (parentId) => {
+      setCreatingUnder({ parentId });
+      // Otherwise the new row would be created into a subtree the collapse
+      // above just hid, invisible the moment it exists.
+      setCollapsedIds((prev) => {
+        if (!prev.has(parentId)) return prev;
+        const next = new Set(prev);
+        next.delete(parentId);
+        return next;
+      });
+    },
+    onCommitCreate: commitCreate,
+    onCancelCreate: () => setCreatingUnder(null),
+    onDelete: setDeleting,
+    onMove: (id, parentId) => void runMutation(() => onMoveGroup(id, parentId)),
+  };
+
+  const newGroupControl =
+    creatingUnder && creatingUnder.parentId === undefined ? (
+      <InlineInput
+        initial=""
+        placeholder="Group name"
+        onCommit={(value) => commitCreate(undefined, value)}
+        onCancel={() => setCreatingUnder(null)}
+      />
+    ) : (
+      <Button
+        type="button"
+        variant="ghost"
+        size="xs"
+        onClick={() => setCreatingUnder({ parentId: undefined })}
+        className="w-fit gap-1"
+      >
+        <Plus size={12} strokeWidth={2} />
+        New group
+      </Button>
+    );
+
   return (
     <div className="flex flex-col gap-1.5">
       <div className="flex flex-wrap items-center gap-1.5">
@@ -118,66 +250,46 @@ export function GroupStrip({
           selected={ungroupedSelected}
           onClick={onSelectUngrouped}
         />
-
-        {sorted.map((group) =>
-          renamingId === group.id ? (
-            <InlineInput
-              key={group.id}
-              initial={group.name}
-              placeholder="Group name"
-              onCommit={(value) => {
-                setRenamingId(null);
-                const trimmed = value.trim();
-                if (!trimmed || trimmed === group.name) return;
-                void runMutation(() => onRenameGroup(group.id, trimmed));
-              }}
-              onCancel={() => setRenamingId(null)}
+        {isFlat &&
+          tree.map((node) => (
+            <GroupRow
+              key={node.group.id}
+              node={node}
+              parentId={undefined}
+              tree={tree}
+              {...rowProps}
             />
-          ) : (
-            <GroupChip
-              key={group.id}
-              group={group}
-              count={counts.byGroup[group.id] ?? 0}
-              selected={selectedGroupId === group.id}
-              onSelect={() => onSelectGroup(group.id)}
-              onRename={() => setRenamingId(group.id)}
-              onDelete={() => setDeleting(group)}
-            />
-          ),
-        )}
-
-        {creating ? (
-          <InlineInput
-            initial=""
-            placeholder="Group name"
-            onCommit={(value) => {
-              setCreating(false);
-              const trimmed = value.trim();
-              if (!trimmed) return;
-              void runMutation(() => onCreateGroup(trimmed));
-            }}
-            onCancel={() => setCreating(false)}
-          />
-        ) : (
-          <Button
-            type="button"
-            variant="ghost"
-            size="xs"
-            onClick={() => setCreating(true)}
-            className="gap-1"
-          >
-            <Plus size={12} strokeWidth={2} />
-            New group
-          </Button>
-        )}
+          ))}
+        {isFlat && newGroupControl}
       </div>
+
+      {!isFlat && (
+        <div className="flex max-h-48 flex-col gap-0.5 overflow-y-auto">
+          <ul className="flex flex-col gap-0.5">
+            {tree.map((node) => (
+              <GroupTreeRow
+                key={node.group.id}
+                node={node}
+                depth={0}
+                parentId={undefined}
+                tree={tree}
+                {...rowProps}
+              />
+            ))}
+          </ul>
+          {newGroupControl}
+        </div>
+      )}
 
       <AlertDialog open={deleting !== null} onOpenChange={(open) => !open && setDeleting(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>Delete group &quot;{deleting?.name}&quot;?</AlertDialogTitle>
             <AlertDialogDescription>
-              {deleteDescription(deleting ? (counts.byGroup[deleting.id] ?? 0) : 0)}
+              {deleteDescription(
+                deleting ? (counts.direct[deleting.id] ?? 0) : 0,
+                deleting ? groups.filter((g) => g.parentId === deleting.id).length : 0,
+              )}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -196,6 +308,154 @@ export function GroupStrip({
         </AlertDialogContent>
       </AlertDialog>
     </div>
+  );
+}
+
+/** Everything one row needs beside its own `node`/`parentId`/`tree` - bundled
+ *  so the recursion threads one object down instead of a dozen positional
+ *  props, on `FileTreeNode.tsx`'s `depth`+`tree` threading. */
+type GroupTreeRowProps = {
+  counts: GroupCounts;
+  selectedGroupId: string | null;
+  collapsedIds: ReadonlySet<string>;
+  onToggleExpand: (id: string) => void;
+  onSelect: (id: string) => void;
+  renamingId: string | null;
+  onStartRename: (id: string) => void;
+  onCommitRename: (id: string, name: string, previousName: string) => void;
+  onCancelRename: () => void;
+  creatingUnder: { parentId: string | undefined } | null;
+  onStartCreateChild: (parentId: string) => void;
+  onCommitCreate: (parentId: string | undefined, name: string) => void;
+  onCancelCreate: () => void;
+  onDelete: (group: HostGroup) => void;
+  onMove: (id: string, parentId: string | undefined) => void;
+};
+
+/** The rename input, or the chip itself when not being renamed - shared by a
+ *  tree row and the flat-install wrap row, which skips the chevron and depth
+ *  indent below but renders the same chip. */
+function GroupRow({
+  node,
+  parentId,
+  tree,
+  counts,
+  selectedGroupId,
+  onSelect,
+  renamingId,
+  onStartRename,
+  onCommitRename,
+  onCancelRename,
+  onStartCreateChild,
+  onDelete,
+  onMove,
+}: {
+  node: GroupNode;
+  parentId: string | undefined;
+  tree: readonly GroupNode[];
+} & Pick<
+  GroupTreeRowProps,
+  | "counts"
+  | "selectedGroupId"
+  | "onSelect"
+  | "renamingId"
+  | "onStartRename"
+  | "onCommitRename"
+  | "onCancelRename"
+  | "onStartCreateChild"
+  | "onDelete"
+  | "onMove"
+>): ReactNode {
+  const { group } = node;
+  return renamingId === group.id ? (
+    <InlineInput
+      initial={group.name}
+      placeholder="Group name"
+      onCommit={(value) => onCommitRename(group.id, value.trim(), group.name)}
+      onCancel={onCancelRename}
+    />
+  ) : (
+    <GroupChip
+      group={group}
+      count={counts.byGroup[group.id] ?? 0}
+      selected={selectedGroupId === group.id}
+      onSelect={() => onSelect(group.id)}
+      onRename={() => onStartRename(group.id)}
+      onDelete={() => onDelete(group)}
+      onCreateChild={() => onStartCreateChild(group.id)}
+      node={node}
+      tree={tree}
+      currentParentId={parentId}
+      onMove={(newParentId) => onMove(group.id, newParentId)}
+    />
+  );
+}
+
+function GroupTreeRow({
+  node,
+  depth,
+  parentId,
+  tree,
+  ...actions
+}: GroupTreeRowProps & {
+  node: GroupNode;
+  depth: number;
+  parentId: string | undefined;
+  tree: readonly GroupNode[];
+}): ReactNode {
+  const { collapsedIds, onToggleExpand, creatingUnder, onCommitCreate, onCancelCreate } = actions;
+  const { group, children } = node;
+  const hasChildren = children.length > 0;
+  const expanded = !collapsedIds.has(group.id);
+  const creatingHere = creatingUnder?.parentId === group.id;
+
+  return (
+    <li>
+      <div className="flex items-center gap-0.5" style={{ paddingLeft: depth * 16 }}>
+        {hasChildren ? (
+          <button
+            type="button"
+            aria-expanded={expanded}
+            aria-label={expanded ? `Collapse ${group.name}` : `Expand ${group.name}`}
+            onClick={() => onToggleExpand(group.id)}
+            className="text-muted-foreground flex size-4 shrink-0 items-center justify-center"
+          >
+            <ChevronRight
+              size={12}
+              strokeWidth={2.25}
+              className={cn("transition-transform", expanded && "rotate-90")}
+            />
+          </button>
+        ) : (
+          <span className="size-4 shrink-0" />
+        )}
+        <GroupRow node={node} parentId={parentId} tree={tree} {...actions} />
+      </div>
+      {creatingHere ? (
+        <div style={{ paddingLeft: (depth + 1) * 16 + 18 }}>
+          <InlineInput
+            initial=""
+            placeholder="Sub-group name"
+            onCommit={(value) => onCommitCreate(group.id, value)}
+            onCancel={onCancelCreate}
+          />
+        </div>
+      ) : null}
+      {expanded && hasChildren ? (
+        <ul className="flex flex-col gap-0.5">
+          {children.map((child) => (
+            <GroupTreeRow
+              key={child.group.id}
+              node={child}
+              depth={depth + 1}
+              parentId={group.id}
+              tree={tree}
+              {...actions}
+            />
+          ))}
+        </ul>
+      ) : null}
+    </li>
   );
 }
 
@@ -247,6 +507,11 @@ function GroupChip({
   onSelect,
   onRename,
   onDelete,
+  onCreateChild,
+  node,
+  tree,
+  currentParentId,
+  onMove,
 }: {
   group: HostGroup;
   count: number;
@@ -254,6 +519,11 @@ function GroupChip({
   onSelect: () => void;
   onRename: () => void;
   onDelete: () => void;
+  onCreateChild: () => void;
+  node: GroupNode;
+  tree: readonly GroupNode[];
+  currentParentId: string | undefined;
+  onMove: (parentId: string | undefined) => void;
 }) {
   return (
     // Plain "group" (not a named group) so IconActionButton's own
@@ -283,8 +553,54 @@ function GroupChip({
           {count}
         </span>
       </button>
-      <IconActionButton icon={Pencil} label="Rename group" onClick={onRename} />
-      <IconActionButton icon={Trash2} label="Delete group" onClick={onDelete} variant="danger" />
+      <IconActionButton icon={Plus} label="New sub-group" onClick={onCreateChild} />
+      <DropdownMenu>
+        <IconTooltip label="More group actions" side="bottom">
+          <DropdownMenuTrigger asChild>
+            <button
+              type="button"
+              aria-label="More group actions"
+              className={cn(
+                TRAILING_BTN_BASE,
+                TRAILING_BTN_VARIANT.default,
+                // Radix moves focus into the menu portal the instant it opens,
+                // so `group-focus-within:`/`focus-visible:` above both stop
+                // matching and the trigger fades to `opacity-0` while its own
+                // menu is on screen. `aria-expanded` is the one attribute Radix
+                // keeps current on the trigger itself regardless of where focus
+                // lands, so it is what keeps this control visible for exactly
+                // as long as the menu it opens is.
+                "aria-expanded:opacity-100",
+              )}
+            >
+              <MoreHorizontal size={TRAILING_ICON_SIZE} strokeWidth={2} />
+            </button>
+          </DropdownMenuTrigger>
+        </IconTooltip>
+        <DropdownMenuContent align="start">
+          <DropdownMenuItem onSelect={onRename}>
+            <Pencil size={14} strokeWidth={1.75} />
+            Rename
+          </DropdownMenuItem>
+          <DropdownMenuSub>
+            <DropdownMenuSubTrigger>
+              <FolderInput size={14} strokeWidth={1.75} />
+              Move to…
+            </DropdownMenuSubTrigger>
+            <DropdownMenuSubContent>
+              {moveTargetsFor(node, tree, currentParentId).map((opt) => (
+                <DropdownMenuItem key={opt.parentId ?? ""} onSelect={() => onMove(opt.parentId)}>
+                  {opt.label}
+                </DropdownMenuItem>
+              ))}
+            </DropdownMenuSubContent>
+          </DropdownMenuSub>
+          <DropdownMenuItem variant="destructive" onSelect={onDelete}>
+            <Trash2 size={14} strokeWidth={1.75} />
+            Delete
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
     </div>
   );
 }
