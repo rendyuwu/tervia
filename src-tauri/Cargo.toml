@@ -143,6 +143,10 @@ url = "2"
 # RDP dependency set.
 russh = { version = "=0.60.1", default-features = false, features = ["ring", "flate2", "rsa"] }
 russh-sftp = "2.1"
+# OS CSPRNG for `ssh_key_generate` (`src-tauri/src/modules/ssh/mod.rs`): rand_core
+# 0.10 ships no `OsRng`, so `UnwrapErr(SysRng)` is the `CryptoRng` `PrivateKey::random`
+# takes. Already compiled with `sys_rng` via russh's `rand` 0.10; this adds no crate.
+getrandom = { version = "0.4", features = ["sys_rng"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "net"] }
 # PBKDF2 + AES-256-GCM + CSPRNG for the passphrase-encrypted SSH connection
 # backup (`modules/backup.rs`). Already in the tree as russh's crypto backend

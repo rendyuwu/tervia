@@ -143,7 +143,7 @@ const PINNED: Array<{ file: string; imports: Array<[string, string[]]> }> = [
   {
     file: "src/modules/vault/editor/KeyEditorDialog.tsx",
     imports: [
-      ["@/modules/hosts/editor/FormControls", ["Field"]],
+      ["@/modules/hosts/editor/FormControls", ["Field", "ToggleButton"]],
       ["@/modules/hosts/editor/secretStoreCopy", ["SECRET_STORE_LOCATIONS"]],
     ],
   },

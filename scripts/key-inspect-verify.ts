@@ -143,6 +143,11 @@ console.log("[1] describeKeyInfo - the container's answer, translated for the pa
     okPlain.kind === "ok" && okPlain.comment === "rendy@host",
     okPlain,
   );
+  check(
+    "and its public key survives",
+    okPlain.kind === "ok" && okPlain.publicKey === plainEd25519.publicKey,
+    okPlain,
+  );
 
   // The case the doc comment calls out by name: an encrypted openssh-key-v1 key
   // inspected without its passphrase keeps the public half in cleartext but seals
@@ -179,6 +184,15 @@ console.log("[1] describeKeyInfo - the container's answer, translated for the pa
   check(
     'a parsed key with no reported algorithm renders "unknown", not null and not blank',
     okNoType.kind === "ok" && okNoType.keyType === "unknown",
+    okNoType,
+  );
+  // The Generate flow's copy button reads this field unconditionally
+  // (`state.publicKey` in `src/modules/vault/editor/KeyEditorDialog.tsx`), so
+  // a null half has to fall back to "", the same convention `keyType` and
+  // `fingerprint` already use, rather than becoming a copy button over `null`.
+  check(
+    'a parsed key with no public half renders "", not null',
+    okNoType.kind === "ok" && okNoType.publicKey === "",
     okNoType,
   );
 }

@@ -7220,6 +7220,7 @@ dependencies = [
  "arboard",
  "base64 0.22.1",
  "dirs 5.0.1",
+ "getrandom 0.4.3",
  "globset",
  "grep-regex",
  "grep-searcher",

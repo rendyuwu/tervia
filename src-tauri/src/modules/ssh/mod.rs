@@ -20,7 +20,10 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, OnceLock};
 
-use russh::keys::ssh_key::PrivateKey;
+use getrandom::SysRng;
+use russh::keys::ssh_key::rand_core::UnwrapErr;
+use russh::keys::ssh_key::{LineEnding, PrivateKey};
+use russh::keys::{Algorithm, EcdsaCurve};
 use serde::{Deserialize, Serialize};
 use tauri::ipc::Channel;
 use tauri::AppHandle;
@@ -244,6 +247,27 @@ pub struct SshKeyInfo {
     /// passphrase: that container keeps the public half in cleartext but seals
     /// the comment inside the private section. Pass the passphrase to get it.
     pub comment: Option<String>,
+}
+
+/// `ssh_key_generate`'s answer: the freshly minted private key, plus the
+/// SAME metadata `ssh_key_inspect` would report for it, flattened onto this
+/// struct rather than nested - so the frontend can hand `info` straight to
+/// `describeKeyInfo`/`vaultKeyFactsFrom` (`src/modules/vault/keyInspect.ts`)
+/// exactly as it already does for a pasted key, with no second translation
+/// for a generated one.
+///
+/// No `Debug` derive: `pem` is `Zeroizing<String>`, which does not implement
+/// it (the same reason `HopSecrets`/`SshSecrets` above derive no `Debug`
+/// either) - a stray `{:?}` must not become a place a private key leaks.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SshKeyGenerated {
+    /// OpenSSH `openssh-key-v1` PEM, LF line endings, encrypted when a
+    /// passphrase was given. The only place the private key material leaves
+    /// this function - the caller stores it exactly as a pasted key's body.
+    pub pem: Zeroizing<String>,
+    #[serde(flatten)]
+    pub info: SshKeyInfo,
 }
 
 /// Header-level shape of pasted key text, decided before any parse attempt.
@@ -529,6 +553,87 @@ fn ssh_key_inspect_inner(pem: &str, passphrase: Option<&str>) -> Result<SshKeyIn
         Err(_) if encrypted => Err(ERR_PASSPHRASE_OR_CORRUPT.into()),
         Err(_) => Err(ERR_UNREADABLE.into()),
     }
+}
+
+/// Wire names `ssh_key_generate` accepts for `algorithm`, matched exactly.
+/// Three rather than the crate's whole `Algorithm` surface: DSA is refused
+/// everywhere else in this file, and P-384/P-521 or a different RSA size have
+/// no picker slot in the key editor to offer them from.
+fn parse_key_generate_algorithm(algorithm: &str) -> Result<Algorithm, String> {
+    match algorithm {
+        "ed25519" => Ok(Algorithm::Ed25519),
+        "ecdsa-p256" => Ok(Algorithm::Ecdsa {
+            curve: EcdsaCurve::NistP256,
+        }),
+        "rsa-4096" => Ok(Algorithm::Rsa { hash: None }),
+        other => Err(format!("ssh: unknown key algorithm \"{other}\"")),
+    }
+}
+
+/// Generate a new SSH key pair - the vault's other half of "import one".
+/// Backs the key editor's Generate action: the private key is built and
+/// serialized entirely here, and the caller only ever sees the `pem` this
+/// returns, exactly as it would a pasted key's body - nothing about a
+/// generated key takes a different path through `upsertKey`
+/// (`src/modules/vault/store.ts`) than an imported one.
+///
+/// Rust rather than the frontend for the reason `ssh_key_inspect`'s own doc
+/// comment gives above: `crypto.subtle` is unavailable at the bundled app's
+/// origin.
+///
+/// Async and `spawn_blocking`, for the same reason `ssh_key_inspect` is:
+/// RSA-4096 generation runs a Miller-Rabin prime search that can take several
+/// seconds, and a sync command would freeze the WebView2 window for that span.
+#[tauri::command]
+pub async fn ssh_key_generate(
+    algorithm: String,
+    passphrase: Option<String>,
+    comment: Option<String>,
+) -> Result<SshKeyGenerated, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        ssh_key_generate_inner(&algorithm, passphrase.as_deref(), comment.as_deref())
+    })
+    .await
+    .map_err(|e| format!("ssh_key_generate join error: {e}"))?
+}
+
+fn ssh_key_generate_inner(
+    algorithm: &str,
+    passphrase: Option<&str>,
+    comment: Option<&str>,
+) -> Result<SshKeyGenerated, String> {
+    let algo = parse_key_generate_algorithm(algorithm)?;
+    // `SysRng::try_fill_bytes` only fails if the OS RNG itself is unavailable;
+    // `UnwrapErr` turns that failure into a panic, which aborts the process
+    // under the release profile's `panic = "abort"` (a join error only in
+    // dev), rather than returning a key built from a failed RNG.
+    let mut rng = UnwrapErr(SysRng);
+    let mut key = PrivateKey::random(&mut rng, algo)
+        .map_err(|e| format!("ssh: could not generate key: {e}"))?;
+    if let Some(comment) = comment.map(str::trim).filter(|c| !c.is_empty()) {
+        key.set_comment(comment);
+    }
+    let pass = passphrase.filter(|p| !p.is_empty());
+    // Computed on `key` BEFORE it is (maybe) encrypted, and `encrypted` names
+    // the STORED form rather than `key`'s own (always-unencrypted) state:
+    // `PrivateKey::encrypt` (below) returns a value whose own public half is
+    // rebuilt from bare key data and carries no comment - `internal-russh-forked-ssh-key`
+    // 0.6.18's `PrivateKey::encrypt_with` constructs it as
+    // `self.public_key.key_data.clone().into()`, which drops the comment field
+    // entirely. That is the same asymmetry `ssh_key_inspect_inner` already
+    // relies on for an `openssh-key-v1` container inspected without its
+    // passphrase.
+    let info = key_info(&key, pass.is_some())?;
+    let stored = match pass {
+        Some(pass) => key
+            .encrypt(&mut rng, pass)
+            .map_err(|e| format!("ssh: could not encrypt generated key: {e}"))?,
+        None => key,
+    };
+    let pem = stored
+        .to_openssh(LineEnding::LF)
+        .map_err(|e| format!("ssh: could not serialize generated key: {e}"))?;
+    Ok(SshKeyGenerated { pem, info })
 }
 
 #[tauri::command]
@@ -1090,8 +1195,8 @@ pub async fn ssh_git(
 #[cfg(test)]
 mod tests {
     use super::{
-        last_line, shell_quote, ssh_key_inspect_inner, ERR_OPENSSH_BODY, ERR_PASSPHRASE_OR_CORRUPT,
-        ERR_UNREADABLE, ERR_WRONG_PASSPHRASE,
+        last_line, shell_quote, ssh_key_generate_inner, ssh_key_inspect_inner, ERR_OPENSSH_BODY,
+        ERR_PASSPHRASE_OR_CORRUPT, ERR_UNREADABLE, ERR_WRONG_PASSPHRASE,
     };
 
     /// `ssh-keygen -t ed25519 -N '' -C tervia-test@localhost`.
@@ -1642,6 +1747,111 @@ Ym9ndXMgYm9keSwgbmV2ZXIgcmVhY2hlZA==
         assert_eq!(openssh_err, ERR_OPENSSH_BODY);
         assert_eq!(unreadable_err, ERR_UNREADABLE);
         assert_ne!(openssh_err, unreadable_err);
+    }
+
+    #[test]
+    fn unknown_algorithm_is_refused() {
+        // `SshKeyGenerated` has no `Debug` (its PEM is `Zeroizing`), so no `expect_err`.
+        let Err(err) = ssh_key_generate_inner("dsa", None, None) else {
+            panic!("dsa has no generate path");
+        };
+        assert!(err.contains("unknown key algorithm"), "{err}");
+    }
+
+    /// Every offered algorithm generates a key `decode_secret_key` re-reads,
+    /// whose fingerprint survives that round trip - proof the PEM this
+    /// command hands back is exactly what `ssh_key_inspect` would parse back
+    /// out, and RSA-4096 in particular proves `rsa`'s feature gate on
+    /// `PrivateKey::random` is actually wired up rather than merely present in
+    /// `src-tauri/Cargo.toml`.
+    #[test]
+    fn every_algorithm_generates_a_key_that_round_trips() {
+        for algorithm in ["ed25519", "ecdsa-p256", "rsa-4096"] {
+            let generated = ssh_key_generate_inner(algorithm, None, None)
+                .unwrap_or_else(|e| panic!("{algorithm}: generation failed: {e}"));
+            assert!(generated.info.parsed, "{algorithm}");
+            assert!(!generated.info.encrypted, "{algorithm}");
+            let reread = russh::keys::decode_secret_key(&generated.pem, None)
+                .unwrap_or_else(|e| panic!("{algorithm}: generated key did not decode: {e}"));
+            assert_eq!(
+                reread.fingerprint(russh::keys::HashAlg::Sha256).to_string(),
+                generated
+                    .info
+                    .fingerprint
+                    .clone()
+                    .expect("fingerprint recorded"),
+                "{algorithm}: round-tripped key reports a different fingerprint"
+            );
+
+            // The same PEM through the actual inspect path a saved key takes,
+            // proving the two commands agree rather than merely both
+            // compiling.
+            let inspected = ssh_key_inspect_inner(&generated.pem, None)
+                .unwrap_or_else(|e| panic!("{algorithm}: did not inspect clean: {e}"));
+            assert_eq!(
+                inspected.fingerprint, generated.info.fingerprint,
+                "{algorithm}"
+            );
+            assert_eq!(inspected.key_type, generated.info.key_type, "{algorithm}");
+        }
+    }
+
+    /// The passphrase-encrypted path: the PEM only decodes with the right
+    /// passphrase, and the fingerprint recorded before encryption still
+    /// matches the key `decode_secret_key` hands back after it - the same
+    /// property the unencrypted test above checks, over the arm
+    /// `keySecretsForSave` (`src/modules/vault/editor/draft.ts`) reaches when
+    /// the key editor's passphrase field is filled in before Generate.
+    #[test]
+    fn a_passphrase_encrypts_the_generated_key() {
+        let generated = ssh_key_generate_inner("ed25519", Some("correct horse"), None)
+            .expect("generation should succeed");
+        assert!(generated.info.encrypted);
+        let fingerprint = generated
+            .info
+            .fingerprint
+            .clone()
+            .expect("fingerprint recorded");
+
+        russh::keys::decode_secret_key(&generated.pem, None)
+            .expect_err("an encrypted key must not decode with no passphrase");
+
+        let reread = russh::keys::decode_secret_key(&generated.pem, Some("correct horse"))
+            .expect("the right passphrase decodes it");
+        assert_eq!(
+            reread.fingerprint(russh::keys::HashAlg::Sha256).to_string(),
+            fingerprint
+        );
+
+        // openssh-key-v1 keeps the public half in cleartext, so the facts read
+        // out without the passphrase - the contract
+        // `locked_openssh_key_reports_metadata_without_a_passphrase` pins for an
+        // imported key.
+        let locked = ssh_key_inspect_inner(&generated.pem, None)
+            .expect("metadata readable without the passphrase");
+        assert!(locked.parsed);
+        assert!(locked.encrypted);
+        assert_eq!(locked.fingerprint.as_deref(), Some(fingerprint.as_str()));
+        let unlocked = ssh_key_inspect_inner(&generated.pem, Some("correct horse"))
+            .expect("right passphrase unlocks");
+        assert_eq!(unlocked.fingerprint, Some(fingerprint));
+    }
+
+    /// The comment is readable in the metadata this command returns (computed
+    /// before encryption - see the doc comment on `ssh_key_generate_inner`),
+    /// and on the unencrypted PEM it also survives the round trip through
+    /// `ssh_key_inspect_inner`: the same "cleartext public half" carrier a
+    /// pasted key's own comment already relies on.
+    #[test]
+    fn a_comment_is_set_and_survives_an_unencrypted_round_trip() {
+        let generated = ssh_key_generate_inner("ed25519", None, Some("tervia-test@localhost"))
+            .expect("generation should succeed");
+        assert_eq!(
+            generated.info.comment.as_deref(),
+            Some("tervia-test@localhost")
+        );
+        let reread = ssh_key_inspect_inner(&generated.pem, None).expect("round trip parses");
+        assert_eq!(reread.comment.as_deref(), Some("tervia-test@localhost"));
     }
 
     /// The rc-noise guard: a chatty remote `~/.bashrc` prepends its own output

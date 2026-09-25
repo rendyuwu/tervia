@@ -38,6 +38,12 @@ export type KeyInspectState =
       keyType: string;
       fingerprint: string;
       encrypted: boolean;
+      /** The `.pub` line, for the key editor's Generate flow: a key nobody
+       *  has installed anywhere yet needs to be copyable the moment it
+       *  exists, not only after it is saved and reopened. Same fallback as
+       *  `keyType`/`fingerprint` - a real key answers this, so an absent
+       *  half is treated as "not yet known" rather than given its own state. */
+      publicKey: string;
       comment?: string;
     }
   | { kind: "error"; message: string };
@@ -58,6 +64,7 @@ export function describeKeyInfo(info: KeyInspectResult): KeyInspectState {
     keyType: info.keyType ?? "unknown",
     fingerprint: info.fingerprint ?? "",
     encrypted: info.encrypted,
+    publicKey: info.publicKey ?? "",
     comment: info.comment ?? undefined,
   };
 }
