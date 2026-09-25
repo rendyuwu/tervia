@@ -425,7 +425,7 @@ export type DeleteNoteSubject = {
  */
 export function deleteNote(subject: DeleteNoteSubject): string {
   const runningNote = subject.hostOwned
-    ? "Deleting the rule does not stop its forward — that one dies with the terminal tab that opened it."
+    ? "Deleting the rule does not stop its forward — that one stops when the last terminal tab to its host closes."
     : subject.pageStops
       ? "Stopping it first is not required — deleting a running rule stops it."
       : null;

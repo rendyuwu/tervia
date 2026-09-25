@@ -2676,7 +2676,9 @@ console.log(
   resetFakes();
   resetStores();
   const rule = fakeRule({ id: "c9", localPort: 18080 });
-  useHostOwnedForwards.setState({ byRule: { c9: { sessionId: 41, boundPort: 54321 } } });
+  useHostOwnedForwards.setState({
+    byRule: { c9: { sessionId: 41, boundPort: 54321, generation: 1 } },
+  });
   await startRule(rule, FAKE_RUNTIME);
   check(
     "C9: nothing was dialled - the refusal is ahead of the open",
@@ -2765,7 +2767,9 @@ console.log(
   // The terminal's autostart claims WHILE this dial is in flight. Synchronous
   // in production too - `claimHostOwned` is a plain store write - so no timing
   // trick is needed to reach it.
-  useHostOwnedForwards.setState({ byRule: { c10: { sessionId: 41, boundPort: 54321 } } });
+  useHostOwnedForwards.setState({
+    byRule: { c10: { sessionId: 41, boundPort: 54321, generation: 1 } },
+  });
 
   const landedClaim = nextFakeClaim;
   parkedFakeOpens[0].resolve({
@@ -2864,7 +2868,9 @@ console.log(
   autoAnswerFakeOpen = false;
   const starting = startRule(rule, FAKE_RUNTIME);
   await settle();
-  useHostOwnedForwards.setState({ byRule: { c10r: { sessionId: 41, boundPort: 18080 } } });
+  useHostOwnedForwards.setState({
+    byRule: { c10r: { sessionId: 41, boundPort: 18080, generation: 1 } },
+  });
   parkedFakeOpens[0].reject(
     "ssh: bind 127.0.0.1:18080 failed: Address already in use (os error 98)",
   );
@@ -2979,7 +2985,7 @@ type ForwardStatusType = NonNullable<
       byRule: c.status === undefined ? {} : { c11: { status: c.status } },
     });
     useHostOwnedForwards.setState({
-      byRule: c.hostOwned ? { c11: { sessionId: 41, boundPort: 54321 } } : {},
+      byRule: c.hostOwned ? { c11: { sessionId: 41, boundPort: 54321, generation: 1 } } : {},
     });
     check(
       `C11: status=${c.status ?? "(no entry)"} hostOwned=${c.hostOwned} -> ${c.want}`,

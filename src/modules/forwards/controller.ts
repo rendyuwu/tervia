@@ -164,7 +164,7 @@ function isCurrentAttempt(ruleId: string, prompts: Set<string>): boolean {
  *  "exercisable under plain node" property the header exists for. This one also
  *  names the rule, because a toast outlives the row it came from. */
 function hostOwnedRefusalText(rule: ForwardRule): string {
-  return `"${rule.name}" is already open on its terminal. Close that terminal tab to stop it.`;
+  return `"${rule.name}" is already open on its terminal. Close every terminal tab to this host to stop it.`;
 }
 
 /** What a Start says when its dial LANDED - resolved or rejected - into a rule
@@ -177,7 +177,7 @@ function hostOwnedRefusalText(rule: ForwardRule): string {
  *  up. Ends in the same sentence as the refusal, because the answer to "how
  *  do I stop it now" is the same. */
 function hostOwnedYieldText(rule: ForwardRule): string {
-  return `"${rule.name}" came up on its terminal while this Start was dialling. Close that terminal tab to stop it.`;
+  return `"${rule.name}" came up on its terminal while this Start was dialling. Close every terminal tab to this host to stop it.`;
 }
 
 /**

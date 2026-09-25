@@ -98,7 +98,8 @@ import { localPortLabel, stopNote, type ForwardRuleRow } from "./derive";
  *  cannot stop - the terminal that opened it owns it, and it dies with that
  *  tab. See `../hostOwned.ts`: a Stop here would spend a reference nobody on
  *  this page ever took. */
-const HOST_OWNED_NOTE = "Started with its terminal. Close that terminal tab to stop it.";
+const HOST_OWNED_NOTE =
+  "Started with its terminal. Close every terminal tab to this host to stop it.";
 
 export type RuleCardProps = {
   row: ForwardRuleRow;

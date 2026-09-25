@@ -780,7 +780,7 @@ console.log(
 {
   const STOPPING = "Stopping it first is not required — deleting a running rule stops it.";
   const HOST_OWNED =
-    "Deleting the rule does not stop its forward — that one dies with the terminal tab that opened it.";
+    "Deleting the rule does not stop its forward — that one stops when the last terminal tab to its host closes.";
   const START = "It will no longer start automatically with its host.";
   // the app-launch analog of START, mutually exclusive with it at
   // every REACHABLE write (`src/modules/forwards/store.ts`'s `upsertRule`

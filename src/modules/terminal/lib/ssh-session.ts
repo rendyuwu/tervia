@@ -1,18 +1,16 @@
-import { defaultAutostartDeps, startHostForwards } from "@/modules/forwards/autostart";
-import { useHostOwnedForwards } from "@/modules/forwards/hostOwned";
-import { listHosts, markConnected, pinFingerprint } from "@/modules/hosts/store";
+import { attachHostForwards } from "@/modules/forwards/autostart";
+import { listHosts, markConnected } from "@/modules/hosts/store";
 import { resolveJumpHops } from "@/modules/hosts/jumps";
 import { isSshHost, type SshHost } from "@/modules/hosts/types";
 import { resolveSshAuth } from "@/modules/vault/resolve";
 import {
-  confirmHostKey,
-  openSsh,
-  openSshForward,
+  closeSshForward,
   isHostKeyMismatchError,
+  openSshForward,
+  type SshForwardHandle,
   type SshJumpHop,
-  type SshSession,
 } from "@/modules/ssh/bridge";
-import { hostKeyOwners, useHostKeyPrompt } from "@/modules/ssh/hostKeyPrompt";
+import { openShellForConnection } from "@/modules/ssh/tunnel";
 import {
   allSshHopsUp,
   buildSshRoute,
@@ -30,7 +28,6 @@ import {
   decideSshConnectFailure,
   decideSshEnding,
   endingFromExitReason,
-  hostKeyRefused,
   SshLocalConnectError,
   type SshEnding,
 } from "./ssh-exit-decision";
@@ -89,15 +86,18 @@ export async function openSshForSession(
   rows: number,
   onData: (bytes: Uint8Array) => void,
   onExit: (code: number) => void,
+  urlForwards: Map<number, Promise<SshForwardHandle>>,
 ): Promise<PtySession> {
-  // Look up connection metadata at open time so settings changes are picked up on
-  // the next reconnect. These pre-flight failures (profile deleted, jump chain
-  // broken or cyclic) are the only ones that happen BEFORE the "connecting"
-  // status below, so they are reported explicitly: a leaf that throws here would
-  // otherwise sit at `idle` forever, which reads as "still coming up" to
-  // everything watching - the terminal's Enter-to-retry stays disabled, and a
-  // remote editor pane bound to this profile waits on a session that will never
-  // arrive instead of offering to reconnect.
+  // Look up connection metadata at open time so a RECONNECT that re-dials
+  // picks up settings changes; a tab that JOINS a live session instead rides
+  // whatever settings that session was originally dialled with. These
+  // pre-flight failures (profile deleted, jump chain broken or cyclic) are
+  // the only ones that happen BEFORE the "connecting" status below, so they
+  // are reported explicitly: a leaf that throws here would otherwise sit at
+  // `idle` forever, which reads as "still coming up" to everything watching -
+  // the terminal's Enter-to-retry stays disabled, and a remote editor pane
+  // bound to this profile waits on a session that will never arrive instead
+  // of offering to reconnect.
   let conn: SshHost;
   let auth: Awaited<ReturnType<typeof resolveSshAuth>>;
   let jumps: SshJumpHop[];
@@ -150,37 +150,24 @@ export async function openSshForSession(
     `\x1b[2m[tervia] connecting to ${auth.user}@${conn.host}:${conn.port}…\x1b[0m\r\n`,
   );
 
-  // Route the first ending (onExit or onError) through here; russh can fire
-  // both for one drop (an error followed by the channel closing), and only
-  // the first should be acted on. The actual reconnect-or-not decision is
+  // Route the shell's ending through here, once: `terminated` keeps a second
+  // report from being acted on. The actual reconnect-or-not decision is
   // `decideSshEnding` (module scope, above) - kept pure and separate from
   // these side effects so it stays unit-testable on its own.
   let terminated = false;
-  // Has this session ENDED? Read by `startHostForwards`'s `stillLive` below,
-  // and the reason it exists at all is that BOTH release sites are one-shot:
-  // `finishSsh` is behind `terminated` and the adapter's `close` fires once, so
-  // an entry claimed after either has run is never released, and the row then
-  // reads "Running (with host)" for the rest of the app's life with a disabled
-  // Stop and a note pointing at a tab that is already gone. Autostart is N
-  // sequential IPC round trips, and `disposeSession` releases synchronously
-  // before its own `ssh_close` invoke lands, so the window is real and it
-  // favours the leak.
-  let sessionEnded = false;
+  // This tab's release, run from both places it can end: `finishSsh` below
+  // (the session dropped, or an ending that closes the pane) and the
+  // adapter's `close` (user-initiated). One-shot via `tabReleased`, so firing
+  // both is harmless. It detaches this tab from `attachHostForwards` and
+  // closes this tab's own url tunnels - the shared session itself may now
+  // outlive the tab, riding whatever other tabs or forwards still hold it.
   const finishSsh = (ending: SshEnding) => {
     if (terminated) return;
     terminated = true;
-    // The forwards this session's autostart opened die WITH the session, so
-    // they are released here - ABOVE the disposed guard below, deliberately. A
-    // disposed pane's forwards are exactly as dead as a live one's, and a
-    // release under that guard would leak every entry for every tab the user
-    // closed. `resolvedSessionId` is null until `openSsh` resolves, and an
-    // attempt that never got that far claimed nothing - but the FLAG is set
-    // unconditionally, because a session that ended without ever resolving an
-    // id is still one an in-flight autostart must not claim against.
-    sessionEnded = true;
-    if (resolvedSessionId !== null) {
-      useHostOwnedForwards.getState().releaseSession(resolvedSessionId);
-    }
+    // Released ABOVE the disposed guard below, deliberately. A disposed
+    // pane's forwards are exactly as dead as a live one's, and a release
+    // under that guard would leak every entry for every tab the user closed.
+    releaseTab();
     if (s.disposed) return;
     // SSH dropped. Reset the AI CLI detector so its state doesn't ghost into the next reconnect.
     s.aiCliDetector?.reset();
@@ -241,231 +228,92 @@ export async function openSshForSession(
     }
   };
 
-  // Need both russh session id (from openSsh) and server fingerprint (from onConnected).
-  // The two events can land in either order, so emit on session id and re-emit when fingerprint arrives.
-  let pendingFingerprint: string | null = null;
   let resolvedSessionId: number | null = null;
-  const emitConnectedIfReady = () => {
-    if (resolvedSessionId === null) return;
-    s.sshReconnectAttempts = 0;
-    // The shell channel is open, so every hop behind it carried: mark the whole
-    // chain up. `onJumpConnected` covers the hops individually, but a resumed or
-    // reused chain may not re-announce them.
-    if (s.sshRoute) s.sshRoute = allSshHopsUp(s.sshRoute);
-    emitSshStatus(s, {
-      kind: "connected",
-      fingerprint: pendingFingerprint ?? "",
-      since: Date.now(),
-      sessionId: resolvedSessionId,
-    });
+  let tabReleased = false;
+  let detachForwards: (() => void) | null = null;
+  const releaseTab = () => {
+    if (tabReleased) return;
+    tabReleased = true;
+    detachForwards?.();
+    detachForwards = null;
+    const sid = resolvedSessionId;
+    if (sid === null) return;
+    // This tab's url tunnels: the session may outlive the tab now.
+    for (const pending of urlForwards.values()) {
+      void pending.then((h) => closeSshForward(sid, h.boundPort, h.generation)).catch(() => {});
+    }
   };
 
-  // Track the first-connect host-key prompt so it can be cleaned up if this
-  // attempt dies before the user answers it (see the catch below).
-  let hostKeyPromptId: string | null = null;
-  // Every ANSWER this attempt's host-key questions were given, in the
-  // order they arrived. Recorded at the moment the answer is MADE - see the
-  // `confirm` wrapper below - rather than inferred at failure time from how many
-  // prompts were raised against how many were trusted.
-  //
-  // The difference is a real failure, not a tidiness one: "raised and not
-  // trusted" is also the state a link dropping while the dialog is still on
-  // screen leaves behind, so counting parks the exact transport blip the ladder
-  // exists for. Only an answer proves someone on this side ended the attempt.
-  const hostKeyAnswers: boolean[] = [];
-  let sshSession: SshSession;
-  try {
-    const { user, ...credentialValues } = auth;
-    sshSession = await openSsh(
-      {
-        host: conn.host,
-        port: conn.port,
-        user,
-        ...credentialValues,
-        // Pin against the last recorded fingerprint. First connect is TOFU; later connects fail fast on mismatch.
-        expectedFingerprint: conn.lastFingerprint || undefined,
-        jumps,
-        cols,
-        rows,
-      },
-      {
-        // Pin each jump host's fingerprint on its own saved connection as the
-        // chain authenticates, so the next connect verifies it fail-fast.
-        onJumpConnected: (connectionId, fp) => {
-          // Index by position, not by id: the same host can legitimately appear
-          // twice in a chain, and `jumps` is already in connect order. This is
-          // the one place a route change has no status emit of its own, so it
-          // re-emits - and only when the hop actually moved, since `markSshHop`
-          // returns the same array for a hop reporting twice.
-          if (s.sshRoute) {
-            const next = markSshHop(
-              s.sshRoute,
-              jumps.findIndex((j) => j.connectionId === connectionId),
-              "up",
-            );
-            if (next !== s.sshRoute) {
-              s.sshRoute = next;
-              emitSshStatus(s, s.sshStatus);
-            }
-          }
-          void markConnected(connectionId, fp).catch(() => {});
-        },
-        onConnected: (fp) => {
-          // Handshake cleared the host-key gate (pinned, or the user trusted it
-          // via the dialog, which already dequeued the prompt). Drop our ref so
-          // the failure path can never dismiss a prompt that isn't ours.
-          hostKeyPromptId = null;
-          writeSshBanner(s, `\x1b[2m[tervia] server key ${fp}\x1b[0m\r\n`);
-          pendingFingerprint = fp;
-          // Fire-and-forget. Timestamp write failure shouldn't break the session.
-          void markConnected(hostId, fp).catch(() => {});
-          emitConnectedIfReady();
-        },
-        // First connect to a new host: pause for the user to verify the server
-        // fingerprint before credentials are sent (shown by the global dialog).
-        // Trusting it pins it right away, on whichever saved host the key
-        // actually belongs to - the prompt can come from any hop in the chain,
-        // so it is matched by host rather than assumed to be the target. Waiting
-        // for a successful connect instead meant a rejected password re-asked
-        // the same question on every retry.
-        onHostKeyPrompt: (prompt) => {
-          hostKeyPromptId = prompt.promptId;
-          const owners = hostKeyOwners(
-            prompt.host,
-            { host: conn.host, connectionId: hostId },
-            jumps,
-          );
-          useHostKeyPrompt.getState().enqueue(
-            {
-              ...prompt,
-              // The queue answers every prompt through the prompt's own
-              // `confirm`, so wrapping it here is the one place that sees EVERY
-              // answer this attempt's questions get - the user's Trust, the
-              // user's Reject, and the rejection `abandon` sends on the user's
-              // behalf when the pane that asked has gone away. Recording the
-              // answer here is what makes the classification a fact rather than
-              // an inference: nothing is written when a prompt is merely raised,
-              // which is why a drop under the dialog stays a transport failure.
-              //
-              // Forwarded unchanged, and its result untouched: the paused
-              // handshake is blocked on this very call, so swallowing it would
-              // hang the connect until the backend's confirm window ran out.
-              confirm: (promptId, accept) => {
-                hostKeyAnswers.push(accept);
-                return confirmHostKey(promptId, accept);
-              },
-            },
-            () => {
-              for (const id of owners) void pinFingerprint(id, prompt.fingerprint).catch(() => {});
-            },
-          );
-        },
-        onData,
-        onExit: (code, reason) => finishSsh(endingFromExitReason(reason, code)),
-        onError: (msg) => {
-          writeSshBanner(s, `\r\n\x1b[31m[tervia] ssh error: ${msg}\x1b[0m\r\n`);
-          finishSsh({ kind: "ambiguous", reason: msg });
-        },
-      },
-    );
-  } catch (e) {
-    // The connect failed before a live session existed: the host-key prompt
-    // timed out (120s backend cap) or was rejected, the credentials were wrong,
-    // or the transport dropped. ssh_open surfaces all of these as a promise
-    // rejection - NOT via onError - so this is the only place that sees them.
-    // If a first-connect prompt was emitted and is still sitting in the queue,
-    // drop it: the dialog renders only queue[0], so a dead prompt left at the
-    // front would shadow every later attempt's prompt (the bug that forced an
-    // app restart to recover).
-    if (hostKeyPromptId) {
-      useHostKeyPrompt.getState().dismiss(hostKeyPromptId);
-      hostKeyPromptId = null;
-    }
-    // A key this attempt asked about and was REFUSED trust for is the
-    // other failure the frontend can attribute on its own. A refusal aborts the
-    // handshake before any credential is sent, and the ladder's answer to that
-    // was to ask the same question again, up to three more times. The user
-    // already answered.
-    //
-    // Refused, not "unanswered". A prompt still sitting in the queue when the
-    // connect died says nothing about who ended it: the link dropping under the
-    // dialog leaves exactly that state, and it is the blip the ladder is FOR.
-    //
-    // Kept as a BELT, not because it is the only thing that knows. The backend
-    // now reports a user-refused key as `config` and `openSsh` rethrows that as
-    // an `SshLocalConnectError`, so the park below would happen without this
-    // line for the refusals that reach Rust. What it still covers on its own is
-    // the app's own `abandon` path - the pane that asked went away, the queue
-    // answers `false` on its behalf - and it costs one predicate over a list
-    // this scope already has. Removing a working guard in the same change that
-    // moves the classification is how a regression gets blamed on the wrong
-    // half.
-    //
-    // Everything else the backend reports now carries a kind of its own, and
-    // `openSsh` has already turned it into the right wrapper by the time it
-    // arrives here: a credential the server refused parks as `rejected`, an
-    // unparseable key and a wrong passphrase park as `config`, a host that would
-    // not resolve stays transport and ladders. The backend's own 120s confirm
-    // window lapsing is `config` and parks too - `check_server_key` records
-    // that lapse the same way it records a refusal - while a link that died
-    // under the dialog records nothing and stays transport, which is the split
-    // this block always wanted and could not make on its own.
-    if (hostKeyRefused(hostKeyAnswers)) {
-      throw new SshLocalConnectError(describeError(e), { cause: e });
-    }
-    throw e;
+  const claim = await openShellForConnection(hostId, {
+    promptForHostKey: true,
+    cols,
+    rows,
+    onJumpConnected: (connectionId, fp) => {
+      // Index by position, not by id: the same host can legitimately appear
+      // twice in a chain, and `jumps` is already in connect order. This is
+      // the one place a route change has no status emit of its own, so it
+      // re-emits - and only when the hop actually moved, since `markSshHop`
+      // returns the same array for a hop reporting twice.
+      if (s.sshRoute) {
+        const next = markSshHop(
+          s.sshRoute,
+          jumps.findIndex((j) => j.connectionId === connectionId),
+          "up",
+        );
+        if (next !== s.sshRoute) {
+          s.sshRoute = next;
+          emitSshStatus(s, s.sshStatus);
+        }
+      }
+      void markConnected(connectionId, fp).catch(() => {});
+    },
+    onData,
+    onExit: (code, reason) => finishSsh(endingFromExitReason(reason, code)),
+  });
+
+  resolvedSessionId = claim.sessionId;
+  writeSshBanner(s, `\x1b[2m[tervia] server key ${claim.fingerprint}\x1b[0m\r\n`);
+  void markConnected(hostId, claim.fingerprint).catch(() => {});
+  s.sshReconnectAttempts = 0;
+  if (s.sshRoute) s.sshRoute = allSshHopsUp(s.sshRoute);
+  emitSshStatus(s, {
+    kind: "connected",
+    fingerprint: claim.fingerprint,
+    since: Date.now(),
+    sessionId: claim.sessionId,
+  });
+
+  // The FIRST tab on this session starts its `startWithHost` forwards; later
+  // tabs ride the forwards already up. A tab whose own teardown already ran
+  // while this dial was in flight (the pane closed mid-connect) must not
+  // attach forwards nothing will ever release.
+  if (!tabReleased) {
+    detachForwards = attachHostForwards(hostId, claim.sessionId, (text) => writeSshBanner(s, text));
   }
-
-  resolvedSessionId = sshSession.id;
-  emitConnectedIfReady();
-
-  // Saved `ssh -L` rules used to be re-opened here on every fresh session.
-  // `Host` carries no `forwards` field any more - a forward rule is its own
-  // `ForwardRule` record, so this reads the rules that name THIS host and
-  // starts the ones flagged `startWithHost` on the session just opened.
-  //
-  // Fire-and-forget on purpose, and safe because `startHostForwards` never
-  // rejects: a rule that cannot bind writes a banner and the connect carries
-  // on. Awaiting it would hold the pane's first prompt behind N binds, and
-  // letting it throw would turn a busy local port into a failed SSH connect.
-  // `.catch(() => {})` regardless, matching this file's own idiom in
-  // `onJumpConnected`, `onConnected` and `onHostKeyPrompt`: "never rejects" is
-  // now structural in that function, and this is the belt that does not
-  // depend on reading it.
-  //
-  // The deps object exists for ONE key. `stillLive` is the only dep whose
-  // answer lives in this scope - autostart's loop has to be able to ask whether
-  // the session it is binding on is still the one that started, and nothing at
-  // that module's scope can answer. Everything else is spread straight off the
-  // default.
-  void startHostForwards(hostId, sshSession.id, (text) => writeSshBanner(s, text), {
-    ...defaultAutostartDeps,
-    stillLive: () => !sessionEnded,
-  }).catch(() => {});
 
   // Adapter so SSH looks like a PtySession to the rest of the file. SSH
   // sessions are not persisted via daemon UUIDs (`pty_attach` is local
   // PTY only), so `sessionId` is empty - serialize.ts skips ptyId for
   // SSH leaves.
   return {
-    id: sshSession.id,
+    id: claim.sessionId,
     sessionId: "",
     alive: true,
-    write: (data) => sshSession.write(data),
-    resize: (cols, rows) => sshSession.resize(cols, rows),
+    write: claim.write,
+    resize: claim.resize,
     close: () => {
       // The second release site, for the ending that never reaches `finishSsh`
       // - a user-initiated `disconnectSsh`, or a pane closing under a session
-      // that reports nothing back. Idempotent, so firing both is harmless.
+      // that reports nothing back. Idempotent via `tabReleased`, so firing
+      // both is harmless.
       //
-      // BOTH BEFORE `sshSession.close()`, and that order is the claim. Written
-      // as `sshSession.close().finally(() => release)` this file would still
+      // BOTH BEFORE `claim.close()`, and that order is the claim. Written as
+      // `claim.close().finally(() => releaseTab())` this file would still
       // mention both calls while moving the release AFTER the close IPC
       // resolves - which is exactly the window an in-flight autostart claim
       // slips through.
-      sessionEnded = true;
-      useHostOwnedForwards.getState().releaseSession(sshSession.id);
-      return sshSession.close();
+      releaseTab();
+      return claim.close();
     },
   };
 }
@@ -483,8 +331,10 @@ export async function openSshForSession(
  * quietly binding it would tunnel over their own dev server.
  *
  * `cache` is keyed by remote port and owned by the caller's pty spawn, which
- * is the exact lifetime of these forwards: they die with the SSH session, and
- * a reconnect runs a fresh `openPtyForSession` with a fresh cache. It holds the
+ * is the exact lifetime of these forwards: `openSshForSession`'s `releaseTab`
+ * closes each one when THIS TAB detaches - the shared session may now
+ * outlive it - and a reconnect runs a fresh `openPtyForSession` with a fresh
+ * cache. It holds the
  * in-flight PROMISE, not the resolved port, because a dev server prints its
  * banner in bursts: caching only the result would let a second announcement
  * arrive while the first bind was still in flight, miss the cache, and leave
@@ -494,7 +344,7 @@ export async function openSshForSession(
 export async function forwardDetectedUrl(
   s: Session,
   url: string,
-  cache: Map<number, Promise<number>>,
+  cache: Map<number, Promise<SshForwardHandle>>,
 ): Promise<string | null> {
   // On an SSH leaf `pty` is the adapter returned by `openSshForSession`, whose
   // `id` IS the ssh session id - not a local PTY handle. Only ever reached with
@@ -508,18 +358,13 @@ export async function forwardDetectedUrl(
   if (pending === undefined) {
     // Always 127.0.0.1 as the tunnel's target: the url's host is whatever the
     // server calls itself, and a server bound to 0.0.0.0 is on loopback too.
-    // The bound port alone, out of the pair the open resolves with: nothing here
-    // ever closes one of these forwards on its own - they die with the session,
-    // which is what `cache`'s own lifetime rests on - so the handle's
-    // `generation`, which exists only to name a listener to a close, has no
-    // consumer on this path.
     pending = openSshForward(sessionId, 0, "127.0.0.1", remotePort).then(
-      ({ boundPort }) => {
+      (handle) => {
         writeSshBanner(
           s,
-          `\x1b[2m[tervia] forwarding localhost:${boundPort} -> remote localhost:${remotePort}\x1b[0m\r\n`,
+          `\x1b[2m[tervia] forwarding localhost:${handle.boundPort} -> remote localhost:${remotePort}\x1b[0m\r\n`,
         );
-        return boundPort;
+        return handle;
       },
       (e) => {
         cache.delete(remotePort);
@@ -528,7 +373,7 @@ export async function forwardDetectedUrl(
     );
     cache.set(remotePort, pending);
   }
-  return toLocalUrl(url, await pending);
+  return toLocalUrl(url, (await pending).boundPort);
 }
 
 /**

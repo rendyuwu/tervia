@@ -73,11 +73,8 @@ export async function runSshProbe(args: SshProbeArgs): Promise<SshProbeResult> {
           ...sshInlineCredentials(args.authMode, args.secrets),
           expectedFingerprint: args.expectedFingerprint || undefined,
           jumps,
-          cols: 80,
-          rows: 24,
         },
         {
-          onData: () => {},
           // New host: hand the fingerprint to the global host-key dialog so the
           // user can verify it, and stop the probe deadline - waiting on a human
           // can take arbitrarily long and the handshake stays paused (no
@@ -93,27 +90,14 @@ export async function runSshProbe(args: SshProbeArgs): Promise<SshProbeResult> {
             // same question again.
             useHostKeyPrompt.getState().enqueue(prompt, () => args.onTrusted(prompt.fingerprint));
           },
-          onConnected: (fingerprint) => {
-            if (resolved) return;
-            resolved = true;
-            clearTimeout(timer);
-            resolve({ fingerprint });
-          },
-          onError: (msg) => {
-            if (resolved) return;
-            resolved = true;
-            clearTimeout(timer);
-            reject(new Error(msg));
-          },
-          onExit: () => {
-            if (resolved) return;
-            resolved = true;
-            clearTimeout(timer);
-            reject(new Error("session ended before authenticating"));
-          },
         },
       )
         .then(async (sess) => {
+          if (!resolved) {
+            resolved = true;
+            clearTimeout(timer);
+            resolve({ fingerprint: sess.fingerprint });
+          }
           // Close immediately. Only the handshake matters.
           try {
             await sess.close();

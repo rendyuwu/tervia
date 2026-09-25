@@ -1,7 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -76,12 +76,10 @@ const HOST_KEY_ALGOS: &[Algorithm] = &[
     rename_all_fields = "camelCase"
 )]
 pub enum SshEvent {
-    /// Auth/connect handshake completed; frontend can show "connected".
-    Connected { fingerprint: String },
     /// A jump host in a ProxyJump chain authenticated. Carries the saved
     /// connection id it came from so the frontend pins the hop's fingerprint on
-    /// the right connection (the target's fingerprint still arrives via
-    /// `Connected`). Emitted once per hop, in connect order, before `Connected`.
+    /// the right connection (the target's fingerprint comes back in
+    /// `ssh_open`'s result instead). Emitted once per hop, in connect order.
     JumpConnected {
         connection_id: String,
         fingerprint: String,
@@ -124,6 +122,11 @@ pub enum SshEvent {
     /// reaped; see the ordering note on `exec_capture`) or the transport may
     /// really have died. Only this variant is reconnect-eligible on the
     /// frontend.
+    ///
+    /// Also sent exactly once on the SESSION channel (the one `ssh_open` was
+    /// given) when the connection itself ends on its own - remote disconnect,
+    /// transport error, keepalive timeout - and never for an explicit
+    /// `ssh_close`. See the janitor in `ssh_open`.
     Disconnected,
 }
 
@@ -311,6 +314,12 @@ pub(super) struct HostKeyVerifier {
     /// present, always empty for a jump hop: nothing ever calls
     /// `open_remote_forward` on one, so its registry has no writer.
     remote_forwards: RemoteForwardTargets,
+    /// Session-end signal: never sent, only dropped. Only the TARGET hop's
+    /// verifier holds one. russh moves the handler into the session task and
+    /// drops it when that task ends (remote disconnect, transport error,
+    /// keepalive timeout, our own `disconnect`), so the receiver `ssh_open`
+    /// waits on wakes exactly once, whatever the channels are doing.
+    _session_end: Option<oneshot::Sender<()>>,
 }
 
 #[derive(Default)]
@@ -439,15 +448,38 @@ impl Handler for HostKeyVerifier {
     }
 }
 
-pub struct SshSession {
-    /// Write half of the SSH channel. Methods take `&self`, so writes from
+/// One interactive shell channel on a session - a terminal tab's. A session
+/// carries any number of them; each ends on its own, and closing one leaves the
+/// session and every other shell up.
+pub struct SshShell {
+    /// Write half of the shell channel. Methods take `&self`, so writes from
     /// concurrent commands proceed without locking against the read pump.
     /// Earlier versions shared the whole Channel<Msg> behind a Mutex, which
     /// deadlocked: the pump held the lock across `wait().await` while idle,
     /// blocking every keystroke.
     write_half: ChannelWriteHalf<Msg>,
-    /// Background task draining channel messages to the IPC channel.
-    pump: Mutex<Option<JoinHandle<()>>>,
+    /// Background task draining channel messages to the IPC channel. `None`
+    /// for a shell-less (SFTP-only) channel, which is never pumped.
+    pump: std::sync::Mutex<Option<JoinHandle<()>>>,
+    /// Live terminal dims; updated by `resize`. Read for list metadata.
+    dims: std::sync::Mutex<(u16, u16)>,
+    created_at_ms: u64,
+    /// Extra mirror sinks (the remote-access bridge) the pump fans Data / Exit
+    /// to alongside the GUI's own channel. Populated by `add_mirror_sink`.
+    mirror_sinks: Arc<std::sync::Mutex<Vec<IpcChannel<SshEvent>>>>,
+    /// Recent raw output, replayed to a freshly-attached mirror sink so it has
+    /// context (SSH has no daemon-side scrollback). Capped.
+    mirror_ring: Arc<std::sync::Mutex<VecDeque<u8>>>,
+    alive: Arc<AtomicBool>,
+}
+
+pub struct SshSession {
+    /// Live shell channels, keyed by the id `open_shell` minted. A pump removes
+    /// its own entry when its channel ends; `close_shell` and `close` take the
+    /// rest.
+    shells: std::sync::Mutex<HashMap<u32, Arc<SshShell>>>,
+    /// Source of the ids in `shells`.
+    shell_seq: AtomicU32,
     /// Underlying client handle. Kept alive so the TCP connection stays up;
     /// dropping it drops the SSH session. `pub(super)` so the sibling `sftp`
     /// module can open new subsystem channels on it.
@@ -483,27 +515,15 @@ pub struct SshSession {
     /// `connect()` note above `remote_forwards`). `open_remote_forward`/
     /// `close_remote_forward` are this struct's own write side.
     remote_forwards: RemoteForwardTargets,
-    /// One-shot signal that fires when the pump task exits. The sender lives
-    /// inside the pump's tokio task; `send()` runs at normal exit (Eof/Close,
-    /// peer hang-up, wait() returning None) and the Sender simply drops on
-    /// `pump.abort()` from explicit close; both paths unblock the receiver.
-    /// Taken once by `ssh_open` to drive the post-exit janitor that evicts
-    /// the session id from `SshState.sessions`. `std::sync::Mutex` so the
-    /// take is sync-cheap.
-    exit_signal: std::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    /// Fires once when the connection ends - see `HostKeyVerifier::_session_end`.
+    /// Taken once by `ssh_open` to drive the janitor that evicts the session id
+    /// from `SshState.sessions`. `std::sync::Mutex` so the take is sync-cheap.
+    ended: std::sync::Mutex<Option<oneshot::Receiver<()>>>,
+    /// SHA256 fingerprint the target presented; `ssh_open` returns it.
+    pub(super) fingerprint: String,
     /// Remote endpoint, surfaced by `ssh_list_sessions`.
     host: String,
     user: String,
-    /// Live terminal dims; updated by `resize`. Read for list metadata.
-    dims: std::sync::Mutex<(u16, u16)>,
-    created_at_ms: u64,
-    /// Extra mirror sinks (the remote-access bridge) the pump fans Data / Exit
-    /// to alongside the GUI's own channel. Populated by `add_mirror_sink`.
-    mirror_sinks: Arc<std::sync::Mutex<Vec<IpcChannel<SshEvent>>>>,
-    /// Recent raw output, replayed to a freshly-attached mirror sink so it has
-    /// context (SSH has no daemon-side scrollback). Capped.
-    mirror_ring: Arc<std::sync::Mutex<VecDeque<u8>>>,
-    alive: Arc<AtomicBool>,
 }
 
 /// Mint the next generation for a forward on one session. Monotonic, and never
@@ -559,7 +579,7 @@ async fn abort_forward(
     }
 }
 
-impl SshSession {
+impl SshShell {
     pub async fn write(&self, data: &[u8]) -> Result<(), String> {
         self.write_half.data(data).await.map_err(|e| e.to_string())
     }
@@ -575,7 +595,7 @@ impl SshSession {
     }
 
     /// Register an extra event sink (the remote-access bridge) and replay the
-    /// recent output ring so it has context. Returns whether the session is
+    /// recent output ring so it has context. Returns whether the shell is
     /// still alive. Mirrors the PTY daemon's multi-subscriber attach.
     pub fn add_mirror_sink(&self, ch: IpcChannel<SshEvent>) -> bool {
         let bytes: Vec<u8> = self
@@ -601,12 +621,10 @@ impl SshSession {
         self.alive.load(Ordering::Acquire)
     }
 
-    /// Snapshot for `ssh_list_sessions`: (host, user, cols, rows, alive, created_at_ms).
-    pub fn mirror_info(&self) -> (String, String, u16, u16, bool, u64) {
+    /// Snapshot for `ssh_list_sessions`: (cols, rows, alive, created_at_ms).
+    pub fn info(&self) -> (u16, u16, bool, u64) {
         let (cols, rows) = self.dims.lock().map(|d| *d).unwrap_or((80, 24));
         (
-            self.host.clone(),
-            self.user.clone(),
             cols,
             rows,
             self.alive.load(Ordering::Acquire),
@@ -614,11 +632,277 @@ impl SshSession {
         )
     }
 
-    pub async fn close(self: Arc<Self>) {
+    /// Close this one channel. The pump is aborted FIRST, so a close the
+    /// frontend asked for emits no ending event.
+    pub async fn close(&self) {
+        let pump = self.pump.lock().ok().and_then(|mut g| g.take());
+        if let Some(j) = pump {
+            j.abort();
+        }
         let _ = self.write_half.eof().await;
         let _ = self.write_half.close().await;
+    }
+}
+
+impl SshSession {
+    /// Take the one-shot session-end receiver out of the session. Called once
+    /// by `ssh_open` to wire up the janitor task; subsequent callers get
+    /// `None`.
+    pub fn take_ended_signal(&self) -> Option<oneshot::Receiver<()>> {
+        self.ended.lock().ok().and_then(|mut g| g.take())
+    }
+
+    pub fn shell(&self, shell_id: u32) -> Option<Arc<SshShell>> {
+        self.shells.lock().ok()?.get(&shell_id).cloned()
+    }
+
+    /// Close one shell, leaving the session and every other shell up. `false`
+    /// when `shell_id` names no live shell - it already ended, or was closed.
+    pub async fn close_shell(&self, shell_id: u32) -> bool {
+        // Removed under the lock, closed outside it: a std guard must not be
+        // held across an await.
+        let shell = self
+            .shells
+            .lock()
+            .ok()
+            .and_then(|mut m| m.remove(&shell_id));
+        let Some(shell) = shell else {
+            return false;
+        };
+        shell.close().await;
+        true
+    }
+
+    /// Snapshot for `ssh_list_sessions`, one row per live shell:
+    /// (shell_id, host, user, cols, rows, alive, created_at_ms).
+    pub fn shell_infos(&self) -> Vec<(u32, String, String, u16, u16, bool, u64)> {
+        let Ok(shells) = self.shells.lock() else {
+            return Vec::new();
+        };
+        shells
+            .iter()
+            .map(|(id, s)| {
+                let (cols, rows, alive, created_at_ms) = s.info();
+                (
+                    *id,
+                    self.host.clone(),
+                    self.user.clone(),
+                    cols,
+                    rows,
+                    alive,
+                    created_at_ms,
+                )
+            })
+            .collect()
+    }
+
+    /// Open one more shell channel on this live session - a terminal tab's -
+    /// and pump its output to `on_event`. Returns the shell's id within the
+    /// session.
+    pub async fn open_shell(
+        self: &Arc<Self>,
+        cols: u16,
+        rows: u16,
+        on_event: IpcChannel<SshEvent>,
+    ) -> Result<u32, String> {
+        // Hold the handle lock only across the channel open, exactly like
+        // `exec_capture`. Authentication already succeeded; a channel that will
+        // not open now is the transport or a server limit, and may well open on
+        // the next attempt.
+        let channel = {
+            let handle_guard = self.handle.lock().await;
+            let handle = handle_guard
+                .as_ref()
+                .ok_or_else(|| "ssh session is closed".to_string())?;
+            handle
+                .channel_open_session()
+                .await
+                .map_err(|e| format!("ssh: open channel failed: {e}"))?
+        };
+
+        // Interactive PTY + shell are best-effort. Locked-down file-transfer
+        // accounts (SFTP chroot, `PermitTTY no`, `ForceCommand internal-sftp`,
+        // a `/usr/sbin/nologin` login shell) deny the PTY and/or the shell -
+        // which once failed the WHOLE connect, so a plain "FTP"-style host could
+        // never be added at all. But the authenticated `Handle` is all the SFTP
+        // file browser needs: it opens its OWN `sftp` subsystem channel (see
+        // `sftp::open_sftp_on_handle`), independent of this shell channel. So a
+        // denied shell must DEGRADE, not abort. A normal server takes the
+        // interactive path; a shell-less server gets an inert shell.
+        let mut interactive = true;
+        if let Err(e) = channel
+            .request_pty(true, "xterm-256color", cols.into(), rows.into(), 0, 0, &[])
+            .await
+        {
+            log::warn!(
+                "ssh: request pty denied ({e}); continuing as SFTP-only (no interactive shell)"
+            );
+            interactive = false;
+        }
+        if interactive {
+            if let Err(e) = channel.request_shell(true).await {
+                log::warn!("ssh: request shell denied ({e}); continuing as SFTP-only");
+                interactive = false;
+            }
+        }
+
+        if interactive {
+            // Bootstrap: turn on OSC 7 cwd reporting on the remote shell. Stock
+            // bash/zsh on most distros do not emit OSC 7 by default, leaving the
+            // SFTP file tree stuck at the SFTP-canonicalised home regardless of
+            // `cd`. Inject a tiny `precmd` / PROMPT_COMMAND hook so every prompt
+            // prints the path the local OSC 7 handler parses. Errors from non-
+            // bash/zsh shells (fish, dash, csh) are silenced; worst case the tree
+            // stays on home. Leading space keeps it out of bash history when
+            // HISTCONTROL=ignorespace. Trailing `clear` wipes the snippet's echo
+            // and the motd, which is acceptable for a clean prompt.
+            const OSC7_BOOTSTRAP: &[u8] = b" { if [ -n \"$ZSH_VERSION\" ]; then __tervia_o7(){ printf '\\e]7;file://%s%s\\e\\\\' \"${HOST:-$HOSTNAME}\" \"$PWD\"; }; typeset -ag precmd_functions; precmd_functions+=(__tervia_o7); elif [ -n \"$BASH_VERSION\" ]; then __tervia_o7(){ printf '\\e]7;file://%s%s\\e\\\\' \"$HOSTNAME\" \"$PWD\"; }; case \":${PROMPT_COMMAND:-}:\" in *\":__tervia_o7:\"*) ;; *) PROMPT_COMMAND=\"__tervia_o7${PROMPT_COMMAND:+;$PROMPT_COMMAND}\";; esac; fi; __tervia_o7 2>/dev/null; } 2>/dev/null; { clear 2>/dev/null || printf '\\033c'; }\r";
+            let _ = channel.data(OSC7_BOOTSTRAP).await;
+        } else {
+            // No usable terminal, but SFTP works over the live `Handle`. The
+            // shell below stays inert - NO read pump - so a shell-less channel
+            // that closes or sits idle never fires the tab's reconnect loop; it
+            // lives until `ssh_shell_close`. A one-line notice in the inert
+            // terminal tells the user why it accepts no input.
+            const SFTP_ONLY_NOTICE: &[u8] = b"\r\n\x1b[33m[tervia] This server allows file transfer (SFTP) only - no interactive shell. The terminal is disabled; use the remote file browser.\x1b[0m\r\n";
+            let _ = on_event.send(SshEvent::Data {
+                data: B64.encode(SFTP_ONLY_NOTICE),
+            });
+        }
+
+        // Split so the pump task owns the read half exclusively and the
+        // SshShell owns the write half. No shared lock, no deadlock.
+        let (mut read_half, write_half) = channel.split();
+        let shell = Arc::new(SshShell {
+            write_half,
+            pump: std::sync::Mutex::new(None),
+            dims: std::sync::Mutex::new((cols, rows)),
+            created_at_ms: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0),
+            mirror_sinks: Arc::new(std::sync::Mutex::new(Vec::new())),
+            mirror_ring: Arc::new(std::sync::Mutex::new(VecDeque::new())),
+            alive: Arc::new(AtomicBool::new(true)),
+        });
+        // Inserted BEFORE the pump exists, so a channel that ends at once cannot
+        // remove its entry ahead of the insert and leave a dead shell behind.
+        let shell_id = self.shell_seq.fetch_add(1, Ordering::Relaxed);
+        if let Ok(mut m) = self.shells.lock() {
+            m.insert(shell_id, shell.clone());
+        }
+        if !interactive {
+            // The read half drops here: a shell-less channel is never pumped.
+            return Ok(shell_id);
+        }
+
+        // Mirror infrastructure shared with the pump: extra sinks (remote-access
+        // bridge), a small replay ring, and an alive flag.
+        const MIRROR_RING_CAP: usize = 128 * 1024;
+        let pump_sinks = shell.mirror_sinks.clone();
+        let pump_ring = shell.mirror_ring.clone();
+        let pump_alive = shell.alive.clone();
+        // Weak, not Arc: the pump is owned BY the session (through its shell),
+        // so a strong ref would keep a closed session alive.
+        let weak = Arc::downgrade(self);
+
+        let pump = tokio::spawn(async move {
+            // Fan an event to every extra mirror sink, pruning any whose channel has
+            // closed (the browser / bridge went away). Without this, dead sinks
+            // accumulate across reconnects and the pump wastes a clone + send on
+            // every output byte.
+            let fan = |ev: &SshEvent| {
+                if let Ok(mut sinks) = pump_sinks.lock() {
+                    sinks.retain(|ch| ch.send(ev.clone()).is_ok());
+                }
+            };
+            // Exit status / signal can legitimately arrive AFTER Eof (dropbear
+            // always sends Eof first; OpenSSH does too whenever the child's
+            // stdout closes before it is reaped - same ordering `exec_capture`
+            // above documents). So neither ExitStatus nor ExitSignal ends the
+            // loop by itself: both are just recorded here, and the terminal
+            // SshEvent is decided once the channel actually ends (Close, or
+            // wait() returning None). Ending on Eof the way this used to would
+            // make a server with that ordering report every exit as the
+            // ambiguous `Disconnected` shape, since the real exit-status/-signal
+            // would never be read.
+            let mut exit_status: Option<i32> = None;
+            let mut exit_signal: Option<(String, bool)> = None;
+            while let Some(msg) = read_half.wait().await {
+                match msg {
+                    ChannelMsg::Data { ref data } => {
+                        if let Ok(mut r) = pump_ring.lock() {
+                            r.extend(data.iter().copied());
+                            while r.len() > MIRROR_RING_CAP {
+                                r.pop_front();
+                            }
+                        }
+                        let ev = SshEvent::Data {
+                            data: B64.encode(data),
+                        };
+                        let _ = on_event.send(ev.clone());
+                        fan(&ev);
+                    }
+                    ChannelMsg::ExtendedData { ref data, ext: 1 } => {
+                        let ev = SshEvent::Stderr {
+                            data: B64.encode(data),
+                        };
+                        let _ = on_event.send(ev.clone());
+                        fan(&ev);
+                    }
+                    ChannelMsg::ExitStatus {
+                        exit_status: status,
+                    } => {
+                        exit_status = Some(status as i32);
+                    }
+                    ChannelMsg::ExitSignal {
+                        signal_name,
+                        core_dumped,
+                        ..
+                    } => {
+                        exit_signal = Some((format!("{signal_name:?}"), core_dumped));
+                    }
+                    ChannelMsg::Eof => {
+                        // Deliberately not a break - see the ordering note above.
+                        // Keep draining for Close (and a possibly-delayed
+                        // exit-status/exit-signal).
+                    }
+                    ChannelMsg::Close => break,
+                    _ => {}
+                }
+            }
+            // Close, or wait() returning None for a peer that hung up without
+            // one. Either way the channel is over: report how, then drop this
+            // shell from its session.
+            pump_alive.store(false, Ordering::Release);
+            let ev = build_exit_event(exit_status, exit_signal);
+            let _ = on_event.send(ev.clone());
+            fan(&ev);
+            if let Some(s) = weak.upgrade() {
+                if let Ok(mut m) = s.shells.lock() {
+                    m.remove(&shell_id);
+                }
+            }
+        });
+        if let Ok(mut p) = shell.pump.lock() {
+            *p = Some(pump);
+        }
+        Ok(shell_id)
+    }
+
+    pub async fn close(self: Arc<Self>) {
+        // Collected first: `ssh_close` awaits this inside a Tauri command, so
+        // the std guard must not be held across the closes below.
+        let shells: Vec<Arc<SshShell>> = self
+            .shells
+            .lock()
+            .map(|mut m| m.drain().map(|(_, s)| s).collect())
+            .unwrap_or_default();
+        for s in shells {
+            s.close().await;
+        }
         // Drop the forward listeners first so their ports are free again the
-        // moment the tab closes, rather than whenever the last Arc goes.
+        // moment the session closes, rather than whenever the last Arc goes.
         for (_, (_, t)) in self.forwards.lock().await.drain() {
             t.abort();
         }
@@ -639,17 +923,6 @@ impl SshSession {
                 .disconnect(Disconnect::ByApplication, "tervia: client closed", "")
                 .await;
         }
-        if let Some(j) = self.pump.lock().await.take() {
-            j.abort();
-        }
-    }
-
-    /// Take the one-shot exit-signal receiver out of the session. Called once
-    /// by `ssh_open` to wire up the janitor task; subsequent callers get
-    /// `None`. Returning `Option` so the field can be safely re-tried without
-    /// panicking when a future refactor introduces a second consumer.
-    pub fn take_exit_signal(&self) -> Option<tokio::sync::oneshot::Receiver<()>> {
-        self.exit_signal.lock().ok().and_then(|mut g| g.take())
     }
 
     /// Start an `ssh -L` local forward: bind `127.0.0.1:local_port` and pipe
@@ -1145,13 +1418,10 @@ async fn serve_socks_connection(
 impl Drop for SshSession {
     fn drop(&mut self) {
         // Last-resort cleanup when the frontend hung up without calling
-        // ssh_close. Abort the pump so its tokio task can unwind.
-        if let Ok(mut g) = self.pump.try_lock() {
-            if let Some(j) = g.take() {
-                j.abort();
-            }
-        }
-        // Same for the -L listeners, so a session evicted by the janitor (remote
+        // ssh_close. Shells are deliberately NOT aborted: each pump holds only a
+        // Weak to this session and reports its own ending when the connection
+        // dies.
+        // The -L listeners go, so a session evicted by the janitor (remote
         // hangup, never an explicit close) releases its local ports.
         if let Ok(mut f) = self.forwards.try_lock() {
             for (_, (_, t)) in f.drain() {
@@ -1186,6 +1456,7 @@ fn build_verifier(
     on_event: IpcChannel<SshEvent>,
     host: String,
     remote_forwards: RemoteForwardTargets,
+    session_end: Option<oneshot::Sender<()>>,
 ) -> (HostKeyVerifier, Arc<Mutex<HostKeyReport>>, String, bool) {
     let report: Arc<Mutex<HostKeyReport>> = Arc::new(Mutex::new(HostKeyReport::default()));
     let needs_confirm = expected_fingerprint.is_none();
@@ -1207,6 +1478,7 @@ fn build_verifier(
         host,
         decision,
         remote_forwards,
+        _session_end: session_end,
     };
     (handler, report, prompt_id, needs_confirm)
 }
@@ -1783,6 +2055,7 @@ pub async fn connect(
             // `RemoteForwardTargets`'s own doc - so this registry is built
             // fresh here and never written to.
             Arc::new(Mutex::new(HashMap::new())),
+            None,
         );
         let mut handle = if let Some(prev) = jump_handles.last() {
             let channel = open_tunnel(prev, &hop.host, hop.port, needs_confirm, &prompt_id).await?;
@@ -1841,11 +2114,13 @@ pub async fn connect(
     // this registry - not a session reference the verifier could route
     // through later - is what lets the two agree on one map.
     let remote_forwards: RemoteForwardTargets = Arc::new(Mutex::new(HashMap::new()));
+    let (end_tx, end_rx) = oneshot::channel::<()>();
     let (handler, report, prompt_id, needs_confirm) = build_verifier(
         input.expected_fingerprint.clone(),
-        on_event.clone(),
+        on_event,
         input.host.clone(),
         remote_forwards.clone(),
+        Some(end_tx),
     );
     let mut handle = if let Some(prev) = jump_handles.last() {
         let channel = open_tunnel(prev, &input.host, input.port, needs_confirm, &prompt_id).await?;
@@ -1889,225 +2164,22 @@ pub async fn connect(
         return Err(SshConnectError::auth("ssh: authentication rejected"));
     }
 
-    // Authentication already succeeded; a channel that will not open now is the
-    // transport or a server limit, and may well open on the next attempt.
-    let channel = handle
-        .channel_open_session()
-        .await
-        .map_err(|e| SshConnectError::transport(format!("ssh: open channel failed: {e}")))?;
-
-    // Interactive PTY + shell are best-effort. Locked-down file-transfer
-    // accounts (SFTP chroot, `PermitTTY no`, `ForceCommand internal-sftp`,
-    // a `/usr/sbin/nologin` login shell) deny the PTY and/or the shell - which
-    // used to fail the WHOLE connect via `?`, so a plain "FTP"-style host could
-    // never be added at all. But the authenticated `Handle` is all the SFTP
-    // file browser needs: it opens its OWN `sftp` subsystem channel (see
-    // `sftp::open_sftp_on_handle`), independent of this shell channel. So a
-    // denied shell must DEGRADE, not abort. A normal server still takes the
-    // unchanged interactive path below; a shell-less server connects SFTP-only.
-    let mut interactive = true;
-    if let Err(e) = channel
-        .request_pty(
-            true,
-            "xterm-256color",
-            input.cols.into(),
-            input.rows.into(),
-            0,
-            0,
-            &[],
-        )
-        .await
-    {
-        log::warn!("ssh: request pty denied ({e}); continuing as SFTP-only (no interactive shell)");
-        interactive = false;
-    }
-    if interactive {
-        if let Err(e) = channel.request_shell(true).await {
-            log::warn!("ssh: request shell denied ({e}); continuing as SFTP-only");
-            interactive = false;
-        }
-    }
-
-    if !interactive {
-        // No usable terminal, but SFTP works over the live `Handle`. Build a
-        // minimal session with NO read pump and NO exit janitor: a shell-less
-        // channel that closes or sits idle must not fire the frontend's
-        // reconnect loop or evict the session the file browser depends on. It
-        // lives until an explicit `ssh_close`. Emit Connected (flips the leaf to
-        // "connected" and surfaces the remote file tree) plus a one-line notice
-        // in the inert terminal so the user knows why it accepts no input.
-        let fingerprint = report.lock().await.seen.clone().unwrap_or_default();
-        let _ = on_event.send(SshEvent::Connected { fingerprint });
-        const SFTP_ONLY_NOTICE: &[u8] = b"\r\n\x1b[33m[tervia] This server allows file transfer (SFTP) only - no interactive shell. The terminal is disabled; use the remote file browser.\x1b[0m\r\n";
-        let _ = on_event.send(SshEvent::Data {
-            data: B64.encode(SFTP_ONLY_NOTICE),
-        });
-        // Keep the channel's write half to satisfy the struct; the read half is
-        // intentionally dropped (we never pump a shell-less channel).
-        let (_read_half, write_half) = channel.split();
-        let created_at_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-        return Ok(Arc::new(SshSession {
-            write_half,
-            pump: Mutex::new(None),
-            handle: Mutex::new(Some(handle)),
-            jump_handles: Mutex::new(jump_handles),
-            sftp: Mutex::new(None),
-            forwards: Mutex::new(HashMap::new()),
-            forward_seq: AtomicU64::new(1),
-            remote_forwards: remote_forwards.clone(),
-            exit_signal: std::sync::Mutex::new(None),
-            host: input.host.clone(),
-            user: input.user.clone(),
-            dims: std::sync::Mutex::new((input.cols, input.rows)),
-            created_at_ms,
-            mirror_sinks: Arc::new(std::sync::Mutex::new(Vec::new())),
-            mirror_ring: Arc::new(std::sync::Mutex::new(VecDeque::new())),
-            alive: Arc::new(AtomicBool::new(true)),
-        }));
-    }
-
-    // Bootstrap: turn on OSC 7 cwd reporting on the remote shell. Stock
-    // bash/zsh on most distros do not emit OSC 7 by default, leaving the
-    // SFTP file tree stuck at the SFTP-canonicalised home regardless of
-    // `cd`. Inject a tiny `precmd` / PROMPT_COMMAND hook so every prompt
-    // prints the path the local OSC 7 handler parses. Errors from non-
-    // bash/zsh shells (fish, dash, csh) are silenced; worst case the tree
-    // stays on home. Leading space keeps it out of bash history when
-    // HISTCONTROL=ignorespace. Trailing `clear` wipes the snippet's echo
-    // and the motd, which is acceptable for a clean prompt.
-    const OSC7_BOOTSTRAP: &[u8] = b" { if [ -n \"$ZSH_VERSION\" ]; then __tervia_o7(){ printf '\\e]7;file://%s%s\\e\\\\' \"${HOST:-$HOSTNAME}\" \"$PWD\"; }; typeset -ag precmd_functions; precmd_functions+=(__tervia_o7); elif [ -n \"$BASH_VERSION\" ]; then __tervia_o7(){ printf '\\e]7;file://%s%s\\e\\\\' \"$HOSTNAME\" \"$PWD\"; }; case \":${PROMPT_COMMAND:-}:\" in *\":__tervia_o7:\"*) ;; *) PROMPT_COMMAND=\"__tervia_o7${PROMPT_COMMAND:+;$PROMPT_COMMAND}\";; esac; fi; __tervia_o7 2>/dev/null; } 2>/dev/null; { clear 2>/dev/null || printf '\\033c'; }\r";
-    let _ = channel.data(OSC7_BOOTSTRAP).await;
-
+    // No channel yet: every shell (a terminal tab's) is opened on demand by
+    // `open_shell`, and the session outlives all of them.
     let fingerprint = report.lock().await.seen.clone().unwrap_or_default();
-    let _ = on_event.send(SshEvent::Connected { fingerprint });
-
-    // Split so the pump task owns the read half exclusively and the
-    // SshSession owns the write half. No shared lock, no deadlock.
-    let (mut read_half, write_half) = channel.split();
-    let on_event_pump = on_event.clone();
-
-    // Pump owns the sender side; whether it sends() or just drops, the
-    // receiver returned to ssh_open unblocks. That gives us a single wakeup
-    // for both "remote disconnected" (Eof/Close branch) and "explicit close"
-    // (pump.abort() drops the sender mid-future).
-    let (exit_tx, exit_rx) = tokio::sync::oneshot::channel::<()>();
-
-    // Mirror infrastructure shared with the pump: extra sinks (remote-access
-    // bridge), a small replay ring, and an alive flag.
-    const MIRROR_RING_CAP: usize = 128 * 1024;
-    let mirror_sinks: Arc<std::sync::Mutex<Vec<IpcChannel<SshEvent>>>> =
-        Arc::new(std::sync::Mutex::new(Vec::new()));
-    let mirror_ring: Arc<std::sync::Mutex<VecDeque<u8>>> =
-        Arc::new(std::sync::Mutex::new(VecDeque::new()));
-    let alive = Arc::new(AtomicBool::new(true));
-    let pump_sinks = mirror_sinks.clone();
-    let pump_ring = mirror_ring.clone();
-    let pump_alive = alive.clone();
-
-    let pump = tokio::spawn(async move {
-        let _exit_tx = exit_tx;
-        // Fan an event to every extra mirror sink, pruning any whose channel has
-        // closed (the browser / bridge went away). Without this, dead sinks
-        // accumulate across reconnects and the pump wastes a clone + send on
-        // every output byte.
-        let fan = |ev: &SshEvent| {
-            if let Ok(mut sinks) = pump_sinks.lock() {
-                sinks.retain(|ch| ch.send(ev.clone()).is_ok());
-            }
-        };
-        // Exit status / signal can legitimately arrive AFTER Eof (dropbear
-        // always sends Eof first; OpenSSH does too whenever the child's
-        // stdout closes before it is reaped - same ordering `exec_capture`
-        // above documents). So neither ExitStatus nor ExitSignal ends the
-        // loop by itself: both are just recorded here, and the terminal
-        // SshEvent is decided once the channel actually ends (Close, or
-        // wait() returning None). Ending on Eof the way this used to would
-        // make a server with that ordering report every exit as the
-        // ambiguous `Disconnected` shape, since the real exit-status/-signal
-        // would never be read.
-        let mut exit_status: Option<i32> = None;
-        let mut exit_signal: Option<(String, bool)> = None;
-        while let Some(msg) = read_half.wait().await {
-            match msg {
-                ChannelMsg::Data { ref data } => {
-                    if let Ok(mut r) = pump_ring.lock() {
-                        r.extend(data.iter().copied());
-                        while r.len() > MIRROR_RING_CAP {
-                            r.pop_front();
-                        }
-                    }
-                    let ev = SshEvent::Data {
-                        data: B64.encode(data),
-                    };
-                    let _ = on_event_pump.send(ev.clone());
-                    fan(&ev);
-                }
-                ChannelMsg::ExtendedData { ref data, ext: 1 } => {
-                    let ev = SshEvent::Stderr {
-                        data: B64.encode(data),
-                    };
-                    let _ = on_event_pump.send(ev.clone());
-                    fan(&ev);
-                }
-                ChannelMsg::ExitStatus {
-                    exit_status: status,
-                } => {
-                    exit_status = Some(status as i32);
-                }
-                ChannelMsg::ExitSignal {
-                    signal_name,
-                    core_dumped,
-                    ..
-                } => {
-                    exit_signal = Some((format!("{signal_name:?}"), core_dumped));
-                }
-                ChannelMsg::Eof => {
-                    // Deliberately not a break - see the ordering note above.
-                    // Keep draining for Close (and a possibly-delayed
-                    // exit-status/exit-signal).
-                }
-                ChannelMsg::Close => {
-                    pump_alive.store(false, Ordering::Release);
-                    let ev = build_exit_event(exit_status, exit_signal);
-                    let _ = on_event_pump.send(ev.clone());
-                    fan(&ev);
-                    return;
-                }
-                _ => {}
-            }
-        }
-        // wait() returned None: peer closed without ever sending Close.
-        pump_alive.store(false, Ordering::Release);
-        let ev = build_exit_event(exit_status, exit_signal);
-        let _ = on_event_pump.send(ev.clone());
-        fan(&ev);
-    });
-
-    let created_at_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
-
     Ok(Arc::new(SshSession {
-        write_half,
-        pump: Mutex::new(Some(pump)),
+        shells: std::sync::Mutex::new(HashMap::new()),
+        shell_seq: AtomicU32::new(1),
         handle: Mutex::new(Some(handle)),
         jump_handles: Mutex::new(jump_handles),
         sftp: Mutex::new(None),
         forwards: Mutex::new(HashMap::new()),
         forward_seq: AtomicU64::new(1),
         remote_forwards,
-        exit_signal: std::sync::Mutex::new(Some(exit_rx)),
-        host: input.host.clone(),
-        user: input.user.clone(),
-        dims: std::sync::Mutex::new((input.cols, input.rows)),
-        created_at_ms,
-        mirror_sinks,
-        mirror_ring,
-        alive,
+        ended: std::sync::Mutex::new(Some(end_rx)),
+        fingerprint,
+        host: input.host,
+        user: input.user,
     }))
 }
 
@@ -2831,8 +2903,6 @@ mod chain_tests {
             certificate: None,
             agent_key_fingerprint: None,
             jumps,
-            cols: 80,
-            rows: 24,
         };
         let secrets = SshSecrets {
             target: key_secret(),
@@ -2876,8 +2946,6 @@ mod chain_tests {
             certificate: None,
             agent_key_fingerprint: None,
             jumps: Vec::new(),
-            cols: 80,
-            rows: 24,
         };
         let empty = SshSecrets {
             target: HopSecrets::default(),
@@ -2906,10 +2974,14 @@ mod chain_tests {
             let session = connect(input, secrets, channel)
                 .await
                 .expect("chain connect failed");
-            let (host, _user, _cols, _rows, alive, _ts) = session.mirror_info();
-            assert_eq!(host, target_host, "session bound to target host");
+            assert_eq!(session.host, target_host, "session bound to target host");
             assert!(
-                alive,
+                session
+                    .handle
+                    .lock()
+                    .await
+                    .as_ref()
+                    .is_some_and(|h| !h.is_closed()),
                 "session should be live after connecting through chain"
             );
             session.close().await;
@@ -3243,8 +3315,6 @@ mod chain_tests {
                 certificate: None,
                 agent_key_fingerprint: None,
                 jumps: Vec::new(),
-                cols: 80,
-                rows: 24,
             };
             let secrets = SshSecrets {
                 target: HopSecrets {
@@ -3258,10 +3328,14 @@ mod chain_tests {
             let session = connect(input, secrets, channel)
                 .await
                 .expect("connect with the generated key failed");
-            let (host, _user, _cols, _rows, alive, _ts) = session.mirror_info();
-            assert_eq!(host, "127.0.0.1");
+            assert_eq!(session.host, "127.0.0.1");
             assert!(
-                alive,
+                session
+                    .handle
+                    .lock()
+                    .await
+                    .as_ref()
+                    .is_some_and(|h| !h.is_closed()),
                 "session should be live after authenticating with a generated key"
             );
             session.close().await;
@@ -3415,8 +3489,6 @@ mod chain_tests {
                     certificate: Some(cert_text),
                     agent_key_fingerprint: None,
                     jumps: Vec::new(),
-                    cols: 80,
-                    rows: 24,
                 },
                 SshSecrets {
                     target: HopSecrets {
@@ -3429,9 +3501,16 @@ mod chain_tests {
             )
             .await
             .expect("certificate auth against the CA-trusting server failed");
-            let (host, _user, _cols, _rows, alive, _ts) = session.mirror_info();
-            assert_eq!(host, "127.0.0.1");
-            assert!(alive, "session should be live after certificate auth");
+            assert_eq!(session.host, "127.0.0.1");
+            assert!(
+                session
+                    .handle
+                    .lock()
+                    .await
+                    .as_ref()
+                    .is_some_and(|h| !h.is_closed()),
+                "session should be live after certificate auth"
+            );
             session.close().await;
 
             // The signing key ALONE, no certificate: the server trusts the
@@ -3451,8 +3530,6 @@ mod chain_tests {
                     certificate: None,
                     agent_key_fingerprint: None,
                     jumps: Vec::new(),
-                    cols: 80,
-                    rows: 24,
                 },
                 SshSecrets {
                     target: HopSecrets {
@@ -3651,8 +3728,6 @@ mod chain_tests {
                     certificate: None,
                     agent_key_fingerprint: Some(held_fingerprint),
                     jumps: Vec::new(),
-                    cols: 80,
-                    rows: 24,
                 },
                 SshSecrets {
                     target: HopSecrets::default(),
@@ -3662,9 +3737,16 @@ mod chain_tests {
             )
             .await
             .expect("agent auth restricted to the held identity failed");
-            let (host, _user, _cols, _rows, alive, _ts) = session.mirror_info();
-            assert_eq!(host, "127.0.0.1");
-            assert!(alive, "session should be live after agent auth");
+            assert_eq!(session.host, "127.0.0.1");
+            assert!(
+                session
+                    .handle
+                    .lock()
+                    .await
+                    .as_ref()
+                    .is_some_and(|h| !h.is_closed()),
+                "session should be live after agent auth"
+            );
             session.close().await;
 
             let Err(err) = connect(
@@ -3680,8 +3762,6 @@ mod chain_tests {
                     certificate: None,
                     agent_key_fingerprint: Some(absent_fingerprint.clone()),
                     jumps: Vec::new(),
-                    cols: 80,
-                    rows: 24,
                 },
                 SshSecrets {
                     target: HopSecrets::default(),
@@ -3712,9 +3792,10 @@ mod chain_tests {
     }
 }
 
-/// Live end-to-end checks for `-R` and `-D`, against a throwaway
-/// `/usr/sbin/sshd` this process spawns itself - unlike `chain_tests`' own
-/// live checks above, which need a real VPS and env vars. Both tests are
+/// Live end-to-end checks for `-R`, `-D` and shells sharing one session,
+/// against a throwaway `/usr/sbin/sshd` this process spawns itself - unlike
+/// `chain_tests`' own live checks above, which need a real VPS and env vars.
+/// Every test here is
 /// `#[ignore = "needs /usr/sbin/sshd"]`, not a bare `#[ignore]`, so `cargo
 /// test` output says why without a reader having to open this file. Run:
 /// `cargo test remote_dynamic_forward_tests -- --ignored --nocapture`.
@@ -3878,8 +3959,6 @@ mod remote_dynamic_forward_tests {
             certificate: None,
             agent_key_fingerprint: None,
             jumps: Vec::new(),
-            cols: 80,
-            rows: 24,
         };
         (
             input,
@@ -4004,6 +4083,157 @@ mod remote_dynamic_forward_tests {
             eprintln!(
                 "[remote_dynamic_forward_tests] OK: -D 127.0.0.1:{socks_port} reached the local echo server via SOCKS5 CONNECT"
             );
+        });
+    }
+
+    /// An event sink that forwards every `Data` chunk, decoded, to `tx`, and
+    /// any other event as `<type>` - a marker no shell output here contains.
+    fn recording(tx: std::sync::mpsc::Sender<String>) -> IpcChannel<SshEvent> {
+        IpcChannel::new(move |body| {
+            if let tauri::ipc::InvokeResponseBody::Json(s) = body {
+                let v: serde_json::Value = serde_json::from_str(&s).unwrap_or_default();
+                if v["type"] == "data" {
+                    if let Some(bytes) = v["data"].as_str().and_then(|d| B64.decode(d).ok()) {
+                        let _ = tx.send(String::from_utf8_lossy(&bytes).into_owned());
+                    }
+                } else if let Some(kind) = v["type"].as_str() {
+                    let _ = tx.send(format!("<{kind}>"));
+                }
+            }
+            Ok(())
+        })
+    }
+
+    /// Whether `needle` shows up in `rx`'s accumulated output within 10 s.
+    fn saw(rx: &std::sync::mpsc::Receiver<String>, needle: &str) -> bool {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut seen = String::new();
+        while let Some(left) = deadline.checked_duration_since(std::time::Instant::now()) {
+            let Ok(chunk) = rx.recv_timeout(left) else {
+                return false;
+            };
+            seen.push_str(&chunk);
+            if seen.contains(needle) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Two shells on ONE session: each carries its own bytes, closing one
+    /// leaves the session and the other up, and closing the session fires the
+    /// end signal `ssh_open`'s janitor waits on.
+    #[test]
+    #[ignore = "needs /usr/sbin/sshd"]
+    fn two_shells_share_one_session_and_close_independently() {
+        let Some(sshd) = TestSshd::start() else {
+            return;
+        };
+        let (input, secrets) = connect_input(&sshd);
+
+        it_runtime().block_on(async move {
+            let channel = IpcChannel::new(|_msg| Ok(()));
+            let session = connect(input, secrets, channel)
+                .await
+                .expect("connect failed");
+            let ended = session.take_ended_signal().expect("end signal taken once");
+
+            let (a_tx, a_rx) = std::sync::mpsc::channel();
+            let (b_tx, b_rx) = std::sync::mpsc::channel();
+            let a = session
+                .open_shell(80, 24, recording(a_tx))
+                .await
+                .expect("open shell a");
+            let b = session
+                .open_shell(80, 24, recording(b_tx))
+                .await
+                .expect("open shell b");
+            assert_ne!(a, b, "each shell gets its own id");
+
+            // `$((6*7))` so the typed command's own echo cannot match.
+            session
+                .shell(a)
+                .unwrap()
+                .write(b"echo tervia-$((6*7))-a\r")
+                .await
+                .expect("write to shell a");
+            assert!(saw(&a_rx, "tervia-42-a"), "shell a ran its command");
+
+            assert!(session.close_shell(a).await, "a live shell reports a close");
+            assert!(
+                session.shell(a).is_none(),
+                "a closed shell leaves its session"
+            );
+            assert!(
+                !session.handle.lock().await.as_ref().unwrap().is_closed(),
+                "closing one shell leaves the session up"
+            );
+
+            session
+                .shell(b)
+                .unwrap()
+                .write(b"echo tervia-$((6*7))-b\r")
+                .await
+                .expect("write to shell b");
+            assert!(
+                saw(&b_rx, "tervia-42-b"),
+                "shell b still works after a closed"
+            );
+
+            session.clone().close().await;
+            assert!(
+                tokio::time::timeout(Duration::from_secs(5), ended)
+                    .await
+                    .is_ok(),
+                "closing the session fires its end signal"
+            );
+            eprintln!("[remote_dynamic_forward_tests] OK: two shells shared one session");
+        });
+    }
+
+    /// The connection ending on the REMOTE side - its sshd process killed
+    /// from inside the shell - fires the same end signal, with no close from
+    /// this side, and the shell reports its own ending as `disconnected`.
+    #[test]
+    #[ignore = "needs /usr/sbin/sshd"]
+    fn a_remote_hangup_fires_the_end_signal() {
+        let Some(sshd) = TestSshd::start() else {
+            return;
+        };
+        let (input, secrets) = connect_input(&sshd);
+
+        it_runtime().block_on(async move {
+            let channel = IpcChannel::new(|_msg| Ok(()));
+            let session = connect(input, secrets, channel)
+                .await
+                .expect("connect failed");
+            let ended = session.take_ended_signal().expect("end signal taken once");
+            let (tx, rx) = std::sync::mpsc::channel();
+            let shell = session
+                .open_shell(80, 24, recording(tx))
+                .await
+                .expect("open shell");
+
+            session
+                .shell(shell)
+                .unwrap()
+                .write(b"kill -9 $PPID\r")
+                .await
+                .expect("write to the shell");
+            assert!(
+                tokio::time::timeout(Duration::from_secs(10), ended)
+                    .await
+                    .is_ok(),
+                "a remote hangup fires the end signal"
+            );
+            assert!(saw(&rx, "<disconnected>"), "the shell reports a disconnect");
+            // The pump drops its entry just AFTER sending that ending.
+            let gone = (0..50).any(|_| {
+                std::thread::sleep(Duration::from_millis(20));
+                session.shell(shell).is_none()
+            });
+            assert!(gone, "the ended shell left its session");
+            eprintln!("[remote_dynamic_forward_tests] OK: a remote hangup fired the end signal");
         });
     }
 }
