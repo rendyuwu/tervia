@@ -37,15 +37,13 @@ export type SshExitReason =
   | { kind: "disconnected" };
 
 export type SshEvent =
-  | { type: "connected"; fingerprint: string }
   | { type: "jumpConnected"; connectionId: string; fingerprint: string }
   | { type: "hostKeyPrompt"; promptId: string; fingerprint: string; host: string }
   | { type: "data"; data: string }
   | { type: "stderr"; data: string }
   | { type: "exit"; code: number }
   | { type: "signal"; name: string; coreDumped: boolean }
-  | { type: "disconnected" }
-  | { type: "error"; message: string };
+  | { type: "disconnected" };
 
 /**
  * A wire event that ends the channel -> the two arguments `onExit` is called
@@ -79,7 +77,6 @@ export function exitReasonFromSshEvent(
 }
 
 export type SshHandlers = {
-  onConnected?: (fingerprint: string) => void;
   /** A jump host in the ProxyJump chain authenticated. `connectionId` is the
    *  saved connection the hop came from, so the caller pins its fingerprint. */
   onJumpConnected?: (connectionId: string, fingerprint: string) => void;
@@ -87,10 +84,9 @@ export type SshHandlers = {
    *  `confirmHostKey(promptId, accept)`; the handshake is paused (no
    *  credentials sent) until then. */
   onHostKeyPrompt?: (prompt: SshHostKeyPrompt) => void;
-  onData: (bytes: Uint8Array) => void;
-  /** Fires exactly once when the channel ends - see `SshExitReason`. */
-  onExit?: (code: number, reason: SshExitReason) => void;
-  onError?: (message: string) => void;
+  /** The session's connection ended on its own - remote disconnect, transport
+   *  error, keepalive timeout. At most once; never for `close()`. */
+  onClosed?: () => void;
 };
 
 /** One hop in a ProxyJump chain, resolved from a saved connection into keychain
@@ -133,8 +129,6 @@ export type SshOpenInput = {
   agentKeyFingerprint?: string;
   /** ProxyJump chain in connect order (entry host first). Empty/absent = direct. */
   jumps?: SshJumpHop[];
-  cols: number;
-  rows: number;
 };
 
 /** One key held by the local ssh-agent, as `ssh-add -l` would list it. */
@@ -363,8 +357,8 @@ export function openSshSocks(id: number, localPort: number): Promise<SshForwardH
 
 export type SshSession = {
   id: number;
-  write: (data: string) => Promise<void>;
-  resize: (cols: number, rows: number) => Promise<void>;
+  /** SHA256 fingerprint the target presented. */
+  fingerprint: string;
   close: () => Promise<void>;
 };
 
@@ -434,9 +428,6 @@ export async function openSsh(input: SshOpenInput, handlers: SshHandlers): Promi
   const channel = new Channel<SshEvent>();
   channel.onmessage = (event) => {
     switch (event.type) {
-      case "connected":
-        handlers.onConnected?.(event.fingerprint);
-        break;
       case "jumpConnected":
         handlers.onJumpConnected?.(event.connectionId, event.fingerprint);
         break;
@@ -447,24 +438,14 @@ export async function openSsh(input: SshOpenInput, handlers: SshHandlers): Promi
           host: event.host,
         });
         break;
+      case "disconnected":
+        handlers.onClosed?.();
+        break;
       case "data":
-        handlers.onData(decodeBase64(event.data));
-        break;
       case "stderr":
-        // Surface stderr inline. The server PTY usually merges both streams already.
-        handlers.onData(decodeBase64(event.data));
-        break;
       case "exit":
       case "signal":
-      case "disconnected": {
-        // One call for all three, so the mapping itself is the pure function's
-        // and cannot drift per arm.
-        const ending = exitReasonFromSshEvent(event);
-        handlers.onExit?.(ending.code, ending.reason);
-        break;
-      }
-      case "error":
-        handlers.onError?.(event.message);
+        // Shell-channel events; never sent on the session channel `openSsh` opens.
         break;
     }
   };
@@ -473,7 +454,7 @@ export async function openSsh(input: SshOpenInput, handlers: SshHandlers): Promi
   // the reconnect ladder, the host editor's Test button, the forward tunnel -
   // receives an `Error` and behaves exactly as it did when this command
   // rejected with a string.
-  const id = await invoke<number>("ssh_open", {
+  const { id, fingerprint } = await invoke<{ id: number; fingerprint: string }>("ssh_open", {
     input: {
       host: input.host,
       port: input.port,
@@ -498,18 +479,70 @@ export async function openSsh(input: SshOpenInput, handlers: SshHandlers): Promi
         certificate: j.certificate ?? null,
         agentKeyFingerprint: j.agentKeyFingerprint ?? null,
       })),
-      cols: input.cols,
-      rows: input.rows,
     },
     onEvent: channel,
   }).catch((e: unknown) => {
     throw sshConnectErrorFrom(e);
   });
 
+  return { id, fingerprint, close: () => invoke("ssh_close", { id }) };
+}
+
+export type SshShellHandlers = {
+  onData: (bytes: Uint8Array) => void;
+  /** Fires exactly once when the shell channel ends on its own - see SshExitReason. Never for close(). */
+  onExit: (code: number, reason: SshExitReason) => void;
+};
+
+export type SshShell = {
+  write: (data: string) => Promise<void>;
+  resize: (cols: number, rows: number) => Promise<void>;
+  close: () => Promise<void>;
+};
+
+/** Open one interactive shell channel on a live session. Every terminal tab
+ *  calls this - not `openSsh` - so N tabs on one host share the session and
+ *  cost N shell channels, not N russh connections. */
+export async function openSshShell(
+  sessionId: number,
+  cols: number,
+  rows: number,
+  handlers: SshShellHandlers,
+): Promise<SshShell> {
+  const channel = new Channel<SshEvent>();
+  channel.onmessage = (event) => {
+    switch (event.type) {
+      case "data":
+        handlers.onData(decodeBase64(event.data));
+        break;
+      case "stderr":
+        // Surface stderr inline. The server PTY usually merges both streams already.
+        handlers.onData(decodeBase64(event.data));
+        break;
+      case "exit":
+      case "signal":
+      case "disconnected": {
+        // One call for all three, so the mapping itself is the pure function's
+        // and cannot drift per arm.
+        const ending = exitReasonFromSshEvent(event);
+        handlers.onExit(ending.code, ending.reason);
+        break;
+      }
+      case "jumpConnected":
+      case "hostKeyPrompt":
+        // Session-channel events; never sent on a shell channel.
+        break;
+    }
+  };
+  const shellId = await invoke<number>("ssh_shell_open", {
+    id: sessionId,
+    cols,
+    rows,
+    onEvent: channel,
+  });
   return {
-    id,
-    write: (data) => invoke("ssh_write", { id, data }),
-    resize: (cols, rows) => invoke("ssh_resize", { id, cols, rows }),
-    close: () => invoke("ssh_close", { id }),
+    write: (data) => invoke("ssh_shell_write", { id: sessionId, shellId, data }),
+    resize: (cols, rows) => invoke("ssh_shell_resize", { id: sessionId, shellId, cols, rows }),
+    close: () => invoke("ssh_shell_close", { id: sessionId, shellId }),
   };
 }

@@ -1351,12 +1351,45 @@ mapping in `src/modules/workspaces/serialize.ts`.
 **Trigger.** A workspace-file migration pass landing for some other reason -
 at that point the saved key can move to `hostId` alongside it.
 
+## SSH sessions
+
+### Every tab to one host is a channel on one session, so the server's `MaxSessions` caps concurrent tabs
+
+**Accepted state.** Every terminal tab to a saved host opens one more shell
+channel on that host's single session, shared with its forwards and RDP panes.
+OpenSSH's `MaxSessions` (default 10) counts every session channel on one
+connection, the SFTP subsystem and each `ssh_git` exec included, so past it the
+next tab's `ssh_shell_open` fails with "ssh: open channel failed", walks the
+reconnect ladder and parks. [INFERENCE] Not exercised against a server at the
+limit.
+
+**Carried by.** The `ponytail:` comment above `openShellForConnection` in
+`src/modules/ssh/tunnel.ts`.
+
+**Trigger.** A user reaching the limit. The upgrade is to dial a dedicated
+session for the tab when the shared one refuses the channel.
+
+### A host edit reaches its terminals only once every reference to the old session is released
+
+**Accepted state.** A new tab, or a reconnect where only the shell ended, joins
+the host's live session, which was dialled with the user, port, credential and
+jump chain in force at dial time. The terminal's pre-flight still re-reads the
+host for its banner and route, so after an edit those can name the new endpoint
+while the shell rides the old session. Once every tab, forward and RDP pane on
+the host lets go, the next open re-dials with the edit.
+
+**Carried by.** `sessionFor` in `src/modules/ssh/tunnel.ts`, which keys the
+shared session by connection id alone.
+
+**Trigger.** A report of an edit that did not seem to apply. The fix is to
+compare the dial inputs in `sessionFor` and refuse to join on a mismatch.
+
 ## Forwards
 
 ### `-R`/`-D` rules do not autostart with their host
 
 **Accepted state.** `startWithHost` brings a `-L` rule up on the terminal's
-own live SSH session through `AutostartDeps.openForward`, which binds a LOCAL
+shared live SSH session through `AutostartDeps.openForward`, which binds a LOCAL
 listener and speaks a fixed `(id, localPort, remoteHost, remotePort)` shape.
 Neither a `-R` rule (which needs `Handle::tcpip_forward` on the SERVER, not a
 local bind) nor a `-D` rule (which needs a SOCKS5 listener, not a fixed dial
@@ -1369,7 +1402,7 @@ at the top of `startHostForwards`'s loop, both in
 `src/modules/forwards/autostart.ts`.
 
 **Trigger.** `AutostartDeps` growing a second dial shape (or one call each for
-`-R`/`-D`) that `ssh-session.ts`'s live session can drive the same way it
+`-R`/`-D`) that the terminal's shared session can drive the same way it
 drives `-L`'s today.
 
 ### `RuntimeDeps` cannot drive a `-R`/`-D` Start or Stop through a fake
@@ -1416,26 +1449,21 @@ ladders a `startWithApp` rule's INITIAL bind failure, and any retry's own
 failure, but not a session that drops AFTER a successful bind. `ssh/tunnel.ts`'s
 `dropSession` is the single function both a deliberate release
 (`releaseSession` at zero refs, e.g. a manual Stop of the last rule on a host)
-and an unexpected drop (`dialSession`'s `onExit`/`onError`) call - nothing
-distinguishes them from outside it today. Telling them apart needs an intent
-flag surviving the async Tauri IPC delivery window, the exact hazard
-`terminal/lib/ssh-session.ts`'s own `sshUserClose` flag exists to guard
-against for the terminal's identical problem (`SshSession::close` aborts its
-pump task rather than draining it to a final event, so a deliberate close can
-still race a real ending onto the frontend channel). Not provable under the
-`RuntimeDeps` seam this suite tests through either - there is no real Tauri
-channel under plain node to race. A `startWithApp` rule whose bastion drops
-mid-session stays "Running" (stale) until a manual Stop/Start, the same status
-quo every OTHER page-started rule already has - this does not regress it.
+and an unexpected drop (`dialSession`'s `onClosed`) call, and nothing
+subscribes to it. The two are already told apart upstream: `ssh_open`'s janitor
+sends the session channel's `disconnected` only for a connection that ended on
+its own, never after `ssh_close`, because `ssh_close` removes the id before the
+janitor looks. What is missing is the subscriber. A `startWithApp` rule whose
+bastion drops mid-session stays "Running" (stale) until a manual Stop/Start,
+the same status quo every OTHER page-started rule already has - this does not
+regress it.
 
 **Carried by.** `dropSession` in `src/modules/ssh/tunnel.ts`, which has no
 subscriber-notification hook today.
 
-**Trigger.** `tunnel.ts` gaining a `sshUserClose`-equivalent intent flag
-(set before a deliberate `releaseSession`, read by `dialSession`'s
-`onExit`/`onError` before treating a drop as unexpected) that a check can
-prove against a real close/exit race - at that point `startForwardAutostart`
-can subscribe per `hostId` and re-enter the ladder on a genuine drop.
+**Trigger.** `tunnel.ts` gaining a per-connection drop subscription, fed from
+`onClosed`, that a check can prove - at that point `startForwardAutostart` can
+subscribe per `hostId` and re-enter the ladder on a genuine drop.
 
 ### A remote edit landing while its retry is pending re-dials the OLD endpoints
 

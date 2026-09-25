@@ -241,14 +241,6 @@ console.log("\n[source-text] the two call sites route through the two functions"
     calls === 2,
     `exitReasonFromSshEvent appears exactly twice in bridge.ts - its declaration and this one call (found ${calls})`,
   );
-  // Counting `onExit?.(` as well, because the three arms sharing one call is
-  // the property: a fourth arm added with its own inline object literal would
-  // satisfy the count above and still hand `onExit` an unmapped reason.
-  const handoffs = bridge.split("handlers.onExit?.(").length - 1;
-  assert(
-    handoffs === 1 && squash(bridge).includes("handlers.onExit?.(ending.code,ending.reason)"),
-    `channel.onmessage hands onExit the pure function's own result and nothing else (${handoffs} call site(s))`,
-  );
 
   const sshSession = squash(stripCommentsNoJsx(read("src/modules/terminal/lib/ssh-session.ts")));
   assert(

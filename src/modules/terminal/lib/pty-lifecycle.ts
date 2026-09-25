@@ -1,4 +1,5 @@
 import { openPty, reattachPty, type PtySession } from "./pty-bridge";
+import type { SshForwardHandle } from "@/modules/ssh/bridge";
 import { sessions, type Session } from "./sessionState";
 import {
   MIN_PTY_DIM,
@@ -58,9 +59,9 @@ export function openPtyForSession(s: Session, cwd: string | undefined): Promise<
   const urlDecoder = new TextDecoder("utf-8", { fatal: false });
 
   // Auto-opened `ssh -L` tunnels for urls this shell printed, remote port ->
-  // in-flight local bound port. Scoped to the spawn on purpose: the forwards
-  // die with the SSH session, and a reconnect re-enters here with an empty map.
-  const sshUrlForwards = new Map<number, Promise<number>>();
+  // in-flight forward handle. Scoped to the spawn on purpose: closed when
+  // this tab's shell ends, not when the (now possibly shared) session does.
+  const sshUrlForwards = new Map<number, Promise<SshForwardHandle>>();
 
   // Diagnostic counters for the live-PTY-but-empty-pane case. Toggle via TERVIA_DEBUG_PTY.
   const debug = isDebugPty();
@@ -206,7 +207,7 @@ export function openPtyForSession(s: Session, cwd: string | undefined): Promise<
   // SSH leaf never is. Make the Hosts tab closable, or add a caller that does
   // not branch, and these two paths become live.
   if (s.hostId) {
-    return openSshForSession(s, s.hostId, spawnCols, spawnRows, onData, onExit);
+    return openSshForSession(s, s.hostId, spawnCols, spawnRows, onData, onExit, sshUrlForwards);
   }
 
   // Restore path: a saved daemon UUID exists. Try `reattachPty` first. Two

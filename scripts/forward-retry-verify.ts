@@ -491,7 +491,9 @@ console.log(
   // `starting` (its own header), stood in for here the same way
   // `forwards-shell-verify.ts`'s own mid-dial fixtures write `hostOwned`
   // directly rather than driving a second real terminal session.
-  useHostOwnedForwards.setState({ byRule: { r9: { sessionId: 9, boundPort: 18080 } } });
+  useHostOwnedForwards.setState({
+    byRule: { r9: { sessionId: 9, boundPort: 18080, generation: 1 } },
+  });
   parkedOpens[0]?.reject(new Error("EADDRINUSE"));
   await settle();
   check(

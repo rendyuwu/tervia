@@ -1,8 +1,9 @@
 //! Interactive SSH client sessions.
 //!
-//! Mirrors the local PTY module's command shape (`ssh_open`/`ssh_write`/
-//! `ssh_resize`/`ssh_close`) so the frontend can swap a local PTY for a
-//! remote shell with minimal plumbing. Auth supports the local ssh-agent (the
+//! One authenticated session per `ssh_open`, carrying any number of shell
+//! channels (`ssh_shell_open`/`ssh_shell_write`/`ssh_shell_resize`/
+//! `ssh_shell_close`) until `ssh_close`, so the frontend can swap a local PTY
+//! for a remote shell with minimal plumbing. Auth supports the local ssh-agent (the
 //! private key stays inside the agent; Tervia only ever sees signatures), a
 //! private key, or a password.
 //! Host-key handling: SHA-256 fingerprint pinning. The first connect to
@@ -31,8 +32,8 @@ use tokio::runtime::Runtime;
 use zeroize::Zeroizing;
 
 use crate::modules::secrets::{SecretSource, SecretsState};
-use session::SshSession;
 pub use session::{SshConnectError, SshEvent};
+use session::{SshSession, SshShell};
 
 /// Shared tokio runtime for every SSH session. russh is async-first; driving
 /// it from per-session executors would duplicate thread pools. A single
@@ -53,7 +54,7 @@ pub struct SshState {
     /// `pub(crate)` so the sibling `sftp` module can look up an existing
     /// session by id to issue file-system commands. `Arc`-wrapped so the
     /// janitor task spawned per session can hold a handle for eviction
-    /// after the pump task exits on remote disconnect.
+    /// after the session's connection ends.
     pub(crate) sessions: Arc<tokio::sync::RwLock<HashMap<u32, Arc<SshSession>>>>,
     next_id: AtomicU32,
 }
@@ -135,8 +136,15 @@ pub struct SshOpenInput {
     /// the hop closest to the target last). Empty/absent = direct connection.
     #[serde(default)]
     pub jumps: Vec<SshJumpHop>,
-    pub cols: u16,
-    pub rows: u16,
+}
+
+/// What `ssh_open` returns: the session id every later command names, and the
+/// SHA256 fingerprint the target presented, for the frontend to pin.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SshOpened {
+    pub id: u32,
+    pub fingerprint: String,
 }
 
 /// One hop's secrets, read out of the keychain at the command boundary.
@@ -781,13 +789,14 @@ pub async fn ssh_open(
     state: tauri::State<'_, SshState>,
     input: SshOpenInput,
     on_event: Channel<SshEvent>,
-) -> Result<u32, SshConnectError> {
+) -> Result<SshOpened, SshConnectError> {
     // Before the spawn: `tauri::State` is borrowed from the invocation and
     // cannot cross into the SSH runtime. A keychain read that fails is a
     // `config` kind, which the frontend parks on - the same treatment a
     // missing credential gets.
     let secrets = resolve_secrets(&app, &secrets, &input).map_err(SshConnectError::config)?;
     let rt = ssh_runtime();
+    let on_end = on_event.clone();
     let session = rt
         .spawn(session::connect(input, secrets, on_event))
         .await
@@ -799,32 +808,35 @@ pub async fn ssh_open(
             e
         })?;
     let id = state.next_id.fetch_add(1, Ordering::Relaxed);
-    // Take the exit receiver before handing the Arc to the map so the
-    // janitor can wait for the pump task to finish without racing another
-    // caller for the slot. Receiver fires on normal exit (Eof/Close, peer
-    // hangup) and on pump abort (because the oneshot Sender is then dropped),
-    // so explicit close paths also wake the janitor; it just no-ops on the
-    // already-removed id.
-    let exit_signal = session.take_exit_signal();
+    // Take the end receiver before handing the Arc to the map so the janitor
+    // can wait for the connection to end without racing another caller for
+    // the slot. It fires however the connection ends; an explicit `ssh_close`
+    // has already removed the id, so only a connection that ended on its own
+    // reaches the eviction and its `Disconnected`.
+    let ended = session.take_ended_signal();
+    let fingerprint = session.fingerprint.clone();
     let sessions_handle = state.sessions.clone();
     state.sessions.write().await.insert(id, session);
-    if let Some(rx) = exit_signal {
+    if let Some(rx) = ended {
         rt.spawn(async move {
             let _ = rx.await;
-            sessions_handle.write().await.remove(&id);
-            log::info!("ssh session id={id} evicted after pump exit");
+            if sessions_handle.write().await.remove(&id).is_some() {
+                let _ = on_end.send(SshEvent::Disconnected);
+                log::info!("ssh session id={id} evicted after its connection ended");
+            }
         });
     }
     log::info!("ssh opened id={id}");
-    Ok(id)
+    Ok(SshOpened { id, fingerprint })
 }
 
-#[tauri::command]
-pub async fn ssh_write(
-    state: tauri::State<'_, SshState>,
+/// Look up one shell of one live session, for the commands that drive it.
+async fn shell_of(
+    state: &SshState,
     id: u32,
-    data: String,
-) -> Result<(), String> {
+    shell_id: u32,
+    cmd: &str,
+) -> Result<Arc<SshShell>, String> {
     let session = state
         .sessions
         .read()
@@ -832,19 +844,26 @@ pub async fn ssh_write(
         .get(&id)
         .cloned()
         .ok_or_else(|| {
-            log::warn!("ssh_write: unknown id={id}");
+            log::warn!("{cmd}: unknown id={id}");
             "no session".to_string()
         })?;
-    session.write(data.as_bytes()).await
+    session.shell(shell_id).ok_or_else(|| {
+        log::warn!("{cmd}: unknown shell={shell_id} on id={id}");
+        "no shell".to_string()
+    })
 }
 
+/// Open one more interactive shell (a terminal tab) on the live session `id`,
+/// streaming its output to `on_event`. Returns the shell's id within the
+/// session.
 #[tauri::command]
-pub async fn ssh_resize(
+pub async fn ssh_shell_open(
     state: tauri::State<'_, SshState>,
     id: u32,
     cols: u16,
     rows: u16,
-) -> Result<(), String> {
+    on_event: Channel<SshEvent>,
+) -> Result<u32, String> {
     let session = state
         .sessions
         .read()
@@ -852,10 +871,61 @@ pub async fn ssh_resize(
         .get(&id)
         .cloned()
         .ok_or_else(|| {
-            log::warn!("ssh_resize: unknown id={id}");
+            log::warn!("ssh_shell_open: unknown id={id}");
             "no session".to_string()
         })?;
-    session.resize(cols, rows).await
+    // On the SSH runtime, not tauri's: the pump and the russh channel it
+    // drains must be driven by the same reactor.
+    let shell_id = ssh_runtime()
+        .spawn(async move { session.open_shell(cols, rows, on_event).await })
+        .await
+        .map_err(|e| format!("ssh shell task join failed: {e}"))??;
+    log::info!("ssh shell opened id={id} shell={shell_id}");
+    Ok(shell_id)
+}
+
+#[tauri::command]
+pub async fn ssh_shell_write(
+    state: tauri::State<'_, SshState>,
+    id: u32,
+    shell_id: u32,
+    data: String,
+) -> Result<(), String> {
+    shell_of(&state, id, shell_id, "ssh_shell_write")
+        .await?
+        .write(data.as_bytes())
+        .await
+}
+
+#[tauri::command]
+pub async fn ssh_shell_resize(
+    state: tauri::State<'_, SshState>,
+    id: u32,
+    shell_id: u32,
+    cols: u16,
+    rows: u16,
+) -> Result<(), String> {
+    shell_of(&state, id, shell_id, "ssh_shell_resize")
+        .await?
+        .resize(cols, rows)
+        .await
+}
+
+/// Close one shell, leaving the session and its other shells up. Idempotent:
+/// an unknown session or shell - already ended, or already closed - is `Ok`.
+#[tauri::command]
+pub async fn ssh_shell_close(
+    state: tauri::State<'_, SshState>,
+    id: u32,
+    shell_id: u32,
+) -> Result<(), String> {
+    let session = state.sessions.read().await.get(&id).cloned();
+    if let Some(s) = session {
+        if s.close_shell(shell_id).await {
+            log::info!("ssh shell closed id={id} shell={shell_id}");
+        }
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -1124,13 +1194,14 @@ pub fn ssh_confirm_host_key(prompt_id: String, accept: bool) -> Result<(), Strin
     }
 }
 
-/// Metadata for one live SSH session, returned by `ssh_list_sessions`. Lets the
+/// Metadata for one live SSH shell, returned by `ssh_list_sessions`. Lets the
 /// remote-access bridge enumerate SSH tabs the GUI has open (they live here, not
 /// in the PTY daemon) before attaching to mirror them.
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SshSessionInfo {
     pub id: u32,
+    pub shell_id: u32,
     pub host: String,
     pub user: String,
     pub cols: u16,
@@ -1146,40 +1217,36 @@ pub async fn ssh_list_sessions(
     let map = state.sessions.read().await;
     let mut out = Vec::with_capacity(map.len());
     for (id, s) in map.iter() {
-        let (host, user, cols, rows, alive, created_at_ms) = s.mirror_info();
-        out.push(SshSessionInfo {
-            id: *id,
-            host,
-            user,
-            cols,
-            rows,
-            alive,
-            created_at_ms,
-        });
+        for (shell_id, host, user, cols, rows, alive, created_at_ms) in s.shell_infos() {
+            out.push(SshSessionInfo {
+                id: *id,
+                shell_id,
+                host,
+                user,
+                cols,
+                rows,
+                alive,
+                created_at_ms,
+            });
+        }
     }
     Ok(out)
 }
 
-/// Attach an additional event sink to an existing SSH session so a second
-/// consumer (the remote-access bridge) mirrors its output + writes input via
-/// `ssh_write`. Replays the recent ring on attach. Returns `alive`.
+/// Attach an additional event sink to one shell of an existing SSH session so
+/// a second consumer (the remote-access bridge) mirrors its output + writes
+/// input via `ssh_shell_write`. Replays the recent ring on attach. Returns
+/// `alive`.
 #[tauri::command]
 pub async fn ssh_attach(
     state: tauri::State<'_, SshState>,
     id: u32,
+    shell_id: u32,
     on_event: Channel<SshEvent>,
 ) -> Result<bool, String> {
-    let session = state
-        .sessions
-        .read()
-        .await
-        .get(&id)
-        .cloned()
-        .ok_or_else(|| {
-            log::warn!("ssh_attach: unknown id={id}");
-            "no session".to_string()
-        })?;
-    Ok(session.add_mirror_sink(on_event))
+    Ok(shell_of(&state, id, shell_id, "ssh_attach")
+        .await?
+        .add_mirror_sink(on_event))
 }
 
 /// Single-quote a value for a POSIX shell so a remote-supplied path can never

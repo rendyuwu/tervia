@@ -1,17 +1,18 @@
 /**
- * `startWithHost`: bring a host's saved forward rules up on the TERMINAL's own
- * SSH session, as that session connects.
+ * `startWithHost`: bring a host's saved forward rules up on the TERMINAL's
+ * shared SSH session (`ssh/tunnel.ts`'s `sessionFor`/`openShellForConnection`
+ * map), while at least one terminal tab is attached to that session.
  *
  * Reproduces what `conn.forwards` used to do before the SSH/RDP unification
- * (`types.ts`'s `startWithHost` doc), on the session the
- * terminal already holds - never through `ssh/tunnel.ts`, which would dial a
- * SECOND russh session to a host this pane is already connected to and show up
- * on the server as two logins. That is why the bridge
- * call here is `openSshForward` (a forward on a session id) rather than
- * `openForwardForConnection` (a forward on a host id, dialling if needed).
+ * (`types.ts`'s `startWithHost` doc), on the session id the terminal is
+ * already riding - always with the raw `openSshForward` (a forward on a
+ * session id), never `openForwardForConnection` (a forward on a HOST id,
+ * dialling a session of its own if none is up): a host-owned forward must not
+ * hold a session reference of its own, because its lifetime is the ATTACHED
+ * TABS' - see {@link attachHostForwards} - not the session's.
  *
  * A MODULE AND NOT A HOOK, for the reason `controller.ts`'s header gives: this
- * runs from a session callback, not a render, so it reads both stores, and
+ * runs from a terminal callback, not a render, so it reads both stores, and
  * makes its one page-store write, through `getState()` and stays exercisable
  * under plain `node`/`tsx` -
  * `scripts/forward-autostart-verify.ts` drives it through {@link AutostartDeps}
@@ -51,21 +52,25 @@ export type AutostartDeps = {
     remoteHost: string,
     remotePort: number,
   ) => Promise<SshForwardHandle>;
-  /** `ssh/bridge.ts`'s `closeSshForward`. Needed for the two cases where a bind
+  /** `ssh/bridge.ts`'s `closeSshForward`. Needed for FOUR cases now: a bind
    *  RESOLVED into a rule somebody else had meanwhile taken - the PAGE (its
-   *  `markStarting` is synchronous) or ANOTHER PANE's own autostart run, which
-   *  is not staggered by anything and so passes its own pre-bind read before
-   *  either side claims. First claim wins, so the loser closes the
+   *  `markStarting` is synchronous) or ANOTHER SESSION's own autostart run,
+   *  which is not staggered by anything and so passes its own pre-bind read
+   *  before either side claims, so first claim wins and the loser closes the
    *  listener it just bound rather than leaving a second one standing that
-   *  nothing on either side names.
+   *  nothing on either side names; the LATE BIND that lands after `stillLive`
+   *  has already gone false, closed for the same reason - a session shared
+   *  across tabs has nothing on the backend left to reap it; and the LAST TAB
+   *  TO DETACH from a session, in {@link attachHostForwards}'s
+   *  `stopHostForwards`, closing every entry it claimed.
    *
    *  Takes the `generation` its own open handed back, so the close names the
    *  listener THAT bind opened rather than whatever holds the port when it
-   *  lands. Nothing in this loop reaches that case today - the two binds racing
-   *  for one rule cannot both hold a pinned port, and the loop issues one close
-   *  per bind with no await between the bind and it - so the pair is threaded
-   *  here because it is what the command takes, not to close a window that is
-   *  open on this side. */
+   *  lands. The first two cases never reach a second bind on the same port -
+   *  the two binds racing for one rule cannot both hold a pinned port, and
+   *  each issues one close per bind with no await between the bind and it -
+   *  so the pair is threaded here because it is what the command takes, not
+   *  to close a window that is open on this side. */
   closeForward: (id: number, boundPort: number, generation: number) => Promise<boolean>;
   /** The page's status for this rule. READ TWICE per rule - once before the
    *  bind and once immediately before the claim - because the user can click
@@ -91,10 +96,11 @@ export type AutostartDeps = {
    *  `starting` - a live page dial resolves or fails on its own side. */
   markPageStopped: (ruleId: string) => void;
   /**
-   * Is the session these forwards are being opened on still alive? OPTIONAL,
-   * defaulting to `() => true`, because only the caller's own scope can answer
-   * it - `ssh-session.ts` closes over a flag it sets at both of its release
-   * sites, and module scope here has nothing to close over.
+   * Is at least one terminal tab still attached to the session these forwards
+   * are being opened on? OPTIONAL, defaulting to `() => true`, because only
+   * the caller's own scope can answer it - {@link attachHostForwards} supplies
+   * it, closing over the EPOCH object its own first-tab branch created, and
+   * module scope here has nothing to close over.
    *
    * Same idiom as `controller.ts`'s `isCurrentAttempt` and the epoch check
    * inside `openPtyForSession` (`pty-lifecycle.ts`): an `await` in a
@@ -160,16 +166,17 @@ function skippedBanner(rule: ForwardRule, status: "running" | "starting"): strin
     : `\x1b[33m[tervia] forward "${rule.name}" is starting from the Port Forwarding page; not starting a second one.\x1b[0m\r\n`;
 }
 
-/** The other half of the exclusion: another PANE's session already has this
- *  rule open on this host. The terminal deliberately dials its own session per
- *  pane (see `ssh/tunnel.ts`'s header, on what is NOT shared), so two tabs to
- *  one host are two autostart runs. Deliberately does NOT say the page owns
- *  it - it does not.
+/** The other half of the exclusion: another SESSION already has this rule
+ *  open on this host. Now fires only across two DIFFERENT session ids for one
+ *  host - `attachHostForwards` runs `startHostForwards` at most once per
+ *  session, so two tabs sharing a session never race here; what still can is
+ *  a reconnect's new session id racing the old one's own teardown. Deliberately
+ *  does NOT say the page owns it - it does not.
  *
  *  ONE SENTENCE FOR BOTH ARMS of that half - the pre-bind refusal and the
  *  post-bind yield, which also closes the listener it just bound. The outcome
  *  the sentence describes is the same either way: no second forward for this
- *  rule, and the one that is up belongs to another tab. Spelling the two
+ *  rule, and the one that is up belongs to another session. Spelling the two
  *  differently would be two ways of saying one fact, and the terminal is not
  *  the surface on which to explain a race. */
 function otherTerminalBanner(rule: ForwardRule): string {
@@ -246,13 +253,11 @@ export async function startHostForwards(
         writeBanner(typedAutostartSkippedBanner(rule));
         continue;
       }
-      // THE SESSION MAY ALREADY BE GONE BEFORE THE FIRST BIND, not only during
-      // a later one. `finishSsh` sets `sessionEnded` UNCONDITIONALLY
-      // (`ssh-session.ts`), before `openSsh` has resolved an id - so a
-      // session that ended while this run was still reading the store would
-      // otherwise issue one bind on a dead session and orphan that listener
-      // before the post-bind check below breaks the loop. Same `break` and same
-      // reasoning as that one; it just costs nothing to ask first.
+      // THE SESSION'S LAST TAB MAY ALREADY HAVE DETACHED BEFORE THE FIRST BIND,
+      // not only during a later one: `attachHostForwards` starts this run
+      // synchronously, but the store read above is an await, and the tab can
+      // close in between. Same `break` and same reasoning as the post-bind
+      // check below; asking first saves a bind that check would only close.
       if (!(deps.stillLive?.() ?? true)) break;
       // THE TERMINAL'S OWN MAP FIRST, then the page's. Two exclusions, neither
       // implying the other, and this one is checked first for two reasons: it is
@@ -287,25 +292,23 @@ export async function startHostForwards(
           rule.remoteHost,
           rule.remotePort,
         );
-        // THE SESSION DIED WHILE THIS BIND WAS IN FLIGHT. Both release sites are
-        // ONE-SHOT - `finishSsh` is behind `terminated` and the pane adapter's
-        // `close` fires once - so an entry claimed after either of them ran is
-        // never released: the row reads "Running (with host)" for the rest of
-        // the app's life, with Start/Stop disabled and a note telling the user
-        // to close a tab that is already gone.
+        // THE SESSION'S LAST TAB DETACHED WHILE THIS BIND WAS IN FLIGHT - or
+        // it was already gone before the bind started. `stillLive` (supplied
+        // by `attachHostForwards`'s epoch) answers false either way, and an
+        // entry claimed past that point is never released: the row reads
+        // "Running (with host)" for the rest of the app's life, with
+        // Start/Stop disabled and a note pointing at a tab that is already
+        // gone.
         //
-        // The window is the whole run - `disposeSession` releases SYNCHRONOUSLY
-        // and only then issues `ssh_close`, while this loop is already parked on
-        // an `ssh_forward_open` issued earlier, and the backend's read lock
-        // usually wins that race.
-        //
-        // BREAK, not `continue`: there is nothing to bind further forwards on,
-        // and no banner is worth writing because the pane is gone. Not claiming
-        // is sufficient - the backend reaps the orphaned listener when the last
-        // `Arc<Session>` drops (`SshSession` holds `handle`/`jump_handles` in
-        // `src-tauri/src/modules/ssh/session.rs`, and its `Drop` impl aborts
-        // the forward tasks), so what leaks here is only frontend state.
-        if (!(deps.stillLive?.() ?? true)) break;
+        // CLOSE IT, THEN BREAK. The session is SHARED now, so nothing on the
+        // backend reaps this listener just because this run's tab went away -
+        // closing it is this run's own job. `continue` would still be wrong:
+        // there is nothing to bind further forwards on, and no banner is
+        // worth writing because the pane this run started for is gone.
+        if (!(deps.stillLive?.() ?? true)) {
+          await deps.closeForward(sessionId, boundPort, generation).catch(() => {});
+          break;
+        }
         // RE-READ BOTH MAPS, in the same order as the pre-bind pair above, and
         // for the same reason each of them exists. The pre-bind reads happened
         // before an `await`, and neither of the two owners they ask about is
@@ -374,7 +377,7 @@ export async function startHostForwards(
         // is what the page reads. Reversed, anything that threw in between would
         // leave the user told about a forward the page cannot see. A `failed`
         // page entry is reset here because the claim makes its error false.
-        deps.claimHostOwned(rule.id, { sessionId, boundPort });
+        deps.claimHostOwned(rule.id, { sessionId, boundPort, generation });
         if (taken === "failed") deps.markPageStopped(rule.id);
         writeBanner(forwardingBanner(rule, boundPort));
       } catch (e) {
@@ -389,4 +392,50 @@ export async function startHostForwards(
     // the connect path. There is no surface left to report on either - the
     // thing that failed is very often the banner writer itself.
   }
+}
+
+/** Terminal tabs holding a shell on each backend session. The epoch OBJECT is the liveness token: a run's `stillLive` compares identity, so a session that goes 1→0→1 tabs never lets the first run claim into the second epoch. */
+const tabsBySession = new Map<number, { tabs: number }>();
+
+/** A terminal tab's shell is up on `sessionId`. The FIRST tab on a session runs `startHostForwards`; later tabs ride the forwards already up. Returns this tab's detach - idempotent - and the LAST detach on the session stops those forwards. */
+export function attachHostForwards(
+  hostId: string,
+  sessionId: number,
+  writeBanner: (text: string) => void,
+  deps: AutostartDeps = defaultAutostartDeps,
+): () => void {
+  let epoch = tabsBySession.get(sessionId);
+  if (!epoch) {
+    const fresh = { tabs: 0 };
+    tabsBySession.set(sessionId, fresh);
+    epoch = fresh;
+    void startHostForwards(hostId, sessionId, writeBanner, {
+      ...deps,
+      stillLive: () => tabsBySession.get(sessionId) === fresh,
+    });
+  }
+  epoch.tabs += 1;
+  const mine = epoch;
+  let detached = false;
+  return () => {
+    if (detached) return;
+    detached = true;
+    mine.tabs -= 1;
+    if (mine.tabs > 0 || tabsBySession.get(sessionId) !== mine) return;
+    tabsBySession.delete(sessionId);
+    void stopHostForwards(sessionId, deps);
+  };
+}
+
+/** Release every forward this module claimed on `sessionId` - claims first and synchronously, so the page stops showing "Running (with host)" at once - then close each listener. Never rejects. */
+async function stopHostForwards(
+  sessionId: number,
+  deps: Pick<AutostartDeps, "closeForward">,
+): Promise<void> {
+  const owned = Object.values(useHostOwnedForwards.getState().byRule).filter(
+    (e) => e.sessionId === sessionId,
+  );
+  useHostOwnedForwards.getState().releaseSession(sessionId);
+  for (const e of owned)
+    await deps.closeForward(sessionId, e.boundPort, e.generation).catch(() => {});
 }

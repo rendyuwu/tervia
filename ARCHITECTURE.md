@@ -276,19 +276,25 @@ rather than skip it.
 
 ### Session model
 
-The backend mirrors the local PTY command shape on purpose — `ssh_open`,
-`ssh_write`, `ssh_resize`, `ssh_close` — so a terminal pane can swap a local PTY
-for a remote shell with minimal plumbing. `openSshForSession`
-(`terminal/lib/ssh-session.ts`) returns an adapter that satisfies the same
-`PtySession` interface the local path returns.
+One `ssh_open` is one authenticated connection and nothing more; each terminal
+tab is a shell channel on it (`ssh_shell_open`, `ssh_shell_write`,
+`ssh_shell_resize`, `ssh_shell_close`), and `ssh_close` ends the connection.
+`openSshForSession` (`terminal/lib/ssh-session.ts`) returns an adapter that
+satisfies the same `PtySession` interface the local path returns. Tabs, forwards
+and RDP-over-jump all share ONE session per saved host through `ssh/tunnel.ts`'s
+refcounted map (`openShellForConnection` for a tab): closing one consumer leaves
+the session up, and the last release closes it. A tab that reconnects against a
+dead session joins whatever re-dial its siblings already started.
 
 Every session runs on one shared 2-worker tokio runtime (`tervia-ssh`); russh is
 async-first and per-session executors would duplicate thread pools. Sessions
 live in `SshState` keyed by a `u32`, and each one spawns a janitor task that
-evicts its slot when the pump task exits, so a remote hangup does not leak an
-entry. Output streams back as `SshEvent` over a `Channel` (`connected`,
-`jumpConnected`, `hostKeyPrompt`, `data`, `stderr`, `exit`, `error`), with
-payload bytes base64-encoded.
+evicts its slot when the CONNECTION ends (not any one shell), so a remote hangup
+does not leak an entry, and sends `disconnected` on the session's `Channel`.
+Each shell streams back as `SshEvent` over its own `Channel` (`data`, `stderr`,
+`exit`, `signal`, `disconnected`), with payload bytes base64-encoded; the
+session's `Channel` carries `jumpConnected` and `hostKeyPrompt` during the dial,
+and `ssh_open` returns the target's fingerprint.
 
 Host-key and public-key signature algorithms are pinned to russh 0.60's vetted
 default set **minus bare `ssh-rsa`** (RSA with SHA-1, which OpenSSH disabled by
@@ -374,20 +380,24 @@ minimal SOCKS5 listener (no-auth, CONNECT only) that opens one
 
 Three callers, three shapes:
 
-1. **Declared forwards.** After the shell channel comes up,
-   `openSshForSession` fires each of `conn.forwards` as fire-and-forget: an
-   already-taken local port is worth a line in the terminal, not a failed shell.
+1. **Declared forwards.** When the FIRST terminal tab's shell on a session comes
+   up, `attachHostForwards` (`forwards/autostart.ts`) fires each `startWithHost`
+   rule as fire-and-forget: an already-taken local port is worth a line in the
+   terminal, not a failed shell. The LAST tab to detach from that session stops
+   them, even when an RDP pane or a page-started forward keeps the session up.
 2. **Auto-forwarded dev servers.** When a remote shell prints a
    `localhost:PORT` URL, `forwardDetectedUrl` binds an OS-chosen local port,
    tunnels it to that port on the server's loopback, and rewrites the URL's
    authority so the pill opens something that actually resolves. The per-spawn
    cache holds the in-flight _promise_, not the resolved port, because a dev
    server prints its banner in bursts and caching only results would leave two
-   tunnels standing for one port.
+   tunnels standing for one port. Each tunnel is closed when its tab's shell
+   ends, because the shared session may outlive the tab.
 3. **Headless tunnels.** `ssh/tunnel.ts` opens a forward for a saved connection
    with no terminal attached — the "reach a database only the bastion can see"
-   case. Sessions are refcounted per connection id so several forwards share one
-   SSH session, and forwards are memoized by `connId|host|port` so a repeat
+   case. Sessions are refcounted per connection id so forwards, RDP-over-jump
+   and terminal tabs share one SSH session, and forwards are memoized by
+   `connId|host|port` so a repeat
    request reuses its port. A connection with no pinned host key is **refused**
    unless the caller passes `promptForHostKey` and has a dialog on screen to
    answer with. Callers: the RDP dial path, and `forwards/controller.ts`'s
@@ -522,15 +532,17 @@ For a remote leaf the same flow runs through `ssh_sftp_read_file` instead, on
 the session resolved from the leaf's connection id.
 
 **Connecting to a saved host.** The header's SSH menu opens a terminal leaf
-carrying `hostId` -> `openSshForSession` loads the row, reads its
-secrets, and resolves the ProxyJump chain (all at open time, so an edited chain
-is picked up on the next reconnect) -> `invoke("ssh_open", ...)` dials each hop
-in order -> the server presents its key; if the row has no pinned fingerprint
-the handshake pauses and a `hostKeyPrompt` event raises the confirmation dialog
--> on acceptance the fingerprint is pinned, authentication proceeds, and
-`connected` arrives with the session id -> declared `ssh -L` forwards are opened
-on the fresh session -> remote bytes stream in over the same `Channel` and land
-in xterm exactly like local PTY output.
+carrying `hostId` -> `openSshForSession` loads the row for the banner and route
+-> `openShellForConnection` (`ssh/tunnel.ts`) joins the host's live session or
+dials one: it reads the secrets and resolves the ProxyJump chain (at dial time,
+so an edited chain is picked up once every reference to the old session is
+gone) -> `invoke("ssh_open", ...)` dials each hop in order -> the server presents
+its key; if the row has no pinned fingerprint the handshake pauses and a
+`hostKeyPrompt` event raises the confirmation dialog -> on acceptance
+authentication proceeds and `ssh_open` returns the session id and fingerprint,
+which is pinned -> `ssh_shell_open` opens this tab's shell channel -> the first
+tab on the session starts its `startWithHost` forwards -> remote bytes stream in
+over the shell's `Channel` and land in xterm exactly like local PTY output.
 
 ### PTY daemon persistence
 
