@@ -3,7 +3,8 @@
  * below actually needs answered.
  *
  * A focused terminal owns every bare-Ctrl control code (Ctrl+E, Ctrl+W, Ctrl+K,
- * Ctrl+L, Ctrl+[ Esc, Ctrl+I Tab, the tmux/screen prefix) and every bare-Alt
+ * Ctrl+L, Ctrl+[ Esc, Ctrl+I Tab, the tmux/screen prefix - except where the
+ * bound action is in `FIRES_OVER_RAW_KEYBOARD`) and every bare-Alt
  * meta sequence, and a focused RDP pane owns the same chords for the same
  * reason - so those keystrokes must fall through to the surface instead of
  * firing an app action. That is a claim about FOCUS.
@@ -68,20 +69,53 @@ export function focusTargetOf(e: KeyboardEvent): FocusTarget {
 }
 
 /**
+ * The actions that fire over a focused terminal or RDP pane even though their
+ * chord is a control code that surface would otherwise take: `pane.splitRight`
+ * (^D EOF), `pane.focusNext` (^] GS), `pane.focusPrev` (^[ Esc). The pane pair
+ * qualifies because it moves focus and mutates nothing - navigation, not
+ * mutation.
+ *
+ * Scope comes from the modal stack, not from this table - the issue that asked
+ * for the pair said "scope the exemption by the target's position in the modal
+ * stack, not by the chord's identity":
+ *  - This table decides WHICH ids fire over a raw-keyboard surface.
+ *  - The modal stack decides WHERE. `useGlobalShortcuts`' modal gate returns
+ *    for all of these ids whenever any modal is on the stack, the Command
+ *    Palette included, because none of them has a `MODAL_GATE_EXEMPT` entry.
+ *    The order of the two checks does not matter; both are side-effect-free
+ *    early returns.
+ *  - Raw-keyboard surfaces exist only inside `PaneTreeView`, so the exemption
+ *    can only apply while the tab area is the top layer.
+ *  - Never add these ids to `MODAL_GATE_EXEMPT`.
+ *
+ * Keyed on the action, not the key: a user who rebinds one of these ids
+ * carries the exemption to the new chord, and any other action bound to
+ * Ctrl+] / Ctrl+[ still yields. Add a member only if its handler acts on the
+ * tab area's panes.
+ */
+const FIRES_OVER_RAW_KEYBOARD: Partial<Record<ShortcutId, true>> = {
+  "pane.splitRight": true,
+  "pane.focusNext": true,
+  "pane.focusPrev": true,
+};
+
+/**
  * True when the keydown for shortcut `id` must be let through to the raw
  * surface instead of firing the app action bound to it. Applied by
  * `useGlobalShortcuts` to every caller's matched chord.
  *
  * A focused terminal owns every bare-Ctrl control code (Ctrl+E, Ctrl+W,
- * Ctrl+K, Ctrl+L, Ctrl+[ Esc, Ctrl+I Tab, the tmux/screen prefix, …) and
+ * Ctrl+K, Ctrl+L, Ctrl+[ Esc, Ctrl+I Tab, the tmux/screen prefix, … - except
+ * where the bound action is in `FIRES_OVER_RAW_KEYBOARD`) and
  * every bare-Alt meta sequence (readline M-b / M-f / M-d / M-1..9). On
  * Win/Linux `Mod` is Ctrl, so those chords would otherwise fire an app
  * action (close tab, word-wrap, explorer search, …) and the byte never
- * reaches the shell. Exception: `pane.splitRight` (Ctrl+D) always fires;
- * `pane.splitDown` already passes because it carries Shift. Terminal-safe
- * app chords keep Shift/Meta or add a second modifier (Ctrl+Shift+C copy,
- * Ctrl+Shift+X close, Ctrl+Alt+P, Shift+Alt+F) and stay active; Ctrl+Tab /
- * Ctrl+digit / zoom are not control codes either.
+ * reaches the shell. Exception: the actions in `FIRES_OVER_RAW_KEYBOARD`
+ * (`pane.splitRight` Ctrl+D, `pane.focusNext` Ctrl+], `pane.focusPrev`
+ * Ctrl+[) always fire; `pane.splitDown` already passes because it carries
+ * Shift. Terminal-safe app chords keep Shift/Meta or add a second modifier
+ * (Ctrl+Shift+C copy, Ctrl+Shift+X close, Ctrl+Alt+P, Shift+Alt+F) and stay
+ * active; Ctrl+Tab / Ctrl+digit / zoom are not control codes either.
  *
  * A focused RDP pane is gated the same way and for the same reason: the
  * remote desktop owns its own Ctrl and Alt chords, so Ctrl+W has to reach
@@ -103,7 +137,7 @@ export function yieldsToRawKeyboard(
   tabAreaCovered: boolean,
 ): boolean {
   return (
-    id !== "pane.splitRight" &&
+    FIRES_OVER_RAW_KEYBOARD[id] !== true &&
     !tabAreaCovered &&
     ownsRawKeyboard(target) &&
     (isTerminalControlChord(e) || isTerminalMetaChord(e))

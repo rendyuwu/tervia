@@ -5,7 +5,9 @@
  *  1. WHICH CHORDS - `isTerminalControlChord` / `isTerminalMetaChord`: the ones
  *     a focused terminal keeps (readline editing, Ctrl+D EOF / screen detach,
  *     Ctrl+I Tab, Ctrl+[ Esc, the tmux/screen prefix) instead of the app's
- *     Mod+letter shortcuts stealing them on Windows/Linux.
+ *     Mod+letter shortcuts stealing them on Windows/Linux - unless the bound
+ *     action is one the gate fires over the terminal by design (Ctrl+D split,
+ *     the Ctrl+] / Ctrl+[ pane-navigation pair; see part 3).
  *  2. WHO IS FOCUSED - `ownsRawKeyboard` (`shortcuts/lib/keyboardOwner.ts`).
  *     The half that was never asked: the gate used to test which leaf was
  *     ACTIVE IN THE TAB while its own comment claimed to be about focus, so
@@ -18,7 +20,10 @@
  *     "Go to file" (Mod+P / Mod+G) collides with a focused terminal's
  *     readline Ctrl+P (previous-history) and Ctrl+G (abort), which is
  *     exactly the bug this gate exists to prevent: it had no gate of its
- *     own before this.
+ *     own before this. The same part pins the pane-navigation exemption:
+ *     `pane.focusNext` / `pane.focusPrev` fire over a focused terminal or RDP
+ *     pane, and it follows the action - another action matched on Ctrl+]
+ *     still yields.
  *
  * Run: `npx tsx scripts/keybindings-terminal-verify.ts`.
  */
@@ -71,7 +76,9 @@ function expect(label: string, e: Ev, want: boolean): void {
   }
 }
 
-console.log("[bare Ctrl + control-code key] -> reach the shell");
+console.log(
+  "[bare Ctrl + control-code key] -> a control-code chord (reaches the shell unless its action fires over the terminal by design)",
+);
 for (const [code, name] of [
   ["KeyD", "Ctrl+D (EOF / screen detach)"],
   ["KeyE", "Ctrl+E (end-of-line)"],
@@ -243,6 +250,25 @@ console.log("\n[yieldsToRawKeyboard] the exact rule the FileExplorer bug needed 
       toEvent({ code: "KeyD", ctrlKey: true }),
       false,
     ),
+  );
+  const ctrlBracketRight = toEvent({ code: "BracketRight", ctrlKey: true });
+  const ctrlBracketLeft = toEvent({ code: "BracketLeft", ctrlKey: true });
+  check(
+    "Ctrl+] (pane.focusNext) fires over a focused terminal instead of yielding",
+    !yieldsToRawKeyboard("pane.focusNext", terminal, ctrlBracketRight, false),
+  );
+  check(
+    "Ctrl+[ (pane.focusPrev) fires over a focused terminal instead of yielding",
+    !yieldsToRawKeyboard("pane.focusPrev", terminal, ctrlBracketLeft, false),
+  );
+  check(
+    "and both fire over a focused RDP pane",
+    !yieldsToRawKeyboard("pane.focusNext", rdp, ctrlBracketRight, false) &&
+      !yieldsToRawKeyboard("pane.focusPrev", rdp, ctrlBracketLeft, false),
+  );
+  check(
+    "the exemption belongs to the action, not the key: another action matched on Ctrl+] still yields",
+    yieldsToRawKeyboard("explorer.search", terminal, ctrlBracketRight, false),
   );
   check(
     "a Shift chord (explorer.grep's Mod+Shift+F) is not a control chord, so it never yields",
