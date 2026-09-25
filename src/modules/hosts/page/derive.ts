@@ -83,6 +83,14 @@ export type GroupFilter =
   { kind: "all" } | { kind: "ungrouped" } | { kind: "group"; groupId: string };
 
 /**
+ * Every selected tag must be on the host (ALL, not ANY) - narrowing, the same
+ * direction the protocol and group stages already narrow in. Lowercased tag
+ * keys, so membership is case-insensitive without every caller re-folding it;
+ * an empty set means "no filter", matching `GroupFilter`'s `{ kind: "all" }`.
+ */
+export type TagFilter = ReadonlySet<string>;
+
+/**
  * Does an SSH host's own credential name a secret the record says is absent?
  *
  * The `never` default is the same guarantee `resolve.ts` gives itself: a fourth
@@ -197,6 +205,29 @@ export function groupCounts(hosts: readonly Host[], groups: readonly HostGroup[]
   return { total: hosts.length, ungrouped, direct, byGroup };
 }
 
+export type TagCount = { tag: string; count: number };
+
+/**
+ * Every tag in use, one entry per canonical spelling, case-insensitively
+ * merged across hosts: two hosts spelling the same idea "Prod" and "prod" count
+ * as one chip, under whichever spelling `hosts` yields first for that lowercase
+ * key. There is no managed tag record to pick a winner up front the way
+ * `HostGroup.name` does, so "first seen" is the whole rule. Sorted
+ * case-insensitively by spelling, for a stable strip order across renders.
+ */
+export function tagCounts(hosts: readonly Host[]): TagCount[] {
+  const byKey = new Map<string, TagCount>();
+  for (const host of hosts) {
+    for (const raw of host.tags ?? []) {
+      const key = raw.toLowerCase();
+      const entry = byKey.get(key);
+      if (entry) entry.count += 1;
+      else byKey.set(key, { tag: raw, count: 1 });
+    }
+  }
+  return [...byKey.values()].sort((a, b) => a.tag.toLowerCase().localeCompare(b.tag.toLowerCase()));
+}
+
 /**
  * A predicate for one filter, built ONCE rather than re-derived per host: the
  * `"group"` arm's {@link descendantIds} is a full `buildGroupTree` plus a
@@ -226,6 +257,22 @@ export function matchesGroupFilter(
   }
 }
 
+/**
+ * A predicate for one filter, built ONCE per {@link filterAndRank} call rather
+ * than re-derived per host, on {@link matchesGroupFilter}'s own reasoning.
+ */
+export function matchesTagFilter(filter: TagFilter): (host: Host) => boolean {
+  if (filter.size === 0) return () => true;
+  return (host) => {
+    if (!host.tags || host.tags.length === 0) return false;
+    const hostTags = new Set(host.tags.map((t) => t.toLowerCase()));
+    for (const tag of filter) {
+      if (!hostTags.has(tag)) return false;
+    }
+    return true;
+  };
+}
+
 export type HostsViewInput = {
   rows: readonly HostSearchRow[];
   protocol: ProtocolFilter;
@@ -235,11 +282,12 @@ export type HostsViewInput = {
    *  is gone", and can test "this group or a descendant" for the `"group"`
    *  arm - the rows themselves cannot say either. */
   groups: readonly HostGroup[];
+  tags: TagFilter;
   query: string;
 };
 
 /**
- * The rows a render should draw: protocol, then group, then ranking.
+ * The rows a render should draw: protocol, then group, then tag, then ranking.
  *
  * Ranking LAST is deliberate, but be precise about what it buys, because no
  * output today can tell the two orders apart: a predicate and a stable TOTAL
@@ -261,7 +309,9 @@ export function filterAndRank(input: HostsViewInput): HostSearchRow[] {
   );
   const inGroup = matchesGroupFilter(input.group, input.groups);
   const byGroup = byProtocol.filter((row) => inGroup(row.host));
-  return rankHosts(byGroup, input.query);
+  const inTags = matchesTagFilter(input.tags);
+  const byTags = byGroup.filter((row) => inTags(row.host));
+  return rankHosts(byTags, input.query);
 }
 
 /**

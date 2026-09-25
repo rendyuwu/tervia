@@ -17,6 +17,11 @@ export type SharedDraft = {
   /** "" = no group. A group is CHOSEN here and created on the Hosts page. */
   groupId: string;
   description: string;
+  /** Unnormalised: `TagsInput` keeps whatever the user has added so far - its
+   *  own `commit` already runs each addition through `normalizeHostTags`, and
+   *  the save path runs the whole draft through it again (`writeHost` a third
+   *  time), the same layered normalisation every other writer gets. */
+  tags: readonly string[];
 };
 
 export type SshCredentialDraft = {

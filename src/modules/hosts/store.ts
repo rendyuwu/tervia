@@ -53,6 +53,7 @@ import {
   HostBindingChangedError,
   hostFingerprint,
   hostPins,
+  normalizeHostTags,
   type Host,
   type HostGroup,
   type HostPins,
@@ -942,6 +943,10 @@ export function createHostsStore(io: HostsIo): HostsStore {
     const at = now();
     const record: Host = {
       ...withPins(credentialed, nextPins(credentialed, existing)),
+      // Normalised HERE too, not only in the editor: `duplicateHost` and a
+      // backup import both route through this function with a record whose
+      // tags may never have passed through `HostEditorDialog.tsx` at all.
+      tags: normalizeHostTags(credentialed.tags),
       updatedAt: at,
     };
 

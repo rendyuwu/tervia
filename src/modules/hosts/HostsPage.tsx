@@ -58,6 +58,7 @@ import { HostEditorDialog } from "./HostEditorDialog";
 import { Chip, GroupStrip } from "./page/GroupStrip";
 import { HostCard } from "./page/HostCard";
 import { HostsBackupActions } from "./page/HostsBackupActions";
+import { TagStrip } from "./page/TagStrip";
 import {
   cardFocusTarget,
   deleteRulesNote,
@@ -66,8 +67,10 @@ import {
   identityName,
   missingSecret,
   searchRows,
+  tagCounts,
   type GroupFilter,
   type ProtocolFilter,
+  type TagFilter,
 } from "./page/derive";
 import {
   clearHostEditorRequest,
@@ -98,6 +101,10 @@ export type HostsPageProps = {
 // list on every keystroke anywhere on the page.
 const ALL_GROUPS: GroupFilter = { kind: "all" };
 const UNGROUPED: GroupFilter = { kind: "ungrouped" };
+/** Stable identity, on the same grounds as `ALL_GROUPS` above: a fresh `Set`
+ *  literal at every render would defeat the `visible` memo below on every
+ *  keystroke anywhere on the page, not just a tag click. */
+const NO_TAGS_SELECTED: TagFilter = new Set();
 
 const PROTOCOL_FILTERS: ReadonlyArray<{ value: ProtocolFilter; label: string }> = [
   { value: "all", label: "All" },
@@ -174,6 +181,7 @@ export function HostsPage({ onConnect, onScreen }: HostsPageProps): ReactNode {
   const [query, setQuery] = useState("");
   const [protocol, setProtocol] = useState<ProtocolFilter>("all");
   const [group, setGroup] = useState<GroupFilter>(ALL_GROUPS);
+  const [tagFilter, setTagFilter] = useState<TagFilter>(NO_TAGS_SELECTED);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [editorTarget, setEditorTarget] = useState<HostEditorTarget | null>(null);
   const [pendingDelete, setPendingDelete] = useState<Host | null>(null);
@@ -233,9 +241,10 @@ export function HostsPage({ onConnect, onScreen }: HostsPageProps): ReactNode {
   const knownGroupIds = useMemo(() => new Set(groups.map((g) => g.id)), [groups]);
   const rows = useMemo(() => searchRows(hosts, groups, vault), [hosts, groups, vault]);
   const counts = useMemo(() => groupCounts(hosts, groups), [hosts, groups]);
+  const tags = useMemo(() => tagCounts(hosts), [hosts]);
   const visible = useMemo(
-    () => filterAndRank({ rows, protocol, group, groups, query }),
-    [rows, protocol, group, groups, query],
+    () => filterAndRank({ rows, protocol, group, groups, tags: tagFilter, query }),
+    [rows, protocol, group, groups, tagFilter, query],
   );
 
   // The grid's one tab stop: the selected card while it is on screen, else the
@@ -250,6 +259,16 @@ export function HostsPage({ onConnect, onScreen }: HostsPageProps): ReactNode {
   useEffect(() => {
     if (group.kind === "group" && !knownGroupIds.has(group.groupId)) setGroup(ALL_GROUPS);
   }, [group, knownGroupIds]);
+
+  // The same reset as the one above, for a tag no host carries any more - the
+  // last host wearing it was deleted or edited, in this window or another.
+  useEffect(() => {
+    const known = new Set(tags.map((t) => t.tag.toLowerCase()));
+    setTagFilter((prev) => {
+      const next = new Set([...prev].filter((t) => known.has(t)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [tags]);
 
   // The header's quick-connect opens the Hosts tab and then asks for the editor,
   // so the request may predate this mount - see `pendingEditor.ts`.
@@ -349,7 +368,19 @@ export function HostsPage({ onConnect, onScreen }: HostsPageProps): ReactNode {
     await deleteGroup(id);
   }, []);
 
-  const filtering = query.trim().length > 0 || protocol !== "all" || group.kind !== "all";
+  const toggleTag = useCallback((key: string) => {
+    setTagFilter((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }, []);
+
+  const clearTags = useCallback(() => setTagFilter(NO_TAGS_SELECTED), []);
+
+  const filtering =
+    query.trim().length > 0 || protocol !== "all" || group.kind !== "all" || tagFilter.size > 0;
   const pendingRulesNote = pendingDelete
     ? deleteRulesNote(pendingDelete.id, forwardsById.values())
     : null;
@@ -548,6 +579,8 @@ export function HostsPage({ onConnect, onScreen }: HostsPageProps): ReactNode {
           identities={Array.from(vault.identities.values())}
           onSetDefaultIdentity={setGroupDefaultIdentity}
         />
+
+        <TagStrip tags={tags} selected={tagFilter} onToggle={toggleTag} onClear={clearTags} />
       </div>
 
       {/* No transform and no fixed row height anywhere between here and the
@@ -643,7 +676,7 @@ function EmptyState({ filtering, hasHosts }: { filtering: boolean; hasHosts: boo
       </span>
       <span className="max-w-72 text-[11px] leading-relaxed opacity-70">
         {hasHosts && filtering
-          ? "Clear the search box or widen the protocol and group filters."
+          ? "Clear the search box or widen the protocol, group and tag filters."
           : "Use New host to save an SSH or RDP machine, or Import to bring one over."}
       </span>
     </div>

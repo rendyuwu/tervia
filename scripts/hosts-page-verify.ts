@@ -32,9 +32,12 @@ import {
   hostUsername,
   identityName,
   matchesGroupFilter,
+  matchesTagFilter,
   missingSecret,
   searchRows,
+  tagCounts,
   UNKNOWN_IDENTITY_LABEL,
+  type TagFilter,
   type VaultSnapshot,
 } from "../src/modules/hosts/page/derive";
 import type { HostGroup, RdpHost, SshHost } from "../src/modules/hosts/types";
@@ -216,6 +219,11 @@ const NO_VAULT = vault();
 function group(id: string, name: string, order?: number, parentId?: string): HostGroup {
   return { id, name, order, parentId };
 }
+
+/** "No tag filter" for a `filterAndRank` call that is not exercising tags -
+ *  empty, on the same "shared and never a comparison baseline" grounds as
+ *  `NO_VAULT` above. */
+const ALL_TAGS: TagFilter = new Set();
 
 // --- missingSecret: SSH, inline -----------------------------------------
 
@@ -790,14 +798,66 @@ console.log(
   );
 }
 
+// --- matchesTagFilter -----------------------------------------------------
+
+console.log("\n[matchesTagFilter] ALL selected tags must be on the host, case-insensitively");
+{
+  const both: SshHost = { ...sshInline("h-80"), tags: ["Prod", "db"] };
+  const one: SshHost = { ...sshInline("h-81"), tags: ["prod"] };
+  const none: SshHost = { ...sshInline("h-82") };
+  const empty: SshHost = { ...sshInline("h-83"), tags: [] };
+
+  const matchesEmpty = matchesTagFilter(new Set());
+  check(
+    "an empty filter keeps every host, tagged or not",
+    [both, one, none, empty].map((h) => matchesEmpty(h)),
+    [true, true, true, true],
+  );
+  const matchesProd = matchesTagFilter(new Set(["prod"]));
+  check(
+    "one selected tag keeps every host carrying it, case-insensitively",
+    [both, one, none, empty].map((h) => matchesProd(h)),
+    [true, true, false, false],
+  );
+  const matchesBoth = matchesTagFilter(new Set(["prod", "db"]));
+  check(
+    "two selected tags require ALL of them, not just one",
+    [both, one, none, empty].map((h) => matchesBoth(h)),
+    [true, false, false, false],
+  );
+}
+
+// --- tagCounts -------------------------------------------------------------
+
+console.log("\n[tagCounts] merges case-insensitively, keeps the first spelling, sorts");
+{
+  const a: SshHost = { ...sshInline("h-90"), tags: ["Prod", "db"] };
+  const b: SshHost = { ...sshInline("h-91"), tags: ["prod", "staging"] };
+  const c: SshHost = { ...sshInline("h-92") };
+  const counts = tagCounts([a, b, c]);
+  check(
+    "sorted case-insensitively by spelling",
+    counts.map((t) => t.tag),
+    ["db", "Prod", "staging"],
+  );
+  check("counts sum across hosts, merged case-insensitively", counts, [
+    { tag: "db", count: 1 },
+    { tag: "Prod", count: 2 },
+    { tag: "staging", count: 1 },
+  ]);
+  check("no hosts and no tags is an empty list", tagCounts([]), []);
+  check("a host with no tags field contributes nothing", tagCounts([c]), []);
+}
+
 // --- filterAndRank ------------------------------------------------------
 //
-// Protocol, then group, then ranking. Note what this can and cannot pin: a
-// predicate and a stable total sort COMMUTE, so no output can distinguish
-// filter-then-rank from rank-then-filter. What it does pin is that all three
-// run, that ranking is what orders the survivors, and that the order does not
-// depend on the input order - which is what a regression actually breaks (a
-// top-N slice taken before a filter, or a filter dropped entirely).
+// Protocol, then group, then tag, then ranking. Note what this can and cannot
+// pin: a predicate and a stable total sort COMMUTE, so no output can
+// distinguish filter-then-rank from rank-then-filter. What it does pin is
+// that all four run, that ranking is what orders the survivors, and that the
+// order does not depend on the input order - which is what a regression
+// actually breaks (a top-N slice taken before a filter, or a filter dropped
+// entirely).
 //
 // `filterAndRank`'s own doc comment used to disagree with this, claiming the
 // alternative order would make "the visible order whatever survived rather than
@@ -806,13 +866,13 @@ console.log(
 // function contradicting each other is worse than either being wrong alone,
 // because a reader has no way to tell which one was checked.
 
-console.log("\n[filterAndRank] all three filters run, and ranking orders what survives");
+console.log("\n[filterAndRank] all four filters run, and ranking orders what survives");
 {
   const groups = [group("g-1", "Production")];
   const v = vault([identity("i-1", { username: "ansible" })]);
   const hosts = [
     sshInline("h-45", {}, "g-1"),
-    rdpInline("h-46", {}, "g-1"),
+    { ...rdpInline("h-46", {}, "g-1"), tags: ["prod"] },
     sshInline("h-47"),
     rdpInline("h-48"),
   ];
@@ -827,6 +887,7 @@ console.log("\n[filterAndRank] all three filters run, and ranking orders what su
         protocol: "ssh",
         group: { kind: "all" },
         groups,
+        tags: ALL_TAGS,
         query: "",
       }),
     ),
@@ -840,6 +901,7 @@ console.log("\n[filterAndRank] all three filters run, and ranking orders what su
         protocol: "rdp",
         group: { kind: "all" },
         groups,
+        tags: ALL_TAGS,
         query: "",
       }),
     ),
@@ -853,10 +915,27 @@ console.log("\n[filterAndRank] all three filters run, and ranking orders what su
         protocol: "ssh",
         group: { kind: "group", groupId: "g-1" },
         groups,
+        tags: ALL_TAGS,
         query: "",
       }),
     ),
     ["h-45"],
+  );
+  // h-45 is also in g-1, and it carries no "prod" tag, so it is removed only
+  // by the tag stage, not the group stage above.
+  check(
+    "the tag stage narrows too, composing with the group stage",
+    ids(
+      filterAndRank({
+        rows,
+        protocol: "all",
+        group: { kind: "group", groupId: "g-1" },
+        groups,
+        tags: new Set(["prod"]),
+        query: "",
+      }),
+    ),
+    ["h-46"],
   );
   check(
     "a query narrows what the two filters left",
@@ -866,6 +945,7 @@ console.log("\n[filterAndRank] all three filters run, and ranking orders what su
         protocol: "all",
         group: { kind: "all" },
         groups,
+        tags: ALL_TAGS,
         query: "h-45",
       }),
     ),
@@ -878,6 +958,7 @@ console.log("\n[filterAndRank] all three filters run, and ranking orders what su
       protocol: "all",
       group: { kind: "all" },
       groups,
+      tags: ALL_TAGS,
       query: "zzzz",
     }).length,
     0,
@@ -896,6 +977,7 @@ console.log("\n[filterAndRank] all three filters run, and ranking orders what su
       protocol: "all",
       group: { kind: "all" },
       groups: [],
+      tags: ALL_TAGS,
       query: "db",
     }).map((r) => r.host.name);
   check("output is ranked, not input-ordered", order([buried, prefix, exact]), [

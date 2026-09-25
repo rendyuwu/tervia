@@ -99,6 +99,7 @@ import {
   RDP_CLIPBOARD_MODES,
   RDP_DEFAULT_PRESET,
   hostPins,
+  normalizeHostTags,
   type Host,
   type HostBase,
   type HostGroup,
@@ -286,6 +287,7 @@ function baseOf(raw: Record<string, unknown>): HostBase | null {
   const groupId = str(raw.groupId).trim();
   const description = str(raw.description).trim();
   const lastConnectedAt = raw.lastConnectedAt;
+  const tags = normalizeHostTags(raw.tags);
 
   return {
     id,
@@ -299,6 +301,7 @@ function baseOf(raw: Record<string, unknown>): HostBase | null {
     // group exists here under a different id.
     ...(groupId ? { groupId } : {}),
     ...(description ? { description } : {}),
+    ...(tags ? { tags } : {}),
     ...(typeof lastConnectedAt === "number" && Number.isFinite(lastConnectedAt)
       ? { lastConnectedAt }
       : {}),

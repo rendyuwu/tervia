@@ -420,6 +420,27 @@ field / default identity was not written by this build" as distinct from
 "this group is a root / has no default" - at which point an old file could
 keep the local nesting or default instead of overwriting it.
 
+## Host tags
+
+### A tag has no managed record, so renaming or deleting one everywhere is not one action
+
+**Accepted state.** `HostBase.tags` is free-form strings, normalised per host by
+`normalizeHostTags` - there is no `HostTag` record the way `HostGroup` is one, and
+so no place carrying a single spelling, a rename, or a delete that would reach
+every host wearing that tag at once. Retyping "prod" to "production" on one host
+leaves every other host still saying "prod"; deleting it from one host leaves it
+on the rest. This is the group-record integrity work `HostGroup`'s collision
+check, rename and delete-cascade already do, deliberately not built for tags:
+adding, removing, filtering and searching a tag on a host is what was asked
+for, not managing tags as records in their own right.
+
+**Carried by.** `HostBase.tags` and `normalizeHostTags`
+(`src/modules/hosts/types.ts`).
+
+**Trigger.** A request for a managed tag list with rename-everywhere or
+delete-everywhere, carrying the same collision/rename/delete-cascade work
+`HostGroup` and `store.ts`'s `upsertGroup`/`deleteGroup` already do for groups.
+
 ## Shared UI
 
 ### A shared row/box layout is duplicated between the SSH credential section and the host editor, and only one copy is checked

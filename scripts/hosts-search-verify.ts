@@ -219,18 +219,23 @@ console.log("\n[tier 4] a word-boundary hit outranks a bare substring hit");
   check("the no-boundary (tier 5) form ranks after all four", names(result)[4], "xmail");
 }
 
-// --- tier 5: substring in username or group name, and dropped non-matches -
+// --- tier 5: substring in username, group name or tags, and dropped
+// non-matches -------------------------------------------------------------
 
-console.log("\n[tier 5] a match found only via username or only via group name still ranks");
+console.log(
+  "\n[tier 5] a match found only via username, only via group name, or only via a tag still ranks",
+);
 {
   const viaUser = row(ssh("h-1", "box-one", "10.0.0.1", { user: "deploy" }));
   const viaGroup = row(ssh("h-2", "box-two", "10.0.0.2"), { groupName: "deploy-team" });
+  const viaTag = row(ssh("h-4", "box-four", "10.0.0.4"), { tags: ["deploy-target"] });
   const noMatch = row(ssh("h-3", "box-three", "10.0.0.3"));
-  const result = rankHosts([noMatch, viaUser, viaGroup], "deploy");
-  check("both match, the non-match is dropped (not sorted to the bottom)", names(result).sort(), [
-    "box-one",
-    "box-two",
-  ]);
+  const result = rankHosts([noMatch, viaUser, viaGroup, viaTag], "deploy");
+  check(
+    "all three match, the non-match is dropped (not sorted to the bottom)",
+    names(result).sort(),
+    ["box-four", "box-one", "box-two"],
+  );
 }
 // A vault-bound row carries no inline username. The version of this that was
 // here asserted `.length === 1` over a SINGLE-row input, which passes for any
@@ -259,9 +264,9 @@ console.log("\n[tier 5] a match found only via username or only via group name s
 //
 // Every query in the tier blocks above is already lowercase, and `matchTier`
 // lowercases the fields itself - so `rankHosts`'s own `query.trim().toLowerCase()`
-// was removable with ZERO failures, and so were `matchTier`'s folds on `username`
-// and `groupName`, which nothing above ever fed a capital letter to. Each check
-// below is written to die if exactly one of those five folds is dropped: an
+// was removable with ZERO failures, and so were `matchTier`'s folds on `username`,
+// `groupName` and `tags`, which nothing above ever fed a capital letter to. Each
+// check below is written to die if exactly one of those six folds is dropped: an
 // uppercase query against a lowercase field kills the query fold, a lowercase
 // query against a mixed-case field kills that field's fold, and each list carries
 // a non-matching row so a `matchTier` that stopped discriminating fails too.
@@ -302,9 +307,10 @@ console.log("\n[case folding] an uppercase query and an uppercase field both fol
     ["gateway"],
   );
 
-  // The two folds nothing above exercised at all.
+  // The three folds nothing above exercised at all.
   const upperUser = row(ssh("h-4", "box-four", "10.0.0.4", { user: "Deploy" }));
   const upperGroup = row(ssh("h-5", "box-five", "10.0.0.5"), { groupName: "Deploy-Team" });
+  const upperTag = row(ssh("h-6", "box-six", "10.0.0.6"), { tags: ["Deploy-Ring"] });
   check(
     "a lowercase query matches a mixed-case USERNAME",
     names(rankHosts([upperUser, noise], "deploy")),
@@ -314,6 +320,11 @@ console.log("\n[case folding] an uppercase query and an uppercase field both fol
     "a lowercase query matches a mixed-case GROUP NAME",
     names(rankHosts([upperGroup, noise], "deploy")),
     ["box-five"],
+  );
+  check(
+    "a lowercase query matches a mixed-case TAG",
+    names(rankHosts([upperTag, noise], "deploy")),
+    ["box-six"],
   );
   // Both ends at once, which needs the query fold and the field fold together.
   check(
@@ -325,6 +336,11 @@ console.log("\n[case folding] an uppercase query and an uppercase field both fol
     "an uppercase query matches a mixed-case group name",
     names(rankHosts([upperGroup, noise], "DEPLOY")),
     ["box-five"],
+  );
+  check(
+    "an uppercase query matches a mixed-case tag",
+    names(rankHosts([upperTag, noise], "DEPLOY")),
+    ["box-six"],
   );
 }
 
@@ -612,6 +628,22 @@ console.log("\n[two surfaces] one row builder, so the page and the header cannot
       identities,
     }).map((r) => r.groupName),
     ["Blank"],
+  );
+  // `searchRows` is the one place `row.tags` is populated from `host.tags` -
+  // every tag-matching check above builds its rows with the `row()` fixture
+  // helper instead, which passes `tags` straight through `extra`, so it can
+  // never catch `searchRows` itself dropping that line.
+  check(
+    "searchRows carries a host's tags into the row, so a tag-only query finds it",
+    names(
+      rankHosts(
+        searchRows([{ ...ssh("h-7", "box-seven", "10.0.0.7"), tags: ["Deploy-Ring"] }], [], {
+          identities,
+        }),
+        "deploy",
+      ),
+    ),
+    ["box-seven"],
   );
 }
 

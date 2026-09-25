@@ -95,13 +95,19 @@ export function HostCard({
         "group flex cursor-default flex-col gap-2 rounded-lg border p-3 text-left transition-colors outline-none",
         "focus-visible:ring-ring/50 focus-visible:ring-2",
         selected ? "border-primary bg-accent/30" : "border-border hover:bg-muted/30",
-        // ~100px: p-3 padding (24) + name/pip row (20) + detail row (16) +
-        // group/actions row (24) + two 8px gaps (16). content-visibility:auto
-        // skips layout/paint for off-screen cards (search-first keeps the
-        // steady-state DOM small, this covers the unfiltered case); without
-        // contain-intrinsic-size an off-screen card lays out at 0px and the
-        // scrollbar jumps while the user scrolls - it looks like dead weight
-        // and is load-bearing.
+        // 100px is the UNTAGGED size: p-3 padding (24) + name/pip row (20) +
+        // detail row (16) + group/actions row (24) + two 8px gaps (16). A
+        // host with tags adds the optional row below (h-4, 16px) plus one
+        // more 8px gap, so ~124px there - more still if the tags wrap onto a
+        // second line. content-visibility:auto skips layout/paint for
+        // off-screen cards (search-first keeps the steady-state DOM small,
+        // this covers the unfiltered case); without contain-intrinsic-size
+        // an off-screen card lays out at 0px and the scrollbar jumps while
+        // the user scrolls - it looks like dead weight and is load-bearing.
+        // The estimate stays at the untagged 100px: an under-estimate only
+        // grows the scrollbar as tagged cards paint in, while an over-estimate
+        // jumps it backwards, and `auto` remembers each card's real size once
+        // it has painted.
         "[contain-intrinsic-size:auto_100px] [content-visibility:auto]",
       )}
     >
@@ -119,6 +125,16 @@ export function HostCard({
       <div className="text-muted-foreground truncate text-xs">
         {host.protocol.toUpperCase()} · {detail}
       </div>
+
+      {host.tags && host.tags.length > 0 ? (
+        <div className="flex flex-wrap gap-1">
+          {host.tags.map((tag) => (
+            <Badge key={tag} variant="outline" className="h-4 px-1.5 text-[10px] font-normal">
+              {tag}
+            </Badge>
+          ))}
+        </div>
+      ) : null}
 
       <div className="flex min-h-6 flex-wrap items-center justify-between gap-x-2 gap-y-1">
         {groupName || connectedLabel ? (

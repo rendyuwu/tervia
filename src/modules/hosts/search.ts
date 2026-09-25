@@ -24,11 +24,18 @@ import type { Host, HostGroup } from "./types";
 // binding when handed the identity map, which is a lookup over plain data, not a
 // vault operation - `useVault()` gives every caller that map synchronously.
 
-/** One searchable row: a host plus the two fields {@link matchTier} cannot work
+/** One searchable row: a host plus the fields {@link matchTier} cannot work
  *  out from the host alone, because a vault-bound host's username lives on its
- *  identity and a group's name lives on the group. Build these with
- *  {@link searchRows}, never by hand. */
-export type HostSearchRow = { host: Host; username?: string; groupName?: string };
+ *  identity and a group's name lives on the group. `tags` is a straight copy of
+ *  `host.tags`, carried here rather than read off `host` a second time inside
+ *  {@link matchTier} so every field that function reads comes from the same
+ *  place. Build these with {@link searchRows}, never by hand. */
+export type HostSearchRow = {
+  host: Host;
+  username?: string;
+  groupName?: string;
+  tags?: readonly string[];
+};
 
 /**
  * Just the map {@link searchRows} reads.
@@ -51,6 +58,7 @@ function matchTier(row: HostSearchRow, query: string): number | null {
   const host = row.host.host.toLowerCase();
   const username = row.username?.toLowerCase();
   const groupName = row.groupName?.toLowerCase();
+  const tags = row.tags?.map((t) => t.toLowerCase());
 
   if (name === query) return 1;
   if (name.startsWith(query)) return 2;
@@ -60,7 +68,8 @@ function matchTier(row: HostSearchRow, query: string): number | null {
     name.includes(query) ||
     host.includes(query) ||
     (username !== undefined && username.includes(query)) ||
-    (groupName !== undefined && groupName.includes(query))
+    (groupName !== undefined && groupName.includes(query)) ||
+    (tags !== undefined && tags.some((t) => t.includes(query)))
   ) {
     return 5;
   }
@@ -91,8 +100,9 @@ function compareRows(a: HostSearchRow, b: HostSearchRow): number {
   return a.host.id.localeCompare(b.host.id);
 }
 
-/** Filter and rank, case-insensitively, over name, host, username and group name.
- *  An empty or whitespace-only query returns every row in its default order. */
+/** Filter and rank, case-insensitively, over name, host, username, group name
+ *  and tags. An empty or whitespace-only query returns every row in its
+ *  default order. */
 export function rankHosts(rows: HostSearchRow[], query: string): HostSearchRow[] {
   const trimmed = query.trim().toLowerCase();
   if (trimmed.length === 0) {
@@ -163,6 +173,7 @@ export function searchRows(
     host,
     username: hostUsername(host, vault.identities),
     groupName: host.groupId === undefined ? undefined : groupNames.get(host.groupId),
+    tags: host.tags,
   }));
 }
 

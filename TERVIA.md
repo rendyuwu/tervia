@@ -308,7 +308,13 @@ macOS/Linux rely on `Drop for Session -> killer.kill()`.
   `HostGroup.defaultIdentityId` names the vault identity a NEW host created
   in that group (or a descendant with none of its own) is pre-bound to at
   CREATE time - `resolve.ts` never reads a group, so editing or clearing it
-  never moves a host that already exists.
+  never moves a host that already exists. `HostBase.tags` is cross-cutting
+  rather than exclusive - a host can carry several, unlike its one `groupId` -
+  free-form strings with no managed record of their own;
+  `normalizeHostTags` is the one normaliser every LOCAL writer (`store.ts`,
+  the host editor, `modules/backup/file.ts`'s `sanitizeHost`) runs a tag
+  array through; a sync landing is carried as-is, like every other host
+  field.
 - `groupTree.ts`: `buildGroupTree` is the read-time forest `GroupStrip.tsx` and
   `page/derive.ts` build on - only the group whose OWN parent is missing, or
   which itself sits on a cycle, resolves to root; a group further down an
