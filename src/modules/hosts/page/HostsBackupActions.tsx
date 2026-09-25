@@ -15,13 +15,23 @@
  * five collections into one backup is expected, not a mismatch to puzzle over.
  */
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { toast } from "@/components/ui/toast";
 import type { FsReadResult } from "@/lib/ipc";
 import type { BackupMode } from "@/modules/backup/BackupDialog";
 import { BACKUP_EXTENSION, BACKUP_EXTENSION_V1, parseBackupFile } from "@/modules/backup/file";
+import type { ForeignImportMode } from "@/modules/backup/ForeignImportDialog";
+import { isPuttyPrivateKeyFile, parsePuttyReg } from "@/modules/backup/puttyRegImport";
+import { parseSshConfig } from "@/modules/backup/sshConfigImport";
 import { invoke } from "@tauri-apps/api/core";
+import { homeDir, join } from "@tauri-apps/api/path";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
-import { Download, Upload } from "lucide-react";
+import { Download, FileInput, Upload } from "lucide-react";
 import { lazy, Suspense, useState, type ReactNode } from "react";
 
 // Same treatment SshMenu gave it: the backup dialog pulls in the crypto/IO
@@ -29,10 +39,20 @@ import { lazy, Suspense, useState, type ReactNode } from "react";
 const BackupDialog = lazy(() =>
   import("@/modules/backup/BackupDialog").then((m) => ({ default: m.BackupDialog })),
 );
+// Same reasoning, one module over: the foreign-import dialog pulls in
+// `@tauri-apps/api/path` and the key-inspection round trip, neither of which
+// a user who never imports from ssh_config/PuTTY should pay for.
+const ForeignImportDialog = lazy(() =>
+  import("@/modules/backup/ForeignImportDialog").then((m) => ({
+    default: m.ForeignImportDialog,
+  })),
+);
 
 export function HostsBackupActions(): ReactNode {
   const [backup, setBackup] = useState<BackupMode | null>(null);
   const [backupOpen, setBackupOpen] = useState(false);
+  const [foreignImport, setForeignImport] = useState<ForeignImportMode | null>(null);
+  const [foreignImportOpen, setForeignImportOpen] = useState(false);
 
   const openExport = () => {
     setBackup({ kind: "export" });
@@ -95,6 +115,65 @@ export function HostsBackupActions(): ReactNode {
     }
   };
 
+  // Same two-step discipline as `openImport`: pick, read, and run the PURE
+  // parser (stanza/directive parsing only - no store, no file I/O beyond this
+  // one read) before any dialog opens, so a wrong-format pick is toasted
+  // immediately. The deeper resolution (an `IdentityFile` read, `ProxyJump`
+  // against saved hosts) is async I/O with no synchronous analogue here, and
+  // runs inside the dialog itself behind a loading state, still before
+  // anything is written.
+  const openForeignImport = async (source: "ssh_config" | "putty_reg") => {
+    try {
+      let defaultPath: string | undefined;
+      if (source === "ssh_config") {
+        try {
+          defaultPath = await join(await homeDir(), ".ssh", "config");
+        } catch {
+          defaultPath = undefined;
+        }
+      }
+      const selected = await openFileDialog({
+        multiple: false,
+        ...(defaultPath ? { defaultPath } : {}),
+        filters:
+          source === "ssh_config"
+            ? [{ name: "SSH config", extensions: ["*"] }]
+            : [{ name: "PuTTY registry export", extensions: ["reg"] }],
+      });
+      const path = typeof selected === "string" ? selected : null;
+      if (!path) return;
+      const result = await invoke<FsReadResult>("fs_read_file", { path });
+      if (result.kind !== "text") {
+        toast("That file is not a UTF-8 text file.", { variant: "error" });
+        return;
+      }
+      // Checked by CONTENT, not by the `.reg` extension the picker offered -
+      // a user can still pick "All files" on some platforms, and this is the
+      // one case worth a specific message rather than a generic parse
+      // failure: a `.ppk` is a key to import in the Vault, not a session.
+      if (source === "putty_reg" && isPuttyPrivateKeyFile(result.content)) {
+        toast(
+          "That looks like a PuTTY private key (.ppk). Import it from the Vault's key editor instead.",
+          { variant: "error" },
+        );
+        return;
+      }
+      try {
+        if (source === "ssh_config") {
+          setForeignImport({ source, parsed: parseSshConfig(result.content), path });
+        } else {
+          setForeignImport({ source, parsed: parsePuttyReg(result.content) });
+        }
+      } catch (e) {
+        toast(e instanceof Error ? e.message : String(e), { variant: "error" });
+        return;
+      }
+      setForeignImportOpen(true);
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e), { variant: "error" });
+    }
+  };
+
   return (
     <div className="flex items-center gap-2">
       {/* Label hidden below the same `@container` threshold "New host" uses
@@ -139,6 +218,22 @@ export function HostsBackupActions(): ReactNode {
         <Download size={13} strokeWidth={1.75} />
         <span className="@max-[420px]:hidden">Import…</span>
       </Button>
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button variant="outline" size="sm" aria-label="Import from…" className="gap-1.5">
+            <FileInput size={13} strokeWidth={1.75} />
+            <span className="@max-[420px]:hidden">Import from…</span>
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="start">
+          <DropdownMenuItem onSelect={() => void openForeignImport("ssh_config")}>
+            OpenSSH config (~/.ssh/config)
+          </DropdownMenuItem>
+          <DropdownMenuItem onSelect={() => void openForeignImport("putty_reg")}>
+            PuTTY sessions (.reg)
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
       {/* The menu this replaces closed itself before a failed pick could be
           reported, so the message had nowhere to land - the improvement is a
           surface that outlives the click. That surface used to be an
@@ -161,6 +256,18 @@ export function HostsBackupActions(): ReactNode {
               if (!o) setBackup(null);
             }}
             mode={backup}
+          />
+        </Suspense>
+      ) : null}
+      {foreignImport ? (
+        <Suspense fallback={null}>
+          <ForeignImportDialog
+            open={foreignImportOpen}
+            onOpenChange={(o) => {
+              setForeignImportOpen(o);
+              if (!o) setForeignImport(null);
+            }}
+            mode={foreignImport}
           />
         </Suspense>
       ) : null}
