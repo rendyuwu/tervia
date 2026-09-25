@@ -58,7 +58,11 @@ export type RuleDraft = {
   /** `-R` only. "" or "0" both mean "let the SERVER pick" - see
    *  {@link parseLocalPort}, which this reuses. */
   bindPort: string;
+  /** Mutually exclusive with {@link startWithApp} in the form - the editor
+   *  offers one exclusive choice; `store.ts`'s `upsertRule` refuses both. */
   startWithHost: boolean;
+  /** See {@link startWithHost}'s doc on the mutual exclusion. */
+  startWithApp: boolean;
   description: string;
 };
 
@@ -76,6 +80,7 @@ export const EMPTY_RULE_DRAFT: RuleDraft = {
   bindAddress: "",
   bindPort: "",
   startWithHost: false,
+  startWithApp: false,
   description: "",
 };
 
@@ -95,6 +100,7 @@ export function ruleDraftFrom(rule: ForwardRule): RuleDraft {
     bindAddress: rule.bindAddress ?? "",
     bindPort: rule.bindPort === undefined || rule.bindPort === 0 ? "" : String(rule.bindPort),
     startWithHost: rule.startWithHost,
+    startWithApp: rule.startWithApp === true,
     description: rule.description ?? "",
   };
 }
@@ -204,6 +210,7 @@ export function ruleRecordFrom(id: string, draft: RuleDraft): ForwardRule {
       remoteHost: "",
       remotePort: 0,
       startWithHost: draft.startWithHost,
+      startWithApp: draft.startWithApp,
       description,
     };
   }
@@ -224,6 +231,7 @@ export function ruleRecordFrom(id: string, draft: RuleDraft): ForwardRule {
       ...(bindAddress ? { bindAddress } : {}),
       ...(bindPort !== undefined ? { bindPort } : {}),
       startWithHost: draft.startWithHost,
+      startWithApp: draft.startWithApp,
       description,
     };
   }
@@ -236,6 +244,7 @@ export function ruleRecordFrom(id: string, draft: RuleDraft): ForwardRule {
     remoteHost: draft.remoteHost.trim(),
     remotePort: parseRemotePort(draft.remotePort),
     startWithHost: draft.startWithHost,
+    startWithApp: draft.startWithApp,
     description,
   };
 }

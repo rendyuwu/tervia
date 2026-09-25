@@ -1,5 +1,4 @@
 import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
   DialogClose,
@@ -452,27 +451,45 @@ export function RuleEditorDialog({
                 </Field>
               )}
 
-              <Field label="Start with host">
+              <Field label="Autostart">
+                <div className="flex flex-wrap gap-1">
+                  <ToggleButton
+                    active={!draft.startWithHost && !draft.startWithApp}
+                    onClick={() => patch({ startWithHost: false, startWithApp: false })}
+                  >
+                    Manually
+                  </ToggleButton>
+                  <ToggleButton
+                    active={draft.startWithHost}
+                    disabled={draft.type !== ""}
+                    onClick={() => patch({ startWithHost: true, startWithApp: false })}
+                  >
+                    With the host&apos;s terminal
+                  </ToggleButton>
+                  <ToggleButton
+                    active={draft.startWithApp}
+                    onClick={() => patch({ startWithApp: true, startWithHost: false })}
+                  >
+                    When Tervia starts
+                  </ToggleButton>
+                </div>
                 {draft.type === "" ? (
-                  <label className="flex items-start gap-2 text-[12px]">
-                    <Checkbox
-                      checked={draft.startWithHost}
-                      onCheckedChange={(checked) => patch({ startWithHost: checked === true })}
-                      className="mt-0.5"
-                    />
-                    <span>
-                      Bring this rule up when this host&apos;s terminal connects. It closes with
-                      that tab.
-                    </span>
-                  </label>
+                  <span className="text-muted-foreground text-[10.5px]">
+                    &quot;With the host&apos;s terminal&quot; rides that terminal&apos;s own SSH
+                    session and closes with the tab. &quot;When Tervia starts&quot; binds once at
+                    launch, with no tab required, and retries on a backoff ladder if the bind fails.
+                  </span>
                 ) : (
                   // `startHostForwards` (`../autostart.ts`) skips every `-R`/`-D`
-                  // rule with a banner rather than starting it - see
-                  // `KNOWN-LIMITS.md` - so the toggle is disabled here instead of
-                  // offering a setting this rule cannot act on yet.
+                  // rule with a banner rather than starting it on a terminal's own
+                  // session - see `KNOWN-LIMITS.md` - so that option is disabled
+                  // here. "When Tervia starts" has no such limit: it dials headless
+                  // through `ssh/tunnel.ts` the same way a page Start already does
+                  // for every rule type.
                   <span className="text-muted-foreground text-[10.5px]">
-                    Remote and dynamic rules cannot start with their host yet - start this one from
-                    the Port Forwarding page.
+                    Remote and dynamic rules cannot start with their host&apos;s terminal yet -
+                    &quot;When Tervia starts&quot; still works, or start this one from the Port
+                    Forwarding page.
                   </span>
                 )}
               </Field>

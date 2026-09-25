@@ -3977,6 +3977,49 @@ console.log("\n[draft.ts per-type] validateRuleDraft/ruleRecordFrom/ruleDraftFro
       draftFromRemote.bindPort === "2222",
     draftFromRemote,
   );
+
+  // startWithApp round-trips through ruleRecordFrom for every type - a
+  // dropped branch would lose the flag on edit - and back out through
+  // ruleDraftFrom, the read half of the same field.
+  const localRecordApp = ruleRecordFrom("f-6", {
+    ...base,
+    type: "",
+    localPort: "",
+    remoteHost: "10.0.0.9",
+    remotePort: "5432",
+    startWithApp: true,
+  });
+  const socksRecordApp = ruleRecordFrom("f-7", {
+    ...base,
+    type: "dynamic",
+    localPort: "1080",
+    startWithApp: true,
+  });
+  const remoteRecordApp = ruleRecordFrom("f-8", {
+    ...base,
+    type: "remote",
+    targetHost: "10.0.0.9",
+    targetPort: "22",
+    startWithApp: true,
+  });
+  check(
+    "ruleRecordFrom: startWithApp survives on -L, -D and -R records alike",
+    localRecordApp.startWithApp === true &&
+      socksRecordApp.startWithApp === true &&
+      remoteRecordApp.startWithApp === true,
+    { localRecordApp, socksRecordApp, remoteRecordApp },
+  );
+  check(
+    "ruleDraftFrom: startWithApp round-trips back into the draft, for each type",
+    ruleDraftFrom(localRecordApp).startWithApp === true &&
+      ruleDraftFrom(socksRecordApp).startWithApp === true &&
+      ruleDraftFrom(remoteRecordApp).startWithApp === true,
+    {
+      local: ruleDraftFrom(localRecordApp),
+      socks: ruleDraftFrom(socksRecordApp),
+      remote: ruleDraftFrom(remoteRecordApp),
+    },
+  );
 }
 
 process.exit(failed === 0 ? 0 : 1);

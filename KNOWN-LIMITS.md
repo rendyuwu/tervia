@@ -1409,6 +1409,91 @@ two different addresses at once and route by address, which is not how
 one port is legitimately bound on more than one address within a single
 session.
 
+### A `startWithApp` rule's mid-session drop does not re-enter the backoff ladder
+
+**Accepted state.** `controller.ts`'s `startForwardAutostart`
+ladders a `startWithApp` rule's INITIAL bind failure, and any retry's own
+failure, but not a session that drops AFTER a successful bind. `ssh/tunnel.ts`'s
+`dropSession` is the single function both a deliberate release
+(`releaseSession` at zero refs, e.g. a manual Stop of the last rule on a host)
+and an unexpected drop (`dialSession`'s `onExit`/`onError`) call - nothing
+distinguishes them from outside it today. Telling them apart needs an intent
+flag surviving the async Tauri IPC delivery window, the exact hazard
+`terminal/lib/ssh-session.ts`'s own `sshUserClose` flag exists to guard
+against for the terminal's identical problem (`SshSession::close` aborts its
+pump task rather than draining it to a final event, so a deliberate close can
+still race a real ending onto the frontend channel). Not provable under the
+`RuntimeDeps` seam this suite tests through either - there is no real Tauri
+channel under plain node to race. A `startWithApp` rule whose bastion drops
+mid-session stays "Running" (stale) until a manual Stop/Start, the same status
+quo every OTHER page-started rule already has - this does not regress it.
+
+**Carried by.** `dropSession` in `src/modules/ssh/tunnel.ts`, which has no
+subscriber-notification hook today.
+
+**Trigger.** `tunnel.ts` gaining a `sshUserClose`-equivalent intent flag
+(set before a deliberate `releaseSession`, read by `dialSession`'s
+`onExit`/`onError` before treating a drop as unexpected) that a check can
+prove against a real close/exit race - at that point `startForwardAutostart`
+can subscribe per `hostId` and re-enter the ladder on a genuine drop.
+
+### A remote edit landing while its retry is pending re-dials the OLD endpoints
+
+**Accepted state.** `attemptForwardAutostart` deliberately reuses the SAME
+`rule` object across every rung of its own backoff ladder (`controller.ts`'s
+"REUSES THE SAME `rule` OBJECT" doc on that function) - a Stop, Delete or
+Save cancels the ladder outright (`pageMustStopFirst`'s `forwardRetries.has`
+check), but a sync LANDING that only _rewrites_ the rule's record does not:
+`sync/scheduler.ts`'s landing-side `release` hands `releaseRule` only
+DELETED landings, so an edit that lands elsewhere - a renamed target, a
+changed port - never reaches the cancel at all. If that edit lands during
+one of the ladder's waits (up to 30 s), the timer that fires next still
+dials the OLD endpoints captured when the ladder started. The row then
+reads `Running` for the NEW record, and its Stop names a key nothing is
+stored under - the same leak P0-1 fixed for Delete and Edit, arriving
+through the sync door instead of a click. The window is narrow (a landing
+has to arrive during an in-flight wait, not merely at any point after the
+edit), and the same class of leak already exists on the base for a page-
+`running` rule a landing rewrites, so this is not a new hazard, only a new
+way to reach an old one.
+
+**Carried by.** `attemptForwardAutostart` in
+`src/modules/forwards/controller.ts`, which has no subscription to a sync
+landing to cancel itself against.
+
+**Trigger.** `sync/scheduler.ts`'s landing-side release growing a REWRITE
+case (not only a delete) that cancels a rule's pending retry the same way
+`stopRule` already does - at that point this entry can close alongside the
+mid-session-drop one above, since both need the same kind of landing
+subscription.
+
+### A local forward-bind conflict walks the ladder before parking
+
+**Accepted state.** `controller.ts`'s backoff ladder classifies a
+Start failure through `classifySshConnectFailure`, which files anything that
+is not `SshLocalConnectError`/`SshAuthRejectedError` as `"transport"`
+(retry-eligible). `ssh_open`'s own rejection is structured
+(`SshConnectError { kind, message }`, `src-tauri/src/modules/ssh/session.rs`)
+and wrapped into one of those two classes by `sshConnectErrorFrom`
+(`src/modules/ssh/bridge.ts`) before it reaches the classifier.
+`ssh_forward_open`/`ssh_remote_forward_open`/`ssh_socks_open`
+(`src-tauri/src/modules/ssh/mod.rs`) do not: each rejects with a bare
+`String`, so a LOCAL bind conflict (the port this rule pins is already taken
+on this machine) and the session dying between the connect and the bind are
+indistinguishable on the wire. The ladder is bounded and self-terminating -
+the first attempt plus the ladder's 5 retries, then the row parks `failed`
+with the last error - so a doomed pinned-port rule wastes that span once rather than
+being recognised on the first attempt; it does not retry forever.
+
+**Carried by.** `attemptForwardAutostart` in
+`src/modules/forwards/controller.ts`, which has no third classification to
+read this apart with.
+
+**Trigger.** Giving `ssh_forward_open`/`ssh_remote_forward_open`/
+`ssh_socks_open` a structured error boundary mirroring `SshConnectError` - a
+Rust-side change, proportionate only once something besides this bounded
+ladder needs the distinction too.
+
 ## Known Hosts
 
 ### The Known Hosts page's Forget button has no "every device" option

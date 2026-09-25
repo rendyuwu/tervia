@@ -782,11 +782,18 @@ console.log(
   const HOST_OWNED =
     "Deleting the rule does not stop its forward — that one dies with the terminal tab that opened it.";
   const START = "It will no longer start automatically with its host.";
+  // the app-launch analog of START, mutually exclusive with it at
+  // every REACHABLE write (`src/modules/forwards/store.ts`'s `upsertRule`
+  // refuses a rule naming both), so `deleteNote` never has to choose between
+  // the two in practice - it just reads whichever one this rule happens to
+  // carry.
+  const START_APP = "It will no longer start automatically when Tervia starts.";
   const FALLBACK = "Deleting it changes nothing else.";
 
   const subject = (over: Partial<DeleteNoteSubject> = {}): DeleteNoteSubject => ({
     pageStops: false,
     startWithHost: false,
+    startWithApp: false,
     hostOwned: false,
     ...over,
   });
@@ -802,6 +809,17 @@ console.log(
   const hostOwnedAndStart = subject({ hostOwned: true, startWithHost: true });
   const hostOwnedAndPageStops = subject({ hostOwned: true, pageStops: true });
   const allThree = subject({ hostOwned: true, pageStops: true, startWithHost: true });
+  // the same four cells `startWithHost` gets, for `startWithApp` -
+  // the two never coexist in a rule this app wrote
+  // (`src/modules/forwards/store.ts`'s `upsertRule` refuses both true), so
+  // there is no "both start flags at once" cell to add;
+  // `hostOwnedAndStartApp` is reachable the same way `hostOwnedAndStart` is -
+  // the rule was edited from `startWithHost` to `startWithApp` AFTER a
+  // terminal already claimed it, and the confirm has to be right about both.
+  const startAppOnly = subject({ startWithApp: true });
+  const bothApp = subject({ pageStops: true, startWithApp: true });
+  const hostOwnedAndStartApp = subject({ hostOwned: true, startWithApp: true });
+  const allThreeApp = subject({ hostOwned: true, pageStops: true, startWithApp: true });
 
   check(
     "the page stops it, does not start with host: the stopping sentence alone",
@@ -856,6 +874,26 @@ console.log(
     deleteNote(allThree),
     `${HOST_OWNED} ${START}`,
   );
+  check(
+    "no forward to stop, starts with app: the start-with-app sentence alone",
+    deleteNote(startAppOnly),
+    START_APP,
+  );
+  check(
+    "the page stops it AND it starts with app: both sentences",
+    deleteNote(bothApp),
+    `${STOPPING} ${START_APP}`,
+  );
+  check(
+    "terminal-owned AND starts with app: both sentences",
+    deleteNote(hostOwnedAndStartApp),
+    `${HOST_OWNED} ${START_APP}`,
+  );
+  check(
+    "all three, app-flavoured: the terminal sentence plus the start-with-app one",
+    deleteNote(allThreeApp),
+    `${HOST_OWNED} ${START_APP}`,
+  );
 
   // D8: the stops-it/does-not pair must differ. A `deleteNote` that branched on
   // `startWithHost` alone (or ignored `pageStops` altogether) would return
@@ -888,6 +926,10 @@ console.log(
     hostOwnedAndStart,
     hostOwnedAndPageStops,
     allThree,
+    startAppOnly,
+    bothApp,
+    hostOwnedAndStartApp,
+    allThreeApp,
   ].map((s) => deleteNote(s));
   for (const note of everyNote) {
     ok(

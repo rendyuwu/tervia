@@ -1561,9 +1561,11 @@ mod tests {
 
     #[tokio::test]
     async fn a_published_record_carries_no_device_local_field() {
-        // The four fields that describe THIS machine. A wholesale write of a
-        // pulled record deletes the receiving device's trust pins, so the
-        // publishing side is where they have to stop.
+        // The five fields that describe THIS machine (four host fields plus
+        // a forward rule's `startWithApp`). A wholesale write of a pulled
+        // record deletes the receiving device's trust pins (or auto-binds a
+        // listener nobody on it asked for), so the publishing side is where
+        // they all have to stop.
         let keys = keys();
         let fake = Fake::cas(false);
         let mut mine = host("h-1", NOW - 1000, "this-device", "pinned");
@@ -1574,6 +1576,7 @@ mod tests {
             "lastConnectedAt": 1700,
             "lastFingerprint": "SHA256:aaa",
             "certFingerprint": "SHA256:bbb",
+            "startWithApp": true,
         });
         push(
             &fake,
@@ -1595,6 +1598,7 @@ mod tests {
             "lastConnectedAt",
             "lastFingerprint",
             "certFingerprint",
+            "startWithApp",
         ] {
             assert!(
                 published.record.get(field).is_none(),

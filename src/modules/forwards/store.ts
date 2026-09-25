@@ -178,6 +178,16 @@ export function createForwardStore(io: ForwardsIo): ForwardsStore {
       if (!rule.name.trim()) {
         throw new Error("forwards: a rule needs a name");
       }
+      // Independent of `type`: a rule cannot ride BOTH a terminal's own
+      // session and the app-launch trigger - `types.ts`'s doc on each flag
+      // says why they are two different owners with two different
+      // lifetimes. Checked ahead of the type-conditional block below since
+      // it applies to every type equally.
+      if (rule.startWithHost && rule.startWithApp) {
+        throw new Error(
+          `forwards: "${rule.name}" cannot start with both its host's terminal and the app - choose one`,
+        );
+      }
       // Every port/host refusal below is TYPE-CONDITIONAL: `-D` only binds a
       // local SOCKS5 port and has no dial target at all; `-R` dials its
       // target LOCALLY (so `targetHost`/`targetPort` are refused, its own
@@ -357,8 +367,25 @@ export function createForwardStore(io: ForwardsIo): ForwardsStore {
           (t) => t.id === landing.id && t.kind === RULE_TOMBSTONE_KIND,
         );
         if (superseding && superseding.deletedAt > landing.updatedAt) continue;
-        const record: ForwardRule = { ...landing.record, updatedAt: landing.updatedAt };
         const idx = rules.findIndex((r) => r.id === landing.id);
+        const existing = idx >= 0 ? rules[idx] : undefined;
+        // `startWithApp` is device-local (`sync/envelope.ts`'s
+        // `DEVICE_LOCAL_FIELDS`) and stripped before an envelope is sealed, so
+        // a landing never carries it - but the whole-record spread this
+        // function used to do would otherwise DELETE this device's own choice
+        // on every landing, the same hazard `hosts/store.ts`'s own
+        // `applyRemote` already guards `pins`/`lastConnectedAt` against.
+        // Carried forward from the STORED record alone, and cleared the
+        // moment a landing turns the rule to `startWithHost` - `upsertRule`'s
+        // own exclusivity refusal, which this apply path bypasses and so has
+        // to re-enforce by hand.
+        const { startWithApp: _, ...incoming } = landing.record;
+        const keepStartWithApp = existing?.startWithApp === true && incoming.startWithHost !== true;
+        const record: ForwardRule = {
+          ...incoming,
+          ...(keepStartWithApp ? { startWithApp: true } : {}),
+          updatedAt: landing.updatedAt,
+        };
         if (idx >= 0) rules[idx] = record;
         else rules.push(record);
         const buriedIdx = buried.findIndex((t) => t.id === landing.id);

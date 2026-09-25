@@ -10,6 +10,7 @@
  * Where behaviors are set up (each is its own hook unless noted):
  *   - useWorkspaceRoot         - home / picked root + `tervia <path>` CLI targets
  *   - useStoreRecoveryNotices  - toasts a store recovered from its `.bak`
+ *   - useForwardsAutostart     - brings a `startWithApp` forward rule up once, no tab required
  *   - useWorkspacePersistence  - hydrate + auto-snapshot workspaces
  *   - useQuitGuard             - pre-quit snapshot flush + busy-terminal prompt
  *   - useWorkspaceSwitching    - switch / create / close orchestration
@@ -72,6 +73,7 @@ import { useQuitGuard } from "./hooks/useQuitGuard";
 import { useWorkspacePersistence } from "./hooks/useWorkspacePersistence";
 import { useSessionDisposal } from "./hooks/useSessionDisposal";
 import { useStoreRecoveryNotices } from "./hooks/useStoreRecoveryNotices";
+import { useForwardsAutostart } from "./hooks/useForwardsAutostart";
 import { useAdoptDaemonSessions } from "./hooks/useAdoptDaemonSessions";
 import { useActiveLeafSurface } from "./hooks/useActiveLeafSurface";
 import { useProjectUrl } from "./hooks/useProjectUrl";
@@ -320,6 +322,12 @@ export default function App() {
   // back from its `.bak`. Without this the recovery happened silently: the
   // notice was produced and nothing ever took it.
   useStoreRecoveryNotices();
+
+  // -------- forward autostart --------
+  // Brings every `startWithApp` rule up once the stores it needs have
+  // hydrated - see the hook's own header for the launch-trigger and
+  // backoff-ladder reasoning.
+  useForwardsAutostart();
 
   // -------- workspaces wiring --------
   const wsHydrate = useWorkspacesStore((s) => s.hydrate);

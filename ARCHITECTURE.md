@@ -388,10 +388,13 @@ Three callers, three shapes:
    with no terminal attached — the "reach a database only the bastion can see"
    case. Sessions are refcounted per connection id so several forwards share one
    SSH session, and forwards are memoized by `connId|host|port` so a repeat
-   request reuses its port. A connection with no pinned host key is **refused**:
-   a first connect needs a human to verify the fingerprint, and nothing on this
-   path can show that dialog. Note that this module currently has no in-tree
-   caller; it is the API the planned surfaces will use.
+   request reuses its port. A connection with no pinned host key is **refused**
+   unless the caller passes `promptForHostKey` and has a dialog on screen to
+   answer with. Callers: the RDP dial path, and `forwards/controller.ts`'s
+   page-owned Start/Stop (all three rule types) - including
+   `startForwardAutostart`, which `app/hooks/useForwardsAutostart.ts` calls
+   once per `startWithApp` rule at launch and which re-enters on a
+   transport-class failure through `controller.ts`'s own backoff ladder.
 
 ### SFTP and remote files
 

@@ -104,6 +104,7 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { HOSTS_KEY, HOSTS_STORE_PATH, type SshHost } from "../src/modules/hosts/types";
+import { SshLocalConnectError } from "../src/modules/terminal/lib/ssh-exit-decision";
 import type { VaultAuthMode } from "../src/modules/vault/types";
 
 // ---------------------------------------------------------------------------
@@ -943,6 +944,78 @@ console.log("\n[trust] an unverified bastion refuses by default");
   });
   assert(message.includes("entry"), "an unpinned JUMP host refuses too, naming the hop");
   check("and still nothing was dialled", countOf("ssh_open"), 0);
+}
+
+// ---------------------------------------------------------------------------
+console.log(
+  "\n[trust] every local pre-dial refusal in dialSession is a typed SshLocalConnectError, not a bare Error - so controller.ts's backoff ladder parks it instead of retrying",
+);
+{
+  reset([]);
+  let error: unknown;
+  await openForwardForConnection("nowhere", "10.10.11.26", 3389).catch((e) => {
+    error = e;
+  });
+  assert(error instanceof SshLocalConnectError, "a missing connection id is typed local");
+  check("nothing was dialled", countOf("ssh_open"), 0);
+}
+{
+  const rdpOnlyRow: RdpHostFixture = {
+    id: "r-refused",
+    name: "win-refused",
+    host: "10.10.11.27",
+    port: 3389,
+    protocol: "rdp",
+    credential: {
+      kind: "inline",
+      hostId: "r-refused",
+      username: "Administrator",
+      hasPassword: true,
+    },
+    desktopWidth: 1280,
+    desktopHeight: 800,
+    sizeMode: "preset",
+  };
+  reset([rdpOnlyRow] as unknown as Row[]);
+  let error: unknown;
+  await openForwardForConnection("r-refused", "10.10.11.26", 3389).catch((e) => {
+    error = e;
+  });
+  assert(error instanceof SshLocalConnectError, "an RDP host is typed local, not merely refused");
+  check("nothing was dialled", countOf("ssh_open"), 0);
+}
+{
+  // A jump host the chain names but the store no longer has - `resolveJumpHops`
+  // (`hosts/jumps.ts`) throws a plain `Error` here; `dialSession`'s own
+  // whole-block catch is what attributes it as local rather than transport.
+  reset([row({ id: "c-target2", proxyJumpId: "c-gone" })]);
+  let error: unknown;
+  await openForwardForConnection("c-target2", "10.10.11.26", 3389).catch((e) => {
+    error = e;
+  });
+  assert(error instanceof SshLocalConnectError, "a removed jump host is typed local");
+  check("nothing was dialled", countOf("ssh_open"), 0);
+}
+{
+  // A credential binding `resolveSshAuth` (`vault/resolve.ts`) can no longer
+  // resolve - the identity itself was deleted. Also a plain `Error` before
+  // `dialSession`'s own catch.
+  const orphanRow: Row = {
+    id: "c-orphan",
+    protocol: "ssh",
+    name: "orphan",
+    host: "orphan.example.com",
+    port: 22,
+    lastFingerprint: "SHA256:pin-orphan",
+    credential: { kind: "identity", identityId: "gone" },
+  };
+  reset([orphanRow]);
+  let error: unknown;
+  await openForwardForConnection("c-orphan", "10.10.11.26", 3389).catch((e) => {
+    error = e;
+  });
+  assert(error instanceof SshLocalConnectError, "a deleted identity binding is typed local");
+  check("nothing was dialled", countOf("ssh_open"), 0);
 }
 
 console.log("\n[trust] a caller that can ask gets the prompt, and the pin lands");

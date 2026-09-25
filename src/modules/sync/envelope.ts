@@ -19,7 +19,11 @@ import { WIRE_VERSION, type Envelope } from "./types";
  * two sides of the merge are symmetric. Without this one, the local envelope
  * would still carry this device's `pins` while every remote copy has them
  * stripped, so `changed` would be true on every pull and every pull would
- * rewrite the host file.
+ * rewrite the host file. `pins`, `lastConnectedAt`, `lastFingerprint`, and
+ * `certFingerprint` describe a host in `src/modules/hosts/types.ts`;
+ * `startWithApp` describes a `ForwardRule` in `src/modules/forwards/types.ts`
+ * the same way - it names what THIS device auto-binds, not a fact about the
+ * rule, so it never travels either.
  *
  * `scripts/sync-scheduler-verify.ts` reads both spellings and refuses a drift.
  */
@@ -28,6 +32,7 @@ export const DEVICE_LOCAL_FIELDS = [
   "lastConnectedAt",
   "lastFingerprint",
   "certFingerprint",
+  "startWithApp",
 ] as const;
 
 /** `record` with every device-local field gone. A copy: the caller's record is
