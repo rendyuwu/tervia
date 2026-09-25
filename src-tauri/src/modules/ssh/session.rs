@@ -3875,6 +3875,8 @@ mod remote_dynamic_forward_tests {
             private_key: Some(SecretSource::Inline { value: key }),
             private_key_passphrase: None,
             expected_fingerprint: Some(sshd.host_fingerprint.clone()),
+            certificate: None,
+            agent_key_fingerprint: None,
             jumps: Vec::new(),
             cols: 80,
             rows: 24,
