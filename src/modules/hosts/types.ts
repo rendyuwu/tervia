@@ -303,13 +303,29 @@ export type Host = SshHost | RdpHost;
  *  through. `upsertGroup` (`store.ts`) refuses all three at WRITE time
  *  instead, on the pattern its jump-host chain check already set.
  *  `updatedAt` reads exactly as {@link HostBase.updatedAt} does, absent
- *  included. */
+ *  included.
+ *
+ *  `defaultIdentityId` names the vault identity a NEW host created in this
+ *  group (or in a descendant with no default of its own -
+ *  `groupTree.ts`'s `defaultIdentityFor` walks the chain) is pre-bound to,
+ *  copied into the host's `credential` at CREATE time only - editing or
+ *  clearing this field never moves a host that already exists, the same way
+ *  `resolve.ts` never reads a group at all. One field, not one per protocol:
+ *  a `VaultIdentity` is protocol-agnostic by design (its own doc in
+ *  `modules/vault/types.ts`), so there is no per-protocol validity to
+ *  narrow on. `upsertGroup` refuses a value naming no identity, but only
+ *  when this field is the one changing - on `parentId`'s own pattern, so a
+ *  dangling value arriving through sync never blocks a rename, and
+ *  `defaultIdentityFor` skips a dangling value at read time and falls
+ *  through to a live ancestor's instead of refusing anything or shadowing
+ *  one further up the chain. */
 export type HostGroup = {
   id: string;
   name: string;
   parentId?: string;
   order?: number;
   updatedAt?: number;
+  defaultIdentityId?: string;
 };
 
 export function isSshHost(host: Host): host is SshHost {

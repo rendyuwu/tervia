@@ -157,6 +157,7 @@ import {
   orderHostWrites,
   parseBackupFile,
   refuseProtocolConflicts,
+  resolveGroupDefaults,
   resolveIdentityBindings,
   sanitizeGroup,
   sanitizeHost,
@@ -1762,7 +1763,54 @@ check(
   sanitizeGroup({ id: "g-1", name: "prod", parentId: "  " }),
   { id: "g-1", name: "prod" },
 );
+check(
+  "defaultIdentityId travels, trimmed, same as parentId",
+  sanitizeGroup({ id: "g-1", name: "prod", defaultIdentityId: " i-1 " })?.defaultIdentityId,
+  "i-1",
+);
+check(
+  "a blank defaultIdentityId is dropped rather than kept as an empty string",
+  sanitizeGroup({ id: "g-1", name: "prod", defaultIdentityId: "  " }),
+  { id: "g-1", name: "prod" },
+);
 
+console.log(
+  "\n[groups] resolveGroupDefaults: a default identity must be in the FILE OR on the device",
+);
+check(
+  "an identity travelling in the file keeps the group's default",
+  resolveGroupDefaults([{ id: "g-1", name: "prod", defaultIdentityId: "i-1" }], travelled("i-1"))[0]
+    .defaultIdentityId,
+  "i-1",
+);
+check(
+  "an identity already on the device (not in the file at all) is just as good",
+  resolveGroupDefaults(
+    [{ id: "g-1", name: "prod", defaultIdentityId: "i-local" }],
+    travelled("i-local"),
+  )[0].defaultIdentityId,
+  "i-local",
+);
+check(
+  "an identity in neither set is DROPPED, not refused - the group row still writes",
+  resolveGroupDefaults([{ id: "g-1", name: "prod", defaultIdentityId: "i-gone" }], NO_IDENTITIES),
+  [{ id: "g-1", name: "prod" }],
+);
+check(
+  "a group with no default at all is untouched",
+  resolveGroupDefaults([{ id: "g-1", name: "prod" }], NO_IDENTITIES),
+  [{ id: "g-1", name: "prod" }],
+);
+
+check(
+  "the matched-id-and-name replace path carries defaultIdentityId, the same way order does",
+  mergeGroups(
+    [{ id: "g-1", name: "prod", defaultIdentityId: "i-2" }],
+    [{ id: "g-1", name: "prod", defaultIdentityId: "i-1" }],
+    [],
+  ).groups[0].defaultIdentityId,
+  "i-2",
+);
 const collide = mergeGroups(
   [{ id: "g-file", name: "Prod" }],
   [{ id: "g-local", name: " prod " }],

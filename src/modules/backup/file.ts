@@ -479,7 +479,9 @@ export function sanitizeHost(raw: unknown): Host | null {
  * id-shaped field this function reads - whether it names a group that will
  * actually exist after this import is `orderGroupWrites`'s question, not
  * this one's: a dangling or cyclic reference is read as root there rather
- * than refused here.
+ * than refused here. `defaultIdentityId` travels the same way; whether it
+ * names an identity that will exist after this import is
+ * `resolveGroupDefaults`'s question, not this one's.
  */
 export function sanitizeGroup(raw: unknown): HostGroup | null {
   if (!isRecord(raw)) return null;
@@ -488,11 +490,13 @@ export function sanitizeGroup(raw: unknown): HostGroup | null {
   if (!id || !name) return null;
   const order = raw.order;
   const parentId = str(raw.parentId).trim();
+  const defaultIdentityId = str(raw.defaultIdentityId).trim();
   return {
     id,
     name,
     ...(parentId ? { parentId } : {}),
     ...(typeof order === "number" && Number.isFinite(order) ? { order } : {}),
+    ...(defaultIdentityId ? { defaultIdentityId } : {}),
   };
 }
 
@@ -1252,6 +1256,34 @@ export function carryPins(incoming: Host[], existing: Host[]): Host[] {
     const saved = byId.get(h.id);
     const pins: Record<string, string> = { ...(saved ? hostPins(saved) : {}), ...hostPins(h) };
     return Object.keys(pins).length > 0 ? { ...h, pins } : h;
+  });
+}
+
+/**
+ * Drop a `defaultIdentityId` that names no identity that actually LANDED in
+ * this import - the identity-side counterpart of {@link resolveIdentityBindings},
+ * much smaller because there is no secret at stake: a group's default owns
+ * no keychain account, so honouring one that travelled costs nothing the
+ * way applying a host's vault binding can.
+ *
+ * Called at `applyV3`'s own WRITE 3, against the union of the identities
+ * already on disk and the ones `WRITE 2` actually saved - NOT the pre-write
+ * `identityIds` set `resolveIdentityBindings` above uses, which counts an
+ * identity whose write FAILED as existing. Filtering with that earlier,
+ * wider set here would leave a group naming an identity that never landed,
+ * which `upsertGroup`'s own existence check then refuses outright - losing
+ * the whole group row, and every new sub-group under it, over one failed
+ * identity write. Filtering against what actually landed instead is what
+ * keeps this drop, never a refusal, true regardless of WRITE 2's outcome.
+ */
+export function resolveGroupDefaults(
+  groups: HostGroup[],
+  identityIds: ReadonlySet<string>,
+): HostGroup[] {
+  return groups.map((g) => {
+    if (!g.defaultIdentityId || identityIds.has(g.defaultIdentityId)) return g;
+    const { defaultIdentityId: _drop, ...rest } = g;
+    return rest;
   });
 }
 

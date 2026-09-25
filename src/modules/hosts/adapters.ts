@@ -2,6 +2,7 @@ import { createRecoveredStore, type RecoveredStoreIo } from "@/lib/recoveredStor
 import { tauriStoreFileIo, type StoreFileIo } from "@/lib/storeRecovery";
 import type { DirtyId } from "@/lib/tombstones";
 import type { SecretsIo } from "@/modules/vault/adapters";
+import type { VaultIdentity } from "@/modules/vault/types";
 
 import { HOSTS_KEY, HOSTS_STORE_PATH, type Host } from "./types";
 
@@ -64,11 +65,21 @@ export type HostsIo = {
    */
   markDirty?: (dirty: DirtyId[]) => void;
   /**
-   * Told the vault identity a successful connect authenticated as, after this host's
-   * own stamp has committed. Optional with a no-op default, on `markDirty`'s terms:
-   * omitting it means nothing records vault recency, never "skip the host stamp".
+   * Told the vault identity a successful connect authenticated as this identity,
+   * after this host's own stamp has committed. Optional with a no-op default, on
+   * `markDirty`'s terms: omitting it means nothing records vault recency, never
+   * "skip the host stamp".
    */
   markIdentityConnected?: (identityId: string, protocol: Host["protocol"]) => Promise<void>;
+  /**
+   * Looked up when `upsertGroup` writes a CHANGING `defaultIdentityId`, to
+   * refuse one naming nothing - on `markIdentityConnected`'s own terms:
+   * optional with a no-op default, and omitting it means the existence
+   * check never runs, never "the write is refused". The one production
+   * wiring is `vaultStore.findIdentity`, on `markIdentityConnected`'s own
+   * pattern.
+   */
+  findIdentity?: (id: string) => Promise<VaultIdentity | undefined>;
 };
 
 /** The file port every caller gets unless a test hands one in. */

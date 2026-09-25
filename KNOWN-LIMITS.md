@@ -340,13 +340,24 @@ root, even one that is currently nested locally. Not fixable in code: there
 is no way to tell "absent because pre-nesting" from "absent because root"
 once the field has been read.
 
-**Carried by.** `orderGroupWrites` and `sanitizeGroup` in
-`src/modules/backup/file.ts`.
+The same "file wins" replace, in `mergeGroups` this time, does the identical
+thing to `defaultIdentityId`: a group matched by id AND name is taken from
+the file WHOLE, so a backup written before this field existed - or one
+where the default was simply never set - clears a live local default with
+nothing. `resolveGroupDefaults` dropping a file default as dangling
+(WRITE 3, against the identities that actually landed) has the same effect:
+the drop overwrites whatever local default the group had, even a live one.
+Not fixable for the same reason as the `parentId` case: there is no way to
+tell "absent because the file predates the field" from "absent because the
+group genuinely has no default" once the field has been read.
+
+**Carried by.** `orderGroupWrites`, `mergeGroups`, `resolveGroupDefaults` and
+`sanitizeGroup` in `src/modules/backup/file.ts`.
 
 **Trigger.** A versioned backup format that can record "this group's parent
-field was not written by this build" as distinct from "this group is a
-root" - at which point an old file could keep the local nesting instead of
-overwriting it.
+field / default identity was not written by this build" as distinct from
+"this group is a root / has no default" - at which point an old file could
+keep the local nesting or default instead of overwriting it.
 
 ## Shared UI
 
@@ -745,13 +756,17 @@ device decided the delete against the inventory it could see; a refusal here
 leaves the record alive locally, and a live record is pushed, so one user's
 delete would resurrect on every device that still has a holder. The holder that
 remains is the state the local refusals describe as recoverable: an identity
-naming a key that is gone, or a row whose jump host vanished.
+naming a key that is gone, a row whose jump host vanished, or a group naming a
+deleted identity as its default.
 
 **Carried by.** The `applyRemote` doc on each of the three stores, which states
 it beside the two cascades that are deliberately not re-run. The local refusals
 are `identitiesUsingKey` in `src/modules/vault/refs.ts`, the `hostRefs` argument
 to `deleteIdentity`, and the `VaultInUseError` branch of `deleteHost` in
-`src/modules/hosts/store.ts`.
+`src/modules/hosts/store.ts`. A group's own dangling default is the read-time
+tolerance in `defaultIdentityFor` (`src/modules/hosts/groupTree.ts`), which
+skips it and falls through to a live ancestor's rather than surfacing it as a
+holder to recover.
 
 **Trigger.** A report of a secret lost this way, or the pull gaining a place to
 put a refusal that does not republish the record - a per-object quarantine that

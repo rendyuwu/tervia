@@ -305,6 +305,10 @@ macOS/Linux rely on `Drop for Session -> killer.kill()`.
   record. `HostGroup.parentId` nests one group under another; a value that
   dangles, names itself, or closes a cycle is read as root (`groupTree.ts`)
   rather than refused, because sync can deliver one already merged.
+  `HostGroup.defaultIdentityId` names the vault identity a NEW host created
+  in that group (or a descendant with none of its own) is pre-bound to at
+  CREATE time - `resolve.ts` never reads a group, so editing or clearing it
+  never moves a host that already exists.
 - `groupTree.ts`: `buildGroupTree` is the read-time forest `GroupStrip.tsx` and
   `page/derive.ts` build on - only the group whose OWN parent is missing, or
   which itself sits on a cycle, resolves to root; a group further down an
@@ -313,7 +317,10 @@ macOS/Linux rely on `Drop for Session -> killer.kill()`.
   one of those in the first place, checking a candidate edge against this
   same resolution rather than a second walk; `modules/backup/file.ts`'s
   `orderGroupWrites` is the other consumer, ordering an import's group writes
-  off `effectiveParents`.
+  off `effectiveParents`. `defaultIdentityFor` walks the same map to find a
+  group's effective default identity - its own if it has one, else the
+  nearest ancestor's - which `HostEditorDialog.tsx`'s create-mode load reads
+  to pre-bind a new host.
 - `jumps.ts`: `jumpChain` is the pure walk (shared with the write guard),
   `resolveJumpHops` puts a credential on each hop and reverses into the backend's
   connect order. Cycle detection is seeded by the target's own id, and
@@ -361,7 +368,9 @@ macOS/Linux rely on `Drop for Session -> killer.kill()`.
   `VaultKey` is a private key stored once and shared by every identity using it.
   Secrets go to service `tervia-vault`. A delete is **refused** while something
   still references the record (`VaultInUseError` names the holders) rather than
-  cascading, and `identityHostRefs` is the host store's answer to "who uses this".
+  cascading, and `identityHostRefs` is the host store's answer to "who uses
+  this" - both the hosts bound to it (`hostsUsingIdentity`) and the groups
+  naming it as their default (`groupsUsingIdentity`, `modules/vault/refs.ts`).
 - `resolve.ts` is the **one** place a binding becomes something the connect path
   can use, and both protocols get the same shape: a keychain **reference**
   (`{kind: "keychain", service, account}`). `rdp_open` and `ssh_open` both

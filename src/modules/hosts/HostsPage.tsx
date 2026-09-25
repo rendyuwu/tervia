@@ -227,8 +227,8 @@ export function HostsPage({ onConnect, onScreen }: HostsPageProps): ReactNode {
   // bearing, not an optimisation (see `identityRows` in
   // `src/modules/vault/page/derive.ts`).
   const identityRowList = useMemo(
-    () => identityRows(Array.from(vault.identities.values()), vault.keys, hosts),
-    [vault.identities, vault.keys, hosts],
+    () => identityRows(Array.from(vault.identities.values()), vault.keys, hosts, groups),
+    [vault.identities, vault.keys, hosts, groups],
   );
   const knownGroupIds = useMemo(() => new Set(groups.map((g) => g.id)), [groups]);
   const rows = useMemo(() => searchRows(hosts, groups, vault), [hosts, groups, vault]);
@@ -335,6 +335,16 @@ export function HostsPage({ onConnect, onScreen }: HostsPageProps): ReactNode {
     [groups],
   );
 
+  const setGroupDefaultIdentity = useCallback(
+    async (id: string, identityId: string | undefined): Promise<void> => {
+      const existing = groups.find((g) => g.id === id);
+      if (!existing) return;
+      // Spread, so `order` and `parentId` survive - the same reason `moveGroup` spreads.
+      await upsertGroup({ ...existing, defaultIdentityId: identityId });
+    },
+    [groups],
+  );
+
   const removeGroup = useCallback(async (id: string): Promise<void> => {
     await deleteGroup(id);
   }, []);
@@ -403,13 +413,25 @@ export function HostsPage({ onConnect, onScreen }: HostsPageProps): ReactNode {
             </DropdownMenuTrigger>
             <DropdownMenuContent align="start">
               <DropdownMenuItem
-                onSelect={() => setEditorTarget({ mode: "create", protocol: "ssh" })}
+                onSelect={() =>
+                  setEditorTarget({
+                    mode: "create",
+                    protocol: "ssh",
+                    ...(group.kind === "group" ? { prefill: { groupId: group.groupId } } : {}),
+                  })
+                }
               >
                 <SquareTerminal size={14} strokeWidth={1.75} />
                 SSH host
               </DropdownMenuItem>
               <DropdownMenuItem
-                onSelect={() => setEditorTarget({ mode: "create", protocol: "rdp" })}
+                onSelect={() =>
+                  setEditorTarget({
+                    mode: "create",
+                    protocol: "rdp",
+                    ...(group.kind === "group" ? { prefill: { groupId: group.groupId } } : {}),
+                  })
+                }
               >
                 <Monitor size={14} strokeWidth={1.75} />
                 RDP host
@@ -523,6 +545,8 @@ export function HostsPage({ onConnect, onScreen }: HostsPageProps): ReactNode {
           onRenameGroup={renameGroup}
           onMoveGroup={moveGroup}
           onDeleteGroup={removeGroup}
+          identities={Array.from(vault.identities.values())}
+          onSetDefaultIdentity={setGroupDefaultIdentity}
         />
       </div>
 

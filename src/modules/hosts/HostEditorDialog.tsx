@@ -33,7 +33,7 @@ import type { IdentityRow } from "@/modules/vault/page/derive";
 import { listKeys } from "@/modules/vault/store";
 import type { VaultKey } from "@/modules/vault/types";
 import type { ReactNode } from "react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import {
   bindHostToIdentity,
@@ -48,6 +48,7 @@ import {
   credentialChangeFor,
   credentialChangeNote,
   credentialChangeTitle,
+  credentialChoiceForGroup,
   currentCredentialChoice,
   hostKeySecretNames,
   hostOwnedSecretNames,
@@ -359,6 +360,23 @@ export function HostEditorDialog({
    */
   const sshSeeded = useRef<SshSecretSeeded>(NOTHING_SEEDED);
   /**
+   * Whether the user has already committed to a credential this sitting -
+   * either by touching the CREDENTIAL PICKER itself, or by arriving with (or
+   * typing) an inline account a group re-seed would otherwise clobber.
+   *
+   * A ref, on `sshTouched`'s own terms: reset once per token at the top of
+   * the load effect, then seeded in the create arm from
+   * `prefill.user !== undefined` (a quick-connect `user@host` already named
+   * an account) before the picker's own `onChange`, {@link patchSshCred} and
+   * the RDP section's `onChange` each set it too. Read (never rendered) by
+   * the group picker's `onChange` below to decide whether re-seeding
+   * `choice` for the newly picked group would discard a credential the user
+   * already has. Only matters in CREATE mode - `boundIdentity` in edit mode
+   * never reads `choice`, so nothing here can move an existing host's
+   * binding.
+   */
+  const credentialTouched = useRef(false);
+  /**
    * Whether the user has asked this host to forget the key material it still
    * stores under an auth mode that cannot use it - IN THE DRAFT.
    *
@@ -502,6 +520,17 @@ export function HostEditorDialog({
     [],
   );
 
+  /**
+   * The identities `credentialChoiceForGroup` is allowed to seed the picker
+   * to - `identityRows` is this dialog's own live list, the same one the
+   * picker's own options come from, so a dangling default is never offered
+   * as a choice the picker cannot also show.
+   */
+  const liveIdentityIds = useMemo(
+    () => new Set(identityRows.map((row) => row.identity.id)),
+    [identityRows],
+  );
+
   // Reset and populate whenever the editor is pointed at a different row. Closing
   // deliberately leaves the draft alone: the next open resets it, and wiping it
   // here would empty every field behind the dialog's own close animation.
@@ -520,6 +549,9 @@ export function HostEditorDialog({
     // last row's seed would license clearing this one's secret.
     sshTouched.current = NO_SSH_SECRETS_TOUCHED;
     sshSeeded.current = NOTHING_SEEDED;
+    // Per row: a group re-seed for the row this editor was pointed away
+    // from must not carry an "already picked" mark onto a fresh create.
+    credentialTouched.current = false;
     // Per row for the same reason: the intent names the accounts of the row this
     // editor was pointed away from, and carrying it onto the next one would
     // delete a key nothing on screen has said a word about.
@@ -562,13 +594,14 @@ export function HostEditorDialog({
 
       if (target.mode === "create") {
         const prefill = target.prefill ?? {};
+        const seedGroupId = liveGroup(prefill.groupId);
         setProtocol(target.protocol);
         setPortTouched(prefill.port !== undefined);
         setShared({
           name: prefill.name ?? "",
           host: prefill.host ?? "",
           port: String(prefill.port ?? defaultPortFor(target.protocol)),
-          groupId: liveGroup(prefill.groupId),
+          groupId: seedGroupId,
           description: "",
         });
         setSshCred({ ...EMPTY_SSH_CRED, user: prefill.user ?? "" });
@@ -578,10 +611,17 @@ export function HostEditorDialog({
         setTunnelSshHostId("");
         setClipboardMode("both");
         setPins({});
+        // A quick-connect `user@host` (or any prefilled user) already named
+        // an account, so the group re-seed below - and the picker's own
+        // onChange after it - must not clobber it either.
+        credentialTouched.current = prefill.user !== undefined;
         // The create arm returns before the `currentCredentialChoice(host)`
         // reset below is reached, so it gets its own: a choice left over from a
-        // previous EDIT sitting must not leak into a new host.
-        setChoice(CREDENTIAL_CHOICE_INLINE);
+        // previous EDIT sitting must not leak into a new host. Inherits the
+        // group's effective default identity when there is one and it names a
+        // live identity - `credentialChoiceForGroup` falls back to the inline
+        // sentinel otherwise, which is the prior behaviour unchanged.
+        setChoice(credentialChoiceForGroup(seedGroupId, allGroups, liveIdentityIds));
         setReady(true);
         return;
       }
@@ -850,6 +890,9 @@ export function HostEditorDialog({
    * the keychain read has not reached yet.
    */
   const patchSshCred = (patch: Partial<SshCredentialDraft>) => {
+    // An inline account the user is actively typing must not be clobbered
+    // by a later group pick - see `credentialTouched`'s own doc.
+    credentialTouched.current = true;
     setSshCred((d) => ({ ...d, ...patch }));
     sshTouched.current = {
       password: sshTouched.current.password || patch.password !== undefined,
@@ -1768,7 +1811,10 @@ export function HostEditorDialog({
                   <Combobox
                     options={credentialOptions}
                     value={choice}
-                    onChange={setChoice}
+                    onChange={(next) => {
+                      credentialTouched.current = true;
+                      setChoice(next);
+                    }}
                     searchPlaceholder="Search identities…"
                     emptyLabel="No identities found."
                   />
@@ -1815,7 +1861,12 @@ export function HostEditorDialog({
                     boundIdentity={boundIdentity}
                     identityName={boundIdentityName}
                     value={rdpCred}
-                    onChange={(patch) => setRdpCred((d) => ({ ...d, ...patch }))}
+                    onChange={(patch) => {
+                      // Same reasoning as `patchSshCred`: a typed RDP account
+                      // must not be clobbered by a later group pick.
+                      credentialTouched.current = true;
+                      setRdpCred((d) => ({ ...d, ...patch }));
+                    }}
                     hasStoredPassword={hasStoredRdpPassword}
                   />
                 )}
@@ -1842,7 +1893,15 @@ export function HostEditorDialog({
                   <Combobox
                     options={groupOptions}
                     value={shared.groupId}
-                    onChange={(groupId) => setShared({ ...shared, groupId })}
+                    onChange={(groupId) => {
+                      setShared({ ...shared, groupId });
+                      // Re-seeds the still-untouched picker for the newly
+                      // picked group's own default - never in edit mode,
+                      // where `boundIdentity` does not read `choice` at all.
+                      if (mode === "create" && !credentialTouched.current) {
+                        setChoice(credentialChoiceForGroup(groupId, groups, liveIdentityIds));
+                      }
+                    }}
                     searchPlaceholder="Search groups…"
                     emptyLabel="No group found."
                   />

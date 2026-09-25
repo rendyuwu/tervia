@@ -2101,8 +2101,8 @@ console.log(
   }
 
   // -------------------------------------------------------------------------
-  // Pin 1: the create arm RESETS `choice` to the inline sentinel, and
-  // does so on the path that `return`s before the edit arm's own reset.
+  // Pin 1: the create arm SEEDS `choice` exactly once, on the path that
+  // `return`s before the edit arm's own reset.
   //
   // The three checks above pin where `boundIdentity` READS `choice`. Nothing
   // pinned where `choice` is WRITTEN per target, and `choice` is component
@@ -2115,6 +2115,18 @@ console.log(
   // `pnpm verify` 53/53. The line is correct in shipped code; what was
   // missing was anything holding it there.
   //
+  // Relaxed one notch from its original form: this used to also pin the
+  // ARGUMENT'S TEXT, requiring it to name `CREDENTIAL_CHOICE_INLINE`. The
+  // create arm now seeds `choice` from the picked group's effective default
+  // via `credentialChoiceForGroup(seedGroupId, allGroups, liveIdentityIds)`,
+  // which never mentions that sentinel by name even though it still returns
+  // it for a group-less or default-less create - `credential-move-verify.ts`
+  // section [16] proves THAT half by value, over the pure helper, rather
+  // than this file grepping for a literal argument. What is left here is the
+  // three claims a source-text argument filter cannot make: exactly one
+  // seed, reached only under `target.mode === "create"`, and reached before
+  // the arm's own `return`.
+  //
   // Rooted at `load`'s own body and then counted, per
   // {@link findVariableDeclarations}: rooting excludes a decoy appended
   // outside the effect, the count excludes a second reset added inside it.
@@ -2125,39 +2137,19 @@ console.log(
   // -------------------------------------------------------------------------
   const loadBody = hostEditorFnBody ? findConstArrowBody(hostEditorFnBody, "load") : null;
   check("the load effect's `load` arrow body was found (compiler API)", loadBody !== null);
-  const inlineResets = loadBody
-    ? findCalls(loadBody, editorSf, ["setChoice"]).filter(
-        (c) =>
-          c.arguments.length === 1 &&
-          norm(c.arguments[0].getText(editorSf)) === "CREDENTIAL_CHOICE_INLINE",
-      )
-    : [];
-  check(
-    "the load effect resets choice to the inline sentinel EXACTLY ONCE - rooted at `load` so a decoy outside it is not counted, counted so a second one inside it is",
-    inlineResets.length === 1,
-    inlineResets.length,
+  // Filtered by WHERE the call sits, not by what it says: the edit arm's own
+  // `setChoice(currentCredentialChoice(host))` is the other `setChoice` call
+  // inside `load`, and it is never enclosed by `target.mode === "create"`,
+  // so this filter excludes it without needing to read its argument's text.
+  const allChoiceCalls = loadBody ? findCalls(loadBody, editorSf, ["setChoice"]) : [];
+  const createChoiceCalls = allChoiceCalls.filter((c) =>
+    ifConditionsEnclosing(c, editorSf).some((cond) => /target\.mode === "create"/.test(cond)),
   );
-  if (inlineResets.length === 1) {
-    const reset = inlineResets[0];
-    // Callee and argument as separate comparisons rather than the
-    // CallExpression's whole text: a trailing comma sits INSIDE a multi-line
-    // call's own span but OUTSIDE its arguments' spans, so pinning the two
-    // smallest nodes that carry the claim cannot falsely redden on a reflow
-    // that pinning the whole right-hand side would. Whitespace is normalised
-    // and only whitespace - Prettier owns the line breaks, everything else
-    // here IS the claim.
-    check(
-      "and the reset it makes is setChoice(CREDENTIAL_CHOICE_INLINE) - the sentinel, not some other draft value",
-      norm(reset.expression.getText(editorSf)) === "setChoice" &&
-        norm(reset.arguments[0].getText(editorSf)) === "CREDENTIAL_CHOICE_INLINE",
-      { callee: reset.expression.getText(editorSf), arg: reset.arguments[0].getText(editorSf) },
-    );
-    check(
-      'and it is reached only under a condition naming target.mode === "create" - never by adjacency',
-      ifConditionsEnclosing(reset, editorSf).some((c) => /target\.mode === "create"/.test(c)),
-      ifConditionsEnclosing(reset, editorSf),
-    );
-  }
+  check(
+    'the load effect seeds choice under a condition naming target.mode === "create" EXACTLY ONCE - never by adjacency to the edit arm\'s own reset',
+    createChoiceCalls.length === 1,
+    { totalSetChoiceCalls: allChoiceCalls.length, underCreateCondition: createChoiceCalls.length },
+  );
   // The half of the claim that "a setChoice call exists in the create arm"
   // does not carry: the reset has to run BEFORE the arm's `return`, or it is
   // dead code AND the edit arm's reset below is never reached either. Direct
@@ -2181,11 +2173,11 @@ console.log(
       (s) =>
         ts.isExpressionStatement(s) &&
         ts.isCallExpression(s.expression) &&
-        inlineResets.includes(s.expression),
+        createChoiceCalls.includes(s.expression),
     );
     const returnAt = stmts.findIndex((s) => ts.isReturnStatement(s));
     check(
-      "the reset is a DIRECT statement of the create arm's block and precedes its return - the path that returns before the edit arm's reset is reached",
+      "the seed is a DIRECT statement of the create arm's block and precedes its return - the path that returns before the edit arm's reset is reached",
       resetAt >= 0 && returnAt >= 0 && resetAt < returnAt,
       { resetAt, returnAt, statements: stmts.length },
     );

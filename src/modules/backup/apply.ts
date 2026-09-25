@@ -83,6 +83,7 @@ import {
   orderHostWrites,
   parseBackupFile,
   refuseProtocolConflicts,
+  resolveGroupDefaults,
   resolveIdentityBindings,
   sanitizePayload,
   type BackupFile,
@@ -776,8 +777,21 @@ async function applyV3(payload: SealedBlob, passphrase: string): Promise<ImportR
     // before it - `upsertGroup` checks `parentId` against what is already on
     // disk, and `orderGroupWrites` is also what drops a dangling or cyclic
     // reference to root before either row reaches that check.
+    //
+    // `resolveGroupDefaults` runs HERE, against `existingIdentities` union
+    // `savedIdentities` - the identities that actually landed - rather than
+    // the pre-write `identityIds` WRITE 2 used to decide what to attempt.
+    // `identityIds` counts an identity whose write FAILED as existing (its
+    // own comment above says so), so filtering with it here would leave a
+    // group naming a NEVER-SAVED identity, which `upsertGroup`'s existence
+    // check then refuses - losing the whole group row, and every new
+    // sub-group under it, over one failed identity write.
     const groupIds = new Set(existingGroups.map((g) => g.id));
-    for (const group of orderGroupWrites(merged.groups, existingGroups)) {
+    const landedIdentityIds = new Set([...existingIdentities, ...savedIdentities].map((i) => i.id));
+    for (const group of orderGroupWrites(
+      resolveGroupDefaults(merged.groups, landedIdentityIds),
+      existingGroups,
+    )) {
       try {
         await upsertGroup(group);
         tally(group.id, groupIds, groups);

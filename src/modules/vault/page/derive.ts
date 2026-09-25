@@ -1,7 +1,9 @@
 import { hasWordBoundaryMatch } from "@/lib/searchTiers";
-import type { Host } from "@/modules/hosts/types";
+import type { Host, HostGroup } from "@/modules/hosts/types";
 
 import {
+  GROUP_DEFAULT_SUFFIX,
+  groupsUsingIdentity,
   hostsUsingIdentity,
   identitiesUsingKey,
   identityMissingSecret,
@@ -75,6 +77,14 @@ export type IdentityRow = {
    *  This field being a primitive does NOT make {@link identityRows} itself safe
    *  to call from inside a selector - see that function's own doc. */
   hostCount: number;
+  /** How many groups name this identity as their default. Same reasoning as
+   *  `hostCount` - a count, not the array; the array is available from
+   *  `groupsUsingIdentity` for the delete refusal, which needs the names.
+   *
+   *  A row with `hostCount: 0` and `groupCount: 0` is the row a delete
+   *  succeeds on - `hostCount` alone stopped being that boundary the moment
+   *  a group could hold an identity too. */
+  groupCount: number;
   missingSecret: boolean;
 };
 
@@ -105,25 +115,27 @@ export type KeyRow = {
  *
  * Returns a FRESH array on every call, the same as any function ending in
  * `.map` does - this is a plain function, not a memoized selector. A caller
- * MUST wrap the call in `useMemo` keyed on its three arguments, and must never
+ * MUST wrap the call in `useMemo` keyed on its four arguments, and must never
  * call it directly inside a zustand selector: a fresh array read as "changed"
  * on every store broadcast re-renders forever (v5 throws "Maximum update
- * depth exceeded" outright). `hostCount` being a primitive (see its own doc)
- * fixes the LEAF, not this - the array this function returns is a new
- * reference every call regardless of what its elements are made of.
- * `useVault()` and `useHosts()` hand back references that are stable BETWEEN
- * RENDERS - they come straight out of `useState`, not rebuilt by a render
- * their own component did not cause - so a memo keyed on those plus
- * `identities`/`keys` is safe; calling this function with no memo at all is
- * not. They are NOT stable across a BROADCAST: `useHosts.ts` and `useVault.ts`
- * each build a fresh `Map` on every `onHostsChanged`/`onVaultChanged`,
- * identical data or not, so a real store change still re-runs every memo on
- * this page - cheap at this scale, not a property the hooks themselves have.
+ * depth exceeded" outright). `hostCount`/`groupCount` being primitives (see
+ * their own doc) fixes the LEAF, not this - the array this function returns
+ * is a new reference every call regardless of what its elements are made of.
+ * `useVault()`, `useHosts()` and `useHostGroups()` hand back references that
+ * are stable BETWEEN RENDERS - they come straight out of `useState`, not
+ * rebuilt by a render their own component did not cause - so a memo keyed on
+ * those plus `identities`/`keys` is safe; calling this function with no memo
+ * at all is not. They are NOT stable across a BROADCAST: `useHosts.ts` and
+ * `useVault.ts` each build a fresh `Map` on every
+ * `onHostsChanged`/`onVaultChanged`, identical data or not, so a real store
+ * change still re-runs every memo on this page - cheap at this scale, not a
+ * property the hooks themselves have.
  */
 export function identityRows(
   identities: readonly VaultIdentity[],
   keys: ReadonlyMap<string, VaultKey>,
   hosts: readonly Host[],
+  groups: readonly HostGroup[],
 ): IdentityRow[] {
   return identities.map((identity) => {
     let keyName: string | undefined;
@@ -138,6 +150,7 @@ export function identityRows(
       keyName,
       keyDangling,
       hostCount: hostsUsingIdentity(hosts, identity.id).length,
+      groupCount: groupsUsingIdentity(groups, identity.id).length,
       missingSecret: identityMissingSecret(identity, keys),
     };
   });
@@ -352,8 +365,17 @@ export function rankKeys(rows: readonly KeyRow[], query: string): KeyRow[] {
  *
  * `holderKind` comes from the caller rather than from the error because the
  * error does not carry it - the noun is baked into its message string only. The
- * caller always knows: an identity is held by hosts, a key is held by
- * identities, and nothing else holds either.
+ * caller always knows: an identity is held by hosts (and now, groups naming
+ * one as their default), a key is held by identities, and nothing else holds
+ * either.
+ *
+ * A GROUP holder only ever arrives inside the "host" `holderKind` branch -
+ * `identityHostRefs` (`src/modules/hosts/store.ts`) is the only source of a
+ * group holder, and it names it in the identity's holder list, never a
+ * key's. It arrives suffixed with {@link GROUP_DEFAULT_SUFFIX}, which is the
+ * signal this function reads to say something noun-neutral instead of
+ * "N hosts still use it" - a group is not a host, and "point it at another
+ * credential" is not the edit that clears a group's default.
  *
  * Anything that is not a refusal falls through to its own message unchanged. A
  * keychain that refused a delete has something to say and this must not eat it.
@@ -365,6 +387,12 @@ export function deleteRefusalText(
 ): string {
   if (!(e instanceof VaultInUseError)) return e instanceof Error ? e.message : String(e);
   const names = e.holders.map((h) => h.name || h.id).join(", ");
+  if (holderKind === "host" && e.holders.some((h) => h.name.endsWith(GROUP_DEFAULT_SUFFIX))) {
+    return (
+      `Cannot delete ${subject}: still in use by ${names}. Point each host at another ` +
+      `credential and set each group's default identity to None first.`
+    );
+  }
   const one = e.holders.length === 1;
   const noun = one ? holderKind : holderKind === "host" ? "hosts" : "identities";
   const target = holderKind === "host" ? "another credential" : "another key";
