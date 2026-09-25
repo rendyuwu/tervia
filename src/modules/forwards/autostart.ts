@@ -183,6 +183,16 @@ function yieldedBanner(rule: ForwardRule): string {
   return `\x1b[33m[tervia] forward "${rule.name}" was started from the Port Forwarding page while this one was binding; closing the one this terminal just opened.\x1b[0m\r\n`;
 }
 
+/** `-R`/`-D` do not ride the terminal's own session yet: `deps.openForward`
+ *  binds a LOCAL listener and speaks `-L`'s own
+ *  `(id, localPort, remoteHost, remotePort)` shape, which neither type's dial
+ *  matches - a `-R` rule needs `Handle::tcpip_forward` and a `-D` rule needs a
+ *  SOCKS5 listener. Skipped rather than forced through it; see
+ *  `KNOWN-LIMITS.md`. */
+function typedAutostartSkippedBanner(rule: ForwardRule): string {
+  return `\x1b[33m[tervia] forward "${rule.name}" is a remote or dynamic rule; starting it with its host is not supported yet - start it from the Port Forwarding page.\x1b[0m\r\n`;
+}
+
 /**
  * Open every `startWithHost` rule bound to `hostId` on the terminal's own live
  * session, writing one banner per rule.
@@ -229,6 +239,13 @@ export async function startHostForwards(
 
     const mine = rules.filter((rule) => rule.hostId === hostId && rule.startWithHost);
     for (const rule of mine) {
+      // `-R`/`-D` SKIPPED BEFORE ANY OTHER CHECK - see
+      // `typedAutostartSkippedBanner`'s own doc for why this is not "the same
+      // small call" `deps.openForward` already makes for `-L`.
+      if (rule.type) {
+        writeBanner(typedAutostartSkippedBanner(rule));
+        continue;
+      }
       // THE SESSION MAY ALREADY BE GONE BEFORE THE FIRST BIND, not only during
       // a later one. `finishSsh` sets `sessionEnded` UNCONDITIONALLY
       // (`ssh-session.ts`), before `openSsh` has resolved an id - so a

@@ -114,7 +114,21 @@ export function ruleRows(
       rule,
       hostName,
       hostDangling: hostsLoaded && host === undefined,
-      route: `${localPortLabel(rule, undefined)} → ${hostName} → ${rule.remoteHost}:${rule.remotePort}`,
+      // `-D` HAS NO DIAL TARGET AT ALL - a SOCKS5 CONNECT names one per
+      // connection - so the shared `-L` formula below would print a blank
+      // host and a zero port for it, which reads as broken rather than
+      // merely incomplete. `-R` has its own bind-side route too: its
+      // `localPort`/`remoteHost`/`remotePort` are unused (forced 0/""/0),
+      // so the shared `-L` formula would print `Auto → host → 127.0.0.1:0`
+      // for a rule that has never bound anything on this machine at all -
+      // the listener is on the SERVER, at `bindAddress:bindPort`, dialling
+      // `targetHost:targetPort` back here.
+      route:
+        rule.type === "dynamic"
+          ? `SOCKS ${localPortLabel(rule, undefined)} → ${hostName}`
+          : rule.type === "remote"
+            ? `${rule.bindAddress || "localhost"}:${rule.bindPort || "Auto"} on ${hostName} → ${rule.targetHost}:${rule.targetPort}`
+            : `${localPortLabel(rule, undefined)} → ${hostName} → ${rule.remoteHost}:${rule.remotePort}`,
     };
   });
 }
@@ -203,8 +217,23 @@ export function rankRules(rows: readonly ForwardRuleRow[], query: string): Forwa
  * must show the port that is ACTUALLY LISTENING, never the number the rule
  * merely asked for. Showing the requested port for a running rule names a port
  * nothing is listening on.
+ *
+ * `-R` reads differently: {@link ForwardRule.localPort} is unused for it, so
+ * `boundPort`/the pinned {@link ForwardRule.bindPort} name a port on the
+ * SERVER, not on this machine - `hostName` is what says whose port it is.
+ * `hostName` absent falls back to a generic word rather than blaming
+ * `localhost`, which is never where a `-R` listener lives.
  */
-export function localPortLabel(rule: ForwardRule, boundPort: number | undefined): string {
+export function localPortLabel(
+  rule: ForwardRule,
+  boundPort: number | undefined,
+  hostName?: string,
+): string {
+  if (rule.type === "remote") {
+    const host = hostName ?? "server";
+    if (boundPort !== undefined) return `${host}:${boundPort}`;
+    return rule.bindPort ? `${host}:${rule.bindPort}` : "Auto";
+  }
   if (boundPort !== undefined) return `localhost:${boundPort}`;
   return rule.localPort === 0 ? "Auto" : `localhost:${rule.localPort}`;
 }

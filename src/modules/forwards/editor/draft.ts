@@ -34,10 +34,30 @@ import type { ForwardRule } from "../types";
 export type RuleDraft = {
   name: string;
   hostId: string;
-  /** "" or "0" both mean auto - see {@link parseLocalPort}. */
+  /** `""` means `-L` (local) - the sentinel this DRAFT alone uses; the
+   *  RECORD's own `type` stays `undefined` for that case, per `types.ts`'s
+   *  doc on `ForwardRule.type`. `"remote"`/`"dynamic"` mean `-R`/`-D`. */
+  type: "" | "remote" | "dynamic";
+  /** "" or "0" both mean auto - see {@link parseLocalPort}. `-L`'s local bind
+   *  port, or `-D`'s SOCKS port; unused for `-R`. */
   localPort: string;
+  /** `-L`'s dial target host; unused for `-R`/`-D` - `-R`'s own is
+   *  {@link targetHost}. */
   remoteHost: string;
+  /** `-L`'s dial target port; unused for `-R`/`-D`. */
   remotePort: string;
+  /** `-R` only: the host THIS MACHINE dials for each connection the server
+   *  accepts; unused for `-L`/`-D`. */
+  targetHost: string;
+  /** `-R` only: paired with {@link targetHost}; unused for `-L`/`-D`. */
+  targetPort: string;
+  /** `-R` only: the address the SERVER's listener binds to. Blank means
+   *  "localhost", the same way `-L`'s blank `localPort` means "auto" - see
+   *  {@link ruleRecordFrom}. */
+  bindAddress: string;
+  /** `-R` only. "" or "0" both mean "let the SERVER pick" - see
+   *  {@link parseLocalPort}, which this reuses. */
+  bindPort: string;
   startWithHost: boolean;
   description: string;
 };
@@ -47,9 +67,14 @@ export type RuleDraft = {
 export const EMPTY_RULE_DRAFT: RuleDraft = {
   name: "",
   hostId: "",
+  type: "",
   localPort: "",
   remoteHost: "",
   remotePort: "",
+  targetHost: "",
+  targetPort: "",
+  bindAddress: "",
+  bindPort: "",
   startWithHost: false,
   description: "",
 };
@@ -61,9 +86,14 @@ export function ruleDraftFrom(rule: ForwardRule): RuleDraft {
   return {
     name: rule.name,
     hostId: rule.hostId,
+    type: rule.type ?? "",
     localPort: rule.localPort === 0 ? "" : String(rule.localPort),
     remoteHost: rule.remoteHost,
-    remotePort: String(rule.remotePort),
+    remotePort: rule.remotePort === 0 ? "" : String(rule.remotePort),
+    targetHost: rule.targetHost ?? "",
+    targetPort: rule.targetPort === undefined ? "" : String(rule.targetPort),
+    bindAddress: rule.bindAddress ?? "",
+    bindPort: rule.bindPort === undefined || rule.bindPort === 0 ? "" : String(rule.bindPort),
     startWithHost: rule.startWithHost,
     description: rule.description ?? "",
   };
@@ -79,7 +109,9 @@ export function ruleDraftFrom(rule: ForwardRule): RuleDraft {
  * Exported so `RuleEditorDialog`'s live `privilegedPortWarning` preview reads
  * a typed port exactly the way {@link ruleRecordFrom} will write it - a second
  * parse in the dialog, even one that looks equivalent, is how the warning
- * shown while typing and the port actually saved could disagree.
+ * shown while typing and the port actually saved could disagree. Reused for
+ * every "0 lets something else pick" port on the draft - `-D`'s SOCKS port
+ * and `-R`'s `bindPort` parse through this same function.
  */
 export function parseLocalPort(localPort: string): number {
   const trimmed = localPort.trim();
@@ -88,7 +120,7 @@ export function parseLocalPort(localPort: string): number {
 }
 
 /** Not exported - nothing outside `ruleRecordFrom` and `validateRuleDraft`
- *  needs a typed remote port, unlike the local port's live warning. */
+ *  needs a typed remote/target port, unlike the local port's live warning. */
 function parseRemotePort(remotePort: string): number {
   return Number.parseInt(remotePort.trim(), 10);
 }
@@ -112,11 +144,28 @@ function isValidRemotePort(port: number): boolean {
  * ever called, and a `hostId` that names a deleted or now-RDP host is left for
  * `upsertRule` to refuse - see the file header. This function's job is
  * everything else the store also checks that a draft can decide with no
- * lookup: name, both ports and the remote host - four of `upsertRule`'s
- * (`src/modules/forwards/store.ts`) six refusals that need nothing but the draft itself.
+ * lookup, TYPE-CONDITIONAL to match `upsertRule`'s own per-type refusals
+ * (`src/modules/forwards/store.ts`) - see `types.ts`'s doc on `ForwardRule`
+ * for which type uses which field.
  */
 export function validateRuleDraft(draft: RuleDraft): string | null {
   if (!draft.name.trim()) return "Name is required";
+  if (draft.type === "dynamic") {
+    if (!isValidLocalPort(parseLocalPort(draft.localPort))) {
+      return "SOCKS port must be 0 (auto), or 1–65535";
+    }
+    return null;
+  }
+  if (draft.type === "remote") {
+    if (!draft.targetHost.trim()) return "Local target host is required";
+    if (!isValidRemotePort(parseRemotePort(draft.targetPort))) {
+      return "Local target port must be 1–65535";
+    }
+    if (draft.bindPort.trim() && !isValidLocalPort(parseLocalPort(draft.bindPort))) {
+      return "Bind port must be 0 (auto), or 1–65535";
+    }
+    return null;
+  }
   if (!isValidLocalPort(parseLocalPort(draft.localPort))) {
     return "Local port must be 0 (auto), or 1–65535";
   }
@@ -137,16 +186,56 @@ export function validateRuleDraft(draft: RuleDraft): string | null {
  * The whole class of defect this guards against is a one-line spread at exactly
  * this call site, so this function existing at all is the fix: a caller that wants to
  * change one field has to change it HERE, in the draft, not at the call site.
+ *
+ * TYPE-CONDITIONAL, the same way `validateRuleDraft` is: each branch fills
+ * only the fields its type uses, per `types.ts`'s doc on `ForwardRule`.
  */
 export function ruleRecordFrom(id: string, draft: RuleDraft): ForwardRule {
+  const name = draft.name.trim();
+  const description = draft.description.trim() || undefined;
+
+  if (draft.type === "dynamic") {
+    return {
+      id,
+      name,
+      hostId: draft.hostId,
+      type: "dynamic",
+      localPort: parseLocalPort(draft.localPort),
+      remoteHost: "",
+      remotePort: 0,
+      startWithHost: draft.startWithHost,
+      description,
+    };
+  }
+
+  if (draft.type === "remote") {
+    const bindAddress = draft.bindAddress.trim();
+    const bindPort = draft.bindPort.trim() ? parseLocalPort(draft.bindPort) : undefined;
+    return {
+      id,
+      name,
+      hostId: draft.hostId,
+      type: "remote",
+      localPort: 0,
+      remoteHost: "",
+      remotePort: 0,
+      targetHost: draft.targetHost.trim(),
+      targetPort: parseRemotePort(draft.targetPort),
+      ...(bindAddress ? { bindAddress } : {}),
+      ...(bindPort !== undefined ? { bindPort } : {}),
+      startWithHost: draft.startWithHost,
+      description,
+    };
+  }
+
   return {
     id,
-    name: draft.name.trim(),
+    name,
     hostId: draft.hostId,
     localPort: parseLocalPort(draft.localPort),
     remoteHost: draft.remoteHost.trim(),
     remotePort: parseRemotePort(draft.remotePort),
     startWithHost: draft.startWithHost,
-    description: draft.description.trim() || undefined,
+    description,
   };
 }

@@ -358,9 +358,19 @@ tracking otherwise streams motion reports into the reconnected shell as garbage.
 `127.0.0.1:local_port` and tunnels every connection to `remote_host:remote_port`
 **as resolved from the server**, over the live session — so a ProxyJump chain
 applies for free. `local_port` 0 lets the OS pick, and the bound port is
-returned. There is deliberately no close command: forwards are declared on the
-saved connection and re-opened on every connect, so the session's own teardown
-is the only lifecycle they need.
+returned. `ssh_forward_close(id, bound_port, generation)` closes one listener
+without touching the session or its other forwards.
+
+`ssh_remote_forward_open(id, bind_address, bind_port, local_host, local_port)`
+/ `ssh_remote_forward_close(id, bind_address, bound_port, generation)` are the
+`ssh -R` pair: ask the server to listen on `bind_address:bind_port` (`0` lets
+the SERVER pick) and dial `local_host:local_port` on THIS machine for every
+connection it accepts back - `HostKeyVerifier`'s
+`server_channel_open_forwarded_tcpip` override is what routes that
+acceptance. `ssh_socks_open(id, local_port)` is `ssh -D`: a
+minimal SOCKS5 listener (no-auth, CONNECT only) that opens one
+`channel_open_direct_tcpip` per accepted CONNECT, closed through the SAME
+`ssh_forward_close` `-L` uses.
 
 Three callers, three shapes:
 

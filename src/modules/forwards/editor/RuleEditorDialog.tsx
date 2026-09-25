@@ -11,7 +11,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Combobox, type ComboboxOption } from "@/modules/hosts/editor/Combobox";
-import { Field } from "@/modules/hosts/editor/FormControls";
+import { Field, ToggleButton } from "@/modules/hosts/editor/FormControls";
 import { savedHostOptions } from "@/modules/hosts/editor/hostOptions";
 import { findHost } from "@/modules/hosts/store";
 import { isSshHost, type Host } from "@/modules/hosts/types";
@@ -272,7 +272,7 @@ export function RuleEditorDialog({
         <DialogHeader>
           <DialogTitle>{title}</DialogTitle>
           <DialogDescription>
-            A local port forward that rides the chosen SSH host&apos;s own connection.
+            A port forward that rides the chosen SSH host&apos;s own connection.
           </DialogDescription>
         </DialogHeader>
 
@@ -340,50 +340,141 @@ export function RuleEditorDialog({
                 ) : null}
               </Field>
 
-              <Field label="Local port">
-                <Input
-                  value={draft.localPort}
-                  onChange={(e) => patch({ localPort: e.target.value })}
-                  placeholder="Auto"
-                  inputMode="numeric"
-                  className="h-8 font-mono text-[12px]"
-                />
-                {localPortWarning ? (
-                  <span className="text-muted-foreground text-[10.5px]">{localPortWarning}</span>
-                ) : null}
+              <Field label="Type">
+                <div className="flex gap-1">
+                  <ToggleButton active={draft.type === ""} onClick={() => patch({ type: "" })}>
+                    Local (-L)
+                  </ToggleButton>
+                  <ToggleButton
+                    active={draft.type === "remote"}
+                    onClick={() => patch({ type: "remote" })}
+                  >
+                    Remote (-R)
+                  </ToggleButton>
+                  <ToggleButton
+                    active={draft.type === "dynamic"}
+                    onClick={() => patch({ type: "dynamic" })}
+                  >
+                    Dynamic (-D · SOCKS)
+                  </ToggleButton>
+                </div>
               </Field>
 
-              <Field label="Remote host">
-                <Input
-                  value={draft.remoteHost}
-                  onChange={(e) => patch({ remoteHost: e.target.value })}
-                  placeholder="10.0.0.9 or db.internal"
-                  spellCheck={false}
-                  className="h-8 font-mono text-[12px]"
-                />
-              </Field>
+              {draft.type === "" ? (
+                <>
+                  <Field label="Local port">
+                    <Input
+                      value={draft.localPort}
+                      onChange={(e) => patch({ localPort: e.target.value })}
+                      placeholder="Auto"
+                      inputMode="numeric"
+                      className="h-8 font-mono text-[12px]"
+                    />
+                    {localPortWarning ? (
+                      <span className="text-muted-foreground text-[10.5px]">
+                        {localPortWarning}
+                      </span>
+                    ) : null}
+                  </Field>
 
-              <Field label="Remote port">
-                <Input
-                  value={draft.remotePort}
-                  onChange={(e) => patch({ remotePort: e.target.value })}
-                  inputMode="numeric"
-                  className="h-8 font-mono text-[12px]"
-                />
-              </Field>
+                  <Field label="Remote host">
+                    <Input
+                      value={draft.remoteHost}
+                      onChange={(e) => patch({ remoteHost: e.target.value })}
+                      placeholder="10.0.0.9 or db.internal"
+                      spellCheck={false}
+                      className="h-8 font-mono text-[12px]"
+                    />
+                  </Field>
+
+                  <Field label="Remote port">
+                    <Input
+                      value={draft.remotePort}
+                      onChange={(e) => patch({ remotePort: e.target.value })}
+                      inputMode="numeric"
+                      className="h-8 font-mono text-[12px]"
+                    />
+                  </Field>
+                </>
+              ) : draft.type === "remote" ? (
+                <>
+                  <Field label="Bind address">
+                    <Input
+                      value={draft.bindAddress}
+                      onChange={(e) => patch({ bindAddress: e.target.value })}
+                      placeholder="localhost"
+                      spellCheck={false}
+                      className="h-8 font-mono text-[12px]"
+                    />
+                  </Field>
+
+                  <Field label="Bind port">
+                    <Input
+                      value={draft.bindPort}
+                      onChange={(e) => patch({ bindPort: e.target.value })}
+                      placeholder="Auto"
+                      inputMode="numeric"
+                      className="h-8 font-mono text-[12px]"
+                    />
+                  </Field>
+
+                  <Field label="Local target host">
+                    <Input
+                      value={draft.targetHost}
+                      onChange={(e) => patch({ targetHost: e.target.value })}
+                      placeholder="10.0.0.9 or localhost"
+                      spellCheck={false}
+                      className="h-8 font-mono text-[12px]"
+                    />
+                  </Field>
+
+                  <Field label="Local target port">
+                    <Input
+                      value={draft.targetPort}
+                      onChange={(e) => patch({ targetPort: e.target.value })}
+                      inputMode="numeric"
+                      className="h-8 font-mono text-[12px]"
+                    />
+                  </Field>
+                </>
+              ) : (
+                <Field label="SOCKS port">
+                  <Input
+                    value={draft.localPort}
+                    onChange={(e) => patch({ localPort: e.target.value })}
+                    placeholder="Auto"
+                    inputMode="numeric"
+                    className="h-8 font-mono text-[12px]"
+                  />
+                  {localPortWarning ? (
+                    <span className="text-muted-foreground text-[10.5px]">{localPortWarning}</span>
+                  ) : null}
+                </Field>
+              )}
 
               <Field label="Start with host">
-                <label className="flex items-start gap-2 text-[12px]">
-                  <Checkbox
-                    checked={draft.startWithHost}
-                    onCheckedChange={(checked) => patch({ startWithHost: checked === true })}
-                    className="mt-0.5"
-                  />
-                  <span>
-                    Bring this rule up when this host&apos;s terminal connects. It closes with that
-                    tab.
+                {draft.type === "" ? (
+                  <label className="flex items-start gap-2 text-[12px]">
+                    <Checkbox
+                      checked={draft.startWithHost}
+                      onCheckedChange={(checked) => patch({ startWithHost: checked === true })}
+                      className="mt-0.5"
+                    />
+                    <span>
+                      Bring this rule up when this host&apos;s terminal connects. It closes with
+                      that tab.
+                    </span>
+                  </label>
+                ) : (
+                  // `startHostForwards` (`../autostart.ts`) skips every `-R`/`-D`
+                  // rule with a banner rather than starting it - see
+                  // `KNOWN-LIMITS.md` - so the toggle is disabled here instead of
+                  // offering a setting this rule cannot act on yet.
+                  <span className="text-muted-foreground text-[10.5px]">
+                    Remote and dynamic rules cannot start with their host yet - start this one from
+                    the Port Forwarding page.
                   </span>
-                </label>
+                )}
               </Field>
 
               <Field label="Description (optional)">

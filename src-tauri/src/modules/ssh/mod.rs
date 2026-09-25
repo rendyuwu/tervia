@@ -741,6 +741,129 @@ pub async fn ssh_forward_close(
     Ok(session.close_forward(bound_port, generation).await)
 }
 
+/// Blank `bind_address` - an empty field left on the form, or the frontend's
+/// own default - means "let the server pick its own bind address", the same
+/// as a blank OpenSSH `-R` bind address, so it is normalised to `"localhost"`
+/// once here rather than in each of `ssh_remote_forward_open` and
+/// `ssh_remote_forward_close` separately.
+fn normalize_bind_address(bind_address: String) -> String {
+    let trimmed = bind_address.trim();
+    if trimmed.is_empty() {
+        "localhost".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// `ssh -R`: ask the server to listen on `bind_address:bind_port`
+/// (`bind_port` 0 lets the SERVER pick) and route every connection it accepts
+/// back to `local_host:local_port` on THIS machine, over the live session
+/// `id` - `SshSession::open_remote_forward` in `session.rs` is where that
+/// routing actually happens, through the target hop's
+/// `HostKeyVerifier::server_channel_open_forwarded_tcpip` override. Returns
+/// the `SshForwardHandle` shape `ssh_forward_open` does; both halves have to
+/// come back to `ssh_remote_forward_close`.
+#[tauri::command]
+pub async fn ssh_remote_forward_open(
+    state: tauri::State<'_, SshState>,
+    id: u32,
+    bind_address: String,
+    bind_port: u16,
+    local_host: String,
+    local_port: u16,
+) -> Result<SshForwardHandle, String> {
+    let bind_address = normalize_bind_address(bind_address);
+    let local_host = local_host.trim().to_string();
+    if local_host.is_empty() {
+        return Err("ssh: remote forward needs a local target host".into());
+    }
+    if local_port == 0 {
+        return Err("ssh: remote forward needs a local target port".into());
+    }
+    let session = state
+        .sessions
+        .read()
+        .await
+        .get(&id)
+        .cloned()
+        .ok_or_else(|| {
+            log::warn!("ssh_remote_forward_open: unknown id={id}");
+            "no session".to_string()
+        })?;
+    let (bound_port, generation) = ssh_runtime()
+        .spawn(async move {
+            session
+                .open_remote_forward(bind_address, bind_port, local_host, local_port)
+                .await
+        })
+        .await
+        .map_err(|e| format!("ssh remote forward task join failed: {e}"))??;
+    Ok(SshForwardHandle {
+        bound_port,
+        generation,
+    })
+}
+
+/// Close ONE `-R` listener without touching the session - the same contract
+/// `ssh_forward_close` has for `-L`. `false` for an unknown session, an
+/// unknown port, or a `generation` a later open has moved past.
+#[tauri::command]
+pub async fn ssh_remote_forward_close(
+    state: tauri::State<'_, SshState>,
+    id: u32,
+    bind_address: String,
+    bound_port: u16,
+    generation: u64,
+) -> Result<bool, String> {
+    let Some(session) = state.sessions.read().await.get(&id).cloned() else {
+        log::debug!("ssh_remote_forward_close: unknown id={id}");
+        return Ok(false);
+    };
+    let bind_address = normalize_bind_address(bind_address);
+    ssh_runtime()
+        .spawn(async move {
+            session
+                .close_remote_forward(bind_address, bound_port, generation)
+                .await
+        })
+        .await
+        .map_err(|e| format!("ssh remote forward close task join failed: {e}"))?
+}
+
+/// `ssh -D`: bind a local SOCKS5 listener on `127.0.0.1:local_port` (0 picks a
+/// free port) over the live session `id`. `SshSession::open_socks` in
+/// `session.rs` speaks the minimal RFC 1928 subset a working proxy needs and
+/// opens one `channel_open_direct_tcpip` per accepted CONNECT - the same call
+/// `ssh_forward_open` makes for `-L`. Returns the SAME `SshForwardHandle`
+/// shape `-L` does, and closes through the SAME `ssh_forward_close`: a SOCKS5
+/// listener lives in the identical per-session forward map `-L`'s does, so it
+/// needs no close command of its own.
+#[tauri::command]
+pub async fn ssh_socks_open(
+    state: tauri::State<'_, SshState>,
+    id: u32,
+    local_port: u16,
+) -> Result<SshForwardHandle, String> {
+    let session = state
+        .sessions
+        .read()
+        .await
+        .get(&id)
+        .cloned()
+        .ok_or_else(|| {
+            log::warn!("ssh_socks_open: unknown id={id}");
+            "no session".to_string()
+        })?;
+    let (bound_port, generation) = ssh_runtime()
+        .spawn(async move { session.open_socks(local_port).await })
+        .await
+        .map_err(|e| format!("ssh socks task join failed: {e}"))??;
+    Ok(SshForwardHandle {
+        bound_port,
+        generation,
+    })
+}
+
 /// Answer a first-connect `HostKeyPrompt`. `accept = true` lets the paused
 /// handshake proceed (and the connection pins the fingerprint on success);
 /// `accept = false` aborts the connect before any credential is sent. Called

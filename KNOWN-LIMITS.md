@@ -1148,3 +1148,61 @@ mapping in `src/modules/workspaces/serialize.ts`.
 
 **Trigger.** A workspace-file migration pass landing for some other reason -
 at that point the saved key can move to `hostId` alongside it.
+
+## Forwards
+
+### `-R`/`-D` rules do not autostart with their host
+
+**Accepted state.** `startWithHost` brings a `-L` rule up on the terminal's
+own live SSH session through `AutostartDeps.openForward`, which binds a LOCAL
+listener and speaks a fixed `(id, localPort, remoteHost, remotePort)` shape.
+Neither a `-R` rule (which needs `Handle::tcpip_forward` on the SERVER, not a
+local bind) nor a `-D` rule (which needs a SOCKS5 listener, not a fixed dial
+target) fits that shape, so `startHostForwards` skips a rule carrying either
+type with a banner rather than forcing it through a call that does not mean
+what it asks for. Such a rule still starts from the Port Forwarding page.
+
+**Carried by.** `typedAutostartSkippedBanner` and the `if (rule.type)` guard
+at the top of `startHostForwards`'s loop, both in
+`src/modules/forwards/autostart.ts`.
+
+**Trigger.** `AutostartDeps` growing a second dial shape (or one call each for
+`-R`/`-D`) that `ssh-session.ts`'s live session can drive the same way it
+drives `-L`'s today.
+
+### `RuntimeDeps` cannot drive a `-R`/`-D` Start or Stop through a fake
+
+**Accepted state.** `controller.ts`'s `startRule`/`stopRule` read `-L`'s dial
+through `RuntimeDeps.openForward`/`closeForward`, which a check can replace
+with a fake with no Tauri bridge - see that file's own header. `-R`/`-D` ride
+a separate branch (`startTypedRule`, and one `if`/`else` in `stopRule`'s close
+call) that calls `@/modules/ssh/tunnel`'s `openRemoteForwardForConnection`/
+`openSocksForConnection` directly, because nothing in this codebase drives
+either type through a fake yet. A check exercising `-R`/`-D` `startRule`/
+`stopRule` behaviour today would need the real Tauri bridge.
+
+**Carried by.** `startTypedRule` in `src/modules/forwards/controller.ts`, and
+the type it does NOT add to `RuntimeDeps`.
+
+**Trigger.** A test needing to drive a `-R`/`-D` Start/Stop without a live
+Tauri bridge - at that point `RuntimeDeps` gains the matching keys the way it
+already has `openForward`/`closeForward`.
+
+### A `-R` rule's routing registry is keyed by port alone, not `(address, port)`
+
+**Accepted state.** `SshSession`'s `remote_forwards` registry
+(`src-tauri/src/modules/ssh/session.rs`) maps a bound SERVER port straight to
+the local target it dials, dropping the bind address `tcpip_forward` was
+asked for. This is sound today: a server can bind one port only once, so once
+`open_remote_forward` has the port it actually bound, that port is already a
+unique key - the compound key would add a dimension nothing currently needs.
+It would stop being sound only for a server that can bind the SAME port on
+two different addresses at once and route by address, which is not how
+`GatewayPorts no`'s ordinary loopback-only posture behaves.
+
+**Carried by.** `RemoteForwardTargets`'s own doc comment in
+`src-tauri/src/modules/ssh/session.rs`, directly above the type alias.
+
+**Trigger.** A server-side forwarding mode this app starts supporting where
+one port is legitimately bound on more than one address within a single
+session.

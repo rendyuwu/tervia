@@ -33,7 +33,14 @@
 import { toast } from "@/components/ui/toast";
 import { describeError } from "@/lib/describeError";
 import { useHostKeyPrompt } from "@/modules/ssh/hostKeyPrompt";
-import { closeForwardForConnection, openForwardForConnection } from "@/modules/ssh/tunnel";
+import {
+  closeForwardForConnection,
+  closeRemoteForwardForConnection,
+  closeSocksForConnection,
+  openForwardForConnection,
+  openRemoteForwardForConnection,
+  openSocksForConnection,
+} from "@/modules/ssh/tunnel";
 
 import { useHostOwnedForwards } from "./hostOwned";
 import { bindFailureText } from "./page/derive";
@@ -139,6 +146,14 @@ export async function startRule(
   rule: ForwardRule,
   runtime: RuntimeDeps = defaultRuntimeDeps,
 ): Promise<void> {
+  // `-R`/`-D` are a SEPARATE code path, not routed through `RuntimeDeps`:
+  // nothing in this codebase drives them through a fake yet (see
+  // `KNOWN-LIMITS.md`). Kept as an early branch so every statement below this
+  // one is the ORIGINAL `-L` body, untouched.
+  if (rule.type) {
+    await startTypedRule(rule, runtime);
+    return;
+  }
   // `useHostOwnedForwards` imported directly rather than routed through
   // `RuntimeDeps`, exactly as `useForwardRuntime` and `useHostKeyPrompt`
   // already are and for the reason this file's header gives: a zustand store
@@ -242,6 +257,123 @@ export async function startRule(
   } finally {
     // Only ever ours to clear: a later Start has published its own Set, and a
     // Stop has already taken this one out.
+    if (startAttempts.get(rule.id) === prompts) startAttempts.delete(rule.id);
+  }
+}
+
+/**
+ * One open call plus its matching close, picked by `rule.type`, with the
+ * result normalised to the three fields {@link startTypedRule} reads:
+ * `boundPort` names `tunnel.ts`'s `SshSocksForward.localPort` for a `-D`
+ * rule and its `SshRemoteForward.boundPort` for a `-R` one - the same
+ * "whichever party actually listens" fact under one name, so the caller
+ * below does not need its own type branch to read it.
+ *
+ * `rule.bindAddress` is passed through AS-IS, blank and all: `tunnel.ts`'s
+ * `openRemoteForwardForConnection`/`closeRemoteForwardForConnection` each
+ * normalise it identically (`.trim() || "localhost"`), which is the one
+ * place that owns the map key built from it, so handing both the same raw
+ * string keeps them agreeing without a second copy of that rule here.
+ */
+function openTypedRule(
+  rule: ForwardRule,
+  prompts: Set<string>,
+): [
+  Promise<{ boundPort: number; sessionId: number; claim: number }>,
+  (claim: number) => Promise<void>,
+] {
+  const promptOpts = {
+    promptForHostKey: true as const,
+    onHostKeyPrompt: (promptId: string) => prompts.add(promptId),
+  };
+  if (rule.type === "dynamic") {
+    return [
+      openSocksForConnection(rule.hostId, rule.localPort, promptOpts).then((f) => ({
+        boundPort: f.localPort,
+        sessionId: f.sessionId,
+        claim: f.claim,
+      })),
+      (claim) => closeSocksForConnection(rule.hostId, rule.localPort, claim),
+    ];
+  }
+  const bindAddress = rule.bindAddress ?? "";
+  const bindPort = rule.bindPort ?? 0;
+  const targetHost = rule.targetHost ?? "";
+  const targetPort = rule.targetPort ?? 0;
+  return [
+    openRemoteForwardForConnection(
+      rule.hostId,
+      bindAddress,
+      bindPort,
+      targetHost,
+      targetPort,
+      promptOpts,
+    ).then((f) => ({ boundPort: f.boundPort, sessionId: f.sessionId, claim: f.claim })),
+    (claim) =>
+      closeRemoteForwardForConnection(
+        rule.hostId,
+        bindAddress,
+        bindPort,
+        targetHost,
+        targetPort,
+        claim,
+      ),
+  ];
+}
+
+/**
+ * The `-R`/`-D` half of {@link startRule}, split out because the shape is
+ * different enough from `-L`'s single-port dial to make one function harder
+ * to read rather than easier - see `src/modules/forwards/types.ts`'s
+ * field-by-field doc on `ForwardRule` for which field each type dials.
+ *
+ * Repeats `-L`'s own refusal/yield shape (terminal-owned refusal, the
+ * superseded-attempt release, the post-dial yield, the rejecting-dial yield)
+ * rather than sharing code with it, because the two dials take different
+ * arguments end to end and a shared helper would have to accept both shapes
+ * anyway. {@link openTypedRule} above is the `-R`/`-D` PAIR sharing code
+ * with EACH OTHER, which is the duplication that was actually free to
+ * remove: both arms took the same refusal/yield shape written out twice,
+ * open and close each spelled with every one of their own five/six
+ * arguments a second time.
+ */
+async function startTypedRule(rule: ForwardRule, runtime: RuntimeDeps): Promise<void> {
+  if (useHostOwnedForwards.getState().byRule[rule.id] !== undefined) {
+    runtime.toast(hostOwnedRefusalText(rule), { variant: "warning" });
+    return;
+  }
+  const prompts = new Set<string>();
+  startAttempts.set(rule.id, prompts);
+  useForwardRuntime.getState().markStarting(rule.id);
+  try {
+    const [pending, close] = openTypedRule(rule, prompts);
+    const forward = await pending;
+    if (!isCurrentAttempt(rule.id, prompts)) {
+      await close(forward.claim);
+      return;
+    }
+    if (useHostOwnedForwards.getState().byRule[rule.id] !== undefined) {
+      await close(forward.claim);
+      useForwardRuntime.getState().markStopped(rule.id);
+      runtime.toast(hostOwnedYieldText(rule), { variant: "warning" });
+      return;
+    }
+    useForwardRuntime.getState().markRunning(rule.id, {
+      boundPort: forward.boundPort,
+      sessionId: forward.sessionId,
+      claim: forward.claim,
+    });
+  } catch (e) {
+    if (!isCurrentAttempt(rule.id, prompts)) return;
+    if (useHostOwnedForwards.getState().byRule[rule.id] !== undefined) {
+      useForwardRuntime.getState().markStopped(rule.id);
+      runtime.toast(hostOwnedYieldText(rule), { variant: "warning" });
+      return;
+    }
+    const text = describeError(e);
+    useForwardRuntime.getState().markFailed(rule.id, text);
+    runtime.toast(text, { variant: "error" });
+  } finally {
     if (startAttempts.get(rule.id) === prompts) startAttempts.delete(rule.id);
   }
 }
@@ -366,17 +498,32 @@ export async function stopRule(
   const claim = useForwardRuntime.getState().byRule[rule.id]?.claim;
   try {
     if (claim !== undefined) {
-      await runtime.closeForward(
-        rule.hostId,
-        rule.remoteHost,
-        rule.remotePort,
-        // The port the open ASKED FOR - `rule.localPort`, 0 for an auto rule -
-        // and never the bound one. That is what names the entry alongside the
-        // target; `closeForwardForConnection`'s own doc spells out why the
-        // asymmetry with open's optional `opts.localPort` is deliberate.
-        rule.localPort,
-        claim,
-      );
+      if (rule.type === "dynamic") {
+        await closeSocksForConnection(rule.hostId, rule.localPort, claim);
+      } else if (rule.type === "remote") {
+        // `bindAddress` passed AS-IS - see `openTypedRule`'s own doc above
+        // for why an unnormalised value here still agrees with the open.
+        await closeRemoteForwardForConnection(
+          rule.hostId,
+          rule.bindAddress ?? "",
+          rule.bindPort ?? 0,
+          rule.targetHost ?? "",
+          rule.targetPort ?? 0,
+          claim,
+        );
+      } else {
+        await runtime.closeForward(
+          rule.hostId,
+          rule.remoteHost,
+          rule.remotePort,
+          // The port the open ASKED FOR - `rule.localPort`, 0 for an auto rule -
+          // and never the bound one. That is what names the entry alongside the
+          // target; `closeForwardForConnection`'s own doc spells out why the
+          // asymmetry with open's optional `opts.localPort` is deliberate.
+          rule.localPort,
+          claim,
+        );
+      }
     }
   } finally {
     // Stopped even if the close threw. The entry it named is deleted before the

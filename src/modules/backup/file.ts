@@ -37,11 +37,16 @@
  *   the key material, and it is the only thing a saved record has to say that an
  *   arriving key needs a passphrase nobody here holds. See {@link sanitizeKey}.
  *
- *   A RULE is a saved port-forward riding an SSH host. `upsertRule` refuses a
- *   blank name or remote host, a local port outside `0` or `1-65535`, a remote
- *   port outside `1-65535`, and a `hostId` naming anything but a saved SSH host
- *   - every one of them a throw, so every one of them costs the rows behind it.
- *   See {@link sanitizeRule}.
+ *   A RULE is a saved port-forward riding an SSH host, of one of three TYPES -
+ *   `-L` (`type` absent), `-R` (`"remote"`) or `-D` (`"dynamic"`) - and
+ *   `upsertRule`'s refusals are TYPE-CONDITIONAL to match: see
+ *   `src/modules/forwards/types.ts`'s
+ *   doc on `ForwardRule` for which type uses which field. A `hostId` naming
+ *   anything but a saved SSH host and a blank name are refused for every
+ *   type; every other refusal here mirrors one of `upsertRule`'s own, so
+ *   every one of them costs the rows behind it. A `type` string this build
+ *   does not recognise drops just that row, the same as any other unknown
+ *   field value. See {@link sanitizeRule}.
  *
  * THE PASSES OVER THOSE RECORDS HAVE AN ORDER, and it is stated here because no
  * signature carries it and nothing in the type system enforces it. Each function
@@ -88,7 +93,7 @@
  * are safe; anything reaching a store or an `invoke` belongs in `apply.ts`
  * instead.
  */
-import type { ForwardRule } from "@/modules/forwards/types";
+import type { ForwardRule, ForwardRuleType } from "@/modules/forwards/types";
 import { effectiveParents } from "@/modules/hosts/groupTree";
 import {
   RDP_CLIPBOARD_MODES,
@@ -602,19 +607,37 @@ export function sanitizeKey(raw: unknown): VaultKey | null {
   };
 }
 
+/** The `type` strings this build recognises - absent means `-L`. A literal
+ *  lookup rather than derived from `ForwardRuleType` so an unrecognised
+ *  STRING is a runtime fact this function can act on, not merely a
+ *  compile-time refusal. */
+const KNOWN_RULE_TYPES: Record<string, true> = { remote: true, dynamic: true };
+
 /**
  * Validate one forward rule. Null when the row could not be a working one.
  *
  * Every refusal below mirrors one `upsertRule` already makes, so a row that
- * would throw at the write is skipped and counted here instead. The two that do
- * not mirror anything - a blank `id`, a blank `hostId` - are refused for the
- * same reason every other record's are: a rule with no id has no slot, and a
- * rule naming no host is refused by the host lookup a moment later anyway.
+ * would throw at the write is skipped and counted here instead. `id`, `name`
+ * and `hostId` blank are refused for every type, for the same reason every
+ * other record's are: a rule with no id has no slot, and a rule naming no
+ * host is refused by the host lookup a moment later anyway.
  *
- * THE TWO PORTS ARE DIFFERENT and the store says so: `localPort` may be `0`,
- * which means "let the OS pick", and `remotePort` may not, because it is dialled
- * on the far side. See {@link localPort} for why that is a second predicate
- * rather than a looser {@link port}.
+ * `type` ABSENT MEANS `-L`, matching `ForwardRule`'s own read-time-adoption
+ * shape. A `type` that is a STRING this build does not recognise - a future
+ * build's fourth type - drops just this row, the same "known field, unknown
+ * value" answer every other sanitizer in this file already gives; it is not a
+ * hard failure of the whole import.
+ *
+ * THE REST IS TYPE-CONDITIONAL, mirroring `upsertRule`'s own per-type
+ * refusals (`src/modules/forwards/store.ts`): `-D` needs only a valid
+ * `localPort` (its SOCKS port; `0` legal, "let the OS pick"); `-R` needs a
+ * non-blank `targetHost` (its OWN dial-target field, never `remoteHost` -
+ * see `ForwardRule.remoteHost`'s own doc on why it is forced blank instead)
+ * and a valid `targetPort` (`1-65535`, never `0` - it is dialled), plus -
+ * only when the file names one - a valid `bindPort` (`0` legal, "let the
+ * SERVER pick"); `-L` is unchanged from before this type existed: a
+ * non-blank `remoteHost`, `localPort` `0` or `1-65535`, `remotePort`
+ * `1-65535`.
  *
  * `startWithHost` is `true` only when the file literally says `true`. A missing
  * or non-boolean value falls to `false`, which is the safe direction: a rule
@@ -626,23 +649,56 @@ export function sanitizeRule(raw: unknown): ForwardRule | null {
   const id = str(raw.id).trim();
   const name = str(raw.name).trim();
   const hostId = str(raw.hostId).trim();
-  const remoteHost = str(raw.remoteHost).trim();
-  const local = localPort(raw.localPort);
-  const remote = port(raw.remotePort);
-  if (!id || !name || !hostId || !remoteHost || local === null || remote === null) return null;
+  if (!id || !name || !hostId) return null;
+
+  const rawType = raw.type;
+  if (rawType !== undefined && (typeof rawType !== "string" || !KNOWN_RULE_TYPES[rawType])) {
+    return null;
+  }
+  const type = rawType as ForwardRuleType | undefined;
 
   const description = str(raw.description).trim();
-
-  return {
+  const base = {
     id,
     name,
     hostId,
-    localPort: local,
-    remoteHost,
-    remotePort: remote,
     startWithHost: raw.startWithHost === true,
     ...(description ? { description } : {}),
   };
+
+  if (type === "dynamic") {
+    const local = localPort(raw.localPort);
+    if (local === null) return null;
+    return { ...base, type, localPort: local, remoteHost: "", remotePort: 0 };
+  }
+
+  if (type === "remote") {
+    const targetHost = str(raw.targetHost).trim();
+    const target = port(raw.targetPort);
+    if (!targetHost || target === null) return null;
+    const bindAddress = str(raw.bindAddress).trim();
+    const rawBindPort = raw.bindPort;
+    const bindPort = rawBindPort === undefined ? undefined : localPort(rawBindPort);
+    if (rawBindPort !== undefined && bindPort === null) return null;
+    return {
+      ...base,
+      type,
+      localPort: 0,
+      remoteHost: "",
+      remotePort: 0,
+      targetHost,
+      targetPort: target,
+      ...(bindAddress ? { bindAddress } : {}),
+      ...(bindPort !== undefined && bindPort !== null ? { bindPort } : {}),
+    };
+  }
+
+  // `-L`: unchanged from before `type` existed.
+  const remoteHost = str(raw.remoteHost).trim();
+  const local = localPort(raw.localPort);
+  const remote = port(raw.remotePort);
+  if (!remoteHost || local === null || remote === null) return null;
+  return { ...base, localPort: local, remoteHost, remotePort: remote };
 }
 
 function sanitizeSealed(raw: unknown): SealedBlob | null {

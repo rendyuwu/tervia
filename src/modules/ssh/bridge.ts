@@ -232,6 +232,56 @@ export function closeSshForward(
   return invoke<boolean>("ssh_forward_close", { id, boundPort, generation });
 }
 
+/**
+ * Start an `ssh -R` remote forward on a live session: ask the server to
+ * listen on `bindAddress:bindPort` (`bindPort` 0 lets the SERVER pick) and
+ * route every connection it accepts back to `localHost:localPort` on THIS
+ * machine. Resolves with the SAME {@link SshForwardHandle} shape `-L` does -
+ * `boundPort` here is the port the SERVER bound. Both halves have to come
+ * back to {@link closeSshRemoteForward}.
+ */
+export function openSshRemoteForward(
+  id: number,
+  bindAddress: string,
+  bindPort: number,
+  localHost: string,
+  localPort: number,
+): Promise<SshForwardHandle> {
+  return invoke<SshForwardHandle>("ssh_remote_forward_open", {
+    id,
+    bindAddress,
+    bindPort,
+    localHost,
+    localPort,
+  });
+}
+
+/** Close ONE `ssh -R` listener on a live session, naming it with `bindAddress`
+ *  plus both halves of the {@link SshForwardHandle} the open handed back.
+ *  `false` means there was no such forward, on the same terms
+ *  {@link closeSshForward} already gives for `-L`. */
+export function closeSshRemoteForward(
+  id: number,
+  bindAddress: string,
+  boundPort: number,
+  generation: number,
+): Promise<boolean> {
+  return invoke<boolean>("ssh_remote_forward_close", { id, bindAddress, boundPort, generation });
+}
+
+/**
+ * Start an `ssh -D` SOCKS5 listener on a live session: bind
+ * `127.0.0.1:localPort` (0 picks a free port) and open one
+ * `channel_open_direct_tcpip` per accepted CONNECT. Resolves with the SAME
+ * {@link SshForwardHandle} shape `-L` does, and closes through the SAME
+ * {@link closeSshForward} - a SOCKS5 listener lives in the identical
+ * per-session forward map `-L`'s does, so it needs no close command of its
+ * own.
+ */
+export function openSshSocks(id: number, localPort: number): Promise<SshForwardHandle> {
+  return invoke<SshForwardHandle>("ssh_socks_open", { id, localPort });
+}
+
 export type SshSession = {
   id: number;
   write: (data: string) => Promise<void>;

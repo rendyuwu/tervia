@@ -203,8 +203,10 @@ export function RuleCard({ row, onEdit, onDelete }: RuleCardProps): ReactNode {
   // here: the dialog has a different sentence for it, not a missing one.
   const pageStops = running || starting;
   // The port that is ACTUALLY LISTENING, whichever owner bound it -
-  // `hostOwnedPort` first, the same order as everything below.
-  const localLabel = localPortLabel(rule, hostOwnedPort ?? boundPort);
+  // `hostOwnedPort` first, the same order as everything below. `row.hostName`
+  // is only read by the `-R` branch: that port is the SERVER's, not this
+  // machine's, and `localPortLabel` needs the name to say so.
+  const localLabel = localPortLabel(rule, hostOwnedPort ?? boundPort, row.hostName);
 
   // A dangling row's host is gone, so there is no credential and no route left
   // to dial - Start is refused at the UI rather than left to fail at

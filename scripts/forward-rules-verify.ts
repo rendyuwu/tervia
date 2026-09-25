@@ -330,6 +330,93 @@ console.log("\n[refusals] name and remoteHost may not be blank");
 }
 
 // ---------------------------------------------------------------------------
+console.log(
+  "\n[type -D] the SOCKS port is the only refusal, and it shares -L's localPort predicate",
+);
+{
+  const h = harness();
+  const hosts = hostsOf([sshHost()]);
+  const socksRule = (over: Partial<ForwardRule> = {}): ForwardRule => ({
+    ...rule({ id: "f-socks", type: "dynamic", remoteHost: "", remotePort: 0 }),
+    ...over,
+  });
+
+  await rejectsWith(
+    "a negative SOCKS port is refused",
+    () => h.forwards.upsertRule(socksRule({ localPort: -1 }), hosts),
+    'forwards: "web tunnel" has an invalid SOCKS port -1 - must be 0, or 1-65535',
+  );
+  await rejectsWith(
+    "a SOCKS port past 65535 is refused",
+    () => h.forwards.upsertRule(socksRule({ localPort: 65536 }), hosts),
+    'forwards: "web tunnel" has an invalid SOCKS port 65536 - must be 0, or 1-65535',
+  );
+  check("neither refusal wrote anything", (h.data.rules as ForwardRule[]).length, 0);
+
+  const zero = await h.forwards.upsertRule(socksRule({ localPort: 0 }), hosts);
+  check("0 (auto) is accepted for a -D rule", zero.localPort, 0);
+  check("a -D rule carries the type through unmodified", zero.type, "dynamic");
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n[type -R] the local target host/port, and, only when present, the bind port");
+{
+  const h = harness();
+  const hosts = hostsOf([sshHost()]);
+  const remoteRule = (over: Partial<ForwardRule> = {}): ForwardRule => ({
+    ...rule({
+      id: "f-remote",
+      type: "remote",
+      localPort: 0,
+      remoteHost: "",
+      remotePort: 0,
+      targetHost: "127.0.0.1",
+      targetPort: 80,
+    }),
+    ...over,
+  });
+
+  await rejectsWith(
+    "a blank local target host is refused, and the message says LOCAL TARGET",
+    () => h.forwards.upsertRule(remoteRule({ targetHost: " " }), hosts),
+    'forwards: "web tunnel" needs a local target host',
+  );
+  await rejectsWith(
+    "target port 0 is refused - it is dialled, the same as -L's remotePort",
+    () => h.forwards.upsertRule(remoteRule({ targetPort: 0 }), hosts),
+    'forwards: "web tunnel" has an invalid target port 0 - must be 1-65535',
+  );
+  await rejectsWith(
+    "an absent target port is refused too, not read as 0",
+    () => h.forwards.upsertRule(remoteRule({ targetPort: undefined }), hosts),
+    'forwards: "web tunnel" has an invalid target port undefined - must be 1-65535',
+  );
+  await rejectsWith(
+    "an invalid bindPort is refused, only when one is present",
+    () => h.forwards.upsertRule(remoteRule({ bindPort: 65536 }), hosts),
+    'forwards: "web tunnel" has an invalid bind port 65536 - must be 0, or 1-65535',
+  );
+  check("none of the four refusals wrote anything", (h.data.rules as ForwardRule[]).length, 0);
+
+  const noBindPort = await h.forwards.upsertRule(remoteRule(), hosts);
+  check(
+    "bindPort absent is accepted - the server picks its own default",
+    noBindPort.bindPort,
+    undefined,
+  );
+  check(
+    "remoteHost/remotePort stay forced blank on a -R row - an older build refuses it instead of reading it as a working -L (issue 78's field-mapping fix)",
+    [noBindPort.remoteHost, noBindPort.remotePort],
+    ["", 0],
+  );
+  const autoBind = await h.forwards.upsertRule(
+    remoteRule({ id: "f-remote-2", bindPort: 0 }),
+    hosts,
+  );
+  check("bindPort 0 (let the server pick) is accepted", autoBind.bindPort, 0);
+}
+
+// ---------------------------------------------------------------------------
 console.log("\n[dropRulesForHost] removes exactly the rules naming that host, in order");
 {
   const h = harness();

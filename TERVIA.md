@@ -127,7 +127,7 @@ src/                            Frontend (React webview), alias @/* -> src/*
 
 | Module         | Key commands / role                                                                                                                                                                                                                                                                                                                                  |
 | -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ssh/`         | The product. `ssh_open/write/resize/close/attach/list_sessions`, `ssh_confirm_host_key`, `ssh_agent_keys`, `ssh_forward_open`, `ssh_git_status`, `ssh_git`, `ssh_sftp_*` (see below), `ssh_key_inspect`.                                                                                                                                             |
+| `ssh/`         | The product. `ssh_open/write/resize/close/attach/list_sessions`, `ssh_confirm_host_key`, `ssh_agent_keys`, `ssh_forward_open/close`, `ssh_remote_forward_open/close`, `ssh_socks_open`, `ssh_git_status`, `ssh_git`, `ssh_sftp_*` (see below), `ssh_key_inspect`.                                                                                    |
 | `rdp/`         | `rdp_open/input/close/attach/list_sessions/snapshot`, `rdp_confirm_cert`, `rdp_clipboard_focus`. Certificate pinning mirrors SSH's host-key flow; the password arrives as a keychain **reference**, never a value.                                                                                                                                   |
 | `pty/`         | `pty_open/attach/write/resize/close/list_sessions/kill_all`, `terminal_probe_path`. Two backends: daemon (default) falls back to in-process.                                                                                                                                                                                                         |
 | `pty_daemon/`  | Sidecar owning PTYs across GUI restarts (`--pty-daemon` flag, no Tauri commands).                                                                                                                                                                                                                                                                    |
@@ -176,9 +176,16 @@ runtime (`ssh_runtime()`); the Tauri commands hop onto it and back.
   tunnels to the given remote host and port as resolved from the server, over
   the live session (so a jump chain applies for free). A `local_port` of 0
   picks a free port and returns it.
-  There is deliberately **no close command**: forwards are declared on the saved
-  connection and re-opened per connect, so session teardown is their whole
-  lifecycle.
+  `ssh_forward_close(id, bound_port, generation)` closes one listener without
+  touching the session or its other forwards.
+- **Remote (`-R`) and dynamic/SOCKS (`-D`) forwarding**: `ssh_remote_forward_open`
+  asks the server to listen on `bind_address:bind_port` (`0` lets the SERVER
+  pick) and dials `local_host:local_port` on this machine for every connection
+  it accepts back, routed through `HostKeyVerifier`'s
+  `server_channel_open_forwarded_tcpip` override; `ssh_remote_forward_close`
+  stops one such listener. `ssh_socks_open` binds a minimal SOCKS5 listener
+  (no-auth, CONNECT only) that opens one `channel_open_direct_tcpip` per
+  accepted CONNECT, and closes through the same `ssh_forward_close` `-L` uses.
 - **Mirroring**: `ssh_attach` adds a second event sink to a live session and
   replays its ring; `ssh_list_sessions` enumerates them. Neither has a frontend
   caller today.
