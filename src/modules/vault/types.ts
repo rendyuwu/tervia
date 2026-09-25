@@ -122,9 +122,25 @@ export type VaultIdentity = {
 /** What `ssh_key_inspect` reports. Display only. */
 export type VaultKeyType = "rsa" | "ed25519" | "ecdsa" | "unknown";
 
+/**
+ * What kind of vault key this is. Absent means today's shape: a PEM body,
+ * stored exactly as before - read-time adoption, no migration.
+ *
+ * - `"cert"`: the signing private key is stored exactly like a `pem` key
+ *   (same `hasPrivateKey`/`hasPassphrase` accounts, same `decode_secret_key`
+ *   at dial time), plus an OpenSSH certificate. The certificate is PUBLIC,
+ *   so it lives in `certificate` below, never in the keychain.
+ * - `"hardware"`: no secret at all. `hasPrivateKey`/`hasPassphrase` stay
+ *   `false` forever; `fingerprint` is the identifying fact, matched against
+ *   the OS ssh-agent at dial time (`resolveSshAuth`, `src/modules/vault/resolve.ts`).
+ */
+export type VaultKeyKind = "cert" | "hardware";
+
 /** A private key, stored once and shared by every identity that uses it. */
 export type VaultKey = {
   id: string;
+  /** See {@link VaultKeyKind}. */
+  kind?: VaultKeyKind;
   /** Referenced by NAME across many hosts, so a duplicate is a real usability
    *  failure - see the collision warning in `store.ts`. */
   name: string;
@@ -176,6 +192,26 @@ export type VaultKey = {
   /** The last successful SSH connect that authenticated with this key, on the
    *  terms of {@link VaultIdentity.lastConnectedAt}. */
   lastConnectedAt?: number;
+  /**
+   * `kind === "cert"` only: the OpenSSH certificate text
+   * (`ssh-ed25519-cert-v01@openssh.com ...`). Public - the certified key's
+   * own private half is what is secret, and that is `hasPrivateKey` above,
+   * unchanged from a `pem` key.
+   */
+  certificate?: string;
+  /** `kind === "cert"` only, parsed from `certificate` by `ssh_key_classify`
+   *  at save time: the signing CA's own fingerprint. */
+  certCaFingerprint?: string;
+  /** `kind === "cert"` only: the certificate's `key_id`, a CA-chosen label. */
+  certKeyId?: string;
+  /** `kind === "cert"` only: the usernames/hostnames this certificate is
+   *  valid for. */
+  certPrincipals?: string[];
+  /** `kind === "cert"` only, unix seconds. */
+  certValidAfter?: number;
+  /** `kind === "cert"` only, unix seconds - absent means the certificate
+   *  never expires (OpenSSH's `u64::MAX` "forever" sentinel). */
+  certValidBefore?: number;
 };
 
 /**
@@ -361,11 +397,23 @@ export const VAULT_STAMP_ABSENT = "absent";
  * three-state field read by two rules; and it made `null` stamp as `0`, the
  * STRONGER claim that something looked and found the body unencrypted. Both
  * readers now test `=== true` for the encrypted answer.
+ *
+ * `kind` and, for a `cert` key, `certificate` itself are appended for the
+ * same reason the fingerprint is included: a `cert` record whose signing key
+ * stays untouched but whose `certificate` field is swapped for a DIFFERENT
+ * certificate over the SAME key is a materially different authentication
+ * fact (a different validity window, different principals) that none of the
+ * fields above would otherwise notice, since the fingerprint they hash is
+ * the signing key's, not the certificate's. `kind` alone guards a record
+ * changing shape entirely - `pem` to `hardware`, say - from ever reading as
+ * unchanged.
  */
 export function vaultKeyStamp(key: VaultKey | null | undefined): string {
   if (!key) return VAULT_STAMP_ABSENT;
   const encrypted = key.encrypted === true ? "1" : key.encrypted === false ? "0" : "-";
-  return `key:${key.hasPrivateKey ? 1 : 0}${key.hasPassphrase ? 1 : 0}${encrypted}:${key.fingerprint ?? ""}`;
+  const kind = key.kind ?? "pem";
+  const cert = key.kind === "cert" ? (key.certificate ?? "") : "";
+  return `key:${kind}:${key.hasPrivateKey ? 1 : 0}${key.hasPassphrase ? 1 : 0}${encrypted}:${key.fingerprint ?? ""}:${cert}`;
 }
 
 /**

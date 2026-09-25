@@ -864,6 +864,121 @@ console.log("\n[ssh] resolution hands back keychain REFERENCES for every auth mo
 }
 
 // ---------------------------------------------------------------------------
+console.log(
+  "\n[ssh] resolution over the cert and hardware kinds - a certificate travels alongside the keychain references, a hardware key resolves through the agent instead of them",
+);
+{
+  const h = harness();
+  // A `cert` key still stores its SIGNING key inline, exactly like a `pem`
+  // key - the certificate itself is a PLAIN field, never in the keychain
+  // (`VaultKeyKind` in `src/modules/vault/types.ts`).
+  await h.vault.upsertKey(
+    vaultKey({
+      id: "k-cert",
+      kind: "cert",
+      certificate: "ssh-ed25519-cert-v01@openssh.com AAAA...",
+    }),
+    { privateKey: "PRIVATE-PEM", passphrase: "pp" },
+  );
+  await h.vault.upsertIdentity(
+    identity({
+      id: "i-cert",
+      name: "cert",
+      username: "dave",
+      authMode: "key",
+      keyId: "k-cert",
+    }),
+    {},
+  );
+  // A `hardware` key stores NO secret at all (`VaultKeyKind` in
+  // `src/modules/vault/types.ts`) - `fingerprint` is the identifying fact
+  // matched against ssh-agent at dial time.
+  await h.vault.upsertKey(vaultKey({ id: "k-hw", kind: "hardware", fingerprint: "SHA256:hw" }), {});
+  await h.vault.upsertIdentity(
+    identity({
+      id: "i-hw",
+      name: "hardware",
+      username: "erin",
+      authMode: "key",
+      keyId: "k-hw",
+    }),
+    {},
+  );
+  // Named, deliberately, exactly like `i-dangle` above: a `hardware` key
+  // record with no fingerprint at all - reachable from a hand-edited
+  // `tervia-vault.json` or an older client, and refused rather than dialled
+  // silently with no restriction.
+  await h.vault.upsertKey(vaultKey({ id: "k-hw-blank", kind: "hardware" }), {});
+  await h.vault.upsertIdentity(
+    identity({
+      id: "i-hw-blank",
+      name: "hardware, no fingerprint",
+      username: "frank",
+      authMode: "key",
+      keyId: "k-hw-blank",
+    }),
+    {},
+  );
+  // A `cert` record with no certificate at all - reachable from a
+  // hand-edited vault file or a trimmed-empty import field - the same
+  // "refused, not dialled silently" shape the hardware fixture above
+  // exercises for its own missing fact.
+  await h.vault.upsertKey(vaultKey({ id: "k-cert-blank", kind: "cert" }), {
+    privateKey: "PRIVATE-PEM",
+    passphrase: "pp",
+  });
+  await h.vault.upsertIdentity(
+    identity({
+      id: "i-cert-blank",
+      name: "cert, no certificate",
+      username: "grace",
+      authMode: "key",
+      keyId: "k-cert-blank",
+    }),
+    {},
+  );
+
+  const before = h.reads().length;
+  const vaultRef = (account: string) =>
+    ({ kind: "keychain", service: "tervia-vault", account }) as const;
+
+  check(
+    "a cert-kind identity references the signing key's accounts AND carries the certificate text",
+    await resolveSshAuth({ kind: "identity", identityId: "i-cert" }, h.deps()),
+    {
+      user: "dave",
+      privateKey: vaultRef("k-cert::privateKey"),
+      privateKeyPassphrase: vaultRef("k-cert::passphrase"),
+      certificate: "ssh-ed25519-cert-v01@openssh.com AAAA...",
+    },
+  );
+
+  check(
+    "a hardware-kind identity resolves through the agent, restricted to its fingerprint - no keychain reference at all",
+    await resolveSshAuth({ kind: "identity", identityId: "i-hw" }, h.deps()),
+    { user: "erin", useAgent: true, agentKeyFingerprint: "SHA256:hw" },
+  );
+
+  check(
+    "and neither resolution touched the keychain - a cert's signing key is a REFERENCE, and a hardware key has no secret to reference",
+    h.reads().length - before,
+    0,
+  );
+
+  await rejects(
+    "a hardware-kind identity whose key records no fingerprint is refused, not dialled with no restriction",
+    () => resolveSshAuth({ kind: "identity", identityId: "i-hw-blank" }, h.deps()),
+    ["hardware", "fingerprint"],
+  );
+
+  await rejects(
+    "a cert-kind identity whose key records no certificate is refused, not dialled as a bare key",
+    () => resolveSshAuth({ kind: "identity", identityId: "i-cert-blank" }, h.deps()),
+    ["certificate"],
+  );
+}
+
+// ---------------------------------------------------------------------------
 console.log("\n[rdp] resolution hands back a keychain REFERENCE, never a value");
 {
   const h = harness();

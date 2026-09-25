@@ -767,6 +767,7 @@ pub fn run() {
             ssh::ssh_agent_keys,
             ssh::ssh_key_inspect,
             ssh::ssh_key_generate,
+            ssh::ssh_key_classify,
             ssh::ssh_forward_open,
             ssh::ssh_forward_close,
             ssh::ssh_remote_forward_open,

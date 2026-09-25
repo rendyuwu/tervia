@@ -85,6 +85,12 @@ export type SshCredentials = {
   password?: SecretSource;
   privateKey?: SecretSource;
   privateKeyPassphrase?: SecretSource;
+  /** OpenSSH certificate text, paired with `privateKey` - set only when the
+   *  identity's key is `kind: "cert"`. Public, unlike every field above it. */
+  certificate?: string;
+  /** Restrict `useAgent` to the ssh-agent identity with this SHA256
+   *  fingerprint - set only when the identity's key is `kind: "hardware"`. */
+  agentKeyFingerprint?: string;
 };
 
 /** What the SSH connect path needs: the credential half plus the user to send it
@@ -230,14 +236,16 @@ function sshKeychainCredentials(
  * Resolve an identity, refusing the states that would fail at the handshake with
  * a message about something the user never touched.
  *
- * `keyId` is absent for any mode that does not use one. It is deliberately not
- * filled with the identity's own id: that reads like a key id at every call site
- * downstream, and the day one of them uses it, it points at the wrong record.
+ * `key` is the whole record, not a bare id - `resolveSshAuth` needs to branch
+ * on `key.kind` (a `hardware` key builds an agent restriction instead of a
+ * keychain reference; a `cert` key adds its certificate text), which a bare
+ * id cannot answer without a second store read here duplicating this one.
+ * Absent for any mode that does not name a key at all.
  */
 async function resolveIdentity(
   deps: ResolveDeps,
   identityId: string,
-): Promise<{ identity: VaultIdentity; keyId?: string }> {
+): Promise<{ identity: VaultIdentity; key?: VaultKey }> {
   const identity = await deps.vault.findIdentity(identityId);
   if (!identity) throw new Error(`vault: identity ${identityId} no longer exists`);
   if (identity.authMode !== "key") return { identity };
@@ -248,7 +256,7 @@ async function resolveIdentity(
   if (!key) {
     throw new Error(`vault: identity "${identity.name}" names a key that no longer exists`);
   }
-  return { identity, keyId: key.id };
+  return { identity, key };
 }
 
 export async function resolveSshAuth(
@@ -265,13 +273,38 @@ export async function resolveSshAuth(
     };
   }
 
-  const { identity, keyId } = await resolveIdentity(deps, binding.identityId);
+  const { identity, key } = await resolveIdentity(deps, binding.identityId);
+  // A `hardware` key holds no secret at all: auth goes through the OS
+  // ssh-agent, restricted to this one identity by its fingerprint, rather
+  // than through the keychain reference every other "key" auth mode builds.
+  if (key?.kind === "hardware") {
+    if (!key.fingerprint) {
+      throw new Error(
+        `vault: hardware key "${key.name}" has no recorded fingerprint to match in ssh-agent`,
+      );
+    }
+    return { user: identity.username, useAgent: true, agentKeyFingerprint: key.fingerprint };
+  }
+  const base = sshKeychainCredentials(identity.authMode, VAULT_SSH_FIELDS, VAULT_KEYRING_SERVICE, {
+    password: identity.id,
+    key: key?.id,
+  });
+  // A `cert` key's certificate is PUBLIC, so it travels alongside the
+  // keychain references above instead of through one - this module makes
+  // no secret read of its own for anything, certificate included. A record
+  // with no certificate at all - reachable from a hand-edited vault file or
+  // a trimmed-empty import field - is refused by name here, the same way
+  // the hardware branch above refuses a missing fingerprint: dialling it
+  // silently as a bare key would authenticate as a DIFFERENT credential
+  // than the one this identity names, against whatever server still trusts
+  // the bare signing key.
+  if (key?.kind === "cert" && !key.certificate) {
+    throw new Error(`vault: certificate key "${key.name}" has no certificate`);
+  }
   return {
     user: identity.username,
-    ...sshKeychainCredentials(identity.authMode, VAULT_SSH_FIELDS, VAULT_KEYRING_SERVICE, {
-      password: identity.id,
-      key: keyId,
-    }),
+    ...base,
+    ...(key?.kind === "cert" ? { certificate: key.certificate } : {}),
   };
 }
 

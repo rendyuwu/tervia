@@ -93,7 +93,7 @@ src-tauri/                      Backend (Rust)
   src/main.rs                   thin shim
   src/modules/
     ssh/{mod,session,sftp}.rs             russh sessions, ProxyJump, -L forwards, SFTP,
-                                          ssh_key_inspect, ssh_key_generate
+                                          ssh_key_inspect, ssh_key_generate, ssh_key_classify
     rdp/{mod,session,frame,tls}.rs        ironrdp sessions, certificate pinning, frames
     pty/{mod,session,shell_init,job,path_probe}.rs + scripts/   interactive PTYs
     pty_daemon/{mod,protocol,transport,paths,server,client,spawn}.rs   sidecar
@@ -127,7 +127,7 @@ src/                            Frontend (React webview), alias @/* -> src/*
 
 | Module         | Key commands / role                                                                                                                                                                                                                                                                                                                                  |
 | -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ssh/`         | The product. `ssh_open/write/resize/close/attach/list_sessions`, `ssh_confirm_host_key`, `ssh_agent_keys`, `ssh_forward_open/close`, `ssh_remote_forward_open/close`, `ssh_socks_open`, `ssh_git_status`, `ssh_git`, `ssh_sftp_*` (see below), `ssh_key_inspect`, `ssh_key_generate`.                                                                |
+| `ssh/`         | The product. `ssh_open/write/resize/close/attach/list_sessions`, `ssh_confirm_host_key`, `ssh_agent_keys`, `ssh_forward_open/close`, `ssh_remote_forward_open/close`, `ssh_socks_open`, `ssh_git_status`, `ssh_git`, `ssh_sftp_*` (see below), `ssh_key_inspect`, `ssh_key_generate`, `ssh_key_classify`.                                            |
 | `rdp/`         | `rdp_open/input/close/attach/list_sessions/snapshot`, `rdp_confirm_cert`, `rdp_clipboard_focus`. Certificate pinning mirrors SSH's host-key flow; the password arrives as a keychain **reference**, never a value.                                                                                                                                   |
 | `pty/`         | `pty_open/attach/write/resize/close/list_sessions/kill_all`, `terminal_probe_path`. Two backends: daemon (default) falls back to in-process.                                                                                                                                                                                                         |
 | `pty_daemon/`  | Sidecar owning PTYs across GUI restarts (`--pty-daemon` flag, no Tauri commands).                                                                                                                                                                                                                                                                    |
@@ -400,6 +400,22 @@ secrets)` is the mode-to-wire mapping for the one case with nothing to
   plus exactly the metadata shape `ssh_key_inspect` reports, flattened onto one
   struct (`SshKeyGenerated`), so `KeyEditorDialog.tsx`'s Generate action treats a
   minted key the same way it treats an inspected one - one draft, one save path.
+- `VaultKey.kind` (absent, `"cert"`, or `"hardware"`) is a discriminated union
+  over the same record, adopted at read time (absent = today's PEM shape, no
+  migration). A `cert` key stores its SIGNING key inline exactly like a `pem`
+  key and adds a public `certificate` field plus the facts
+  `ssh_key_classify` parses off it (`certCaFingerprint`/`certKeyId`/
+  `certPrincipals`/`certValidAfter`/`certValidBefore`); dial time authenticates
+  with `authenticate_openssh_cert` (`session.rs`), refusing a certificate that
+  does not certify the paired private key. A `hardware` key stores **no**
+  secret at all - `fingerprint` is the identifying fact, matched against the
+  local ssh-agent's held identities at dial time (`authenticate_agent`'s
+  `only_fingerprint` restriction), so authentication goes through whatever
+  holds that fingerprint (a hardware token or another agent-held key) rather
+  than through the keychain. `ssh_key_classify(text)` is the sibling of
+  `ssh_key_inspect`/`ssh_key_generate` above that answers "what IS this
+  text" - a private key, an OpenSSH certificate, a bare public-key line, or
+  neither - with no unlock and no KDF, backing both new kinds' editor panels.
 
 ### SSH (`src/modules/ssh/`)
 

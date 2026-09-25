@@ -1113,8 +1113,11 @@ console.log("    missingPrivateKey -> the row Badge's variant AND its label");
     );
   }
 
-  // --- missingPrivateKey: the same shape, on KeyCard, with no chip to
-  // protect - `KeyCard.tsx` has only the one destructive signal.
+  // --- missingPrivateKey: the same shape, on KeyCard, which now carries a
+  // SECOND badge - the kind badge, for `cert`/`hardware` records
+  // (`VaultKeyKind` in `src/modules/vault/types.ts`) - so the missing-secret
+  // badge is located by which one's variant mentions `missingPrivateKey`,
+  // rather than by being the only badge in the file or the first one found.
   const sfKey = ts.createSourceFile(
     FILES.keyCard,
     src.keyCard,
@@ -1126,31 +1129,30 @@ console.log("    missingPrivateKey -> the row Badge's variant AND its label");
   check("found KeyCard's function body to check", keyBody !== null);
 
   const keyBadges = keyBody ? findOpeningElementsByTag(keyBody, "Badge", sfKey) : [];
-  check("found exactly one <Badge> in KeyCard.tsx", keyBadges.length === 1, keyBadges.length);
-  const keyBadge = keyBadges[0] ?? null;
-  const keyVariant = keyBadge ? jsxAttrExprText(keyBadge, "variant", sfKey) : null;
-  check("found KeyCard's row Badge's variant expression", keyVariant !== null);
-  if (keyVariant !== null) {
-    check(
-      "KeyCard's row Badge variant is driven by missingPrivateKey",
-      /\bmissingPrivateKey\b/.test(keyVariant),
-      keyVariant,
-    );
-  }
+  check("found at least one <Badge> in KeyCard.tsx", keyBadges.length >= 1, keyBadges.length);
+  const missingKeyBadges = keyBadges.filter((b) =>
+    (jsxAttrExprText(b, "variant", sfKey) ?? "").includes("missingPrivateKey"),
+  );
+  check(
+    "exactly one Badge in KeyCard.tsx is driven by missingPrivateKey - still the one destructive signal, even though the kind badge beside it is not",
+    missingKeyBadges.length === 1,
+    missingKeyBadges.length,
+  );
+  const keyBadge = missingKeyBadges[0] ?? null;
 
   const keyBadgeElement =
     keyBadge && ts.isJsxOpeningElement(keyBadge) && ts.isJsxElement(keyBadge.parent)
       ? keyBadge.parent
       : null;
   check(
-    "found KeyCard's row Badge's own JSX element (for its label text)",
+    "found KeyCard's missing-secret Badge's own JSX element (for its label text)",
     keyBadgeElement !== null,
   );
   if (keyBadgeElement) {
     const badgeText = keyBadgeElement.getText(sfKey);
     check(
-      'KeyCard\'s row Badge LABEL also switches on missingPrivateKey: `missingPrivateKey ? "Missing private key" : …`',
-      /missingPrivateKey\s*\?\s*"Missing private key"/.test(badgeText),
+      "KeyCard's missing-secret Badge LABEL also switches on missingPrivateKey and still says \"Missing private key\" somewhere in that branch - not the new wording's exact phrasing, which the browser smoke already confirmed",
+      /missingPrivateKey\s*\?/.test(badgeText) && badgeText.includes('"Missing private key"'),
       badgeText,
     );
   }

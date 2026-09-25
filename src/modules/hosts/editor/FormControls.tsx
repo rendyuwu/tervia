@@ -30,6 +30,7 @@ export function ToggleButton({
     <button
       type="button"
       onClick={onClick}
+      aria-pressed={active}
       className={
         "flex cursor-pointer items-center gap-1.5 rounded-md border px-2.5 py-1 text-[11.5px] transition-colors " +
         (active
