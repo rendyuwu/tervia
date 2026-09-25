@@ -35,6 +35,7 @@ import type { VaultKey } from "@/modules/vault/types";
 import type { ReactNode } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
+import { HostAppearancePicker } from "./appearance";
 import {
   bindHostToIdentity,
   convertHostToVault,
@@ -152,6 +153,8 @@ const EMPTY_SHARED: SharedDraft = {
   groupId: "",
   description: "",
   tags: [],
+  icon: "",
+  color: "",
 };
 
 const EMPTY_SSH_CRED: SshCredentialDraft = {
@@ -613,6 +616,8 @@ export function HostEditorDialog({
           groupId: seedGroupId,
           description: "",
           tags: [],
+          icon: "",
+          color: "",
         });
         setSshCred({ ...EMPTY_SSH_CRED, user: prefill.user ?? "" });
         setRdpCred({ ...EMPTY_RDP_CRED, username: prefill.user ?? "" });
@@ -652,6 +657,8 @@ export function HostEditorDialog({
         groupId: liveGroup(host.groupId),
         description: host.description ?? "",
         tags: host.tags ?? [],
+        icon: host.icon ?? "",
+        color: host.color ?? "",
       });
       // Through `hostPins`, never off the flat field: it is the one place a record
       // written before pins were keyed adopts its pin onto the address that record
@@ -1216,6 +1223,8 @@ export function HostEditorDialog({
         groupId: shared.groupId || undefined,
         description: shared.description.trim() || undefined,
         tags: normalizeHostTags(shared.tags),
+        icon: shared.icon || undefined,
+        color: shared.color || undefined,
         lastConnectedAt: existing?.lastConnectedAt,
         // The whole draft map, addresses and all. The store decides which of them
         // is the flat pin every consumer reads, so `lastFingerprint` /
@@ -1944,6 +1953,13 @@ export function HostEditorDialog({
                     suggestions={allTags}
                   />
                 </Field>
+
+                <HostAppearancePicker
+                  icon={shared.icon}
+                  color={shared.color}
+                  onIconChange={(icon) => setShared({ ...shared, icon })}
+                  onColorChange={(color) => setShared({ ...shared, color })}
+                />
 
                 {mode === "edit" ? (
                   <PinnedKeyRow

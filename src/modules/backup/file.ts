@@ -289,6 +289,8 @@ function baseOf(raw: Record<string, unknown>): HostBase | null {
   const description = str(raw.description).trim();
   const lastConnectedAt = raw.lastConnectedAt;
   const tags = normalizeHostTags(raw.tags);
+  const icon = str(raw.icon).trim();
+  const color = str(raw.color).trim();
 
   return {
     id,
@@ -303,6 +305,11 @@ function baseOf(raw: Record<string, unknown>): HostBase | null {
     ...(groupId ? { groupId } : {}),
     ...(description ? { description } : {}),
     ...(tags ? { tags } : {}),
+    // Trimmed like `description`, not checked against this build's ids: the
+    // card resolves them on read (`hostIconId`/`hostColorId`), so an id a
+    // later build exported survives the trip instead of being dropped.
+    ...(icon ? { icon } : {}),
+    ...(color ? { color } : {}),
     ...(typeof lastConnectedAt === "number" && Number.isFinite(lastConnectedAt)
       ? { lastConnectedAt }
       : {}),

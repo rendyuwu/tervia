@@ -732,6 +732,20 @@ check(
   undefined,
 );
 check("no tags field at all leaves tags absent", host(ssh({})).tags, undefined);
+{
+  const set = host(ssh({ icon: "rocket", color: " cyan " }));
+  check(
+    "icon and color survive the import whitelist trimmed, even an id this build cannot draw",
+    [set.icon, set.color],
+    ["rocket", "cyan"],
+  );
+  const junk = host(ssh({ icon: 5, color: "  " }));
+  check(
+    "a non-string or blank icon/color is dropped, not imported as-is",
+    [junk.icon, junk.color],
+    [undefined, undefined],
+  );
+}
 check(
   "lastConnectedAt survives, but only as a real number",
   [

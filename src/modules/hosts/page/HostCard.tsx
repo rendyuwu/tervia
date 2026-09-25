@@ -12,6 +12,7 @@ import { lastConnectedLabel } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { CircleAlert, Copy, Pencil, Play, Trash2, type LucideIcon } from "lucide-react";
 import type { ReactNode } from "react";
+import { HostGlyph } from "../appearance";
 import { isSshHost, type Host } from "../types";
 
 export type HostCardProps = {
@@ -112,6 +113,7 @@ export function HostCard({
       )}
     >
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+        <HostGlyph icon={host.icon} color={host.color} />
         <span className="min-w-0 flex-1 truncate text-sm font-medium">{host.name}</span>
         <Badge
           variant={missingSecret ? "destructive" : identityName ? "secondary" : "outline"}

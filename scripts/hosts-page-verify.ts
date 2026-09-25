@@ -40,7 +40,13 @@ import {
   type TagFilter,
   type VaultSnapshot,
 } from "../src/modules/hosts/page/derive";
-import type { HostGroup, RdpHost, SshHost } from "../src/modules/hosts/types";
+import {
+  hostColorId,
+  hostIconId,
+  type HostGroup,
+  type RdpHost,
+  type SshHost,
+} from "../src/modules/hosts/types";
 import type {
   RdpInlineCredentials,
   SshInlineCredentials,
@@ -1078,6 +1084,30 @@ console.log("\n[lastConnectedLabel] HostCard actually renders it");
     readFileSync(join(root, "src/modules/hosts/page/HostCard.tsx"), "utf8"),
   );
   ok("HostCard calls lastConnectedLabel", card.includes("lastConnectedLabel("));
+}
+
+console.log("\n[appearance] a stored icon/colour id resolves only when this build knows it");
+{
+  check(
+    "a known id resolves to itself",
+    [hostIconId("database"), hostColorId("cyan")],
+    ["database", "cyan"],
+  );
+  check(
+    "an id a later build might write, or an inherited Object key, resolves to nothing",
+    [
+      hostIconId("rocket"),
+      hostColorId("orange"),
+      hostIconId("constructor"),
+      hostColorId("toString"),
+    ],
+    [undefined, undefined, undefined, undefined],
+  );
+  check(
+    "unset or a non-string landed value resolves to nothing rather than throwing",
+    [hostIconId(undefined), hostColorId(undefined), hostIconId(5), hostColorId({})],
+    [undefined, undefined, undefined, undefined],
+  );
 }
 
 // --- purity: derive.ts reaches nothing it is not allowed to reach --------
