@@ -4,20 +4,19 @@
  *   A. No two DIFFERENT catalog actions share the same chord (intra-app clash).
  *   B. In a focused terminal (local PTY and SSH are the same "terminal" leaf),
  *      every shell control code reaches xterm instead of firing an app action:
- *      bare Ctrl+letter / Ctrl+[ / Ctrl+] / Ctrl+\ (via isTerminalControlChord),
- *      plus Enter / Ctrl+Enter / Shift+Enter (no global handler -> fall through).
+ *      bare Ctrl+letter / Ctrl+[ / Ctrl+] / Ctrl+\ (via yieldsToRawKeyboard,
+ *      the real gate), plus Enter / Ctrl+Enter / Shift+Enter (no global
+ *      handler -> fall through) - except the three chords the gate hands to
+ *      the app by design: Ctrl+D pane.splitRight, Ctrl+] pane.focusNext,
+ *      Ctrl+[ pane.focusPrev.
  * Run: `npx tsx scripts/keybindings-collision-verify.ts`.
  *
  * Under node, platform() throws so MOD_PROP resolves to "ctrl" (see platform.ts),
  * i.e. this checks exactly the Windows/Linux bindings. macOS is safer by
  * construction: Mod = Cmd (meta), so no bare-Ctrl chord is ever an app shortcut.
  */
-import {
-  SHORTCUTS,
-  isTerminalControlChord,
-  isTerminalMetaChord,
-  type KeyBinding,
-} from "../src/modules/shortcuts/shortcuts";
+import { SHORTCUTS, type KeyBinding } from "../src/modules/shortcuts/shortcuts";
+import { yieldsToRawKeyboard, type FocusTarget } from "../src/modules/shortcuts/lib/keyboardOwner";
 
 // Actions with a global handler in src/app/lib/shortcutHandlers.ts. The
 // readOnly Enter-family (ai.send / ai.queueWhileBusy / ai.newline) is NOT here:
@@ -114,11 +113,16 @@ for (const [chord, ids] of byChord) {
 if (dupes === 0) console.log("  ok: no chord is bound to two different actions");
 
 // --- B. Terminal focus: every shell control code must fall through ---------
-console.log("\n[B] terminal focus: shell control codes must reach xterm, not fire an app action");
+console.log(
+  "\n[B] terminal focus: shell control codes must reach xterm, except the chords the gate hands to the app by design",
+);
+// A focus target inside a terminal leaf, as `ownsRawKeyboard` asks it.
+const TERMINAL: FocusTarget = {
+  closest: (sel) => (sel.includes("[data-terminal-leaf-id]") ? {} : null),
+};
 // Which action (if any) fires for a chord when a terminal is focused. Mirrors
-// useGlobalShortcuts (first match in array order wins) + its raw-keyboard gate
-// (yieldsToRawKeyboard, shortcuts/lib/keyboardOwner.ts), minus pane.splitRight's
-// exemption.
+// useGlobalShortcuts (first match in array order wins) and calls its real
+// raw-keyboard gate (yieldsToRawKeyboard, shortcuts/lib/keyboardOwner.ts).
 function terminalAction(ev: KeyboardEvent): string | null {
   for (const s of SHORTCUTS) {
     const match = s.defaultBindings.some(
@@ -130,9 +134,9 @@ function terminalAction(ev: KeyboardEvent): string | null {
         b.key.toLowerCase() === ev.key.toLowerCase(),
     );
     if (!match) continue;
-    // yieldsToRawKeyboard: terminal focused + control/meta chord -> fall through,
-    // minus pane.splitRight's exemption.
-    if (isTerminalControlChord(ev) || isTerminalMetaChord(ev)) return null;
+    // The real gate: terminal focused + control/meta chord -> fall through,
+    // unless the action fires over a raw-keyboard surface by design.
+    if (yieldsToRawKeyboard(s.id, TERMINAL, ev, false)) return null;
     // browser.* is gated off outside a browser pane -> fall through.
     if (s.id.startsWith("browser.")) return null;
     // No global handler -> early return without preventDefault -> fall through.
@@ -165,21 +169,34 @@ const SHELL_KEYS: KeyBinding[] = [
   { key: "z", alt: true },
   { key: "1", alt: true },
 ];
+// The chords the gate hands to the app over a focused terminal by design
+// (keyboardOwner.ts FIRES_OVER_RAW_KEYBOARD), keyed by canon(binding).
+const TAKEN_BY_DESIGN: Partial<Record<string, string>> = {
+  "Ctrl+d": "pane.splitRight",
+  "Ctrl+]": "pane.focusNext",
+  "Ctrl+[": "pane.focusPrev",
+};
 let shadowed = 0;
 for (const b of SHELL_KEYS) {
   const fired = terminalAction(toEvent(b));
+  const expected = TAKEN_BY_DESIGN[canon(b)] ?? null;
+  if (fired === expected) continue;
   if (fired) {
     console.error(`  SHADOWED: ${canon(b)} is eaten by ${fired} instead of reaching the shell`);
-    shadowed++;
-    failed++;
+  } else {
+    console.error(`  NOT TAKEN: ${canon(b)} should fire ${expected} but reaches the shell`);
   }
+  shadowed++;
+  failed++;
 }
 if (shadowed === 0)
-  console.log("  ok: all bare-Ctrl control codes + Enter/Tab/Esc/arrows reach the shell");
+  console.log(
+    "  ok: every bare-Ctrl control code + Enter/Tab/Esc/arrows reaches the shell, except Ctrl+D / Ctrl+] / Ctrl+[ (app by design)",
+  );
 
 // --- Informational: app chords that still fire inside a terminal ----------
 console.log(
-  "\n[info] app chords that stay active INSIDE a terminal (need Shift/Alt/Meta, non-control):",
+  "\n[info] app chords that stay active INSIDE a terminal (Shift/Alt/Meta chords, plus the control chords the gate hands to the app by design):",
 );
 const active = new Set<string>();
 for (const s of SHORTCUTS) {
@@ -191,4 +208,6 @@ for (const s of SHORTCUTS) {
 [...active].sort().forEach((x) => console.log("  " + x));
 
 if (failed > 0) throw new Error(`${failed} collision issue(s) found`);
-console.log("\nAll checks passed: no clashes, terminal keeps every shell control code.");
+console.log(
+  "\nAll checks passed: no clashes, terminal keeps every shell control code except the three chords the gate hands to the app by design.",
+);

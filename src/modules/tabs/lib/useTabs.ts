@@ -661,18 +661,25 @@ export function useTabs() {
     [showTabs],
   );
 
-  /** Ctrl+] / Ctrl+[. A chord whose whole purpose is "show me that pane". */
+  /**
+   * Ctrl+] / Ctrl+[. A chord whose whole purpose is "show me that pane".
+   * A single-pane tab is a no-op, and handing back `curr` keeps that no-op from
+   * costing a workspace write (same reason as `focusPane`).
+   */
   const focusNextPaneInTab = useCallback(
     (tabId: number, delta: 1 | -1) => {
       showTabs();
-      setTabs((curr) =>
-        curr.map((t) => {
+      setTabs((curr) => {
+        let moved = false;
+        const next = curr.map((t) => {
           if (t.id !== tabId || t.kind !== "pane") return t;
-          const next = nextLeafId(t.paneTree, t.activeLeafId, delta);
-          if (next === t.activeLeafId) return t;
-          return syncPaneMirror({ ...t, activeLeafId: next });
-        }),
-      );
+          const nextLeaf = nextLeafId(t.paneTree, t.activeLeafId, delta);
+          if (nextLeaf === t.activeLeafId) return t;
+          moved = true;
+          return syncPaneMirror({ ...t, activeLeafId: nextLeaf });
+        });
+        return moved ? next : curr;
+      });
     },
     [showTabs],
   );

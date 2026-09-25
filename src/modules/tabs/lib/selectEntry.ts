@@ -1,6 +1,7 @@
 /**
- * The two routes a tab-strip chip has into "activate this entry", and the one
- * expression they share.
+ * The three routes a tab-strip chip has into "activate this entry" - Radix's
+ * `onValueChange`, the chip's own click, and a leaf drag starting - and the
+ * one expression they share.
  *
  * A LEAF module on purpose: the only import is `import type { Entry }`, which is
  * erased, so `scripts/rail-views-verify.ts` can import this at runtime under
@@ -74,4 +75,33 @@ export function entrySelectHandlers(
   return {
     onClick: () => onSelectEntry(entry.tabId, entry.leafId),
   };
+}
+
+/**
+ * The drag counterpart of `entrySelectHandlers`, for the same Radix reason: the
+ * dragged chip's mousedown is a no-op when the chip is already the active
+ * entry, which under a rail view is the covered tab. So a leaf drag started
+ * there reached the drop with the view still up, and closed the view only if
+ * the drop reached `reorderLeafInGroup`. Selecting at activation makes a header
+ * rearrangement leave the view before the drop, the same way "Toggle Split
+ * Orientation" does. With no view, or on a chip that is not active, it is a
+ * no-op repeat of what mousedown already did (`focusTabView` and `focusPane`
+ * both return `curr`).
+ *
+ * `tab:` group drags are excluded on purpose: they reorder the strip, which a
+ * view does not cover. The same asymmetry remains there and is accepted: a
+ * single-leaf tab's chip carries the group listeners (`SortableTabGroup.tsx`,
+ * `isGroupDragHandle`), so dragging the covered tab's chip keeps the view up,
+ * while dragging any other chip leaves it on mousedown. An unknown leaf id
+ * does nothing.
+ */
+export function selectDraggedLeaf(
+  activeDragId: string,
+  entries: readonly Entry[],
+  onSelectEntry: SelectEntry,
+): void {
+  if (!activeDragId.startsWith("leaf:")) return;
+  const leafId = Number(activeDragId.slice("leaf:".length));
+  const entry = entries.find((e) => e.leafId === leafId);
+  if (entry) onSelectEntry(entry.tabId, entry.leafId);
 }

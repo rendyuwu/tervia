@@ -25,7 +25,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { Tab } from "./lib/useTabs";
 import { canCloseLeaf } from "./lib/closable";
 import { type Entry, buildEntries } from "./lib/entries";
-import { type SelectEntry } from "./lib/selectEntry";
+import { selectDraggedLeaf, type SelectEntry } from "./lib/selectEntry";
 import { EntryIcon } from "./components/EntryIcon";
 import { NewTabMenu } from "./components/NewTabMenu";
 import { SortableTabGroup } from "./components/SortableTabGroup";
@@ -405,7 +405,11 @@ export function TabBar({
               sensors={sensors}
               // Scoped `closestCenter`. See `makeScopedCollisionDetection`.
               collisionDetection={collisionDetection}
-              onDragStart={(ev) => setActiveDragId(String(ev.active.id))}
+              onDragStart={(ev) => {
+                const id = String(ev.active.id);
+                setActiveDragId(id);
+                selectDraggedLeaf(id, entries, onSelectEntry);
+              }}
               onDragEnd={handleDragEnd}
               onDragCancel={() => setActiveDragId(null)}
             >

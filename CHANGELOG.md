@@ -28,6 +28,10 @@ changes).
   SFTP and the encrypted connection backup, plus the local terminal, editor,
   explorer, panes, tabs and workspaces those need. RDP and end-to-end
   encrypted sync are planned and not built yet.
+- **Ctrl+] / Ctrl+[ move pane focus even while a terminal or RDP pane has
+  focus**, like Ctrl+D split already did. They no longer send GS / Esc to the
+  shell or remote desktop; rebind `pane.focusNext` / `pane.focusPrev` in the
+  keybindings settings to give the chords back.
 
 ### Removed
 

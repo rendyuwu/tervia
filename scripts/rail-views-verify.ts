@@ -75,7 +75,11 @@ import type { Tab, useTabs } from "../src/modules/tabs/lib/useTabs";
 // the click route rather than pinning a substring of it, which is the half a
 // source-text sweep cannot do. The entry types beside it stay type-only -
 // `entries.ts` reaches `@/`-aliased modules this script has no bundler for.
-import { entrySelectHandlers, type SelectEntry } from "../src/modules/tabs/lib/selectEntry";
+import {
+  entrySelectHandlers,
+  selectDraggedLeaf,
+  type SelectEntry,
+} from "../src/modules/tabs/lib/selectEntry";
 import type { Entry } from "../src/modules/tabs/lib/entries";
 import {
   isPageKind,
@@ -1225,7 +1229,7 @@ console.log("\n[funnel] no route into the tab area writes activeId on its own");
     !/Math\.min\(/.test(switching) && !/Math\.min\(/.test(persistence),
   );
 
-  // ---- 8d. focusPane hands back the SAME array when nothing moved --------
+  // ---- 8d. focusPane / focusNextPaneInTab hand back the SAME array when nothing moved
   // The one thing in this file that is about identity rather than about which
   // writes exist, and it is here because the cost of a fresh `tabs` identity is real:
   // `curr.map(...)` allocates a new array whether or not any element changed, so
@@ -1243,6 +1247,11 @@ console.log("\n[funnel] no route into the tab area writes activeId on its own");
   // and the second arrival never moves anything. Before the guard, one click on
   // a terminal chip wrote the workspace twice.
   //
+  // `focusNextPaneInTab` carries the same guard for the same cost: since
+  // Ctrl+] / Ctrl+[ fire over a focused terminal (keyboardOwner.ts
+  // FIRES_OVER_RAW_KEYBOARD), every press in a single-pane tab reaches it and
+  // moves nothing.
+  //
   // Pinned as the EXPRESSION, not the name: the updater must
   // hand `curr` back on its no-change path. Both spellings are accepted (a
   // ternary tail or an early `return curr;`) because either is the same promise;
@@ -1258,25 +1267,25 @@ console.log("\n[funnel] no route into the tab area writes activeId on its own");
   // the lifted function into the unaccounted-for bucket. The sweep and the lift
   // want the code in two different places; the sweep is load-bearing for the
   // completeness claim and wins.
-  {
-    const focusPaneBody = tabsBodies.get("focusPane") ?? "";
+  for (const name of ["focusPane", "focusNextPaneInTab"]) {
+    const body = tabsBodies.get(name) ?? "";
     check(
       // Non-vacuity: an empty body satisfies the negative check below for free.
-      "found focusPane's body to scan",
-      /setTabs\(/.test(focusPaneBody) && /activeLeafId/.test(focusPaneBody),
-      focusPaneBody,
+      `found ${name}'s body to scan`,
+      /setTabs\(/.test(body) && /activeLeafId/.test(body),
+      body,
     );
     check(
-      "focusPane's updater returns curr unchanged when no tab moved",
-      /:\s*curr;|\breturn curr;/.test(focusPaneBody),
-      focusPaneBody,
+      `${name}'s updater returns curr unchanged when no tab moved`,
+      /:\s*curr;|\breturn curr;/.test(body),
+      body,
     );
     check(
       // The exact shape it came from, named so a tidy-up back to it fails by
       // description rather than by a regex nobody can read.
-      "and is not the always-allocate curr.map updater it replaced",
-      !/setTabs\(\s*\(curr\)\s*=>\s*curr\.map\(/.test(focusPaneBody),
-      focusPaneBody,
+      `and ${name}'s is not the always-allocate curr.map updater it replaced`,
+      !/setTabs\(\s*\(curr\)\s*=>\s*curr\.map\(/.test(body),
+      body,
     );
   }
 }
@@ -2013,6 +2022,38 @@ console.log("\n[chip] a chip selects its own entry, even when it is already the 
     onValueChange !== null && /if \(!entry\) return;/.test(onValueChange),
     onValueChange,
   );
+
+  // ---- the drag route: a leaf drag selects its own entry at activation ----
+  // Executed, like the click route above. The view exit through `focusTabView`
+  // is already proven for this same `tabId` by the chip-click loop, so it is
+  // not repeated here.
+  const dragCalls: { tabId: number; leafId: number }[] = [];
+  const dragSpy: SelectEntry = (tabId, leafId) => {
+    dragCalls.push({ tabId, leafId });
+  };
+  selectDraggedLeaf(`leaf:${leafEntry.leafId}`, [leafEntry], dragSpy);
+  check(
+    "a leaf drag selects its own entry exactly once",
+    dragCalls.length === 1 &&
+      dragCalls[0].tabId === leafEntry.tabId &&
+      dragCalls[0].leafId === leafEntry.leafId,
+    dragCalls,
+  );
+  dragCalls.length = 0;
+  selectDraggedLeaf(`tab:${leafEntry.tabId}`, [leafEntry], dragSpy);
+  check("a group drag (tab:) selects nothing", dragCalls.length === 0, dragCalls);
+  selectDraggedLeaf("leaf:999999", [leafEntry], dragSpy);
+  check("a leaf id no entry has selects nothing", dragCalls.length === 0, dragCalls);
+
+  const dragStart = propValue(barSrc, "onDragStart");
+  check(
+    "TabBar's onDragStart hands the dragged id to selectDraggedLeaf, once and unconditionally",
+    dragStart !== null &&
+      /selectDraggedLeaf\(id, entries, onSelectEntry\)/.test(dragStart) &&
+      (dragStart.match(/selectDraggedLeaf\(/g) ?? []).length === 1 &&
+      !/if\s*\(|\?\s*selectDraggedLeaf|&&\s*selectDraggedLeaf/.test(dragStart),
+    dragStart,
+  );
 }
 
 if (failed > 0) throw new Error(`${failed} check(s) FAILED`);
@@ -2194,3 +2235,18 @@ console.log("\nALL PASS");
 //       occurrence in the file and you have mutated the comment - every check here
 //       reads `stripTsxComments` output, so the suite stays GREEN and the row looks
 //       like it found a hole. It has not. Mutate the attribute.
+//
+//   N9a useTabs.ts: `focusNextPaneInTab` reverted     the two focusNextPaneInTab
+//       to `setTabs((curr) => curr.map(...))`         rows of 8d - "updater
+//       (EXIT=1, exactly 2 red)                       returns curr unchanged
+//                                                     when no tab moved" and
+//                                                     "is not the always-allocate
+//                                                     curr.map updater it
+//                                                     replaced"
+//   N9b TabBar.tsx: the `selectDraggedLeaf(...)`      "TabBar's onDragStart hands
+//       line deleted from `onDragStart` (EXIT=1,      the dragged id to
+//       exactly 1 red)                                selectDraggedLeaf, once
+//                                                     and unconditionally"
+//   N9c selectEntry.ts: `selectDraggedLeaf`           "a leaf drag selects its
+//       returning early for `leaf:` (EXIT=1,          own entry exactly once"
+//       exactly 1 red)
