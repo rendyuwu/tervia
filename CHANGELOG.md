@@ -4,7 +4,7 @@ The latest release only. Every earlier version:
 [GitHub Releases](https://github.com/rendyuwu/tervia/releases). Versions:
 [SemVer](https://semver.org/); before `1.0` a minor bump may break things.
 
-## [0.1.0] - Unreleased
+## [0.1.0] - 26-09-2026
 
 First release. Forked from [TEDI](https://github.com/IlhamriSKY/TEDI) v0.4.22,
 itself forked from [Terax](https://github.com/crynta/terax-ai) v0.5.9. Earlier
@@ -15,9 +15,9 @@ history: their changelogs and `git log`.
 **Hosts and vault**
 
 - One host list for SSH and RDP: nested groups, tags, icon and colour, last connected.
-- Vault: identities and keys shared by many hosts. A group can set a default identity for new hosts.
+- Vault: identities and keys shared by many hosts, each showing when it last connected. A group can set a default identity for new hosts.
 - Key editor: generate Ed25519, ECDSA P-256 or RSA-4096. OpenSSH certificate and hardware (ssh-agent) key kinds.
-- Connect from the Hosts page, the header quick connect, or `#` in the Command Palette.
+- Connect from the Hosts page (arrow keys move between cards), the header quick connect, or `#` in the Command Palette.
 - Import from `~/.ssh/config` and PuTTY `.reg` exports.
 - Vault page finds keychain entries no record uses and deletes them.
 
@@ -36,7 +36,7 @@ history: their changelogs and `git log`.
 
 **SFTP**
 
-- Remote file tree: upload by drop (files, up to 256 MiB), open and save text files (up to 16 MiB), create, rename, delete.
+- Remote file tree: upload by drop (files, up to 256 MiB), open text files up to 16 MiB and save them, create, rename, delete.
 
 **RDP**
 
@@ -63,13 +63,23 @@ history: their changelogs and `git log`.
 
 ### Changed (vs TEDI v0.4.22)
 
+- Breaking: Tervia reads nothing TEDI saved. Settings, workspaces, SSH connections and saved passwords start empty, and `.tedi-ssh` exports cannot be imported.
 - `Ctrl+]` / `Ctrl+[` move pane focus even when a terminal or RDP pane has focus. Rebind `pane.focusNext` / `pane.focusPrev` to give them back to the shell.
+
+### Fixed (vs TEDI v0.4.22)
+
+- `Ctrl+P` and `Ctrl+G` reach a focused terminal instead of opening Go to file.
+- Close Tabs to the Right asks once for every tab with unsaved changes or a running process, instead of asking about the last one and leaving the rest open.
+- The host-key prompt dims the terminal behind it without blurring, so reconnect messages stay readable.
+- Settings and saved workspaces damaged by a crash mid-save are restored from their last good copy instead of reset to defaults.
+- Saved SSH passwords, keys and passphrases no longer pass through the UI on connect, and no decrypted secret stays cached in memory.
 
 ### Removed (vs TEDI v0.4.22)
 
 - AI agent: providers, MCP, sub-agents, autocomplete, AI diff tab. Detecting agent CLIs in a terminal stays.
 - Extension system and the `ext` CLI subcommand.
-- In-app browser.
+- In-app browser. Dev-server links, Preview in Browser and PDFs open in the system browser.
 - Source Control panel. Explorer git decorations stay.
 - Task scheduler.
+- Private tabs (Mark as Private, Private Terminal).
 - `theme` CLI subcommand and headless `--update`. `--update` now opens the window.
