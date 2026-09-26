@@ -755,6 +755,7 @@ pub fn run() {
             backup::backup_apply_secrets,
             backup::backup_release,
             clipboard::clipboard_read_text,
+            clipboard::clipboard_read_file_list,
             net::http_ping,
             net::port_is_open,
             net::http_stream,

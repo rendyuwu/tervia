@@ -129,6 +129,11 @@ const FIRES_OVER_RAW_KEYBOARD: Partial<Record<ShortcutId, true>> = {
  * answers - not a focus question this function tries to infer - keeps it
  * from depending on whether Chromium happens to move focus off a
  * `visibility: hidden` subtree.
+ *
+ * A focused Remote tree body (`data-sftp-tree`) takes its own file-paste
+ * chord. Without this, `terminal.paste` (Cmd+V on macOS) swallows it and
+ * pastes clipboard text into the active terminal. The Shift and Insert chords
+ * keep reaching the terminal.
  */
 export function yieldsToRawKeyboard(
   id: ShortcutId,
@@ -136,6 +141,14 @@ export function yieldsToRawKeyboard(
   e: KeyboardEvent,
   tabAreaCovered: boolean,
 ): boolean {
+  if (
+    id === "terminal.paste" &&
+    !e.shiftKey &&
+    e.code === "KeyV" &&
+    target !== null &&
+    target.closest("[data-sftp-tree]") !== null
+  )
+    return true;
   return (
     FIRES_OVER_RAW_KEYBOARD[id] !== true &&
     !tabAreaCovered &&

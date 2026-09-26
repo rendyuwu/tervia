@@ -24,7 +24,8 @@ import {
   type FsRowDropDetail,
 } from "@/modules/terminal/lib/useTerminalFileDrop";
 import { toast } from "@/components/ui/toast";
-import { IS_WINDOWS } from "@/lib/platform";
+import { IS_MAC, IS_WINDOWS } from "@/lib/platform";
+import { readClipboardFiles } from "@/lib/clipboard";
 import { save as saveFileDialog } from "@tauri-apps/plugin-dialog";
 import { basename } from "@/lib/path";
 import { cn } from "@/lib/utils";
@@ -34,7 +35,15 @@ import { humanizeFsError } from "@/lib/fsError";
 import { segmentsFromCwd } from "@/modules/statusbar/lib/pathUtils";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import { setSshInRightPanel } from "@/modules/settings/store";
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent,
+  type ReactNode,
+} from "react";
 import { sftpHome } from "./sftp";
 import { useSshFileTree } from "./useSshFileTree";
 import { useSshFileDrop } from "./useSshFileDrop";
@@ -217,6 +226,47 @@ export function SshFileExplorer({
     };
     el.addEventListener(FS_ROW_DROP_EVENT, onDrop);
     return () => el.removeEventListener(FS_ROW_DROP_EVENT, onDrop);
+  }, []);
+
+  // Upload the files an OS file manager copied into `dir`.
+  const pasteInto = useCallback(
+    async (dir: string) => {
+      const paths = await readClipboardFiles();
+      if (paths.length === 0) {
+        toast("No copied files to paste", { variant: "info" });
+        return;
+      }
+      await uploadFiles(paths, dir);
+    },
+    [uploadFiles],
+  );
+
+  // Ctrl+V (Cmd+V on macOS) in the focused tree body pastes into the selected
+  // folder, a selected file's folder, or the root.
+  const handleKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
+    // The row delete dialog and context menus are React children and bubble here.
+    if (!e.currentTarget.contains(e.target as Node)) return;
+    if (e.repeat) return;
+    const mod = IS_MAC ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey;
+    if (e.code !== "KeyV" || e.shiftKey || e.altKey || !mod) return;
+    if (collapsed || sessionId === null || !rootPath) return;
+    if (tree.renaming || tree.pendingCreate) return;
+    const target = e.target as HTMLElement;
+    if (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)
+      return;
+    e.preventDefault();
+    const row = selectedPath
+      ? (treeRef.current?.querySelector(`[data-fs-path="${CSS.escape(selectedPath)}"]`) ?? null)
+      : null;
+    void pasteInto(remoteDropDir(row, rootPath));
+  };
+
+  // WKWebView does not focus a clicked `<button>`, and the keyboard paste needs
+  // focus inside the tree body.
+  const selectPath = useCallback((p: string) => {
+    setSelectedPath(p);
+    const el = treeRef.current;
+    if (el && !el.contains(document.activeElement)) el.focus({ preventScroll: true });
   }, []);
 
   const accordion = !!onToggleCollapsed;
@@ -504,7 +554,13 @@ export function SshFileExplorer({
 
           <ContextMenu>
             <ContextMenuTrigger asChild>
-              <ScrollArea ref={treeRef} data-sftp-tree="" className="min-h-0 flex-1 outline-none">
+              <ScrollArea
+                ref={treeRef}
+                data-sftp-tree=""
+                tabIndex={0}
+                onKeyDown={handleKeyDown}
+                className="min-h-0 flex-1 outline-none"
+              >
                 <div className="py-1">
                   {pendingAtRoot && (
                     <div
@@ -589,9 +645,10 @@ export function SshFileExplorer({
                           }
                         }}
                         selectedPath={selectedPath}
-                        onSelectPath={setSelectedPath}
+                        onSelectPath={selectPath}
                         remote
                         onDownload={downloadViaDialog}
+                        onPaste={pasteInto}
                       />
                     ))}
                 </div>
@@ -614,6 +671,9 @@ export function SshFileExplorer({
                 onSelect={() => tree.beginCreate(rootPath, "dir")}
               >
                 New Folder
+              </ContextMenuItem>
+              <ContextMenuItem className={COMPACT_ITEM} onSelect={() => void pasteInto(rootPath)}>
+                Paste
               </ContextMenuItem>
               <ContextMenuSeparator />
               <ContextMenuItem

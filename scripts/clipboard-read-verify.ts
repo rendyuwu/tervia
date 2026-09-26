@@ -108,7 +108,7 @@ console.log('4. resolves to text, and to "" instead of rejecting');
       },
     },
   };
-  const { readClipboardText } = await import("../src/lib/clipboard");
+  const { readClipboardFiles, readClipboardText } = await import("../src/lib/clipboard");
 
   respond = async () => "hello\nworld";
   assert((await readClipboardText()) === "hello\nworld", "returns the clipboard text verbatim");
@@ -124,6 +124,19 @@ console.log('4. resolves to text, and to "" instead of rejecting');
   const onFailure = await readClipboardText();
   console.warn = warn;
   assert(onFailure === "", "a failed read resolves to the empty string");
+
+  // Paste-to-upload reads the OS file manager's copied paths the same way.
+  respond = async () => ["/a b.txt"];
+  const files = await readClipboardFiles();
+  assert(files.length === 1 && files[0] === "/a b.txt", "returns the copied paths verbatim");
+  assert(calls.includes("clipboard_read_file_list"), "invoked clipboard_read_file_list");
+  respond = async () => {
+    throw new Error("no file list");
+  };
+  console.warn = () => {};
+  const noFiles = await readClipboardFiles();
+  console.warn = warn;
+  assert(noFiles.length === 0, "a failed file-list read resolves to []");
 }
 
 // `throw` (not process.exit) for a non-zero exit, matching the other verify scripts.

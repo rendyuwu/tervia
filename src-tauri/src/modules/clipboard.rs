@@ -73,6 +73,23 @@ pub(crate) fn read_text() -> Result<String, String> {
 
 /// BLOCKING - call only from a blocking thread.
 ///
+/// arboard 3.6.1's Linux `paths_from_uri_list` splits only on `\n`, while
+/// RFC 2483 gives `text/uri-list` CRLF line ends. The trim stops a stray `\r`
+/// from reaching every path.
+pub(crate) fn read_file_list() -> Result<Vec<String>, String> {
+    let paths = handle()?
+        .lock_or_recover()
+        .get()
+        .file_list()
+        .map_err(|e| e.to_string())?;
+    Ok(paths
+        .into_iter()
+        .map(|p| p.to_string_lossy().trim_end_matches('\r').to_owned())
+        .collect())
+}
+
+/// BLOCKING - call only from a blocking thread.
+///
 /// The data is marked so host clipboard managers skip it. Remote clipboard
 /// content can be a password a user copied out of a vault inside the session,
 /// and a history tool indexing it would outlive the session that produced it.
@@ -155,6 +172,15 @@ fn conceal(set: arboard::Set<'_>) -> arboard::Set<'_> {
 #[tauri::command]
 pub async fn clipboard_read_text() -> Result<String, String> {
     tokio::task::spawn_blocking(read_text)
+        .await
+        .map_err(|e| format!("clipboard task failed: {e}"))?
+}
+
+/// Local paths an OS file manager copied (Finder, Explorer, Files), for the
+/// Remote tree's paste-to-upload.
+#[tauri::command]
+pub async fn clipboard_read_file_list() -> Result<Vec<String>, String> {
+    tokio::task::spawn_blocking(read_file_list)
         .await
         .map_err(|e| format!("clipboard task failed: {e}"))?
 }
@@ -260,5 +286,33 @@ mod smoke {
         }
         child.wait().unwrap();
         assert_eq!(super::read_text().unwrap(), "from outside");
+
+        // A file-manager copy (`text/uri-list`, CRLF line ends per RFC 2483)
+        // reads back as decoded local paths with no stray `\r`.
+        let mut child = Command::new("xclip")
+            .args(["-selection", "clipboard", "-t", "text/uri-list"])
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        {
+            use std::io::Write as _;
+            child
+                .stdin
+                .as_mut()
+                .unwrap()
+                .write_all(b"file:///tmp/tervia%20copied.bin\r\nfile:///tmp/second.bin\r\n")
+                .unwrap();
+        }
+        child.wait().unwrap();
+        assert_eq!(
+            super::read_file_list().unwrap(),
+            vec![
+                "/tmp/tervia copied.bin".to_string(),
+                "/tmp/second.bin".to_string()
+            ]
+        );
+        // Plain text is not a file list.
+        super::write_text("plain").unwrap();
+        assert!(super::read_file_list().is_err());
     }
 }

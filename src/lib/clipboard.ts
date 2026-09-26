@@ -24,3 +24,17 @@ export async function readClipboardText(): Promise<string> {
     return "";
   }
 }
+
+/**
+ * Local paths an OS file manager copied, read through the host process
+ * (`clipboard_read_file_list`). `[]` means nothing file-shaped to paste, the
+ * same no-throw contract as `readClipboardText`.
+ */
+export async function readClipboardFiles(): Promise<string[]> {
+  try {
+    return await invoke<string[]>("clipboard_read_file_list");
+  } catch (e) {
+    console.warn("clipboard file read failed:", e);
+    return [];
+  }
+}

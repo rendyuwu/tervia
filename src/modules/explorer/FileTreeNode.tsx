@@ -48,6 +48,9 @@ type Props = {
   remote?: boolean;
   /** Remote tree only: Download… on a file row. */
   onDownload?: (path: string) => void;
+  /** Remote tree only: Paste uploads the OS-copied files into this folder (a
+   *  file row: its parent). */
+  onPaste?: (dir: string) => void;
 };
 
 function FileTreeNodeImpl({
@@ -64,6 +67,7 @@ function FileTreeNodeImpl({
   onSelectPath,
   remote = false,
   onDownload,
+  onPaste,
 }: Props) {
   const path = tree.joinPath(parentPath, entry.name);
   const isDir = entry.kind === "dir";
@@ -248,6 +252,11 @@ function FileTreeNodeImpl({
           >
             New Folder
           </ContextMenuItem>
+          {onPaste && (
+            <ContextMenuItem className={COMPACT_ITEM} onSelect={() => onPaste(createTarget)}>
+              Paste
+            </ContextMenuItem>
+          )}
           <ContextMenuSeparator />
           <ContextMenuItem className={COMPACT_ITEM} onSelect={() => void copyToClipboard(path)}>
             Copy Path
@@ -374,6 +383,7 @@ function FileTreeNodeImpl({
             onSelectPath={onSelectPath}
             remote={remote}
             onDownload={onDownload}
+            onPaste={onPaste}
           />
         ))}
     </>

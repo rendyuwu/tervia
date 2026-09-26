@@ -35,7 +35,7 @@ Tauri 2: a Rust backend and one webview, no Electron. No telemetry.
 
 **SFTP**
 
-- Remote file tree: drop files to upload, download files (context menu, or drag onto a local folder), move by drag, open and save remote text files in the editor, create, rename, delete.
+- Remote file tree: drop or paste files to upload, download files (context menu, or drag onto a local folder), move by drag, open and save remote text files in the editor, create, rename, delete.
 - Branch name of remote repos in the Workspaces panel.
 
 **RDP**

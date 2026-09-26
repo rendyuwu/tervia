@@ -290,6 +290,32 @@ console.log("\n[yieldsToRawKeyboard] the exact rule the FileExplorer bug needed 
       false,
     ),
   );
+
+  const sftpTree = focusedInside("data-sftp-tree");
+  const cmdV = toEvent({ code: "KeyV", metaKey: true });
+  check(
+    // macOS binds terminal.paste to Cmd+V; the focused Remote tree body pastes
+    // files instead, so the global dispatcher must let it through.
+    "Cmd+V (terminal.paste) yields to a focused Remote tree body",
+    yieldsToRawKeyboard("terminal.paste", sftpTree, cmdV, false),
+  );
+  check(
+    "Cmd+V still pastes into the terminal with focus in the tab strip",
+    !yieldsToRawKeyboard("terminal.paste", tabStrip, cmdV, false),
+  );
+  check(
+    "Ctrl+Shift+V still pastes into the terminal from the Remote tree body",
+    !yieldsToRawKeyboard(
+      "terminal.paste",
+      sftpTree,
+      toEvent({ code: "KeyV", ctrlKey: true, shiftKey: true }),
+      false,
+    ),
+  );
+  check(
+    "the Remote tree body owns only the paste chord, not Ctrl+P",
+    !yieldsToRawKeyboard("explorer.search", sftpTree, ctrlP, false),
+  );
 }
 
 console.log("\n[gate wiring] the hook applies the gate; railView reaches every caller");
