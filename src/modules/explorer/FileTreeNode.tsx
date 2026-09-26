@@ -24,7 +24,7 @@ import { useGitDecoration } from "./lib/gitDecorations";
 import { fileIconUrl, folderIconUrl } from "./lib/iconResolver";
 import { COMPACT_CONTENT, COMPACT_ITEM } from "./lib/menuItemClass";
 import type { DirEntry, useFileTree } from "./lib/useFileTree";
-import { ChevronRight, Lock } from "lucide-react";
+import { ChevronRight, LoaderCircle, Lock } from "lucide-react";
 
 type Tree = ReturnType<typeof useFileTree>;
 
@@ -69,6 +69,7 @@ function FileTreeNodeImpl({
   const isExpanded = isDir && tree.expanded.has(path);
   const children = isExpanded ? tree.nodes[path] : undefined;
   const isRenaming = tree.renaming === path;
+  const isDeleting = tree.deleting.has(path);
 
   const [confirmDelete, setConfirmDelete] = useState(false);
 
@@ -78,8 +79,9 @@ function FileTreeNodeImpl({
   // color on folders with changed descendants, plus an ignored flag.
   const { deco, ignored } = useGitDecoration(path, isDir);
   // Dot-prefixed (hidden) or gitignored entries are de-emphasized like VSCode
-  // so they don't compete with regular files for attention.
-  const dim = entry.name.startsWith(".") || ignored;
+  // so they don't compete with regular files for attention. A row being
+  // deleted fades the same way.
+  const dim = entry.name.startsWith(".") || ignored || isDeleting;
 
   const handleNodeSelect = useCallback(() => {
     if (tree.renaming) return;
@@ -167,11 +169,19 @@ function FileTreeNodeImpl({
               </span>
               {/* Remote (SFTP) rows carry a Unix mode summary; local rows leave
                   it undefined. Muted mono so it reads as metadata, not content.
-                  mr-2 clears the ScrollArea overlay thumb like the git letter. */}
-              {entry.permissions && (
-                <span className="text-muted-foreground/60 mr-2 shrink-0 font-mono text-[10px] tracking-tight tabular-nums">
-                  {entry.permissions}
+                  mr-2 clears the ScrollArea overlay thumb like the git letter.
+                  A delete in flight takes its place until the row goes away. */}
+              {isDeleting ? (
+                <span className="text-muted-foreground/70 mr-2 flex shrink-0 items-center gap-1 text-[10px]">
+                  <LoaderCircle size={11} strokeWidth={2} className="animate-spin" />
+                  Deleting…
                 </span>
+              ) : (
+                entry.permissions && (
+                  <span className="text-muted-foreground/60 mr-2 shrink-0 font-mono text-[10px] tracking-tight tabular-nums">
+                    {entry.permissions}
+                  </span>
+                )
               )}
               {deco && !isDir && (
                 <span
