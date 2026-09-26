@@ -44,11 +44,12 @@ import { Button } from "@/components/ui/button";
 import { InputGroup, InputGroupAddon, InputGroupInput } from "@/components/ui/input-group";
 import { toast } from "@/components/ui/toast";
 import { paneCaret } from "@/lib/paneCaret";
-import { identityHostRefs } from "@/modules/hosts/store";
-import { useHosts } from "@/modules/hosts/useHosts";
+import { fileState as hostsFileState, identityHostRefs, listHosts } from "@/modules/hosts/store";
+import { useHostGroups, useHosts } from "@/modules/hosts/useHosts";
 import { KeyRound, Plus, Search, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
+import { listSecrets, tauriSecretsIo } from "./adapters";
 import { IdentityEditorDialog, type IdentityEditorTarget } from "./editor/IdentityEditorDialog";
 import { KeyEditorDialog, type KeyEditorTarget } from "./editor/KeyEditorDialog";
 import { IdentityCard } from "./page/IdentityCard";
@@ -61,9 +62,29 @@ import {
   rankIdentities,
   rankKeys,
 } from "./page/derive";
-import { deleteIdentity, deleteKey } from "./store";
+import {
+  deleteOrphanSecrets,
+  scanOrphanSecrets,
+  type OrphanScan,
+  type OrphanSecretsIo,
+} from "./orphans";
+import {
+  deleteIdentity,
+  deleteKey,
+  fileState as vaultFileState,
+  listIdentities,
+  listKeys,
+} from "./store";
 import type { VaultAuthMode } from "./types";
 import { useVault } from "./useVault";
+
+/**
+ * The sweep's two calls. `listSecrets` is the free function from `./adapters`
+ * rather than a method on `SecretsIo` - its own doc says why it is not on the
+ * port. At module scope because it holds nothing per render, so neither the
+ * scan callback nor the purge needs it in a dependency array.
+ */
+const ORPHAN_IO: OrphanSecretsIo = { list: listSecrets, delete: tauriSecretsIo.delete };
 
 /**
  * Which delete is awaiting confirmation. `id` and `name` are carried
@@ -82,11 +103,17 @@ type PendingDelete =
 export function VaultPage(): ReactNode {
   const vault = useVault();
   const hostsById = useHosts();
+  const groups = useHostGroups();
 
   const [query, setQuery] = useState("");
   const [pendingDelete, setPendingDelete] = useState<PendingDelete | null>(null);
   const [identityTarget, setIdentityTarget] = useState<IdentityEditorTarget | null>(null);
   const [keyTarget, setKeyTarget] = useState<KeyEditorTarget | null>(null);
+  const [scan, setScan] = useState<OrphanScan | null>(null);
+  /** The purge confirm's own open flag, deliberately not a third arm of
+   *  {@link PendingDelete}: that carries the per-record fields `deleteNote`
+   *  branches on, and this delete has no record behind it at all. */
+  const [purging, setPurging] = useState(false);
 
   const searchRef = useRef<HTMLInputElement>(null);
   const pageRef = useRef<HTMLDivElement>(null);
@@ -161,8 +188,8 @@ export function VaultPage(): ReactNode {
   const keys = useMemo(() => Array.from(vault.keys.values()), [vault.keys]);
 
   const identityRowList = useMemo(
-    () => identityRows(identities, vault.keys, hosts),
-    [identities, vault.keys, hosts],
+    () => identityRows(identities, vault.keys, hosts, groups),
+    [identities, vault.keys, hosts, groups],
   );
   const keyRowList = useMemo(() => keyRows(keys, identities), [keys, identities]);
 
@@ -171,6 +198,48 @@ export function VaultPage(): ReactNode {
     [identityRowList, query],
   );
   const visibleKeys = useMemo(() => rankKeys(keyRowList, query), [keyRowList, query]);
+
+  // The STORE functions, not `useVault()` / `useHosts()`. Those hooks start from
+  // an empty Map and fill in after the first broadcast, and a scan whose known
+  // set is empty reports every stored secret as unreferenced. `listHosts` and
+  // friends await the recovery pass instead, which is also what makes the two
+  // `fileState` reads answer about a file that has already settled.
+  const rescan = useCallback(async () => {
+    const [hostRows, hostsFile, vaultIdentities, vaultKeys, vaultFile] = await Promise.all([
+      listHosts(),
+      hostsFileState(),
+      listIdentities(),
+      listKeys(),
+      vaultFileState(),
+    ]);
+    setScan(
+      await scanOrphanSecrets({
+        hosts: { rows: hostRows, file: hostsFile },
+        vault: { identities: vaultIdentities, keys: vaultKeys, file: vaultFile },
+        io: ORPHAN_IO,
+      }),
+    );
+  }, []);
+
+  // Mount only, NOT on every store broadcast: four enumeration round trips per
+  // change would cost more than the answer is worth, and the purge below rescans
+  // for itself.
+  useEffect(() => {
+    void rescan();
+  }, [rescan]);
+
+  const purgeOrphans = useCallback(() => {
+    setPurging(false);
+    if (scan?.kind !== "ok") return;
+    void (async () => {
+      const { failed } = await deleteOrphanSecrets(scan.orphans, ORPHAN_IO);
+      // Each refusal separately: a delete that fails here is a real failure on
+      // every platform, and folding them into one line hides which account is
+      // still on disk.
+      for (const note of failed) toast(note, { variant: "error" });
+      await rescan();
+    })();
+  }, [scan, rescan]);
 
   const confirmDelete = useCallback((target: PendingDelete) => {
     setPendingDelete(null);
@@ -335,6 +404,7 @@ export function VaultPage(): ReactNode {
                   keyName={row.keyName}
                   keyDangling={row.keyDangling}
                   hostCount={row.hostCount}
+                  groupCount={row.groupCount}
                   missingSecret={row.missingSecret}
                   onEdit={() => setIdentityTarget({ mode: "edit", identityId: row.identity.id })}
                   onDelete={() =>
@@ -383,6 +453,49 @@ export function VaultPage(): ReactNode {
             </div>
           )}
         </VaultSection>
+
+        {/* Two independent lines rather than one nested chain, because silence
+            would make "nothing to clean up" and "could not look" read
+            identically - and the second is the one a user has to act on. */}
+        {scan?.kind === "off" ? (
+          <p className="text-muted-foreground text-xs">
+            Unreferenced keychain entries: not checked - {scan.reason}
+          </p>
+        ) : null}
+        {scan?.kind === "ok" && (scan.orphans.length > 0 || scan.failed.length > 0) ? (
+          <section className="flex flex-col gap-2">
+            <h2 className="text-xs font-semibold tracking-wide uppercase">
+              Unreferenced keychain entries
+            </h2>
+            {scan.failed.length > 0 ? (
+              <p className="text-muted-foreground text-xs">
+                Not fully checked - {scan.failed.join("; ")}
+              </p>
+            ) : null}
+            {scan.orphans.length > 0 ? (
+              <div className="flex flex-col gap-1">
+                {scan.orphans.map((entry) => (
+                  <div
+                    key={`${entry.service}::${entry.account}`}
+                    className="text-muted-foreground font-mono text-xs"
+                  >
+                    {entry.service} :: {entry.account}
+                  </div>
+                ))}
+              </div>
+            ) : null}
+            {scan.orphans.length > 0 ? (
+              <Button
+                variant="destructive"
+                size="sm"
+                className="self-start"
+                onClick={() => setPurging(true)}
+              >
+                Delete all ({scan.orphans.length})
+              </Button>
+            ) : null}
+          </section>
+        ) : null}
       </div>
 
       {/* The page owns which editor is open; each dialog owns its own load and
@@ -429,6 +542,30 @@ export function VaultPage(): ReactNode {
               }}
             >
               Delete {shownDelete?.kind}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={purging} onOpenChange={(open) => !open && setPurging(false)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete the unreferenced entries?</AlertDialogTitle>
+            {/* STATIC, and deliberately carrying no count. Radix keeps this
+                content mounted for its exit animation - the note above
+                `shownDelete` has the measured detail - and `purgeOrphans`
+                rescans as this closes, so a count rendered here would read the
+                NEW scan on the way out. The count belongs on the button that
+                opens this, which is never mid-animation. */}
+            <AlertDialogDescription>
+              Each entry listed is a stored secret that no saved machine and no vault record names.
+              This cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction variant="destructive" onClick={purgeOrphans}>
+              Delete
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

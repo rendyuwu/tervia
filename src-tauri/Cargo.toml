@@ -72,21 +72,48 @@ libmimalloc-sys = { version = "0.1", features = ["extended"] }
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
-# Clipboard READS run in the host process instead of through
-# `navigator.clipboard.readText()`, which cannot work on Linux - see
-# `modules/clipboard.rs` for why. Writes still use the webview API. Default
-# features are off deliberately: `image-data` exists for reading/writing IMAGES
-# and drags in an image + TIFF/LZW + MIME-sniffing stack (~12 crates) that a
-# text-only paste never touches. `wayland-data-control` is not a default but is
-# required or a Wayland session (COSMIC, GNOME) has no clipboard at all; arboard
-# still prefers X11 when that is what is running. Picked over
-# tauri-plugin-clipboard-manager, which is the same arboard call behind an ACL
-# plus that whole image stack for five commands we do not use.
+# Host-process clipboard. Reads come through here because
+# `navigator.clipboard.readText()` cannot work on Linux, and so do the RDP
+# clipboard's writes, because a written X11 selection has to stay owned by a
+# live handle - see `modules/clipboard.rs` for both. Ordinary app writes still
+# use the webview API.
+#
+# `image-data` is on because `Get::image` / `Set::image` are the only way to
+# reach host image data through arboard and both are gated on it, and the
+# CLIPRDR bridge carries images. It is not the stack an earlier version of this
+# comment claimed: arboard sets `image`'s features per target with
+# `default-features = false` - `["png"]` on Linux, `["png", "bmp"]` on Windows,
+# `["tiff"]` on macOS - so there is no MIME sniffing anywhere and no TIFF off
+# macOS. Measured here with `cargo tree --edges normal` rather than guessed:
+# five crates compile on Linux (`image`, `png`, `byteorder-lite`, `moxcms`,
+# `pxfm`), of which `png` was already in the lockfile. `Cargo.lock` grows by
+# twelve, because it records the macOS and Windows feature sets too (`tiff`,
+# `weezl`, `zune-jpeg` and friends); none of those is built on Linux.
+# `Get::file_list` / `Set::file_list` are NOT gated on it, so enabling it
+# forecloses nothing for file transfer later.
+#
+# `wayland-data-control` is not a default and is kept for wlroots and COSMIC,
+# where it is the only clipboard path. It does not mean a Wayland session has no
+# clipboard without it: arboard's Wayland backend is `wl-clipboard-rs`, which
+# needs `zwlr_data_control_manager_v1`, and mutter implements neither that nor
+# `ext-data-control-v1` (wl-clipboard-rs#39). arboard tries Wayland when
+# `WAYLAND_DISPLAY` is set, warns on failure and falls back to X11 - which is
+# why reads have always worked on GNOME Wayland.
+#
+# Picked over tauri-plugin-clipboard-manager, which is the same arboard call
+# behind an ACL for five commands we do not use.
 arboard = { version = "3", default-features = false, features = [
+	"image-data",
 	"wayland-data-control",
 ] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Secrets held in memory live in `Zeroizing` containers so a dropped store map,
+# a decrypted buffer or a resolved password is scrubbed rather than merely
+# freed - see `modules/secrets.rs`. Already in the tree transitively; the
+# `serde` feature is what gives `Zeroizing<T>` the `Serialize`/`Deserialize`
+# impls the store map and the `secrets_get` return both need.
+zeroize = { version = "1", features = ["serde"] }
 portable-pty = "0.9"
 dirs = "5"
 base64 = "0.22"
@@ -101,7 +128,6 @@ regex = "1"
 shared_child = "1"
 tauri-plugin-log = "2"
 tauri-plugin-os = "2"
-tauri-plugin-store = "2"
 tauri-plugin-process = "2"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2"] }
 url = "2"
@@ -117,6 +143,10 @@ url = "2"
 # RDP dependency set.
 russh = { version = "=0.60.1", default-features = false, features = ["ring", "flate2", "rsa"] }
 russh-sftp = "2.1"
+# OS CSPRNG for `ssh_key_generate` (`src-tauri/src/modules/ssh/mod.rs`): rand_core
+# 0.10 ships no `OsRng`, so `UnwrapErr(SysRng)` is the `CryptoRng` `PrivateKey::random`
+# takes. Already compiled with `sys_rng` via russh's `rand` 0.10; this adds no crate.
+getrandom = { version = "0.4", features = ["sys_rng"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "net"] }
 # PBKDF2 + AES-256-GCM + CSPRNG for the passphrase-encrypted SSH connection
 # backup (`modules/backup.rs`). Already in the tree as russh's crypto backend
@@ -165,6 +195,16 @@ interprocess = { version = "2.2", features = ["tokio"] }
 # those pins to `ed25519-dalek ^3` / `p256 ^0.14`. When an ironrdp-connector
 # release pins rc.26 or later, this whole block and the russh pin can move
 # forward together.
+#
+# That unblocks the PINS. It does not unblock EGFX/H.264, which needs a second
+# thing from the same crate: a way to advertise the graphics-pipeline
+# early-capability flag, without which a server never opens the graphics
+# channel at all. No published release has one - not 0.9.0, and not the 0.10.0
+# this block already declines for other reasons. The field exists only on
+# IronRDP's main branch, behind a breaking change, so it lands in a connector
+# minor that does not exist yet (IronRDP #1237). A release satisfying only the
+# picky half would move these pins and leave EGFX exactly as unreachable as it
+# is now. `KNOWN-LIMITS.md` carries that as an accepted state.
 ironrdp-connector = "=0.9.0"
 ironrdp-session = "=0.10.0"
 ironrdp-tokio = "=0.9.0"
@@ -180,11 +220,45 @@ ironrdp-input = "=0.6.0"
 # re-exports them and the RDP module names their types. `ironrdp-pdu` for
 # `Action` (the discriminant `Framed::read_pdu` hands back), `InclusiveRectangle`
 # and the `Rectangle` trait that gives it `width()`/`height()`; `ironrdp-core`
-# for `WriteBuf`, which appears in every `Sequence::step` signature. The `=`
-# pins are the versions connector 0.9 / session 0.10 resolve to; a different
-# version would make the rectangle types distinct and stop compiling.
+# for `WriteBuf`, which appears in every `Sequence::step` signature;
+# `ironrdp-dvc` for `DrdynvcClient`, the dynamic-channel multiplexer registered
+# as a static channel on the connector; `ironrdp-displaycontrol` for
+# `DisplayControlClient`, which carries the MS-RDPEDISP monitor-layout PDU that
+# makes `rdp_resize` work, and `MonitorLayoutEntry::adjust_display_size`, the
+# upstream clamp for that PDU's size constraints. The `=` pins are the versions
+# connector 0.9 / session 0.10 resolve to; a different version would make the
+# rectangle and channel-processor types distinct and stop compiling.
 ironrdp-pdu = "=0.8.0"
 ironrdp-core = { version = "=0.2.1", features = ["alloc"] }
+ironrdp-dvc = "=0.7.0"
+ironrdp-displaycontrol = "=0.7.0"
+# CLIPRDR, the RDP clipboard static channel (`modules/rdp/cliprdr.rs`).
+#
+# `ironrdp-cliprdr` is pinned at 0.6.0 and NOT 0.7.0: 0.7.0 requires
+# `ironrdp-pdu ^0.9` and `ironrdp-svc ^0.8`, while this tree is on
+# `ironrdp-pdu` 0.8.0 / `ironrdp-svc` 0.7.0 and those pins are load-bearing for
+# the picky/russh resolver reason the block above gives. 0.6.0 requires
+# `ironrdp-core ^0.2`, `ironrdp-pdu ^0.8`, `ironrdp-svc ^0.7`, `bitflags ^2.11`
+# and `tracing ^0.1`, every one of which is already resolved here, so it moves
+# no pin and adds one crate. It is the first edition-2024 crate in the tree
+# (`rust-version = "1.89"`); CI's stable toolchain covers it.
+#
+# `ironrdp-cliprdr-format` needs only `ironrdp-core ^0.2` and `png ^0.18`, both
+# already in the lockfile, and supplies `bitmap::dib_to_png`, `dibv5_to_png`,
+# `png_to_cf_dib` and `png_to_cf_dibv5` - so no DIB parser is hand-written here.
+# It asks `ironrdp-core` for `std`, which is `["alloc", "ironrdp-error/std"]`, a
+# superset of the `alloc` the entry above declares; leave that entry alone.
+ironrdp-cliprdr = "=0.6.0"
+ironrdp-cliprdr-format = "=0.2.0"
+# A direct dependency because arboard's image API is raw RGBA (`ImageData`:
+# four channels, row-major RGBA8) while all four `ironrdp-cliprdr-format`
+# conversions speak PNG, and something has to bridge them. Already pulled in by
+# arboard's `image-data` feature on all three targets, so this is a promotion
+# rather than a new crate; taken over `png` directly because it makes each
+# conversion one call instead of a hand-rolled encoder and decoder.
+# `ironrdp-cliprdr-native` is not usable for this: every dependency it has is
+# `cfg(windows)`.
+image = { version = "0.25", default-features = false, features = ["png"] }
 # TCP keepalive with a usable idle time on the RDP socket. Already in the tree
 # via tokio/hyper at exactly this version, so this is a promotion, not a new
 # crate. Needed because tokio only exposes `TcpSocket::set_keepalive(bool)`,
@@ -223,6 +297,12 @@ rustls = { version = "0.23", default-features = false, features = [
 keyring = { version = "3.6", default-features = false, features = [
 	"apple-native",
 ] }
+# Enumeration for `secrets_list`. The `keyring` crate has no listing API, and
+# this is the crate its own apple-native backend is built on - version 3 is
+# already in `Cargo.lock` through that dependency, so this adds an edge and no
+# new crate. `default-features = false` because the TLS features the default
+# set carries are nothing to do with reading keychain attributes.
+security-framework = { version = "3", default-features = false }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 keyring = { version = "3.6", default-features = false, features = [

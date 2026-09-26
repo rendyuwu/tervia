@@ -18,10 +18,12 @@ import { FolderOpen, PanelLeft, Settings } from "lucide-react";
 type Props = {
   tabs: Tab[];
   activeId: number;
-  /** Activate a pane entry, or standalone tab when leafId is null. */
-  onSelectEntry: (tabId: number, leafId: number | null) => void;
-  /** Close a pane entry or standalone tab. */
-  onCloseEntry: (tabId: number, leafId: number | null) => void;
+  /** Activate a pane entry. */
+  onSelectEntry: (tabId: number, leafId: number) => void;
+  /** Close one pane entry. */
+  onCloseEntry: (leafId: number) => void;
+  /** "Close Tabs to the Right": close these leaves, asking once for all that need it. */
+  onCloseLeaves: (leafIds: number[]) => void;
   onNewTerminal: () => void;
   /** Toggle the per-leaf privacy flag from the tab right-click menu. */
   /** Set a leaf's tab name, or `null` to fall back to the derived one. */
@@ -97,6 +99,7 @@ function HeaderImpl({
   activeId,
   onSelectEntry,
   onCloseEntry,
+  onCloseLeaves,
   onNewTerminal,
   onRenameLeaf,
   onOpenAgents,
@@ -232,6 +235,7 @@ function HeaderImpl({
           activeId={activeId}
           onSelectEntry={onSelectEntry}
           onCloseEntry={onCloseEntry}
+          onCloseLeaves={onCloseLeaves}
           onNewTerminal={onNewTerminal}
           onRenameLeaf={onRenameLeaf}
           onOpenAgents={onOpenAgents}

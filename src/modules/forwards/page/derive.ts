@@ -114,7 +114,21 @@ export function ruleRows(
       rule,
       hostName,
       hostDangling: hostsLoaded && host === undefined,
-      route: `${localPortLabel(rule, undefined)} → ${hostName} → ${rule.remoteHost}:${rule.remotePort}`,
+      // `-D` HAS NO DIAL TARGET AT ALL - a SOCKS5 CONNECT names one per
+      // connection - so the shared `-L` formula below would print a blank
+      // host and a zero port for it, which reads as broken rather than
+      // merely incomplete. `-R` has its own bind-side route too: its
+      // `localPort`/`remoteHost`/`remotePort` are unused (forced 0/""/0),
+      // so the shared `-L` formula would print `Auto → host → 127.0.0.1:0`
+      // for a rule that has never bound anything on this machine at all -
+      // the listener is on the SERVER, at `bindAddress:bindPort`, dialling
+      // `targetHost:targetPort` back here.
+      route:
+        rule.type === "dynamic"
+          ? `SOCKS ${localPortLabel(rule, undefined)} → ${hostName}`
+          : rule.type === "remote"
+            ? `${rule.bindAddress || "localhost"}:${rule.bindPort || "Auto"} on ${hostName} → ${rule.targetHost}:${rule.targetPort}`
+            : `${localPortLabel(rule, undefined)} → ${hostName} → ${rule.remoteHost}:${rule.remotePort}`,
     };
   });
 }
@@ -171,10 +185,10 @@ function ruleMatchTier(row: ForwardRuleRow, query: string): number | null {
 
 /**
  * Filter and rank rules, case-insensitively, over name, remote host, the
- * bound host's name and (substring tier only) both ports. Same default-order
- * and drop-non-matches rules as `rankIdentities`: an empty or whitespace-only
- * query returns every row in its default order (name, then id), and a row
- * matching no tier is DROPPED, not sorted to the bottom.
+ * bound host's name and (substring tier only) both ports. Same drop-non-matches
+ * rule as `rankIdentities`: an empty or whitespace-only query returns every row
+ * in its default order (name, then id), and a row matching no tier is DROPPED,
+ * not sorted to the bottom.
  */
 export function rankRules(rows: readonly ForwardRuleRow[], query: string): ForwardRuleRow[] {
   const trimmed = query.trim().toLowerCase();
@@ -203,8 +217,23 @@ export function rankRules(rows: readonly ForwardRuleRow[], query: string): Forwa
  * must show the port that is ACTUALLY LISTENING, never the number the rule
  * merely asked for. Showing the requested port for a running rule names a port
  * nothing is listening on.
+ *
+ * `-R` reads differently: {@link ForwardRule.localPort} is unused for it, so
+ * `boundPort`/the pinned {@link ForwardRule.bindPort} name a port on the
+ * SERVER, not on this machine - `hostName` is what says whose port it is.
+ * `hostName` absent falls back to a generic word rather than blaming
+ * `localhost`, which is never where a `-R` listener lives.
  */
-export function localPortLabel(rule: ForwardRule, boundPort: number | undefined): string {
+export function localPortLabel(
+  rule: ForwardRule,
+  boundPort: number | undefined,
+  hostName?: string,
+): string {
+  if (rule.type === "remote") {
+    const host = hostName ?? "server";
+    if (boundPort !== undefined) return `${host}:${boundPort}`;
+    return rule.bindPort ? `${host}:${rule.bindPort}` : "Auto";
+  }
   if (boundPort !== undefined) return `localhost:${boundPort}`;
   return rule.localPort === 0 ? "Auto" : `localhost:${rule.localPort}`;
 }
@@ -344,16 +373,24 @@ export type DeleteNoteSubject = {
    * ("Deleting it changes nothing else.") to a dialog that was about to close a
    * live bind - a destructive confirm saying the opposite of what it does.
    *
-   * SO THE TWO MUST NAME THE SAME STATUSES. This is the CAPTURED half (what the
-   * user was told when the dialog opened) and `pageMustStopFirst` is the LIVE
-   * half (what the confirm does); they are separate on purpose
-   * (`ForwardsPage.tsx`'s `PendingDelete`), and drift between the two status
-   * sets is exactly how the sentence becomes false again. `failed` and
-   * `stopped` are out of both, for the reason `pageMustStopFirst`'s own doc
-   * gives: neither retains a claim, so there is nothing to stop.
+   * KEPT IN STEP WITH `pageMustStopFirst` WHERE A LIVE BIND IS AT STAKE, and
+   * not on every status it answers `true` for. This is the CAPTURED half
+   * (what the user was told when the dialog opened) and `pageMustStopFirst`
+   * is the LIVE half (what the confirm does); they are separate on purpose
+   * (`ForwardsPage.tsx`'s `PendingDelete`), and the two must agree on every
+   * row that HOLDS SOMETHING - `running`/`starting`. `pageMustStopFirst` ALSO
+   * answers `true` for a `failed` row with a pending backoff retry (a
+   * scheduled timer, not a bound port - `controller.ts`'s own header on the
+   * ladder), and this field does NOT widen to match: a pending retry has
+   * nothing live to report, so "Deleting it changes nothing else." stays true
+   * of it, the same as it already was for `stopped`.
    */
   pageStops: boolean;
   startWithHost: boolean;
+  /** See {@link startWithHost}'s own doc - the two are mutually exclusive
+   *  (`store.ts`'s `upsertRule` refuses a rule naming both), so at most one
+   *  of the two `startNote` sentences below ever fires. */
+  startWithApp: boolean;
   /** A TERMINAL owns this rule's forward (`modules/forwards/hostOwned.ts`).
    *  Its own field and not folded into `pageStops`, because the two describe
    *  different owners and only one of them is stopped by this delete - which is
@@ -388,13 +425,15 @@ export type DeleteNoteSubject = {
  */
 export function deleteNote(subject: DeleteNoteSubject): string {
   const runningNote = subject.hostOwned
-    ? "Deleting the rule does not stop its forward — that one dies with the terminal tab that opened it."
+    ? "Deleting the rule does not stop its forward — that one stops when the last terminal tab to its host closes."
     : subject.pageStops
       ? "Stopping it first is not required — deleting a running rule stops it."
       : null;
   const startNote = subject.startWithHost
     ? "It will no longer start automatically with its host."
-    : null;
+    : subject.startWithApp
+      ? "It will no longer start automatically when Tervia starts."
+      : null;
 
   if (runningNote && startNote) return `${runningNote} ${startNote}`;
   if (runningNote) return runningNote;

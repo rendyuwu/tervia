@@ -42,6 +42,28 @@ type Props = {
   quitGuard: QuitGuard;
 };
 
+function closePromptTitle(p: PendingClose): string {
+  if (p.reason === "both") return "Unsaved Changes and Running Processes";
+  return p.reason === "running" ? "Process Running" : "Unsaved Changes";
+}
+
+function closePromptText(p: PendingClose): string {
+  if (p.target.kind === "leaves") {
+    const n = p.target.leafIds.length;
+    if (p.reason === "running")
+      return `${n} tabs still have a process running. Closing them will stop the processes. Close anyway?`;
+    if (p.reason === "unsaved") return `${n} tabs have unsaved changes. Close anyway?`;
+    return `${n} tabs have unsaved changes or a running process. Closing them will discard the changes and stop the processes. Close anyway?`;
+  }
+  if (p.reason === "running")
+    return p.title
+      ? `"${p.title}" still has a process running. Closing it will stop the process. Close anyway?`
+      : "A process is still running. Closing it will stop the process. Close anyway?";
+  return p.title
+    ? `"${p.title}" has unsaved changes. Close anyway?`
+    : "This file has unsaved changes. Close anyway?";
+}
+
 /**
  * The dialog/overlay JSX cluster lifted out of App's render tree: the
  * ask-from-selection popup, the lazy NewEditor dialog, and the
@@ -102,16 +124,10 @@ export function AppDialogs({
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>
-              {pendingClose?.reason === "running" ? "Process Running" : "Unsaved Changes"}
+              {pendingClose ? closePromptTitle(pendingClose) : null}
             </AlertDialogTitle>
             <AlertDialogDescription>
-              {pendingClose?.reason === "running"
-                ? pendingClose.title
-                  ? `"${pendingClose.title}" still has a process running. Closing it will stop the process. Close anyway?`
-                  : "A process is still running. Closing it will stop the process. Close anyway?"
-                : pendingClose?.title
-                  ? `"${pendingClose.title}" has unsaved changes. Close anyway?`
-                  : "This file has unsaved changes. Close anyway?"}
+              {pendingClose ? closePromptText(pendingClose) : null}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

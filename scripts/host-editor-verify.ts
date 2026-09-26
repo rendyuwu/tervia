@@ -155,6 +155,7 @@ import {
 } from "../src/modules/hosts/editor/types";
 import type { Host } from "../src/modules/hosts/types";
 import { stripComments, stripperSelfTest } from "./lib/source";
+import { guardAt, guardAtSelfTest } from "./lib/scope";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const read = (p: string) => readFileSync(join(root, p), "utf8");
@@ -184,14 +185,9 @@ function between(src: string, from: string, to: string): string {
 }
 
 /**
- * The condition of the `if` attached to EVERY statement `needle` occurs in, in
- * source order, with "" for an occurrence that has no guard of its own.
- *
- * Deliberately not "is there an `if` somewhere before this": it walks back to the
- * nearest statement boundary, so a write following a guarded statement borrows
- * nothing, and it makes exactly ONE hop over an opening brace so a block-bodied
- * `if` is read while a write merely sitting deeper in a function is not. Section
- * [0] holds it to both.
+ * The condition of the `if` controlling EVERY statement `needle` occurs in, in
+ * source order, with "" for an occurrence that has no guard of its own. The
+ * walk is `guardAt` in `scripts/lib/scope.ts`; section [0] runs its probes.
  *
  * ALL matches rather than the first, because the first-match form this replaces was
  * a false pass waiting to happen: add a second write of the same kind and it reads
@@ -206,33 +202,6 @@ function guardsFor(region: string, needle: string): string[] {
     out.push(guardAt(region, at));
   }
   return out;
-}
-
-/** The shared walk, from a position rather than a needle, so one implementation
- *  serves both the first-match and the all-matches form. */
-function guardAt(region: string, start: number): string {
-  let at = start;
-  if (at < 0) return "";
-  for (let hop = 0; hop < 2; hop++) {
-    const from = Math.max(
-      region.lastIndexOf(";", at - 1),
-      region.lastIndexOf("{", at - 1),
-      region.lastIndexOf("}", at - 1),
-    );
-    const stmt = region
-      .slice(from + 1, at)
-      .trim()
-      // A statement may open with an operator keyword before the call a check
-      // names (`void pinFingerprint(…)`), and that is still the same statement.
-      // Dropped only at the END, so it cannot swallow a guard.
-      .replace(/\b(?:void|await|return)$/, "")
-      .trim();
-    const m = /^if \((.*)\)$/s.exec(stmt);
-    if (m) return m[1];
-    if (stmt.length > 0 || from < 0 || region[from] !== "{") return "";
-    at = from;
-  }
-  return "";
 }
 
 /** What `const <ident> = …;` assigns, so a check can ask what a guard's operands
@@ -715,48 +684,10 @@ const SECRET_FIELDS = ["password", "privateKey", "keyPassphrase"] as const;
 // ---------------------------------------------------------------------------
 console.log("[0] the helpers the checks below depend on");
 {
-  /** The guard of the only occurrence in a sample, so a one-write case reads as
-   *  one value. Asserts the sample HAS exactly one, or a walker that found none
-   *  would look like a walker that found no guard. */
-  const oneGuard = (region: string, needle: string): string => {
-    const all = guardsFor(region, needle);
-    return all.length === 1 ? all[0] : `<${all.length} matches>`;
-  };
+  // The walk itself; its probes live with it in scripts/lib/scope.ts and the
+  // verdicts are counted here.
+  for (const t of guardAtSelfTest()) check(t.label, t.ok);
 
-  check(
-    "guardsFor reads the condition of a block-bodied guard",
-    oneGuard("if (a === b) {\n  writeIt();\n}\n", "writeIt()") === "a === b",
-    oneGuard("if (a === b) {\n  writeIt();\n}\n", "writeIt()"),
-  );
-  check(
-    "and of a single-statement guard",
-    oneGuard("if (a === b) writeIt();\n", "writeIt()") === "a === b",
-  );
-  check(
-    "and of a guard whose body opens with void, which is how a fire-and-forget write reads",
-    oneGuard("if (a === b) {\n  void writeIt();\n}\n", "writeIt()") === "a === b",
-    oneGuard("if (a === b) {\n  void writeIt();\n}\n", "writeIt()"),
-  );
-  // The false pass this file exists not to repeat.
-  check(
-    "but an unguarded write does not borrow the guard of the statement above it",
-    oneGuard("if (a === b) other();\nwriteIt();\n", "writeIt()") === "",
-    oneGuard("if (a === b) other();\nwriteIt();\n", "writeIt()"),
-  );
-  check(
-    "not even when that write opens with void",
-    oneGuard("if (a === b) other();\nvoid writeIt();\n", "writeIt()") === "",
-    oneGuard("if (a === b) other();\nvoid writeIt();\n", "writeIt()"),
-  );
-  check(
-    "nor the guard that opened the block it sits in two statements deep",
-    oneGuard("if (a === b) {\n  other();\n  writeIt();\n}\n", "writeIt()") === "",
-    oneGuard("if (a === b) {\n  other();\n  writeIt();\n}\n", "writeIt()"),
-  );
-  check(
-    "and an unguarded write in a bare block reports nothing",
-    oneGuard("{\n  writeIt();\n}\n", "writeIt()") === "",
-  );
   check(
     "a missing needle reports an empty list rather than throwing",
     guardsFor("x();\n", "writeIt()").length === 0,
@@ -1593,9 +1524,9 @@ console.log("\n[8] the save hands the store the binding it loaded, and recovers 
   // reads a correctly guarded call that is the second statement in a block as
   // ungated, which is a false PASS on exactly the negative check this exists
   // to catch: `guardsFor` was checked against this shape directly and reports
-  // "" for both `CREDENTIAL_STAMP_ABSENT` and `findHost(` here, because neither
-  // sits as the bare first statement of an `if (cond) { ... }` it recognises -
-  // an `else if`/`else` chain is not a pattern it models. Anchored extraction is
+  // "" for both `CREDENTIAL_STAMP_ABSENT` and `findHost(` here, because the first
+  // sits in an `else if` condition and the second in `const fresh = await findHost(`,
+  // and an `else if`/`else` chain is not a pattern it models. Anchored extraction is
   // what actually resolves the block; a distance check would not "abstain", it
   // would silently pass every wiring.
   const absentAnchor = "e.actual === CREDENTIAL_STAMP_ABSENT) {";
@@ -1742,6 +1673,70 @@ console.log("\n[8] the save hands the store the binding it loaded, and recovers 
     "the error text tells the user their edits survived",
     /edits are still here/.test(catchRegion),
   );
+
+  // The "press Save again" invitation is true only once `existing` has been
+  // re-read: the next stamp is `credentialStamp(existing)`, so a re-read that
+  // failed or came back empty leaves the second press refused the same way.
+  // The same statement-order property `vault-editor-verify.ts` section [17]
+  // pins for the vault editors.
+  const fragFn = recoveryFrag.statements[0];
+  const armStmts =
+    fragFn && ts.isFunctionDeclaration(fragFn) && fragFn.body ? [...fragFn.body.statements] : [];
+  check("the recovery arm's statements were parsed", armStmts.length > 0, armStmts.length);
+  const rereadIdx = armStmts.findIndex((s) => findCalls(s, recoveryFrag, ["findHost"]).length > 0);
+  const noFreshIdx = armStmts.findIndex(
+    (s) => ts.isIfStatement(s) && s.expression.getText(recoveryFrag).includes("!fresh"),
+  );
+  const refreshIdx = armStmts.findIndex(
+    (s) => norm(s.getText(recoveryFrag)) === norm("setExisting(fresh);"),
+  );
+  const inviteIdx = armStmts.findIndex(
+    (s) => !ts.isIfStatement(s) && /press save again/i.test(s.getText(recoveryFrag)),
+  );
+  check("the re-read findHost( was located", rereadIdx >= 0, rereadIdx);
+  check("the not-refreshed exit (!fresh) was located", noFreshIdx >= 0, noFreshIdx);
+  check(
+    "the refresh setExisting(fresh) is a direct statement of the arm",
+    refreshIdx >= 0,
+    refreshIdx,
+  );
+  check('the "press Save again" invitation was located', inviteIdx >= 0, inviteIdx);
+  if (noFreshIdx >= 0) {
+    const noFreshIf = armStmts[noFreshIdx] as ts.IfStatement;
+    const exit = noFreshIf.thenStatement;
+    check(
+      "the not-refreshed exit ends in return",
+      ts.isBlock(exit) &&
+        exit.statements.length > 0 &&
+        ts.isReturnStatement(exit.statements[exit.statements.length - 1]),
+    );
+    const exitText = noFreshIf.getText(recoveryFrag);
+    check(
+      "the not-refreshed exit does not invite a second press (save again / press Save / try again)",
+      !/save again|press save\b|try again/i.test(exitText),
+      exitText,
+    );
+    check(
+      'the not-refreshed exit says "close and reopen" - so an empty or gutted message fails this',
+      /close and reopen/i.test(exitText),
+      exitText,
+    );
+  }
+  if (rereadIdx >= 0 && noFreshIdx >= 0 && refreshIdx >= 0 && inviteIdx >= 0) {
+    check("the not-refreshed exit follows the re-read", rereadIdx < noFreshIdx, {
+      rereadIdx,
+      noFreshIdx,
+    });
+    check("the refresh sits after the not-refreshed exit", noFreshIdx < refreshIdx, {
+      noFreshIdx,
+      refreshIdx,
+    });
+    check(
+      "the invitation is reachable only after the not-refreshed exit and the refresh",
+      refreshIdx < inviteIdx,
+      { refreshIdx, inviteIdx },
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -2106,8 +2101,8 @@ console.log(
   }
 
   // -------------------------------------------------------------------------
-  // Pin 1: the create arm RESETS `choice` to the inline sentinel, and
-  // does so on the path that `return`s before the edit arm's own reset.
+  // Pin 1: the create arm SEEDS `choice` exactly once, on the path that
+  // `return`s before the edit arm's own reset.
   //
   // The three checks above pin where `boundIdentity` READS `choice`. Nothing
   // pinned where `choice` is WRITTEN per target, and `choice` is component
@@ -2120,6 +2115,18 @@ console.log(
   // `pnpm verify` 53/53. The line is correct in shipped code; what was
   // missing was anything holding it there.
   //
+  // Relaxed one notch from its original form: this used to also pin the
+  // ARGUMENT'S TEXT, requiring it to name `CREDENTIAL_CHOICE_INLINE`. The
+  // create arm now seeds `choice` from the picked group's effective default
+  // via `credentialChoiceForGroup(seedGroupId, allGroups, liveIdentityIds)`,
+  // which never mentions that sentinel by name even though it still returns
+  // it for a group-less or default-less create - `credential-move-verify.ts`
+  // section [16] proves THAT half by value, over the pure helper, rather
+  // than this file grepping for a literal argument. What is left here is the
+  // three claims a source-text argument filter cannot make: exactly one
+  // seed, reached only under `target.mode === "create"`, and reached before
+  // the arm's own `return`.
+  //
   // Rooted at `load`'s own body and then counted, per
   // {@link findVariableDeclarations}: rooting excludes a decoy appended
   // outside the effect, the count excludes a second reset added inside it.
@@ -2130,39 +2137,19 @@ console.log(
   // -------------------------------------------------------------------------
   const loadBody = hostEditorFnBody ? findConstArrowBody(hostEditorFnBody, "load") : null;
   check("the load effect's `load` arrow body was found (compiler API)", loadBody !== null);
-  const inlineResets = loadBody
-    ? findCalls(loadBody, editorSf, ["setChoice"]).filter(
-        (c) =>
-          c.arguments.length === 1 &&
-          norm(c.arguments[0].getText(editorSf)) === "CREDENTIAL_CHOICE_INLINE",
-      )
-    : [];
-  check(
-    "the load effect resets choice to the inline sentinel EXACTLY ONCE - rooted at `load` so a decoy outside it is not counted, counted so a second one inside it is",
-    inlineResets.length === 1,
-    inlineResets.length,
+  // Filtered by WHERE the call sits, not by what it says: the edit arm's own
+  // `setChoice(currentCredentialChoice(host))` is the other `setChoice` call
+  // inside `load`, and it is never enclosed by `target.mode === "create"`,
+  // so this filter excludes it without needing to read its argument's text.
+  const allChoiceCalls = loadBody ? findCalls(loadBody, editorSf, ["setChoice"]) : [];
+  const createChoiceCalls = allChoiceCalls.filter((c) =>
+    ifConditionsEnclosing(c, editorSf).some((cond) => /target\.mode === "create"/.test(cond)),
   );
-  if (inlineResets.length === 1) {
-    const reset = inlineResets[0];
-    // Callee and argument as separate comparisons rather than the
-    // CallExpression's whole text: a trailing comma sits INSIDE a multi-line
-    // call's own span but OUTSIDE its arguments' spans, so pinning the two
-    // smallest nodes that carry the claim cannot falsely redden on a reflow
-    // that pinning the whole right-hand side would. Whitespace is normalised
-    // and only whitespace - Prettier owns the line breaks, everything else
-    // here IS the claim.
-    check(
-      "and the reset it makes is setChoice(CREDENTIAL_CHOICE_INLINE) - the sentinel, not some other draft value",
-      norm(reset.expression.getText(editorSf)) === "setChoice" &&
-        norm(reset.arguments[0].getText(editorSf)) === "CREDENTIAL_CHOICE_INLINE",
-      { callee: reset.expression.getText(editorSf), arg: reset.arguments[0].getText(editorSf) },
-    );
-    check(
-      'and it is reached only under a condition naming target.mode === "create" - never by adjacency',
-      ifConditionsEnclosing(reset, editorSf).some((c) => /target\.mode === "create"/.test(c)),
-      ifConditionsEnclosing(reset, editorSf),
-    );
-  }
+  check(
+    'the load effect seeds choice under a condition naming target.mode === "create" EXACTLY ONCE - never by adjacency to the edit arm\'s own reset',
+    createChoiceCalls.length === 1,
+    { totalSetChoiceCalls: allChoiceCalls.length, underCreateCondition: createChoiceCalls.length },
+  );
   // The half of the claim that "a setChoice call exists in the create arm"
   // does not carry: the reset has to run BEFORE the arm's `return`, or it is
   // dead code AND the edit arm's reset below is never reached either. Direct
@@ -2186,11 +2173,11 @@ console.log(
       (s) =>
         ts.isExpressionStatement(s) &&
         ts.isCallExpression(s.expression) &&
-        inlineResets.includes(s.expression),
+        createChoiceCalls.includes(s.expression),
     );
     const returnAt = stmts.findIndex((s) => ts.isReturnStatement(s));
     check(
-      "the reset is a DIRECT statement of the create arm's block and precedes its return - the path that returns before the edit arm's reset is reached",
+      "the seed is a DIRECT statement of the create arm's block and precedes its return - the path that returns before the edit arm's reset is reached",
       resetAt >= 0 && returnAt >= 0 && resetAt < returnAt,
       { resetAt, returnAt, statements: stmts.length },
     );

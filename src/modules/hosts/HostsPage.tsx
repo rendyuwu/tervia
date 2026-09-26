@@ -15,8 +15,7 @@
  * `setTabs` and `nextIdRef` from `useTabs`, which a pane leaf body cannot reach.
  *
  * Nothing here makes a secret safer. On Linux a private key sits in a mode-0600
- * JSON file before and after this work, and SSH still round-trips plaintext
- * through the webview on every connect. What a vault binding buys - and what the
+ * JSON file before and after this work. What a vault binding buys - and what the
  * identity pip on a card is telling you about - is FEWER COPIES of one secret.
  */
 import { Button } from "@/components/ui/button";
@@ -40,24 +39,38 @@ import { InputGroup, InputGroupAddon, InputGroupInput } from "@/components/ui/in
 import { paneCaret } from "@/lib/paneCaret";
 import { toast } from "@/components/ui/toast";
 import { releaseRulesForHost } from "@/modules/forwards/controller";
+import { useForwards } from "@/modules/forwards/useForwards";
 import { identityRows } from "@/modules/vault/page/derive";
 import { VaultInUseError } from "@/modules/vault/types";
 import { useVault } from "@/modules/vault/useVault";
 import { ChevronDown, Monitor, Plus, Search, SquareTerminal, X } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent,
+  type ReactNode,
+} from "react";
 
 import { HostEditorDialog } from "./HostEditorDialog";
 import { Chip, GroupStrip } from "./page/GroupStrip";
 import { HostCard } from "./page/HostCard";
 import { HostsBackupActions } from "./page/HostsBackupActions";
+import { TagStrip } from "./page/TagStrip";
 import {
+  cardFocusTarget,
+  deleteRulesNote,
   filterAndRank,
   groupCounts,
   identityName,
   missingSecret,
   searchRows,
+  tagCounts,
   type GroupFilter,
   type ProtocolFilter,
+  type TagFilter,
 } from "./page/derive";
 import {
   clearHostEditorRequest,
@@ -88,6 +101,10 @@ export type HostsPageProps = {
 // list on every keystroke anywhere on the page.
 const ALL_GROUPS: GroupFilter = { kind: "all" };
 const UNGROUPED: GroupFilter = { kind: "ungrouped" };
+/** Stable identity, on the same grounds as `ALL_GROUPS` above: a fresh `Set`
+ *  literal at every render would defeat the `visible` memo below on every
+ *  keystroke anywhere on the page, not just a tag click. */
+const NO_TAGS_SELECTED: TagFilter = new Set();
 
 const PROTOCOL_FILTERS: ReadonlyArray<{ value: ProtocolFilter; label: string }> = [
   { value: "all", label: "All" },
@@ -97,6 +114,23 @@ const PROTOCOL_FILTERS: ReadonlyArray<{ value: ProtocolFilter; label: string }> 
 
 function errorText(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
+}
+
+/**
+ * Arrow keys between host cards. The grid is ONE tab stop (see `HostCard`'s
+ * `tabStop`), so this is how the keyboard gets from card to card. Only a key
+ * that lands on a card itself moves; on a card's action button it is the
+ * button's.
+ */
+function moveCardFocus(e: KeyboardEvent<HTMLDivElement>): void {
+  const card = e.target;
+  if (!(card instanceof HTMLElement) || !card.hasAttribute("data-host-card")) return;
+  const cards = [...e.currentTarget.querySelectorAll<HTMLElement>("[data-host-card]")];
+  const cols = getComputedStyle(e.currentTarget).gridTemplateColumns.split(" ").length;
+  const to = cardFocusTarget(e.key, cards.indexOf(card), cards.length, cols);
+  if (to === null) return;
+  e.preventDefault();
+  cards[to].focus();
 }
 
 /**
@@ -142,10 +176,12 @@ export function HostsPage({ onConnect, onScreen }: HostsPageProps): ReactNode {
   const hostsById = useHosts();
   const groups = useHostGroups();
   const vault = useVault();
+  const forwardsById = useForwards();
 
   const [query, setQuery] = useState("");
   const [protocol, setProtocol] = useState<ProtocolFilter>("all");
   const [group, setGroup] = useState<GroupFilter>(ALL_GROUPS);
+  const [tagFilter, setTagFilter] = useState<TagFilter>(NO_TAGS_SELECTED);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [editorTarget, setEditorTarget] = useState<HostEditorTarget | null>(null);
   const [pendingDelete, setPendingDelete] = useState<Host | null>(null);
@@ -199,16 +235,23 @@ export function HostsPage({ onConnect, onScreen }: HostsPageProps): ReactNode {
   // bearing, not an optimisation (see `identityRows` in
   // `src/modules/vault/page/derive.ts`).
   const identityRowList = useMemo(
-    () => identityRows(Array.from(vault.identities.values()), vault.keys, hosts),
-    [vault.identities, vault.keys, hosts],
+    () => identityRows(Array.from(vault.identities.values()), vault.keys, hosts, groups),
+    [vault.identities, vault.keys, hosts, groups],
   );
   const knownGroupIds = useMemo(() => new Set(groups.map((g) => g.id)), [groups]);
   const rows = useMemo(() => searchRows(hosts, groups, vault), [hosts, groups, vault]);
   const counts = useMemo(() => groupCounts(hosts, groups), [hosts, groups]);
+  const tags = useMemo(() => tagCounts(hosts), [hosts]);
   const visible = useMemo(
-    () => filterAndRank({ rows, protocol, group, knownGroupIds, query }),
-    [rows, protocol, group, knownGroupIds, query],
+    () => filterAndRank({ rows, protocol, group, groups, tags: tagFilter, query }),
+    [rows, protocol, group, groups, tagFilter, query],
   );
+
+  // The grid's one tab stop: the selected card while it is on screen, else the
+  // first. Without the fallback a filtered-out selection leaves no tab stop.
+  const tabStopId = visible.some(({ host }) => host.id === selectedId)
+    ? selectedId
+    : (visible[0]?.host.id ?? null);
 
   // A group deleted in another window (or by the strip below) leaves the filter
   // naming an id nothing has, which shows an empty grid with no way back to it -
@@ -216,6 +259,16 @@ export function HostsPage({ onConnect, onScreen }: HostsPageProps): ReactNode {
   useEffect(() => {
     if (group.kind === "group" && !knownGroupIds.has(group.groupId)) setGroup(ALL_GROUPS);
   }, [group, knownGroupIds]);
+
+  // The same reset as the one above, for a tag no host carries any more - the
+  // last host wearing it was deleted or edited, in this window or another.
+  useEffect(() => {
+    const known = new Set(tags.map((t) => t.tag.toLowerCase()));
+    setTagFilter((prev) => {
+      const next = new Set([...prev].filter((t) => known.has(t)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [tags]);
 
   // The header's quick-connect opens the Hosts tab and then asks for the editor,
   // so the request may predate this mount - see `pendingEditor.ts`.
@@ -277,8 +330,8 @@ export function HostsPage({ onConnect, onScreen }: HostsPageProps): ReactNode {
     );
   }, []);
 
-  const createGroup = useCallback(async (name: string): Promise<void> => {
-    await upsertGroup({ id: newGroupId(), name });
+  const createGroup = useCallback(async (name: string, parentId?: string): Promise<void> => {
+    await upsertGroup({ id: newGroupId(), name, parentId });
   }, []);
 
   const renameGroup = useCallback(
@@ -291,11 +344,46 @@ export function HostsPage({ onConnect, onScreen }: HostsPageProps): ReactNode {
     [groups],
   );
 
+  const moveGroup = useCallback(
+    async (id: string, parentId: string | undefined): Promise<void> => {
+      const existing = groups.find((g) => g.id === id);
+      if (!existing) return;
+      // Spread, so `order` survives a move - the same reason `renameGroup` spreads.
+      await upsertGroup({ ...existing, parentId });
+    },
+    [groups],
+  );
+
+  const setGroupDefaultIdentity = useCallback(
+    async (id: string, identityId: string | undefined): Promise<void> => {
+      const existing = groups.find((g) => g.id === id);
+      if (!existing) return;
+      // Spread, so `order` and `parentId` survive - the same reason `moveGroup` spreads.
+      await upsertGroup({ ...existing, defaultIdentityId: identityId });
+    },
+    [groups],
+  );
+
   const removeGroup = useCallback(async (id: string): Promise<void> => {
     await deleteGroup(id);
   }, []);
 
-  const filtering = query.trim().length > 0 || protocol !== "all" || group.kind !== "all";
+  const toggleTag = useCallback((key: string) => {
+    setTagFilter((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }, []);
+
+  const clearTags = useCallback(() => setTagFilter(NO_TAGS_SELECTED), []);
+
+  const filtering =
+    query.trim().length > 0 || protocol !== "all" || group.kind !== "all" || tagFilter.size > 0;
+  const pendingRulesNote = pendingDelete
+    ? deleteRulesNote(pendingDelete.id, forwardsById.values())
+    : null;
 
   return (
     // `@container`: this page renders inside an independently resizable pane
@@ -356,13 +444,25 @@ export function HostsPage({ onConnect, onScreen }: HostsPageProps): ReactNode {
             </DropdownMenuTrigger>
             <DropdownMenuContent align="start">
               <DropdownMenuItem
-                onSelect={() => setEditorTarget({ mode: "create", protocol: "ssh" })}
+                onSelect={() =>
+                  setEditorTarget({
+                    mode: "create",
+                    protocol: "ssh",
+                    ...(group.kind === "group" ? { prefill: { groupId: group.groupId } } : {}),
+                  })
+                }
               >
                 <SquareTerminal size={14} strokeWidth={1.75} />
                 SSH host
               </DropdownMenuItem>
               <DropdownMenuItem
-                onSelect={() => setEditorTarget({ mode: "create", protocol: "rdp" })}
+                onSelect={() =>
+                  setEditorTarget({
+                    mode: "create",
+                    protocol: "rdp",
+                    ...(group.kind === "group" ? { prefill: { groupId: group.groupId } } : {}),
+                  })
+                }
               >
                 <Monitor size={14} strokeWidth={1.75} />
                 RDP host
@@ -474,8 +574,13 @@ export function HostsPage({ onConnect, onScreen }: HostsPageProps): ReactNode {
           onSelectGroup={(groupId) => setGroup({ kind: "group", groupId })}
           onCreateGroup={createGroup}
           onRenameGroup={renameGroup}
+          onMoveGroup={moveGroup}
           onDeleteGroup={removeGroup}
+          identities={Array.from(vault.identities.values())}
+          onSetDefaultIdentity={setGroupDefaultIdentity}
         />
+
+        <TagStrip tags={tags} selected={tagFilter} onToggle={toggleTag} onClear={clearTags} />
       </div>
 
       {/* No transform and no fixed row height anywhere between here and the
@@ -498,7 +603,10 @@ export function HostsPage({ onConnect, onScreen }: HostsPageProps): ReactNode {
           // container ancestor of their own; it does not add containment to
           // `HostCard` itself, so its own `content-visibility: auto` /
           // `contain-intrinsic-size` (HostCard.tsx) are untouched.
-          <div className="grid grid-cols-1 gap-2 @[580px]:grid-cols-2 @[860px]:grid-cols-3 @[1140px]:grid-cols-4">
+          <div
+            className="grid grid-cols-1 gap-2 @[580px]:grid-cols-2 @[860px]:grid-cols-3 @[1140px]:grid-cols-4"
+            onKeyDown={moveCardFocus}
+          >
             {visible.map(({ host, groupName }) => (
               <HostCard
                 key={host.id}
@@ -507,6 +615,7 @@ export function HostsPage({ onConnect, onScreen }: HostsPageProps): ReactNode {
                 groupName={groupName}
                 missingSecret={missingSecret(host, vault)}
                 selected={host.id === selectedId}
+                tabStop={host.id === tabStopId}
                 onSelect={() => setSelectedId(host.id)}
                 onConnect={() => onConnect(host)}
                 onEdit={() => setEditorTarget({ mode: "edit", hostId: host.id })}
@@ -536,7 +645,8 @@ export function HostsPage({ onConnect, onScreen }: HostsPageProps): ReactNode {
           <AlertDialogHeader>
             <AlertDialogTitle>Delete host &quot;{pendingDelete?.name}&quot;?</AlertDialogTitle>
             <AlertDialogDescription>
-              {pendingDelete ? deleteKeychainNote(pendingDelete) : null} This cannot be undone.
+              {pendingDelete ? deleteKeychainNote(pendingDelete) : null}
+              {pendingRulesNote ? ` ${pendingRulesNote}` : null} This cannot be undone.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -566,7 +676,7 @@ function EmptyState({ filtering, hasHosts }: { filtering: boolean; hasHosts: boo
       </span>
       <span className="max-w-72 text-[11px] leading-relaxed opacity-70">
         {hasHosts && filtering
-          ? "Clear the search box or widen the protocol and group filters."
+          ? "Clear the search box or widen the protocol, group and tag filters."
           : "Use New host to save an SSH or RDP machine, or Import to bring one over."}
       </span>
     </div>

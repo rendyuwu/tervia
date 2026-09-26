@@ -1,4 +1,3 @@
-import { tauriSecretsIo, type SecretsIo } from "./adapters";
 import { vaultStore } from "./store";
 import {
   HOST_KEYRING_SERVICE,
@@ -21,19 +20,11 @@ import {
 // One module, one job: turn a credential binding into what the connect path
 // needs.
 //
-// Two output shapes, because the two protocols have genuinely different
-// invariants, and the asymmetry is worth stating plainly rather than hiding
-// behind a common type:
-//
-//   RDP gets a REFERENCE. `rdp_open` takes a keychain service/account and the
-//   host process reads the plaintext itself, so an RDP password never enters the
-//   webview. That is a standing invariant, and here it is preserved BY
-//   CONSTRUCTION: `resolveRdpAuth` makes no keychain read at all.
-//
-//   SSH gets VALUES, because that is what `openSsh` takes today. This is a
-//   pre-existing defect, not one the vault introduces: SSH
-//   round-trips plaintext through JS on every connect and every ProxyJump hop,
-//   bound to a vault identity or not.
+// Both protocols get REFERENCES. `rdp_open` and `ssh_open` take a keychain
+// service/account and the host process reads the plaintext itself, so no saved
+// credential enters the webview on a connect. That is preserved BY
+// CONSTRUCTION here: this module makes no keychain read at all - it imports no
+// secrets port and has nowhere to put one.
 //
 // This module deliberately imports NOTHING from another feature module. The
 // dependency direction is vault <- hosts: `modules/hosts` imports the binding
@@ -49,6 +40,15 @@ import {
  * to this file can put one in the webview without changing this type first.
  */
 export type KeychainRef = { kind: "keychain"; service: string; account: string };
+
+/**
+ * Where one secret comes from, as `ssh_open` accepts it: a reference the host
+ * process dereferences itself, or a plaintext the caller is holding. The
+ * inline arm exists for ONE case - the host editor's Test button, where the
+ * user has just typed a credential that is not saved anywhere yet - and is
+ * never reachable from a saved binding: neither producer below emits one.
+ */
+export type SecretSource = KeychainRef | { kind: "inline"; value: string };
 
 /**
  * What the RDP connect path needs. `username` and `domain` are VALUES because
@@ -80,23 +80,31 @@ export type SshSecretValues = {
  * mode then means finding every one of them, and any that is missed silently
  * connects with no credentials at all.
  */
-export type SshCredentialValues = {
+export type SshCredentials = {
   useAgent?: boolean;
-  password?: string;
-  privateKey?: string;
-  privateKeyPassphrase?: string;
+  password?: SecretSource;
+  privateKey?: SecretSource;
+  privateKeyPassphrase?: SecretSource;
+  /** OpenSSH certificate text, paired with `privateKey` - set only when the
+   *  identity's key is `kind: "cert"`. Public, unlike every field above it. */
+  certificate?: string;
+  /** Restrict `useAgent` to the ssh-agent identity with this SHA256
+   *  fingerprint - set only when the identity's key is `kind: "hardware"`. */
+  agentKeyFingerprint?: string;
 };
 
 /** What the SSH connect path needs: the credential half plus the user to send it
  *  as, so a caller never has to branch on the binding kind again. */
-export type ResolvedSshAuth = SshCredentialValues & { user: string };
+export type ResolvedSshAuth = SshCredentials & { user: string };
 
 /**
- * One auth mode's credentials, from whatever the keychain returned.
+ * One auth mode's credentials from a typed draft, as INLINE sources.
  *
- * Exported so a caller holding secrets that are not in the vault at all - a
- * dialog's unsaved draft, an ad-hoc connection - maps them the same way a
- * resolved binding does, instead of assembling the fields by hand.
+ * Exported for the one caller holding secrets that are not saved anywhere yet
+ * - the host editor's Test probe - so it maps them the same way a resolved
+ * binding does instead of assembling the fields by hand. Every saved
+ * connection goes through {@link sshKeychainCredentials} instead and sends
+ * references.
  *
  * Everything empty becomes `undefined` rather than `""`, so a missing secret
  * fails the backend's explicit "no credentials" guard instead of attempting an
@@ -106,10 +114,12 @@ export type ResolvedSshAuth = SshCredentialValues & { user: string };
  * mode added to that union stops this file compiling until it is handled here,
  * rather than falling off the end and returning `undefined`.
  */
-export function sshCredentialValues(
+export function sshInlineCredentials(
   authMode: VaultAuthMode,
   secrets: SshSecretValues,
-): SshCredentialValues {
+): SshCredentials {
+  const inline = (v: string | null | undefined): SecretSource | undefined =>
+    v ? { kind: "inline", value: v } : undefined;
   switch (authMode) {
     case "agent":
       // The local ssh-agent signs the handshake. Tervia never sees, stores or
@@ -117,11 +127,11 @@ export function sshCredentialValues(
       return { useAgent: true };
     case "key":
       return {
-        privateKey: secrets.privateKey || undefined,
-        privateKeyPassphrase: secrets.keyPassphrase || undefined,
+        privateKey: inline(secrets.privateKey),
+        privateKeyPassphrase: inline(secrets.keyPassphrase),
       };
     case "password":
-      return { password: secrets.password || undefined };
+      return { password: inline(secrets.password) };
     default: {
       const unhandled: never = authMode;
       throw new Error(`vault: unhandled auth mode ${String(unhandled)}`);
@@ -138,9 +148,9 @@ export type VaultLookup = {
   findKey(id: string): Promise<VaultKey | undefined>;
 };
 
-export type ResolveDeps = { vault: VaultLookup; secrets: SecretsIo };
+export type ResolveDeps = { vault: VaultLookup };
 
-export const defaultResolveDeps: ResolveDeps = { vault: vaultStore, secrets: tauriSecretsIo };
+export const defaultResolveDeps: ResolveDeps = { vault: vaultStore };
 
 /** The three SSH field names on each side. They differ only in the passphrase -
  *  see the constants for why. Exported so `credentialMove.ts` builds every
@@ -160,10 +170,6 @@ export const VAULT_SSH_FIELDS = {
 
 type SshFields = typeof HOST_SSH_FIELDS | typeof VAULT_SSH_FIELDS;
 
-/** Accounts an auth mode actually uses, keyed by the `SshSecretValues` field they
- *  fill. Empty for `agent`. */
-type SshAccounts = Partial<Record<keyof SshSecretValues, string>>;
-
 /**
  * Who owns the accounts one resolution reads.
  *
@@ -176,21 +182,30 @@ type SshAccounts = Partial<Record<keyof SshSecretValues, string>>;
 type SshAccountOwner = { password: string; key?: string };
 
 /**
- * Which accounts one auth mode reads.
+ * The keychain references an auth mode authenticates with. Makes no read: the
+ * host process dereferences these itself, so no SSH secret enters the webview
+ * on the connect path.
  *
- * `agent` reads none: the local ssh-agent signs the handshake, so there is no
- * secret to fetch and no IPC to spend.
+ * `agent` references none: the local ssh-agent signs the handshake, so there
+ * is no secret to name.
  */
-function sshAccountsFor(
+function sshKeychainCredentials(
   mode: VaultAuthMode,
   fields: SshFields,
+  service: string,
   owner: SshAccountOwner,
-): SshAccounts {
+): SshCredentials {
   switch (mode) {
     case "agent":
-      return {};
+      return { useAgent: true };
     case "password":
-      return { password: vaultAccount(owner.password, fields.password) };
+      return {
+        password: {
+          kind: "keychain",
+          service,
+          account: vaultAccount(owner.password, fields.password),
+        },
+      };
     case "key":
       if (!owner.key) {
         // Refuse rather than build `undefined::privateKey`, which reads back as
@@ -199,8 +214,16 @@ function sshAccountsFor(
         throw new Error("vault: key auth resolved with no key to read it from");
       }
       return {
-        privateKey: vaultAccount(owner.key, fields.privateKey),
-        keyPassphrase: vaultAccount(owner.key, fields.keyPassphrase),
+        privateKey: {
+          kind: "keychain",
+          service,
+          account: vaultAccount(owner.key, fields.privateKey),
+        },
+        privateKeyPassphrase: {
+          kind: "keychain",
+          service,
+          account: vaultAccount(owner.key, fields.keyPassphrase),
+        },
       };
     default: {
       const unhandled: never = mode;
@@ -210,41 +233,19 @@ function sshAccountsFor(
 }
 
 /**
- * The one keychain read a resolution makes: only the accounts the auth mode uses,
- * in a single `secrets_get_all` against a single SERVICE. A batch spanning
- * host-owned and vault-owned accounts would be two calls, and no resolution needs
- * one - a binding is either inline or by identity, never half of each.
- */
-async function readSshSecrets(
-  secrets: SecretsIo,
-  service: string,
-  accounts: SshAccounts,
-): Promise<SshSecretValues> {
-  const fields = Object.keys(accounts) as (keyof SshSecretValues)[];
-  if (fields.length === 0) return {};
-  const values = await secrets.getAll(
-    service,
-    fields.map((f) => accounts[f] as string),
-  );
-  const out: SshSecretValues = {};
-  fields.forEach((field, i) => {
-    out[field] = values[i] ?? null;
-  });
-  return out;
-}
-
-/**
  * Resolve an identity, refusing the states that would fail at the handshake with
  * a message about something the user never touched.
  *
- * `keyId` is absent for any mode that does not use one. It is deliberately not
- * filled with the identity's own id: that reads like a key id at every call site
- * downstream, and the day one of them uses it, it points at the wrong record.
+ * `key` is the whole record, not a bare id - `resolveSshAuth` needs to branch
+ * on `key.kind` (a `hardware` key builds an agent restriction instead of a
+ * keychain reference; a `cert` key adds its certificate text), which a bare
+ * id cannot answer without a second store read here duplicating this one.
+ * Absent for any mode that does not name a key at all.
  */
 async function resolveIdentity(
   deps: ResolveDeps,
   identityId: string,
-): Promise<{ identity: VaultIdentity; keyId?: string }> {
+): Promise<{ identity: VaultIdentity; key?: VaultKey }> {
   const identity = await deps.vault.findIdentity(identityId);
   if (!identity) throw new Error(`vault: identity ${identityId} no longer exists`);
   if (identity.authMode !== "key") return { identity };
@@ -255,7 +256,7 @@ async function resolveIdentity(
   if (!key) {
     throw new Error(`vault: identity "${identity.name}" names a key that no longer exists`);
   }
-  return { identity, keyId: key.id };
+  return { identity, key };
 }
 
 export async function resolveSshAuth(
@@ -263,26 +264,54 @@ export async function resolveSshAuth(
   deps: ResolveDeps = defaultResolveDeps,
 ): Promise<ResolvedSshAuth> {
   if (binding.kind === "inline") {
-    const accounts = sshAccountsFor(binding.authMode, HOST_SSH_FIELDS, {
-      password: binding.hostId,
-      key: binding.hostId,
-    });
-    const secrets = await readSshSecrets(deps.secrets, HOST_KEYRING_SERVICE, accounts);
-    return { user: binding.user, ...sshCredentialValues(binding.authMode, secrets) };
+    return {
+      user: binding.user,
+      ...sshKeychainCredentials(binding.authMode, HOST_SSH_FIELDS, HOST_KEYRING_SERVICE, {
+        password: binding.hostId,
+        key: binding.hostId,
+      }),
+    };
   }
 
-  const { identity, keyId } = await resolveIdentity(deps, binding.identityId);
-  const accounts = sshAccountsFor(identity.authMode, VAULT_SSH_FIELDS, {
+  const { identity, key } = await resolveIdentity(deps, binding.identityId);
+  // A `hardware` key holds no secret at all: auth goes through the OS
+  // ssh-agent, restricted to this one identity by its fingerprint, rather
+  // than through the keychain reference every other "key" auth mode builds.
+  if (key?.kind === "hardware") {
+    if (!key.fingerprint) {
+      throw new Error(
+        `vault: hardware key "${key.name}" has no recorded fingerprint to match in ssh-agent`,
+      );
+    }
+    return { user: identity.username, useAgent: true, agentKeyFingerprint: key.fingerprint };
+  }
+  const base = sshKeychainCredentials(identity.authMode, VAULT_SSH_FIELDS, VAULT_KEYRING_SERVICE, {
     password: identity.id,
-    key: keyId,
+    key: key?.id,
   });
-  const secrets = await readSshSecrets(deps.secrets, VAULT_KEYRING_SERVICE, accounts);
-  return { user: identity.username, ...sshCredentialValues(identity.authMode, secrets) };
+  // A `cert` key's certificate is PUBLIC, so it travels alongside the
+  // keychain references above instead of through one - this module makes
+  // no secret read of its own for anything, certificate included. A record
+  // with no certificate at all - reachable from a hand-edited vault file or
+  // a trimmed-empty import field - is refused by name here, the same way
+  // the hardware branch above refuses a missing fingerprint: dialling it
+  // silently as a bare key would authenticate as a DIFFERENT credential
+  // than the one this identity names, against whatever server still trusts
+  // the bare signing key.
+  if (key?.kind === "cert" && !key.certificate) {
+    throw new Error(`vault: certificate key "${key.name}" has no certificate`);
+  }
+  return {
+    user: identity.username,
+    ...base,
+    ...(key?.kind === "cert" ? { certificate: key.certificate } : {}),
+  };
 }
 
 /**
- * The RDP half. Note what is missing: `deps.secrets` is never touched, so there
- * is no code path here that reads an RDP password into a JS value.
+ * The RDP half, on the same terms as the SSH half above: a reference out, no
+ * keychain read here, so there is no code path in this module that reads an
+ * RDP password into a JS value.
  *
  * An identity's `authMode` is deliberately NOT checked. `hasPassword` is
  * independent of it, so a key identity holding a password is a legitimate row -

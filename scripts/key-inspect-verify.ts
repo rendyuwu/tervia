@@ -43,11 +43,18 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
+  describeAgentKeyClassification,
+  describeAgentKeyError,
+  describeCertClassification,
+  describeCertError,
   describeKeyError,
   describeKeyInfo,
+  hardwareFactsFrom,
+  vaultCertFactsFrom,
   vaultKeyFactsFrom,
   vaultKeyTypeFrom,
   type KeyInspectResult,
+  type SshTextClassification,
   type VaultKeyFacts,
 } from "../src/modules/vault/keyInspect";
 import { stripComments, stripperSelfTest } from "./lib/source";
@@ -143,6 +150,11 @@ console.log("[1] describeKeyInfo - the container's answer, translated for the pa
     okPlain.kind === "ok" && okPlain.comment === "rendy@host",
     okPlain,
   );
+  check(
+    "and its public key survives",
+    okPlain.kind === "ok" && okPlain.publicKey === plainEd25519.publicKey,
+    okPlain,
+  );
 
   // The case the doc comment calls out by name: an encrypted openssh-key-v1 key
   // inspected without its passphrase keeps the public half in cleartext but seals
@@ -179,6 +191,15 @@ console.log("[1] describeKeyInfo - the container's answer, translated for the pa
   check(
     'a parsed key with no reported algorithm renders "unknown", not null and not blank',
     okNoType.kind === "ok" && okNoType.keyType === "unknown",
+    okNoType,
+  );
+  // The Generate flow's copy button reads this field unconditionally
+  // (`state.publicKey` in `src/modules/vault/editor/KeyEditorDialog.tsx`), so
+  // a null half has to fall back to "", the same convention `keyType` and
+  // `fingerprint` already use, rather than becoming a copy button over `null`.
+  check(
+    'a parsed key with no public half renders "", not null',
+    okNoType.kind === "ok" && okNoType.publicKey === "",
     okNoType,
   );
 }
@@ -355,6 +376,171 @@ console.log("\n[3b] vaultKeyFactsFrom - what the STORE records, which is not wha
     "and names no algorithm literal of its own",
     !/ed25519|ecdsa|ssh-rsa|rsa-sha2/.test(strippedFacts),
     strippedFacts,
+  );
+}
+
+// ---------------------------------------------------------------------------
+console.log(
+  "\n[3c] vaultCertFactsFrom / hardwareFactsFrom / describeCertClassification / describeCertError - the cert and hardware kinds' facts and panel translation",
+);
+{
+  const cert = (
+    overrides: Partial<Extract<SshTextClassification, { kind: "certificate" }>> = {},
+  ): SshTextClassification => ({
+    kind: "certificate",
+    caFingerprint: "SHA256:ca",
+    fingerprint: "SHA256:certified",
+    keyId: "tervia-test",
+    principals: ["rendy"],
+    validAfter: 1_700_000_000,
+    validBefore: 1_800_000_000,
+    ...overrides,
+  });
+  const PUB_LINE = "ssh-ed25519 AAAAC3Nz... rendy@host";
+  const pub = (
+    overrides: Partial<Extract<SshTextClassification, { kind: "publicKey" }>> = {},
+  ): SshTextClassification => ({
+    kind: "publicKey",
+    algorithm: "ssh-ed25519",
+    fingerprint: "SHA256:pub",
+    comment: "rendy@host",
+    publicKey: PUB_LINE,
+    ...overrides,
+  });
+  const notCert: SshTextClassification[] = [
+    { kind: "privateKey" },
+    pub(),
+    { kind: "unsupported", reason: "nope" },
+  ];
+  const notPublicKey: SshTextClassification[] = [
+    { kind: "privateKey" },
+    cert(),
+    { kind: "unsupported", reason: "nope" },
+  ];
+
+  for (const classification of notCert) {
+    check(
+      `vaultCertFactsFrom(${classification.kind}) is null, not a certificate`,
+      vaultCertFactsFrom(classification) === null,
+      classification,
+    );
+  }
+  for (const classification of notPublicKey) {
+    check(
+      `hardwareFactsFrom(${classification.kind}) is null, not a public key`,
+      hardwareFactsFrom(classification) === null,
+      classification,
+    );
+  }
+
+  const facts = vaultCertFactsFrom(cert());
+  check(
+    "a certificate classification carries the CA fingerprint, key id and principals verbatim",
+    facts?.certCaFingerprint === "SHA256:ca" &&
+      facts?.certKeyId === "tervia-test" &&
+      JSON.stringify(facts?.certPrincipals) === JSON.stringify(["rendy"]),
+    facts,
+  );
+  check(
+    "and the validity window, both ends",
+    facts?.certValidAfter === 1_700_000_000 && facts?.certValidBefore === 1_800_000_000,
+    facts,
+  );
+  // OpenSSH's `u64::MAX` "forever" sentinel is already `null` by the time it
+  // reaches this function (`ssh_key_classify_inner`, `src-tauri/src/modules/ssh/mod.rs`) -
+  // this function's own job is to leave it ABSENT rather than write `null`
+  // or `Infinity` into the record, which `VaultKey.certValidBefore`'s own doc
+  // comment relies on.
+  const forever = vaultCertFactsFrom(cert({ validBefore: null }));
+  check(
+    "a certificate that never expires records certValidBefore as ABSENT, not null",
+    forever !== null && !("certValidBefore" in forever),
+    forever,
+  );
+
+  const hw = hardwareFactsFrom(pub());
+  check(
+    "a public-key classification's algorithm is mapped the same way a pem key's is",
+    hw?.keyType === "ed25519",
+    hw,
+  );
+  check(
+    "and its fingerprint and .pub line are carried through unchanged",
+    hw?.fingerprint === "SHA256:pub" && hw?.publicKey === PUB_LINE,
+    hw,
+  );
+  // `hardware` never asks the encryption question (there is no body to
+  // encrypt), and the field must still be PRESENT so `keyRecordFrom`'s
+  // wholesale replace does not carry a stale `encrypted` forward from
+  // whatever the record held before - the same "present rather than absent"
+  // rule section [3b] holds `vaultKeyFactsFrom` to.
+  check(
+    "encrypted is explicitly present and undefined, not omitted",
+    hw !== null && "encrypted" in hw && hw.encrypted === undefined,
+    hw,
+  );
+
+  const okCert = describeCertClassification(cert());
+  check(
+    "describeCertClassification reports ok with every field for a certificate",
+    okCert.kind === "ok" &&
+      okCert.caFingerprint === "SHA256:ca" &&
+      okCert.fingerprint === "SHA256:certified" &&
+      okCert.keyId === "tervia-test",
+    okCert,
+  );
+  for (const classification of notCert) {
+    const described = describeCertClassification(classification);
+    check(
+      `describeCertClassification(${classification.kind}) reports notACertificate, not which of the other three it was`,
+      described.kind === "notACertificate",
+      described,
+    );
+  }
+
+  const certStripped = describeCertError(new Error("ssh: could not read this OpenSSH certificate"));
+  check(
+    "describeCertError strips the ssh: prefix the same way describeKeyError does",
+    certStripped.kind === "error" &&
+      certStripped.message === "could not read this OpenSSH certificate",
+    certStripped,
+  );
+  const certFromString = describeCertError("plain string");
+  check(
+    "and a plain thrown value still becomes an error state with a message",
+    certFromString.kind === "error" && certFromString.message.length > 0,
+    certFromString,
+  );
+
+  // `describeAgentKeyClassification`/`describeAgentKeyError` - the
+  // `hardware` kind's own panel translation, merged here from a local
+  // KeyEditorDialog.tsx copy so it shares one home with
+  // `describeCertClassification`'s twin.
+  const okPub = describeAgentKeyClassification(pub());
+  check(
+    "describeAgentKeyClassification reports ok with algorithm/fingerprint/comment for a public-key classification",
+    okPub.kind === "ok" &&
+      okPub.algorithm === "ssh-ed25519" &&
+      okPub.fingerprint === "SHA256:pub" &&
+      okPub.comment === "rendy@host",
+    okPub,
+  );
+  for (const classification of notPublicKey) {
+    const described = describeAgentKeyClassification(classification);
+    check(
+      `describeAgentKeyClassification(${classification.kind}) reports notAPublicKey, not which of the other three it was`,
+      described.kind === "notAPublicKey",
+      described,
+    );
+  }
+  const agentStripped = describeAgentKeyError(
+    new Error("ssh: could not read this public key line"),
+  );
+  check(
+    "describeAgentKeyError strips the ssh: prefix the same way describeKeyError/describeCertError do",
+    agentStripped.kind === "error" &&
+      agentStripped.message === "could not read this public key line",
+    agentStripped,
   );
 }
 

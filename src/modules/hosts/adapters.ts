@@ -1,8 +1,10 @@
 import { createRecoveredStore, type RecoveredStoreIo } from "@/lib/recoveredStore";
 import { tauriStoreFileIo, type StoreFileIo } from "@/lib/storeRecovery";
+import type { DirtyId } from "@/lib/tombstones";
 import type { SecretsIo } from "@/modules/vault/adapters";
+import type { VaultIdentity } from "@/modules/vault/types";
 
-import { HOSTS_KEY, HOSTS_STORE_PATH } from "./types";
+import { HOSTS_KEY, HOSTS_STORE_PATH, type Host } from "./types";
 
 // The two things the host store layer reaches outside itself for, behind
 // interfaces - for the same reason `modules/vault` does it: `scripts/*-verify.ts`
@@ -35,7 +37,50 @@ export type HostsStoreIo = RecoveredStoreIo;
  * take their ports - omitting it means "the real filesystem", never "skip a
  * guard", so there is nothing here for a caller to silently opt out of.
  */
-export type HostsIo = { store: HostsStoreIo; secrets: SecretsIo; files?: StoreFileIo };
+export type HostsIo = {
+  store: HostsStoreIo;
+  secrets: SecretsIo;
+  files?: StoreFileIo;
+  /**
+   * The clock every `updatedAt` and every `deletedAt` in this store is stamped
+   * from. Optional with the real default, on the same terms as `files` above -
+   * omitting it means the real clock, never "skip a stamp".
+   *
+   * It exists because the property it carries is otherwise uncheckable: two
+   * awaited writes against in-memory ports routinely land in the same
+   * millisecond, so "a second write produces a later stamp" would be a check
+   * that fails at random rather than one that fails when the stamp is wrong. The
+   * tombstone window's boundary needs the same control.
+   */
+  now?: () => number;
+  /**
+   * Told which records a committed write owes a push, after every commit.
+   *
+   * INJECTED and optional with a no-op default, which is the only shape that
+   * keeps the dependency pointing the right way: a store that imported a
+   * scheduler would put a network module behind every host edit, and every
+   * suite that builds this store would have to construct one. Omitting it means
+   * "nothing is listening", never "this write does not count" - what a write
+   * owes is decided at the call site, by what it passes `persist`.
+   */
+  markDirty?: (dirty: DirtyId[]) => void;
+  /**
+   * Told the vault identity a successful connect authenticated as this identity,
+   * after this host's own stamp has committed. Optional with a no-op default, on
+   * `markDirty`'s terms: omitting it means nothing records vault recency, never
+   * "skip the host stamp".
+   */
+  markIdentityConnected?: (identityId: string, protocol: Host["protocol"]) => Promise<void>;
+  /**
+   * Looked up when `upsertGroup` writes a CHANGING `defaultIdentityId`, to
+   * refuse one naming nothing - on `markIdentityConnected`'s own terms:
+   * optional with a no-op default, and omitting it means the existence
+   * check never runs, never "the write is refused". The one production
+   * wiring is `vaultStore.findIdentity`, on `markIdentityConnected`'s own
+   * pattern.
+   */
+  findIdentity?: (id: string) => Promise<VaultIdentity | undefined>;
+};
 
 /** The file port every caller gets unless a test hands one in. */
 export const defaultHostFiles: StoreFileIo = tauriStoreFileIo;

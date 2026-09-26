@@ -239,8 +239,9 @@ pub struct Batch {
 }
 
 impl Batch {
-    /// A full-framebuffer keyframe. What a fresh `rdp_attach` / `rdp_snapshot`
-    /// gets, since there is no byte stream to replay the way SSH has.
+    /// A full-framebuffer keyframe. What `rdp_snapshot` returns - to the pane
+    /// on a resync, and to a fresh `rdp_attach` mirror for its first picture -
+    /// since there is no byte stream to replay the way SSH has.
     pub fn keyframe(width: u16, height: u16) -> Self {
         Self {
             kind: BatchKind::Keyframe,
@@ -249,20 +250,17 @@ impl Batch {
     }
 }
 
-/// Accumulates `GraphicsUpdate` regions over one flush window.
+/// Accumulates `GraphicsUpdate` regions until a consumer pulls them.
 ///
 /// # Backpressure
 ///
-/// This is the MVP's *only* backpressure guard, and it is a cap on batch size
-/// rather than real flow control: once the accumulated dirty area passes half
-/// the framebuffer, the batch collapses to a single full-framebuffer keyframe.
-/// So one batch can never cost more than one framebuffer, no matter how many
-/// updates landed in the window. The push transport has no way to learn that
-/// the webview is behind, so a consumer that cannot keep up still falls
-/// further behind - one framebuffer at a time instead of unboundedly. Swapping
-/// push for a pull / credit-based model is deferred, and would be a local
-/// change: a second [`FrameTransport`] impl plus a different flush trigger in
-/// `session.rs`.
+/// This IS the queue, and `rdp_take_frame` is what drains it - so it empties
+/// at the consumer's pace and frames accumulate nowhere else. A consumer that
+/// stops pulling costs exactly one framebuffer of host memory and no IPC at
+/// all: the collapse rule caps a single batch at one full-framebuffer keyframe
+/// once the accumulated dirty area passes half the screen, and one batch is
+/// the whole backlog. Falling behind therefore costs resolution in time -
+/// fewer, more coalesced batches - rather than an unbounded queue.
 #[derive(Debug)]
 pub struct FrameBatcher {
     rects: Vec<Rect>,
@@ -412,10 +410,9 @@ pub struct FrameBuffer<'a> {
 /// **The reason is unpainted pixels, not decoded ones.** `DecodedImage::new`
 /// zero-fills (`ironrdp-session` 0.10.0, `DecodedImage::new`), so every pixel
 /// the server has not painted yet has alpha 0 and would be fully transparent
-/// in a canvas. That is exactly what `rdp_snapshot` and a fresh `rdp_attach`
-/// return in the window between reaching the active stage and the first full
-/// repaint, and again after every reactivation, which rebuilds the framebuffer
-/// blank.
+/// in a canvas. That is exactly what `rdp_snapshot` returns in the window
+/// between reaching the active stage and the first full repaint, and again
+/// after every reactivation, which rebuilds the framebuffer blank.
 ///
 /// An earlier version of this comment blamed `apply_rgb32_bitmap`'s memcpy
 /// branch copying the wire's padding byte. That is **not** reachable in this
@@ -495,22 +492,6 @@ pub fn encode_batch(fb: FrameBuffer<'_>, batch: &Batch) -> Vec<u8> {
 
     out
 }
-
-/// The one place encoded frames leave the session task.
-///
-/// Today there is a single push implementation: the session task encodes a
-/// batch and hands the bytes to the IPC channel immediately. A pull / credit
-/// model would slot in as a second impl plus a different flush trigger in
-/// `session.rs`; nothing else in the module knows how frames get out.
-pub trait FrameTransport: Send {
-    /// Deliver one encoded batch. `Err` means this sink is gone for good and
-    /// the caller should stop using it.
-    fn deliver(&mut self, bytes: Vec<u8>) -> Result<(), TransportGone>;
-}
-
-/// The sink has closed - the webview navigated away or the channel was dropped.
-#[derive(Debug, Clone, Copy)]
-pub struct TransportGone;
 
 #[cfg(test)]
 mod tests {

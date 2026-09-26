@@ -69,7 +69,7 @@ export function resolveSshContext(params: {
   };
 
   // Focused leaf if connected. A live SSH session is keyed in `sshStatuses` by
-  // leaf id; that connected status (not a saved `sshConnectionId`, which an
+  // leaf id; that connected status (not a saved `hostId`, which an
   // ad-hoc connection lacks) is what makes a leaf drive the panel.
   if (focusPaneTab) {
     const leaf = activeLeaf(focusPaneTab);
@@ -88,8 +88,8 @@ export function resolveSshContext(params: {
       // falls back to its frozen id. Either way the session must still be
       // connected: a remote file left open after Disconnect would otherwise
       // point Source Control at a dead session (a permanent error banner).
-      const sid = leaf.sshConnectionId
-        ? sshBindingByConnection.get(leaf.sshConnectionId)?.sessionId
+      const sid = leaf.hostId
+        ? sshBindingByConnection.get(leaf.hostId)?.sessionId
         : leaf.sshSessionId;
       if (sid === undefined || !sessionIsLive(sid)) return NO_SSH_CONTEXT;
       // A remote file open in the editor counts as "focused on that remote":

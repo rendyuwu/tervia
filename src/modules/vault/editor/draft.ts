@@ -1,5 +1,5 @@
-import type { VaultKeyFacts } from "../keyInspect";
-import type { VaultAuthMode, VaultIdentity, VaultKey } from "../types";
+import type { VaultCertFacts, VaultKeyFacts } from "../keyInspect";
+import type { VaultAuthMode, VaultIdentity, VaultKey, VaultKeyKind } from "../types";
 
 // What the two vault editors edit, and the pure functions that turn a draft
 // into the record and the secrets the store is handed.
@@ -199,28 +199,53 @@ export function identitySecretsForSave(draft: IdentityDraft): { password?: strin
  * `privateKey` blank means "leave the stored key alone" on an edit and is
  * refused on a create - {@link validateKeyDraft} says why. The stored body is
  * never read back into this field, for the reason in the file header.
+ *
+ * `kind` is `"pem"` for the union's absent case (never `undefined` here -
+ * the form always has a chosen kind on screen, and {@link keyRecordFrom} is
+ * where `"pem"` maps back to an omitted `VaultKey.kind`).
+ *
+ * `certificate` and `publicKey` are NOT secrets, unlike `privateKey`/
+ * `passphrase` above - a certificate is public, and `publicKey` (the
+ * `hardware` kind's ssh-agent public-key line) already is one for a `pem`
+ * key's own field of the same name. So both are preloaded from the stored
+ * record on edit ({@link keyDraftFrom}) and simply round-trip like `name`/
+ * `description`, with no "blank means leave alone" rule to apply.
  */
 export type KeyDraft = {
   name: string;
+  kind: "pem" | VaultKeyKind;
   privateKey: string;
   passphrase: string;
+  /** `kind === "cert"` only. */
+  certificate: string;
+  /** `kind === "hardware"` only: a `.pub` line, pasted or picked from
+   *  ssh-agent. */
+  publicKey: string;
   description: string;
 };
 
 export const EMPTY_KEY_DRAFT: KeyDraft = {
   name: "",
+  kind: "pem",
   privateKey: "",
   passphrase: "",
+  certificate: "",
+  publicKey: "",
   description: "",
 };
 
-/** A stored key, opened for editing. Both secret fields start blank and nothing
- *  fills them: blank means "leave the stored value alone". */
+/** A stored key, opened for editing. The two SECRET fields start blank and
+ *  nothing fills them: blank means "leave the stored value alone".
+ *  `certificate`/`publicKey` are not secrets and ARE preloaded - see
+ *  {@link KeyDraft}'s own doc comment. */
 export function keyDraftFrom(key: VaultKey): KeyDraft {
   return {
     name: key.name,
+    kind: key.kind ?? "pem",
     privateKey: "",
     passphrase: "",
+    certificate: key.certificate ?? "",
+    publicKey: key.kind === "hardware" ? (key.publicKey ?? "") : "",
     description: key.description ?? "",
   };
 }
@@ -236,7 +261,9 @@ export function keyDraftFrom(key: VaultKey): KeyDraft {
  * failed connect and nothing outside this editor ever fills one in - the same
  * argument that governs the RDP password. On an EDIT,
  * blank is the only way to say "keep the stored key", so it must be allowed;
- * refusing it would mean retyping a PEM to rename a key.
+ * refusing it would mean retyping a PEM to rename a key. The same asymmetry
+ * governs `cert`'s private-key field; its certificate field is never blank
+ * on either door, because {@link KeyDraft} preloads it on edit like `name`.
  *
  * Consequence, stated rather than discovered: `missingPrivateKey: true` on a
  * key row is unreachable from the UI. It is covered behaviourally in
@@ -246,8 +273,24 @@ export function keyDraftFrom(key: VaultKey): KeyDraft {
  */
 export function validateKeyDraft(draft: KeyDraft, mode: "create" | "edit"): string | null {
   if (!draft.name.trim()) return "Name is required";
-  if (mode === "create" && !draft.privateKey.trim()) return "Paste or import a private key";
-  return null;
+  switch (draft.kind) {
+    case "pem":
+      if (mode === "create" && !draft.privateKey.trim()) return "Paste or import a private key";
+      return null;
+    case "cert":
+      if (mode === "create" && !draft.privateKey.trim()) {
+        return "Paste or import the certificate's private key";
+      }
+      return draft.certificate.trim() ? null : "Paste the OpenSSH certificate";
+    case "hardware":
+      return draft.publicKey.trim()
+        ? null
+        : "Pick a key from ssh-agent, or paste its public key line";
+    default: {
+      const unhandled: never = draft.kind;
+      throw new Error(`vault: unhandled key kind ${String(unhandled)}`);
+    }
+  }
 }
 
 /**
@@ -259,7 +302,9 @@ export function validateKeyDraft(draft: KeyDraft, mode: "create" | "edit"): stri
  * three, and has to: a rename that dropped it would turn "an inspection found
  * this body encrypted" back into "nobody has ever looked", which is the record
  * silently forgetting the one fact that says a stored key needs a passphrase it
- * does not have.
+ * does not have. For a `hardware` draft `facts` describes the PUBLIC-key
+ * classification instead of an unlock - built by the caller, same null rule
+ * ("nothing typed" -> nothing changed).
  *
  * When `facts` is present the four are replaced WHOLESALE, and that includes
  * being replaced with nothing: `vaultKeyFactsFrom` returns only `encrypted` for
@@ -269,6 +314,12 @@ export function validateKeyDraft(draft: KeyDraft, mode: "create" | "edit"): stri
  * body it described names a key the record no longer holds, and the Vault page
  * would show it next to the new key's name without anything looking wrong.
  *
+ * `certFacts` is the same rule a second time, over the certificate's own five
+ * fields, independent of `facts` - a `cert` draft's save replaces both
+ * wholesale together (the signing key's material AND the certificate's), but
+ * each null-checks on its own source going blank, not on the other.
+ * Meaningless (and ignored) outside `kind === "cert"`.
+ *
  * `hasPrivateKey` and `hasPassphrase` are placeholders: `upsertKey` overwrites
  * both with what it actually stored (`writeKeySecrets` in `src/modules/vault/store.ts`).
  */
@@ -277,6 +328,7 @@ export function keyRecordFrom(
   draft: KeyDraft,
   existing: VaultKey | null,
   facts: VaultKeyFacts | null,
+  certFacts: VaultCertFacts | null,
 ): VaultKey {
   const base: VaultKey = {
     id,
@@ -284,17 +336,31 @@ export function keyRecordFrom(
     description: draft.description.trim() || undefined,
     hasPrivateKey: false,
     hasPassphrase: false,
+    ...(draft.kind !== "pem" ? { kind: draft.kind } : {}),
   };
-  if (facts === null) {
-    return {
-      ...base,
-      keyType: existing?.keyType,
-      fingerprint: existing?.fingerprint,
-      publicKey: existing?.publicKey,
-      encrypted: existing?.encrypted,
-    };
-  }
-  return { ...base, ...facts };
+  const material =
+    facts === null
+      ? {
+          keyType: existing?.keyType,
+          fingerprint: existing?.fingerprint,
+          publicKey: existing?.publicKey,
+          encrypted: existing?.encrypted,
+        }
+      : { ...facts };
+  const cert =
+    draft.kind !== "cert"
+      ? {}
+      : certFacts === null
+        ? {
+            certificate: existing?.certificate,
+            certCaFingerprint: existing?.certCaFingerprint,
+            certKeyId: existing?.certKeyId,
+            certPrincipals: existing?.certPrincipals,
+            certValidAfter: existing?.certValidAfter,
+            certValidBefore: existing?.certValidBefore,
+          }
+        : { certificate: draft.certificate.trim(), ...certFacts };
+  return { ...base, ...material, ...cert };
 }
 
 /**
@@ -313,15 +379,57 @@ export function keyRecordFrom(
  * the stored one alone, and a typed one replaces it. There is therefore no way
  * to remove a passphrase without replacing the key - the same gap the identity
  * password has, taken in the same cautious direction.
+ *
+ * A `hardware` draft sends neither, always: nothing is ever stored in the
+ * keychain for it (see {@link VaultKeyKind} in `../types`), so there is no
+ * body and no passphrase this function could send regardless of what the
+ * (unused, for this kind) fields hold.
  */
 export function keySecretsForSave(draft: KeyDraft): {
   privateKey?: string;
   passphrase?: string;
 } {
+  if (draft.kind === "hardware") return {};
   if (draft.privateKey.trim() === "") {
     return draft.passphrase.trim() === "" ? {} : { passphrase: draft.passphrase };
   }
   return { privateKey: draft.privateKey, passphrase: draft.passphrase };
+}
+
+/**
+ * A draft carried across a refresh of the record it was opened from. A field
+ * the user left as loaded takes the refreshed record's value; a field they
+ * changed keeps theirs. Secret fields need no rule of their own: the
+ * `*DraftFrom` builders blank them on both sides, so a typed secret survives
+ * and a blank one stays blank - still "leave the stored value alone".
+ */
+function rebaseDraft<T extends Record<keyof T, string>>(draft: T, loaded: T, fresh: T): T {
+  const out = { ...draft };
+  for (const field of Object.keys(draft) as (keyof T)[]) {
+    if (draft[field] === loaded[field]) out[field] = fresh[field];
+  }
+  return out;
+}
+
+/** {@link rebaseDraft} for the identity editor. `authMode` and `keyId` re-base
+ *  like any other field, so an untouched one follows another writer's change
+ *  rather than a second Save quietly reverting it. */
+export function rebaseIdentityDraft(
+  draft: IdentityDraft,
+  loaded: VaultIdentity,
+  fresh: VaultIdentity,
+): IdentityDraft {
+  return rebaseDraft(draft, identityDraftFrom(loaded), identityDraftFrom(fresh));
+}
+
+/** {@link rebaseDraft} for the key editor, with one field cleared: a passphrase
+ *  typed without a new body. It was typed to unlock the body the form loaded,
+ *  which may no longer be the stored one, and with no body beside it
+ *  {@link keySecretsForSave} would write it over whatever is stored now. A
+ *  passphrase typed WITH a body travels with that body and is kept. */
+export function rebaseKeyDraft(draft: KeyDraft, loaded: VaultKey, fresh: VaultKey): KeyDraft {
+  const next = rebaseDraft(draft, keyDraftFrom(loaded), keyDraftFrom(fresh));
+  return next.privateKey.trim() === "" ? { ...next, passphrase: "" } : next;
 }
 
 /**

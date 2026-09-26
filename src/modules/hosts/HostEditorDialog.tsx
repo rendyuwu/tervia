@@ -33,8 +33,9 @@ import type { IdentityRow } from "@/modules/vault/page/derive";
 import { listKeys } from "@/modules/vault/store";
 import type { VaultKey } from "@/modules/vault/types";
 import type { ReactNode } from "react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
+import { HostAppearancePicker } from "./appearance";
 import {
   bindHostToIdentity,
   convertHostToVault,
@@ -48,6 +49,7 @@ import {
   credentialChangeFor,
   credentialChangeNote,
   credentialChangeTitle,
+  credentialChoiceForGroup,
   currentCredentialChoice,
   hostKeySecretNames,
   hostOwnedSecretNames,
@@ -73,6 +75,7 @@ import {
 import { SshCredentialSection, validateSshCredential } from "./editor/SshCredentialSection";
 import { SshOptions } from "./editor/SshOptions";
 import { runSshProbe } from "./editor/sshProbe";
+import { TagsInput } from "./editor/TagsInput";
 import {
   NO_SSH_SECRETS_TOUCHED,
   type RdpCredentialDraft,
@@ -98,14 +101,17 @@ import {
   HostBindingChangedError,
   isRdpHost,
   isSshHost,
+  normalizeHostTags,
   presetById,
   presetIdFor,
   RDP_DEFAULT_PORT,
   RDP_DEFAULT_PRESET,
+  RDP_FIT_SIZE_ID,
   SSH_DEFAULT_PORT,
   type Host,
   type HostGroup,
   type HostPins,
+  type RdpClipboardMode,
   type SshHost,
 } from "./types";
 
@@ -120,9 +126,8 @@ import {
 // is quite enough to do in one pass.
 //
 // Nothing here protects a secret better than it was protected before. On Linux a
-// private key sits in a mode-0600 JSON file before and after, and the SSH connect
-// path still round-trips plaintext through the webview. What the vault binding this
-// form preserves buys is FEWER COPIES of one secret.
+// private key sits in a mode-0600 JSON file before and after. What the vault
+// binding this form preserves buys is FEWER COPIES of one secret.
 
 export type HostEditorDialogProps = {
   /** null = closed. */
@@ -141,7 +146,16 @@ export type HostEditorDialogProps = {
   identityRows: IdentityRow[];
 };
 
-const EMPTY_SHARED: SharedDraft = { name: "", host: "", port: "", groupId: "", description: "" };
+const EMPTY_SHARED: SharedDraft = {
+  name: "",
+  host: "",
+  port: "",
+  groupId: "",
+  description: "",
+  tags: [],
+  icon: "",
+  color: "",
+};
 
 const EMPTY_SSH_CRED: SshCredentialDraft = {
   user: "",
@@ -358,6 +372,23 @@ export function HostEditorDialog({
    */
   const sshSeeded = useRef<SshSecretSeeded>(NOTHING_SEEDED);
   /**
+   * Whether the user has already committed to a credential this sitting -
+   * either by touching the CREDENTIAL PICKER itself, or by arriving with (or
+   * typing) an inline account a group re-seed would otherwise clobber.
+   *
+   * A ref, on `sshTouched`'s own terms: reset once per token at the top of
+   * the load effect, then seeded in the create arm from
+   * `prefill.user !== undefined` (a quick-connect `user@host` already named
+   * an account) before the picker's own `onChange`, {@link patchSshCred} and
+   * the RDP section's `onChange` each set it too. Read (never rendered) by
+   * the group picker's `onChange` below to decide whether re-seeding
+   * `choice` for the newly picked group would discard a credential the user
+   * already has. Only matters in CREATE mode - `boundIdentity` in edit mode
+   * never reads `choice`, so nothing here can move an existing host's
+   * binding.
+   */
+  const credentialTouched = useRef(false);
+  /**
    * Whether the user has asked this host to forget the key material it still
    * stores under an auth mode that cannot use it - IN THE DRAFT.
    *
@@ -379,8 +410,9 @@ export function HostEditorDialog({
   const [forgetKey, setForgetKey] = useState(false);
   const [proxyJumpId, setProxyJumpId] = useState("");
   const [rdpCred, setRdpCred] = useState<RdpCredentialDraft>(EMPTY_RDP_CRED);
-  const [presetId, setPresetId] = useState(RDP_DEFAULT_PRESET.id);
+  const [presetId, setPresetId] = useState(RDP_FIT_SIZE_ID);
   const [tunnelSshHostId, setTunnelSshHostId] = useState("");
+  const [clipboardMode, setClipboardMode] = useState<RdpClipboardMode>("both");
   /** The stored record being edited, or null in create mode. */
   const [existing, setExisting] = useState<Host | null>(null);
   const [hosts, setHosts] = useState<Host[]>([]);
@@ -500,6 +532,17 @@ export function HostEditorDialog({
     [],
   );
 
+  /**
+   * The identities `credentialChoiceForGroup` is allowed to seed the picker
+   * to - `identityRows` is this dialog's own live list, the same one the
+   * picker's own options come from, so a dangling default is never offered
+   * as a choice the picker cannot also show.
+   */
+  const liveIdentityIds = useMemo(
+    () => new Set(identityRows.map((row) => row.identity.id)),
+    [identityRows],
+  );
+
   // Reset and populate whenever the editor is pointed at a different row. Closing
   // deliberately leaves the draft alone: the next open resets it, and wiping it
   // here would empty every field behind the dialog's own close animation.
@@ -518,6 +561,9 @@ export function HostEditorDialog({
     // last row's seed would license clearing this one's secret.
     sshTouched.current = NO_SSH_SECRETS_TOUCHED;
     sshSeeded.current = NOTHING_SEEDED;
+    // Per row: a group re-seed for the row this editor was pointed away
+    // from must not carry an "already picked" mark onto a fresh create.
+    credentialTouched.current = false;
     // Per row for the same reason: the intent names the accounts of the row this
     // editor was pointed away from, and carrying it onto the next one would
     // delete a key nothing on screen has said a word about.
@@ -560,25 +606,37 @@ export function HostEditorDialog({
 
       if (target.mode === "create") {
         const prefill = target.prefill ?? {};
+        const seedGroupId = liveGroup(prefill.groupId);
         setProtocol(target.protocol);
         setPortTouched(prefill.port !== undefined);
         setShared({
           name: prefill.name ?? "",
           host: prefill.host ?? "",
           port: String(prefill.port ?? defaultPortFor(target.protocol)),
-          groupId: liveGroup(prefill.groupId),
+          groupId: seedGroupId,
           description: "",
+          tags: [],
+          icon: "",
+          color: "",
         });
         setSshCred({ ...EMPTY_SSH_CRED, user: prefill.user ?? "" });
         setRdpCred({ ...EMPTY_RDP_CRED, username: prefill.user ?? "" });
         setProxyJumpId("");
-        setPresetId(RDP_DEFAULT_PRESET.id);
+        setPresetId(RDP_FIT_SIZE_ID);
         setTunnelSshHostId("");
+        setClipboardMode("both");
         setPins({});
+        // A quick-connect `user@host` (or any prefilled user) already named
+        // an account, so the group re-seed below - and the picker's own
+        // onChange after it - must not clobber it either.
+        credentialTouched.current = prefill.user !== undefined;
         // The create arm returns before the `currentCredentialChoice(host)`
         // reset below is reached, so it gets its own: a choice left over from a
-        // previous EDIT sitting must not leak into a new host.
-        setChoice(CREDENTIAL_CHOICE_INLINE);
+        // previous EDIT sitting must not leak into a new host. Inherits the
+        // group's effective default identity when there is one and it names a
+        // live identity - `credentialChoiceForGroup` falls back to the inline
+        // sentinel otherwise, which is the prior behaviour unchanged.
+        setChoice(credentialChoiceForGroup(seedGroupId, allGroups, liveIdentityIds));
         setReady(true);
         return;
       }
@@ -598,6 +656,9 @@ export function HostEditorDialog({
         port: String(host.port),
         groupId: liveGroup(host.groupId),
         description: host.description ?? "",
+        tags: host.tags ?? [],
+        icon: host.icon ?? "",
+        color: host.color ?? "",
       });
       // Through `hostPins`, never off the flat field: it is the one place a record
       // written before pins were keyed adopts its pin onto the address that record
@@ -624,8 +685,9 @@ export function HostEditorDialog({
         });
         setProxyJumpId(liveSshHost(host.proxyJumpId));
         setRdpCred(EMPTY_RDP_CRED);
-        setPresetId(RDP_DEFAULT_PRESET.id);
+        setPresetId(RDP_FIT_SIZE_ID);
         setTunnelSshHostId("");
+        setClipboardMode("both");
         // Interactive BEFORE the secret read, deliberately. Moving this below the
         // await would close the race the seed below guards against, but it would
         // hold the whole form - name, address, port, group - behind "Loading…" for
@@ -667,8 +729,13 @@ export function HostEditorDialog({
         });
         // A row written by a build offering a size this one does not falls back to
         // the default rather than showing an empty picker.
-        setPresetId(presetIdFor(host.desktopWidth, host.desktopHeight) || RDP_DEFAULT_PRESET.id);
+        setPresetId(
+          host.sizeMode === "fit"
+            ? RDP_FIT_SIZE_ID
+            : presetIdFor(host.desktopWidth, host.desktopHeight) || RDP_DEFAULT_PRESET.id,
+        );
         setTunnelSshHostId(liveSshHost(host.tunnel?.sshHostId));
+        setClipboardMode(host.clipboard ?? "both");
         setSshCred(EMPTY_SSH_CRED);
         setProxyJumpId("");
         setReady(true);
@@ -782,6 +849,10 @@ export function HostEditorDialog({
     { value: "", label: "None", search: "none no group ungrouped" },
     ...groups.map((g) => ({ value: g.id, label: g.name, search: `${g.name} ${g.id}` })),
   ];
+  // Every tag already used across saved hosts, exact spellings, offered as
+  // `TagsInput`'s datalist suggestions - `normalizeHostTags` is what actually
+  // dedupes, this is only a typing aid.
+  const allTags: string[] = [...new Set(hosts.flatMap((h) => h.tags ?? []))];
 
   // The credential picker's options. Each identity option carries the id in
   // `search` too, not only in `label` - `ComboboxOption.search` in
@@ -841,6 +912,9 @@ export function HostEditorDialog({
    * the keychain read has not reached yet.
    */
   const patchSshCred = (patch: Partial<SshCredentialDraft>) => {
+    // An inline account the user is actively typing must not be clobbered
+    // by a later group pick - see `credentialTouched`'s own doc.
+    credentialTouched.current = true;
     setSshCred((d) => ({ ...d, ...patch }));
     sshTouched.current = {
       password: sshTouched.current.password || patch.password !== undefined,
@@ -1148,6 +1222,9 @@ export function HostEditorDialog({
         port,
         groupId: shared.groupId || undefined,
         description: shared.description.trim() || undefined,
+        tags: normalizeHostTags(shared.tags),
+        icon: shared.icon || undefined,
+        color: shared.color || undefined,
         lastConnectedAt: existing?.lastConnectedAt,
         // The whole draft map, addresses and all. The store decides which of them
         // is the flat pin every consumer reads, so `lastFingerprint` /
@@ -1217,10 +1294,14 @@ export function HostEditorDialog({
               },
           desktopWidth: preset.width,
           desktopHeight: preset.height,
-          sizeMode: "preset",
+          sizeMode: presetId === RDP_FIT_SIZE_ID ? "fit" : "preset",
           // `undefined` rather than an empty object, so a direct connection is the
           // absence of a tunnel and not an empty one.
           tunnel: tunnelSshHostId ? { sshHostId: tunnelSshHostId } : undefined,
+          // Same shape as `tunnel`: `undefined` for the default, so a record
+          // written by this build is indistinguishable from one written before
+          // the field existed.
+          clipboard: clipboardMode === "both" ? undefined : clipboardMode,
         };
         // `undefined`, not `""`, when the field was left blank: an empty string
         // would DELETE the stored password, so an edit that only renamed the host
@@ -1283,49 +1364,59 @@ export function HostEditorDialog({
         // exact defect `sshTouched` exists to prevent. This path reads the record,
         // never a secret.
         const fresh = await findHost(e.hostId).catch(() => undefined);
-        if (fresh) {
-          setExisting(fresh);
-          // The one draft value this recovery does drop, and it has to: the arm
-          // below re-seeds `authMode` from `fresh`, so a record that is now on
-          // key auth would put the key textarea back on screen with the intent
-          // still set - the second press of Save would then delete the body the
-          // user is looking at, with the row that promised it nowhere in the
-          // form. Dropped in the safe direction: nothing has been deleted, the
-          // row renders again from `fresh`'s own flags with its button back, and
-          // its note still says what pressing it does.
-          setForgetKey(false);
-          // The most common way this refusal is reached now is the
-          // credential picker above, on ANOTHER open editor for the same host:
-          // this form loaded a row BOUND to an identity, that binding was
-          // detached in the meantime, and `boundIdentity` recomputes off
-          // `fresh` and goes null the instant it does. A form that loaded a
-          // bound row never had an editable user/username field to seed the
-          // draft from - it was blank the whole time, under
-          // `VaultBindingPanel` - so pressing Save again would write that
-          // blank draft as the record's plain `user`/`authMode` (or
-          // `username`/`domain`), silently overwriting the real values
-          // `fresh` just copied from the identity. Re-seeding those two
-          // fields from `fresh` closes it. The secret fields are written ""
-          // alongside them rather than left as whatever the blank draft
-          // already held, because nothing here has read them and a stale
-          // value must not be implied as current.
-          if (existing?.credential.kind !== "inline" && fresh.credential.kind === "inline") {
-            if (isSshHost(fresh)) {
-              const cred = fresh.credential;
-              if (cred.kind === "inline") {
-                setSshCred({
-                  user: cred.user,
-                  authMode: cred.authMode,
-                  password: "",
-                  privateKey: "",
-                  keyPassphrase: "",
-                });
-              }
-            } else if (isRdpHost(fresh)) {
-              const cred = fresh.credential;
-              if (cred.kind === "inline") {
-                setRdpCred({ username: cred.username, domain: cred.domain ?? "", password: "" });
-              }
+        // A re-read that failed or came back empty refreshed nothing: `existing` -
+        // and with it `boundIdentity` and the stamp the next Save sends - is still
+        // what the form loaded, so a second press is refused the same way.
+        // "Close and reopen" is the only instruction that is true there, the same
+        // exit the vault editors take for the same refusal.
+        if (!fresh) {
+          setError(
+            `${e.message} Close and reopen this host to edit it against what is stored now; ` +
+              `anything typed here has to be entered again.`,
+          );
+          return;
+        }
+        setExisting(fresh);
+        // The one draft value this recovery does drop, and it has to: the arm
+        // below re-seeds `authMode` from `fresh`, so a record that is now on
+        // key auth would put the key textarea back on screen with the intent
+        // still set - the second press of Save would then delete the body the
+        // user is looking at, with the row that promised it nowhere in the
+        // form. Dropped in the safe direction: nothing has been deleted, the
+        // row renders again from `fresh`'s own flags with its button back, and
+        // its note still says what pressing it does.
+        setForgetKey(false);
+        // The most common way this refusal is reached now is the
+        // credential picker above, on ANOTHER open editor for the same host:
+        // this form loaded a row BOUND to an identity, that binding was
+        // detached in the meantime, and `boundIdentity` recomputes off
+        // `fresh` and goes null the instant it does. A form that loaded a
+        // bound row never had an editable user/username field to seed the
+        // draft from - it was blank the whole time, under
+        // `VaultBindingPanel` - so pressing Save again would write that
+        // blank draft as the record's plain `user`/`authMode` (or
+        // `username`/`domain`), silently overwriting the real values
+        // `fresh` just copied from the identity. Re-seeding those two
+        // fields from `fresh` closes it. The secret fields are written ""
+        // alongside them rather than left as whatever the blank draft
+        // already held, because nothing here has read them and a stale
+        // value must not be implied as current.
+        if (existing?.credential.kind !== "inline" && fresh.credential.kind === "inline") {
+          if (isSshHost(fresh)) {
+            const cred = fresh.credential;
+            if (cred.kind === "inline") {
+              setSshCred({
+                user: cred.user,
+                authMode: cred.authMode,
+                password: "",
+                privateKey: "",
+                keyPassphrase: "",
+              });
+            }
+          } else if (isRdpHost(fresh)) {
+            const cred = fresh.credential;
+            if (cred.kind === "inline") {
+              setRdpCred({ username: cred.username, domain: cred.domain ?? "", password: "" });
             }
           }
         }
@@ -1745,7 +1836,10 @@ export function HostEditorDialog({
                   <Combobox
                     options={credentialOptions}
                     value={choice}
-                    onChange={setChoice}
+                    onChange={(next) => {
+                      credentialTouched.current = true;
+                      setChoice(next);
+                    }}
                     searchPlaceholder="Search identities…"
                     emptyLabel="No identities found."
                   />
@@ -1792,7 +1886,12 @@ export function HostEditorDialog({
                     boundIdentity={boundIdentity}
                     identityName={boundIdentityName}
                     value={rdpCred}
-                    onChange={(patch) => setRdpCred((d) => ({ ...d, ...patch }))}
+                    onChange={(patch) => {
+                      // Same reasoning as `patchSshCred`: a typed RDP account
+                      // must not be clobbered by a later group pick.
+                      credentialTouched.current = true;
+                      setRdpCred((d) => ({ ...d, ...patch }));
+                    }}
                     hasStoredPassword={hasStoredRdpPassword}
                   />
                 )}
@@ -1808,8 +1907,10 @@ export function HostEditorDialog({
                     sshHosts={sshHosts}
                     presetId={presetId}
                     tunnelSshHostId={tunnelSshHostId}
+                    clipboardMode={clipboardMode}
                     onPresetChange={setPresetId}
                     onTunnelChange={setTunnelSshHostId}
+                    onClipboardChange={setClipboardMode}
                   />
                 )}
 
@@ -1817,7 +1918,15 @@ export function HostEditorDialog({
                   <Combobox
                     options={groupOptions}
                     value={shared.groupId}
-                    onChange={(groupId) => setShared({ ...shared, groupId })}
+                    onChange={(groupId) => {
+                      setShared({ ...shared, groupId });
+                      // Re-seeds the still-untouched picker for the newly
+                      // picked group's own default - never in edit mode,
+                      // where `boundIdentity` does not read `choice` at all.
+                      if (mode === "create" && !credentialTouched.current) {
+                        setChoice(credentialChoiceForGroup(groupId, groups, liveIdentityIds));
+                      }
+                    }}
                     searchPlaceholder="Search groups…"
                     emptyLabel="No group found."
                   />
@@ -1836,6 +1945,21 @@ export function HostEditorDialog({
                     className="h-16 text-[12px]"
                   />
                 </Field>
+
+                <Field label="Tags (optional)">
+                  <TagsInput
+                    tags={shared.tags}
+                    onChange={(tags) => setShared({ ...shared, tags })}
+                    suggestions={allTags}
+                  />
+                </Field>
+
+                <HostAppearancePicker
+                  icon={shared.icon}
+                  color={shared.color}
+                  onIconChange={(icon) => setShared({ ...shared, icon })}
+                  onColorChange={(color) => setShared({ ...shared, color })}
+                />
 
                 {mode === "edit" ? (
                   <PinnedKeyRow

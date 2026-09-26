@@ -11,9 +11,9 @@ import { isSshHost, type Host, type SshHost } from "./types";
 // connect resolve a whole chain against a single `listHosts()` read.
 //
 // Credentials come from `resolveSshAuth`, so a hop bound to a vault identity and
-// a hop owning its credentials inline are the same code here. That is also where
-// the plaintext enters JS, once per hop - the pre-existing SSH defect, unchanged
-// by this module and not made worse by it.
+// a hop owning its credentials inline are the same code here. Every hop carries
+// keychain REFERENCES, dereferenced in the host process, so no hop's plaintext
+// enters JS.
 
 /** Hard cap so a malformed chain cannot spin forever building hops. */
 export const MAX_JUMP_HOPS = 16;

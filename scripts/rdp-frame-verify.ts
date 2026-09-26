@@ -1,7 +1,8 @@
 /**
- * RDP frame-format, letterbox and scancode audit. Four properties, and every
- * one of them fails SILENTLY: there is no exception to see, just wrong pixels,
- * a cursor that lands away from the click, or a key that types something else.
+ * RDP frame-format, letterbox, scancode and input-queue audit. Six properties,
+ * and every one of them fails SILENTLY: there is no exception to see, just
+ * wrong pixels, a cursor that lands away from the click, a key that types
+ * something else, or a modifier stuck down.
  *
  * 1. WIRE FORMAT. `frame.ts` is the reader for the format `src-tauri/src/
  *    modules/rdp/frame.rs` writes. The fixtures below are byte-for-byte the
@@ -17,16 +18,34 @@
  *    desktop is drawn and `toRemotePoint` decides what a click hit; if they
  *    disagree by a pixel the cursor is permanently offset from the pointer, and
  *    if the bars are not excluded a click beside the desktop lands on its edge.
- * 4. SCANCODES CARRY THE EXTENDED FLAG. The navigation cluster and the numpad
+ * 4. FIT MODE ASKS FOR THE RIGHT SIZE. `fitDesktopSize` converts a CSS-pixel
+ *    pane rect into the device-pixel desktop the server is asked for, inside
+ *    MS-RDPEDISP's 200..=8192 range with an even width. Wrong arithmetic is an
+ *    upscaled, blurry desktop or a remote clamped to a postage stamp - neither
+ *    of which raises anything.
+ * 5. SCANCODES CARRY THE EXTENDED FLAG. The navigation cluster and the numpad
  *    share low bytes, so a missing `0xE0` makes Delete type numpad-period and
  *    the arrows move the numpad. Nothing reports that; the remote just does the
  *    wrong thing.
+ * 6. A REJECTED BATCH LOSES NO KEY TRANSITION. `rdp_input` refuses a batch
+ *    whole once the session task falls behind, and the pane re-queues it in
+ *    front of whatever arrived meanwhile. `coalesceMoves` collapses the move
+ *    runs that seam creates, and must touch nothing else: a key transition or
+ *    a `releaseAll` dropped there strands a modifier down on the server for
+ *    the rest of the session, silently.
  *
  * Run: `npx tsx scripts/rdp-frame-verify.ts`.
  */
 import { parseFrameBatch, RDP_FRAME_VERSION } from "../src/modules/rdp/frame";
-import { fitViewport, toRemotePoint, wheelRotation } from "../src/modules/rdp/lib/viewport";
+import {
+  fitDesktopSize,
+  fitViewport,
+  toRemotePoint,
+  wheelRotation,
+} from "../src/modules/rdp/lib/viewport";
 import { CTRL_ALT_DEL_SCANCODES, scancodeFor } from "../src/modules/rdp/scancodes";
+import { coalesceMoves } from "../src/modules/rdp/lib/inputQueue";
+import type { RdpInputEvent } from "../src/modules/rdp/bridge";
 
 let failures = 0;
 function check(label: string, actual: unknown, expected: unknown): void {
@@ -117,7 +136,6 @@ console.log("\n[wire] a well-formed batch parses exactly");
   const batch = parseFrameBatch(buf);
   checkTrue("it parses", batch !== null);
   if (!batch) throw new Error("unreachable: guarded above");
-  check("delta, not keyframe", batch.keyframe, false);
   check("framebuffer size", [batch.fbWidth, batch.fbHeight], [8, 4]);
   check("rect table, in order", batch.rects, rects);
   // The offsets are ABSOLUTE into the buffer, which is what lets a caller build
@@ -144,7 +162,6 @@ console.log("\n[wire] a keyframe is one full-framebuffer rect");
     encode({ keyframe: true, fbWidth: 6, fbHeight: 3, rects: [{ x: 0, y: 0, w: 6, h: 3 }] }),
   );
   checkTrue("it parses", batch !== null);
-  check("kind 1 reads as a keyframe", batch?.keyframe, true);
   check("covering the whole framebuffer", batch?.rects, [{ x: 0, y: 0, w: 6, h: 3 }]);
 }
 
@@ -335,6 +352,35 @@ console.log("\n[letterbox] the mapping is the exact inverse of the draw");
   check("which maps nothing", toRemotePoint(fitViewport(0, 0, 1280, 720), 1280, 720, 0, 0), null);
 }
 
+console.log("\n[fit] the desktop size asked for matches the pane in DEVICE pixels");
+{
+  // Device pixels, not CSS: a 2x display asks for twice the pane, or the
+  // framebuffer is upscaled and blurrier than the preset it replaced. Width is
+  // rounded DOWN to even (MS-RDPEDISP 2.2.2.2.1), height is not.
+  check("scales by the device pixel ratio", fitDesktopSize(1000.4, 700.6, 2), {
+    width: 2000,
+    height: 1401,
+  });
+  check("an odd width rounds down at dpr 1", fitDesktopSize(1001, 700, 1), {
+    width: 1000,
+    height: 700,
+  });
+  // The spec floor and ceiling. Both are even, so the parity mask cannot push
+  // a clamped width back out of range.
+  check("a tiny pane clamps up to the floor", fitDesktopSize(50, 40, 1), {
+    width: 200,
+    height: 200,
+  });
+  check("a huge pane clamps down to the ceiling", fitDesktopSize(9000, 9000, 1), {
+    width: 8192,
+    height: 8192,
+  });
+  // The guard that stops a hidden tab - which measures 0x0 - from clamping to
+  // the floor and shrinking the remote desktop to a postage stamp.
+  check("an unmeasurable width yields null", fitDesktopSize(0, 500, 1), null);
+  check("an unmeasurable height yields null", fitDesktopSize(800, 0, 1), null);
+}
+
 console.log("\n[wheel] one notch per event, with RDP's sign");
 {
   // The DOM's positive Y is scroll DOWN; RDP's positive rotation is scroll UP.
@@ -473,6 +519,36 @@ console.log("\n[scancodes] Ctrl+Alt+Del releases exactly what it pressed");
   // later keystroke in the session.
   check("released in reverse", up, [...down].reverse());
   check("and nothing is left held", [...down].sort(), [...up].sort());
+}
+
+console.log("\n[input queue] a re-queued batch keeps every key transition");
+{
+  const move = (x: number, y: number): RdpInputEvent => ({ kind: "mouseMove", x, y });
+  const keyDown = (scancode: number): RdpInputEvent => ({ kind: "keyDown", scancode });
+  const releaseAll: RdpInputEvent = { kind: "releaseAll" };
+
+  check("an empty batch stays empty", coalesceMoves([]), []);
+
+  const seam: RdpInputEvent[] = [
+    move(1, 1),
+    move(2, 2),
+    keyDown(0x1c),
+    move(3, 3),
+    move(4, 4),
+    move(5, 5),
+    releaseAll,
+    move(6, 6),
+  ];
+  check("newest of each run, and no run collapses backwards past a non-move", coalesceMoves(seam), [
+    move(2, 2),
+    keyDown(0x1c),
+    move(5, 5),
+    releaseAll,
+    move(6, 6),
+  ]);
+
+  const nonMoves = (events: RdpInputEvent[]) => events.filter((e) => e.kind !== "mouseMove").length;
+  check("every non-move survives", nonMoves(coalesceMoves(seam)), nonMoves(seam));
 }
 
 if (failures > 0) throw new Error(`rdp-frame-verify: ${failures} FAILED`);

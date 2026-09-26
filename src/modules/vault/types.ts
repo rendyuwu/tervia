@@ -4,9 +4,8 @@
 // is a private key, stored ONCE and shared by every identity that uses it.
 //
 // What this buys is FEWER COPIES of the same secret, not a stronger secret. On
-// Linux a private key sits in a mode-0600 JSON file before and after this work,
-// and the SSH connect path still round-trips plaintext through JS on every
-// connect and every ProxyJump hop. Nothing here changes either.
+// Linux a private key sits in a mode-0600 JSON file before and after this work.
+// Nothing here changes that.
 
 export const VAULT_STORE_PATH = "tervia-vault.json";
 export const VAULT_IDENTITIES_KEY = "identities";
@@ -107,14 +106,41 @@ export type VaultIdentity = {
   /** Set when `authMode === "key"`. Names a {@link VaultKey}. */
   keyId?: string;
   description?: string;
+  /** Unix ms of the last change, stamped by the store on every write. Absent is
+   *  not zero and is never backfilled on read - `HostBase.updatedAt` in
+   *  `modules/hosts/types.ts` carries the full reasoning, and this field means
+   *  exactly the same thing. */
+  updatedAt?: number;
+  /** Unix ms of the last successful connect that authenticated as this identity,
+   *  FROM THIS DEVICE. Written only by `markIdentityConnected` in
+   *  `src/modules/vault/store.ts`. Never synced (`DEVICE_LOCAL_FIELDS` strips it by
+   *  name), never folded into `updatedAt`, and not restored by a backup import
+   *  (KNOWN-LIMITS.md). */
+  lastConnectedAt?: number;
 };
 
 /** What `ssh_key_inspect` reports. Display only. */
 export type VaultKeyType = "rsa" | "ed25519" | "ecdsa" | "unknown";
 
+/**
+ * What kind of vault key this is. Absent means today's shape: a PEM body,
+ * stored exactly as before - read-time adoption, no migration.
+ *
+ * - `"cert"`: the signing private key is stored exactly like a `pem` key
+ *   (same `hasPrivateKey`/`hasPassphrase` accounts, same `decode_secret_key`
+ *   at dial time), plus an OpenSSH certificate. The certificate is PUBLIC,
+ *   so it lives in `certificate` below, never in the keychain.
+ * - `"hardware"`: no secret at all. `hasPrivateKey`/`hasPassphrase` stay
+ *   `false` forever; `fingerprint` is the identifying fact, matched against
+ *   the OS ssh-agent at dial time (`resolveSshAuth`, `src/modules/vault/resolve.ts`).
+ */
+export type VaultKeyKind = "cert" | "hardware";
+
 /** A private key, stored once and shared by every identity that uses it. */
 export type VaultKey = {
   id: string;
+  /** See {@link VaultKeyKind}. */
+  kind?: VaultKeyKind;
   /** Referenced by NAME across many hosts, so a duplicate is a real usability
    *  failure - see the collision warning in `store.ts`. */
   name: string;
@@ -160,7 +186,42 @@ export type VaultKey = {
    */
   encrypted?: boolean;
   description?: string;
+  /** Unix ms of the last change, on the same terms as
+   *  {@link VaultIdentity.updatedAt}. */
+  updatedAt?: number;
+  /** The last successful SSH connect that authenticated with this key, on the
+   *  terms of {@link VaultIdentity.lastConnectedAt}. */
+  lastConnectedAt?: number;
+  /**
+   * `kind === "cert"` only: the OpenSSH certificate text
+   * (`ssh-ed25519-cert-v01@openssh.com ...`). Public - the certified key's
+   * own private half is what is secret, and that is `hasPrivateKey` above,
+   * unchanged from a `pem` key.
+   */
+  certificate?: string;
+  /** `kind === "cert"` only, parsed from `certificate` by `ssh_key_classify`
+   *  at save time: the signing CA's own fingerprint. */
+  certCaFingerprint?: string;
+  /** `kind === "cert"` only: the certificate's `key_id`, a CA-chosen label. */
+  certKeyId?: string;
+  /** `kind === "cert"` only: the usernames/hostnames this certificate is
+   *  valid for. */
+  certPrincipals?: string[];
+  /** `kind === "cert"` only, unix seconds. */
+  certValidAfter?: number;
+  /** `kind === "cert"` only, unix seconds - absent means the certificate
+   *  never expires (OpenSSH's `u64::MAX` "forever" sentinel). */
+  certValidBefore?: number;
 };
+
+/**
+ * What an identity and a key are called in a tombstone's `kind`.
+ *
+ * Both kinds share ONE tombstone list, because both live in one file and `kind`
+ * is what tells them apart.
+ */
+export const IDENTITY_TOMBSTONE_KIND = "identity";
+export const KEY_TOMBSTONE_KIND = "key";
 
 /** A reference to a shared vault identity. */
 export type VaultIdentityBinding = { kind: "identity"; identityId: string };
@@ -256,16 +317,18 @@ export function assertBindingOwner(
 export type VaultRef = { id: string; name: string };
 
 /**
- * The hosts that reference one identity.
+ * Every host bound to one identity, plus every group naming it as a default -
+ * everything `deleteIdentity` refuses to delete over.
  *
  * INJECTED, never imported. `modules/hosts` imports
  * {@link SshCredentialBinding} and {@link RdpCredentialBinding} from
  * this module, so a vault -> hosts import would close a cycle. The wiring is
- * `(id) => listHosts().then((hosts) => hosts.filter(usesIdentity(id)).map(toRef))`.
+ * `(id) => [...hostsUsingIdentity(hosts, id), ...groupsUsingIdentity(groups, id)]`
+ * (`modules/vault/refs.ts`).
  *
  * Required, never optional: a caller allowed to pass nothing would silently skip
  * the guard, and the guard is the only thing between one confirmed delete and a
- * host that can no longer connect.
+ * host - or a group's default - that can no longer name what it claims to.
  */
 export type IdentityHostRefs = (identityId: string) => VaultRef[] | Promise<VaultRef[]>;
 
@@ -334,11 +397,23 @@ export const VAULT_STAMP_ABSENT = "absent";
  * three-state field read by two rules; and it made `null` stamp as `0`, the
  * STRONGER claim that something looked and found the body unencrypted. Both
  * readers now test `=== true` for the encrypted answer.
+ *
+ * `kind` and, for a `cert` key, `certificate` itself are appended for the
+ * same reason the fingerprint is included: a `cert` record whose signing key
+ * stays untouched but whose `certificate` field is swapped for a DIFFERENT
+ * certificate over the SAME key is a materially different authentication
+ * fact (a different validity window, different principals) that none of the
+ * fields above would otherwise notice, since the fingerprint they hash is
+ * the signing key's, not the certificate's. `kind` alone guards a record
+ * changing shape entirely - `pem` to `hardware`, say - from ever reading as
+ * unchanged.
  */
 export function vaultKeyStamp(key: VaultKey | null | undefined): string {
   if (!key) return VAULT_STAMP_ABSENT;
   const encrypted = key.encrypted === true ? "1" : key.encrypted === false ? "0" : "-";
-  return `key:${key.hasPrivateKey ? 1 : 0}${key.hasPassphrase ? 1 : 0}${encrypted}:${key.fingerprint ?? ""}`;
+  const kind = key.kind ?? "pem";
+  const cert = key.kind === "cert" ? (key.certificate ?? "") : "";
+  return `key:${kind}:${key.hasPrivateKey ? 1 : 0}${key.hasPassphrase ? 1 : 0}${encrypted}:${key.fingerprint ?? ""}:${cert}`;
 }
 
 /**

@@ -270,6 +270,18 @@ check(
 );
 check('the picker filter contains "json"', /"json"/.test(filterExtensions));
 
+// Bounded to `openImport`'s own body - `openForeignImport` (the ssh_config/
+// PuTTY importer) legitimately makes a second `fs_read_file` call with its
+// own guard shape below it, and an unscoped count/order check would start
+// reading across both functions' control flow instead of just this one's.
+// Same region-bounding style `summarizeBody` above uses: slice from this
+// function's own `const` to the next top-level one.
+const openImportSrc = actionsSrc.slice(
+  actionsSrc.indexOf("const openImport"),
+  actionsSrc.indexOf("const openForeignImport"),
+);
+check("openImport()'s own body was found", openImportSrc.length > 0);
+
 console.log("\n[actions] openImport() checks the shape BEFORE opening the passphrase dialog");
 // Textual order is the contract here: reading is not enough (the bug was
 // exactly that the read happened first and the check ran only after Import
@@ -283,11 +295,11 @@ const anchors = {
   openDialog: 'setBackup({ kind: "import"',
 } as const;
 for (const needle of Object.values(anchors)) {
-  const count = actionsSrc.split(needle).length - 1;
-  check(`"${needle}" appears exactly once (found ${count})`, count === 1);
+  const count = openImportSrc.split(needle).length - 1;
+  check(`"${needle}" appears exactly once in openImport() (found ${count})`, count === 1);
 }
 const idx = Object.fromEntries(
-  Object.entries(anchors).map(([name, needle]) => [name, actionsSrc.indexOf(needle)]),
+  Object.entries(anchors).map(([name, needle]) => [name, openImportSrc.indexOf(needle)]),
 ) as Record<keyof typeof anchors, number>;
 check(
   "the file is read before its JSON is parsed",
@@ -314,14 +326,14 @@ console.log("\n[actions] a failed pre-check toasts and returns, never reaching t
 // to survive: the catch immediately after it, and `setBackup` immediately
 // after that, are scaffolding this file's own guarded call sits inside, not
 // evidence the call is still there. Confirmed by removing each call in turn.
-const jsonGuard = actionsSrc.match(
+const jsonGuard = openImportSrc.match(
   /try \{\s*\n\s*raw = JSON\.parse\(result\.content\);\s*\n\s*\} catch \{\s*\n\s*toast\("That file is not valid JSON\.",\s*\{\s*variant:\s*"error"\s*\}\);\s*\n\s*return;/,
 );
 check(
   "the try that parses JSON is guarded by a catch that toasts then returns",
   jsonGuard !== null,
 );
-const shapeGuard = actionsSrc.match(
+const shapeGuard = openImportSrc.match(
   /try \{\s*\n\s*parseBackupFile\(raw\);\s*\n\s*\} catch \(e\) \{\s*\n\s*toast\(e instanceof Error \? e\.message : String\(e\), \{ variant: "error" \}\);\s*\n\s*return;\s*\n\s*\}\s*\n\s*setBackup\(\{ kind: "import"/,
 );
 check(
@@ -332,14 +344,14 @@ check(
 console.log("\n[actions] a plain Cancel is still not an error - untouched by this change");
 check(
   "the cancel guard (`if (!path) return;`) is unchanged: no toast, just a silent return",
-  /if \(!path\) return;/.test(actionsSrc),
+  /if \(!path\) return;/.test(openImportSrc),
 );
 // The cancel guard has to run BEFORE the file is even read, let alone
 // shape-checked - otherwise a null path would reach `fs_read_file` with
 // nothing to read.
 check(
   "the cancel guard runs before the file read",
-  actionsSrc.indexOf("if (!path) return;") < idx.readFile,
+  openImportSrc.indexOf("if (!path) return;") < idx.readFile,
 );
 
 // --- Part 3: the plaintext read path stays deleted, on both sides -----------
@@ -427,6 +439,21 @@ check(
     : `lib.rs registers backup::backup_open (found ${bareHandlers})`,
   bareHandlers === 0,
 );
+
+console.log("\n[apply] an import writes the whole batch as ONE store commit");
+// On Linux and Windows every commit rewrites the entire store, so a per-ref
+// `write_secret` made importing N connections cost roughly 3N whole-store
+// rewrites. No Rust test can pin this: `write_secrets` needs an `AppHandle`,
+// and anything reachable from `cargo test` would only re-exercise
+// `commit_locked` and say nothing about the decision to call it once.
+{
+  const rust = stripComments(read("src-tauri/src/modules/backup.rs"));
+  const batched = (rust.match(/write_secrets\(/g) ?? []).length;
+  check(`backup.rs calls write_secrets exactly once (found ${batched})`, batched === 1);
+  // Disjoint patterns: the trailing `(` excludes the plural, so this says no
+  // per-ref write survived anywhere in the file.
+  check("and no per-ref write_secret( call survives", !/write_secret\(/.test(rust));
+}
 
 // --- Functional: WHAT the pre-check decides, at the point it runs -----------
 

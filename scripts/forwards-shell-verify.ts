@@ -304,6 +304,8 @@ function walkSrcFiles(dir: string): string[] {
 
   const SHARED_HELPERS = [
     "closesABlock",
+    "guardAt",
+    "guardAtSelfTest",
     "importSpecifiersOf",
     "isDirectlyInFunctionBody",
     "isUnguardedToItsFunctionBody",
@@ -1737,17 +1739,33 @@ console.log(
   // added to one side only is as loud as one added to both.
   // --------------------------------------------------------------------------
   const FORWARDS_STORE_MEMBERS = [
-    // The three WRITE ROUTES. Every other member is a read or plumbing, and
-    // these three are the whole of how a rule record is created, rewritten or
-    // removed - which is what makes "release before every one of them" a claim
-    // with a finite surface rather than a hope.
+    // The three WRITE ROUTES A USER REACHES. Every other member is a read or
+    // plumbing, and these three are the whole of how a rule record is created,
+    // rewritten or removed from this machine - which is what makes "release
+    // before every one of them" a claim with a finite surface rather than a
+    // hope.
     "deleteRule",
     "dropRulesForHost",
     "upsertRule",
-    // The reads and the plumbing.
+    // THE FOURTH WRITE ROUTE, AND THE RELEASE CLAIM ABOVE COVERS IT FROM THE
+    // CALLER'S SIDE, NOT FROM HERE. `applyRemote` lands another device's
+    // deletes, so it can drop a rule record whose forward is running here, and
+    // it cannot release one itself: the runtime lives in `controller.ts`, which
+    // imports this store, so a store that called back into it would close the
+    // cycle every port in this module exists to keep open. So the release is
+    // sequenced ahead of the apply by the one caller - `release` in
+    // `src/modules/sync/scheduler.ts`, through an injected port - the way
+    // `HostsPage.tsx` sequences `deleteHost`'s. `scripts/sync-scheduler-verify.ts`
+    // pins that order; a landed EDIT is still not released, which is what
+    // `KNOWN-LIMITS.md` now carries.
+    "applyRemote",
+    // The reads and the plumbing. `listTombstones` is a READ: it reports what
+    // the three write routes above left behind, and adding it changed no rule
+    // record, so the release claim's surface is still those three.
     "ensureLoaded",
     "findRule",
     "listRules",
+    "listTombstones",
     "newRuleId",
     "onForwardsChanged",
     "takeRecoveryNotice",
@@ -1781,7 +1799,7 @@ console.log(
       visit(factory);
     }
     check(
-      "the object createForwardStore returns has EXACTLY these members, three of them write routes (upsertRule, deleteRule, dropRulesForHost) - a fourth route reddens here",
+      "the object createForwardStore returns has EXACTLY these members, four of them write routes (upsertRule, deleteRule, dropRulesForHost, applyRemote) - a fifth route reddens here",
       JSON.stringify(returned) === JSON.stringify(FORWARDS_STORE_MEMBERS),
       returned,
     );
@@ -2148,13 +2166,6 @@ const bridgeCallbacks = new Map<number, (payload: unknown) => void>();
 async function handleBridgeInvoke(cmd: string, args: Record<string, unknown>): Promise<unknown> {
   bridgeCalls.push({ cmd, args });
   switch (cmd) {
-    case "plugin:store|load":
-    case "plugin:store|get_store":
-      return 1;
-    case "plugin:store|get":
-      return [[], true];
-    case "plugin:store|set":
-    case "plugin:store|save":
     case "plugin:event|emit":
       return undefined;
     case "secrets_get_all":
@@ -2665,7 +2676,9 @@ console.log(
   resetFakes();
   resetStores();
   const rule = fakeRule({ id: "c9", localPort: 18080 });
-  useHostOwnedForwards.setState({ byRule: { c9: { sessionId: 41, boundPort: 54321 } } });
+  useHostOwnedForwards.setState({
+    byRule: { c9: { sessionId: 41, boundPort: 54321, generation: 1 } },
+  });
   await startRule(rule, FAKE_RUNTIME);
   check(
     "C9: nothing was dialled - the refusal is ahead of the open",
@@ -2754,7 +2767,9 @@ console.log(
   // The terminal's autostart claims WHILE this dial is in flight. Synchronous
   // in production too - `claimHostOwned` is a plain store write - so no timing
   // trick is needed to reach it.
-  useHostOwnedForwards.setState({ byRule: { c10: { sessionId: 41, boundPort: 54321 } } });
+  useHostOwnedForwards.setState({
+    byRule: { c10: { sessionId: 41, boundPort: 54321, generation: 1 } },
+  });
 
   const landedClaim = nextFakeClaim;
   parkedFakeOpens[0].resolve({
@@ -2840,6 +2855,78 @@ console.log(
 
 // ---------------------------------------------------------------------------
 console.log(
+  "\n[C10r] startRule's dial REJECTS into a rule the TERMINAL claimed meanwhile - STOPPED, not failed, so no error survives to resurface when that tab closes",
+);
+// The rejecting half of C10. The terminal claims on `starting` and holds the
+// pinned port, so the page's own dial fails EADDRINUSE. `markFailed` there
+// parks an error `RuleCard` only hides under `hostOwned` - the red line comes
+// back the moment that tab closes.
+{
+  resetFakes();
+  resetStores();
+  const rule = fakeRule({ id: "c10r", localPort: 18080 });
+  autoAnswerFakeOpen = false;
+  const starting = startRule(rule, FAKE_RUNTIME);
+  await settle();
+  useHostOwnedForwards.setState({
+    byRule: { c10r: { sessionId: 41, boundPort: 18080, generation: 1 } },
+  });
+  parkedFakeOpens[0].reject(
+    "ssh: bind 127.0.0.1:18080 failed: Address already in use (os error 98)",
+  );
+  await starting;
+  await settle();
+  check(
+    "C10r: the row is exactly { status: stopped } - no error left behind",
+    JSON.stringify(useForwardRuntime.getState().byRule["c10r"]) ===
+      JSON.stringify({ status: "stopped" }),
+    useForwardRuntime.getState().byRule["c10r"],
+  );
+  check(
+    "C10r: exactly one WARNING toast, the yield sentence naming the rule",
+    toastCalls.length === 1 &&
+      toastCalls[0]?.variant === "warning" &&
+      (toastCalls[0]?.message ?? "").includes(`"rule-c10r" came up on its terminal`),
+    toastCalls,
+  );
+  check(
+    "C10r: and nothing was closed - a rejected dial took no reference",
+    closeCalls.length === 0,
+    closeCalls,
+  );
+}
+{
+  // The paired control: the same parked reject with the terminal's map EMPTY is
+  // a real failure, and still says so.
+  resetFakes();
+  resetStores();
+  const rule = fakeRule({ id: "c10rb", localPort: 18080 });
+  autoAnswerFakeOpen = false;
+  const starting = startRule(rule, FAKE_RUNTIME);
+  await settle();
+  parkedFakeOpens[0].reject(
+    "ssh: bind 127.0.0.1:18080 failed: Address already in use (os error 98)",
+  );
+  await starting;
+  await settle();
+  check(
+    "C10r: with no terminal claim the same reject marks failed, with the port sentence",
+    JSON.stringify(useForwardRuntime.getState().byRule["c10rb"]) ===
+      JSON.stringify({
+        status: "failed",
+        error: "Port 18080 is already in use on this machine.",
+      }),
+    useForwardRuntime.getState().byRule["c10rb"],
+  );
+  check(
+    "C10r: and says so once, as an error",
+    toastCalls.length === 1 && toastCalls[0]?.variant === "error",
+    toastCalls,
+  );
+}
+
+// ---------------------------------------------------------------------------
+console.log(
   "\n[C11] pageMustStopFirst answers about NOW, over the real stores - every status in, both owners",
 );
 // The predicate `ForwardsPage.tsx`'s confirm and `RuleEditorDialog.tsx`'s save
@@ -2898,7 +2985,7 @@ type ForwardStatusType = NonNullable<
       byRule: c.status === undefined ? {} : { c11: { status: c.status } },
     });
     useHostOwnedForwards.setState({
-      byRule: c.hostOwned ? { c11: { sessionId: 41, boundPort: 54321 } } : {},
+      byRule: c.hostOwned ? { c11: { sessionId: 41, boundPort: 54321, generation: 1 } } : {},
     });
     check(
       `C11: status=${c.status ?? "(no entry)"} hostOwned=${c.hostOwned} -> ${c.want}`,
@@ -3746,5 +3833,199 @@ console.log(failed === 0 ? "\nAll forwards-shell checks passed." : `\n${failed} 
 //           over all fifteen source files these four       tsc clean - the paired
 //           scripts read                                    control, as predicted.
 // ----------------------------------------------------------------------------
+
+// ----------------------------------------------------------------------------
+// [draft.ts per-type] validateRuleDraft/ruleRecordFrom/ruleDraftFrom, BEHAVIOURALLY,
+// per `rule.type`. Everything above this line reads
+// `src/modules/forwards/editor/draft.ts` as SOURCE TEXT
+// (`FILES.draft`); nothing calls its exported functions with real values. This
+// is the gap: that `-R` writes `localPort: 0` and a blank/`0` `remoteHost`/
+// `remotePort` (never the -L dial-target pair) and omits `bindPort` when the
+// field was left blank, and that a `-D` record is written with a blank
+// `remoteHost` too - both only provable by calling the functions, not by
+// reading their text. The draft module is pure (its own header), so a plain import
+// needs no Tauri/window stand-in, unlike the C-series above.
+// ----------------------------------------------------------------------------
+console.log("\n[draft.ts per-type] validateRuleDraft/ruleRecordFrom/ruleDraftFrom, behaviourally");
+{
+  const { EMPTY_RULE_DRAFT, ruleDraftFrom, ruleRecordFrom, validateRuleDraft } =
+    await import("../src/modules/forwards/editor/draft");
+  const base = { ...EMPTY_RULE_DRAFT, name: "web tunnel", hostId: "h-1" };
+
+  // -L (type "").
+  check(
+    "-L: a blank remote host is refused",
+    validateRuleDraft({
+      ...base,
+      type: "",
+      localPort: "8080",
+      remoteHost: " ",
+      remotePort: "80",
+    }) === "Remote host is required",
+  );
+  const localRecord = ruleRecordFrom("f-1", {
+    ...base,
+    type: "",
+    localPort: "",
+    remoteHost: "10.0.0.9",
+    remotePort: "5432",
+  });
+  check(
+    "-L record: type absent, localPort auto (0), remoteHost/remotePort carry the dial target, targetHost/targetPort absent",
+    localRecord.type === undefined &&
+      localRecord.localPort === 0 &&
+      localRecord.remoteHost === "10.0.0.9" &&
+      localRecord.remotePort === 5432 &&
+      !("targetHost" in localRecord),
+    localRecord,
+  );
+
+  // -D (dynamic).
+  check(
+    "-D: an invalid SOCKS port is refused",
+    validateRuleDraft({ ...base, type: "dynamic", localPort: "70000" }) ===
+      "SOCKS port must be 0 (auto), or 1–65535",
+  );
+  const socksRecord = ruleRecordFrom("f-2", { ...base, type: "dynamic", localPort: "1080" });
+  check(
+    "-D record: written with a blank remoteHost and remotePort 0 - an older build's own unconditional -L refusal drops it rather than reading it as a working -L",
+    socksRecord.type === "dynamic" &&
+      socksRecord.localPort === 1080 &&
+      socksRecord.remoteHost === "" &&
+      socksRecord.remotePort === 0,
+    socksRecord,
+  );
+
+  // -R (remote).
+  check(
+    "-R: a blank local target host is refused",
+    validateRuleDraft({ ...base, type: "remote", targetHost: " ", targetPort: "22" }) ===
+      "Local target host is required",
+  );
+  check(
+    "-R: an invalid local target port is refused",
+    validateRuleDraft({ ...base, type: "remote", targetHost: "10.0.0.9", targetPort: "0" }) ===
+      "Local target port must be 1–65535",
+  );
+  check(
+    "-R: an invalid bind port is refused, only when one is present",
+    validateRuleDraft({
+      ...base,
+      type: "remote",
+      targetHost: "10.0.0.9",
+      targetPort: "22",
+      bindPort: "70000",
+    }) === "Bind port must be 0 (auto), or 1–65535",
+  );
+  check(
+    "-R: passes with no bind fields at all",
+    validateRuleDraft({ ...base, type: "remote", targetHost: "10.0.0.9", targetPort: "22" }) ===
+      null,
+  );
+  const remoteRecord = ruleRecordFrom("f-3", {
+    ...base,
+    type: "remote",
+    targetHost: "10.0.0.9",
+    targetPort: "22",
+  });
+  check(
+    "-R record: writes localPort 0 and a blank remoteHost/remotePort:0 - never -L's dial-target fields - while targetHost/targetPort carry the real target",
+    remoteRecord.type === "remote" &&
+      remoteRecord.localPort === 0 &&
+      remoteRecord.remoteHost === "" &&
+      remoteRecord.remotePort === 0 &&
+      remoteRecord.targetHost === "10.0.0.9" &&
+      remoteRecord.targetPort === 22,
+    remoteRecord,
+  );
+  check(
+    "-R record: bindPort is OMITTED entirely when the field is left blank, not written as 0",
+    !("bindPort" in remoteRecord),
+    remoteRecord,
+  );
+  const remoteRecordWithBind = ruleRecordFrom("f-4", {
+    ...base,
+    type: "remote",
+    targetHost: "10.0.0.9",
+    targetPort: "22",
+    bindAddress: "0.0.0.0",
+    bindPort: "0",
+  });
+  check(
+    "-R record: a bind port explicitly typed as 0 (auto) IS written, unlike an untouched blank field",
+    remoteRecordWithBind.bindAddress === "0.0.0.0" && remoteRecordWithBind.bindPort === 0,
+    remoteRecordWithBind,
+  );
+
+  // ruleDraftFrom round-trip, per type.
+  const draftFromRemote = ruleDraftFrom({
+    id: "f-5",
+    name: "web tunnel",
+    hostId: "h-1",
+    type: "remote",
+    localPort: 0,
+    remoteHost: "",
+    remotePort: 0,
+    targetHost: "10.0.0.9",
+    targetPort: 22,
+    bindAddress: "0.0.0.0",
+    bindPort: 2222,
+    startWithHost: false,
+  });
+  check(
+    "ruleDraftFrom: a -R record round-trips into targetHost/targetPort, never remoteHost/remotePort",
+    draftFromRemote.type === "remote" &&
+      draftFromRemote.remoteHost === "" &&
+      draftFromRemote.remotePort === "" &&
+      draftFromRemote.targetHost === "10.0.0.9" &&
+      draftFromRemote.targetPort === "22" &&
+      draftFromRemote.bindAddress === "0.0.0.0" &&
+      draftFromRemote.bindPort === "2222",
+    draftFromRemote,
+  );
+
+  // startWithApp round-trips through ruleRecordFrom for every type - a
+  // dropped branch would lose the flag on edit - and back out through
+  // ruleDraftFrom, the read half of the same field.
+  const localRecordApp = ruleRecordFrom("f-6", {
+    ...base,
+    type: "",
+    localPort: "",
+    remoteHost: "10.0.0.9",
+    remotePort: "5432",
+    startWithApp: true,
+  });
+  const socksRecordApp = ruleRecordFrom("f-7", {
+    ...base,
+    type: "dynamic",
+    localPort: "1080",
+    startWithApp: true,
+  });
+  const remoteRecordApp = ruleRecordFrom("f-8", {
+    ...base,
+    type: "remote",
+    targetHost: "10.0.0.9",
+    targetPort: "22",
+    startWithApp: true,
+  });
+  check(
+    "ruleRecordFrom: startWithApp survives on -L, -D and -R records alike",
+    localRecordApp.startWithApp === true &&
+      socksRecordApp.startWithApp === true &&
+      remoteRecordApp.startWithApp === true,
+    { localRecordApp, socksRecordApp, remoteRecordApp },
+  );
+  check(
+    "ruleDraftFrom: startWithApp round-trips back into the draft, for each type",
+    ruleDraftFrom(localRecordApp).startWithApp === true &&
+      ruleDraftFrom(socksRecordApp).startWithApp === true &&
+      ruleDraftFrom(remoteRecordApp).startWithApp === true,
+    {
+      local: ruleDraftFrom(localRecordApp),
+      socks: ruleDraftFrom(socksRecordApp),
+      remote: ruleDraftFrom(remoteRecordApp),
+    },
+  );
+}
 
 process.exit(failed === 0 ? 0 : 1);

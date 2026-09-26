@@ -46,7 +46,7 @@ const paneTab = (id: number, title: string, leaf: Record<string, unknown>): Tab 
 const sshTerminal = (leafId: number, cwd?: string) => ({
   id: leafId,
   leafKind: "terminal",
-  sshConnectionId: "c-prod",
+  hostId: "c-prod",
   ...(cwd ? { cwd } : {}),
 });
 const localTerminal = (leafId: number) => ({ id: leafId, leafKind: "terminal" });
@@ -117,7 +117,7 @@ const remoteEditorTab = paneTab(3, "file", {
   id: 30,
   leafKind: "editor",
   path: "/srv/app/src/main.rs",
-  sshConnectionId: "c-prod",
+  hostId: "c-prod",
   sshHostLabel: "prod-db",
 });
 const binding = new Map<string, SshConnectionBinding>([
@@ -158,8 +158,31 @@ check(
   false,
 );
 
+console.log("\n[shared session] two tabs to one host carry ONE session id");
+const prodA = paneTab(6, "prod", sshTerminal(60, "/srv/a"));
+const prodB = paneTab(7, "prod", sshTerminal(70, "/srv/b"));
+const sharedSession = new Map<number, SshStatus>([
+  [60, { kind: "disconnected", reason: "closed by user", canRetry: true }],
+  [70, connected(77)],
+]);
+check(
+  "the remote editor resolves through the tab whose shell is still live",
+  run({
+    sshStatuses: sharedSession,
+    sshBindingByConnection: binding,
+    focusPaneTab: remoteEditorTab,
+    tabs: [prodA, prodB, remoteEditorTab],
+  }),
+  { sessionId: 77, hostLabel: "prod-db", cwd: "/srv/app/src", fromActiveLeaf: true },
+);
+check(
+  "and the still-live tab itself resolves to the same session",
+  run({ sshStatuses: sharedSession, focusPaneTab: prodB, tabs: [prodA, prodB] }),
+  { sessionId: 77, hostLabel: "prod", cwd: "/srv/b", fromActiveLeaf: true },
+);
+
 console.log("\n[fallback stickiness] two remotes must not flap when focus leaves both");
-const sshTabB = paneTab(5, "staging", { id: 50, leafKind: "terminal", sshConnectionId: "c-stg" });
+const sshTabB = paneTab(5, "staging", { id: 50, leafKind: "terminal", hostId: "c-stg" });
 const two = new Map<number, SshStatus>([
   [10, connected(77)],
   [50, connected(88)],

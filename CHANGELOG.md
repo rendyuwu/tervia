@@ -1,48 +1,85 @@
 # Changelog
 
-All notable changes to **Tervia**. Format follows
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
-[SemVer](https://semver.org/) (pre-`1.0`, minor bumps may include breaking
-changes).
+The latest release only. Every earlier version:
+[GitHub Releases](https://github.com/rendyuwu/tervia/releases). Versions:
+[SemVer](https://semver.org/); before `1.0` a minor bump may break things.
 
-> Tervia is a fork of [IlhamriSKY/TEDI](https://github.com/IlhamriSKY/TEDI) at
-> **v0.4.22**, which is itself a fork of
-> [crynta/terax-ai](https://github.com/crynta/terax-ai) at **Terax v0.5.9**.
-> The version series restarts at `0.1.0`, so nothing before this file belongs
-> to Tervia. For what shipped up to the fork point, see
-> [TEDI's CHANGELOG](https://github.com/IlhamriSKY/TEDI/blob/main/CHANGELOG.md)
-> and, before that,
-> [Terax's](https://github.com/crynta/terax-ai/blob/main/CHANGELOG.md). The git
-> history in this repository is intact back through both, so `git log` and
-> `git blame` still reach the original commits.
+## [0.1.0] - 26-09-2026
 
-## [Unreleased]
+First release. Forked from [TEDI](https://github.com/IlhamriSKY/TEDI) v0.4.22,
+itself forked from [Terax](https://github.com/crynta/terax-ai) v0.5.9. Earlier
+history: their changelogs and `git log`.
 
 ### Added
 
-- Nothing yet. The first release will be `0.1.0`.
+**Hosts and vault**
 
-### Changed
+- One host list for SSH and RDP: nested groups, tags, icon and colour, last connected.
+- Vault: identities and keys shared by many hosts, each showing when it last connected. A group can set a default identity for new hosts.
+- Key editor: generate Ed25519, ECDSA P-256 or RSA-4096. OpenSSH certificate and hardware (ssh-agent) key kinds.
+- Connect from the Hosts page (arrow keys move between cards), the header quick connect, or `#` in the Command Palette.
+- Import from `~/.ssh/config` and PuTTY `.reg` exports.
+- Vault page finds keychain entries no record uses and deletes them.
 
-- **Scope narrowed to remote machines.** Tervia keeps SSH, port forwarding,
-  SFTP and the encrypted connection backup, plus the local terminal, editor,
-  explorer, panes, tabs and workspaces those need. RDP and end-to-end
-  encrypted sync are planned and not built yet.
+**SSH**
 
-### Removed
+- Auth: password, private key, ssh-agent, OpenSSH certificate, hardware key.
+- SHA-256 host-key pinning with a first-connect trust prompt. Known Hosts page lists and revokes SSH and RDP pins.
+- Jump host chains.
+- One session per host, shared by terminal tabs, forwards and RDP tunnels.
 
-Relative to TEDI v0.4.22:
+**Port forwarding**
 
-- The AI agent and everything around it: providers, MCP, sub-agents,
-  autocomplete, the AI diff tab and the AI settings sections. Detection and
-  spawning of third-party agent CLIs inside a terminal stays — that is
-  terminal functionality, not an AI feature.
-- The extension system: host, panels, marketplace, permissions, the `ext` CLI
-  subcommand and the extension backend. There is no extension API.
-- The in-app preview browser and its Rust backend.
-- The Source Control panel. Git decorations in the file explorer and the branch
-  display in the workspaces panel are unaffected.
-- The task scheduler.
-- The `theme` and headless `--update` CLI subcommands. `tervia [PATH]`,
-  `--help`, `--version` and `--update` remain; `--update` now needs the window
-  to open.
+- `-L`, `-R` and SOCKS5 `-D` rules on the Port Forwarding page.
+- Start by hand, with the host's terminal (`-L` only), or at app launch with retry backoff.
+- A `localhost:PORT` URL printed by a remote shell gets a local forward.
+
+**SFTP**
+
+- Remote file tree: upload by drop (files, up to 256 MiB), open text files up to 16 MiB and save them, create, rename, delete.
+
+**RDP**
+
+- TLS and CredSSP (NTLM), certificate pinning, RemoteFX and bitmap graphics.
+- Resize to fit the pane (Display Control), or a fixed size.
+- Clipboard text and images, direction set per host.
+- Tunnel through a saved SSH host. Up to 8 sessions.
+
+**Backup and sync**
+
+- `.tervia-backup` (format v3): hosts, groups, vault, forward rules and secrets, sealed with PBKDF2-HMAC-SHA256 (600,000 rounds) and AES-256-GCM.
+- End-to-end encrypted sync over S3-compatible storage or WebDAV. Per-record AES-256-GCM, last writer wins, 90-day tombstones. Off by default; key bodies opt-in.
+
+**Workspace**
+
+- Local terminals on xterm.js (WebGL). Shell integration for zsh, bash, fish and PowerShell. PTYs survive closing the window.
+- Split panes, tabs, saved workspaces, pop-out windows.
+- CodeMirror 6 editor: vim mode, format on save (Prettier or an external formatter), Markdown preview.
+- File explorer: go to file, search and replace in files, git decorations.
+- Status of AI agent CLIs (Claude Code, Codex, Gemini, ...) in a terminal, and a board of them.
+- Themes (import and export `.tervia` files), rebindable shortcuts, Command Palette.
+- CLI: `tervia [PATH]`, `--help`, `--version`, `--update`.
+- Signed updates, checked every 6 hours, installed on request.
+
+### Changed (vs TEDI v0.4.22)
+
+- Breaking: Tervia reads nothing TEDI saved. Settings, workspaces, SSH connections and saved passwords start empty, and `.tedi-ssh` exports cannot be imported.
+- `Ctrl+]` / `Ctrl+[` move pane focus even when a terminal or RDP pane has focus. Rebind `pane.focusNext` / `pane.focusPrev` to give them back to the shell.
+
+### Fixed (vs TEDI v0.4.22)
+
+- `Ctrl+P` and `Ctrl+G` reach a focused terminal instead of opening Go to file.
+- Close Tabs to the Right asks once for every tab with unsaved changes or a running process, instead of asking about the last one and leaving the rest open.
+- The host-key prompt dims the terminal behind it without blurring, so reconnect messages stay readable.
+- Settings and saved workspaces damaged by a crash mid-save are restored from their last good copy instead of reset to defaults.
+- Saved SSH passwords, keys and passphrases no longer pass through the UI on connect, and no decrypted secret stays cached in memory.
+
+### Removed (vs TEDI v0.4.22)
+
+- AI agent: providers, MCP, sub-agents, autocomplete, AI diff tab. Detecting agent CLIs in a terminal stays.
+- Extension system and the `ext` CLI subcommand.
+- In-app browser. Dev-server links, Preview in Browser and PDFs open in the system browser.
+- Source Control panel. Explorer git decorations stay.
+- Task scheduler.
+- Private tabs (Mark as Private, Private Terminal).
+- `theme` CLI subcommand and headless `--update`. `--update` now opens the window.

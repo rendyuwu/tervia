@@ -36,18 +36,35 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { toast } from "@/components/ui/toast";
 import type { FsReadResult } from "@/lib/ipc";
-import { Field } from "@/modules/hosts/editor/FormControls";
+import { cn } from "@/lib/utils";
+import { Field, ToggleButton } from "@/modules/hosts/editor/FormControls";
 import { SECRET_STORE_LOCATIONS } from "@/modules/hosts/editor/secretStoreCopy";
-import { inspectSshKey } from "@/modules/ssh/bridge";
+import {
+  classifySshText,
+  generateSshKey,
+  inspectSshKey,
+  listSshAgentKeys,
+  type SshAgentKey,
+  type SshKeyAlgorithm,
+} from "@/modules/ssh/bridge";
 import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 
 import {
+  describeAgentKeyClassification,
+  describeAgentKeyError,
+  describeCertClassification,
+  describeCertError,
   describeKeyError,
   describeKeyInfo,
+  hardwareFactsFrom,
+  vaultCertFactsFrom,
   vaultKeyFactsFrom,
+  type AgentKeyInspectState,
+  type CertInspectState,
   type KeyInspectState,
+  type VaultCertFacts,
   type VaultKeyFacts,
 } from "../keyInspect";
 import { findKey, newKeyId, upsertKey } from "../store";
@@ -65,6 +82,7 @@ import {
   keySecretsForSave,
   passphraseHelp,
   privateKeyHelp,
+  rebaseKeyDraft,
   validateKeyDraft,
   type KeyDraft,
 } from "./draft";
@@ -81,6 +99,14 @@ export type KeyEditorDialogProps = {
  *  `src/modules/hosts/editor/SshCredentialSection.tsx` declares: the picked file's path, or why it could not be used. */
 type ImportState =
   { kind: "idle" } | { kind: "loaded"; path: string } | { kind: "error"; message: string };
+
+/** What `listSshAgentKeys` answered, for the `hardware` kind's picker -
+ *  same shape `AgentState` in `src/modules/hosts/editor/SshCredentialSection.tsx` declares. */
+type AgentKeysState =
+  | { kind: "idle" }
+  | { kind: "checking" }
+  | { kind: "ok"; keys: SshAgentKey[] }
+  | { kind: "error"; message: string };
 
 /**
  * A token for "the row this form is showing RIGHT NOW", stable across
@@ -112,6 +138,11 @@ export function KeyEditorDialog({ target, onClose }: KeyEditorDialogProps): Reac
   const [keyRefusal, setKeyRefusal] = useState<string | null>(null);
   const [inspected, setInspected] = useState<KeyInspectState>({ kind: "idle" });
   const [imported, setImported] = useState<ImportState>({ kind: "idle" });
+  // The key editor's Generate action. Local to this dialog, not part of
+  // `KeyDraft`: the algorithm choice steers what the NEXT generate call
+  // builds, it is not itself a fact `upsertKey` saves.
+  const [algorithm, setAlgorithm] = useState<SshKeyAlgorithm>("ed25519");
+  const [generating, setGenerating] = useState(false);
   // What `inspected` currently describes: the (body, passphrase) pair as of the
   // last `checkKey` call still allowed to write to it. Bumped by `checkKey`
   // itself, so a second call outruns a first still in flight; by
@@ -120,6 +151,15 @@ export function KeyEditorDialog({ target, onClose }: KeyEditorDialogProps): Reac
   // repaint over this one. A response may repaint only while it still names the
   // generation it was asked to answer for.
   const inspectGeneration = useRef(0);
+  // The `cert` kind's certificate field, and the `hardware` kind's public-key
+  // field: same race-safety property as `inspectGeneration` above, held
+  // separately because each guards a different input the user can edit
+  // independently of the private-key field.
+  const [certInspected, setCertInspected] = useState<CertInspectState>({ kind: "idle" });
+  const certInspectGeneration = useRef(0);
+  const [hwInspected, setHwInspected] = useState<AgentKeyInspectState>({ kind: "idle" });
+  const hwInspectGeneration = useRef(0);
+  const [agentKeys, setAgentKeys] = useState<AgentKeysState>({ kind: "idle" });
 
   const token = tokenFor(target);
   /** The token whose load has been applied. A ref rather than state because the
@@ -139,7 +179,14 @@ export function KeyEditorDialog({ target, onClose }: KeyEditorDialogProps): Reac
     setSaving(false);
     setInspected({ kind: "idle" });
     setImported({ kind: "idle" });
+    setAlgorithm("ed25519");
+    setGenerating(false);
     inspectGeneration.current += 1;
+    setCertInspected({ kind: "idle" });
+    certInspectGeneration.current += 1;
+    setHwInspected({ kind: "idle" });
+    hwInspectGeneration.current += 1;
+    setAgentKeys({ kind: "idle" });
     setExisting(null);
     setReady(false);
     setMode(target.mode);
@@ -216,6 +263,76 @@ export function KeyEditorDialog({ target, onClose }: KeyEditorDialogProps): Reac
     setKeyRefusal(null);
   };
 
+  /** {@link checkKey}, over the `cert` kind's certificate text: classify,
+   *  no unlocking, no passphrase. */
+  const checkCertificate = async (text: string) => {
+    const generation = ++certInspectGeneration.current;
+    if (!text.trim()) {
+      setCertInspected({ kind: "idle" });
+      return;
+    }
+    setCertInspected({ kind: "checking" });
+    try {
+      const result = describeCertClassification(await classifySshText(text));
+      if (certInspectGeneration.current === generation) setCertInspected(result);
+    } catch (e) {
+      const result = describeCertError(e);
+      if (certInspectGeneration.current === generation) setCertInspected(result);
+    }
+  };
+
+  const invalidateCertInspection = () => {
+    certInspectGeneration.current += 1;
+    setCertInspected({ kind: "idle" });
+    setKeyRefusal(null);
+  };
+
+  /** {@link checkKey}, over the `hardware` kind's public-key text, pasted or
+   *  filled in by picking a row from {@link agentKeys}. Translation is
+   *  `describeAgentKeyClassification`/`describeAgentKeyError`
+   *  (`../keyInspect`), the same shared home `describeCertClassification`/
+   *  `describeCertError` give the certificate panel's twin. */
+  const checkPublicKey = async (text: string) => {
+    const generation = ++hwInspectGeneration.current;
+    if (!text.trim()) {
+      setHwInspected({ kind: "idle" });
+      return;
+    }
+    setHwInspected({ kind: "checking" });
+    try {
+      const result = describeAgentKeyClassification(await classifySshText(text));
+      if (hwInspectGeneration.current === generation) setHwInspected(result);
+    } catch (e) {
+      const result = describeAgentKeyError(e);
+      if (hwInspectGeneration.current === generation) setHwInspected(result);
+    }
+  };
+
+  const invalidateHwInspection = () => {
+    hwInspectGeneration.current += 1;
+    setHwInspected({ kind: "idle" });
+    setKeyRefusal(null);
+  };
+
+  /** Ask the local ssh-agent what it holds, for the `hardware` kind's picker
+   *  rows. Cheap enough to re-run on every switch into the kind, the same
+   *  reasoning `SshCredentialSection.tsx`'s own `checkAgent` gives. */
+  const refreshAgentKeys = useCallback(async () => {
+    setAgentKeys({ kind: "checking" });
+    try {
+      setAgentKeys({ kind: "ok", keys: await listSshAgentKeys() });
+    } catch (e) {
+      setAgentKeys({ kind: "error", message: e instanceof Error ? e.message : String(e) });
+    }
+  }, []);
+
+  // Re-check whenever the form is showing the `hardware` kind - same
+  // reasoning `SshCredentialSection.tsx`'s own effect over `checkAgent` gives.
+  useEffect(() => {
+    if (draft.kind !== "hardware") return;
+    void refreshAgentKeys();
+  }, [draft.kind, refreshAgentKeys]);
+
   const pickKeyFile = async () => {
     setImported({ kind: "idle" });
     try {
@@ -264,34 +381,118 @@ export function KeyEditorDialog({ target, onClose }: KeyEditorDialogProps): Reac
     }
   };
 
+  /**
+   * Fill this form's own fields with a freshly generated key pair - the same
+   * draft `save` already turns into a record via `keyRecordFrom`/
+   * `keySecretsForSave`, so a generated key takes no second path to the
+   * store. Disabled in the JSX below while `draft.privateKey` is non-blank,
+   * so a pasted or imported body is never silently replaced.
+   *
+   * Reuses whatever is already in the passphrase field as the encryption
+   * passphrase (so ticking one in before pressing Generate returns an
+   * already-encrypted key, consistent with `save`'s own read of that field)
+   * and the Name field as the key's comment - both fields this form already
+   * asks for, rather than two more inputs that ask the same questions again.
+   */
+  const generateKey = async () => {
+    const generation = ++inspectGeneration.current;
+    setGenerating(true);
+    // A freshly generated key is a DIFFERENT key from whatever file status line
+    // was showing before it, the same reason `pickKeyFile` resets this on a fresh pick.
+    setImported({ kind: "idle" });
+    try {
+      const generated = await generateSshKey(
+        algorithm,
+        draft.passphrase || undefined,
+        draft.name.trim() || undefined,
+      );
+      // Discard rather than write if a newer call - or the load effect reopening
+      // this dialog on a different key - has since moved the generation on. Without
+      // this, a slow RSA-4096 generation could silently overwrite a body the user
+      // pasted or imported in the meantime, or land in a different key's draft.
+      if (inspectGeneration.current !== generation) return;
+      patch({ privateKey: generated.pem });
+      setInspected(describeKeyInfo(generated));
+    } catch (e) {
+      const result = describeKeyError(e);
+      if (inspectGeneration.current === generation) setInspected(result);
+    } finally {
+      setGenerating(false);
+    }
+  };
+
   const save = async () => {
     setError(null);
     setKeyRefusal(null);
-    const invalid = validateKeyDraft(draft, mode);
-    if (invalid) {
-      setError(invalid);
-      return;
-    }
     setSaving(true);
     try {
-      // Inspected HERE rather than read off `inspected`: this reads both fields
-      // at the moment the record is built, so there is no generation to compare
-      // and no way for the stored facts to describe a pair the form has moved
-      // on from. A blank body means the stored key is not being replaced, so
-      // there is nothing to inspect and `keyRecordFrom` keeps the facts the
-      // record already has.
+      // Moved inside the try (P2-6, Oracle review): `validateKeyDraft`'s
+      // `never` default throws for a `draft.kind` this build does not
+      // recognise - reachable if a load ever produced one - and `save` is
+      // called as `() => void save()`, so a throw BEFORE this try would
+      // reject the promise the `void` discards: an unhandled rejection, with
+      // nothing on screen saying why. Inside the try, the same `catch` below
+      // reports it like any other save-time refusal.
+      const invalid = validateKeyDraft(draft, mode);
+      if (invalid) {
+        setError(invalid);
+        return;
+      }
+      // Inspected/classified HERE rather than read off `inspected`/
+      // `certInspected`/`hwInspected`: this reads every field at the moment
+      // the record is built, so there is no generation to compare and no way
+      // for the stored facts to describe a pair the form has moved on from.
       let facts: VaultKeyFacts | null = null;
-      if (draft.privateKey.trim() !== "") {
-        const info = await inspectSshKey(draft.privateKey, draft.passphrase || undefined);
-        const refusal = encryptedKeyRefusal(info.encrypted, draft.passphrase);
-        if (refusal) {
-          // Not `setError`: this refusal names the key field specifically, so
-          // it renders there instead of in the generic line at the bottom of
-          // the form. See `keyRefusal`'s declaration above.
-          setKeyRefusal(refusal);
-          return;
+      let certFacts: VaultCertFacts | null = null;
+      if (draft.kind === "hardware") {
+        // No secret to inspect for this kind - the public-key text is
+        // classified instead, the same way a `pem`/`cert` body is unlocked.
+        // Blank means "the stored record is not being replaced", same rule.
+        if (draft.publicKey.trim() !== "") {
+          facts = hardwareFactsFrom(await classifySshText(draft.publicKey));
+          if (facts === null) {
+            setKeyRefusal(
+              "That is not a public key line. Pick a key from ssh-agent, or paste its `.pub` line.",
+            );
+            return;
+          }
         }
-        facts = vaultKeyFactsFrom(info);
+      } else {
+        if (draft.privateKey.trim() !== "") {
+          const info = await inspectSshKey(draft.privateKey, draft.passphrase || undefined);
+          const refusal = encryptedKeyRefusal(info.encrypted, draft.passphrase);
+          if (refusal) {
+            // Not `setError`: this refusal names the key field specifically, so
+            // it renders there instead of in the generic line at the bottom of
+            // the form. See `keyRefusal`'s declaration above.
+            setKeyRefusal(refusal);
+            return;
+          }
+          facts = vaultKeyFactsFrom(info);
+        }
+        if (draft.kind === "cert" && draft.certificate.trim() !== "") {
+          const classification = await classifySshText(draft.certificate);
+          certFacts = vaultCertFactsFrom(classification);
+          if (certFacts === null) {
+            setKeyRefusal("That is not an OpenSSH certificate.");
+            return;
+          }
+          // The frontend half of the pairing check - see
+          // `SshTextClassification::Certificate`'s `fingerprint` field doc
+          // (`src-tauri/src/modules/ssh/mod.rs`). `authenticate_hop`
+          // (`src-tauri/src/modules/ssh/session.rs`) makes the authoritative
+          // one at dial time, over key data rather than a fingerprint
+          // string, for a record this check never ran against.
+          const signingFingerprint = facts?.fingerprint ?? existing?.fingerprint;
+          if (
+            signingFingerprint &&
+            classification.kind === "certificate" &&
+            classification.fingerprint !== signingFingerprint
+          ) {
+            setKeyRefusal("This certificate does not certify the private key above.");
+            return;
+          }
+        }
       }
       const id = existing?.id ?? newKeyId();
       // `upsertKey` REFUSES a nameless key and rolls both accounts back for a key
@@ -304,7 +505,7 @@ export function KeyEditorDialog({ target, onClose }: KeyEditorDialogProps): Reac
       // "absent", and the store finds no record under a freshly minted id either -
       // so the check passes and there is no `mode` branch here to get wrong.
       const { warning } = await upsertKey(
-        keyRecordFrom(id, draft, existing, facts),
+        keyRecordFrom(id, draft, existing, facts, certFacts),
         keySecretsForSave(draft),
         vaultKeyStamp(existing),
       );
@@ -317,17 +518,49 @@ export function KeyEditorDialog({ target, onClose }: KeyEditorDialogProps): Reac
       onClose();
     } catch (e) {
       if (e instanceof VaultRecordChangedError) {
-        // Rendered so the user can act on it, and NO recovery is offered:
-        // nothing here calls `setExisting`, so `existing` - and with it the id
-        // and the stamp this form sends - stays exactly as it was. A second
-        // press is refused the same way whichever direction the record moved,
-        // so neither arm may invite one.
+        // A DELETED record gets no recovery: nothing on that arm calls
+        // `setExisting`, so `existing` - and with it the id and the stamp this
+        // form sends - stays exactly as it was, and a second press is refused
+        // the same way every time.
+        //
+        // A MOVED record is re-read, and that is what makes "press Save again"
+        // true: `existing` becomes `fresh`, so the next stamp is
+        // `vaultKeyStamp(fresh)`, and the draft is re-based through
+        // `rebaseKeyDraft` so an untouched field shows what is stored now
+        // instead of writing the loaded value back over it. `setDraft` takes an
+        // updater so keystrokes typed while `save` awaited `inspectSshKey` are
+        // re-based too rather than dropped.
+        //
+        // Nothing loaded (create mode) or a re-read that failed or came back
+        // empty means nothing was refreshed - the stamp is still the old one -
+        // so "close and reopen" is the only instruction that is true there.
+        if (e.actual === VAULT_STAMP_ABSENT) {
+          setError(
+            `${e.message} Close this editor - pressing Save again will not help: this form ` +
+              `still names the deleted record, so the write is refused the same way every time.`,
+          );
+          return;
+        }
+        const loaded = existing;
+        const fresh = loaded ? await findKey(e.recordId).catch(() => undefined) : undefined;
+        if (!loaded || !fresh) {
+          setError(
+            `${e.message} Close and reopen this key to edit it against what is stored now; ` +
+              `anything typed here has to be entered again.`,
+          );
+          return;
+        }
+        // Read off the `draft` closure because the updater below runs later;
+        // the same condition `rebaseKeyDraft` clears the passphrase on.
+        const clearedPassphrase = draft.privateKey.trim() === "" && draft.passphrase !== "";
+        setExisting(fresh);
+        setDraft((d) => rebaseKeyDraft(d, loaded, fresh));
         setError(
-          e.actual === VAULT_STAMP_ABSENT
-            ? `${e.message} Close this editor - pressing Save again will not help: this form ` +
-                `still names the deleted record, so the write is refused the same way every time.`
-            : `${e.message} Close and reopen this key to edit it against what is stored now; ` +
-                `anything typed here has to be entered again.`,
+          `${e.message} Your edits are still here; fields you had not changed and the Stored key ` +
+            `box now show what is stored. Review them and press Save again.` +
+            (clearedPassphrase
+              ? " The passphrase you typed was cleared: it was meant for the key stored before, so enter it again if it still applies."
+              : ""),
         );
         return;
       }
@@ -385,83 +618,300 @@ export function KeyEditorDialog({ target, onClose }: KeyEditorDialogProps): Reac
                 </span>
               </Field>
 
-              <Field label="Private key (PEM / OpenSSH)">
-                <div className="flex flex-col gap-1">
-                  <Textarea
-                    value={draft.privateKey}
-                    onChange={(e) => {
-                      patch({ privateKey: e.target.value });
-                      // A stale panel must not sit under a body that has since
-                      // been edited - what it shows would describe the old text.
-                      invalidateInspection();
-                    }}
-                    placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
-                    spellCheck={false}
-                    className="h-32 font-mono text-[11px]"
-                  />
-                  <div className="flex items-center justify-between gap-2">
+              <Field label="Kind">
+                {mode === "create" ? (
+                  <div className="flex gap-1.5" role="group" aria-label="Kind">
+                    <ToggleButton
+                      active={draft.kind === "pem"}
+                      onClick={() => patch({ kind: "pem" })}
+                    >
+                      Private key
+                    </ToggleButton>
+                    <ToggleButton
+                      active={draft.kind === "cert"}
+                      onClick={() => patch({ kind: "cert" })}
+                    >
+                      Certificate
+                    </ToggleButton>
+                    <ToggleButton
+                      active={draft.kind === "hardware"}
+                      onClick={() => patch({ kind: "hardware" })}
+                    >
+                      Hardware key
+                    </ToggleButton>
+                  </div>
+                ) : (
+                  // Read-only on edit (P1-1): switching an existing record's kind in
+                  // place is a different credential, not a rename - a `hardware`
+                  // draft's `keySecretsForSave` sends neither secret regardless of
+                  // what a stale `existing` body still holds, so a mid-edit switch
+                  // would leave a PEM sitting in the keychain under a record that
+                  // now says it stores none. A kind change is a new key.
+                  <div className="text-[12px]">
+                    {draft.kind === "cert"
+                      ? "Certificate"
+                      : draft.kind === "hardware"
+                        ? "Hardware key"
+                        : "Private key"}
+                  </div>
+                )}
+                <span className="text-muted-foreground text-[10.5px]">
+                  {mode === "edit"
+                    ? "Fixed once created - a different credential kind needs a new key."
+                    : draft.kind === "cert"
+                      ? "The signing private key below, plus an OpenSSH certificate for it."
+                      : draft.kind === "hardware"
+                        ? "No private key is stored: authentication goes through the OS ssh-agent, restricted to one identity."
+                        : "A plain private key, stored once and shared by every identity that uses it."}
+                </span>
+              </Field>
+
+              {draft.kind !== "hardware" ? (
+                <Field label="Private key (PEM / OpenSSH)">
+                  <div className="flex flex-col gap-1">
+                    <Textarea
+                      value={draft.privateKey}
+                      onChange={(e) => {
+                        patch({ privateKey: e.target.value });
+                        // A stale panel must not sit under a body that has since
+                        // been edited - what it shows would describe the old text.
+                        invalidateInspection();
+                      }}
+                      placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
+                      spellCheck={false}
+                      className="h-32 font-mono text-[11px]"
+                    />
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-1.5">
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="h-7 px-2 text-[11px]"
+                          onClick={() => void pickKeyFile()}
+                        >
+                          Import from file…
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="h-7 px-2 text-[11px]"
+                          onClick={() => void checkKey(draft.privateKey, draft.passphrase)}
+                          disabled={inspected.kind === "checking" || !replacingBody}
+                        >
+                          Check key
+                        </Button>
+                      </div>
+                      {imported.kind === "loaded" ? (
+                        <span className="text-muted-foreground truncate text-[10.5px]">
+                          Loaded {imported.path}
+                        </span>
+                      ) : imported.kind === "error" ? (
+                        <span className="text-destructive truncate text-[10.5px]">
+                          {imported.message}
+                        </span>
+                      ) : (
+                        <span className="text-muted-foreground text-[10.5px]">
+                          Paste, or import a .pem / key file
+                        </span>
+                      )}
+                    </div>
                     <div className="flex items-center gap-1.5">
+                      <ToggleButton
+                        active={algorithm === "ed25519"}
+                        onClick={() => setAlgorithm("ed25519")}
+                      >
+                        Ed25519
+                      </ToggleButton>
+                      <ToggleButton
+                        active={algorithm === "ecdsa-p256"}
+                        onClick={() => setAlgorithm("ecdsa-p256")}
+                      >
+                        ECDSA P-256
+                      </ToggleButton>
+                      <ToggleButton
+                        active={algorithm === "rsa-4096"}
+                        onClick={() => setAlgorithm("rsa-4096")}
+                      >
+                        RSA-4096
+                      </ToggleButton>
                       <Button
                         type="button"
                         variant="outline"
                         size="sm"
                         className="h-7 px-2 text-[11px]"
-                        onClick={() => void pickKeyFile()}
+                        onClick={() => void generateKey()}
+                        disabled={generating || replacingBody}
                       >
-                        Import from file…
-                      </Button>
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        className="h-7 px-2 text-[11px]"
-                        onClick={() => void checkKey(draft.privateKey, draft.passphrase)}
-                        disabled={inspected.kind === "checking" || !replacingBody}
-                      >
-                        Check key
+                        {generating ? "Generating…" : "Generate"}
                       </Button>
                     </div>
-                    {imported.kind === "loaded" ? (
-                      <span className="text-muted-foreground truncate text-[10.5px]">
-                        Loaded {imported.path}
-                      </span>
-                    ) : imported.kind === "error" ? (
-                      <span className="text-destructive truncate text-[10.5px]">
-                        {imported.message}
-                      </span>
-                    ) : (
+                    <span className="text-muted-foreground text-[10.5px]">
+                      Fill in the passphrase below first to encrypt the new key; generating replaces
+                      the stored key on Save.
+                    </span>
+                    {replacingBody ? (
                       <span className="text-muted-foreground text-[10.5px]">
-                        Paste, or import a .pem / key file
+                        Clear the key field above to generate a new pair instead.
                       </span>
-                    )}
+                    ) : null}
+                    <KeyInspectPanel state={inspected} />
                   </div>
-                  <KeyInspectPanel state={inspected} />
-                </div>
-                <span className="text-muted-foreground text-[10.5px]">{privateKeyHelp(mode)}</span>
-                {/* The encrypted-key refusal from `save`, not the generic
+                  <span className="text-muted-foreground text-[10.5px]">
+                    {privateKeyHelp(mode)}
+                  </span>
+                  {/* The encrypted-key refusal from `save`, not the generic
                     `error` line at the bottom - it names this field, and its
                     "Enter it below" points at the passphrase field right
                     under this one. */}
-                {keyRefusal ? <p className="text-destructive text-[10.5px]">{keyRefusal}</p> : null}
-              </Field>
+                  {keyRefusal ? (
+                    <p className="text-destructive text-[10.5px]">{keyRefusal}</p>
+                  ) : null}
+                </Field>
+              ) : null}
 
-              <Field label="Key passphrase (optional)">
-                <Input
-                  type="password"
-                  value={draft.passphrase}
-                  onChange={(e) => {
-                    patch({ passphrase: e.target.value });
-                    // The panel's "ok" and "locked" results, and any error
-                    // naming a wrong passphrase, all describe the passphrase
-                    // that was IN this field at check time.
-                    invalidateInspection();
-                  }}
-                  className="h-8 font-mono text-[12px]"
-                />
-                <span className="text-muted-foreground text-[10.5px]">
-                  {passphraseHelp(replacingBody)}
-                </span>
-              </Field>
+              {draft.kind === "cert" ? (
+                <Field label="Certificate (OpenSSH)">
+                  <div className="flex flex-col gap-1">
+                    <Textarea
+                      value={draft.certificate}
+                      onChange={(e) => {
+                        patch({ certificate: e.target.value });
+                        invalidateCertInspection();
+                      }}
+                      placeholder="ssh-ed25519-cert-v01@openssh.com AAAA..."
+                      spellCheck={false}
+                      className="h-20 font-mono text-[11px]"
+                    />
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="h-7 w-fit px-2 text-[11px]"
+                      onClick={() => void checkCertificate(draft.certificate)}
+                      disabled={certInspected.kind === "checking" || !draft.certificate.trim()}
+                    >
+                      Check certificate
+                    </Button>
+                    <CertInspectPanel state={certInspected} />
+                  </div>
+                  <span className="text-muted-foreground text-[10.5px]">
+                    Signed by a CA the server trusts (`TrustedUserCAKeys`), for the private key
+                    above. Saved alongside it - the certificate is public.
+                  </span>
+                </Field>
+              ) : null}
+
+              {draft.kind !== "hardware" ? (
+                <Field label="Key passphrase (optional)">
+                  <Input
+                    type="password"
+                    value={draft.passphrase}
+                    onChange={(e) => {
+                      patch({ passphrase: e.target.value });
+                      // The panel's "ok" and "locked" results, and any error
+                      // naming a wrong passphrase, all describe the passphrase
+                      // that was IN this field at check time.
+                      invalidateInspection();
+                    }}
+                    className="h-8 font-mono text-[12px]"
+                  />
+                  <span className="text-muted-foreground text-[10.5px]">
+                    {passphraseHelp(replacingBody)}
+                  </span>
+                </Field>
+              ) : null}
+
+              {draft.kind === "hardware" ? (
+                <Field label="Hardware key (ssh-agent)">
+                  <div className="flex flex-col gap-1.5">
+                    {agentKeys.kind === "checking" ? (
+                      <span className="text-muted-foreground text-[10.5px]">
+                        Checking ssh-agent…
+                      </span>
+                    ) : agentKeys.kind === "error" ? (
+                      <span className="text-destructive text-[10.5px]">{agentKeys.message}</span>
+                    ) : agentKeys.kind === "ok" && agentKeys.keys.length > 0 ? (
+                      <div className="flex flex-col gap-1">
+                        {agentKeys.keys.map((k) => {
+                          const picked = draft.publicKey.trim() === k.publicKey;
+                          return (
+                            <button
+                              key={k.fingerprint}
+                              type="button"
+                              aria-pressed={picked}
+                              onClick={() => {
+                                patch({ publicKey: k.publicKey });
+                                void checkPublicKey(k.publicKey);
+                              }}
+                              className={cn(
+                                "border-border/60 hover:bg-muted/50 flex flex-col items-start rounded-md border px-2 py-1 text-left",
+                                picked && "border-primary bg-muted/50",
+                              )}
+                            >
+                              <span className="text-[11px]">
+                                {k.algorithm}
+                                {k.comment ? ` · ${k.comment}` : ""}
+                              </span>
+                              <span className="text-muted-foreground truncate font-mono text-[10px]">
+                                {k.fingerprint}
+                              </span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <span className="text-muted-foreground text-[10.5px]">
+                        ssh-agent is running but holds no key.
+                      </span>
+                    )}
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="h-7 w-fit px-2 text-[11px]"
+                      onClick={() => void refreshAgentKeys()}
+                    >
+                      Refresh
+                    </Button>
+                    <Textarea
+                      value={draft.publicKey}
+                      onChange={(e) => {
+                        patch({ publicKey: e.target.value });
+                        invalidateHwInspection();
+                      }}
+                      placeholder="sk-ssh-ed25519@openssh.com AAAA... - or pick a row above"
+                      spellCheck={false}
+                      className="h-14 font-mono text-[11px]"
+                    />
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="h-7 w-fit px-2 text-[11px]"
+                      onClick={() => void checkPublicKey(draft.publicKey)}
+                      disabled={hwInspected.kind === "checking" || !draft.publicKey.trim()}
+                    >
+                      Check key
+                    </Button>
+                    <AgentKeyPanel state={hwInspected} />
+                    {/* Same refusal `save` can produce for this kind (a private
+                        key or a certificate pasted into this box), rendered here
+                        for the same reason the Private key Field renders its own
+                        copy: without this, `save` stops and `saving` resets with
+                        nothing on screen saying why. */}
+                    {keyRefusal ? (
+                      <p className="text-destructive text-[10.5px]">{keyRefusal}</p>
+                    ) : null}
+                  </div>
+                  <span className="text-muted-foreground text-[10.5px]">
+                    Authentication is restricted to this one identity - the agent, and whatever
+                    holds this fingerprint for it (a hardware token, or another key), is what signs
+                    the handshake. Nothing here is stored in the keychain.
+                  </span>
+                </Field>
+              ) : null}
 
               <Field label="Description (optional)">
                 <Textarea
@@ -506,8 +956,19 @@ export function KeyEditorDialog({ target, onClose }: KeyEditorDialogProps): Reac
  * meant to be copied straight into `authorized_keys` (`VaultKey.publicKey` in `src/modules/vault/types.ts`) -
  * it is rendered whole, in a selectable box, because a value someone pastes
  * elsewhere has to be pasteable.
+ *
+ * `kind === "cert"` adds a second box for the certificate's own facts - CA
+ * fingerprint, key id, principals and the validity window, with "expired"
+ * said outright once `certValidBefore` is in the past. `kind === "hardware"`
+ * needs no branch: `fingerprint`/`publicKey` already read correctly for it,
+ * and `hasPassphrase`/`keyType` are simply absent/false the way they are for
+ * any key with no stored body.
  */
 function StoredKeyRow({ vaultKey }: { vaultKey: VaultKey }): ReactNode {
+  const expired =
+    vaultKey.kind === "cert" &&
+    vaultKey.certValidBefore !== undefined &&
+    vaultKey.certValidBefore * 1000 < Date.now();
   return (
     <Field label="Stored key">
       {/* Same box as the read-only status blocks in the host editor. */}
@@ -525,6 +986,31 @@ function StoredKeyRow({ vaultKey }: { vaultKey: VaultKey }): ReactNode {
           </span>
         ) : null}
       </div>
+      {vaultKey.kind === "cert" ? (
+        <div className="border-border/60 bg-muted/30 mt-1 flex flex-col gap-1 rounded-md border px-2 py-1.5">
+          <span className={expired ? "text-destructive text-[11px]" : "text-[11px]"}>
+            Certificate{expired ? " (expired)" : ""}
+          </span>
+          <span className="text-muted-foreground truncate font-mono text-[10.5px]">
+            CA {vaultKey.certCaFingerprint ?? "unknown"}
+          </span>
+          {vaultKey.certKeyId ? (
+            <span className="text-muted-foreground text-[10.5px]">Key id {vaultKey.certKeyId}</span>
+          ) : null}
+          {vaultKey.certPrincipals && vaultKey.certPrincipals.length > 0 ? (
+            <span className="text-muted-foreground text-[10.5px]">
+              Principals {vaultKey.certPrincipals.join(", ")}
+            </span>
+          ) : null}
+          {vaultKey.certValidBefore !== undefined ? (
+            <span className="text-muted-foreground text-[10.5px]">
+              Valid until {new Date(vaultKey.certValidBefore * 1000).toLocaleString()}
+            </span>
+          ) : (
+            <span className="text-muted-foreground text-[10.5px]">Never expires</span>
+          )}
+        </div>
+      ) : null}
     </Field>
   );
 }
@@ -569,11 +1055,118 @@ function KeyInspectPanel({ state }: { state: KeyInspectState }): ReactNode {
           {state.fingerprint}
         </span>
       </div>
+      {state.publicKey ? (
+        <div className="flex min-w-0 items-center gap-1.5 font-mono text-[10.5px]">
+          <span className="text-muted-foreground shrink-0">Public key</span>
+          <span className="truncate" title={state.publicKey}>
+            {state.publicKey}
+          </span>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="h-5 shrink-0 px-1.5 text-[10px]"
+            onClick={() => void navigator.clipboard.writeText(state.publicKey).catch(() => {})}
+          >
+            Copy
+          </Button>
+        </div>
+      ) : null}
       {state.comment ? (
         <span className="text-muted-foreground truncate text-[10.5px]" title={state.comment}>
           {state.comment}
         </span>
       ) : null}
+    </div>
+  );
+}
+
+/**
+ * What `checkCertificate` found, rendered under the certificate textarea.
+ * `CertInspectState`'s sibling to {@link KeyInspectPanel}, over a different
+ * question: what the certificate itself says, not what unlocking a body
+ * found. "Expired" is said outright once `validBefore` is in the past, the
+ * same rule {@link StoredKeyRow} applies to the stored record.
+ */
+function CertInspectPanel({ state }: { state: CertInspectState }): ReactNode {
+  if (state.kind === "idle") return null;
+  if (state.kind === "checking") {
+    return <span className="text-muted-foreground text-[10.5px]">Reading certificate…</span>;
+  }
+  if (state.kind === "notACertificate") {
+    return (
+      <span className="text-destructive text-[10.5px]">That is not an OpenSSH certificate.</span>
+    );
+  }
+  if (state.kind === "error") {
+    return <span className="text-destructive text-[10.5px]">{state.message}</span>;
+  }
+  const expired = state.validBefore !== null && state.validBefore * 1000 < Date.now();
+  return (
+    <div className="border-border/60 bg-muted/30 flex flex-col gap-1 rounded-md border px-2 py-1.5">
+      <div className="flex min-w-0 items-center gap-1.5 font-mono text-[10.5px]">
+        <span className="text-muted-foreground shrink-0">CA fingerprint</span>
+        <span className="truncate" title={state.caFingerprint}>
+          {state.caFingerprint}
+        </span>
+      </div>
+      <div className="flex min-w-0 items-center gap-1.5 font-mono text-[10.5px]">
+        <span className="text-muted-foreground shrink-0">Certified key</span>
+        <span className="truncate" title={state.fingerprint}>
+          {state.fingerprint}
+        </span>
+      </div>
+      {state.keyId ? (
+        <span className="text-muted-foreground text-[10.5px]">Key id {state.keyId}</span>
+      ) : null}
+      {state.principals.length > 0 ? (
+        <span className="text-muted-foreground text-[10.5px]">
+          Principals {state.principals.join(", ")}
+        </span>
+      ) : null}
+      <span
+        className={
+          expired ? "text-destructive text-[10.5px]" : "text-muted-foreground text-[10.5px]"
+        }
+      >
+        {state.validBefore === null
+          ? "Never expires"
+          : `Valid until ${new Date(state.validBefore * 1000).toLocaleString()}${expired ? " (expired)" : ""}`}
+      </span>
+    </div>
+  );
+}
+
+/**
+ * What `checkPublicKey` found, rendered under the `hardware` kind's
+ * paste/pick field. `AgentKeyInspectState`'s sibling to
+ * {@link KeyInspectPanel} and {@link CertInspectPanel}; its translation
+ * lives in `../keyInspect` beside `describeCertClassification`'s, so both
+ * kinds' panels are backed from one home.
+ */
+function AgentKeyPanel({ state }: { state: AgentKeyInspectState }): ReactNode {
+  if (state.kind === "idle") return null;
+  if (state.kind === "checking") {
+    return <span className="text-muted-foreground text-[10.5px]">Reading key…</span>;
+  }
+  if (state.kind === "notAPublicKey") {
+    return <span className="text-destructive text-[10.5px]">That is not a public key line.</span>;
+  }
+  if (state.kind === "error") {
+    return <span className="text-destructive text-[10.5px]">{state.message}</span>;
+  }
+  return (
+    <div className="border-border/60 bg-muted/30 flex flex-col gap-1 rounded-md border px-2 py-1.5">
+      <div className="flex items-center gap-2 text-[11px]">
+        <span>{state.algorithm}</span>
+        {state.comment ? <span className="text-muted-foreground">{state.comment}</span> : null}
+      </div>
+      <div className="flex min-w-0 items-center gap-1.5 font-mono text-[10.5px]">
+        <span className="text-muted-foreground shrink-0">Fingerprint</span>
+        <span className="truncate" title={state.fingerprint}>
+          {state.fingerprint}
+        </span>
+      </div>
     </div>
   );
 }

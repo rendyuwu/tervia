@@ -1,4 +1,5 @@
 import { openPty, reattachPty, type PtySession } from "./pty-bridge";
+import type { SshForwardHandle } from "@/modules/ssh/bridge";
 import { sessions, type Session } from "./sessionState";
 import {
   MIN_PTY_DIM,
@@ -58,9 +59,9 @@ export function openPtyForSession(s: Session, cwd: string | undefined): Promise<
   const urlDecoder = new TextDecoder("utf-8", { fatal: false });
 
   // Auto-opened `ssh -L` tunnels for urls this shell printed, remote port ->
-  // in-flight local bound port. Scoped to the spawn on purpose: the forwards
-  // die with the SSH session, and a reconnect re-enters here with an empty map.
-  const sshUrlForwards = new Map<number, Promise<number>>();
+  // in-flight forward handle. Scoped to the spawn on purpose: closed when
+  // this tab's shell ends, not when the (now possibly shared) session does.
+  const sshUrlForwards = new Map<number, Promise<SshForwardHandle>>();
 
   // Diagnostic counters for the live-PTY-but-empty-pane case. Toggle via TERVIA_DEBUG_PTY.
   const debug = isDebugPty();
@@ -120,7 +121,7 @@ export function openPtyForSession(s: Session, cwd: string | undefined): Promise<
     // SIGWINCH-nudges the shell to repaint if the viewport is still blank. Inert
     // when the prompt actually paints (the common case). SSH runs its own
     // banner / reconnect flow, so skip it there.
-    if (isFirstByte && !s.sshConnectionId) {
+    if (isFirstByte && !s.hostId) {
       armBlankViewportRepaint(s, myEpoch);
     }
     // A remote `npm run dev` prints `http://localhost:5173`, but that port
@@ -131,7 +132,7 @@ export function openPtyForSession(s: Session, cwd: string | undefined): Promise<
     if (containsSchemeSeparator(bytes)) {
       const url = findLocalUrl(urlDecoder.decode(bytes, { stream: true }));
       if (url && url !== s.lastDetectedUrl) {
-        if (!s.sshConnectionId) {
+        if (!s.hostId) {
           s.lastDetectedUrl = url;
           s.callbacks.onDetectedLocalUrl?.(url);
         } else {
@@ -170,13 +171,7 @@ export function openPtyForSession(s: Session, cwd: string | undefined): Promise<
     // exit means init failed. Hold the leaf with a retry banner instead of closing.
     const spawnedAt = s.ptySpawnedAt;
     const elapsed = spawnedAt !== null ? Date.now() - spawnedAt : Infinity;
-    if (
-      !s.disposed &&
-      !s.sshConnectionId &&
-      spawnedAt !== null &&
-      elapsed < SPAWN_GRACE_MS &&
-      code !== 0
-    ) {
+    if (!s.disposed && !s.hostId && spawnedAt !== null && elapsed < SPAWN_GRACE_MS && code !== 0) {
       s.pty = null;
       s.ptySpawnedAt = null;
       s.term.options.disableStdin = false;
@@ -205,14 +200,14 @@ export function openPtyForSession(s: Session, cwd: string | undefined): Promise<
   // ladder behaviour `ssh-exit-decision.ts` decides.
   //
   // Both are unreachable for SSH today, and only by other code's choices:
-  // Enter-to-retry and the stuck-recovery watchdog branch on `sshConnectionId`
+  // Enter-to-retry and the stuck-recovery watchdog branch on `hostId`
   // and call `retrySsh` instead (useTerminalSession.ts, session-lifecycle.ts),
   // and `respawnSession` is only ever called for a leaf that is the LAST entry in
   // its workspace (usePaneHandles.ts) - which the permanent Hosts tab means an
   // SSH leaf never is. Make the Hosts tab closable, or add a caller that does
   // not branch, and these two paths become live.
-  if (s.sshConnectionId) {
-    return openSshForSession(s, s.sshConnectionId, spawnCols, spawnRows, onData, onExit);
+  if (s.hostId) {
+    return openSshForSession(s, s.hostId, spawnCols, spawnRows, onData, onExit, sshUrlForwards);
   }
 
   // Restore path: a saved daemon UUID exists. Try `reattachPty` first. Two
@@ -330,7 +325,7 @@ export function writePtyError(s: Session, message: string): void {
  * the first `onData`.
  */
 export function armNoDataWatchdog(s: Session, epoch: number): void {
-  if (s.sshConnectionId) return; // SSH has its own status banner
+  if (s.hostId) return; // SSH has its own status banner
   // First byte may have arrived before `pty_open` resolved (channel onmessage is
   // wired before the await). Don't arm in that case; the shell is already healthy.
   if (s.firstByteEpoch === epoch) return;

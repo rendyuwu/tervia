@@ -77,10 +77,10 @@ import type { Tab, useTabs } from "../src/modules/tabs/lib/useTabs";
 // `entries.ts` reaches `@/`-aliased modules this script has no bundler for.
 import {
   entrySelectHandlers,
-  entrySelectTarget,
+  selectDraggedLeaf,
   type SelectEntry,
 } from "../src/modules/tabs/lib/selectEntry";
-import type { Entry, PaneEntry } from "../src/modules/tabs/lib/entries";
+import type { Entry } from "../src/modules/tabs/lib/entries";
 import {
   isPageKind,
   PAGE_KINDS,
@@ -254,8 +254,8 @@ for (const page of PAGE_KINDS) {
 }
 check("Hosts is the tab page", isTabPageKind(TAB_PAGE_KIND) && TAB_PAGE_KIND === "hosts");
 check(
-  "the rail views are Vault and Port Forwarding, in that order",
-  RAIL_VIEW_KINDS.join(",") === "vault,forwards",
+  "the rail views are Vault, Port Forwarding and Known Hosts, in that order",
+  RAIL_VIEW_KINDS.join(",") === "vault,forwards,known-hosts",
   RAIL_VIEW_KINDS,
 );
 check(
@@ -288,6 +288,7 @@ check(
 console.log("\n[saved] a page leaf that is not Hosts does not come back as a tab");
 check("a saved vault leaf is unrestorable", isUnrestorablePageLeaf(savedPage("vault")));
 check("a saved forwards leaf is unrestorable", isUnrestorablePageLeaf(savedPage("forwards")));
+check("and so is a saved known-hosts leaf", isUnrestorablePageLeaf(savedPage("known-hosts")));
 check(
   // The case a two-name enumeration missed: not a rail view, not Hosts, and
   // turning it INTO Hosts is what minted the second permanent Hosts tab.
@@ -352,9 +353,11 @@ console.log("\n[migrate] a snapshot holding a Vault tab restores without one in 
   );
 }
 {
-  // Everything the workspace had was a rail view. An empty window is not an
+  // Everything the workspace had was a rail view - all THREE kinds, not just
+  // the original two, so a third rail view is covered by this fixture rather
+  // than by an update nobody remembers to make. An empty window is not an
   // option, so it lands where a fresh profile does.
-  const saved: SavedTab[] = [savedTab(savedPage("vault")), savedTab(savedPage("forwards"))];
+  const saved: SavedTab[] = RAIL_VIEW_KINDS.map((view) => savedTab(savedPage(view)));
   const tabs = restoreSavedTabs(saved, allocId);
   check("falls back to a single tab", tabs.length === 1, leafKinds(tabs));
   check("and it is the Hosts page", leafKinds(tabs).join(",") === "page:hosts", leafKinds(tabs));
@@ -1122,6 +1125,7 @@ console.log("\n[funnel] no route into the tab area writes activeId on its own");
       "closePaneByLeaf",
       "closeTab",
       "disposeTab",
+      "requestCloseLeaves",
     ];
     const CLOSING_CHORDS = ["tab.close", "terminal.close"];
     for (const id of CLOSING_CHORDS) {
@@ -1225,7 +1229,7 @@ console.log("\n[funnel] no route into the tab area writes activeId on its own");
     !/Math\.min\(/.test(switching) && !/Math\.min\(/.test(persistence),
   );
 
-  // ---- 8d. focusPane hands back the SAME array when nothing moved --------
+  // ---- 8d. focusPane / focusNextPaneInTab hand back the SAME array when nothing moved
   // The one thing in this file that is about identity rather than about which
   // writes exist, and it is here because the cost of a fresh `tabs` identity is real:
   // `curr.map(...)` allocates a new array whether or not any element changed, so
@@ -1243,6 +1247,11 @@ console.log("\n[funnel] no route into the tab area writes activeId on its own");
   // and the second arrival never moves anything. Before the guard, one click on
   // a terminal chip wrote the workspace twice.
   //
+  // `focusNextPaneInTab` carries the same guard for the same cost: since
+  // Ctrl+] / Ctrl+[ fire over a focused terminal (keyboardOwner.ts
+  // FIRES_OVER_RAW_KEYBOARD), every press in a single-pane tab reaches it and
+  // moves nothing.
+  //
   // Pinned as the EXPRESSION, not the name: the updater must
   // hand `curr` back on its no-change path. Both spellings are accepted (a
   // ternary tail or an early `return curr;`) because either is the same promise;
@@ -1258,25 +1267,25 @@ console.log("\n[funnel] no route into the tab area writes activeId on its own");
   // the lifted function into the unaccounted-for bucket. The sweep and the lift
   // want the code in two different places; the sweep is load-bearing for the
   // completeness claim and wins.
-  {
-    const focusPaneBody = tabsBodies.get("focusPane") ?? "";
+  for (const name of ["focusPane", "focusNextPaneInTab"]) {
+    const body = tabsBodies.get(name) ?? "";
     check(
       // Non-vacuity: an empty body satisfies the negative check below for free.
-      "found focusPane's body to scan",
-      /setTabs\(/.test(focusPaneBody) && /activeLeafId/.test(focusPaneBody),
-      focusPaneBody,
+      `found ${name}'s body to scan`,
+      /setTabs\(/.test(body) && /activeLeafId/.test(body),
+      body,
     );
     check(
-      "focusPane's updater returns curr unchanged when no tab moved",
-      /:\s*curr;|\breturn curr;/.test(focusPaneBody),
-      focusPaneBody,
+      `${name}'s updater returns curr unchanged when no tab moved`,
+      /:\s*curr;|\breturn curr;/.test(body),
+      body,
     );
     check(
       // The exact shape it came from, named so a tidy-up back to it fails by
       // description rather than by a regex nobody can read.
-      "and is not the always-allocate curr.map updater it replaced",
-      !/setTabs\(\s*\(curr\)\s*=>\s*curr\.map\(/.test(focusPaneBody),
-      focusPaneBody,
+      `and ${name}'s is not the always-allocate curr.map updater it replaced`,
+      !/setTabs\(\s*\(curr\)\s*=>\s*curr\.map\(/.test(body),
+      body,
     );
   }
 }
@@ -1318,8 +1327,7 @@ console.log("\n[chip] a chip selects its own entry, even when it is already the 
   // The format is hand-copied here, so 9(ii) pins `TabBar`'s own `activeKey`
   // expression to keep the copy honest - see "TabBar still composes an
   // activeKey the way this fixture spells it" below.
-  const leafEntry: PaneEntry = {
-    kind: "pane-leaf",
+  const leafEntry: Entry = {
     key: "leaf-42",
     tabId: 7,
     leafId: 42,
@@ -1337,7 +1345,7 @@ console.log("\n[chip] a chip selects its own entry, even when it is already the 
     { key: leafEntry.key, activeKey },
   );
 
-  const calls: { tabId: number; leafId: number | null }[] = [];
+  const calls: { tabId: number; leafId: number }[] = [];
   const spy: SelectEntry = (tabId, leafId) => {
     calls.push({ tabId, leafId });
   };
@@ -1345,15 +1353,6 @@ console.log("\n[chip] a chip selects its own entry, even when it is already the 
   check("clicking it calls onSelectEntry exactly once", calls.length === 1, calls);
   check("with its own tab id", calls[0]?.tabId === leafEntry.tabId, calls[0]);
   check("and its own leaf id", calls[0]?.leafId === leafEntry.leafId, calls[0]);
-  const leafTarget = entrySelectTarget(leafEntry);
-  check(
-    // ONE expression for both routes. Asserted rather than assumed, because the
-    // pair was hand-written at each call site before, which is how they were
-    // free to drift.
-    "and the pair it passed is the one entrySelectTarget names",
-    calls[0]?.tabId === leafTarget.tabId && calls[0]?.leafId === leafTarget.leafId,
-    { click: calls[0], target: leafTarget },
-  );
   // `?? -1` so a handler that never fired fails the rows below rather than
   // throwing a TypeError out of the whole section - which would take 9(ii),
   // the source-text half, down with it and report nothing about the wiring.
@@ -1374,18 +1373,6 @@ console.log("\n[chip] a chip selects its own entry, even when it is already the 
       next,
     );
   }
-
-  // The standalone arm, so `leafId` cannot come back 0 or undefined for a tab
-  // that has no leaves - `onCloseEntry` and `onSelectEntry` both read `null` as
-  // "the whole tab".
-  const boardEntry: Entry = { kind: "board", key: "tab-9", tabId: 9, label: "Board" };
-  const boardCalls: { tabId: number; leafId: number | null }[] = [];
-  entrySelectHandlers(boardEntry, (tabId, leafId) => {
-    boardCalls.push({ tabId, leafId });
-  }).onClick();
-  check("a standalone chip selects its tab", boardCalls[0]?.tabId === boardEntry.tabId, boardCalls);
-  check("with no leaf at all, not leaf 0", boardCalls[0]?.leafId === null, boardCalls);
-  check("and entrySelectTarget agrees", entrySelectTarget(boardEntry).leafId === null);
 
   // ---- 9(ii) source text: the wiring is what was missing -----------------
   // These are POSITIVE checks over `.tsx` files, so they run on
@@ -1898,22 +1885,23 @@ console.log("\n[chip] a chip selects its own entry, even when it is already the 
   const stripPath = "src/modules/hosts/page/GroupStrip.tsx";
   const iconActionPath = "src/components/IconActionButton.tsx";
   const stripAst = existsSync(join(root, stripPath)) ? parseTsx(stripPath) : null;
-  const stripSrc = stripAst === null ? "" : stripTsxComments(read(stripPath));
+  const stripTags = stripAst === null ? [] : jsxDescendantTags(stripAst);
   const iconActionUses =
-    stripAst === null
-      ? -1
-      : jsxDescendantTags(stripAst).filter((t) => t === "IconActionButton").length;
+    stripAst === null ? -1 : stripTags.filter((t) => t === "IconActionButton").length;
   const iconActionSpec = stripAst === null ? null : importSpecifierOf(stripAst, "IconActionButton");
   check(
     // Non-vacuity, and the row that stops the next check from passing over a
-    // file nobody renders: revert these call sites and the element read below
-    // is no longer the element the group strip shows. Both call sites, and the
-    // span sibling named nowhere in the file, so a half-revert fails too.
-    "the group strip renders both of its trailing controls through IconActionButton",
-    iconActionUses === 2 &&
+    // file nobody renders: revert the call site and the element read below is
+    // no longer the element the group strip shows. At least one real use is
+    // required (not a fixed count - which icons the strip puts through
+    // IconActionButton is a design choice, not this check's business), and
+    // the span sibling must be named nowhere as a rendered JSX tag, so
+    // reverting to it fails too.
+    "the group strip renders its trailing icon controls through IconActionButton, never the span sibling",
+    iconActionUses >= 1 &&
       iconActionSpec !== null &&
       resolveInRepo(stripPath, iconActionSpec) === iconActionPath &&
-      !/TrailingIconButton/.test(stripSrc),
+      !stripTags.includes("TrailingIconButton"),
     { iconActionUses, iconActionSpec },
   );
 
@@ -1999,8 +1987,7 @@ console.log("\n[chip] a chip selects its own entry, even when it is already the 
     activeKeyMemo,
   );
   check(
-    // Both arms, because 9(i) fixtures both: `leaf-42` for the pane chip and
-    // `tab-9` for the standalone one.
+    // `leaf-42` is the arm 9(i) fixtures.
     "TabBar still composes an activeKey the way this fixture spells it",
     activeKeyMemo !== null &&
       activeKeyMemo.includes("return `leaf-${active.activeLeafId}`") &&
@@ -2018,9 +2005,7 @@ console.log("\n[chip] a chip selects its own entry, even when it is already the 
     // Both routes through one expression. Radix's route survives for the ARROW
     // keys - the roving tabindex moves focus, `TabsTrigger`'s `onFocus` sees
     // `!isSelected` under the default automatic activation, and that genuinely
-    // is a value change - so a second hand-written
-    // `entry.kind === "pane-leaf" ? ... : null` here is a second place to get a
-    // standalone tab's `null` wrong.
+    // is a value change.
     //
     // Enter and Space are NOT that route, which is worth stating because it
     // looks like they are: they go `onKeyDown` -> `onValueChange` and are
@@ -2028,19 +2013,46 @@ console.log("\n[chip] a chip selects its own entry, even when it is already the 
     // Radix renders a real `<button>` and the browser dispatches a native
     // `click`, so the chips' own handler runs - an accident of the element type
     // that an `asChild` onto a non-button would take away silently.
-    "onValueChange resolves its target through entrySelectTarget",
-    onValueChange !== null && /entrySelectTarget\(/.test(onValueChange),
-    onValueChange,
-  );
-  check(
-    "and keeps none of its own kind test, so the two routes cannot drift",
-    onValueChange !== null && !/pane-leaf/.test(onValueChange),
+    "onValueChange hands onSelectEntry the entry's own tab and leaf",
+    onValueChange !== null && /onSelectEntry\(entry\.tabId, entry\.leafId\)/.test(onValueChange),
     onValueChange,
   );
   check(
     "and still bails on a key no entry has",
     onValueChange !== null && /if \(!entry\) return;/.test(onValueChange),
     onValueChange,
+  );
+
+  // ---- the drag route: a leaf drag selects its own entry at activation ----
+  // Executed, like the click route above. The view exit through `focusTabView`
+  // is already proven for this same `tabId` by the chip-click loop, so it is
+  // not repeated here.
+  const dragCalls: { tabId: number; leafId: number }[] = [];
+  const dragSpy: SelectEntry = (tabId, leafId) => {
+    dragCalls.push({ tabId, leafId });
+  };
+  selectDraggedLeaf(`leaf:${leafEntry.leafId}`, [leafEntry], dragSpy);
+  check(
+    "a leaf drag selects its own entry exactly once",
+    dragCalls.length === 1 &&
+      dragCalls[0].tabId === leafEntry.tabId &&
+      dragCalls[0].leafId === leafEntry.leafId,
+    dragCalls,
+  );
+  dragCalls.length = 0;
+  selectDraggedLeaf(`tab:${leafEntry.tabId}`, [leafEntry], dragSpy);
+  check("a group drag (tab:) selects nothing", dragCalls.length === 0, dragCalls);
+  selectDraggedLeaf("leaf:999999", [leafEntry], dragSpy);
+  check("a leaf id no entry has selects nothing", dragCalls.length === 0, dragCalls);
+
+  const dragStart = propValue(barSrc, "onDragStart");
+  check(
+    "TabBar's onDragStart hands the dragged id to selectDraggedLeaf, once and unconditionally",
+    dragStart !== null &&
+      /selectDraggedLeaf\(id, entries, onSelectEntry\)/.test(dragStart) &&
+      (dragStart.match(/selectDraggedLeaf\(/g) ?? []).length === 1 &&
+      !/if\s*\(|\?\s*selectDraggedLeaf|&&\s*selectDraggedLeaf/.test(dragStart),
+    dragStart,
   );
 }
 
@@ -2168,10 +2180,10 @@ console.log("\nALL PASS");
 //   N8b IconActionButton.tsx: its `<button              "and that control is a real
 //       type="button">` flipped to a `<span>`            <button type="button">,
 //       (EXIT=1, exactly 1 red)                          with no hand-written role"
-//   N8c GroupStrip.tsx: both trailing controls          "the group strip renders
-//       reverted to `TrailingIconButton` (EXIT=1,        both of its trailing
-//       exactly 1 red)                                   controls through
-//                                                        IconActionButton"
+//   N8c GroupStrip.tsx: the New sub-group        "the group strip renders
+//       IconActionButton call site reverted        its trailing icon controls
+//       to `TrailingIconButton` (EXIT=1,            through IconActionButton,
+//       exactly 1 red)                              never the span sibling"
 //
 //       N8c is what makes that guard a guard rather than decoration: without it the
 //       element check below it reads a component the app no longer renders, and
@@ -2223,3 +2235,18 @@ console.log("\nALL PASS");
 //       occurrence in the file and you have mutated the comment - every check here
 //       reads `stripTsxComments` output, so the suite stays GREEN and the row looks
 //       like it found a hole. It has not. Mutate the attribute.
+//
+//   N9a useTabs.ts: `focusNextPaneInTab` reverted     the two focusNextPaneInTab
+//       to `setTabs((curr) => curr.map(...))`         rows of 8d - "updater
+//       (EXIT=1, exactly 2 red)                       returns curr unchanged
+//                                                     when no tab moved" and
+//                                                     "is not the always-allocate
+//                                                     curr.map updater it
+//                                                     replaced"
+//   N9b TabBar.tsx: the `selectDraggedLeaf(...)`      "TabBar's onDragStart hands
+//       line deleted from `onDragStart` (EXIT=1,      the dragged id to
+//       exactly 1 red)                                selectDraggedLeaf, once
+//                                                     and unconditionally"
+//   N9c selectEntry.ts: `selectDraggedLeaf`           "a leaf drag selects its
+//       returning early for `leaf:` (EXIT=1,          own entry exactly once"
+//       exactly 1 red)

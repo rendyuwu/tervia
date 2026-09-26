@@ -555,15 +555,36 @@ console.log("\n[3. save inspects fields] KeyEditorDialog's save reads draft.priv
       );
     }
 
-    // Exactly one, not merely "at least one": a second assignment in a later
-    // arm of `save` is how a fallback hides behind this pin's positive.
+    // Not a count: the number of kind arms `save` has is not the property
+    // worth pinning, and a count breaks again at the next kind. What IS
+    // worth pinning is that no assignment to `facts` hides a fallback
+    // source - every one of them has to call `vaultKeyFactsFrom` (the
+    // unlock-based kinds) or `hardwareFactsFrom` (the classification-based
+    // one) as its right side.
     const factsAssignments = findAssignmentsTo(saveBodyForFacts, "facts");
     check(
-      "save contains exactly one assignment to `facts`",
-      factsAssignments.length === 1,
+      "save assigns `facts` at least once",
+      factsAssignments.length >= 1,
       factsAssignments.length,
     );
-    if (factsAssignments.length === 1) {
+    const FACTS_SOURCES = ["vaultKeyFactsFrom", "hardwareFactsFrom"];
+    for (const a of factsAssignments) {
+      const callee = ts.isCallExpression(a.right)
+        ? a.right.expression.getText(keySfForFacts)
+        : null;
+      check(
+        `every assignment to facts calls vaultKeyFactsFrom( or hardwareFactsFrom( - not a fallback source`,
+        callee !== null && FACTS_SOURCES.includes(callee),
+        callee ?? a.right.getText(keySfForFacts),
+      );
+    }
+
+    const pemAssignment = factsAssignments.find(
+      (a) =>
+        ts.isCallExpression(a.right) &&
+        a.right.expression.getText(keySfForFacts) === "vaultKeyFactsFrom",
+    );
+    if (pemAssignment && ts.isCallExpression(pemAssignment.right)) {
       // Decomposed into callee + its own single argument, rather than one
       // getText() over the whole right-hand side: `vaultKeyFactsFrom(...)` is
       // committed as a MULTI-LINE call (its one argument on its own line),
@@ -573,38 +594,28 @@ console.log("\n[3. save inspects fields] KeyEditorDialog's save reads draft.priv
       // here would falsely FAIL against the correct, committed code the
       // moment Prettier's trailing comma is counted as part of "the claim"
       // rather than as formatting pin 1's rule 2 already says to discount.
-      const rhs = factsAssignments[0].right;
-      const rhsIsVaultKeyFactsFromCall =
-        ts.isCallExpression(rhs) && rhs.expression.getText(keySfForFacts) === "vaultKeyFactsFrom";
       check(
-        "the single assignment to `facts` calls vaultKeyFactsFrom(",
-        rhsIsVaultKeyFactsFromCall,
-        rhs.getText(keySfForFacts),
+        "vaultKeyFactsFrom( is called with exactly 1 argument",
+        pemAssignment.right.arguments.length === 1,
+        pemAssignment.right.arguments.length,
       );
-      if (rhsIsVaultKeyFactsFromCall && ts.isCallExpression(rhs)) {
+      if (pemAssignment.right.arguments.length === 1) {
+        const argText = pemAssignment.right.arguments[0].getText(keySfForFacts);
+        // Re-aimed: `save` now inspects the
+        // key ONCE into a local `info` and reuses it for both the refusal
+        // below and this call, rather than inspecting twice - so the
+        // argument here is the bare identifier `info`, not the inline
+        // `inspectSshKey(...)` call this pin used to name directly. The
+        // claim that `facts` comes from a FRESH inspection has not
+        // weakened: it has moved one line up, onto `info`'s own
+        // initializer, which the next two checks pin instead.
         check(
-          "vaultKeyFactsFrom( is called with exactly 1 argument",
-          rhs.arguments.length === 1,
-          rhs.arguments.length,
+          "vaultKeyFactsFrom's argument is exactly info - the fresh inspection bound above, not" +
+            " a cached one (e.g. `lastInfo.current`) that would reintroduce the alias mutation" +
+            " this pin exists to catch",
+          norm(argText) === norm("info"),
+          argText,
         );
-        if (rhs.arguments.length === 1) {
-          const argText = rhs.arguments[0].getText(keySfForFacts);
-          // Re-aimed: `save` now inspects the
-          // key ONCE into a local `info` and reuses it for both the refusal
-          // below and this call, rather than inspecting twice - so the
-          // argument here is the bare identifier `info`, not the inline
-          // `inspectSshKey(...)` call this pin used to name directly. The
-          // claim that `facts` comes from a FRESH inspection has not
-          // weakened: it has moved one line up, onto `info`'s own
-          // initializer, which the next two checks pin instead.
-          check(
-            "vaultKeyFactsFrom's argument is exactly info - the fresh inspection bound above, not" +
-              " a cached one (e.g. `lastInfo.current`) that would reintroduce the alias mutation" +
-              " this pin exists to catch",
-            norm(argText) === norm("info"),
-            argText,
-          );
-        }
       }
     }
 
@@ -840,6 +851,7 @@ console.log(
     fileKey: keyof typeof FILES,
     calleeName: string,
     expectedArgs: readonly [string, string, string],
+    arg0Callee?: string,
   ): void => {
     const sf = sourceFile(fileKey);
     const calls = findCalls(sf, sf, [calleeName]);
@@ -859,11 +871,34 @@ console.log(
         c.arguments.length,
       );
       if (c.arguments.length !== 3) continue;
-      for (const [i, expected] of expectedArgs.entries()) {
+      if (arg0Callee) {
+        // Argument 0's CALLEE only, not its whole argument list - a
+        // parameter added to `keyRecordFrom` must not break this pin the
+        // way it broke the whole-argument-list pin this replaces.
+        // `keyRecordFrom` is already proven by value in
+        // vault-draft-verify.ts sections [5]/[5b].
+        const arg0 = c.arguments[0];
+        check(
+          `${FILES[fileKey]}: ${calleeName}('s argument 0 is a call to ${arg0Callee}(`,
+          ts.isCallExpression(arg0) && arg0.expression.getText(sf) === arg0Callee,
+          arg0.getText(sf),
+        );
+      } else {
+        const actual = c.arguments[0].getText(sf);
+        check(
+          `${FILES[fileKey]}: ${calleeName}('s argument 0 is exactly ${expectedArgs[0]}`,
+          norm(actual) === norm(expectedArgs[0]),
+          actual,
+        );
+      }
+      // Arguments 1 and 2 stay exact: neither was broken by the kind
+      // additions, and argument 2 (the stamp) has a stated consumer-visible
+      // rationale below.
+      for (const i of [1, 2] as const) {
         const actual = c.arguments[i].getText(sf);
         check(
-          `${FILES[fileKey]}: ${calleeName}('s argument ${i} is exactly ${expected}`,
-          norm(actual) === norm(expected),
+          `${FILES[fileKey]}: ${calleeName}('s argument ${i} is exactly ${expectedArgs[i]}`,
+          norm(actual) === norm(expectedArgs[i]),
           actual,
         );
       }
@@ -875,27 +910,42 @@ console.log(
   // facts))` type-checks, reads as a stamp, and stamps the record ABOUT TO BE
   // WRITTEN rather than the one this form loaded - which makes the compare
   // compare a value against itself and pass always. So the argument's whole
-  // expression text is the claim, the same way arguments 0 and 1 are.
-  pinUpsertArgs("keyDialog", "upsertKey", [
-    "keyRecordFrom(id, draft, existing, facts)",
-    "keySecretsForSave(draft)",
-    "vaultKeyStamp(existing)",
-  ]);
+  // expression text is the claim, the same way argument 1 is.
+  pinUpsertArgs(
+    "keyDialog",
+    "upsertKey",
+    [
+      "keyRecordFrom(id, draft, existing, facts, certFacts)",
+      "keySecretsForSave(draft)",
+      "vaultKeyStamp(existing)",
+    ],
+    "keyRecordFrom",
+  );
   pinUpsertArgs("identityDialog", "upsertIdentity", [
     "identityRecordFrom(id, draft)",
     "identitySecretsForSave(draft)",
     "vaultIdentityStamp(existing)",
   ]);
 
-  const smellKeys = [
-    "keyType:",
-    "fingerprint:",
-    "publicKey:",
-    "hasPassword:",
-    "hasPrivateKey:",
-    "hasPassphrase:",
-  ];
-  for (const key of ["keyDialog", "identityDialog"] as const) {
+  // `fingerprint:`/`publicKey:` dropped from `keyDialog`'s own list only:
+  // the hardware kind gave both names a second, legitimate, NON-record
+  // meaning in THAT file a plain substring scan can no longer tell apart
+  // from a hand-assembled VaultKey - `patch({ publicKey: ... })` (twice,
+  // over the picker row and the paste textarea) writes `KeyDraft.publicKey`
+  // itself (the hardware kind's `.pub` line, `vault/editor/draft.ts`, the
+  // same field NAME as `VaultKey.publicKey` by design), and
+  // `AgentKeyCheckState`'s "ok" arm carries its own `fingerprint` for the
+  // hardware picker's checked-line panel, a value with no `id`/`name`
+  // beside it and so no `VaultKey` at all. `identityDialog` has neither
+  // reason, so it keeps the full list. Section 5's argument-exact pin on
+  // `keyRecordFrom(`'s callee above is what still guards against a
+  // hand-built record either name could otherwise have caught here.
+  const keyDialogSmells = ["keyType:", "hasPassword:", "hasPrivateKey:", "hasPassphrase:"];
+  const identityDialogSmells = [...keyDialogSmells, "fingerprint:", "publicKey:"];
+  for (const [key, smellKeys] of [
+    ["keyDialog", keyDialogSmells],
+    ["identityDialog", identityDialogSmells],
+  ] as const) {
     const stripped = stripComments(src[key]);
     for (const smell of smellKeys) {
       check(
@@ -2007,27 +2057,29 @@ console.log("\n[16. placement] the compare is a direct statement of the queued w
 }
 
 // ============================================================================
-// 17. The two refusal messages tell the user what to do, not to press Save
-//     again. (COMPILER API to locate each arm; SOURCE-TEXT over its content.)
+// 17. A vault refusal invites a second press only on the path that refreshed
+//     the record. (COMPILER API to locate each arm; SOURCE-TEXT over its
+//     content.)
 // ============================================================================
-// Protects: `KNOWN-LIMITS.md`'s entry accepting no refresh/recovery on this
-// refusal rests on the strength of these two messages saying what to do -
-// close and reopen - instead of inviting a second press that is refused the
-// same way every time. Nothing else holds either sentence: both are
-// assembled inline in a `.tsx` catch arm, never exported, so there is no
-// function to pin by return value the way `vault-draft-verify.ts` section [9]
-// pins `encryptedKeyRefusal`. This section is the closest equivalent that
-// shape allows - the ternary each `save` branches on, found structurally so a
-// swap of its two arms cannot hide from a check that reads the file as one
-// blob, and its own two arm texts read directly off the AST rather than by a
-// fragile string anchor.
+// Protects: "press Save again" is true only once `existing` has been re-read -
+// the next stamp is derived from it, so without `setExisting(fresh)` a second
+// press sends the same stale stamp and is refused the same way every time.
+// Copying the host editor's wording without its refresh would ship a false
+// instruction. So each `save`'s `VaultRecordChangedError` arm is found
+// structurally and read as its ordered statements: the two early exits (the
+// deleted record, and nothing refreshed) must each return with their own
+// instruction and no invitation, and the invitation must sit after both of
+// them and after the refresh and the draft re-base. Nothing else holds these
+// sentences: all are assembled inline in a `.tsx` catch arm, never exported,
+// so there is no function to pin by return value the way
+// `vault-draft-verify.ts` section [9] pins `encryptedKeyRefusal`.
 //
-// PINS THE PROPERTY, NOT THE SENTENCE: neither arm may read as an invitation
-// to press Save again, and each arm must still say its own instruction - the
-// deleted-record arm says "close this editor" (no reopen: there is nothing
-// left to reopen against), the moved-record arm says "close and reopen"
+// PINS THE PROPERTY, NOT THE SENTENCE: neither exit may read as an invitation
+// to press Save again, and each must still say its own instruction - the
+// deleted-record exit says "close this editor" (no reopen: there is nothing
+// left to reopen against), the not-refreshed exit says "close and reopen"
 // (there is). A pure negative set passes a message reduced to nothing, which
-// is why each arm also carries its own positive.
+// is why each exit also carries its own positive.
 //
 // ONE SPELLING DECISION IS DISCLOSED HERE, because it decides how a future
 // rewrite of either message may be worded: the deleted-record arm's own
@@ -2039,34 +2091,13 @@ console.log("\n[16. placement] the compare is a direct statement of the queued w
 // help") requires updating `dulled()` alongside it, or the negative goes
 // stale and starts failing the correct, committed text.
 //
-// WHAT THIS CANNOT SEE: whether either message ever reaches a render at all -
-// section 14's own entry above this one is the closest existing coverage of
-// that, and it is an absence, not a check.
-console.log("\n[17. refusal wording] neither vault refusal message invites a second press");
+// WHAT THIS CANNOT SEE: whether any of these messages ever reaches a render -
+// `KNOWN-LIMITS.md`'s "Nothing pins where a vault editor's message renders"
+// records that absence.
+console.log(
+  "\n[17. refusal recovery] a vault refusal invites a second press only after refreshing the record",
+);
 {
-  /** The first ConditionalExpression under `root` whose own condition text
-   *  names `name` - the same nesting question `findAncestorConditionOn`
-   *  above answers walking UP; this walks DOWN from a `save` body to find
-   *  the `e.actual === VAULT_STAMP_ABSENT` ternary structurally, so a swap of
-   *  its two arms moves with the node and cannot be missed by treating the
-   *  region as one blob of text. */
-  function findConditionalOn(
-    root: ts.Node,
-    name: string,
-    sf: ts.SourceFile,
-  ): ts.ConditionalExpression | null {
-    let result: ts.ConditionalExpression | null = null;
-    const visit = (n: ts.Node): void => {
-      if (result) return;
-      if (ts.isConditionalExpression(n) && n.condition.getText(sf).includes(name)) {
-        result = n;
-      }
-      ts.forEachChild(n, visit);
-    };
-    visit(root);
-    return result;
-  }
-
   /** Strips the one phrase the deleted-record arm legitimately contains -
    *  see this section's header comment on why a bare negative cannot tell
    *  the refusal's own "will not help" from an actual invitation. */
@@ -2090,36 +2121,213 @@ console.log("\n[17. refusal wording] neither vault refusal message invites a sec
     );
   };
 
+  /** An early exit: an `if` whose body is a block ending in `return`. */
+  const exitsEarly = (s: ts.IfStatement): boolean =>
+    ts.isBlock(s.thenStatement) &&
+    s.thenStatement.statements.length > 0 &&
+    ts.isReturnStatement(s.thenStatement.statements[s.thenStatement.statements.length - 1]);
+
+  const rebaseFn = { keyDialog: "rebaseKeyDraft", identityDialog: "rebaseIdentityDraft" } as const;
+
   for (const key of ["keyDialog", "identityDialog"] as const) {
     const sf = sourceFile(key);
     const saveBody = findConstArrowBody(sf, "save");
     check(`${FILES[key]}: save's body was located (section 17)`, saveBody !== null);
     if (!saveBody) continue;
 
-    const ternary = findConditionalOn(saveBody, "VAULT_STAMP_ABSENT", sf);
-    check(
-      `${FILES[key]}: the e.actual === VAULT_STAMP_ABSENT ternary was located`,
-      ternary !== null,
-    );
-    if (!ternary) continue;
+    let arm: ts.Block | null = null;
+    const visit = (n: ts.Node): void => {
+      if (arm) return;
+      if (
+        ts.isIfStatement(n) &&
+        norm(n.expression.getText(sf)) === norm("e instanceof VaultRecordChangedError") &&
+        ts.isBlock(n.thenStatement)
+      ) {
+        arm = n.thenStatement;
+        return;
+      }
+      ts.forEachChild(n, visit);
+    };
+    visit(saveBody);
+    const found = arm as ts.Block | null;
+    check(`${FILES[key]}: the VaultRecordChangedError arm of save was located`, found !== null);
+    if (!found) continue;
+    const stmts = found.statements;
 
-    const deletedArm = ternary.whenTrue.getText(sf);
-    const movedArm = ternary.whenFalse.getText(sf);
+    const ifAt = (needle: string): number =>
+      stmts.findIndex((s) => ts.isIfStatement(s) && s.expression.getText(sf).includes(needle));
+    const deletedIdx = ifAt("VAULT_STAMP_ABSENT");
+    const noFreshIdx = ifAt("!fresh");
+    check(
+      `${FILES[key]}: the deleted-record exit (VAULT_STAMP_ABSENT) was located`,
+      deletedIdx >= 0,
+    );
+    check(`${FILES[key]}: the not-refreshed exit (!fresh) was located`, noFreshIdx >= 0);
+    if (deletedIdx < 0 || noFreshIdx < 0) continue;
+    const deletedIf = stmts[deletedIdx] as ts.IfStatement;
+    const noFreshIf = stmts[noFreshIdx] as ts.IfStatement;
+    check(`${FILES[key]}: the deleted-record exit ends in return`, exitsEarly(deletedIf));
+    check(`${FILES[key]}: the not-refreshed exit ends in return`, exitsEarly(noFreshIf));
 
     pinRefusalArm(
       FILES[key],
       "the deleted-record arm",
-      deletedArm,
+      deletedIf.getText(sf),
       /close this editor/i,
       '"close this editor"',
     );
     pinRefusalArm(
       FILES[key],
-      "the moved-record arm",
-      movedArm,
+      "the not-refreshed arm",
+      noFreshIf.getText(sf),
       /close and reopen/i,
       '"close and reopen"',
     );
+
+    const stmtAt = (text: string): number =>
+      stmts.findIndex((s) => norm(s.getText(sf)) === norm(text));
+    const refreshIdx = stmtAt("setExisting(fresh);");
+    const rebaseIdx = stmtAt(`setDraft((d) => ${rebaseFn[key]}(d, loaded, fresh));`);
+    const inviteIdx = stmts.findIndex(
+      (s) => !ts.isIfStatement(s) && /press save again/i.test(s.getText(sf)),
+    );
+    check(`${FILES[key]}: the refresh setExisting(fresh) was located`, refreshIdx >= 0);
+    check(`${FILES[key]}: the draft re-base through ${rebaseFn[key]} was located`, rebaseIdx >= 0);
+    check(`${FILES[key]}: the "press Save again" invitation was located`, inviteIdx >= 0);
+    if (refreshIdx < 0 || rebaseIdx < 0 || inviteIdx < 0) continue;
+
+    check(
+      `${FILES[key]}: the deleted-record exit comes before the not-refreshed exit`,
+      deletedIdx < noFreshIdx,
+      { deletedIdx, noFreshIdx },
+    );
+    check(`${FILES[key]}: the refresh sits after both exits`, noFreshIdx < refreshIdx, {
+      noFreshIdx,
+      refreshIdx,
+    });
+    check(
+      `${FILES[key]}: the invitation is reachable only after both exits and after the refresh`,
+      refreshIdx < inviteIdx,
+      { refreshIdx, inviteIdx },
+    );
+    check(
+      `${FILES[key]}: the invitation is reachable only after the draft re-base`,
+      rebaseIdx < inviteIdx,
+      { rebaseIdx, inviteIdx },
+    );
+  }
+}
+
+// ============================================================================
+// 18. Generate fills the draft; it does not save, and a non-empty draft
+//     disables it. (COMPILER API to locate `generateKey`'s body and the
+//     Generate button.)
+// ============================================================================
+// Protects two structural properties a generate action has to hold: the
+// generated key takes no path to the store but the draft `save` already
+// reads (`keyRecordFrom`/`keySecretsForSave`, both covered by section 5 once
+// the body they read is non-blank), and generating over a pasted body is
+// guarded rather than silently overwriting it. `tsc`'s `noUnusedLocals`
+// already catches `generateSshKey`/the bridge import disappearing, so those
+// are not pinned as source text here.
+console.log(
+  "\n[18. generate] KeyEditorDialog's Generate action fills the draft, and is disabled over a non-empty body",
+);
+{
+  const keySf = sourceFile("keyDialog");
+  const generateBody = findConstArrowBody(keySf, "generateKey");
+  check("generateKey's body was located (compiler API)", generateBody !== null);
+
+  if (generateBody) {
+    // Negative: the whole file's upsertKey calls (section 4 already asserts
+    // each is inside `save`) must not ALSO include one inside `generateKey` -
+    // a call could be lexically inside both if `generateKey` ever called
+    // `save` itself, which section 4 alone would not catch.
+    const upsertCalls = findCalls(keySf, keySf, ["upsertKey", "upsertIdentity"]);
+    for (const c of upsertCalls) {
+      check(
+        `${c.getText(keySf)} is not inside generateKey - Generate takes no path to the store`,
+        !(c.getStart(keySf) >= generateBody.getStart(keySf) && c.end <= generateBody.end),
+        c.getText(keySf),
+      );
+    }
+  }
+
+  const buttons = findOpeningElementsByTag(keySf, "Button", keySf);
+  const generateButton = buttons.find((el) =>
+    (jsxAttrExprText(el, "onClick", keySf) ?? "").includes("generateKey()"),
+  );
+  check("the Generate button was located", generateButton !== undefined);
+  if (generateButton) {
+    const disabledExpr = jsxAttrExprText(generateButton, "disabled", keySf) ?? "";
+    check(
+      "the Generate button is disabled while the draft's private key is non-blank, so a pasted or imported body is never silently replaced",
+      disabledExpr.includes("replacingBody"),
+      disabledExpr,
+    );
+  }
+}
+
+// ============================================================================
+// 19. The kind toggle - three ToggleButtons pick pem/cert/hardware, and the
+//    kind-specific fields follow that choice rather than always rendering.
+// ============================================================================
+// Structural, the same reason section 11 reads authMode conditionals off the
+// compiler API rather than a substring scan: "is this Field wrapped in a
+// conditional mentioning draft.kind" is a nesting question, and a regex
+// cannot tell a Field genuinely guarded by kind from one merely mentioning
+// the word in a neighbouring comment.
+console.log(
+  "\n[19. kind toggle] three ToggleButtons pick pem/cert/hardware, and the kind-specific fields follow it",
+);
+{
+  const keySf = sourceFile("keyDialog");
+  const toggles = findOpeningElementsByTag(keySf, "ToggleButton", keySf);
+  const kindToggles = toggles.filter((el) =>
+    (jsxAttrExprText(el, "onClick", keySf) ?? "").includes("patch({ kind:"),
+  );
+
+  // No count here: the per-kind loop below already proves each of the three
+  // kinds has a button whose `active` matches what it sets. A count adds no
+  // property that loop does not already cover.
+  for (const kind of ["pem", "cert", "hardware"] as const) {
+    const btn = kindToggles.find((el) =>
+      (jsxAttrExprText(el, "onClick", keySf) ?? "").includes(`kind: "${kind}"`),
+    );
+    check(`a ToggleButton sets draft.kind to "${kind}"`, btn !== undefined);
+    if (btn) {
+      const activeExpr = jsxAttrExprText(btn, "active", keySf) ?? "";
+      check(
+        `its active= state reflects the SAME kind it sets, not a different one`,
+        activeExpr.includes(`draft.kind === "${kind}"`),
+        activeExpr,
+      );
+    }
+  }
+
+  // Each kind-specific Field is guarded by the EXACT condition that follows
+  // `draft.kind`, not merely present somewhere near one - a Field guarded by
+  // the wrong kind would compile, render for nobody or everybody, and pass
+  // any check that only asked "does kind appear nearby". Whitespace-
+  // normalised: Prettier alone decides whether a condition this short stays
+  // on one line, and that choice is not the claim.
+  const kindGuarded: { label: string; wantCondition: string }[] = [
+    { label: "Private key (PEM / OpenSSH)", wantCondition: 'draft.kind !== "hardware"' },
+    { label: "Certificate (OpenSSH)", wantCondition: 'draft.kind === "cert"' },
+    { label: "Key passphrase (optional)", wantCondition: 'draft.kind !== "hardware"' },
+    { label: "Hardware key (ssh-agent)", wantCondition: 'draft.kind === "hardware"' },
+  ];
+  for (const { label, wantCondition } of kindGuarded) {
+    const field = findJsxElementByTagAndLabel(keySf, "Field", label, keySf);
+    check(`the "${label}" Field was located`, field !== null);
+    if (field) {
+      const condition = findAncestorConditionOn(field, "kind", keySf);
+      check(
+        `"${label}" is wrapped in exactly \`${wantCondition}\`, whitespace aside - not rendered unconditionally or guarded by a different kind`,
+        norm(condition ?? "") === norm(wantCondition),
+        condition,
+      );
+    }
   }
 }
 

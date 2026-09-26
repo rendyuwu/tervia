@@ -28,8 +28,10 @@ import { fileURLToPath } from "node:url";
 
 import { sanitizeKey } from "../src/modules/backup/file";
 import {
+  hardwareFactsFrom,
   vaultKeyFactsFrom,
   type KeyInspectResult,
+  type VaultCertFacts,
   type VaultKeyFacts,
 } from "../src/modules/vault/keyInspect";
 import { keyMissingSecret, keyNeedsPassphrase } from "../src/modules/vault/refs";
@@ -37,19 +39,23 @@ import {
   EMPTY_IDENTITY_DRAFT,
   EMPTY_KEY_DRAFT,
   encryptedKeyRefusal,
+  identityDraftFrom,
   identityPasswordHelp,
   identityRecordFrom,
   identitySecretsForSave,
+  keyDraftFrom,
   keyRecordFrom,
   keySecretsForSave,
   passphraseHelp,
   privateKeyHelp,
+  rebaseIdentityDraft,
+  rebaseKeyDraft,
   validateIdentityDraft,
   validateKeyDraft,
   type IdentityDraft,
   type KeyDraft,
 } from "../src/modules/vault/editor/draft";
-import { vaultKeyStamp, type VaultKey } from "../src/modules/vault/types";
+import { vaultKeyStamp, type VaultIdentity, type VaultKey } from "../src/modules/vault/types";
 import { importSpecifiersOf } from "./lib/ast";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -373,7 +379,7 @@ console.log(
   const existing = existingKey();
   check(
     "facts === null carries all four existing facts forward unchanged",
-    keyRecordFrom("k-1", keyDraft(), existing, null),
+    keyRecordFrom("k-1", keyDraft(), existing, null, null),
     {
       id: "k-1",
       name: "id_ed25519",
@@ -394,19 +400,19 @@ console.log(
   // only `true` would be a rule about a value rather than about the field.
   check(
     "an existing encrypted: true survives a facts === null save",
-    keyRecordFrom("k-1", keyDraft(), existingKey({ encrypted: true }), null).encrypted,
+    keyRecordFrom("k-1", keyDraft(), existingKey({ encrypted: true }), null, null).encrypted,
     true,
   );
   check(
     "and so does an existing encrypted: false, rather than degrading to absent",
-    keyRecordFrom("k-1", keyDraft(), existingKey({ encrypted: false }), null).encrypted,
+    keyRecordFrom("k-1", keyDraft(), existingKey({ encrypted: false }), null, null).encrypted,
     false,
   );
 
   const freshFacts = vaultKeyFactsFrom(keyInspectResult());
   check(
     "fresh facts over an existing key REPLACE all four wholesale",
-    keyRecordFrom("k-1", keyDraft(), existing, freshFacts),
+    keyRecordFrom("k-1", keyDraft(), existing, freshFacts, null),
     {
       id: "k-1",
       name: "id_ed25519",
@@ -428,6 +434,7 @@ console.log(
       keyDraft(),
       existingKey({ encrypted: false }),
       vaultKeyFactsFrom(keyInspectResult({ encrypted: true })),
+      null,
     ).encrypted,
     true,
   );
@@ -435,7 +442,7 @@ console.log(
   const sealedFacts = vaultKeyFactsFrom(keyInspectResult({ parsed: false, encrypted: true }));
   check(
     "a sealed container's facts over an existing key leave the other three ABSENT and carry the encryption fact",
-    keyRecordFrom("k-1", keyDraft(), existing, sealedFacts),
+    keyRecordFrom("k-1", keyDraft(), existing, sealedFacts, null),
     {
       id: "k-1",
       name: "id_ed25519",
@@ -448,7 +455,7 @@ console.log(
 
   check(
     "a create (no existing key) with fresh facts writes the facts plus the two false placeholders",
-    keyRecordFrom("k-2", keyDraft(), null, freshFacts),
+    keyRecordFrom("k-2", keyDraft(), null, freshFacts, null),
     {
       id: "k-2",
       name: "id_ed25519",
@@ -467,7 +474,7 @@ console.log(
   // then reads in section 10.
   check(
     "a create from a sealed container records the encryption fact and nothing else about the key",
-    keyRecordFrom("k-2", keyDraft(), null, sealedFacts),
+    keyRecordFrom("k-2", keyDraft(), null, sealedFacts, null),
     {
       id: "k-2",
       name: "id_ed25519",
@@ -475,6 +482,126 @@ console.log(
       hasPrivateKey: false,
       hasPassphrase: false,
       encrypted: true,
+    },
+  );
+}
+
+// --- 5b. keyRecordFrom - kind, and certFacts as a SECOND null-carries-forward
+console.log(
+  "\n[5b] keyRecordFrom - kind is written only when it is not the pem default, and certFacts null-carries-forward independently of facts",
+);
+{
+  check(
+    "a pem draft (the union's absent case) writes no kind field at all",
+    keyRecordFrom("k-1", keyDraft({ kind: "pem" }), null, null, null).kind,
+    undefined,
+  );
+  check(
+    'a cert draft writes kind: "cert"',
+    keyRecordFrom("k-1", keyDraft({ kind: "cert" }), null, null, null).kind,
+    "cert",
+  );
+  check(
+    'a hardware draft writes kind: "hardware"',
+    keyRecordFrom("k-1", keyDraft({ kind: "hardware" }), null, null, null).kind,
+    "hardware",
+  );
+
+  const certFacts: VaultCertFacts = {
+    certCaFingerprint: "SHA256:ca",
+    certKeyId: "tervia",
+    certPrincipals: ["rendy"],
+    certValidAfter: 1_700_000_000,
+    certValidBefore: 1_800_000_000,
+  };
+  check(
+    "a cert draft with certFacts writes the certificate text plus every parsed fact",
+    keyRecordFrom(
+      "k-1",
+      keyDraft({ kind: "cert", certificate: "ssh-ed25519-cert-v01@openssh.com AAAA..." }),
+      null,
+      null,
+      certFacts,
+    ),
+    {
+      id: "k-1",
+      name: "id_ed25519",
+      kind: "cert",
+      description: undefined,
+      hasPrivateKey: false,
+      hasPassphrase: false,
+      keyType: undefined,
+      fingerprint: undefined,
+      publicKey: undefined,
+      encrypted: undefined,
+      certificate: "ssh-ed25519-cert-v01@openssh.com AAAA...",
+      certCaFingerprint: "SHA256:ca",
+      certKeyId: "tervia",
+      certPrincipals: ["rendy"],
+      certValidAfter: 1_700_000_000,
+      certValidBefore: 1_800_000_000,
+    },
+  );
+
+  // certFacts is independent of facts: a cert draft's save replaces BOTH
+  // wholesale together, but each null-checks on its own source going blank.
+  const existingCert = existingKey({
+    kind: "cert",
+    certificate: "ssh-ed25519-cert-v01@openssh.com OLD...",
+    certCaFingerprint: "SHA256:oldca",
+    certKeyId: "old-id",
+    certPrincipals: ["rendy"],
+    certValidAfter: 1,
+    certValidBefore: 2,
+  });
+  check(
+    "certFacts === null carries the existing certificate and its parsed facts forward unchanged - a rename that touches neither field",
+    keyRecordFrom("k-1", keyDraft({ kind: "cert" }), existingCert, null, null),
+    {
+      id: "k-1",
+      name: "id_ed25519",
+      kind: "cert",
+      description: undefined,
+      hasPrivateKey: false,
+      hasPassphrase: false,
+      keyType: "rsa",
+      fingerprint: "SHA256:old",
+      publicKey: "ssh-rsa AAAAold",
+      encrypted: undefined,
+      certificate: "ssh-ed25519-cert-v01@openssh.com OLD...",
+      certCaFingerprint: "SHA256:oldca",
+      certKeyId: "old-id",
+      certPrincipals: ["rendy"],
+      certValidAfter: 1,
+      certValidBefore: 2,
+    },
+  );
+  ok(
+    'certFacts is ignored - and every cert field absent - outside kind === "cert", even when one is passed',
+    !("certificate" in keyRecordFrom("k-1", keyDraft({ kind: "pem" }), null, null, certFacts)),
+  );
+
+  const hwFacts = hardwareFactsFrom({
+    kind: "publicKey",
+    algorithm: "ssh-ed25519",
+    fingerprint: "SHA256:hw",
+    comment: null,
+    publicKey: "ssh-ed25519 AAAAhw",
+  });
+  check(
+    "a hardware draft's facts flow through the SAME material logic a pem key's do - no second table",
+    keyRecordFrom("k-3", keyDraft({ kind: "hardware" }), null, hwFacts, null),
+    {
+      id: "k-3",
+      name: "id_ed25519",
+      kind: "hardware",
+      description: undefined,
+      hasPrivateKey: false,
+      hasPassphrase: false,
+      keyType: "ed25519",
+      fingerprint: "SHA256:hw",
+      publicKey: "ssh-ed25519 AAAAhw",
+      encrypted: undefined,
     },
   );
 }
@@ -504,6 +631,23 @@ console.log("\n[6] keySecretsForSave - the ONE place this editor sends a delete"
   );
 }
 
+// --- 6b. keySecretsForSave - hardware sends neither secret, ever -----------
+console.log(
+  "\n[6b] keySecretsForSave - a hardware draft sends neither secret, regardless of what its (unused) fields hold",
+);
+{
+  check(
+    "a hardware draft with everything blank sends nothing",
+    keySecretsForSave(keyDraft({ kind: "hardware", privateKey: "", passphrase: "" })),
+    {},
+  );
+  check(
+    "and a hardware draft with a stray private key / passphrase STILL sends nothing - nothing is ever written to the keychain for this kind",
+    keySecretsForSave(keyDraft({ kind: "hardware", privateKey: "-----BEGIN...", passphrase: "p" })),
+    {},
+  );
+}
+
 // --- 7. validateKeyDraft -------------------------------------------------------
 console.log("\n[7] validateKeyDraft - a body is required on create, not on edit");
 {
@@ -530,6 +674,52 @@ console.log("\n[7] validateKeyDraft - a body is required on create, not on edit"
   check(
     "a body present on create passes",
     validateKeyDraft(keyDraft({ privateKey: "-----BEGIN..." }), "create"),
+    null,
+  );
+}
+
+// --- 7b. validateKeyDraft - the cert and hardware kinds' own required fields
+console.log(
+  "\n[7b] validateKeyDraft - cert requires its certificate on both doors, hardware requires a public-key line",
+);
+{
+  check(
+    "a cert draft with a blank certificate is refused, even on edit - unlike the signing key's own body, the certificate is never blank on either door (KeyDraft preloads it)",
+    validateKeyDraft(keyDraft({ kind: "cert", certificate: "" }), "edit"),
+    "Paste the OpenSSH certificate",
+  );
+  check(
+    "a cert draft with a certificate passes on edit even with a blank signing-key body - blank there means keep the stored key",
+    validateKeyDraft(
+      keyDraft({
+        kind: "cert",
+        certificate: "ssh-ed25519-cert-v01@openssh.com AAAA...",
+        privateKey: "",
+      }),
+      "edit",
+    ),
+    null,
+  );
+  check(
+    "a cert draft on CREATE additionally requires the signing key's own body",
+    validateKeyDraft(
+      keyDraft({
+        kind: "cert",
+        certificate: "ssh-ed25519-cert-v01@openssh.com AAAA...",
+        privateKey: "",
+      }),
+      "create",
+    ),
+    "Paste or import the certificate's private key",
+  );
+  check(
+    "a hardware draft with a blank public key is refused",
+    validateKeyDraft(keyDraft({ kind: "hardware", publicKey: "" }), "create"),
+    "Pick a key from ssh-agent, or paste its public key line",
+  );
+  check(
+    "a hardware draft with a public key passes, on either door - it stores no secret to distinguish create from edit",
+    validateKeyDraft(keyDraft({ kind: "hardware", publicKey: "ssh-ed25519 AAAA..." }), "create"),
     null,
   );
 }
@@ -826,6 +1016,21 @@ console.log(
     keyMissingSecret(aKey({ encrypted: true, hasPassphrase: false })) === false,
   );
 
+  // `hardware` reads a DIFFERENT flag (`fingerprint`, matched against
+  // ssh-agent at dial time): `hasPrivateKey` stays `false` forever for this
+  // kind by design (`VaultKeyKind` in `src/modules/vault/types.ts`), so an
+  // unbranched predicate would flag every working hardware entry as broken.
+  ok(
+    'a hardware key WITH a fingerprint is not missing its secret - "missing" means no agent identity to match',
+    keyMissingSecret(aKey({ kind: "hardware", fingerprint: "SHA256:hw", hasPrivateKey: false })) ===
+      false,
+  );
+  ok(
+    "a hardware key with NO fingerprint recorded is missing its secret - nothing to match in ssh-agent",
+    keyMissingSecret(aKey({ kind: "hardware", fingerprint: undefined, hasPrivateKey: false })) ===
+      true,
+  );
+
   // THE IMPORT. `sanitizeKey` performs no inspection, so it may only report
   // what the file literally says - three states, the same shape `sanitizeRule`
   // gives `startWithHost`, and the line the field's survival across an
@@ -921,7 +1126,7 @@ console.log(
   // description blank, passes `existing` as null because the id was minted in
   // that same call, and passes the arm's `facts` straight through.
   const convertMint = (facts: VaultKeyFacts): VaultKey =>
-    keyRecordFrom("k-new", keyDraft({ name: "prod key" }), null, facts);
+    keyRecordFrom("k-new", keyDraft({ name: "prod key" }), null, facts, null);
 
   check(
     "convert's skipped-inspection arm - a mint from facts = {} records NONE of the four, `encrypted` included",
@@ -992,6 +1197,72 @@ console.log(
   // which arm a real convert takes is held by reading the component, not by
   // running it. The `hasPrivateKey: true` above is modelled on what
   // `writeKeySecrets` reports for a landed copy rather than read back from it.
+}
+
+// --- 11. rebaseIdentityDraft / rebaseKeyDraft -----------------------------------
+console.log(
+  "\n[11] rebase*Draft - untouched fields follow the refreshed record, edits and typed secrets stay",
+);
+{
+  // What a vault editor's recovery arm carries across a refresh. A field the
+  // user left as loaded must follow the refreshed record - otherwise the second
+  // Save writes the loaded value back over another writer's change - and a
+  // field they changed, or a secret they typed, must survive.
+  const ident = (over: Partial<VaultIdentity> = {}): VaultIdentity => ({
+    id: "i-1",
+    name: "rendy",
+    username: "rendy",
+    authMode: "password",
+    hasPassword: true,
+    ...over,
+  });
+  const loaded = ident();
+  const fresh = ident({ authMode: "key", keyId: "k-2" });
+
+  check(
+    "identity: untouched authMode/keyId follow fresh; the edited name and typed password stay",
+    rebaseIdentityDraft(
+      { ...identityDraftFrom(loaded), name: "renamed", password: "typed" },
+      loaded,
+      fresh,
+    ),
+    { ...identityDraftFrom(fresh), name: "renamed", password: "typed" },
+  );
+  const agent = rebaseIdentityDraft(
+    { ...identityDraftFrom(loaded), authMode: "agent" },
+    loaded,
+    fresh,
+  );
+  check("identity: an authMode the user changed is kept", agent.authMode, "agent");
+  check("identity: ...while an untouched keyId still follows fresh", agent.keyId, "k-2");
+
+  const loadedKey = existingKey();
+  const freshKey = existingKey({ name: "renamed-elsewhere", fingerprint: "SHA256:new" });
+  const rebasedKey = rebaseKeyDraft(
+    { ...keyDraftFrom(loadedKey), description: "mine" },
+    loadedKey,
+    freshKey,
+  );
+  check(
+    "key: an untouched name follows fresh; the edited description stays",
+    { name: rebasedKey.name, description: rebasedKey.description },
+    { name: "renamed-elsewhere", description: "mine" },
+  );
+  const withBody = rebaseKeyDraft(
+    { ...keyDraftFrom(loadedKey), privateKey: "-----BEGIN", passphrase: "p" },
+    loadedKey,
+    freshKey,
+  );
+  check(
+    "key: a typed body and the passphrase typed with it are both kept",
+    { privateKey: withBody.privateKey, passphrase: withBody.passphrase },
+    { privateKey: "-----BEGIN", passphrase: "p" },
+  );
+  check(
+    "key: blank body and typed passphrase - the passphrase is cleared",
+    rebaseKeyDraft({ ...keyDraftFrom(loadedKey), passphrase: "p" }, loadedKey, freshKey).passphrase,
+    "",
+  );
 }
 
 console.log(failed === 0 ? "\nAll vault-draft checks passed." : `\n${failed} check(s) FAILED.`);
@@ -1254,3 +1525,12 @@ process.exit(failed === 0 ? 0 : 1);
 //                                                        it - which is exactly
 //                                                        why 2b is not the only
 //                                                        check on this rule.
+//
+// Section 11's rebase. Run, killed, and `src/modules/vault/editor/draft.ts`
+// restored byte-identical.
+//
+//   Mutation                                          Check(s) it killed
+//   -------------------------------------------------  ---------------------------
+//   R1: draft.ts - rebaseKeyDraft's passphrase clear     section 11's "blank body
+//     dropped, returning `next` as re-based               and typed passphrase" row
+//                                                        (1), exit 1

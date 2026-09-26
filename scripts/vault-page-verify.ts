@@ -36,7 +36,8 @@ import {
   type IdentityRow,
   type KeyRow,
 } from "../src/modules/vault/page/derive";
-import type { RdpHost, SshHost } from "../src/modules/hosts/types";
+import type { HostGroup, RdpHost, SshHost } from "../src/modules/hosts/types";
+import { GROUP_DEFAULT_SUFFIX, groupsUsingIdentity } from "../src/modules/vault/refs";
 import { VaultInUseError } from "../src/modules/vault/types";
 import type { VaultIdentity, VaultKey } from "../src/modules/vault/types";
 import { callsFunction, importSpecifiersOf, namedImportsFrom } from "./lib/ast";
@@ -266,8 +267,9 @@ console.log("\n[4] identityRows and keyRows: counts and key-name resolution agre
     identity("i-4", { authMode: "key", keyId: "k-2" }),
   ];
   const hosts = [sshBound("h-1", "i-1"), rdpBound("h-2", "i-1"), sshBound("h-3", "i-3")];
+  const groups: HostGroup[] = [{ id: "g-1", name: "Group 1", defaultIdentityId: "i-4" }];
 
-  const rows = identityRows(identities, keyMap, hosts);
+  const rows = identityRows(identities, keyMap, hosts, groups);
 
   // Literal expected values, not `hosts.map(...).length)`-shaped expressions
   // built from the same lookups the rows are built from: i-1 is bound by h-1
@@ -281,6 +283,11 @@ console.log("\n[4] identityRows and keyRows: counts and key-name resolution agre
     "hostCount: literal count per identity - i-1 has two holders, i-2/i-3/i-4 none",
     rows.map((r) => r.hostCount),
     [2, 0, 1, 0],
+  );
+  check(
+    "groupCount: literal count per identity - only i-4 is a group's default",
+    rows.map((r) => r.groupCount),
+    [0, 0, 0, 1],
   );
   check(
     "keyName: live key's name, UNKNOWN_KEY_LABEL for dangling, undefined for none",
@@ -312,9 +319,10 @@ console.log("\n[4] identityRows and keyRows: counts and key-name resolution agre
 console.log("\n[5] rankIdentities and rankKeys: tiers, drops, empty and whitespace queries");
 {
   // Six rows, all matched against the query "db", chosen so the DEFAULT order
-  // (name, then id) is a genuine permutation of the tier order below - not the
-  // identity permutation - so a comparator that returned the input unsorted, or
-  // a filter that did not run, would still fail this section.
+  // (no stamps, so name, then id - recency is section 20's) is a genuine
+  // permutation of the tier order below - not the identity permutation - so a
+  // comparator that returned the input unsorted, or a filter that did not run,
+  // would still fail this section.
   //
   //   name           username     tier for "db"
   //   -------------  -----------  -------------------------------------------
@@ -337,13 +345,14 @@ console.log("\n[5] rankIdentities and rankKeys: tiers, drops, empty and whitespa
     keyName: undefined,
     keyDangling: false,
     hostCount: 0,
+    groupCount: 0,
     missingSecret: false,
   });
   const rows = [alpha, bravo, charlie, delta, echo, foxtrot].map(rowOf);
 
   // Default order by name: adbox, db, db-prod, nothing, prod-db-01, zzzzzz.
   check(
-    "empty query returns every row in default (name, then id) order",
+    "empty query, no stamps: every row in default (name, then id) order",
     rankIdentities(rows, "").map((r) => r.identity.id),
     ["i-alpha", "i-charlie", "i-delta", "i-foxtrot", "i-bravo", "i-echo"],
   );
@@ -381,6 +390,7 @@ console.log("\n[5] rankIdentities and rankKeys: tiers, drops, empty and whitespa
     keyName: "deploy-key",
     keyDangling: false,
     hostCount: 0,
+    groupCount: 0,
     missingSecret: false,
   };
   const namePrefixCompetitor: IdentityRow = {
@@ -388,6 +398,7 @@ console.log("\n[5] rankIdentities and rankKeys: tiers, drops, empty and whitespa
     keyName: undefined,
     keyDangling: false,
     hostCount: 0,
+    groupCount: 0,
     missingSecret: false,
   };
   check(
@@ -407,6 +418,7 @@ console.log("\n[5] rankIdentities and rankKeys: tiers, drops, empty and whitespa
     keyName: undefined,
     keyDangling: false,
     hostCount: 0,
+    groupCount: 0,
     missingSecret: false,
   };
   const domainCompetitor: IdentityRow = {
@@ -414,6 +426,7 @@ console.log("\n[5] rankIdentities and rankKeys: tiers, drops, empty and whitespa
     keyName: undefined,
     keyDangling: false,
     hostCount: 0,
+    groupCount: 0,
     missingSecret: false,
   };
   check(
@@ -452,7 +465,7 @@ console.log("\n[5] rankIdentities and rankKeys: tiers, drops, empty and whitespa
 
   // Default order by name: adbox, db, db-prod-key, nothing, prod-db-01, zzzzzz.
   check(
-    "rankKeys: empty query returns every row in default (name, then id) order",
+    "rankKeys: empty query, no stamps: every row in default (name, then id) order",
     rankKeys(kRows, "").map((r) => r.key.id),
     ["k-alpha", "k-charlie", "k-bravo", "k-nomatch", "k-delta", "k-echo"],
   );
@@ -496,6 +509,7 @@ console.log("\n[6] two rows equal on name break the tie on id, both input orders
     keyName: undefined,
     keyDangling: false,
     hostCount: 0,
+    groupCount: 0,
     missingSecret: false,
   };
   const b: IdentityRow = {
@@ -503,6 +517,7 @@ console.log("\n[6] two rows equal on name break the tie on id, both input orders
     keyName: undefined,
     keyDangling: false,
     hostCount: 0,
+    groupCount: 0,
     missingSecret: false,
   };
   check(
@@ -547,6 +562,7 @@ console.log("\n[7] mixed-case name vs lowercase query, and the reverse, both fol
     keyName: undefined,
     keyDangling: false,
     hostCount: 0,
+    groupCount: 0,
     missingSecret: false,
   };
   check(
@@ -559,6 +575,7 @@ console.log("\n[7] mixed-case name vs lowercase query, and the reverse, both fol
     keyName: undefined,
     keyDangling: false,
     hostCount: 0,
+    groupCount: 0,
     missingSecret: false,
   };
   check(
@@ -824,7 +841,7 @@ console.log("\n[15] keyDangling and missingPrivateKey: separate facts, literal p
     identity("i-4", { authMode: "password", keyId: undefined }),
     identity("i-5", { authMode: "key", keyId: "k-3" }),
   ];
-  const rows = identityRows(identities, keyMap, []);
+  const rows = identityRows(identities, keyMap, [], []);
 
   // i-5 is the case a label cannot express: it names a key that EXISTS and is
   // called "Unknown key", so its keyName is identical to i-2's and its
@@ -912,6 +929,30 @@ console.log("\n[17] deleteRefusalText: names the holders and the edit that clear
     deleteRefusalText('identity "Prod root"', "host", twoHosts),
     'Cannot delete identity "Prod root": 2 hosts still use it (web-1, db-1). ' +
       "Point each of them at another credential first.",
+  );
+
+  // A GROUP holder (`identityHostRefs` in `hosts/store.ts` suffixes its name
+  // with GROUP_DEFAULT_SUFFIX) makes the copy noun-neutral - it is not a
+  // host, and "point it at another credential" is not the edit that clears a
+  // group's default.
+  const mixedHolders = new VaultInUseError('identity "root"', "host", [
+    { id: "h-1", name: "web-1" },
+    { id: "g-1", name: `Production${GROUP_DEFAULT_SUFFIX}` },
+  ]);
+  check(
+    "a mixed host+group holder list reads noun-neutral and names both remedies",
+    deleteRefusalText('identity "root"', "host", mixedHolders),
+    'Cannot delete identity "root": still in use by web-1, Production (group default). ' +
+      "Point each host at another credential and set each group's default identity to None first.",
+  );
+  const groupOnly = new VaultInUseError('identity "root"', "host", [
+    { id: "g-1", name: `Production${GROUP_DEFAULT_SUFFIX}` },
+  ]);
+  check(
+    "a group-only holder gets the same noun-neutral copy, not the singular host phrasing",
+    deleteRefusalText('identity "root"', "host", groupOnly),
+    'Cannot delete identity "root": still in use by Production (group default). ' +
+      "Point each host at another credential and set each group's default identity to None first.",
   );
 
   const oneIdentity = new VaultInUseError('key "id_ed25519"', "identity", [
@@ -1159,6 +1200,97 @@ console.log(
         !note.includes("Credential Manager"),
     );
   }
+}
+
+console.log(
+  "\n[20] default order is lastConnectedAt descending (never-connected last), then name, then id",
+);
+{
+  // Names chosen so name order alone (aaa, bbb, ccc, zzz) is a different
+  // permutation: a comparator that ignored recency, or read it ascending, fails.
+  const rowOf = (i: VaultIdentity): IdentityRow => ({
+    identity: i,
+    keyName: undefined,
+    keyDangling: false,
+    hostCount: 0,
+    groupCount: 0,
+    missingSecret: false,
+  });
+  const rows = [
+    identity("i-never", { name: "aaa" }),
+    identity("i-older", { name: "bbb", lastConnectedAt: 100 }),
+    identity("i-newer", { name: "zzz", lastConnectedAt: 200 }),
+    identity("i-tie", { name: "ccc", lastConnectedAt: 100 }),
+  ].map(rowOf);
+  check(
+    "identities: newest first, a tie falls to name, never-connected last",
+    rankIdentities(rows, "").map((r) => r.identity.id),
+    ["i-newer", "i-older", "i-tie", "i-never"],
+  );
+  // Both are tier-2 prefix matches for "db", so recency decides within the tier.
+  check(
+    "identities: recency orders rows within one query tier",
+    rankIdentities(
+      [
+        rowOf(identity("i-a", { name: "db-a" })),
+        rowOf(identity("i-b", { name: "db-b", lastConnectedAt: 5 })),
+      ],
+      "db",
+    ).map((r) => r.identity.id),
+    ["i-b", "i-a"],
+  );
+
+  const keyRowOf = (k: VaultKey): KeyRow => ({
+    key: k,
+    identityCount: 0,
+    missingPrivateKey: false,
+  });
+  const kRows = [
+    key("k-never", { name: "aaa" }),
+    key("k-older", { name: "bbb", lastConnectedAt: 100 }),
+    key("k-newer", { name: "zzz", lastConnectedAt: 200 }),
+    key("k-tie", { name: "ccc", lastConnectedAt: 100 }),
+  ].map(keyRowOf);
+  check(
+    "keys: newest first, a tie falls to name, never-connected last",
+    rankKeys(kRows, "").map((r) => r.key.id),
+    ["k-newer", "k-older", "k-tie", "k-never"],
+  );
+  check(
+    "keys: recency orders rows within one query tier",
+    rankKeys(
+      [
+        keyRowOf(key("k-a", { name: "db-a" })),
+        keyRowOf(key("k-b", { name: "db-b", lastConnectedAt: 5 })),
+      ],
+      "db",
+    ).map((r) => r.key.id),
+    ["k-b", "k-a"],
+  );
+}
+
+// --- 21. groupsUsingIdentity -------------------------------------------------
+
+console.log("\n[21] groupsUsingIdentity: exactly the groups naming this identity as their default");
+{
+  const groups: HostGroup[] = [
+    { id: "g-1", name: "Production", defaultIdentityId: "i-1" },
+    { id: "g-2", name: "Staging" },
+    { id: "g-3", name: "Prod EU", defaultIdentityId: "i-1" },
+    { id: "g-4", name: "Prod APAC", defaultIdentityId: "i-2" },
+  ];
+  check("i-1 is used by exactly its two holders, named", groupsUsingIdentity(groups, "i-1"), [
+    { id: "g-1", name: "Production" },
+    { id: "g-3", name: "Prod EU" },
+  ]);
+  check("i-2 is used by exactly its one holder", groupsUsingIdentity(groups, "i-2"), [
+    { id: "g-4", name: "Prod APAC" },
+  ]);
+  check(
+    "an identity no group defaults to has no holders",
+    groupsUsingIdentity(groups, "i-unused"),
+    [],
+  );
 }
 
 console.log(failed === 0 ? "\nAll vault-page checks passed." : `\n${failed} check(s) FAILED.`);

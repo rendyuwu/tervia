@@ -5,8 +5,9 @@
 //! SSH passwords, private keys and key passphrases; RDP passwords; vault
 //! identity passwords; and vault key bodies and their passphrases - so it can
 //! never be written as plaintext: the file ends up on a USB stick, in
-//! Downloads, or in a synced folder. This module is the whole crypto surface;
-//! everything above it in JS handles only the already-sealed blob.
+//! Downloads, or in a synced folder. This module plus
+//! `src-tauri/src/modules/aesgcm.rs` is the whole crypto surface; everything
+//! above it in JS handles only the already-sealed blob.
 //!
 //! One format lives here (`tervia-connections`), and it seals the WHOLE
 //! payload - five collections (hosts, groups, identities, keys, forward
@@ -22,24 +23,27 @@
 //! is one.
 //!
 //! Not solved here: the decrypted plaintext is ordinary `String`/`serde_json`
-//! data and is dropped unscrubbed, same as every other secret in the process
-//! (the `SecretsState` cache is the larger link in that chain).
+//! data and is dropped unscrubbed. The keychain values this module reads are
+//! `Zeroizing<String>`, but the `serde_json::Value` tree and the `String`
+//! payload built around them are plain heap data, so a credential folded into
+//! one outlives its use until the allocator reuses the page.
 //!
 //! This lives in the host process rather than the webview because
 //! `crypto.subtle` is gated to secure contexts and the app origin is plain
 //! http (the same reason `crypto.randomUUID` is unavailable).
 //!
 //! Construction: PBKDF2-HMAC-SHA256 over the passphrase with a random 16-byte
-//! salt, then AES-256-GCM with a random 12-byte nonce. Salt and nonce are
-//! generated per seal and stored beside the ciphertext; neither is secret.
+//! salt, then AES-256-GCM with a random 12-byte nonce - the second half in
+//! `src-tauri/src/modules/aesgcm.rs`, shared with the sync module. Salt and
+//! nonce are generated per seal and stored beside the ciphertext; neither is
+//! secret.
 //! GCM's authentication tag is what makes a wrong passphrase, a truncated
 //! file, or a flipped byte all fail closed as "wrong passphrase or corrupt
 //! file" rather than yielding garbage that the importer would try to parse.
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use ring::{
-    aead::{self, BoundKey, Nonce, NonceSequence, UnboundKey, AES_256_GCM, NONCE_LEN},
-    error::Unspecified,
+    aead::NONCE_LEN,
     pbkdf2,
     rand::{SecureRandom, SystemRandom},
 };
@@ -50,7 +54,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{LazyLock, Mutex};
 use tauri::AppHandle;
 
-use crate::modules::secrets::{read_secret, write_secret, SecretsState};
+use crate::modules::aesgcm::{open_with_key, seal_with_key};
+use crate::modules::secrets::{read_secret, write_secrets, SecretsState};
 
 /// Deliberately high: the passphrase is user-chosen and the file is offline,
 /// so an attacker gets unlimited guesses. OWASP's 2023 floor for
@@ -67,20 +72,6 @@ pub struct SealedBlob {
     pub salt: String,
     pub nonce: String,
     pub ciphertext: String,
-}
-
-/// `ring`'s sealing API consumes a nonce sequence; we seal exactly one message
-/// per key, so the sequence yields our single random nonce and then refuses.
-/// Refusing matters: reusing a nonce under the same key breaks GCM completely.
-struct OneNonce(Option<[u8; NONCE_LEN]>);
-
-impl NonceSequence for OneNonce {
-    fn advance(&mut self) -> Result<Nonce, Unspecified> {
-        self.0
-            .take()
-            .map(Nonce::assume_unique_for_key)
-            .ok_or(Unspecified)
-    }
 }
 
 fn derive_key(passphrase: &str, salt: &[u8], iterations: u32) -> Result<[u8; 32], String> {
@@ -108,24 +99,13 @@ fn seal_blob(plaintext: String, passphrase: &str) -> Result<SealedBlob, String> 
     if passphrase.is_empty() {
         return Err("backup: a passphrase is required".into());
     }
-    let rng = SystemRandom::new();
     let mut salt = [0u8; SALT_LEN];
-    rng.fill(&mut salt)
+    SystemRandom::new()
+        .fill(&mut salt)
         .map_err(|_| "backup: random salt failed".to_string())?;
-    let mut nonce = [0u8; NONCE_LEN];
-    rng.fill(&mut nonce)
-        .map_err(|_| "backup: random nonce failed".to_string())?;
 
     let key = derive_key(passphrase, &salt, PBKDF2_ITERATIONS)?;
-    let unbound = UnboundKey::new(&AES_256_GCM, &key).map_err(|_| "backup: bad key".to_string())?;
-    let mut sealing = aead::SealingKey::new(unbound, OneNonce(Some(nonce)));
-
-    // seal_in_place_append_tag appends the 16-byte auth tag, so `buf` ends up
-    // as ciphertext||tag - which is exactly what open_in_place expects back.
-    let mut buf = plaintext.into_bytes();
-    sealing
-        .seal_in_place_append_tag(aead::Aad::empty(), &mut buf)
-        .map_err(|_| "backup: encryption failed".to_string())?;
+    let (nonce, buf) = seal_with_key(&key, plaintext.as_bytes())?;
 
     Ok(SealedBlob {
         kdf: "pbkdf2-hmac-sha256".into(),
@@ -153,7 +133,7 @@ fn open_blob(blob: SealedBlob, passphrase: &str) -> Result<String, String> {
     let nonce_bytes = B64
         .decode(&blob.nonce)
         .map_err(|_| "backup: malformed nonce".to_string())?;
-    let mut buf = B64
+    let buf = B64
         .decode(&blob.ciphertext)
         .map_err(|_| "backup: malformed ciphertext".to_string())?;
     let nonce: [u8; NONCE_LEN] = nonce_bytes
@@ -162,14 +142,8 @@ fn open_blob(blob: SealedBlob, passphrase: &str) -> Result<String, String> {
         .map_err(|_| "backup: malformed nonce".to_string())?;
 
     let key = derive_key(passphrase, &salt, blob.iterations)?;
-    let unbound = UnboundKey::new(&AES_256_GCM, &key).map_err(|_| "backup: bad key".to_string())?;
-    let mut opening = aead::OpeningKey::new(unbound, OneNonce(Some(nonce)));
-
-    let plain = opening
-        .open_in_place(aead::Aad::empty(), &mut buf)
-        .map_err(|_| "backup: wrong passphrase, or the file is corrupt".to_string())?;
-    String::from_utf8(plain.to_vec())
-        .map_err(|_| "backup: decrypted data is not valid UTF-8".into())
+    let plain = open_with_key(&key, &nonce, buf, "backup")?;
+    String::from_utf8(plain).map_err(|_| "backup: decrypted data is not valid UTF-8".into())
 }
 
 /// Where one secret lives in the keychain, and where it belongs inside the
@@ -202,7 +176,10 @@ pub struct SecretRef {
 /// one of those names. This is the guard against exactly that: without it, a
 /// `group` that collided with `hosts` would replace the whole host inventory
 /// with a credential map, and the export would still report success.
-fn merge_secrets(payload: &str, values: &[(SecretRef, String)]) -> Result<String, String> {
+fn merge_secrets(
+    payload: &str,
+    values: &[(SecretRef, zeroize::Zeroizing<String>)],
+) -> Result<String, String> {
     let mut root: Map<String, Value> = serde_json::from_str(payload)
         .map_err(|_| "backup: the payload is not a JSON object".to_string())?;
     for (r, _) in values {
@@ -224,7 +201,7 @@ fn merge_secrets(payload: &str, values: &[(SecretRef, String)]) -> Result<String
             .entry(r.id.clone())
             .or_insert_with(|| Value::Object(Map::new()));
         if let Some(entry) = entry.as_object_mut() {
-            entry.insert(r.field.clone(), Value::String(value.clone()));
+            entry.insert(r.field.clone(), Value::String(value.to_string()));
         }
     }
     serde_json::to_string(&Value::Object(root)).map_err(|e| e.to_string())
@@ -252,7 +229,7 @@ pub async fn backup_seal_payload(
     if passphrase.is_empty() {
         return Err("backup: a passphrase is required".into());
     }
-    let mut values: Vec<(SecretRef, String)> = Vec::new();
+    let mut values: Vec<(SecretRef, zeroize::Zeroizing<String>)> = Vec::new();
     for r in refs {
         // A keychain read that FAILS is propagated rather than skipped: an
         // export that silently omits a credential is worse than one that
@@ -364,6 +341,10 @@ pub async fn backup_open_payload(
 /// Returns one flag per ref, in order, saying whether anything was actually
 /// stored - which is what lets the importer report "imported without stored
 /// credentials" without ever seeing the credentials.
+///
+/// The write is ONE store commit, so a failure writes nothing rather than a
+/// prefix: importing N connections used to cost roughly 3N whole-store
+/// rewrites on Linux and Windows.
 #[tauri::command]
 pub async fn backup_apply_secrets(
     app: AppHandle,
@@ -384,16 +365,16 @@ pub async fn backup_apply_secrets(
         refs.iter().map(|r| pick(&held.groups, r)).collect()
     };
 
-    let mut written = Vec::with_capacity(refs.len());
-    for (r, value) in refs.iter().zip(values) {
-        match value {
-            Some(v) => {
-                write_secret(&app, &state, &r.service, &r.account, &v)?;
-                written.push(true);
-            }
-            None => written.push(false),
-        }
-    }
+    let entries: Vec<(&str, &str, &str)> = refs
+        .iter()
+        .zip(&values)
+        .filter_map(|(r, v)| {
+            v.as_deref()
+                .map(|v| (r.service.as_str(), r.account.as_str(), v))
+        })
+        .collect();
+    write_secrets(&app, &state, &entries)?;
+    let written = values.iter().map(Option::is_some).collect();
     Ok(written)
 }
 
@@ -423,6 +404,40 @@ mod tests {
             service: "tervia-ssh".into(),
             account: format!("{id}::{field}"),
         }
+    }
+    /// A keychain value as `merge_secrets` takes it.
+    fn zz(v: &str) -> zeroize::Zeroizing<String> {
+        zeroize::Zeroizing::new(v.to_string())
+    }
+
+    /// A blob sealed by the build that came BEFORE the AES-GCM pair moved out
+    /// of this module into its own leaf, pasted in as a literal.
+    ///
+    /// The provenance is the whole value. A vector generated after that move
+    /// is a round-trip test with extra steps: it proves the code agrees with
+    /// itself, which [`round_trips`] already says. Only a literal that predates
+    /// the move catches a SYMMETRIC mistake - argument order swapped on both
+    /// halves, AAD introduced on both halves, the nonce and the salt exchanged
+    /// on both halves - each of which round-trips green while breaking every
+    /// backup file a user has already exported.
+    ///
+    /// So this must never be regenerated to make it pass. If it fails, the
+    /// on-disk format changed and every existing export stopped opening.
+    #[test]
+    fn a_blob_sealed_before_the_extraction_still_opens() {
+        let blob = SealedBlob {
+            kdf: "pbkdf2-hmac-sha256".into(),
+            iterations: 600_000,
+            salt: "7aw3WpydpuX8SM5xXQ8kCg==".into(),
+            nonce: "viAKCz2DY1lxIN92".into(),
+            ciphertext: "XjlFeALKXGhGJFEBfWTJmpwxQwtSElMhsA7JDvoqzhMKghZl2krRlOOFamog\
+                         MDg7rNcKDRof4972JfpM2uBn4GeCcogMNBA="
+                .into(),
+        };
+        assert_eq!(
+            open(blob, "golden").unwrap(),
+            "golden — ✓ 日本語 {\"c-1\":{\"password\":\"hunter2\"}}"
+        );
     }
 
     #[test]
@@ -479,9 +494,9 @@ mod tests {
         let merged = merge_secrets(
             r#"{"connections":[{"id":"c-1"}],"rdpConnections":[]}"#,
             &[
-                (secret_ref("secrets", "c-1", "password"), "hunter2".into()),
-                (secret_ref("secrets", "c-1", "privateKey"), "KEY".into()),
-                (secret_ref("rdpSecrets", "r-1", "password"), "rdp-pw".into()),
+                (secret_ref("secrets", "c-1", "password"), zz("hunter2")),
+                (secret_ref("secrets", "c-1", "privateKey"), zz("KEY")),
+                (secret_ref("rdpSecrets", "r-1", "password"), zz("rdp-pw")),
             ],
         )
         .unwrap();
@@ -501,10 +516,7 @@ mod tests {
         // report success.
         let err = merge_secrets(
             r#"{"connections":[{"id":"c-1"}]}"#,
-            &[(
-                secret_ref("connections", "c-1", "password"),
-                "pw".to_string(),
-            )],
+            &[(secret_ref("connections", "c-1", "password"), zz("pw"))],
         )
         .unwrap_err();
         assert!(err.contains("already carries"), "unexpected error: {err}");
@@ -531,7 +543,7 @@ mod tests {
     fn split_withholds_only_the_named_groups() {
         let sealed_plain = merge_secrets(
             r#"{"connections":[{"id":"c-1","host":"example.com"}],"rdpConnections":[]}"#,
-            &[(secret_ref("secrets", "c-1", "password"), "hunter2".into())],
+            &[(secret_ref("secrets", "c-1", "password"), zz("hunter2"))],
         )
         .unwrap();
         let (rest, taken) =
@@ -553,17 +565,14 @@ mod tests {
         let sealed_plain = merge_secrets(
             r#"{"connections":[{"id":"c-1","host":"example.com"}]}"#,
             &[
-                (
-                    secret_ref("hostSecrets", "c-1", "password"),
-                    "hunter2".into(),
-                ),
+                (secret_ref("hostSecrets", "c-1", "password"), zz("hunter2")),
                 (
                     secret_ref("identitySecrets", "i-1", "passphrase"),
-                    "id-pass".into(),
+                    zz("id-pass"),
                 ),
                 (
                     secret_ref("keySecrets", "k-1", "privateKey"),
-                    "KEYMATERIAL".into(),
+                    zz("KEYMATERIAL"),
                 ),
             ],
         )
@@ -686,7 +695,7 @@ mod tests {
         let needles = ["vpsalpha", "svcdeploy", "hunter2", "54321"];
         let plain = merge_secrets(
             r#"{"hosts":[{"id":"h-1","name":"vps","protocol":"ssh","host":"vpsalpha.example.com","port":54321,"credential":{"kind":"inline","hostId":"h-1","user":"svcdeploy","authMode":"password","hasPassword":true,"hasPrivateKey":false,"hasKeyPassphrase":false}}],"groups":[],"identities":[],"keys":[],"rules":[]}"#,
-            &[(secret_ref("hostSecrets", "h-1", "password"), "hunter2".into())],
+            &[(secret_ref("hostSecrets", "h-1", "password"), zz("hunter2"))],
         )
         .unwrap();
         // Negative assertions below are free to pass if a needle is simply

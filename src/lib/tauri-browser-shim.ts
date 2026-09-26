@@ -1,10 +1,10 @@
 // Minimal Tauri runtime stub for vanilla-browser preview (vite dev).
 // No-ops when the real Tauri runtime injects __TAURI_INTERNALS__ first.
-// Backs @tauri-apps/plugin-store with localStorage so settings persist across
-// reloads, and `fs_read_file` / `fs_write_file` the same way so the store files
-// behind `lib/recoveredStore.ts` persist too. Other native commands resolve to
-// undefined or empty: UI renders but native features (terminal, fs beyond those
-// two commands, scm, ssh, dialog, updater, opener) stay inert.
+// Backs `fs_read_file` / `fs_write_file` with localStorage so every store file
+// behind `lib/recoveredStore.ts` - settings included - persists across reloads.
+// Other native commands resolve to undefined or empty: UI renders but native
+// features (terminal, fs beyond those two commands, scm, ssh, dialog, updater,
+// opener) stay inert.
 
 declare global {
   interface Window {
@@ -44,25 +44,6 @@ if (typeof window !== "undefined" && !window.__TAURI_INTERNALS__) {
           ? "ios"
           : "linux";
 
-  // Backing storage for @tauri-apps/plugin-store: one bucket per store path,
-  // serialized as JSON in localStorage.
-  const STORE_PREFIX = "tervia:shim:store:";
-  type StoreData = Record<string, unknown>;
-  const loadStore = (path: string): StoreData => {
-    try {
-      return JSON.parse(localStorage.getItem(STORE_PREFIX + path) || "{}");
-    } catch {
-      return {};
-    }
-  };
-  const saveStore = (path: string, data: StoreData): void => {
-    try {
-      localStorage.setItem(STORE_PREFIX + path, JSON.stringify(data));
-    } catch {
-      // Ignore quota or private mode failures.
-    }
-  };
-
   // The app data directory `appDataDir()` resolves to. A constant rather than
   // anything derived: nothing in a browser has one, and the thing that reads it
   // is store path resolution, which needs a stable prefix and no more. Without
@@ -71,11 +52,9 @@ if (typeof window !== "undefined" && !window.__TAURI_INTERNALS__) {
   // "unreachable" store, one error toast per recovered store, at every launch.
   const PREVIEW_APP_DATA_DIR = "/tervia-preview";
 
-  // Backing storage for `fs_read_file` / `fs_write_file`. A SECOND bucket beside
-  // `STORE_PREFIX`, not the same one: the store plugin is keyed by bare file
-  // name and these two commands are keyed by absolute path, so sharing a bucket
-  // would make `tervia-hosts.json` and `/tervia-preview/tervia-hosts.json` two
-  // names for one entry in one direction and none in the other.
+  // Backing storage for `fs_read_file` / `fs_write_file`, keyed by the absolute
+  // path the caller passes. One bucket, because those two commands are the only
+  // way a store file is read or written now.
   const FS_PREFIX = "tervia:shim:fs:";
 
   /** `BaseDirectory.AppData`, which is what `appDataDir()` asks for. */
@@ -156,55 +135,6 @@ if (typeof window !== "undefined" && !window.__TAURI_INTERNALS__) {
 
   const isPluginEvent = (cmd: string, op: string): boolean => cmd === `plugin:event|${op}`;
 
-  const handleStore = (op: string, args: InvokeArgs): unknown => {
-    const a = (args ?? {}) as Record<string, unknown>;
-    const rid = String(a.rid ?? a.path ?? "");
-    const key = String(a.key ?? "");
-
-    switch (op) {
-      case "load":
-        return rid;
-      case "get": {
-        const data = loadStore(rid);
-        const has = Object.prototype.hasOwnProperty.call(data, key);
-        return has ? [data[key], true] : [null, false];
-      }
-      case "set": {
-        const data = loadStore(rid);
-        data[key] = a.value;
-        saveStore(rid, data);
-        return null;
-      }
-      case "has":
-        return Object.prototype.hasOwnProperty.call(loadStore(rid), key);
-      case "delete": {
-        const data = loadStore(rid);
-        const had = Object.prototype.hasOwnProperty.call(data, key);
-        delete data[key];
-        saveStore(rid, data);
-        return had;
-      }
-      case "clear":
-      case "reset":
-        saveStore(rid, {});
-        return null;
-      case "keys":
-        return Object.keys(loadStore(rid));
-      case "values":
-        return Object.values(loadStore(rid));
-      case "entries":
-        return Object.entries(loadStore(rid));
-      case "length":
-        return Object.keys(loadStore(rid)).length;
-      case "save":
-      case "close":
-      case "reload":
-        return null;
-      default:
-        return null;
-    }
-  };
-
   const handleEvent = (op: string, args: InvokeArgs): unknown => {
     const a = (args ?? {}) as Record<string, unknown>;
     const event = String(a.event ?? "");
@@ -278,9 +208,6 @@ if (typeof window !== "undefined" && !window.__TAURI_INTERNALS__) {
     // app-defined IPC. Stub plugins imported during startup so React effects
     // don't reject; everything else returns null so callers fall back or fail
     // at the call site where the warning above explains what's missing.
-    if (cmd.startsWith("plugin:store|")) {
-      return handleStore(cmd.slice("plugin:store|".length), args);
-    }
     if (cmd.startsWith("plugin:event|") || isPluginEvent(cmd, "listen")) {
       return handleEvent(cmd.slice("plugin:event|".length), args);
     }

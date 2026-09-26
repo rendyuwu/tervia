@@ -115,6 +115,7 @@ import {
   HOST_GROUPS_KEY,
   HostBindingChangedError,
   type Host,
+  type HostGroup,
   type RdpHost,
   type SshHost,
 } from "../src/modules/hosts/types";
@@ -123,6 +124,7 @@ import {
   CREDENTIAL_CHOICE_NEW_IDENTITY,
   credentialChangeFor,
   credentialChangeNote,
+  credentialChoiceForGroup,
   hostOwnedSecretNames,
   identityChoice,
   identityIdFromChoice,
@@ -929,7 +931,8 @@ console.log(
   // Measured before the fix, over two presses of one button: two vault password
   // accounts written under freshly minted identity ids, no identity on record to
   // name either, and three copies of "hunter2" in the keychain - unbounded (one
-  // more per press) and unenumerable, since there is no `secrets_list`. The
+  // more per press) and named by no record, so only the Vault page's
+  // unreferenced-entry sweep would ever find them. The
   // confirmation the user had just read says the point is fewer copies of one
   // credential.
   //
@@ -1799,7 +1802,7 @@ console.log(
     // not.
     //
     // Argument-wise is NOT SUFFICIENT ON ITS OWN, and the `--print-width 60`
-    // control is what showed it: argument 0 here is ITSELF a four-argument call,
+    // control is what showed it: argument 0 here is ITSELF a five-argument call,
     // so at a narrow width Prettier wraps that inner call and puts a trailing
     // comma inside the argument's own span, where whitespace-stripping alone
     // does not reach. Measured: this section went to 1 FAIL over unchanged code.
@@ -1830,26 +1833,57 @@ console.log(
       return out;
     };
     const norm = (s: string): string => s.replace(/\s+/g, "").replace(/,(?=\))/g, "");
-    const pinArgs = (callee: string, expected: readonly [string, string, string]): void => {
+    const pinArgs = (
+      callee: string,
+      expected: readonly [string, string, string],
+      arg0Callee?: string,
+    ): void => {
       const calls = findCalls(moveSf, callee);
       check(`found exactly one ${callee}( call to pin`, calls.length, 1);
       for (const c of calls) {
         check(`${callee}( is called with exactly 3 arguments`, c.arguments.length, 3);
         if (c.arguments.length !== 3) continue;
-        for (const [i, want] of expected.entries()) {
+        if (arg0Callee) {
+          // Argument 0's CALLEE only, not its whole argument list: a
+          // parameter added to `keyRecordFrom` must not break this pin the
+          // way it broke the whole-argument-list pin this replaces -
+          // `keyRecordFrom` is already proven by value in
+          // vault-draft-verify.ts sections [5]/[5b].
+          const arg0 = c.arguments[0];
           check(
-            `${callee}('s argument ${i} is exactly \`${want}\`, whitespace aside`,
+            `${callee}('s argument 0 is a call to ${arg0Callee}(`,
+            ts.isCallExpression(arg0) ? arg0.expression.getText(moveSf) : arg0.getText(moveSf),
+            arg0Callee,
+          );
+        } else {
+          check(
+            `${callee}('s argument 0 is exactly \`${expected[0]}\`, whitespace aside`,
+            norm(c.arguments[0].getText(moveSf)),
+            norm(expected[0]),
+          );
+        }
+        // Arguments 1 and 2 stay exact: neither was broken by this branch's
+        // changes, and argument 2 (the stamp) has a stated consumer-visible
+        // rationale - stamping the record ABOUT TO BE WRITTEN rather than
+        // the one this call loaded would make the compare pass always.
+        for (const i of [1, 2] as const) {
+          check(
+            `${callee}('s argument ${i} is exactly \`${expected[i]}\`, whitespace aside`,
             norm(c.arguments[i].getText(moveSf)),
-            norm(want),
+            norm(expected[i]),
           );
         }
       }
     };
-    pinArgs("deps.vault.upsertKey", [
-      "keyRecordFrom(mintedKeyId, keyDraft, null, newKey.facts)",
-      "keySecrets",
-      "VAULT_STAMP_ABSENT",
-    ]);
+    pinArgs(
+      "deps.vault.upsertKey",
+      [
+        "keyRecordFrom(mintedKeyId, keyDraft, null, newKey.facts, null)",
+        "keySecrets",
+        "VAULT_STAMP_ABSENT",
+      ],
+      "keyRecordFrom",
+    );
     pinArgs("deps.vault.upsertIdentity", [
       'identityRecordFrom(identityId, identityDraft, "keep")',
       "identitySecrets",
@@ -2622,8 +2656,8 @@ console.log("\n[13b] a refused detach takes its copies back off the host's own a
   // identity's password and the key's two secrets onto the HOST's accounts
   // before `upsertHost` is called, and `upsertHost` is again the first call
   // that can refuse - so a refusal used to leave a plaintext copy of a SHARED
-  // vault key at `tervia-hosts::<hostId>::privateKey`, named by nothing, and
-  // unenumerable because there is no `secrets_list`.
+  // vault key at `tervia-hosts::<hostId>::privateKey`, named by no record and
+  // reachable afterwards only through the Vault page's unreferenced-entry sweep.
   //
   // Asserted positively, for group 9's reason: the copies must be shown to have
   // LANDED first, or an undo of nothing passes every absence check for free.
@@ -3125,6 +3159,51 @@ console.log("\n[16] credentialChoice.ts, by value");
       '"i-9"',
     ),
     "bind note falls back to the id when no name is known",
+  );
+
+  // credentialChoiceForGroup, by value - the pure helper both the create-mode
+  // load and the group picker's re-seed call, per the group-default
+  // fix-up. Nested so an own default that is DEAD still falls through to a
+  // LIVE ancestor's, rather than shadowing it.
+  const groups: HostGroup[] = [
+    { id: "g-root", name: "Root", defaultIdentityId: "i-root" },
+    { id: "g-mid", name: "Mid", parentId: "g-root" },
+    { id: "g-leaf", name: "Leaf", parentId: "g-mid", defaultIdentityId: "i-leaf" },
+    { id: "g-dangling", name: "Dangling", parentId: "g-root", defaultIdentityId: "i-gone" },
+  ];
+  const rootless: HostGroup[] = [
+    { id: "g-dangling", name: "Dangling", defaultIdentityId: "i-gone" },
+  ];
+  const live = new Set(["i-root", "i-leaf"]);
+  check(
+    "empty group id -> inline, no group selected",
+    credentialChoiceForGroup("", groups, live),
+    CREDENTIAL_CHOICE_INLINE,
+  );
+  check(
+    "own live default -> identityChoice(id)",
+    credentialChoiceForGroup("g-leaf", groups, live),
+    identityChoice("i-leaf"),
+  );
+  check(
+    "no default of its own falls through to the nearest ancestor's",
+    credentialChoiceForGroup("g-mid", groups, live),
+    identityChoice("i-root"),
+  );
+  check(
+    "a dangling own default falls through to a live ancestor's",
+    credentialChoiceForGroup("g-dangling", groups, live),
+    identityChoice("i-root"),
+  );
+  check(
+    "a dangling own default with no live ancestor -> inline",
+    credentialChoiceForGroup("g-dangling", rootless, live),
+    CREDENTIAL_CHOICE_INLINE,
+  );
+  check(
+    "an unknown group id -> inline",
+    credentialChoiceForGroup("g-ghost", groups, live),
+    CREDENTIAL_CHOICE_INLINE,
   );
 }
 

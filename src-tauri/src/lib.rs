@@ -64,7 +64,7 @@ pub mod modules;
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 use modules::{
-    backup, cli, clipboard, format, fs, git, net, pty, pty_daemon, rdp, secrets, shell, ssh,
+    backup, cli, clipboard, format, fs, git, net, pty, pty_daemon, rdp, secrets, shell, ssh, sync,
 };
 use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_window_state::StateFlags;
@@ -302,11 +302,11 @@ fn min_size_correction(current: (f64, f64), min: (f64, f64)) -> Option<(f64, f64
 /// echo it (enforced by `scripts/tauri-config-parity-verify.ts`) stay the only
 /// place the number is written.
 ///
-/// The early return below leaves one case uncorrected, and that case is an
-/// accepted state recorded in `KNOWN-LIMITS.md` under window sizing: a profile
-/// that quit maximized comes back maximized carrying a below-floor size, and
-/// the first un-maximize of every session shows it. Whoever removes or reworks
-/// that early return should retire the entry with it.
+/// The early return below leaves a maximized or fullscreen window alone, so a
+/// profile that quit maximized is restored over a below-floor size this
+/// setup-time call cannot correct. The main window's `Resized` handler in
+/// `run` calls this again, and the first time that window is sized normally -
+/// its un-maximize - is when the floor lands.
 fn enforce_configured_min_size(config: &tauri::Config, window: &tauri::WebviewWindow) {
     let Some(window_config) = config
         .app
@@ -680,7 +680,6 @@ pub fn run() {
                 .build(),
         )
         .plugin(tauri_plugin_autostart::Builder::new().build())
-        .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_os::init())
         .plugin(
             tauri_plugin_log::Builder::new()
@@ -694,6 +693,7 @@ pub fn run() {
         .manage(secrets::SecretsState::default())
         .manage(ssh::SshState::default())
         .manage(rdp::RdpState::default())
+        .manage(sync::engine::SyncState::default())
         .invoke_handler(tauri::generate_handler![
             pty::pty_open,
             pty::pty_attach,
@@ -748,6 +748,7 @@ pub fn run() {
             secrets::secrets_set,
             secrets::secrets_delete,
             secrets::secrets_get_all,
+            secrets::secrets_list,
             secrets::secrets_copy,
             backup::backup_seal_payload,
             backup::backup_open_payload,
@@ -759,14 +760,21 @@ pub fn run() {
             net::http_stream,
             net::http_abort,
             ssh::ssh_open,
-            ssh::ssh_write,
-            ssh::ssh_resize,
+            ssh::ssh_shell_open,
+            ssh::ssh_shell_write,
+            ssh::ssh_shell_resize,
+            ssh::ssh_shell_close,
             ssh::ssh_close,
             ssh::ssh_confirm_host_key,
             ssh::ssh_agent_keys,
             ssh::ssh_key_inspect,
+            ssh::ssh_key_generate,
+            ssh::ssh_key_classify,
             ssh::ssh_forward_open,
             ssh::ssh_forward_close,
+            ssh::ssh_remote_forward_open,
+            ssh::ssh_remote_forward_close,
+            ssh::ssh_socks_open,
             ssh::ssh_list_sessions,
             ssh::ssh_attach,
             ssh::ssh_git_status,
@@ -782,11 +790,19 @@ pub fn run() {
             ssh::sftp::ssh_sftp_delete,
             rdp::rdp_open,
             rdp::rdp_input,
+            rdp::rdp_resize,
             rdp::rdp_close,
             rdp::rdp_list_sessions,
             rdp::rdp_attach,
             rdp::rdp_snapshot,
+            rdp::rdp_take_frame,
             rdp::rdp_confirm_cert,
+            rdp::rdp_clipboard_focus,
+            sync::engine::sync_configure,
+            sync::engine::sync_disable,
+            sync::engine::sync_purge_secrets,
+            sync::engine::sync_pull,
+            sync::engine::sync_push,
         ])
         .on_window_event(|window, event| {
             // Mirror main-window minimize/restore onto the settings child.
@@ -820,6 +836,18 @@ pub fn run() {
                             let _ = w.show();
                         }
                     }
+                    // The size floor, for the one case the setup-time clamp has
+                    // to skip: a profile that quit maximized comes back maximized
+                    // over a below-floor restored size, and this is the first
+                    // event where that size is on screen - the un-maximize.
+                    // `enforce_configured_min_size` still leaves a maximized or
+                    // fullscreen window alone, and the OS already clamps a user
+                    // resize, so every other Resized is a no-op. Not while
+                    // minimized: the size read then is not the restored one, and
+                    // `set_size` would bring the window back up.
+                    if !minimized {
+                        enforce_configured_min_size(app.config(), &main);
+                    }
                 }
                 // Destroyed, not CloseRequested: the GUI can veto its own close
                 // (the quit prompt), and taking the settings window down on a
@@ -830,6 +858,20 @@ pub fn run() {
                             let _ = w.close();
                         }
                     }
+                }
+                // The sync scheduler's second trigger, after the debounce on a
+                // local edit. Emitted here rather than listened for on the
+                // frontend because a webview's own focus and the WINDOW's focus
+                // are different questions - a click on the header restores one
+                // and not the other.
+                //
+                // The `main` guard above is what keeps this to one webview, and
+                // that is load bearing rather than tidy: `fileKeyValueStore.ts`
+                // records that a contended write eventually gives up and writes
+                // over a stale baseline, losing another window's update, so two
+                // windows applying a pull at once would make that routine.
+                tauri::WindowEvent::Focused(true) => {
+                    let _ = window.emit(crate::modules::events::SYNC_FOCUSED, ());
                 }
                 _ => {}
             }

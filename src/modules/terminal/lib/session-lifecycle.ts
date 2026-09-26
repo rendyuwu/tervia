@@ -154,7 +154,7 @@ export function canFit(el: HTMLElement | null | undefined): boolean {
 export function ensureSession(
   leafId: number,
   initialCwd?: string,
-  sshConnectionId?: string,
+  hostId?: string,
   savedPtyId?: string,
   terminalThemeId?: string,
   savedActiveTool?: AiCliKind,
@@ -189,7 +189,7 @@ export function ensureSession(
     // ConPTY resize semantics for local Windows shells - see `WINDOWS_PTY`.
     // An SSH leaf's pty is on the remote host, so it keeps xterm's Unix
     // default; xterm normalizes the undefined back to that default.
-    windowsPty: sshConnectionId ? undefined : WINDOWS_PTY,
+    windowsPty: hostId ? undefined : WINDOWS_PTY,
   });
 
   const fitAddon = new FitAddon();
@@ -225,7 +225,7 @@ export function ensureSession(
     ready: Promise.resolve(),
     disposed: false,
     initialCwd,
-    sshConnectionId,
+    hostId,
     terminalThemeOverride,
     savedPtyId,
     ptyOpening: false,
@@ -273,7 +273,7 @@ export function ensureSession(
         void retryPty(session);
         return false;
       }
-      if (session.sshConnectionId && enterToRetry && canRetrySsh(session.sshStatus)) {
+      if (session.hostId && enterToRetry && canRetrySsh(session.sshStatus)) {
         event.preventDefault();
         event.stopPropagation();
         void retrySsh(session);
@@ -534,7 +534,7 @@ export function attachSession(
     // ConPTY initializes and the shell loads its profile. SSH leaves get
     // their own "[tervia] connecting to …" banner from `openSshForSession`,
     // so skip the placeholder there. Cleared by `onData` on the first byte.
-    if (firstAttach && !s.sshConnectionId && !s.placeholderShown) {
+    if (firstAttach && !s.hostId && !s.placeholderShown) {
       s.placeholderShown = true;
       s.term.write("\x1b[2m[tervia] starting shell…\x1b[0m");
     }
@@ -542,7 +542,7 @@ export function attachSession(
     const tAttach = performance.now();
     if (debug) {
       console.info(
-        `[tervia-pty] attach leaf=${leafId} cols=${s.term.cols} rows=${s.term.rows} containerWxH=${container.clientWidth}x${container.clientHeight} firstAttach=${firstAttach} ssh=${s.sshConnectionId ?? "-"}`,
+        `[tervia-pty] attach leaf=${leafId} cols=${s.term.cols} rows=${s.term.rows} containerWxH=${container.clientWidth}x${container.clientHeight} firstAttach=${firstAttach} ssh=${s.hostId ?? "-"}`,
       );
     }
     const myPromise = openPtyForSession(s, s.initialCwd);
@@ -583,7 +583,7 @@ export function attachSession(
         const msg = describeError(e);
         console.error("openPty failed:", e);
         // SSH leaves use the backoff scheduler. Local PTY uses Enter-to-retry.
-        if (s.sshConnectionId) {
+        if (s.hostId) {
           if (isHostKeyMismatchError(e)) {
             // Fingerprint mismatch can't auto-recover. Park in error so the user can fix the saved fingerprint.
             s.sshReconnectAttempts = 0;
@@ -696,7 +696,7 @@ export function attachSession(
   if (s.lastCwd !== null) callbacks.onCwd?.(s.lastCwd);
   if (s.lastDetectedUrl !== null) callbacks.onDetectedLocalUrl?.(s.lastDetectedUrl);
   callbacks.onSearchReady?.(s.searchAddon);
-  if (s.sshConnectionId) {
+  if (s.hostId) {
     // Re-emit status so pill/dot redraw after split or workspace-switch reattach.
     callbacks.onSshStatus?.(s.sshStatus);
   }

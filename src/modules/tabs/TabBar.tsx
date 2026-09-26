@@ -23,9 +23,9 @@ import {
 import { horizontalListSortingStrategy, SortableContext } from "@dnd-kit/sortable";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Tab } from "./lib/useTabs";
-import { canCloseLeaf, canCloseTab } from "./lib/closable";
-import { type Entry, type PaneEntry, buildEntries } from "./lib/entries";
-import { entrySelectTarget, type SelectEntry } from "./lib/selectEntry";
+import { canCloseLeaf } from "./lib/closable";
+import { type Entry, buildEntries } from "./lib/entries";
+import { selectDraggedLeaf, type SelectEntry } from "./lib/selectEntry";
 import { EntryIcon } from "./components/EntryIcon";
 import { NewTabMenu } from "./components/NewTabMenu";
 import { SortableTabGroup } from "./components/SortableTabGroup";
@@ -34,14 +34,15 @@ import { ChevronLeft, ChevronRight } from "lucide-react";
 type Props = {
   tabs: Tab[];
   activeId: number;
-  /** Activate a pane entry. `leafId` is null for standalone tabs. Named by
-   *  `SelectEntry` rather than re-spelled, like every other hop inside this
-   *  module - this prop is handed straight to `SortableTabGroup`, which names
-   *  it that way, so a hand-written copy here is a signature free to drift from
-   *  the one it feeds. */
+  /** Activate a pane entry. Named by `SelectEntry` rather than re-spelled, like
+   *  every other hop inside this module - this prop is handed straight to
+   *  `SortableTabGroup`, which names it that way, so a hand-written copy here is
+   *  a signature free to drift from the one it feeds. */
   onSelectEntry: SelectEntry;
-  /** Close a pane leaf or standalone tab. `leafId` is null for standalone. */
-  onCloseEntry: (tabId: number, leafId: number | null) => void;
+  /** Close one pane leaf. */
+  onCloseEntry: (leafId: number) => void;
+  /** "Close Tabs to the Right": close these leaves, asking once for all that need it. */
+  onCloseLeaves: (leafIds: number[]) => void;
   onNewTerminal: () => void;
   /** `+` -> Agent...: open the agent picker dialog. */
   onOpenAgents: () => void;
@@ -117,6 +118,7 @@ export function TabBar({
   activeId,
   onSelectEntry,
   onCloseEntry,
+  onCloseLeaves,
   onNewTerminal,
   onOpenAgents,
   onRenameLeaf,
@@ -143,7 +145,7 @@ export function TabBar({
   useExplorerIconsReady();
   // dnd-kit drag id. `tab:<n>` for whole-group, `leaf:<n>` for in-group reorder. Prefix routes `handleDragEnd`.
   const [activeDragId, setActiveDragId] = useState<string | null>(null);
-  // Resolves a leaf's `sshConnectionId` / `rdpConnectionId` for the
+  // Resolves a leaf's `hostId` / `rdpConnectionId` for the
   // `ssh:<name>` / `rdp:<name>` label + tooltip.
   const hosts = useHosts();
 
@@ -159,8 +161,7 @@ export function TabBar({
   const closableKeys = useMemo(() => {
     const keys = new Set<string>();
     for (const e of entries) {
-      // A standalone entry is a whole tab, so it asks the tab-level question.
-      const ok = e.kind === "pane-leaf" ? canCloseLeaf(tabs, e.leafId) : canCloseTab(tabs, e.tabId);
+      const ok = canCloseLeaf(tabs, e.leafId);
       if (ok) keys.add(e.key);
     }
     return keys;
@@ -206,9 +207,7 @@ export function TabBar({
     }
     if (activeDragId.startsWith("leaf:")) {
       const leafId = Number(activeDragId.slice(5));
-      return (
-        entries.find((e): e is PaneEntry => e.kind === "pane-leaf" && e.leafId === leafId) ?? null
-      );
+      return entries.find((e) => e.leafId === leafId) ?? null;
     }
     return null;
   }, [entries, activeDragId]);
@@ -216,14 +215,11 @@ export function TabBar({
   // The last entry has no "close to the right" target, so the menu item is hidden.
   const lastEntryKey = entries.length > 0 ? entries[entries.length - 1].key : null;
 
-  // Close every entry to the right of `entry`. Routes through `onCloseEntry` so dirty-editor confirms still fire.
+  // Close every entry to the right of `entry`, as ONE batch, so every confirm it needs is asked in one prompt (`requestCloseLeaves`).
   const closeEntriesAfter = (entry: Entry) => {
     const idx = entries.findIndex((e) => e.key === entry.key);
     if (idx < 0) return;
-    for (let i = idx + 1; i < entries.length; i++) {
-      const target = entries[i];
-      onCloseEntry(target.tabId, target.kind === "pane-leaf" ? target.leafId : null);
-    }
+    onCloseLeaves(entries.slice(idx + 1).map((e) => e.leafId));
   };
 
   // Active entry: pane tab follows `activeLeafId`; standalone tab is active when its id matches.
@@ -310,16 +306,10 @@ export function TabBar({
       const fromLeaf = Number(activeId.slice(5));
       const overLeaf = Number(overId.slice(5));
       // Restrict to siblings of the same tab. The inner SortableContext usually prevents this, but check anyway.
-      const fromTabId = entries.find(
-        (e): e is PaneEntry => e.kind === "pane-leaf" && e.leafId === fromLeaf,
-      )?.tabId;
-      const overTabId = entries.find(
-        (e): e is PaneEntry => e.kind === "pane-leaf" && e.leafId === overLeaf,
-      )?.tabId;
+      const fromTabId = entries.find((e) => e.leafId === fromLeaf)?.tabId;
+      const overTabId = entries.find((e) => e.leafId === overLeaf)?.tabId;
       if (fromTabId === undefined || fromTabId !== overTabId) return;
-      const groupLeaves = entries.filter(
-        (e): e is PaneEntry => e.kind === "pane-leaf" && e.tabId === fromTabId,
-      );
+      const groupLeaves = entries.filter((e) => e.tabId === fromTabId);
       const fromIdx = groupLeaves.findIndex((e) => e.leafId === fromLeaf);
       const overIdx = groupLeaves.findIndex((e) => e.leafId === overLeaf);
       if (fromIdx < 0 || overIdx < 0) return;
@@ -405,21 +395,21 @@ export function TabBar({
             // chip's own unconditional handler runs. That is an accident of the
             // element type: an `asChild` on something that is not a button
             // would take Enter/Space away without touching a line of this file.
-            //
-            // Both routes resolve their target through `entrySelectTarget`, so
-            // the pair they select cannot drift apart.
             onValueChange={(k) => {
               const entry = entries.find((e) => e.key === k);
               if (!entry) return;
-              const { tabId, leafId } = entrySelectTarget(entry);
-              onSelectEntry(tabId, leafId);
+              onSelectEntry(entry.tabId, entry.leafId);
             }}
           >
             <DndContext
               sensors={sensors}
               // Scoped `closestCenter`. See `makeScopedCollisionDetection`.
               collisionDetection={collisionDetection}
-              onDragStart={(ev) => setActiveDragId(String(ev.active.id))}
+              onDragStart={(ev) => {
+                const id = String(ev.active.id);
+                setActiveDragId(id);
+                selectDraggedLeaf(id, entries, onSelectEntry);
+              }}
               onDragEnd={handleDragEnd}
               onDragCancel={() => setActiveDragId(null)}
             >

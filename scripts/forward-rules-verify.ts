@@ -139,6 +139,10 @@ function findCalls(root: ts.Node, sf: ts.SourceFile, calleeNames: string[]): ts.
 // gives for doing the same with `enqueueWrite`.
 // ---------------------------------------------------------------------------
 
+/** What the frozen clock below answers, and so what every stored rule's
+ *  `updatedAt` is in this file. */
+const STAMP = 1_700_000_000_000;
+
 function harness(seed: { rules?: ForwardRule[] } = {}) {
   const data: Record<string, unknown> = { rules: seed.rules ?? [] };
   const listeners = new Set<() => void>();
@@ -168,7 +172,11 @@ function harness(seed: { rules?: ForwardRule[] } = {}) {
     fileState: async () => ({ found: "ok" as const, recovered: false }),
   };
 
-  const forwards = createForwardStore({ store });
+  // A frozen clock, so the `updatedAt` the store stamps is a value the round-trip
+  // checks below can name. That the stamp MOVES, and that it overrides whatever
+  // the caller sent, is `scripts/sync-prereq-verify.ts`'s subject, not this
+  // file's.
+  const forwards = createForwardStore({ store, now: () => STAMP });
   return { forwards, data, commits: () => commits };
 }
 
@@ -218,10 +226,18 @@ console.log("\n[round-trip] upsert, list, find, and a repeat upsert replaces");
   const h = harness();
   const hosts = hostsOf([sshHost()]);
 
+  // `stored` rather than `rule()`: the store stamps `updatedAt` on every write,
+  // so the stored record is the fixture plus that field and nothing else - which
+  // is exactly what a field-for-field round-trip should say.
+  const stored = (over: Partial<ForwardRule> = {}): ForwardRule => ({
+    ...rule(over),
+    updatedAt: STAMP,
+  });
+
   const created = await h.forwards.upsertRule(rule(), hosts);
-  check("upsert returns the rule as written", created, rule());
-  check("listRules sees exactly it", await h.forwards.listRules(), [rule()]);
-  check("findRule finds it by id", await h.forwards.findRule("f-1"), rule());
+  check("upsert returns the rule as written", created, stored());
+  check("listRules sees exactly it", await h.forwards.listRules(), [stored()]);
+  check("findRule finds it by id", await h.forwards.findRule("f-1"), stored());
   check("finding an unknown id is undefined", await h.forwards.findRule("f-gone"), undefined);
 
   const replaced = rule({ name: "renamed", localPort: 9090 });
@@ -231,7 +247,11 @@ console.log("\n[round-trip] upsert, list, find, and a repeat upsert replaces");
     (await h.forwards.listRules()).length,
     1,
   );
-  check("and the replacement is what is stored", await h.forwards.findRule("f-1"), replaced);
+  check(
+    "and the replacement is what is stored",
+    await h.forwards.findRule("f-1"),
+    stored({ name: "renamed", localPort: 9090 }),
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -307,6 +327,128 @@ console.log("\n[refusals] name and remoteHost may not be blank");
     'forwards: "web tunnel" needs a remote host',
   );
   check("neither refusal wrote anything", (h.data.rules as ForwardRule[]).length, 0);
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n[refusals] startWithHost and startWithApp are mutually exclusive, for every type");
+{
+  const h = harness();
+  const hosts = hostsOf([sshHost()]);
+
+  await rejectsWith(
+    "both true on a -L rule is refused",
+    () => h.forwards.upsertRule(rule({ startWithHost: true, startWithApp: true }), hosts),
+    'forwards: "web tunnel" cannot start with both its host\'s terminal and the app - choose one',
+  );
+  await rejectsWith(
+    "both true on a -D rule is refused too - the guard runs before the type branch",
+    () =>
+      h.forwards.upsertRule(
+        rule({
+          id: "f-socks",
+          type: "dynamic",
+          remoteHost: "",
+          remotePort: 0,
+          startWithHost: true,
+          startWithApp: true,
+        }),
+        hosts,
+      ),
+    'forwards: "web tunnel" cannot start with both its host\'s terminal and the app - choose one',
+  );
+  check("neither refusal wrote anything", (h.data.rules as ForwardRule[]).length, 0);
+
+  const appOnly = await h.forwards.upsertRule(rule({ startWithApp: true }), hosts);
+  check("the paired positive: startWithApp alone is accepted", appOnly.startWithApp, true);
+  const hostOnly = await h.forwards.upsertRule(rule({ id: "f-2", startWithHost: true }), hosts);
+  check("and startWithHost alone, unaffected by the new guard", hostOnly.startWithHost, true);
+}
+
+// ---------------------------------------------------------------------------
+console.log(
+  "\n[type -D] the SOCKS port is the only refusal, and it shares -L's localPort predicate",
+);
+{
+  const h = harness();
+  const hosts = hostsOf([sshHost()]);
+  const socksRule = (over: Partial<ForwardRule> = {}): ForwardRule => ({
+    ...rule({ id: "f-socks", type: "dynamic", remoteHost: "", remotePort: 0 }),
+    ...over,
+  });
+
+  await rejectsWith(
+    "a negative SOCKS port is refused",
+    () => h.forwards.upsertRule(socksRule({ localPort: -1 }), hosts),
+    'forwards: "web tunnel" has an invalid SOCKS port -1 - must be 0, or 1-65535',
+  );
+  await rejectsWith(
+    "a SOCKS port past 65535 is refused",
+    () => h.forwards.upsertRule(socksRule({ localPort: 65536 }), hosts),
+    'forwards: "web tunnel" has an invalid SOCKS port 65536 - must be 0, or 1-65535',
+  );
+  check("neither refusal wrote anything", (h.data.rules as ForwardRule[]).length, 0);
+
+  const zero = await h.forwards.upsertRule(socksRule({ localPort: 0 }), hosts);
+  check("0 (auto) is accepted for a -D rule", zero.localPort, 0);
+  check("a -D rule carries the type through unmodified", zero.type, "dynamic");
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n[type -R] the local target host/port, and, only when present, the bind port");
+{
+  const h = harness();
+  const hosts = hostsOf([sshHost()]);
+  const remoteRule = (over: Partial<ForwardRule> = {}): ForwardRule => ({
+    ...rule({
+      id: "f-remote",
+      type: "remote",
+      localPort: 0,
+      remoteHost: "",
+      remotePort: 0,
+      targetHost: "127.0.0.1",
+      targetPort: 80,
+    }),
+    ...over,
+  });
+
+  await rejectsWith(
+    "a blank local target host is refused, and the message says LOCAL TARGET",
+    () => h.forwards.upsertRule(remoteRule({ targetHost: " " }), hosts),
+    'forwards: "web tunnel" needs a local target host',
+  );
+  await rejectsWith(
+    "target port 0 is refused - it is dialled, the same as -L's remotePort",
+    () => h.forwards.upsertRule(remoteRule({ targetPort: 0 }), hosts),
+    'forwards: "web tunnel" has an invalid target port 0 - must be 1-65535',
+  );
+  await rejectsWith(
+    "an absent target port is refused too, not read as 0",
+    () => h.forwards.upsertRule(remoteRule({ targetPort: undefined }), hosts),
+    'forwards: "web tunnel" has an invalid target port undefined - must be 1-65535',
+  );
+  await rejectsWith(
+    "an invalid bindPort is refused, only when one is present",
+    () => h.forwards.upsertRule(remoteRule({ bindPort: 65536 }), hosts),
+    'forwards: "web tunnel" has an invalid bind port 65536 - must be 0, or 1-65535',
+  );
+  check("none of the four refusals wrote anything", (h.data.rules as ForwardRule[]).length, 0);
+
+  const noBindPort = await h.forwards.upsertRule(remoteRule(), hosts);
+  check(
+    "bindPort absent is accepted - the server picks its own default",
+    noBindPort.bindPort,
+    undefined,
+  );
+  check(
+    "remoteHost/remotePort stay forced blank on a -R row - an older build refuses it instead of reading it as a working -L (issue 78's field-mapping fix)",
+    [noBindPort.remoteHost, noBindPort.remotePort],
+    ["", 0],
+  );
+  const autoBind = await h.forwards.upsertRule(
+    remoteRule({ id: "f-remote-2", bindPort: 0 }),
+    hosts,
+  );
+  check("bindPort 0 (let the server pick) is accepted", autoBind.bindPort, 0);
 }
 
 // ---------------------------------------------------------------------------

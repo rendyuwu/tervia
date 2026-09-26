@@ -3,12 +3,12 @@ import type { VaultIdentity } from "@/modules/vault/types";
 
 import type { Host, HostGroup } from "./types";
 
-// One ranking function, two mount points: the Hosts page search box and the
-// header quick-connect both filter the same saved-host
-// list and MUST agree on what the top match is - a user who sees one answer in
-// the header and a different one on the page for the identical query has no
-// way to tell which is "right". Building this once in `modules/hosts` and
-// having both callers import it is what makes that impossible instead of
+// One ranking function, three mount points: the Hosts page search box, the
+// header quick-connect and the command palette's `#` mode all filter the same
+// saved-host list and MUST agree on what the top match is - a user who sees one
+// answer in the header and a different one on the page for the identical query
+// has no way to tell which is "right". Building this once in `modules/hosts` and
+// having every caller import it is what makes that impossible instead of
 // merely unlikely.
 //
 // The ROW BUILDER lives here for the same reason, and it has to: sharing only
@@ -22,13 +22,20 @@ import type { Host, HostGroup } from "./types";
 //
 // This module is pure: no store read, no React, no Tauri. It resolves a vault
 // binding when handed the identity map, which is a lookup over plain data, not a
-// vault operation - `useVault()` gives both callers that map synchronously.
+// vault operation - `useVault()` gives every caller that map synchronously.
 
-/** One searchable row: a host plus the two fields {@link matchTier} cannot work
+/** One searchable row: a host plus the fields {@link matchTier} cannot work
  *  out from the host alone, because a vault-bound host's username lives on its
- *  identity and a group's name lives on the group. Build these with
- *  {@link searchRows}, never by hand. */
-export type HostSearchRow = { host: Host; username?: string; groupName?: string };
+ *  identity and a group's name lives on the group. `tags` is a straight copy of
+ *  `host.tags`, carried here rather than read off `host` a second time inside
+ *  {@link matchTier} so every field that function reads comes from the same
+ *  place. Build these with {@link searchRows}, never by hand. */
+export type HostSearchRow = {
+  host: Host;
+  username?: string;
+  groupName?: string;
+  tags?: readonly string[];
+};
 
 /**
  * Just the map {@link searchRows} reads.
@@ -51,6 +58,7 @@ function matchTier(row: HostSearchRow, query: string): number | null {
   const host = row.host.host.toLowerCase();
   const username = row.username?.toLowerCase();
   const groupName = row.groupName?.toLowerCase();
+  const tags = row.tags?.map((t) => t.toLowerCase());
 
   if (name === query) return 1;
   if (name.startsWith(query)) return 2;
@@ -60,7 +68,8 @@ function matchTier(row: HostSearchRow, query: string): number | null {
     name.includes(query) ||
     host.includes(query) ||
     (username !== undefined && username.includes(query)) ||
-    (groupName !== undefined && groupName.includes(query))
+    (groupName !== undefined && groupName.includes(query)) ||
+    (tags !== undefined && tags.some((t) => t.includes(query)))
   ) {
     return 5;
   }
@@ -91,8 +100,9 @@ function compareRows(a: HostSearchRow, b: HostSearchRow): number {
   return a.host.id.localeCompare(b.host.id);
 }
 
-/** Filter and rank, case-insensitively, over name, host, username and group name.
- *  An empty or whitespace-only query returns every row in its default order. */
+/** Filter and rank, case-insensitively, over name, host, username, group name
+ *  and tags. An empty or whitespace-only query returns every row in its
+ *  default order. */
 export function rankHosts(rows: HostSearchRow[], query: string): HostSearchRow[] {
   const trimmed = query.trim().toLowerCase();
   if (trimmed.length === 0) {
@@ -146,12 +156,12 @@ export function hostUsername(
 /**
  * Every host as a searchable row - THE row builder, for every mount point.
  *
- * Both surfaces call this rather than mapping the host list themselves, which is
+ * Every surface calls this rather than mapping the host list themselves, which is
  * the fix for the divergence at the top of this file. The two hand-written loops
  * it replaced disagreed on more than the username, too: one treated `groupId` as
  * falsy-or-set and the other as `undefined`-or-set, so an empty-string group id
  * resolved differently in each. One builder means a new searchable field, or a
- * new opinion about a blank id, lands on both surfaces or neither.
+ * new opinion about a blank id, lands on every surface or none.
  */
 export function searchRows(
   hosts: readonly Host[],
@@ -163,6 +173,7 @@ export function searchRows(
     host,
     username: hostUsername(host, vault.identities),
     groupName: host.groupId === undefined ? undefined : groupNames.get(host.groupId),
+    tags: host.tags,
   }));
 }
 

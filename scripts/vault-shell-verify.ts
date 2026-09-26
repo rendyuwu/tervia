@@ -1113,8 +1113,11 @@ console.log("    missingPrivateKey -> the row Badge's variant AND its label");
     );
   }
 
-  // --- missingPrivateKey: the same shape, on KeyCard, with no chip to
-  // protect - `KeyCard.tsx` has only the one destructive signal.
+  // --- missingPrivateKey: the same shape, on KeyCard, which now carries a
+  // SECOND badge - the kind badge, for `cert`/`hardware` records
+  // (`VaultKeyKind` in `src/modules/vault/types.ts`) - so the missing-secret
+  // badge is located by which one's variant mentions `missingPrivateKey`,
+  // rather than by being the only badge in the file or the first one found.
   const sfKey = ts.createSourceFile(
     FILES.keyCard,
     src.keyCard,
@@ -1126,31 +1129,30 @@ console.log("    missingPrivateKey -> the row Badge's variant AND its label");
   check("found KeyCard's function body to check", keyBody !== null);
 
   const keyBadges = keyBody ? findOpeningElementsByTag(keyBody, "Badge", sfKey) : [];
-  check("found exactly one <Badge> in KeyCard.tsx", keyBadges.length === 1, keyBadges.length);
-  const keyBadge = keyBadges[0] ?? null;
-  const keyVariant = keyBadge ? jsxAttrExprText(keyBadge, "variant", sfKey) : null;
-  check("found KeyCard's row Badge's variant expression", keyVariant !== null);
-  if (keyVariant !== null) {
-    check(
-      "KeyCard's row Badge variant is driven by missingPrivateKey",
-      /\bmissingPrivateKey\b/.test(keyVariant),
-      keyVariant,
-    );
-  }
+  check("found at least one <Badge> in KeyCard.tsx", keyBadges.length >= 1, keyBadges.length);
+  const missingKeyBadges = keyBadges.filter((b) =>
+    (jsxAttrExprText(b, "variant", sfKey) ?? "").includes("missingPrivateKey"),
+  );
+  check(
+    "exactly one Badge in KeyCard.tsx is driven by missingPrivateKey - still the one destructive signal, even though the kind badge beside it is not",
+    missingKeyBadges.length === 1,
+    missingKeyBadges.length,
+  );
+  const keyBadge = missingKeyBadges[0] ?? null;
 
   const keyBadgeElement =
     keyBadge && ts.isJsxOpeningElement(keyBadge) && ts.isJsxElement(keyBadge.parent)
       ? keyBadge.parent
       : null;
   check(
-    "found KeyCard's row Badge's own JSX element (for its label text)",
+    "found KeyCard's missing-secret Badge's own JSX element (for its label text)",
     keyBadgeElement !== null,
   );
   if (keyBadgeElement) {
     const badgeText = keyBadgeElement.getText(sfKey);
     check(
-      'KeyCard\'s row Badge LABEL also switches on missingPrivateKey: `missingPrivateKey ? "Missing private key" : …`',
-      /missingPrivateKey\s*\?\s*"Missing private key"/.test(badgeText),
+      "KeyCard's missing-secret Badge LABEL also switches on missingPrivateKey and still says \"Missing private key\" somewhere in that branch - not the new wording's exact phrasing, which the browser smoke already confirmed",
+      /missingPrivateKey\s*\?/.test(badgeText) && badgeText.includes('"Missing private key"'),
       badgeText,
     );
   }
@@ -1252,15 +1254,15 @@ console.log("\n[16. layout parity] the containment pair and the responsive grid 
   // --- the responsive grid: two call sites on VaultPage, one on HostsPage,
   //     one on ForwardsPage ---
   //
-  // GRID_RE ONLY SEES A SINGLE-LINE `<div className="grid …">`, which is a
-  // shape rather than an accident: prettier (printWidth 100) never breaks a
-  // JSX element whose sole attribute is a string literal, so all four of these
-  // stay on one line at 114-116 columns. Give any of those divs a SECOND
-  // attribute and prettier splits it across lines, this regex stops seeing it,
-  // and the file's count drops. The counts below are what make that loud - a
-  // section that only compared the strings it found would go green on finding
-  // none, which is the failure mode this shape has to be paired with.
-  const GRID_RE = /<div className="(grid [^"]*)">/g;
+  // GRID_RE sees `<div className="grid …">` on one line or split across lines
+  // by prettier for a later attribute - HostsPage's grid carries `onKeyDown`
+  // for its arrow keys, so prettier splits that one. `className` has to be the
+  // div's FIRST attribute, and the rest may not contain a `>` (a handler passed
+  // by name, not an inline arrow). Break either and the regex stops seeing the
+  // div, and the file's count drops. The counts below are what make that loud -
+  // a section that only compared the strings it found would go green on finding
+  // none, which is the failure mode this regex has to be paired with.
+  const GRID_RE = /<div\s+className="(grid [^"]*)"[^>]*>/g;
   const vaultGridMatches = [...src.vaultPage.matchAll(GRID_RE)].map((m) => m[1]);
   const hostsGridMatches = [...src.hostsPage.matchAll(GRID_RE)].map((m) => m[1]);
   const forwardsGridMatches = [...src.forwardsPage.matchAll(GRID_RE)].map((m) => m[1]);

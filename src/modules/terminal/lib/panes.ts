@@ -1,7 +1,6 @@
 // Unified pane tree. Leaves are terminal, editor, rdp, board, or page.
 // `kind: "leaf"` stays for back-compat; the discriminator is `leafKind`.
 
-import type { RdpSizeMode } from "@/modules/hosts/types";
 import type { AiCliKind } from "./aiCliStatus";
 
 export type PaneId = number;
@@ -18,7 +17,7 @@ export type TerminalLeafState = {
    * Saved SSH connection id. When set, connects to that host instead of
    * spawning a local PTY; `cwd` is ignored.
    */
-  sshConnectionId?: string;
+  hostId?: string;
   /**
    * FIFO creation index. 1-based, shown on the tab chip and surfaced to the
    * AI in `<env>`. Set at creation, preserved across split/drag/restart.
@@ -86,7 +85,7 @@ export type EditorLeafState = {
    * is live at render time (see `sshSessionId`). Absent on local files and on
    * ad-hoc connections, which have no saved profile to rebind to.
    */
-  sshConnectionId?: string;
+  hostId?: string;
   /**
    * LIVE russh session this leaf currently reads and writes through (SFTP).
    * Frozen at open time for an ad-hoc connection (no saved profile, so nothing
@@ -134,19 +133,13 @@ export type RdpLeafState = {
   leafKind: "rdp";
   /** Id of the saved RDP host in the hosts store (`modules/hosts/store.ts`). */
   rdpConnectionId: string;
-  /**
-   * How this pane's desktop resolution is chosen. Only `"preset"` exists today,
-   * and it is carried on the leaf anyway so that adding `"fit"` later is a new
-   * branch in the pane rather than a migration of every saved workspace.
-   */
-  sizeMode: RdpSizeMode;
   /** User-chosen tab name; see {@link TerminalLeafState.customTitle}. */
   customTitle?: string;
 };
 
-/** The three pages the activity rail can show. Only one of them may be a pane
+/** The four pages the activity rail can show. Only one of them may be a pane
  *  LEAF - see {@link TabPageKind}. */
-export type PageKind = "hosts" | "vault" | "forwards";
+export type PageKind = "hosts" | "vault" | "forwards" | "known-hosts";
 
 /**
  * The page kinds that may live in a tab as a pane leaf. Hosts, and only Hosts.
@@ -164,7 +157,7 @@ export type PageKind = "hosts" | "vault" | "forwards";
  */
 export type TabPageKind = "hosts";
 
-export const PAGE_KINDS: readonly PageKind[] = ["hosts", "vault", "forwards"];
+export const PAGE_KINDS: readonly PageKind[] = ["hosts", "vault", "forwards", "known-hosts"];
 
 export function isPageKind(value: string): value is PageKind {
   return (PAGE_KINDS as readonly string[]).includes(value);
@@ -179,6 +172,7 @@ export const PAGE_LABELS: Record<PageKind, string> = {
   hosts: "Hosts",
   vault: "Vault",
   forwards: "Port Forwarding",
+  "known-hosts": "Known Hosts",
 };
 
 /**
@@ -235,8 +229,7 @@ export function isLeaf(n: PaneNode): n is PaneLeaf {
  */
 export function isRemoteEditorLeaf(leaf: PaneLeaf): boolean {
   return (
-    leaf.leafKind === "editor" &&
-    (leaf.sshConnectionId !== undefined || leaf.sshSessionId !== undefined)
+    leaf.leafKind === "editor" && (leaf.hostId !== undefined || leaf.sshSessionId !== undefined)
   );
 }
 
@@ -447,7 +440,7 @@ export function cloneLeafState(leaf: PaneLeaf): LeafState {
     return {
       leafKind: "terminal",
       cwd: leaf.cwd,
-      sshConnectionId: leaf.sshConnectionId,
+      hostId: leaf.hostId,
       terminalOrdinal: leaf.terminalOrdinal,
       ...(leaf.terminalThemeId ? { terminalThemeId: leaf.terminalThemeId } : {}),
       // Carry the live agent kind so a move/extract doesn't drop the badge
@@ -461,7 +454,7 @@ export function cloneLeafState(leaf: PaneLeaf): LeafState {
       path: leaf.path,
       dirty: leaf.dirty,
       preview: leaf.preview,
-      sshConnectionId: leaf.sshConnectionId,
+      hostId: leaf.hostId,
       sshSessionId: leaf.sshSessionId,
       sshHostLabel: leaf.sshHostLabel,
     };
@@ -470,7 +463,6 @@ export function cloneLeafState(leaf: PaneLeaf): LeafState {
     return {
       leafKind: "rdp",
       rdpConnectionId: leaf.rdpConnectionId,
-      sizeMode: leaf.sizeMode,
     };
   }
   if (leaf.leafKind === "board") {

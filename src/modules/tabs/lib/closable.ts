@@ -168,3 +168,27 @@ export function tabCloseConfirmReason(
   if (all.some((l) => leafIsBusy(l, isProcessRunning))) return "running";
   return null;
 }
+
+/**
+ * A batch close ("Close Tabs to the Right"), asked leaf by leaf the same two
+ * questions a single close asks, in the same order: a refused leaf is in
+ * neither list, `silent` may close at once, `confirm` must be asked about
+ * first. The caller asks about ALL of `confirm` in one prompt - routing each
+ * leaf through the single-close funnel wrote them one after another into the
+ * one pending-close slot, so only the last was ever asked about.
+ */
+export function splitBatchClose(
+  tabs: Tab[],
+  leafIds: readonly number[],
+  isProcessRunning: (leafId: number) => boolean,
+): { silent: number[]; confirm: { leafId: number; reason: CloseConfirmReason }[] } {
+  const silent: number[] = [];
+  const confirm: { leafId: number; reason: CloseConfirmReason }[] = [];
+  for (const leafId of leafIds) {
+    if (!canCloseLeaf(tabs, leafId)) continue;
+    const reason = leafCloseConfirmReason(tabs, leafId, isProcessRunning);
+    if (reason === null) silent.push(leafId);
+    else confirm.push({ leafId, reason });
+  }
+  return { silent, confirm };
+}

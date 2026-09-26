@@ -7,13 +7,11 @@
 //!
 //! # What travels on the session channel
 //!
-//! One `Channel` carries both control events and pixels:
-//!
-//! * JSON payloads are [`RdpEvent`]s (a plain object on the JS side).
-//! * Raw payloads are frame batches (an `ArrayBuffer` on the JS side). The
-//!   binary layout is documented in [`frame`].
-//!
-//! So a frontend handler dispatches on `message instanceof ArrayBuffer`.
+//! JSON control events ([`RdpEvent`]) and nothing else. Pixels are PULLED:
+//! the session emits a tiny `frameReady` and the consumer collects the
+//! encoded batch with [`rdp_take_frame`], whose docs explain why the channel
+//! is the wrong place for a framebuffer. The binary layout is documented in
+//! [`frame`].
 //!
 //! # Certificate trust
 //!
@@ -26,13 +24,29 @@
 //! aborts. See [`tls`] for the full policy, including why the pin is keyed to
 //! the saved connection rather than to `host:port`.
 //!
-//! # Out of scope for this phase
+//! # Clipboard
 //!
-//! Clipboard, audio, device redirection, RD Gateway, KDC proxy, dynamic resize,
-//! EGFX/H.264, `.rdp` import and multi-monitor. Transport is direct TCP only;
+//! Text and images both ways over CLIPRDR, in [`cliprdr`]. The transfer is
+//! triggered on pane focus EDGES rather than on every clipboard change, and
+//! the direction is a per-connection setting ([`RdpClipboardMode`]) whose
+//! `Off` value does not register the channel at all. Files are deliberately
+//! out: the client advertises no file capability, so the server never asks.
+//!
+//! # Not implemented
+//!
+//! Audio, device redirection, RD Gateway, KDC proxy, `.rdp` import and
+//! multi-monitor are deliberate omissions. Transport is direct TCP only;
 //! tunnelling through SSH needs no change here, it just dials a different
 //! address.
+//!
+//! EGFX/H.264 is NOT one of those, and is listed apart from them because the
+//! difference is actionable. It is blocked on the pinned connector, which never
+//! advertises the early-capability bit that makes a server open the graphics
+//! channel and offers no seam to set it (`ironrdp-connector` 0.9.0, `Config`).
+//! Bumping the ironrdp pins does not lift it. `KNOWN-LIMITS.md` carries the
+//! state and the trigger.
 
+mod cliprdr;
 mod frame;
 mod session;
 mod tls;
@@ -93,6 +107,21 @@ fn rdp_runtime() -> &'static Runtime {
     })
 }
 
+/// Simultaneous sessions. Each holds a whole framebuffer (33 MB at 4K) plus,
+/// while a snapshot is being encoded, a second buffer of the same order, and
+/// each adds a task to a 2-worker runtime.
+const MAX_RDP_SESSIONS: usize = 8;
+
+/// `Err` once `live` sessions are already open.
+fn capacity_check(live: usize) -> Result<(), String> {
+    if live >= MAX_RDP_SESSIONS {
+        return Err(format!(
+            "rdp: too many sessions open ({MAX_RDP_SESSIONS}); close one before opening another"
+        ));
+    }
+    Ok(())
+}
+
 pub struct RdpState {
     sessions: Arc<tokio::sync::RwLock<HashMap<u32, Arc<RdpSession>>>>,
     next_id: AtomicU32,
@@ -117,11 +146,11 @@ impl Default for RdpState {
 /// straight into the CredSSP exchange. The password is never returned to, nor
 /// passed in from, the webview.
 ///
-/// This deliberately does NOT mirror the SSH module. There, `resolveSshAuth`
-/// (`src/modules/vault/resolve.ts`) reads the secret and hands the plaintext
-/// back to JS, and `src/modules/ssh/bridge.ts` passes it down to `ssh_open` -
-/// so for SSH the secret does transit the webview. For RDP the plaintext must
-/// never reach the webview at all.
+/// The SSH module now mirrors this: `resolveSshAuth`
+/// (`src/modules/vault/resolve.ts`) returns keychain references too, and
+/// `ssh_open` dereferences them in the host process, so no saved SSH secret
+/// transits the webview either. The one plaintext arm on each side is the
+/// connection dialog's Test button, which has nothing saved to reference yet.
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum RdpCredential {
@@ -182,6 +211,44 @@ pub struct RdpOpenInput {
     /// the server presents anything else - before CredSSP sends a credential.
     /// `None` on first connect, which prompts the user instead.
     pub expected_cert_fingerprint: Option<String>,
+    /// DPI percentage (`devicePixelRatio * 100`) for the initial desktop.
+    /// `0` - the default - means "unset", which is what this connector sent
+    /// before fit mode existed: the connector only derives a non-zero
+    /// `device_scale_factor` for values in 100..=500
+    /// (`ironrdp-connector` 0.9.0, `create_gcc_blocks`).
+    #[serde(default)]
+    pub scale_factor: u32,
+    /// Which directions the clipboard bridge carries. Absent means
+    /// [`RdpClipboardMode::Both`], so no stored connection needs migrating.
+    #[serde(default)]
+    pub clipboard: RdpClipboardMode,
+}
+
+/// Which directions the clipboard bridge carries.
+///
+/// [`Self::Off`] skips registering the CLIPRDR channel entirely, so the server
+/// is never told there is a clipboard at all - as opposed to being told there
+/// is one that then refuses every transfer.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RdpClipboardMode {
+    #[default]
+    Both,
+    HostToRemote,
+    RemoteToHost,
+    Off,
+}
+
+impl RdpClipboardMode {
+    /// Is the host clipboard advertised to, and served to, the remote?
+    pub(crate) fn host_to_remote(self) -> bool {
+        matches!(self, Self::Both | Self::HostToRemote)
+    }
+
+    /// Is the remote's clipboard pulled onto the host's?
+    pub(crate) fn remote_to_host(self) -> bool {
+        matches!(self, Self::Both | Self::RemoteToHost)
+    }
 }
 
 fn default_rdp_port() -> u16 {
@@ -261,6 +328,26 @@ pub(crate) enum InputOp {
     ReleaseAll,
 }
 
+/// One item on the wire to the session task.
+///
+/// A resize rides the same queue as input rather than a channel of its own:
+/// the session task is the only thing that may touch `ActiveStage`, and one
+/// queue means a resize cannot overtake the keystroke that preceded it.
+pub(crate) enum SessionOp {
+    Input(Vec<InputOp>),
+    /// Ask the server for a new desktop size. `scale_factor` is a DPI
+    /// percentage; see [`rdp_resize`].
+    Resize {
+        width: u16,
+        height: u16,
+        scale_factor: u32,
+    },
+    /// One CLIPRDR message to hand to the session's `CliprdrClient`. Rides
+    /// this queue for the same reason a resize does, and so costs the
+    /// `select!` no extra arm.
+    Clipboard(ironrdp_cliprdr::backend::ClipboardMessage),
+}
+
 impl RdpInputEvent {
     /// Translate to a task-side input item. `None` for an event that cannot be
     /// expressed (an unknown mouse button), which is dropped rather than
@@ -289,13 +376,14 @@ impl RdpInputEvent {
 
 /// Resolve the input's credential to a plaintext password.
 ///
-/// The plaintext exists only as a Rust `String` from here until it reaches the
-/// CredSSP exchange; it is never serialised, logged or handed back to JS.
+/// The plaintext exists only as a `Zeroizing<String>`, scrubbed on drop, from
+/// here until it reaches the CredSSP exchange; it is never serialised, logged
+/// or handed back to JS.
 fn resolve_password(
     app: &tauri::AppHandle,
     secrets: &secrets::SecretsState,
     credential: &RdpCredential,
-) -> Result<String, String> {
+) -> Result<zeroize::Zeroizing<String>, String> {
     match credential {
         RdpCredential::Keychain { service, account } => {
             match secrets::read_secret(app, secrets, service, account)? {
@@ -309,7 +397,7 @@ fn resolve_password(
                 )),
             }
         }
-        RdpCredential::Inline { password } => Ok(password.clone()),
+        RdpCredential::Inline { password } => Ok(zeroize::Zeroizing::new(password.clone())),
     }
 }
 
@@ -321,6 +409,9 @@ pub async fn rdp_open(
     input: RdpOpenInput,
     on_event: EventSink,
 ) -> Result<u32, String> {
+    // Refuse before the keychain read and the handshake, so a caller past the
+    // ceiling is told immediately rather than after up to 45 s of connecting.
+    capacity_check(state.sessions.read().await.len())?;
     // Read the keychain on this side of the spawn: `tauri::State` is borrowed
     // from the command invocation and cannot cross into the RDP runtime, and
     // resolving here keeps the plaintext's life as short as possible.
@@ -335,18 +426,30 @@ pub async fn rdp_open(
             e
         })?;
     let id = state.next_id.fetch_add(1, Ordering::Relaxed);
+    // The authoritative check, held across check and insert: two concurrent
+    // opens can both clear the pre-check above, and only this guard serialises
+    // them.
+    let mut sessions = state.sessions.write().await;
+    if let Err(message) = capacity_check(sessions.len()) {
+        drop(sessions);
+        // Emits `disconnected`, aborts the task and drops the TLS stream.
+        session.close().await;
+        return Err(message);
+    }
     // Take the exit receiver before the Arc reaches the map, so the janitor
     // cannot race another caller for the slot. It fires both when the session
     // task ends on its own and when `rdp_close` aborts it (the sender is
     // dropped mid-future), so every teardown path wakes it; it no-ops on an
-    // already-removed id.
+    // already-removed id. After the capacity check, because a rejected session
+    // never reaches the map and so needs no janitor.
     let exit_signal = session.take_exit_signal();
-    let sessions = Arc::clone(&state.sessions);
-    state.sessions.write().await.insert(id, session);
+    let map = Arc::clone(&state.sessions);
+    sessions.insert(id, session);
+    drop(sessions);
     if let Some(rx) = exit_signal {
         rt.spawn(async move {
             let _ = rx.await;
-            sessions.write().await.remove(&id);
+            map.write().await.remove(&id);
             log::info!("rdp session id={id} evicted after task exit");
         });
     }
@@ -367,14 +470,20 @@ pub async fn rdp_open(
 /// everything at once - and do not pre-chunk on the frontend. The count that
 /// matters is the one the events *expand into*, which only the backend can see:
 /// one `releaseAll` can become hundreds of events on its own.
+///
+/// `false` means the session task has fallen behind and the batch was **not**
+/// taken - none of it, so the caller still holds every event and must keep the
+/// batch and retry it. Dropping it instead strands a modifier down on the
+/// server, because a discarded `keyUp` or `releaseAll` never reaches the
+/// keyboard state machine. `Err` means the session is gone.
 #[tauri::command]
 pub async fn rdp_input(
     state: tauri::State<'_, RdpState>,
     id: u32,
     events: Vec<RdpInputEvent>,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     if events.is_empty() {
-        return Ok(());
+        return Ok(true);
     }
     let session = lookup(&state, id, "rdp_input").await?;
     let ops: Vec<InputOp> = events
@@ -382,6 +491,32 @@ pub async fn rdp_input(
         .filter_map(RdpInputEvent::into_input_op)
         .collect();
     session.send_input(ops)
+}
+
+/// Ask the server to resize the desktop to `width` x `height` over the Display
+/// Control channel (MS-RDPEDISP). `scale_factor` is a DPI percentage
+/// (`devicePixelRatio * 100`); the spec ignores anything outside 100..=500, so
+/// `100` is the "no scaling" value.
+///
+/// Resolves as soon as the request is queued, and the requested size is NOT
+/// authoritative: the server answers with a Deactivate All and reactivates at a
+/// size of its own choosing, which arrives as the ordinary `resize` event. A
+/// server with no Display Control channel keeps its current size silently and
+/// the consumer goes on letterboxing - the request is dropped, never escalated
+/// to a reconnect.
+///
+/// Dimensions are clamped and the width made even by the session task, so a
+/// caller may send the raw pane size.
+#[tauri::command]
+pub async fn rdp_resize(
+    state: tauri::State<'_, RdpState>,
+    id: u32,
+    width: u16,
+    height: u16,
+    scale_factor: u32,
+) -> Result<(), String> {
+    let session = lookup(&state, id, "rdp_resize").await?;
+    session.request_resize(width, height, scale_factor).await
 }
 
 #[tauri::command]
@@ -412,8 +547,10 @@ pub async fn rdp_list_sessions(
 /// `rdp_input`.
 ///
 /// Unlike SSH there is no byte stream to replay, so the new sink gets a
-/// `connected` event and one full-framebuffer keyframe first, then the same
-/// dirty-rect deltas the primary sink sees. Returns `alive`.
+/// `connected` event and then takes its first picture from [`rdp_snapshot`],
+/// repainting from `rdp_snapshot` again on each `frameReady`. It does NOT
+/// share the primary's batcher - two consumers draining one batcher would
+/// steal each other's rects. Returns `alive`.
 #[tauri::command]
 pub async fn rdp_attach(
     state: tauri::State<'_, RdpState>,
@@ -424,24 +561,62 @@ pub async fn rdp_attach(
     Ok(session.add_mirror_sink(on_event))
 }
 
-/// The current framebuffer as one keyframe batch, in the same wire format the
-/// session channel uses.
+/// The current framebuffer as one keyframe batch, in the same wire format
+/// [`rdp_take_frame`] uses. Returned as a raw `Response`, so the pixels never
+/// touch JSON.
 ///
-/// Returned as a raw `Response`, which is the one path in this module where
-/// pixels genuinely never touch JSON. The channel path is not so clean: Tauri
-/// only avoids JSON for raw payloads of 1024 bytes or more
-/// (`tauri` 2.11.5, `MAX_RAW_DIRECT_EXECUTE_THRESHOLD`).
-/// Below that it serialises the bytes as a JSON number array and `eval`s
-/// `new Uint8Array([...]).buffer`
-/// (`tauri` 2.11.5, `JavaScriptChannelId::channel_on`) - and a small delta like
-/// a blinking text caret (~2x16 px = 128 bytes) is exactly that case, so on an
-/// idle desktop most batches do go through JSON. At or above the threshold the
-/// body is parked in `ChannelDataIpcQueue` and pulled back by a JS `invoke`
-/// (`tauri` 2.11.5, `JavaScriptChannelId::channel_on`).
+/// This is the RESYNC and FIRST-PICTURE path: a consumer that has no
+/// framebuffer yet, or whose deltas were lost, cannot reconstruct one from
+/// deltas, and on an idle desktop the server sends nothing to reconstruct it
+/// from.
+///
+/// The encode runs on the RDP runtime's blocking pool, never here: it takes
+/// the `image` lock, which the session task holds for the whole of a RemoteFX
+/// decode, and a Tauri worker parked on that stalls every other command.
 #[tauri::command]
 pub async fn rdp_snapshot(state: tauri::State<'_, RdpState>, id: u32) -> Result<Response, String> {
     let session = lookup(&state, id, "rdp_snapshot").await?;
-    Ok(Response::new(session.keyframe()))
+    let bytes = rdp_runtime()
+        .spawn_blocking(move || session.keyframe())
+        .await
+        .map_err(|e| format!("rdp: encoding a snapshot failed: {e}"))?;
+    Ok(Response::new(bytes))
+}
+
+/// Drain whatever the session batcher has accumulated, as one batch in the
+/// wire format [`frame`] documents. Empty when nothing is pending.
+///
+/// This is the whole frame transport. Pixels do NOT travel on the session
+/// `Channel`: a raw channel payload under 1024 bytes is `serde_json`'d and
+/// `eval`'d as a `new Uint8Array([...]).buffer` literal - which is the COMMON
+/// idle case, a blinking caret being about 128 bytes - and one at or above
+/// that threshold is parked in Tauri's process-global `ChannelDataIpcQueue`
+/// until a JS `invoke(fetch)` collects it, so a fetch that errors or races a
+/// navigation leaks a whole framebuffer for the life of the process and a slow
+/// consumer accumulates frames there where nothing on this side can see or
+/// bound them: the threshold (`tauri` 2.11.5, `MAX_RAW_DIRECT_EXECUTE_THRESHOLD`),
+/// the eval path (`tauri` 2.11.5, `JavaScriptChannelId::channel_on`) and the
+/// collector (`tauri` 2.11.5, `fetch`). A command `Response` has no such queue.
+///
+/// Backpressure falls out of it: the consumer pulls when it is ready, and
+/// until then the batcher coalesces. One batch is capped at one framebuffer by
+/// the batcher's collapse rule, so a consumer that stops pulling costs exactly
+/// one framebuffer of host memory and no IPC at all.
+///
+/// Drained on the RDP runtime's blocking pool, never here, for the same reason
+/// [`rdp_snapshot`] is: it takes the `image` lock, which the session task holds
+/// across a whole RemoteFX decode.
+#[tauri::command]
+pub async fn rdp_take_frame(
+    state: tauri::State<'_, RdpState>,
+    id: u32,
+) -> Result<Response, String> {
+    let session = lookup(&state, id, "rdp_take_frame").await?;
+    let bytes = rdp_runtime()
+        .spawn_blocking(move || session.take_frame())
+        .await
+        .map_err(|e| format!("rdp: draining the frame batcher failed: {e}"))?;
+    Ok(Response::new(bytes))
 }
 
 /// Answer a first-connect `certPrompt`. `accept = true` lets the paused TLS
@@ -458,6 +633,30 @@ pub fn rdp_confirm_cert(prompt_id: String, accept: bool) -> Result<(), String> {
         }
         None => Err("rdp: unknown or already-answered certificate prompt".into()),
     }
+}
+
+/// Sync the clipboard across a pane focus edge.
+///
+/// `true` on focus-in advertises the host clipboard to the remote, so a paste
+/// made inside the session finds it; `false` on blur pulls whatever the remote
+/// last advertised onto the host clipboard. Both are no-ops when the saved
+/// direction excludes them, and the whole command is a no-op when the mode is
+/// `Off`, which never registered the channel.
+///
+/// Runs on the RDP runtime's blocking pool, never here: an advertise is a
+/// synchronous arboard round trip to whichever process owns the selection, and
+/// a Tauri worker parked on a slow owner stalls every other command.
+#[tauri::command]
+pub async fn rdp_clipboard_focus(
+    state: tauri::State<'_, RdpState>,
+    id: u32,
+    focused: bool,
+) -> Result<(), String> {
+    let session = lookup(&state, id, "rdp_clipboard_focus").await?;
+    rdp_runtime()
+        .spawn_blocking(move || session.clipboard_focus(focused))
+        .await
+        .map_err(|e| format!("rdp: clipboard task failed: {e}"))?
 }
 
 async fn lookup(
@@ -483,6 +682,16 @@ mod tests {
 
     fn parse(json: &str) -> RdpInputEvent {
         serde_json::from_str(json).expect("deserialize")
+    }
+
+    /// The ceiling exists because each session pins a whole framebuffer and a
+    /// task on a 2-worker runtime. Refusal, not eviction: an open session
+    /// belongs to a user who is looking at it.
+    #[test]
+    fn session_cap_refuses_past_the_ceiling() {
+        capacity_check(MAX_RDP_SESSIONS - 1).expect("one slot left is still a slot");
+        let err = capacity_check(MAX_RDP_SESSIONS).expect_err("a full map refuses");
+        assert!(err.contains("too many sessions open"), "got: {err}");
     }
 
     /// The frontend writes these by hand, so the tags and field names are the
@@ -673,6 +882,8 @@ mod tests {
             width: 1280,
             height: 800,
             expected_cert_fingerprint: None,
+            scale_factor: 0,
+            clipboard: RdpClipboardMode::Both,
         };
         let rendered = format!("{input:?}");
         assert!(!rendered.contains("hunter2"), "got: {rendered}");

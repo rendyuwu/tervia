@@ -18,6 +18,7 @@ type Props = {
   rightSections: RightSectionId[];
   sshRightOpen: boolean;
   explorerRoot: string | null;
+  tabAreaCovered: boolean;
   onPathDeleted: (path: string) => void;
   closeSshRight: () => void;
   /** SSH context for the right-slot Remote explorer (same source the sidebar uses). */
@@ -47,7 +48,7 @@ type Props = {
     cachedTabsByWorkspace: RefObject<Map<string, { tabs: Tab[]; activeId: number | null }>>;
     onFocusLeaf: (tabId: number, leafId: number) => void;
     onRenameLeaf: (leafId: number, title: string | null) => void;
-    onCloseEntry: (tabId: number, leafId: number | null) => void;
+    onCloseEntry: (leafId: number) => void;
     activeLeafId: number | null;
     sshStatuses: Map<number, SshStatus>;
   };
@@ -80,6 +81,7 @@ export function AppRightSlot({
   rightSections,
   sshRightOpen,
   explorerRoot,
+  tabAreaCovered,
   onPathDeleted,
   closeSshRight,
   activeSshContext,
@@ -123,6 +125,7 @@ export function AppRightSlot({
           <div className="border-border/60 bg-background tervia-glass-panel flex h-full min-h-0 flex-col overflow-hidden rounded-md border">
             <FileExplorer
               rootPath={explorerRoot}
+              tabAreaCovered={tabAreaCovered}
               onOpenFile={filesSection.onOpenFile}
               onPathRenamed={filesSection.onPathRenamed}
               onPathDeleted={onPathDeleted}

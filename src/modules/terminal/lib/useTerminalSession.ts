@@ -48,7 +48,7 @@ type Options = {
   focused?: boolean;
   initialCwd?: string;
   /** When set, opens an SSH session instead of a local PTY. */
-  sshConnectionId?: string;
+  hostId?: string;
   /**
    * Daemon UUID from a previously saved workspace. When set the session
    * tries `pty_attach` first and falls back to a fresh `pty_open` on
@@ -92,7 +92,7 @@ export function useTerminalSession({
   visible,
   focused = true,
   initialCwd,
-  sshConnectionId,
+  hostId,
   savedPtyId,
   savedActiveTool,
   terminalThemeId,
@@ -175,7 +175,7 @@ export function useTerminalSession({
     const s = ensureSession(
       leafId,
       initialCwd,
-      sshConnectionId,
+      hostId,
       savedPtyId,
       terminalThemeId,
       savedActiveTool,
@@ -265,9 +265,9 @@ export function useTerminalSession({
       // a ConPTY init and the late resolution would just close as stale.
       if (s.ptyOpening) return;
       console.warn(
-        `[tervia-pty] stuck-recovery: leaf=${leafId} pty=null lastPtyError=null ptyOpening=${s.ptyOpening} sshConn=${s.sshConnectionId ?? "-"} sshStatus=${s.sshStatus.kind} containerAttached=${s.term.element !== undefined} after ${STUCK_RECOVERY_MS}ms - forcing retry`,
+        `[tervia-pty] stuck-recovery: leaf=${leafId} pty=null lastPtyError=null ptyOpening=${s.ptyOpening} sshConn=${s.hostId ?? "-"} sshStatus=${s.sshStatus.kind} containerAttached=${s.term.element !== undefined} after ${STUCK_RECOVERY_MS}ms - forcing retry`,
       );
-      if (s.sshConnectionId) {
+      if (s.hostId) {
         // SSH has its own reconnect. Only intervene from idle.
         if (s.sshStatus.kind === "idle") {
           void retrySsh(s);

@@ -6,11 +6,14 @@ import type {
   VaultKey,
 } from "@/modules/vault/types";
 
+import { buildGroupTree, descendantIds, type GroupNode } from "../groupTree";
 import { rankHosts, type HostSearchRow } from "../search";
 import { isSshHost, type Host, type HostGroup } from "../types";
 
-// Everything the Hosts page derives from its three inputs - the host list, the
-// group list and a snapshot of the vault - as PURE FUNCTIONS over plain data.
+// Everything the Hosts page derives from its inputs - the host list, the group
+// list, a snapshot of the vault, the forward rules for the delete confirm and,
+// for the grid's arrow keys, where focus moves - as PURE FUNCTIONS over plain
+// data.
 //
 // No React and no store access, which is the whole reason
 // `scripts/hosts-page-verify.ts` can exist: the correctness in this file (which
@@ -60,7 +63,17 @@ export type VaultSnapshot = {
  */
 export const UNKNOWN_IDENTITY_LABEL = "Unknown identity";
 
-export type GroupCounts = { total: number; ungrouped: number; byGroup: Record<string, number> };
+export type GroupCounts = {
+  total: number;
+  ungrouped: number;
+  /** This group's OWN hosts only (`host.groupId === group.id`), before
+   *  descendants are summed in. `GroupStrip.tsx`'s delete confirm uses this,
+   *  not `byGroup`: `deleteGroup` clears `groupId` only on DIRECT members, so
+   *  a count that included descendants would overstate what becomes
+   *  ungrouped. */
+  direct: Record<string, number>;
+  byGroup: Record<string, number>;
+};
 
 export type ProtocolFilter = "all" | "ssh" | "rdp";
 
@@ -68,6 +81,14 @@ export type ProtocolFilter = "all" | "ssh" | "rdp";
  *  string in `groupId`. */
 export type GroupFilter =
   { kind: "all" } | { kind: "ungrouped" } | { kind: "group"; groupId: string };
+
+/**
+ * Every selected tag must be on the host (ALL, not ANY) - narrowing, the same
+ * direction the protocol and group stages already narrow in. Lowercased tag
+ * keys, so membership is case-insensitive without every caller re-folding it;
+ * an empty set means "no filter", matching `GroupFilter`'s `{ kind: "all" }`.
+ */
+export type TagFilter = ReadonlySet<string>;
 
 /**
  * Does an SSH host's own credential name a secret the record says is absent?
@@ -151,40 +172,84 @@ export function identityName(
  * UNGROUPED, and that is the case worth stating: it happens whenever a group is
  * deleted in another window between two renders here, and it is the difference
  * between the chips adding up and quietly not. The invariant is
- * `total === ungrouped + sum(byGroup)` - without the fallback a dangling row
- * lands in neither, so the chips sum to less than All and the row itself is
- * reachable from no chip at all.
+ * `total === ungrouped + sum(direct)`, NOT `sum(byGroup)`: `byGroup` sums a
+ * group's own hosts plus every descendant's, so a host under a 3-level chain
+ * is counted once per ancestor and the two would double-count on any nested
+ * fixture.
  *
- * {@link matchesGroupFilter} makes the same call, so the count on a chip is
- * always the number of cards clicking it shows.
+ * Selecting a group means "this group and its descendants" ({@link
+ * matchesGroupFilter} makes the same call), so `byGroup`'s count is its own
+ * hosts plus every descendant's - summed bottom-up over the SAME tree
+ * `GroupStrip.tsx` renders, not a second walk of `parentId` per host.
  */
 export function groupCounts(hosts: readonly Host[], groups: readonly HostGroup[]): GroupCounts {
   const known = new Set(groups.map((g) => g.id));
-  const byGroup: Record<string, number> = {};
+  const direct: Record<string, number> = {};
   // Seeded so an empty group renders its own 0 rather than relying on a caller's
   // fallback for a key that was never written.
-  for (const group of groups) byGroup[group.id] = 0;
+  for (const group of groups) direct[group.id] = 0;
 
   let ungrouped = 0;
   for (const host of hosts) {
-    if (host.groupId !== undefined && known.has(host.groupId)) byGroup[host.groupId] += 1;
+    if (host.groupId !== undefined && known.has(host.groupId)) direct[host.groupId] += 1;
     else ungrouped += 1;
   }
-  return { total: hosts.length, ungrouped, byGroup };
+
+  const byGroup: Record<string, number> = {};
+  function sum(node: GroupNode): number {
+    const total = direct[node.group.id] + node.children.reduce((acc, child) => acc + sum(child), 0);
+    byGroup[node.group.id] = total;
+    return total;
+  }
+  for (const root of buildGroupTree(groups)) sum(root);
+  return { total: hosts.length, ungrouped, direct, byGroup };
 }
 
+export type TagCount = { tag: string; count: number };
+
+/**
+ * Every tag in use, one entry per canonical spelling, case-insensitively
+ * merged across hosts: two hosts spelling the same idea "Prod" and "prod" count
+ * as one chip, under whichever spelling `hosts` yields first for that lowercase
+ * key. There is no managed tag record to pick a winner up front the way
+ * `HostGroup.name` does, so "first seen" is the whole rule. Sorted
+ * case-insensitively by spelling, for a stable strip order across renders.
+ */
+export function tagCounts(hosts: readonly Host[]): TagCount[] {
+  const byKey = new Map<string, TagCount>();
+  for (const host of hosts) {
+    for (const raw of host.tags ?? []) {
+      const key = raw.toLowerCase();
+      const entry = byKey.get(key);
+      if (entry) entry.count += 1;
+      else byKey.set(key, { tag: raw, count: 1 });
+    }
+  }
+  return [...byKey.values()].sort((a, b) => a.tag.toLowerCase().localeCompare(b.tag.toLowerCase()));
+}
+
+/**
+ * A predicate for one filter, built ONCE rather than re-derived per host: the
+ * `"group"` arm's {@link descendantIds} is a full `buildGroupTree` plus a
+ * sort, and the `"ungrouped"` arm's `known` Set was being rebuilt from
+ * `groups` on every call too - both cheap once, expensive `hosts.length`
+ * times, which is what {@link filterAndRank} was paying on every keystroke.
+ */
 export function matchesGroupFilter(
-  host: Host,
   filter: GroupFilter,
-  knownGroupIds: ReadonlySet<string>,
-): boolean {
+  groups: readonly HostGroup[],
+): (host: Host) => boolean {
   switch (filter.kind) {
     case "all":
-      return true;
-    case "ungrouped":
-      return host.groupId === undefined || !knownGroupIds.has(host.groupId);
-    case "group":
-      return host.groupId === filter.groupId;
+      return () => true;
+    case "ungrouped": {
+      const known = new Set(groups.map((g) => g.id));
+      return (host) => host.groupId === undefined || !known.has(host.groupId);
+    }
+    case "group": {
+      const ids = descendantIds(filter.groupId, groups);
+      return (host) => host.groupId !== undefined && ids.has(host.groupId);
+    }
     default: {
       const unhandled: never = filter;
       throw new Error(`hosts: unhandled group filter ${JSON.stringify(unhandled)}`);
@@ -192,19 +257,37 @@ export function matchesGroupFilter(
   }
 }
 
+/**
+ * A predicate for one filter, built ONCE per {@link filterAndRank} call rather
+ * than re-derived per host, on {@link matchesGroupFilter}'s own reasoning.
+ */
+export function matchesTagFilter(filter: TagFilter): (host: Host) => boolean {
+  if (filter.size === 0) return () => true;
+  return (host) => {
+    if (!host.tags || host.tags.length === 0) return false;
+    const hostTags = new Set(host.tags.map((t) => t.toLowerCase()));
+    for (const tag of filter) {
+      if (!hostTags.has(tag)) return false;
+    }
+    return true;
+  };
+}
+
 export type HostsViewInput = {
   rows: readonly HostSearchRow[];
   protocol: ProtocolFilter;
   group: GroupFilter;
-  /** The ids in the CURRENT group list. Passed in rather than derived from the
-   *  rows so {@link matchesGroupFilter} can tell "ungrouped" from "names a group
-   *  that is gone" - the rows themselves cannot say which. */
-  knownGroupIds: ReadonlySet<string>;
+  /** The CURRENT group list. Passed in rather than derived from the rows so
+   *  {@link matchesGroupFilter} can tell "ungrouped" from "names a group that
+   *  is gone", and can test "this group or a descendant" for the `"group"`
+   *  arm - the rows themselves cannot say either. */
+  groups: readonly HostGroup[];
+  tags: TagFilter;
   query: string;
 };
 
 /**
- * The rows a render should draw: protocol, then group, then ranking.
+ * The rows a render should draw: protocol, then group, then tag, then ranking.
  *
  * Ranking LAST is deliberate, but be precise about what it buys, because no
  * output today can tell the two orders apart: a predicate and a stable TOTAL
@@ -224,8 +307,71 @@ export function filterAndRank(input: HostsViewInput): HostSearchRow[] {
   const byProtocol = input.rows.filter(
     (row) => input.protocol === "all" || row.host.protocol === input.protocol,
   );
-  const byGroup = byProtocol.filter((row) =>
-    matchesGroupFilter(row.host, input.group, input.knownGroupIds),
-  );
-  return rankHosts(byGroup, input.query);
+  const inGroup = matchesGroupFilter(input.group, input.groups);
+  const byGroup = byProtocol.filter((row) => inGroup(row.host));
+  const inTags = matchesTagFilter(input.tags);
+  const byTags = byGroup.filter((row) => inTags(row.host));
+  return rankHosts(byTags, input.query);
+}
+
+/**
+ * What the host delete confirm says about the forward rules the delete
+ * cascades away: `deleteHost` runs `releaseRulesForHost`
+ * (`modules/forwards/controller.ts`), which drops every rule riding this host.
+ * `null` when no rule rides it. Takes a structural `{ hostId }` rather than
+ * `ForwardRule`, so this file imports nothing from `modules/forwards`.
+ *
+ * "this host" and not "it": the sentence before this one in the dialog can be
+ * about a vault identity, and a bare "it" would then read as the identity.
+ */
+export function deleteRulesNote(
+  hostId: string,
+  rules: Iterable<{ hostId: string }>,
+): string | null {
+  let count = 0;
+  for (const rule of rules) if (rule.hostId === hostId) count++;
+  if (count === 0) return null;
+  return count === 1
+    ? "The 1 forward rule that uses this host is deleted too."
+    : `The ${count} forward rules that use this host are deleted too.`;
+}
+
+/**
+ * Where an arrow key moves focus in the Hosts grid, or `null` for nowhere: a
+ * key this does not own (Enter stays the card's connect), or a move off the
+ * grid's edge. Left/Right step through reading order, Up/Down move a whole
+ * row, Home/End jump to the ends. `cols` is read off the rendered grid by the
+ * page, because container queries on the pane's width decide it and nothing in
+ * React state knows it.
+ */
+export function cardFocusTarget(
+  key: string,
+  at: number,
+  count: number,
+  cols: number,
+): number | null {
+  let to: number;
+  switch (key) {
+    case "ArrowLeft":
+      to = at - 1;
+      break;
+    case "ArrowRight":
+      to = at + 1;
+      break;
+    case "ArrowUp":
+      to = at - cols;
+      break;
+    case "ArrowDown":
+      to = at + cols;
+      break;
+    case "Home":
+      to = 0;
+      break;
+    case "End":
+      to = count - 1;
+      break;
+    default:
+      return null;
+  }
+  return to >= 0 && to < count ? to : null;
 }

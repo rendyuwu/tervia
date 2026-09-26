@@ -1,6 +1,6 @@
 import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { LazyStore } from "@tauri-apps/plugin-store";
+import { createRecoveredStore } from "@/lib/recoveredStore";
+import type { StoreRecovery } from "@/lib/storeRecovery";
 import type { KeyBinding, ShortcutId } from "@/modules/shortcuts/shortcuts";
 import { normalizeCustomTheme, type CustomTheme } from "./customTheme";
 import {
@@ -406,31 +406,108 @@ export const DEFAULT_PREFERENCES: Preferences = {
   formatters: DEFAULT_FORMATTERS,
 };
 
-const store = new LazyStore(STORE_PATH, { defaults: {}, autoSave: 200 });
+export type PrefKey = keyof Preferences;
 
-// LazyStore.onChange is a store://change broadcast delivered to every window
-// (including the writer). The settings page is a separate webview, so the
-// broadcast covers cross-window listeners. We still mirror every setter
-// through a Tauri event so listeners that only attach the event path also see
-// the change; `source` lets the writing window dedupe its own self-delivered
-// event (Tauri v2 self-delivers emit()) and handle it via onChange only.
+// One entry per PrefKey. `satisfies Record<PrefKey, string>` turns a forgotten
+// key into a COMPILE error instead of a silently-dropped cross-window update -
+// a missing entry here was the documented root cause of the opacity/preset
+// cross-window bugs (appOpacity + userThemePresets were the entries that got
+// dropped). The reverse lookup the listeners need is derived below.
+const PREF_STORE_KEYS = {
+  theme: KEY_THEME,
+  editorTheme: KEY_EDITOR_THEME,
+  fontFamily: KEY_FONT_FAMILY,
+  editorFontSize: KEY_EDITOR_FONT_SIZE,
+  terminalThemeMode: KEY_TERMINAL_THEME_MODE,
+  terminalThemeId: KEY_TERMINAL_THEME_ID,
+  terminalCustomPalette: KEY_TERMINAL_CUSTOM_PALETTE,
+  autostart: KEY_AUTOSTART,
+  restoreWindowState: KEY_RESTORE_WINDOW,
+  vimMode: KEY_VIM_MODE,
+  lineWrap: KEY_LINE_WRAP,
+  showMinimap: KEY_SHOW_MINIMAP,
+  editorLigatures: KEY_EDITOR_LIGATURES,
+  terminalWebglEnabled: KEY_TERMINAL_WEBGL_ENABLED,
+  terminalFontSize: KEY_TERMINAL_FONT_SIZE,
+  terminalScrollback: KEY_TERMINAL_SCROLLBACK,
+  terminalEnvPath: KEY_TERMINAL_ENV_PATH,
+  showHiddenFiles: KEY_SHOW_HIDDEN_FILES,
+  statusBarCompact: KEY_STATUS_BAR_COMPACT,
+  sshInRightPanel: KEY_SSH_IN_RIGHT_PANEL,
+  shortcuts: KEY_SHORTCUTS,
+  contentZoom: KEY_CONTENT_ZOOM,
+  uiZoom: KEY_UI_ZOOM,
+  aiNotificationsEnabled: KEY_AI_NOTIFICATIONS_ENABLED,
+  aiBlockingSound: KEY_AI_BLOCKING_SOUND,
+  aiCompletionSound: KEY_AI_COMPLETION_SOUND,
+  brandColor: KEY_BRAND_COLOR,
+  customThemeEnabled: KEY_CUSTOM_THEME_ENABLED,
+  customTheme: KEY_CUSTOM_THEME,
+  // Written from the Settings window, consumed live by the main window.
+  appOpacity: KEY_APP_OPACITY,
+  userThemePresets: KEY_USER_THEME_PRESETS,
+  formatOnSave: KEY_FORMAT_ON_SAVE,
+  formatters: KEY_FORMATTERS,
+} satisfies Record<PrefKey, string>;
+
+/**
+ * Cache invalidation for the store FILE, and nothing else.
+ *
+ * Separate from {@link PREFS_CHANGED_EVENT} because `commit()` emits its event
+ * with no payload, and `onPreferencesChange` subscribers need the key and the
+ * value. One event serving both would deliver twice per write, once empty.
+ */
+const PREFS_STORE_CHANGED_EVENT = "tervia://prefs-store-changed";
+
+const io = createRecoveredStore({
+  path: STORE_PATH,
+  loadKey: KEY_THEME,
+  changedEvent: PREFS_STORE_CHANGED_EVENT,
+});
+
+/** Startup entry point, for `src/app/hooks/useStoreRecoveryNotices.ts`. */
+export const ensureLoaded = (): Promise<StoreRecovery | null> => io.ensureLoaded();
+export const takeRecoveryNotice = (): StoreRecovery | null => io.takeRecoveryNotice();
+export const onSettingsStoreChanged = (cb: () => void): Promise<() => void> => io.onChanged(cb);
+
+// Every setter mirrors its write through this event, so a consumer in another
+// window gets the key AND the new value rather than only the news that the file
+// moved.
 const PREFS_CHANGED_EVENT = "tervia://prefs-changed";
 
-// Label of the webview that performed a write. Used to ignore the
-// self-delivered PREFS_CHANGED_EVENT in the writing window (the store.onChange
-// broadcast already covers it there), while OTHER windows still react once.
-const SELF_LABEL = getCurrentWebviewWindow().label;
-
 async function writePref<T>(key: string, value: T): Promise<void> {
-  await store.set(key, value);
-  await Promise.all([store.save(), emit(PREFS_CHANGED_EVENT, { key, value, source: SELF_LABEL })]);
+  // Through the port's queue: it is the only queue per store file, and two
+  // setters firing as the user leaves two fields is the ordinary case.
+  await io.enqueueWrite(async () => {
+    await io.set(key, value);
+    await io.commit();
+  });
+  // AFTER the commit, so a listener that re-reads sees the bytes. Tauri v2
+  // self-delivers `emit()`, so this window's own listener fires exactly once
+  // and every other window once. The webview-label dedupe this replaces
+  // suppressed only the WRITER's duplicate: the old plugin store's `onChange`
+  // was a broadcast to every window, so a non-writing window fired twice. One
+  // channel removes that too.
+  await emit(PREFS_CHANGED_EVENT, { key, value });
 }
 
 export async function loadPreferences(): Promise<Preferences> {
-  // Single IPC roundtrip. Per-key fetches were the dominant boot cost.
-  const entries = await store.entries();
+  // No file read at all: the port's settle pass already forced the load, and
+  // `createFileKeyValueStore` serves every later `get` from the whole-file cache
+  // it installed. A cold path would still cost ONE `fs_read_file` for all 33,
+  // because the load shares its in-flight promise.
+  const entries = await Promise.all(
+    Object.values(PREF_STORE_KEYS).map(async (k) => [k, await io.get<unknown>(k)] as const),
+  );
   const map = new Map<string, unknown>(entries);
-  const get = <T>(k: string): T | undefined => map.get(k) as T | undefined;
+  // `RecoveredStoreIo.get` coerces a missing key to `null` where `Map.get` gave
+  // `undefined`. Normalised back here rather than at 33 call sites: the body
+  // below is unchanged, and every consumer in it already tolerates `null`
+  // (`isValidContentFontId` takes `unknown`, `normalizeBrandColor` takes
+  // `string | undefined | null`, the five other normalisers take `unknown`, and
+  // the rest sit behind `??`), so this is one less shape to reason about rather
+  // than a fix for a break.
+  const get = <T>(k: string): T | undefined => (map.get(k) ?? undefined) as T | undefined;
   return {
     theme: get<ThemePref>(KEY_THEME) ?? DEFAULT_PREFERENCES.theme,
     editorTheme: get<EditorThemeId>(KEY_EDITOR_THEME) ?? DEFAULT_PREFERENCES.editorTheme,
@@ -728,78 +805,22 @@ export async function patchFormatter(
   await setFormatters(next);
 }
 
-// Subscribe to raw store-key changes from both same-process writes (store.onChange)
-// and cross-window writes (the Tauri event from writePref), with the self-delivered
-// event deduped via SELF_LABEL.
-async function subscribeRawChanges(cb: (key: string, value: unknown) => void): Promise<UnlistenFn> {
-  const [unsubLocal, unsubEvent] = await Promise.all([
-    store.onChange<unknown>((key, value) => cb(key, value)),
-    listen<{ key: string; value: unknown; source?: string }>(PREFS_CHANGED_EVENT, (e) => {
-      // Same-window write: store.onChange already delivered it here, so skip
-      // the self-delivered event to avoid firing the callback twice.
-      if (e.payload.source === SELF_LABEL) return;
-      cb(e.payload.key, e.payload.value);
-    }),
-  ]);
-  return () => {
-    unsubLocal();
-    unsubEvent();
-  };
-}
-
-export type PrefKey = keyof Preferences;
-
-/** Subscribe to changes from any window (settings to main). */
+/**
+ * Subscribe to changes from any window (settings to main).
+ *
+ * ONE channel, not two. Every write goes through `writePref`, which emits
+ * PREFS_CHANGED_EVENT after its commit; Tauri v2 self-delivers `emit()`, so the
+ * writing window and every other window each see it exactly once and no dedupe
+ * is needed.
+ */
 export async function onPreferencesChange(
   cb: (key: PrefKey, value: unknown) => void,
 ): Promise<UnlistenFn> {
-  // One entry per PrefKey. `satisfies Record<PrefKey, string>` turns a forgotten
-  // key into a COMPILE error instead of a silently-dropped cross-window update -
-  // a missing entry here was the documented root cause of the opacity/preset
-  // cross-window bugs (appOpacity + userThemePresets were the entries that got
-  // dropped). The reverse lookup the listeners need is derived below.
-  const prefToStoreKey = {
-    theme: KEY_THEME,
-    editorTheme: KEY_EDITOR_THEME,
-    fontFamily: KEY_FONT_FAMILY,
-    editorFontSize: KEY_EDITOR_FONT_SIZE,
-    terminalThemeMode: KEY_TERMINAL_THEME_MODE,
-    terminalThemeId: KEY_TERMINAL_THEME_ID,
-    terminalCustomPalette: KEY_TERMINAL_CUSTOM_PALETTE,
-    autostart: KEY_AUTOSTART,
-    restoreWindowState: KEY_RESTORE_WINDOW,
-    vimMode: KEY_VIM_MODE,
-    lineWrap: KEY_LINE_WRAP,
-    showMinimap: KEY_SHOW_MINIMAP,
-    editorLigatures: KEY_EDITOR_LIGATURES,
-    terminalWebglEnabled: KEY_TERMINAL_WEBGL_ENABLED,
-    terminalFontSize: KEY_TERMINAL_FONT_SIZE,
-    terminalScrollback: KEY_TERMINAL_SCROLLBACK,
-    terminalEnvPath: KEY_TERMINAL_ENV_PATH,
-    showHiddenFiles: KEY_SHOW_HIDDEN_FILES,
-    statusBarCompact: KEY_STATUS_BAR_COMPACT,
-    sshInRightPanel: KEY_SSH_IN_RIGHT_PANEL,
-    shortcuts: KEY_SHORTCUTS,
-    contentZoom: KEY_CONTENT_ZOOM,
-    uiZoom: KEY_UI_ZOOM,
-    aiNotificationsEnabled: KEY_AI_NOTIFICATIONS_ENABLED,
-    aiBlockingSound: KEY_AI_BLOCKING_SOUND,
-    aiCompletionSound: KEY_AI_COMPLETION_SOUND,
-    brandColor: KEY_BRAND_COLOR,
-    customThemeEnabled: KEY_CUSTOM_THEME_ENABLED,
-    customTheme: KEY_CUSTOM_THEME,
-    // Written from the Settings window, consumed live by the main window.
-    appOpacity: KEY_APP_OPACITY,
-    userThemePresets: KEY_USER_THEME_PRESETS,
-    formatOnSave: KEY_FORMAT_ON_SAVE,
-    formatters: KEY_FORMATTERS,
-  } satisfies Record<PrefKey, string>;
   const map = Object.fromEntries(
-    Object.entries(prefToStoreKey).map(([pref, storeKey]) => [storeKey, pref as PrefKey]),
+    Object.entries(PREF_STORE_KEYS).map(([pref, storeKey]) => [storeKey, pref as PrefKey]),
   ) as Record<string, PrefKey>;
-  // Same-process writes fire onChange directly. Cross-window writes arrive via the Tauri event from writePref().
-  return subscribeRawChanges((key, value) => {
-    const mapped = map[key];
-    if (mapped) cb(mapped, value);
+  return listen<{ key: string; value: unknown }>(PREFS_CHANGED_EVENT, (e) => {
+    const mapped = map[e.payload.key];
+    if (mapped) cb(mapped, e.payload.value);
   });
 }

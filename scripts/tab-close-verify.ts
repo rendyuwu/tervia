@@ -34,6 +34,9 @@
  * funnel through it, while `handleClose` prompted for the same file. Every
  * fixture in this suite was clean (`editorLeaf` hardcoded `dirty: false`), so
  * nothing here could see it.
+ *
+ * Section [viii] is the batch close behind "Close Tabs to the Right": every
+ * leaf it must confirm is reported, so one prompt can cover them all.
  */
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -43,6 +46,7 @@ import {
   canCloseTab,
   leafCloseConfirmReason,
   leafCloseRefusal,
+  splitBatchClose,
   tabCloseConfirmReason,
   tabCloseRefusal,
 } from "../src/modules/tabs/lib/closable";
@@ -78,7 +82,7 @@ function editorLeaf(id: number, path = "/w/a.ts", dirty = false): PaneNode {
   return { kind: "leaf", id, leafKind: "editor", path, dirty, preview: false };
 }
 function rdpLeaf(id: number, rdpConnectionId = "conn-1"): PaneNode {
-  return { kind: "leaf", id, leafKind: "rdp", rdpConnectionId, sizeMode: "preset" };
+  return { kind: "leaf", id, leafKind: "rdp", rdpConnectionId };
 }
 function split(id: number, children: PaneNode[]): PaneNode {
   return { kind: "split", id, dir: "row", children };
@@ -244,18 +248,14 @@ check(
 console.log("\n[strip] every entry the strip renders resolves through the same predicate");
 {
   const entries = buildEntries(THREE_TABS, new Map());
-  const closable = entries.filter(
-    (e) => e.kind === "pane-leaf" && canCloseLeaf(THREE_TABS, e.leafId),
-  );
-  const refused = entries.filter(
-    (e) => e.kind === "pane-leaf" && !canCloseLeaf(THREE_TABS, e.leafId),
-  );
+  const closable = entries.filter((e) => canCloseLeaf(THREE_TABS, e.leafId));
+  const refused = entries.filter((e) => !canCloseLeaf(THREE_TABS, e.leafId));
   check("three entries, one per leaf", entries.length === 3, entries.length);
   check("two of them get an X", closable.length === 2, closable.length);
   check(
     "the one refused is the page entry",
-    refused.length === 1 && refused[0].kind === "pane-leaf" && refused[0].leafKind === "page",
-    refused.map((e) => (e.kind === "pane-leaf" ? e.leafKind : e.kind)),
+    refused.length === 1 && refused[0].leafKind === "page",
+    refused.map((e) => e.leafKind),
   );
 }
 {
@@ -263,7 +263,7 @@ console.log("\n[strip] every entry the strip renders resolves through the same p
   const entries = buildEntries(HOSTS_ONLY, new Map());
   check(
     "a Hosts-only workspace renders no close X at all",
-    entries.every((e) => e.kind !== "pane-leaf" || !canCloseLeaf(HOSTS_ONLY, e.leafId)),
+    entries.every((e) => !canCloseLeaf(HOSTS_ONLY, e.leafId)),
   );
 }
 
@@ -296,13 +296,11 @@ check("and the terminal beside it closes too", canCloseLeaf(RDP_SPLIT_WITH_TERMI
   // "all three paths agree". Both entries get an X, which is what the hand test
   // saw and the chord did not match.
   const entries = buildEntries(HOSTS_AND_RDP, new Map());
-  const refused = entries.filter(
-    (e) => e.kind === "pane-leaf" && !canCloseLeaf(HOSTS_AND_RDP, e.leafId),
-  );
+  const refused = entries.filter((e) => !canCloseLeaf(HOSTS_AND_RDP, e.leafId));
   check(
     "the strip refuses only the page entry, not the RDP one",
-    refused.length === 1 && refused[0].kind === "pane-leaf" && refused[0].leafKind === "page",
-    refused.map((e) => (e.kind === "pane-leaf" ? e.leafKind : e.kind)),
+    refused.length === 1 && refused[0].leafKind === "page",
+    refused.map((e) => e.leafKind),
   );
 }
 
@@ -533,6 +531,23 @@ console.log("\n[vii] handleClose and requestCloseLeaf both route through closabl
     tabClose !== undefined && !/\.dirty/.test(tabClose),
     tabClose,
   );
+  const batchClose = bodies.get("requestCloseLeaves");
+  check("found requestCloseLeaves", batchClose !== undefined, [...bodies.keys()]);
+  check(
+    "requestCloseLeaves splits the batch through closable.ts",
+    batchClose !== undefined && /splitBatchClose\(/.test(batchClose),
+    batchClose,
+  );
+  check(
+    "and asks one prompt for the whole batch, not one per leaf",
+    batchClose !== undefined && /kind: "leaves"/.test(batchClose),
+    batchClose,
+  );
+  check(
+    "and does not re-decide from the process probe on its own",
+    batchClose !== undefined && !/leafHasRunningProcess\(/.test(batchClose),
+    batchClose,
+  );
   for (const [name, body] of [
     ["requestCloseLeaf", leafClose],
     ["handleClose", tabClose],
@@ -555,6 +570,36 @@ console.log("\n[vii] handleClose and requestCloseLeaf both route through closabl
         body.indexOf("canClose") < body.indexOf("ConfirmReason"),
     );
   }
+}
+
+// ---- (viii) a batch close asks about every leaf that needs it ----------
+console.log("\n[viii] Close Tabs to the Right reports every leaf that needs a confirm");
+{
+  // From the Hosts chip: every leaf after it, in strip order.
+  const BATCH: Tab[] = [
+    tab(1, hostsLeaf(2), 2),
+    tab(3, termLeaf(4), 4),
+    tab(5, editorLeaf(6, "/w/a.ts", true), 6),
+    tab(7, termLeaf(8), 8),
+    tab(9, editorLeaf(10, "/w/b.ts", true), 10),
+  ];
+  const batch = splitBatchClose(BATCH, [2, 4, 6, 8, 10], (id) => id === 4);
+  check(
+    "every leaf that needs a confirm is reported, not just the last",
+    JSON.stringify(batch.confirm) ===
+      JSON.stringify([
+        { leafId: 4, reason: "running" },
+        { leafId: 6, reason: "unsaved" },
+        { leafId: 10, reason: "unsaved" },
+      ]),
+    batch,
+  );
+  check("the idle terminal closes silently", JSON.stringify(batch.silent) === "[8]", batch);
+  check(
+    "the refused page leaf is in neither list",
+    ![...batch.silent, ...batch.confirm.map((c) => c.leafId)].includes(2),
+    batch,
+  );
 }
 
 if (failed > 0) throw new Error(`${failed} check(s) FAILED`);

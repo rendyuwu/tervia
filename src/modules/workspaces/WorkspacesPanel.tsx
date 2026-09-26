@@ -85,12 +85,11 @@ type Props = {
    *  handler the tab strip's right-click Rename uses, so both write one field. */
   onRenameLeaf?: (leafId: number, title: string | null) => void;
   /**
-   * Close one listed tab / pane. `leafId` is null for a tab with no pane tree -
-   * the same signature and the same handler the tab strip's X uses, so a close
-   * from here also gets the busy-terminal and unsaved-editor confirms rather
-   * than a second, weaker code path.
+   * Close one listed tab / pane. The same handler the tab strip's X uses, so a
+   * close from here also gets the busy-terminal and unsaved-editor confirms
+   * rather than a second, weaker code path.
    */
-  onCloseEntry?: (tabId: number, leafId: number | null) => void;
+  onCloseEntry?: (leafId: number) => void;
   /** Open (or focus) the Board tab: this workspace's terminals in columns of
    *  what their AI CLI is doing. Only offered on the ACTIVE workspace, since
    *  the board is opened into and reads the live tab strip. */
@@ -138,7 +137,7 @@ function liveRows(
 ): EntryRow[] {
   return buildEntries(tabs, hosts, sshStatuses, aiStatuses).map((entry) => ({
     entry,
-    title: entry.kind === "pane-leaf" ? titles[entry.leafId] : undefined,
+    title: titles[entry.leafId],
     live: true,
   }));
 }
@@ -428,7 +427,7 @@ type RowProps = {
   onToggleExpanded: (id: string) => void;
   onFocusLeaf?: (tabId: number, leafId: number) => void;
   onRenameLeaf?: (leafId: number, title: string | null) => void;
-  onCloseEntry?: (tabId: number, leafId: number | null) => void;
+  onCloseEntry?: (leafId: number) => void;
   onOpenBoard?: () => void;
   renamingLeafId: number | null;
   onSetRenamingLeaf: (leafId: number | null) => void;
@@ -485,9 +484,7 @@ function SortableWorkspaceRow({
    * one's. No terminals = nothing to chart, so no button either.
    */
   const canOpenBoard =
-    !!onOpenBoard &&
-    isActive &&
-    rows.some((r) => r.live && r.entry.kind === "pane-leaf" && r.entry.leafKind === "terminal");
+    !!onOpenBoard && isActive && rows.some((r) => r.live && r.entry.leafKind === "terminal");
   // Listed tab/pane awaiting its own close confirmation, or null.
   const [confirmingEntry, setConfirmingEntry] = useState<Entry | null>(null);
   /**
@@ -669,7 +666,7 @@ function SortableWorkspaceRow({
               variant="destructive"
               onClick={() => {
                 const e = confirmingEntry;
-                if (e) onCloseEntry?.(e.tabId, e.kind === "pane-leaf" ? e.leafId : null);
+                if (e) onCloseEntry?.(e.leafId);
                 setConfirmingEntry(null);
               }}
             >
@@ -687,18 +684,11 @@ function SortableWorkspaceRow({
             <EntryRowItem
               key={r.entry.key}
               row={r}
-              isActiveLeaf={
-                activeLeafId != null &&
-                r.live &&
-                r.entry.kind === "pane-leaf" &&
-                r.entry.leafId === activeLeafId
-              }
-              renaming={r.live && r.entry.kind === "pane-leaf" && renamingLeafId === r.entry.leafId}
+              isActiveLeaf={activeLeafId != null && r.live && r.entry.leafId === activeLeafId}
+              renaming={r.live && renamingLeafId === r.entry.leafId}
               onOpen={() => {
                 if (r.live && onFocusLeaf) {
-                  // Standalone tabs have no leaf; -1 matches none, so the tab
-                  // side activates the tab and leaves its panes alone.
-                  onFocusLeaf(r.entry.tabId, r.entry.kind === "pane-leaf" ? r.entry.leafId : -1);
+                  onFocusLeaf(r.entry.tabId, r.entry.leafId);
                 } else if (!isActive) onSwitch(w.id);
               }}
               onRename={onRenameLeaf}
@@ -737,15 +727,12 @@ function EntryRowItem({
   onRequestClose?: () => void;
 }) {
   const { entry: e, title } = row;
-  const isLeaf = e.kind === "pane-leaf";
-  // Renaming writes `customTitle` on a LEAF, so a standalone tab (SCM, a diff,
-  // an extension tab) has nothing to write to. A cold workspace's ids are
-  // display-only, so its rows are read-only too.
-  const canRename = row.live && isLeaf && !!onRename;
+  // A cold workspace's ids are display-only, so its rows are read-only.
+  const canRename = row.live && !!onRename;
   const actionCount = (canRename ? 1 : 0) + (onRequestClose ? 1 : 0);
-  const cwd = e.kind === "pane-leaf" ? e.cwd : undefined;
-  const sshStatus = e.kind === "pane-leaf" ? e.sshStatus : undefined;
-  const ai = e.kind === "pane-leaf" ? e.aiCliStatus : undefined;
+  const cwd = e.cwd;
+  const sshStatus = e.sshStatus;
+  const ai = e.aiCliStatus;
   // The OSC title repeats the label often enough (a shell that titles itself
   // after its folder) that showing both would just read as a stutter.
   const showTitle = !!title && title !== e.label && title !== cwd;
@@ -759,8 +746,8 @@ function EntryRowItem({
   // asking is the user's own doing. A pane bound to an SSH host is skipped until
   // its session is up: without one there is nothing to ask, and asking the local
   // git about a remote path would answer about the wrong machine.
-  const isSshLeaf = e.kind === "pane-leaf" && !!e.sshConnectionId;
-  const isTerminal = e.kind === "pane-leaf" && e.leafKind === "terminal";
+  const isSshLeaf = !!e.hostId;
+  const isTerminal = e.leafKind === "terminal";
   const branch = useGitBranch(
     isTerminal && (!isSshLeaf || sshSessionId !== undefined) ? cwd : undefined,
     sshSessionId,
@@ -769,7 +756,7 @@ function EntryRowItem({
   // While renaming, the field replaces the row's button entirely: an <input>
   // inside a <button> is invalid, and a click on the field would activate the
   // row underneath it.
-  if (renaming && e.kind === "pane-leaf") {
+  if (renaming) {
     return (
       <li className="flex h-6 items-center gap-1.5 pr-1.5 pl-7">
         <EntryIcon entry={e} />
@@ -793,7 +780,7 @@ function EntryRowItem({
       type="button"
       onClick={onOpen}
       onDoubleClick={() => {
-        if (canRename && e.kind === "pane-leaf") onSetRenaming(e.leafId);
+        if (canRename) onSetRenaming(e.leafId);
       }}
       className={cn(
         "flex w-full flex-col justify-center text-left text-[11px] transition-colors",
@@ -862,7 +849,7 @@ function EntryRowItem({
             <IconTooltip label="Rename" side="right">
               <Button
                 onClick={() => {
-                  if (e.kind === "pane-leaf") onSetRenaming(e.leafId);
+                  onSetRenaming(e.leafId);
                 }}
                 aria-label={`Rename ${e.label}`}
                 variant="ghost"

@@ -261,6 +261,11 @@ function inlineAuthMode(host: Host): VaultAuthMode {
  * empty string), and `"" === ""` would otherwise make every unreadable key a
  * candidate for every other one.
  *
+ * `!k.kind` (plain `pem` only) excludes both newer kinds: a `hardware` key
+ * holds no private material to reuse at all, and a `cert` key's private half
+ * carries certificate baggage a raw inline host body has no business
+ * inheriting silently.
+ *
  * THE FIRST MATCH WINS when several records share one fingerprint. That state is
  * reachable - importing one key file twice is all it takes - and there is no
  * honest way to pick between them here, so the caller names the record it is
@@ -276,7 +281,9 @@ function inlineAuthMode(host: Host): VaultAuthMode {
 export function reusableVaultKey(keys: readonly VaultKey[], facts: VaultKeyFacts): VaultKey | null {
   const fingerprint = facts.fingerprint?.trim();
   if (!fingerprint) return null;
-  return keys.find((k) => k.hasPrivateKey && k.fingerprint?.trim() === fingerprint) ?? null;
+  return (
+    keys.find((k) => !k.kind && k.hasPrivateKey && k.fingerprint?.trim() === fingerprint) ?? null
+  );
 }
 
 /**
@@ -522,6 +529,18 @@ export async function convertHostToVault(
         `hosts: "${args.host.name}" cannot reuse vault key ${reuse.reuseKeyId}, which no longer exists`,
       );
     }
+    // The offer already excludes `cert`/`hardware` (`reusableVaultKey`'s own
+    // `!k.kind` requirement), and this re-check is that same requirement's
+    // other value: a key that BECAME a new kind between the offer and this
+    // call - or an id that never came from an offer at all - is refused here
+    // the same way a mismatched fingerprint is, rather than silently
+    // releasing the host's own copy onto a record that now authenticates
+    // differently.
+    if (reusedKey.kind) {
+      throw new Error(
+        `hosts: "${args.host.name}" cannot reuse vault key "${reusedKey.name}", which is a ${reusedKey.kind} key`,
+      );
+    }
     if (!reusedKey.hasPrivateKey) {
       throw new Error(
         `hosts: "${args.host.name}" cannot reuse vault key "${reusedKey.name}", which stores no private key, so this host's own copy would be released against a record that holds none`,
@@ -570,8 +589,11 @@ export async function convertHostToVault(
   if (mintedKeyId !== null && newKey) {
     const keyDraft: KeyDraft = {
       name: newKey.name,
+      kind: "pem",
       privateKey: "",
       passphrase: "",
+      certificate: "",
+      publicKey: "",
       description: "",
     };
     const keySecrets: { privateKey?: VaultSecretValue; passphrase?: VaultSecretValue } = {};
@@ -582,7 +604,7 @@ export async function convertHostToVault(
     // turns "convert only ever creates" from a property of this code into a
     // refusal the store enforces.
     const upserted = await deps.vault.upsertKey(
-      keyRecordFrom(mintedKeyId, keyDraft, null, newKey.facts),
+      keyRecordFrom(mintedKeyId, keyDraft, null, newKey.facts, null),
       keySecrets,
       VAULT_STAMP_ABSENT,
     );
@@ -812,8 +834,9 @@ async function undoDetachCopies(
  * The copies land BEFORE the host write, the mirror of convert's ordering and
  * for the same reason. So the same failure path applies: a refused
  * `upsertHost` left a plaintext copy of what may be a SHARED vault key at
- * `tervia-hosts::<hostId>::privateKey`, named by nothing, and unenumerable
- * because there is no `secrets_list`. {@link undoDetachCopies} takes them back.
+ * `tervia-hosts::<hostId>::privateKey`, named by no record, and reachable
+ * afterwards only through the Vault page's unreferenced-entry sweep.
+ * {@link undoDetachCopies} takes them back.
  * The missing-identity arm below needs none of that: it copies nothing, so a
  * refusal there leaves nothing behind, and it must stay that way.
  *

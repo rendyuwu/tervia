@@ -12,7 +12,12 @@ export type SavedTerminalLeaf = {
   kind: "leaf";
   leafKind: "terminal";
   cwd?: string;
-  /** SSH connection id for SSH-bound leaves. */
+  /**
+   * Persisted spelling of the in-memory `hostId`. Frozen under this older
+   * name because every workspace file written by an earlier build carries
+   * it; mapped to/from `hostId` only in `serialize.ts`. See `KNOWN-LIMITS.md`
+   * before touching this field.
+   */
   sshConnectionId?: string;
   /** FIFO chip number. Persisted so "Terminal 3" stays the same after restart. Backfilled by `useTabs.ts` for older state. */
   terminalOrdinal?: number;
@@ -56,12 +61,15 @@ export type SavedEditorLeaf = {
   leafKind: "editor";
   path: string;
   /**
-   * Saved SSH connection id when this file lives on a remote host. `path` is
-   * then a path on THAT host, never on the local disk. The live russh session
-   * number is deliberately not persisted (it is dead after a restart, and the
-   * counter restarts from 1, so it would point at whichever host connected
-   * first); the pane re-resolves this id to a live session instead.
-   * Absent = local file, which is every leaf written before this field existed.
+   * Persisted spelling of the in-memory `hostId`, when this file lives on a
+   * remote host. `path` is then a path on THAT host, never on the local
+   * disk. The live russh session number is deliberately not persisted (it is
+   * dead after a restart, and the counter restarts from 1, so it would point
+   * at whichever host connected first); the pane re-resolves this id to a
+   * live session instead. Absent = local file, which is every leaf written
+   * before this field existed. Frozen under this older name for the same
+   * reason as `SavedTerminalLeaf.sshConnectionId`; mapped to/from `hostId`
+   * only in `serialize.ts`. See `KNOWN-LIMITS.md` before touching this field.
    */
   sshConnectionId?: string;
   /** Display label for the remote host, shown while the leaf waits to rebind. */
@@ -102,9 +110,6 @@ export type SavedRdpLeaf = {
    *  deleted restores anyway and reports it in the pane, rather than vanishing
    *  from the layout without explanation. */
   rdpConnectionId: string;
-  /** Persisted from day one even though `"preset"` is the only value, so adding
-   *  `"fit"` needs no migration of everyone's saved workspaces. */
-  sizeMode: "preset";
   /** User-chosen tab name from the tab's right-click "Rename". */
   customTitle?: string;
 };

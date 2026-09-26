@@ -6,7 +6,9 @@ import { useHostKeyPrompt } from "@/modules/ssh/hostKeyPrompt";
 import {
   confirmRdpCert,
   openRdp,
-  rdpSnapshot,
+  rdpClipboardFocus,
+  rdpResize,
+  rdpTakeFrame,
   type RdpInputEvent,
   type RdpSession,
 } from "./bridge";
@@ -14,7 +16,14 @@ import { listHosts, markConnected, pinFingerprint } from "@/modules/hosts/store"
 import { isRdpHost, type RdpHost } from "@/modules/hosts/types";
 import { openRdpDialTarget, rdpOpenInput, type RdpDialTarget } from "./dial";
 import type { RdpFrameBatch } from "./frame";
-import { fitViewport, toRemotePoint, wheelRotation, type RdpViewport } from "./lib/viewport";
+import {
+  fitDesktopSize,
+  fitViewport,
+  toRemotePoint,
+  wheelRotation,
+  type RdpViewport,
+} from "./lib/viewport";
+import { coalesceMoves } from "./lib/inputQueue";
 import { onRdpPaneAction, type RdpPaneAction } from "./paneActions";
 import { CTRL_ALT_DEL_SCANCODES, scancodeFor } from "./scancodes";
 
@@ -36,19 +45,10 @@ import { CTRL_ALT_DEL_SCANCODES, scancodeFor } from "./scancodes";
  * full-resolution intermediate means the scale happens once, over one image,
  * with the browser's own filtering.
  *
- * NOTHING touches a canvas on the channel callback. That is a constraint Tauri
- * imposes, not a preference: a raw payload of 1024 bytes or more is parked in a
- * process-global map and only freed when the JS side's `invoke(fetch)` actually
- * runs, and Tauri's own wrapper swallows failures with `.catch(console.error)` -
- * so a handler that throws, or that blocks long enough for messages to pile up
- * behind it, can strand payloads in that map with nothing left to collect them.
- * The callback queues a reference and returns; the blit and the composite both
- * happen on the next frame, which also coalesces several batches into one draw.
- *
- * The queue is bounded (`MAX_QUEUED_FRAME_BYTES`) because a batch is bounded at
- * one framebuffer - 33 MB at 4K - and they can arrive at up to 62 Hz, so an
- * unbounded backlog behind a stalled main thread is an OOM rather than a stutter.
- * Overflowing drops the backlog and repairs the image from `rdp_snapshot`.
+ * Pixels are PULLED, not pushed. The channel carries a tiny `frameReady`; the
+ * pane asks for the accumulated batch with `rdpTakeFrame` on a frame, at most
+ * one pull outstanding. There is no frame queue on this side at all - the
+ * `rdp_take_frame` command documents what the backend does while it waits.
  *
  * # How the keys get there
  *
@@ -67,8 +67,8 @@ import { CTRL_ALT_DEL_SCANCODES, scancodeFor } from "./scancodes";
  *
  * The remote cursor is composited into the framebuffer by the server, so the
  * CSS cursor stays at its default and no cursor bitmap is drawn - two cursors
- * is worse than one in the wrong shape. Clipboard, audio, device redirection
- * and dynamic resize are not implemented.
+ * is worse than one in the wrong shape. Clipboard, audio and device
+ * redirection are not implemented.
  */
 
 type Props = {
@@ -91,22 +91,6 @@ type Status =
   | { kind: "error"; message: string }
   | { kind: "closed"; reason: string };
 
-/**
- * Cap on the queued frame BACKLOG, in bytes.
- *
- * A batch is bounded at one framebuffer, which is ~4 MiB at 1280x800 but ~33 MB
- * at 4K, and they can arrive at up to 62 Hz. A main thread stalled for a second
- * would queue gigabytes, so the backlog cannot be unbounded.
- *
- * It caps the BACKLOG and not a single batch, which is why the check below only
- * fires with something already queued. One batch is affordable by definition -
- * it is exactly what would be held for the duration of a synchronous blit - and
- * capping a lone batch would mean a framebuffer larger than this could never be
- * drawn at all: each one would trip the cap, request a resync, and get back a
- * keyframe that trips it again.
- */
-const MAX_QUEUED_FRAME_BYTES = 48 * 1024 * 1024;
-
 /** The framebuffer, at the remote desktop's resolution. */
 type Framebuffer = {
   canvas: HTMLCanvasElement;
@@ -115,12 +99,32 @@ type Framebuffer = {
   height: number;
 };
 
+/** Quiet time before a pane resize is sent to the server. A divider drag emits
+ *  a ResizeObserver callback per frame and each one costs the remote a
+ *  Deactivate-All/reactivate round trip, so only the settled size is sent. */
+const FIT_RESIZE_DEBOUNCE_MS = 250;
+
+/** `devicePixelRatio` as the DPI percentage MS-RDPEDISP takes, inside the
+ *  100..=500 range outside which the spec says the server ignores it. */
+function scalePercent(dpr: number): number {
+  return Math.min(500, Math.max(100, Math.round(dpr * 100)));
+}
+
 export function RdpPane({ leafId, connectionId, visible, focused = true }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const fbRef = useRef<Framebuffer | null>(null);
   const viewportRef = useRef<RdpViewport>({ left: 0, top: 0, width: 0, height: 0, scale: 0 });
   const sessionRef = useRef<RdpSession | null>(null);
+  /** Whether the live session's row asked for fit mode. Written once the row
+   *  resolves inside the connect effect, cleared in its teardown. */
+  const fitRef = useRef(false);
+  /** The size most recently REQUESTED. Keyed on the request, not on the
+   *  framebuffer: the server may grant something else, and comparing against
+   *  the granted size would re-ask for a size it has already refused on every
+   *  subsequent resize. */
+  const lastFitRef = useRef<{ width: number; height: number } | null>(null);
+  const fitTimer = useRef<number | undefined>(undefined);
 
   const [status, setStatus] = useState<Status>({ kind: "connecting" });
   const [conn, setConn] = useState<RdpHost | null>(null);
@@ -132,36 +136,16 @@ export function RdpPane({ leafId, connectionId, visible, focused = true }: Props
   // must not close over a stale render.
   const visibleRef = useRef(visible);
   visibleRef.current = visible;
-  // A composite was skipped while hidden, so becoming visible must redraw even
-  // if no new frame has arrived since.
-  const staleRef = useRef(false);
 
   // ---------------------------------------------------------------- rendering
 
   const compositeHandle = useRef<number | null>(null);
-  /**
-   * Batches waiting to be blitted into the framebuffer, oldest first.
-   *
-   * Frames do NOT touch a canvas on the channel callback. Tauri's `Channel`
-   * makes that dangerous rather than merely slow: a payload of 1024 bytes or
-   * more is parked in a process-global map and only removed when the JS side's
-   * `invoke(fetch)` actually runs, and Tauri's own wrapper ends in
-   * `.catch(console.error)` - so a handler that throws, or that blocks long
-   * enough to pile messages up behind it, can leave payloads parked with
-   * nothing left to collect them. The handler therefore does the cheapest
-   * possible thing: push a reference and return.
-   *
-   * References, not copies. The `ArrayBuffer` handed to `onmessage` belongs to
-   * that message alone and nothing reuses it, so holding a view across a frame
-   * is safe - and copying would cost the same memcpy the blit is being deferred
-   * to avoid, on up to 33 MB.
-   */
-  const pendingBatches = useRef<RdpFrameBatch[]>([]);
-  /** Bytes held in `pendingBatches`, to bound it. */
-  const queuedBytes = useRef(0);
-  /** The queue overflowed and deltas were dropped, so the framebuffer no longer
-   *  matches the server's and only a fresh keyframe can reconcile them. */
-  const desyncedRef = useRef(false);
+  /** At most one pull in flight; that single credit IS the backpressure. */
+  const pullingRef = useRef(false);
+  /** `pullFrame`, read through a ref so `composite` can drive it without the
+   *  two memoizations depending on each other. Assigned on every render, and
+   *  only ever read from a frame callback, so there is nothing stale here. */
+  const pullRef = useRef<() => void>(() => {});
 
   /** Point the framebuffer at a `width` x `height` desktop, discarding whatever
    *  was there. Called on connect and on a server-side resize, where the
@@ -181,22 +165,16 @@ export function RdpPane({ leafId, connectionId, visible, focused = true }: Props
   }, []);
 
   /**
-   * Blit every queued batch into the framebuffer, oldest first. Runs on a frame,
-   * never on the channel callback.
+   * Blit one pulled batch into the framebuffer. Runs on a frame, never on the
+   * channel callback.
    *
-   * Wrapped so one bad batch cannot wedge the pane: `putImageData` should not be
-   * able to throw here (the parser has already proved every rect is in bounds
-   * and every view in range), but if it ever does, the queue is cleared and a
-   * resync requested rather than the same poison batch being retried on every
-   * subsequent frame forever.
+   * `putImageData` should not be able to throw here - the parser has already
+   * proved every rect is in bounds and every view in range - so a throw is
+   * logged and the region waits for the server's next repaint.
    */
-  const drainBatches = useCallback(() => {
-    const queued = pendingBatches.current;
-    if (queued.length === 0) return;
-    pendingBatches.current = [];
-    queuedBytes.current = 0;
-    try {
-      for (const batch of queued) {
+  const blitBatch = useCallback(
+    (batch: RdpFrameBatch): void => {
+      try {
         // The batch header is authoritative about the framebuffer it describes:
         // a batch that arrives right after a server-side resize carries the NEW
         // size whether or not the `resize` event has been handled yet, so sizing
@@ -216,14 +194,12 @@ export function RdpPane({ leafId, connectionId, visible, focused = true }: Props
           const data = new Uint8ClampedArray(buffer, pixelOffsets[i], r.w * r.h * 4);
           fb.ctx.putImageData(new ImageData(data, r.w, r.h), r.x, r.y);
         }
-        // A keyframe replaces everything, so it also clears any earlier loss.
-        if (batch.keyframe) desyncedRef.current = false;
+      } catch (e) {
+        console.error("rdp: dropped a frame batch that could not be blitted", e);
       }
-    } catch (e) {
-      console.error("rdp: dropped a frame batch that could not be blitted", e);
-      desyncedRef.current = true;
-    }
-  }, [resetFramebuffer]);
+    },
+    [resetFramebuffer],
+  );
 
   /** Draw the framebuffer onto the visible canvas, letterboxed and at device
    *  resolution. Also the only place `viewportRef` is written, so the input
@@ -232,17 +208,13 @@ export function RdpPane({ leafId, connectionId, visible, focused = true }: Props
     compositeHandle.current = null;
     const host = hostRef.current;
     const canvas = canvasRef.current;
-    // Drain first, and unconditionally: the queue holds Tauri's own buffers, so
-    // leaving it full while the tab is hidden would pin tens of megabytes for as
-    // long as the user is looking somewhere else.
-    drainBatches();
+    // Pull first, and unconditionally, before the early returns: a hidden pane
+    // must still drain the backend's batcher, or the session sits holding
+    // dirty rects nothing will ever ask for.
+    pullRef.current();
     const fb = fbRef.current;
     if (!host || !canvas) return;
-    if (!visibleRef.current) {
-      staleRef.current = true;
-      return;
-    }
-    staleRef.current = false;
+    if (!visibleRef.current) return;
     // `getBoundingClientRect`, not `clientWidth`: the workspace column applies
     // a CSS `zoom` to counter the UI zoom, and the rect is in the SAME space as
     // the pointer coordinates below. Measuring in layout pixels here and
@@ -281,109 +253,88 @@ export function RdpPane({ leafId, connectionId, visible, focused = true }: Props
       vp.width * dpr,
       vp.height * dpr,
     );
-  }, [drainBatches]);
+  }, []);
 
   const scheduleComposite = useCallback(() => {
     if (compositeHandle.current !== null) return;
     compositeHandle.current = requestAnimationFrame(composite);
   }, [composite]);
 
-  /**
-   * What the channel callback does with a batch, and all it does: queue the
-   * reference, note the bytes, ask for a frame. No canvas, no allocation beyond
-   * the push, no `await`. See `pendingBatches` for why the work is deferred
-   * rather than done here.
-   */
-  const enqueueBatch = useCallback(
-    (batch: RdpFrameBatch) => {
-      // A keyframe replaces the whole framebuffer, so everything queued behind
-      // it is already dead. Dropping those is free correctness AND the main
-      // thing that keeps the queue short on a busy desktop, where the Rust
-      // batcher collapses to a keyframe whenever the dirty area passes half the
-      // screen.
-      if (batch.keyframe) {
-        pendingBatches.current = [];
-        queuedBytes.current = 0;
-      }
-      const bytes = batch.buffer.byteLength;
-      // `length > 0` is load-bearing: the cap bounds the BACKLOG, so a lone
-      // batch is always accepted however large. See `MAX_QUEUED_FRAME_BYTES`.
-      if (
-        pendingBatches.current.length > 0 &&
-        queuedBytes.current + bytes > MAX_QUEUED_FRAME_BYTES
-      ) {
-        // The main thread is far enough behind that holding the backlog costs
-        // more than the picture is worth. Deltas cannot be merged on this side,
-        // so the whole queue goes and the framebuffer is declared out of date;
-        // `resync` below fetches a keyframe to repair it. Dropping is the only
-        // bounded option - an unbounded queue at 33 MB a batch takes the webview
-        // out with it.
-        console.warn(
-          `rdp: frame queue exceeded ${MAX_QUEUED_FRAME_BYTES} bytes, dropping the backlog and resyncing`,
-        );
-        pendingBatches.current = [];
-        queuedBytes.current = 0;
-        desyncedRef.current = true;
-        scheduleComposite();
-        void resync();
-        return;
-      }
-      pendingBatches.current.push(batch);
-      queuedBytes.current += bytes;
-      scheduleComposite();
-    },
-    // `resync` is declared just below and is only ever read when the channel
-    // calls this - long after both are bound - and it is memoized on the same
-    // dependency, so there is nothing stale to capture and nothing to list.
-    [scheduleComposite],
-  );
-
-  /**
-   * Repair the framebuffer after dropped deltas, by asking the host process for
-   * the current framebuffer as one keyframe.
-   *
-   * This is what `rdp_snapshot` is for, and why dropping a backlog is safe
-   * rather than permanent: without it a desktop that went idle straight after an
-   * overflow would show a stale image until something happened to repaint the
-   * lost region, which on an idle desktop is never.
-   */
-  const resync = useCallback(async () => {
+  /** Collect whatever the backend has accumulated. */
+  const pullFrame = useCallback(() => {
     const session = sessionRef.current;
-    if (!session) return;
-    try {
-      const keyframe = await rdpSnapshot(session.id);
-      // Still the same session, and nothing has arrived that already fixed it.
-      if (keyframe && sessionRef.current === session && desyncedRef.current) {
-        pendingBatches.current = [keyframe];
-        queuedBytes.current = keyframe.buffer.byteLength;
+    if (!session || pullingRef.current) return;
+    pullingRef.current = true;
+    void rdpTakeFrame(session.id)
+      .then((batch) => {
+        if (!batch || sessionRef.current !== session) return;
+        blitBatch(batch);
+        // There may be more behind it. Scheduling a composite rather than
+        // pulling again immediately is what rate-limits pulls to one per frame
+        // and lets the backend coalesce in between.
         scheduleComposite();
-      }
-    } catch {
-      // The session went away mid-fetch. The next keyframe from the server
-      // repairs the image anyway; there is nothing useful to report here.
-    }
-  }, [scheduleComposite]);
+      })
+      .catch(() => {})
+      .finally(() => {
+        pullingRef.current = false;
+      });
+  }, [blitBatch, scheduleComposite]);
+
+  pullRef.current = pullFrame;
+
+  /** Debounced "the pane is this big now" for a fit-mode session. */
+  const requestFit = useCallback(() => {
+    if (!fitRef.current) return;
+    clearTimeout(fitTimer.current);
+    fitTimer.current = window.setTimeout(() => {
+      fitTimer.current = undefined;
+      const session = sessionRef.current;
+      const host = hostRef.current;
+      // A hidden pane measures 0x0, which would otherwise clamp to the 200x200
+      // floor and shrink the remote desktop to a postage stamp.
+      if (!session || !host || !visibleRef.current) return;
+      const rect = host.getBoundingClientRect();
+      const dpr = window.devicePixelRatio || 1;
+      const size = fitDesktopSize(rect.width, rect.height, dpr);
+      if (!size) return;
+      const last = lastFitRef.current;
+      if (last && last.width === size.width && last.height === size.height) return;
+      lastFitRef.current = size;
+      void rdpResize(session.id, size.width, size.height, scalePercent(dpr)).catch(() => {});
+    }, FIT_RESIZE_DEBOUNCE_MS);
+  }, []);
 
   // Re-letterbox on a pane resize (a divider drag, a window resize, the sidebar
-  // collapsing). The desktop resolution is fixed, so this only moves the bars
-  // and rescales - nothing is renegotiated with the server.
+  // collapsing). In `"preset"` that is all it does - the desktop resolution is
+  // fixed, so only the bars move. In `"fit"` the settled size is also sent to
+  // the server, which answers with a reactivation at the new resolution.
+  //
+  // A hidden tab's pane is CSS-hidden rather than unmounted, so becoming
+  // visible is itself a 0->N size change and fires the observer; no extra
+  // visibility effect is needed.
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
-    const ro = new ResizeObserver(() => scheduleComposite());
+    const ro = new ResizeObserver(() => {
+      scheduleComposite();
+      requestFit();
+    });
     ro.observe(host);
     return () => ro.disconnect();
-  }, [scheduleComposite]);
+  }, [scheduleComposite, requestFit]);
 
   // Redraw on becoming visible: composites are skipped while the tab is hidden,
-  // so without this the pane shows whatever was on screen when it left.
+  // so without this the pane shows whatever was on screen when it left. It also
+  // RE-ARMS the pull loop, which is why there is no "was it stale" condition -
+  // the loop stops whenever a pull comes back empty.
   useEffect(() => {
-    if (visible && staleRef.current) scheduleComposite();
+    if (visible) scheduleComposite();
   }, [visible, scheduleComposite]);
 
   useEffect(
     () => () => {
       if (compositeHandle.current !== null) cancelAnimationFrame(compositeHandle.current);
+      clearTimeout(fitTimer.current);
     },
     [],
   );
@@ -392,6 +343,10 @@ export function RdpPane({ leafId, connectionId, visible, focused = true }: Props
 
   const pendingRef = useRef<RdpInputEvent[]>([]);
   const flushHandle = useRef<number | null>(null);
+  /** One batch on the wire at a time. A rejected batch goes back to the head of
+   *  the queue, and a second send overtaking it would transpose key
+   *  transitions - which is how a modifier gets stranded down on the server. */
+  const inFlight = useRef(false);
   const heldKeys = useRef<Set<number>>(new Set());
   /**
    * Characters sent as `unicodeDown` with no `keyUp` yet - a dead key, IME
@@ -408,14 +363,45 @@ export function RdpPane({ leafId, connectionId, visible, focused = true }: Props
   const heldUnicode = useRef<Set<string>>(new Set());
   const heldButtons = useRef<Set<number>>(new Set());
 
-  const flushInput = useCallback(() => {
+  // The explicit type argument is required: the body references `flushInput`
+  // to reschedule itself, which TypeScript cannot infer from its own
+  // initializer.
+  const flushInput = useCallback<() => void>(() => {
     flushHandle.current = null;
+    if (pendingRef.current.length === 0) return;
+    // Read before `pendingRef` is cleared, and not optional-chained: a
+    // short-circuited `?.` would skip the whole promise chain and leave
+    // `inFlight` stuck true.
+    const session = sessionRef.current;
+    if (!session || inFlight.current) {
+      // Rescheduled, not cleared: input queued before `openRdp` resolves is
+      // kept rather than dropped. The loop is bounded at both ends - the
+      // unmount effect cancels the frame, and both teardown paths empty
+      // `pendingRef` as they null `sessionRef`, so a pane left sitting on its
+      // "ended" overlay stops on the next frame instead of spinning.
+      if (flushHandle.current === null) flushHandle.current = requestAnimationFrame(flushInput);
+      return;
+    }
     const batch = pendingRef.current;
-    if (batch.length === 0) return;
     pendingRef.current = [];
-    // Dropped rather than retried: input is only meaningful in order and in
-    // time, and the session is torn down on any error worth surfacing.
-    void sessionRef.current?.sendInput(batch).catch(() => {});
+    inFlight.current = true;
+    void session
+      .sendInput(batch)
+      .then((accepted) => {
+        // The same staleness guard `pullFrame` uses: a session that died while
+        // this was in flight must not have its batch put back, or the queue is
+        // refilled behind the teardown that just emptied it.
+        if (accepted || sessionRef.current !== session) return;
+        // Not dropped: the backend took none of it. Put it back in front of
+        // whatever arrived while it was in flight, collapse the move runs that
+        // seam creates, and try again next frame.
+        pendingRef.current = coalesceMoves(batch.concat(pendingRef.current));
+        if (flushHandle.current === null) flushHandle.current = requestAnimationFrame(flushInput);
+      })
+      .catch(() => {})
+      .finally(() => {
+        inFlight.current = false;
+      });
   }, []);
 
   const queueInput = useCallback(
@@ -493,6 +479,49 @@ export function RdpPane({ leafId, connectionId, visible, focused = true }: Props
    */
   const liveFocus = useRef({ visible, focused });
   liveFocus.current = { visible, focused };
+
+  // Clipboard follows the pane's focus. The rising edge advertises the host
+  // clipboard so a paste inside the remote finds it; the falling edge pulls
+  // whatever the remote copied, because leaving the pane is a precondition of
+  // pasting anywhere on the host. Covers Tervia-internal pane and tab
+  // switches, where window focus never changes at all.
+  //
+  // No `onPaste` handler anywhere: a paste inside the remote is Ctrl+V
+  // forwarded as scancodes, and the server then asks US for the data over
+  // CLIPRDR. `sessionRef.current` is null until `openRdp` resolves, which
+  // costs nothing - the initial advertise comes from the backend's own
+  // `on_request_format_list` during channel initialization.
+  useEffect(() => {
+    const id = sessionRef.current?.id;
+    if (id === undefined) return;
+    void rdpClipboardFocus(id, visible && focused).catch(() => {});
+  }, [visible, focused]);
+
+  // The window-level half: alt-tabbing away and back never changes `focused`.
+  //
+  // No `e.target === window` guard. `focus` and `blur` do not bubble, so a
+  // non-capturing window listener fires only when the window itself is the
+  // target - an element's focus reaches a window listener in the CAPTURE
+  // phase only. The `releaseAll` window listener above carries no such guard
+  // for the same reason, and element blur is handled separately by this
+  // pane's own `onBlur`. Registering either of these with `true` would
+  // reintroduce the need for one.
+  useEffect(() => {
+    const sync = (on: boolean) => () => {
+      const id = sessionRef.current?.id;
+      if (id === undefined) return;
+      if (!liveFocus.current.visible || !liveFocus.current.focused) return;
+      void rdpClipboardFocus(id, on).catch(() => {});
+    };
+    const onFocus = sync(true);
+    const onBlur = sync(false);
+    window.addEventListener("focus", onFocus);
+    window.addEventListener("blur", onBlur);
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      window.removeEventListener("blur", onBlur);
+    };
+  }, []);
 
   // Claimed, not taken. This effect can run INSIDE the mousedown that
   // switched the tab (Radix `Tabs` changes value on mousedown and React 19
@@ -597,9 +626,9 @@ export function RdpPane({ leafId, connectionId, visible, focused = true }: Props
 
     setStatus({ kind: "connecting" });
     fbRef.current = null;
-    pendingBatches.current = [];
-    queuedBytes.current = 0;
-    desyncedRef.current = false;
+    fitRef.current = false;
+    lastFitRef.current = null;
+    clearTimeout(fitTimer.current);
     heldKeys.current.clear();
     heldUnicode.current.clear();
     heldButtons.current.clear();
@@ -633,6 +662,16 @@ export function RdpPane({ leafId, connectionId, visible, focused = true }: Props
         });
         return;
       }
+      fitRef.current = row.sizeMode === "fit";
+      const dpr = window.devicePixelRatio || 1;
+      const rect = hostRef.current?.getBoundingClientRect();
+      // Opening AT the pane size means the first frame is already correct and
+      // costs no reactivation round trip. `null` on an unmeasurable pane - a
+      // restored workspace whose tab is not the active one - falls back to the
+      // row's saved size, which is exactly what `desktopWidth`/`desktopHeight`
+      // are for in fit mode.
+      const openSize = fitRef.current && rect ? fitDesktopSize(rect.width, rect.height, dpr) : null;
+      lastFitRef.current = openSize;
       try {
         if (row.tunnel) setStatus({ kind: "connecting", viaTunnel: true });
         // The tunnel first, and it can block for a long time: dialling the
@@ -652,7 +691,11 @@ export function RdpPane({ leafId, connectionId, visible, focused = true }: Props
           // connect differs from a direct one in the address and nothing else -
           // the pinned certificate included, which is what stops an ephemeral
           // local port from looking like a new machine every time.
-          await rdpOpenInput(row, target),
+          await rdpOpenInput(
+            row,
+            target,
+            openSize ? { ...openSize, scaleFactor: scalePercent(dpr) } : undefined,
+          ),
           {
             onConnected: (width, height, fingerprint) => {
               if (!alive) return;
@@ -706,12 +749,16 @@ export function RdpPane({ leafId, connectionId, visible, focused = true }: Props
               resetFramebuffer(width, height);
               scheduleComposite();
             },
-            onFrame: (batch) => {
-              if (alive) enqueueBatch(batch);
+            onFrameReady: () => {
+              if (alive) scheduleComposite();
             },
             onDisconnected: (reason) => {
               if (!alive) return;
               sessionRef.current = null;
+              // Input for a dead session is meaningless, and leaving it queued
+              // would keep `flushInput` rescheduling against a session that is
+              // never coming back.
+              pendingRef.current = [];
               setStatus({ kind: "closed", reason: lastError || reason });
               // Nothing is riding the tunnel any more, and the pane stays
               // mounted on its "ended" overlay for as long as the user leaves
@@ -734,6 +781,13 @@ export function RdpPane({ leafId, connectionId, visible, focused = true }: Props
         }
         session = opened;
         sessionRef.current = opened;
+        // The pane can have been dragged while this was still dialling, and
+        // `requestFit` bails when there is no session yet, so that resize was
+        // dropped. Re-check now that there is one - after the ref is set, not
+        // from `onConnected`, which runs before `openRdp` has resolved. A no-op
+        // when the pane still matches the size the session opened with, because
+        // `lastFitRef` already holds it.
+        requestFit();
       } catch (e) {
         // Covers the tunnel's own failures too - a refused bastion, a rejected
         // host key, a target the jump host cannot reach - so the message a user
@@ -747,6 +801,10 @@ export function RdpPane({ leafId, connectionId, visible, focused = true }: Props
     return () => {
       alive = false;
       sessionRef.current = null;
+      pendingRef.current = [];
+      // A pending request must not fire against a session that is going away.
+      fitRef.current = false;
+      clearTimeout(fitTimer.current);
       // ANSWER the certificate question, do not merely drop it from the queue.
       //
       // This teardown is every way out of an RDP pane: unmount, tab close,
@@ -771,12 +829,8 @@ export function RdpPane({ leafId, connectionId, visible, focused = true }: Props
       // before `rdp_open` returned is released by the `!alive` check above, and
       // one that got as far as a live session is released here.
       releaseDial();
-      // Drop references to Tauri's frame buffers rather than holding them until
-      // the next GC. A queued keyframe is a whole framebuffer - 33 MB at 4K.
-      pendingBatches.current = [];
-      queuedBytes.current = 0;
     };
-  }, [connectionId, attempt, enqueueBatch, resetFramebuffer, scheduleComposite]);
+  }, [connectionId, attempt, resetFramebuffer, scheduleComposite, requestFit]);
 
   const hostLabel = conn ? conn.name.trim() || conn.host : "";
 
@@ -794,8 +848,9 @@ export function RdpPane({ leafId, connectionId, visible, focused = true }: Props
         // (which would otherwise move focus out) and the browser's own
         // accelerators. App-level chords never reach here: `useGlobalShortcuts`
         // listens at window capture and stops propagation for the ones it
-        // owns, and App's `isDisabled` gate lets a focused RDP pane keep the
-        // bare-Ctrl and bare-Alt sequences exactly as a focused terminal does.
+        // owns, and `yieldsToRawKeyboard` (`shortcuts/lib/keyboardOwner.ts`) lets
+        // a focused RDP pane keep the bare-Ctrl and bare-Alt sequences exactly as
+        // a focused terminal does.
         e.preventDefault();
         e.stopPropagation();
         const scancode = scancodeFor(e.code);

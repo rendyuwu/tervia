@@ -8,9 +8,11 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { IconTooltip } from "@/components/ui/icon-tooltip";
 import { DESTRUCTIVE_ACTION } from "@/lib/toolbarButton";
+import { lastConnectedLabel } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { CircleAlert, Copy, Pencil, Play, Trash2, type LucideIcon } from "lucide-react";
 import type { ReactNode } from "react";
+import { HostGlyph } from "../appearance";
 import { isSshHost, type Host } from "../types";
 
 export type HostCardProps = {
@@ -23,6 +25,10 @@ export type HostCardProps = {
    *  whose secret is absent. Renders as a warning pip. */
   missingSecret?: boolean;
   selected?: boolean;
+  /** This card is the grid's ONE tab stop (roving tabindex): it and its four
+   *  action buttons sit in the Tab order, every other card and its buttons at
+   *  -1. The page picks it; the arrow keys move it. */
+  tabStop: boolean;
   /** Single click. Optional, so a surface with no selection model can omit it. */
   onSelect?: () => void;
   onConnect: () => void;
@@ -49,6 +55,7 @@ export function HostCard({
   groupName,
   missingSecret,
   selected,
+  tabStop,
   onSelect,
   onConnect,
   onEdit,
@@ -57,10 +64,15 @@ export function HostCard({
 }: HostCardProps): ReactNode {
   const detail = connectionDetail(host);
   const credentialLabel = missingSecret ? "Missing secret" : (identityName ?? "Inline");
+  // ponytail: computed at render off Date.now(), not a ticker - the label
+  // goes stale while a card sits on screen unvisited. A minute-interval
+  // re-render is the upgrade if that staleness ever matters.
+  const connectedLabel = lastConnectedLabel(host.lastConnectedAt, Date.now());
 
   return (
     <div
-      tabIndex={0}
+      tabIndex={tabStop ? 0 : -1}
+      data-host-card=""
       role="group"
       aria-label={`${host.name}, ${host.protocol.toUpperCase()} host`}
       onClick={onSelect}
@@ -84,17 +96,24 @@ export function HostCard({
         "group flex cursor-default flex-col gap-2 rounded-lg border p-3 text-left transition-colors outline-none",
         "focus-visible:ring-ring/50 focus-visible:ring-2",
         selected ? "border-primary bg-accent/30" : "border-border hover:bg-muted/30",
-        // ~100px: p-3 padding (24) + name/pip row (20) + detail row (16) +
-        // group/actions row (24) + two 8px gaps (16). content-visibility:auto
-        // skips layout/paint for off-screen cards (search-first keeps the
-        // steady-state DOM small, this covers the unfiltered case); without
-        // contain-intrinsic-size an off-screen card lays out at 0px and the
-        // scrollbar jumps while the user scrolls - it looks like dead weight
-        // and is load-bearing.
+        // 100px is the UNTAGGED size: p-3 padding (24) + name/pip row (20) +
+        // detail row (16) + group/actions row (24) + two 8px gaps (16). A
+        // host with tags adds the optional row below (h-4, 16px) plus one
+        // more 8px gap, so ~124px there - more still if the tags wrap onto a
+        // second line. content-visibility:auto skips layout/paint for
+        // off-screen cards (search-first keeps the steady-state DOM small,
+        // this covers the unfiltered case); without contain-intrinsic-size
+        // an off-screen card lays out at 0px and the scrollbar jumps while
+        // the user scrolls - it looks like dead weight and is load-bearing.
+        // The estimate stays at the untagged 100px: an under-estimate only
+        // grows the scrollbar as tagged cards paint in, while an over-estimate
+        // jumps it backwards, and `auto` remembers each card's real size once
+        // it has painted.
         "[contain-intrinsic-size:auto_100px] [content-visibility:auto]",
       )}
     >
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+        <HostGlyph icon={host.icon} color={host.color} />
         <span className="min-w-0 flex-1 truncate text-sm font-medium">{host.name}</span>
         <Badge
           variant={missingSecret ? "destructive" : identityName ? "secondary" : "outline"}
@@ -109,9 +128,28 @@ export function HostCard({
         {host.protocol.toUpperCase()} · {detail}
       </div>
 
+      {host.tags && host.tags.length > 0 ? (
+        <div className="flex flex-wrap gap-1">
+          {host.tags.map((tag) => (
+            <Badge key={tag} variant="outline" className="h-4 px-1.5 text-[10px] font-normal">
+              {tag}
+            </Badge>
+          ))}
+        </div>
+      ) : null}
+
       <div className="flex min-h-6 flex-wrap items-center justify-between gap-x-2 gap-y-1">
-        {groupName ? (
-          <span className="text-muted-foreground min-w-0 truncate text-xs">{groupName}</span>
+        {groupName || connectedLabel ? (
+          <span
+            className="text-muted-foreground min-w-0 flex-1 truncate text-xs"
+            title={
+              host.lastConnectedAt !== undefined
+                ? `Last connected ${new Date(host.lastConnectedAt).toLocaleString()}`
+                : undefined
+            }
+          >
+            {[groupName, connectedLabel].filter(Boolean).join(" · ")}
+          </span>
         ) : (
           <span />
         )}
@@ -123,14 +161,33 @@ export function HostCard({
           onClick={(e) => e.stopPropagation()}
           onDoubleClick={(e) => e.stopPropagation()}
         >
-          <CardAction icon={Play} label="Connect" hostName={host.name} onClick={onConnect} />
-          <CardAction icon={Pencil} label="Edit" hostName={host.name} onClick={onEdit} />
-          <CardAction icon={Copy} label="Duplicate" hostName={host.name} onClick={onDuplicate} />
+          <CardAction
+            icon={Play}
+            label="Connect"
+            hostName={host.name}
+            onClick={onConnect}
+            tabStop={tabStop}
+          />
+          <CardAction
+            icon={Pencil}
+            label="Edit"
+            hostName={host.name}
+            onClick={onEdit}
+            tabStop={tabStop}
+          />
+          <CardAction
+            icon={Copy}
+            label="Duplicate"
+            hostName={host.name}
+            onClick={onDuplicate}
+            tabStop={tabStop}
+          />
           <CardAction
             icon={Trash2}
             label="Delete"
             hostName={host.name}
             onClick={onDelete}
+            tabStop={tabStop}
             destructive
           />
         </div>
@@ -156,12 +213,14 @@ function CardAction({
   label,
   hostName,
   onClick,
+  tabStop,
   destructive,
 }: {
   icon: LucideIcon;
   label: string;
   hostName: string;
   onClick: () => void;
+  tabStop: boolean;
   destructive?: boolean;
 }) {
   return (
@@ -170,6 +229,7 @@ function CardAction({
         type="button"
         variant="ghost"
         size="icon-xs"
+        tabIndex={tabStop ? 0 : -1}
         aria-label={`${label} ${hostName}`}
         onClick={onClick}
         className={cn(destructive && DESTRUCTIVE_ACTION)}

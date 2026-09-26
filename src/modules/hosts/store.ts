@@ -1,8 +1,26 @@
-import type { StoreRecovery } from "@/lib/storeRecovery";
+import { describeError } from "@/lib/describeError";
+import { markDirty } from "@/lib/dirtySink";
+import type { StoreFileState, StoreRecovery } from "@/lib/storeRecovery";
+import {
+  landedTombstones,
+  landingRefusal,
+  livingTombstones,
+  TOMBSTONES_KEY,
+  withoutTombstone,
+  withTombstone,
+  type DirtyId,
+  type RemoteLanding,
+  type RemoteLandingRefusal,
+  type Tombstone,
+} from "@/lib/tombstones";
 import { tauriSecretsIo } from "@/modules/vault/adapters";
-import { hostsUsingIdentity } from "@/modules/vault/refs";
+import {
+  GROUP_DEFAULT_SUFFIX,
+  groupsUsingIdentity,
+  hostsUsingIdentity,
+} from "@/modules/vault/refs";
 import type { SshSecretValues } from "@/modules/vault/resolve";
-import { SECRET_ALREADY_STORED, type VaultSecretValue } from "@/modules/vault/store";
+import { SECRET_ALREADY_STORED, vaultStore, type VaultSecretValue } from "@/modules/vault/store";
 import {
   assertBindingOwner,
   HOST_KEYRING_SERVICE,
@@ -21,17 +39,21 @@ import {
 } from "@/modules/vault/types";
 
 import { createTauriHostsStoreIo, defaultHostFiles, type HostsIo } from "./adapters";
+import { effectiveParents } from "./groupTree";
 import { jumpChain } from "./jumps";
 import { purgeLegacySecrets as runLegacyPurge, type LegacyPurgeResult } from "./legacyPurge";
 import {
   credentialStamp,
+  GROUP_TOMBSTONE_KIND,
   HOSTS_KEY,
   HOST_GROUPS_KEY,
   HOST_RDP_SECRET_FIELDS,
   HOST_SSH_SECRET_FIELDS,
+  HOST_TOMBSTONE_KIND,
   HostBindingChangedError,
   hostFingerprint,
   hostPins,
+  normalizeHostTags,
   type Host,
   type HostGroup,
   type HostPins,
@@ -60,12 +82,14 @@ import {
 //   to save on both sides and then fail every connect to either host.
 //
 //   NO ACCOUNT OUTLIVES THE RECORD NAMING IT, AND NO RECORD OUTLIVES ITS ACCOUNT.
-//   There is no `secrets_list` command, so an account nothing references is not
-//   merely untidy, it is unreachable. A delete clears the host's accounts,
-//   and an upsert clears the ones the new record can no longer name - AFTER the
-//   new record is on disk, never before, because nothing here can read a secret
-//   back to undo a release that a failed write leaves unjustified. `legacyPurge.ts`
-//   is the same rule pointed at the two old connection stores.
+//   `secrets_list` can enumerate an account nothing references, but its only
+//   consumer is the Vault page's unreferenced-entry sweep, which the user has to
+//   find, read and confirm - so an account this layer fails to release is not
+//   merely untidy, it waits on somebody going looking. A delete clears the host's
+//   accounts, and an upsert clears the ones the new record can no longer name -
+//   AFTER the new record is on disk, never before, because nothing here can read
+//   a secret back to undo a release that a failed write leaves unjustified.
+//   `legacyPurge.ts` is the same rule pointed at the two old connection stores.
 
 /**
  * The secret is ALREADY at this host's account: record it as present and write
@@ -160,25 +184,96 @@ export type HostsStore = {
   duplicateHost(id: string): Promise<Host | null>;
   deleteHost(id: string, forwards: ForwardRuleCleanup): Promise<void>;
   deleteGroup(id: string): Promise<void>;
+  /**
+   * Land already-merged hosts and groups, and their tombstones, at their REMOTE
+   * timestamps in ONE commit, and report the ones that were not applied.
+   *
+   * The one writer in this file that does not originate what it writes, which is
+   * why it is the one that does not stamp: every other mutator overwrites its
+   * caller's `updatedAt` because an editor round-trips the record it loaded. A
+   * pulled record stamped from this clock would outrank the copy it came from -
+   * a push loop between two devices, neither of them wrong - and a locally
+   * stamped `deletedAt` restarts the expiry window on every device that receives
+   * the delete.
+   *
+   * HOSTS AND GROUPS IN ONE CALL and one commit, for the reason `deleteGroup`
+   * passes two keys to `persist`: a group landing without the member records
+   * that name it is half an update, and both keys live in one file.
+   *
+   * THE FOUR DEVICE-LOCAL FIELDS ARE CARRIED FORWARD, never taken from the
+   * landing: `pins`, the flat fingerprint projected from them, and
+   * `lastConnectedAt` are this machine's own trust decision and its own history.
+   * The publishing side strips them, so a wholesale write would not merely stale
+   * them, it would DELETE this device's pins - after which the next connect takes
+   * a first-connect prompt it should never have been asked.
+   *
+   * REFUSALS COME BACK, nothing throws. See `landingRefusal` in
+   * `src/lib/tombstones.ts` for the five conditions and for why the reference
+   * guards are outside them. `assertBindingOwner` is outside them too, on the
+   * same terms: the landing is a snapshot of an inventory another device already
+   * held, and a throw from inside this queued write would lose every other
+   * landing in the set.
+   *
+   * A LANDED DELETE RUNS NONE OF THE IN-USE REFUSALS `deleteHost` RUNS, and that
+   * is accepted rather than overlooked - `KNOWN-LIMITS.md` carries it. The other
+   * device decided the delete against the inventory it could see, and a local
+   * holder it never saw cannot un-decide it: refusing here would leave the record
+   * alive locally and push it straight back, resurrecting on every device what
+   * one user deleted.
+   *
+   * A LOCAL DELETE MADE AFTER THE MERGE WINS over a record landing for the same
+   * id. The merge runs outside the queue and this runs inside it, so only this
+   * function can compare the two, and it applies the merge's own rule: the later
+   * stamp wins. The landing is skipped rather than refused, because the local
+   * delete is already marked dirty and the next push is what tells the remote.
+   */
+  applyRemote(
+    hosts: RemoteLanding<Host>[],
+    groups: RemoteLanding<HostGroup>[],
+  ): Promise<RemoteLandingRefusal[]>;
   getHostSshSecrets(id: string): Promise<SshSecretValues>;
   markConnected(id: string, fingerprint: string): Promise<void>;
   pinFingerprint(id: string, fingerprint: string): Promise<void>;
-  // No `clearFingerprint`. It existed for the editor's Forget button, which now
-  // records the intent in the DRAFT and lets Save apply it - because a Forget that
-  // wrote straight through left a cancelled dialog having silently put the host
-  // back on TOFU, with the pin unrecoverable since only that machine can present
-  // it. Nothing else ever cleared a pin, so keeping the method would have left a
-  // store write reachable that no UI path is allowed to make.
+  /**
+   * Remove the pin recorded for one address, straight through - unlike the
+   * editor's Forget button, which records the intent in the DRAFT and lets
+   * Save apply it (`HostEditorDialog.tsx`'s own `forgetPin`, which edits
+   * `setPins` and commits nothing on its own). The Known Hosts page has no
+   * draft to hold the intent in: its Forget button IS the commit, on the same
+   * terms {@link HostsStore.pinFingerprint} accepts one. A no-op - no write,
+   * no file rewrite - when the address carries no pin already.
+   */
+  forgetPin(id: string, address: string): Promise<void>;
   /**
    * The hosts bound to one vault identity, in the shape `deleteIdentity` refuses
    * with. This is the wiring {@link IdentityHostRefs} describes, and it lives
    * here because this is the only module that knows how a host names an identity.
    */
   identityHostRefs: IdentityHostRefs;
+  /**
+   * What this store's deletes have left behind, already pruned to the window.
+   *
+   * Filter-on-read is the whole pruning mechanism on this side, so an expired
+   * row still sitting in the file is never observable here - see
+   * `livingTombstones` in `src/lib/tombstones.ts`.
+   */
+  listTombstones(): Promise<Tombstone[]>;
   onHostsChanged(cb: () => void): Promise<() => void>;
   /** Run the crash-recovery pass and first load, then hand back whatever the
    *  user should be told - once. The startup entry point. */
   ensureLoaded(): Promise<StoreRecovery | null>;
+  /**
+   * How this store's file looked on disk, for a caller that must refuse to act
+   * on emptiness it cannot account for.
+   *
+   * Separate from {@link HostsStore.ensureLoaded} and
+   * {@link HostsStore.takeRecoveryNotice} because both of those DRAIN the
+   * notice slot, and a guard must be able to ask the same question without
+   * racing the toast away. `scanOrphanSecrets` in `modules/vault/orphans.ts` is
+   * the caller: an unreadable file means the ids it would subtract are unknown,
+   * and a sweep over an empty known set calls every stored secret an orphan.
+   */
+  fileState(): Promise<{ found: StoreFileState; recovered: boolean }>;
   /**
    * Clear the keychain accounts the two OLD connection stores left behind, once.
    *
@@ -384,7 +479,9 @@ function hostRef(host: Host): VaultRef {
 }
 
 /** Group names are compared the way a person reads them, so `" prod"` and
- *  `"PROD"` are the collision they look like. */
+ *  `"PROD"` are the collision they look like. Global across the whole tree,
+ *  not scoped per-parent - `KNOWN-LIMITS.md` carries the reason and the
+ *  trigger that would change it. */
 function sameName(a: string, b: string): boolean {
   return a.trim().toLowerCase() === b.trim().toLowerCase();
 }
@@ -396,6 +493,20 @@ export function createHostsStore(io: HostsIo): HostsStore {
   // concurrent read-modify-writes are the ordinary case, not the exotic one.
   const enqueueWrite = <T>(op: () => Promise<T>): Promise<T> => io.store.enqueueWrite(op);
 
+  // Read ONCE per mutator and reused, never called twice inside one. `deleteGroup`
+  // has two stamp sites - the group's `deletedAt` and its members' `updatedAt` -
+  // and those stamps describe one operation, so one read is the honest statement.
+  // It is also the only version a check can see: against an injected constant
+  // clock two reads are indistinguishable from one, so a production drift between
+  // stamps meant to be the same instant would be invisible.
+  //
+  // THE STORE'S OWN CLOCK for every mutator, overwriting whatever a caller
+  // supplied. `applyRemote` is the ONE exception, and it is an exception by
+  // construction rather than by discipline: it takes the timestamp beside the
+  // record it lands, because it is the only writer here that does not originate
+  // what it writes.
+  const now = io.now ?? Date.now;
+
   async function listHosts(): Promise<Host[]> {
     const raw = await io.store.get<Host[]>(HOSTS_KEY);
     return Array.isArray(raw) ? raw : [];
@@ -404,6 +515,13 @@ export function createHostsStore(io: HostsIo): HostsStore {
   async function listGroups(): Promise<HostGroup[]> {
     const raw = await io.store.get<HostGroup[]>(HOST_GROUPS_KEY);
     return Array.isArray(raw) ? raw : [];
+  }
+
+  /** Both the public read and every write's baseline, so no caller can reason
+   *  about an expired row: it is filtered out before either sees it. `at` is the
+   *  mutator's own single clock read. */
+  async function readTombstones(at = now()): Promise<Tombstone[]> {
+    return livingTombstones(await io.store.get(TOMBSTONES_KEY), at);
   }
 
   /**
@@ -419,10 +537,26 @@ export function createHostsStore(io: HostsIo): HostsStore {
    * neither does. That is a property of `lib/fileKeyValueStore.ts`, not of this
    * function: `tauri-plugin-store` saves with an in-place truncate and could
    * tear the pair, which is why the store family stopped using it.
+   *
+   * DIRTY IS THE SECOND PARAMETER, and it is REQUIRED. What it names is the
+   * RECORDS a committed write owes a push, never the keys: `entries` carries
+   * whole arrays, so a sync hook reading it could only say "this file changed"
+   * and every single edit would push the entire inventory.
+   *
+   * Required rather than a marking variant beside this one, because the failure
+   * of the optional shape is silent and permanent: a mutator added later that
+   * forgot to call the marking version would simply never sync, on a device that
+   * reports nothing wrong. A signature cannot be forgotten. "This write is not
+   * for sync" then becomes a statement rather than an omission -
+   * `persist(entries, [])` - and `patchHost` is where it is made.
+   *
+   * The sink is told AFTER the commit, so a write that threw owes nothing: there
+   * is no record on disk for a push to carry.
    */
-  async function persist(entries: [string, unknown][]): Promise<void> {
+  async function persist(entries: [string, unknown][], dirty: DirtyId[]): Promise<void> {
     for (const [key, value] of entries) await io.store.set(key, value);
     await io.store.commit();
+    io.markDirty?.(dirty);
   }
 
   function account(hostId: string, field: string): string {
@@ -540,25 +674,36 @@ export function createHostsStore(io: HostsIo): HostsStore {
    * nobody asked for, and because a fan-out that only works thanks to a lock two
    * layers down is a thing the next reader has to go and check.
    *
-   * The one behavioural difference from the `Promise.all` this replaces: a throw
-   * stops the run, so the accounts after it are not attempted. `rollbackNewHost`
-   * does not care - it swallows the error either way. `releaseStaleAccounts` does,
-   * because it names the unreachable accounts in a message, so it calls this one
-   * field at a time and counts.
+   * Every field is attempted even after one throws, and the FIRST error is
+   * rethrown once all have been tried. Stopping at the throw is harmless for
+   * `deleteHost` and the `applyRemote` landing - both keep the record on a
+   * throw, so a skipped account stays named and reachable - but not for
+   * `rollbackNewHost`, whose record never existed, or `releaseStaleAccounts`,
+   * whose new record no longer names these fields: there a skipped field is an
+   * account nothing names, found only by the Vault page's unreferenced-entry
+   * sweep.
    */
   async function deleteAccounts(hostId: string, fields: readonly HostSecretField[]): Promise<void> {
+    let failed = false;
+    let first: unknown;
     for (const field of fields) {
-      await io.secrets.delete(HOST_KEYRING_SERVICE, account(hostId, field));
+      try {
+        await io.secrets.delete(HOST_KEYRING_SERVICE, account(hostId, field));
+      } catch (e) {
+        if (!failed) first = e;
+        failed = true;
+      }
     }
+    if (failed) throw first;
   }
 
   /**
    * Clear the host-owned accounts the new record can no longer NAME.
    *
    * Covers a credential moving inline -> vault, and a row changing protocol.
-   * Without it those accounts are not merely stale: nothing enumerates them
-   * again, and there is no `secrets_list` command, so "unreferenced" means
-   * unreachable.
+   * Without it those accounts are not merely stale: no record names them, so
+   * nothing but the Vault page's unreferenced-entry sweep - which the user has to
+   * go and run - would ever name them again.
    *
    * Only what the STORED record owned is touched, so a convert-to-vault that
    * copies the secrets to the vault FIRST and rewrites the binding second loses
@@ -577,31 +722,31 @@ export function createHostsStore(io: HostsIo): HostsStore {
     const keeps = new Set(secretFieldsFor(host));
     const stale = secretFieldsFor(existing).filter((f) => !keeps.has(f));
     if (stale.length === 0) return;
-    // One field at a time and COUNTED, because the message below names what is
-    // unreachable and has to be true. `deleteAccounts` stops at the first throw,
-    // so the fields after it were never attempted while the ones before it are
-    // already gone - and naming the whole list would send the user looking for
-    // bytes that are not there, in a message whose whole job is saying where they
-    // are. `secrets_delete` reports an absent account as success, so a cleared
-    // field is cleared.
-    let cleared = 0;
-    try {
-      for (const field of stale) {
+    // One field at a time, because the message below names exactly what is left
+    // and has to be true: `deleteAccounts` tries every field it is given before
+    // it throws, so a single-field call is the only way to know WHICH one threw.
+    // `secrets_delete` reports an absent account as success, so a cleared field
+    // is cleared.
+    const left: HostSecretField[] = [];
+    let why = "";
+    for (const field of stale) {
+      try {
         await deleteAccounts(host.id, [field]);
-        cleared++;
+      } catch (e) {
+        if (left.length === 0) why = e instanceof Error ? e.message : String(e);
+        left.push(field);
       }
-    } catch (e) {
-      // Re-worded rather than rethrown, because the record IS saved and is
-      // accurate about what it owns: reporting the keychain's error alone would
-      // read as "your edit was not saved". Not swallowed either - what is left is
-      // bytes at an account nothing names, and no `secrets_list` can find them.
-      const why = e instanceof Error ? e.message : String(e);
-      const left = stale.slice(cleared);
-      throw new Error(
-        `hosts: "${host.name}" was saved, but ${left.join(", ")} could not be cleared ` +
-          `from the keychain and is now unreachable: ${why}`,
-      );
     }
+    if (left.length === 0) return;
+    // Re-worded rather than rethrown, because the record IS saved and is
+    // accurate about what it owns: reporting the keychain's error alone would
+    // read as "your edit was not saved". Not swallowed either - what is left is
+    // bytes at an account no record names, and only a sweep the user goes
+    // looking for would find them.
+    throw new Error(
+      `hosts: "${host.name}" was saved, but ${left.join(", ")} could not be cleared ` +
+        `from the keychain and is now unreachable: ${why}`,
+    );
   }
 
   /**
@@ -791,7 +936,19 @@ export function createHostsStore(io: HostsIo): HostsStore {
     // longer names must not have that pin projected onto the new address, and this
     // is what makes that structural instead of remembered by each writer. Nothing
     // is discarded: the pin stays in the map under the address it belongs to.
-    const record: Host = withPins(credentialed, nextPins(credentialed, existing));
+    // `updatedAt` is resolved HERE for the reason the pins are, and overwrites
+    // whatever the caller supplied: an editor round-trips the record it loaded,
+    // so honouring that value would mean a save never bumps the stamp. This also
+    // covers `duplicateHost`, which routes through this function.
+    const at = now();
+    const record: Host = {
+      ...withPins(credentialed, nextPins(credentialed, existing)),
+      // Normalised HERE too, not only in the editor: `duplicateHost` and a
+      // backup import both route through this function with a record whose
+      // tags may never have passed through `HostEditorDialog.tsx` at all.
+      tags: normalizeHostTags(credentialed.tags),
+      updatedAt: at,
+    };
 
     const next = [...hosts];
     const idx = next.findIndex((h) => h.id === host.id);
@@ -805,7 +962,17 @@ export function createHostsStore(io: HostsIo): HostsStore {
     // reading a list that names these accounts, and the next commit that
     // succeeds puts it on disk. Clearing the secrets here would leave that live
     // record naming material that is gone.
-    await persist([[HOSTS_KEY, next]]);
+    //
+    // A backup import re-creates a record under its ORIGINAL id, so a restore of
+    // something deleted earlier lands on top of a live tombstone and the first
+    // sync pull would delete it again. Clearing the tombstone here rather than on
+    // a special import path is what makes that structural. The key is carried
+    // only when something actually changed - see `withoutTombstone`, and the
+    // clobber surface it exists to keep narrow.
+    const entries: [string, unknown][] = [[HOSTS_KEY, next]];
+    const graves = withoutTombstone(await readTombstones(at), [host.id], at);
+    if (graves) entries.push([TOMBSTONES_KEY, graves]);
+    await persist(entries, [{ kind: HOST_TOMBSTONE_KIND, id: host.id }]);
 
     // AFTER the rewrite, never before: every step up to the rewrite is additive,
     // so a `persist` that throws leaves the old record still naming secrets that
@@ -827,12 +994,65 @@ export function createHostsStore(io: HostsIo): HostsStore {
       if (groups.some((g) => g.id !== group.id && sameName(g.name, group.name))) {
         throw new Error(`hosts: a group is already named "${group.name.trim()}"`);
       }
+      const stored = groups.find((g) => g.id === group.id);
+      // Only an EDGE THAT IS CHANGING is checked. A `parentId` already on the
+      // stored record - however it got there, including a sync landing this
+      // device never validated - is left alone by a write that does not touch
+      // it, so a rename or a sub-group creation elsewhere in the tree is never
+      // refused for a chain it did not create. Clearing `parentId` (moving to
+      // root) can never close a cycle either, so it skips this block too.
+      // `KNOWN-LIMITS.md` carries what a landed bad chain costs until
+      // something tries to move it.
+      if (group.parentId !== undefined && group.parentId !== stored?.parentId) {
+        if (group.parentId === group.id) {
+          throw new Error(`hosts: "${group.name}" cannot be its own parent group`);
+        }
+        if (!groups.some((g) => g.id === group.parentId)) {
+          throw new Error(`hosts: "${group.name}" names a parent group that does not exist`);
+        }
+        // The TRANSITIVE half: resolve the candidate list - this record with
+        // the NEW edge applied - through the SAME walk `groupTree.ts` uses at
+        // read time. It comes back `undefined` for `group.id` only when the
+        // new edge closes a cycle back through this record; every other bad
+        // edge above is already refused by name.
+        const candidate = stored
+          ? groups.map((g) => (g.id === group.id ? { ...g, parentId: group.parentId } : g))
+          : [...groups, group];
+        if (effectiveParents(candidate).get(group.id) !== group.parentId) {
+          throw new Error("hosts: group parent chain has a cycle");
+        }
+      }
+      // The identity-side counterpart, on the SAME "only a changing edge is
+      // checked" rule - clearing it, leaving it alone, or a caller/test that
+      // never wired `io.findIdentity` all skip this block, so a dangling
+      // default that arrived through sync never blocks a rename either.
+      // `defaultIdentityFor` (`groupTree.ts`) is what SKIPS a dangling value
+      // at read time instead, continuing to a live ancestor's default rather
+      // than shadowing it - the same tolerance `effectiveParents` gives a
+      // bad `parentId`.
+      if (
+        group.defaultIdentityId !== undefined &&
+        group.defaultIdentityId !== stored?.defaultIdentityId &&
+        io.findIdentity
+      ) {
+        const identity = await io.findIdentity(group.defaultIdentityId);
+        if (!identity) {
+          throw new Error(`hosts: "${group.name}" names a default identity that does not exist`);
+        }
+      }
+      // Stamped and tombstone-cleared exactly as `writeHost` does, and for the
+      // same two reasons.
+      const at = now();
+      const record: HostGroup = { ...group, updatedAt: at };
       const next = [...groups];
       const idx = next.findIndex((g) => g.id === group.id);
-      if (idx >= 0) next[idx] = group;
-      else next.push(group);
-      await persist([[HOST_GROUPS_KEY, next]]);
-      return group;
+      if (idx >= 0) next[idx] = record;
+      else next.push(record);
+      const entries: [string, unknown][] = [[HOST_GROUPS_KEY, next]];
+      const graves = withoutTombstone(await readTombstones(at), [group.id], at);
+      if (graves) entries.push([TOMBSTONES_KEY, graves]);
+      await persist(entries, [{ kind: GROUP_TOMBSTONE_KIND, id: group.id }]);
+      return record;
     });
   }
 
@@ -971,24 +1191,255 @@ export function createHostsStore(io: HostsIo): HostsStore {
       // on screen after a confirmed delete. See `deleteAccounts`.
       await deleteAccounts(id, secretFieldsFor(host));
 
-      // Drop the row and nothing else. No surviving row can be naming `id`: both
-      // kinds of reference were refused above, so there is nothing left here to
-      // rewrite. Anything that rewrote a neighbour at this point would be
-      // reintroducing the cascade the refusal replaced.
-      await persist([[HOSTS_KEY, hosts.filter((h) => h.id !== id)]]);
+      // Drop the row and leave a tombstone, in ONE commit. No surviving row can
+      // be naming `id`: both kinds of reference were refused above, so there is
+      // nothing left here to rewrite. Anything that rewrote a neighbour at this
+      // point would be reintroducing the cascade the refusal replaced.
+      //
+      // The pair is atomic for the reason `persist` takes entries at all: split
+      // into two commits there is a window where the record is gone and nothing
+      // records that it was deleted, and a device that pulls into that window
+      // pushes the record straight back. The `if (!host) return` above is what
+      // keeps a missing id from minting a tombstone for a record that never was.
+      const at = now();
+      const graves = await readTombstones(at);
+      await persist(
+        [
+          [HOSTS_KEY, hosts.filter((h) => h.id !== id)],
+          [
+            TOMBSTONES_KEY,
+            withTombstone(graves, [{ id, kind: HOST_TOMBSTONE_KIND, deletedAt: at }], at),
+          ],
+        ],
+        // The host alone. The rules this delete dropped are the forwards store's
+        // records, and that store marked them itself when it dropped them.
+        [{ kind: HOST_TOMBSTONE_KIND, id }],
+      );
     });
   }
 
   async function deleteGroup(id: string): Promise<void> {
     return enqueueWrite(async () => {
       const [groups, hosts] = await Promise.all([listGroups(), listHosts()]);
-      if (!groups.some((g) => g.id === id)) return;
+      const target = groups.find((g) => g.id === id);
+      if (!target) return;
+      const at = now();
+      const graves = await readTombstones(at);
       // The one place a cascade is right: a group is a label, not an owner, so its
       // members lose the label and go on existing.
-      await persist([
-        [HOST_GROUPS_KEY, groups.filter((g) => g.id !== id)],
-        [HOSTS_KEY, hosts.map((h) => (h.groupId === id ? { ...h, groupId: undefined } : h))],
-      ]);
+      //
+      // A member's `updatedAt` MOVES with the clear, and only a member's: the map
+      // already hands back the original object for a non-member. Clearing
+      // `groupId` is a real content change, so without a fresh stamp a merge on
+      // another device would restore the old `groupId` while the group delete
+      // itself propagated - half an update, silently.
+      //
+      // The members are collected while they are rewritten, not found with a
+      // second pass: a member's cleared `groupId` is a real content change under
+      // a new stamp, so each one owes a push of its own, and the map already
+      // knows which rows those are.
+      const members: DirtyId[] = [];
+      const nextHosts = hosts.map((h) => {
+        if (h.groupId !== id) return h;
+        members.push({ kind: HOST_TOMBSTONE_KIND, id: h.id });
+        return { ...h, groupId: undefined, updatedAt: at };
+      });
+      // A child group is not deleted with its parent either - re-parented to
+      // WHERE THE DELETED GROUP WAS. `newParent` is `target`'s own RESOLVED
+      // parent, via `effectiveParents`, not the raw `target.parentId`: a
+      // dangling or cyclic `target` (something sync can land, not something
+      // this write can create - see `upsertGroup`) resolves to root the same
+      // way any other reader of this list would, rather than handing a child
+      // a `parentId` that points at nothing, or at `target` (now gone), or
+      // through `target` right back to itself.
+      const newParent = effectiveParents(groups).get(id);
+      const children: DirtyId[] = [];
+      const nextGroups = groups
+        .filter((g) => g.id !== id)
+        .map((g) => {
+          if (g.parentId !== id) return g;
+          children.push({ kind: GROUP_TOMBSTONE_KIND, id: g.id });
+          return { ...g, parentId: newParent, updatedAt: at };
+        });
+      await persist(
+        [
+          [HOST_GROUPS_KEY, nextGroups],
+          [HOSTS_KEY, nextHosts],
+          [
+            TOMBSTONES_KEY,
+            withTombstone(graves, [{ id, kind: GROUP_TOMBSTONE_KIND, deletedAt: at }], at),
+          ],
+        ],
+        [{ kind: GROUP_TOMBSTONE_KIND, id }, ...members, ...children],
+      );
+    });
+  }
+
+  async function applyRemote(
+    hostLandings: RemoteLanding<Host>[],
+    groupLandings: RemoteLanding<HostGroup>[],
+  ): Promise<RemoteLandingRefusal[]> {
+    return enqueueWrite(async () => {
+      // ONE clock read for the whole set, and unlike every other mutator here it
+      // stamps nothing: it is the window boundary the tombstone reads and writes
+      // are filtered against, so one apply judges every landing in it against one
+      // instant.
+      const at = now();
+      const refusals: RemoteLandingRefusal[] = [];
+      const [hosts, groups] = await Promise.all([listHosts(), listGroups()]);
+      const nextHosts = [...hosts];
+      const nextGroups = [...groups];
+      const graves = await readTombstones(at);
+      const buried: Tombstone[] = [];
+      const revived: string[] = [];
+      let hostsTouched = false;
+      let groupsTouched = false;
+
+      for (const landing of hostLandings) {
+        const refusal = landingRefusal(landing, HOST_TOMBSTONE_KIND);
+        if (refusal) {
+          refusals.push(refusal);
+          continue;
+        }
+        if (landing.deleted) {
+          const idx = nextHosts.findIndex((h) => h.id === landing.tombstone.id);
+          if (idx >= 0) {
+            // The keychain half of `deleteHost`, and ONLY that half. No forward
+            // rules are dropped here: the origin device dropped its own and
+            // published a tombstone per rule, so re-running the cleanup would
+            // mint a SECOND set at this device's clock for rules already deleted
+            // - one user delete published twice, at two times, the later of which
+            // restarts the expiry window. The absence is structural rather than
+            // remembered: `deleteHost` takes its cleanup as a parameter and this
+            // function takes none.
+            //
+            // The keychain half is not optional in the same way. A password left
+            // at an account whose host is gone is named by no record, so nothing
+            // on this machine reaches it again except the Vault page's
+            // unreferenced-entry sweep - which is a screen the user has to visit,
+            // not a release.
+            //
+            // A keychain that refuses becomes a REFUSAL, not a throw. This is the
+            // only await in the loop that can reject, and letting it out would
+            // lose every other landing in the set - the failure the returned
+            // refusal exists to prevent, arriving through the one path that had
+            // not been closed. The record is left in place, so what a partial
+            // release leaves behind is an account the record still names and
+            // `deleteHost` can still reach.
+            try {
+              await deleteAccounts(nextHosts[idx].id, secretFieldsFor(nextHosts[idx]));
+            } catch (e) {
+              refusals.push({
+                kind: HOST_TOMBSTONE_KIND,
+                id: landing.tombstone.id,
+                reason: `the keychain refused to release this host's accounts: ${describeError(e)}`,
+              });
+              continue;
+            }
+            nextHosts.splice(idx, 1);
+            hostsTouched = true;
+          }
+          // A record landed for this id EARLIER IN THE SAME SET is undone here, so
+          // the two lists cannot disagree about one id. One id carries one
+          // disposition out of a merge, so this is a malformed set rather than an
+          // ordinary one - but the state it would otherwise leave is a live record
+          // whose accounts are gone with a tombstone naming it.
+          const revivedIdx = revived.indexOf(landing.tombstone.id);
+          if (revivedIdx >= 0) revived.splice(revivedIdx, 1);
+          // Filed even with no local record to drop: another device deleted it,
+          // and a device that has not pulled since would push its own copy back.
+          buried.push(landing.tombstone);
+          continue;
+        }
+        // A LOCAL DELETE MADE AFTER THE MERGE OUTRANKS THIS LANDING. The merge
+        // runs outside the write queue and the apply runs inside it, so a delete
+        // can land between the two - and this is the only place that can see it,
+        // because only this function reads the tombstone list under the same lock
+        // that writes the record. The comparison is the merge's own rule, applied
+        // to what the merge could not have seen; the local delete is already
+        // marked dirty, so the remote learns about it on the next push.
+        const superseding = graves.find(
+          (t) => t.id === landing.id && t.kind === HOST_TOMBSTONE_KIND,
+        );
+        if (superseding && superseding.deletedAt > landing.updatedAt) continue;
+        const idx = nextHosts.findIndex((h) => h.id === landing.id);
+        const existing = idx >= 0 ? nextHosts[idx] : undefined;
+        // The pins come from the STORED record and from nowhere else, and the
+        // flat fingerprint is projected from them by the same function every
+        // other writer here goes through - so a landing that carried a pin
+        // cannot file one, and a landing that carried none cannot erase one.
+        const record = withPins(
+          {
+            ...landing.record,
+            lastConnectedAt: existing?.lastConnectedAt,
+            updatedAt: landing.updatedAt,
+          },
+          existing ? hostPins(existing) : {},
+        );
+        if (idx >= 0) nextHosts[idx] = record;
+        else nextHosts.push(record);
+        // Undoes a tombstone landed for this id earlier in the same set - see the
+        // other half of this pair in the deleted branch above.
+        const buriedIdx = buried.findIndex((t) => t.id === landing.id);
+        if (buriedIdx >= 0) buried.splice(buriedIdx, 1);
+        revived.push(landing.id);
+        hostsTouched = true;
+      }
+
+      for (const landing of groupLandings) {
+        const refusal = landingRefusal(landing, GROUP_TOMBSTONE_KIND);
+        if (refusal) {
+          refusals.push(refusal);
+          continue;
+        }
+        if (landing.deleted) {
+          const idx = nextGroups.findIndex((g) => g.id === landing.tombstone.id);
+          if (idx >= 0) {
+            nextGroups.splice(idx, 1);
+            groupsTouched = true;
+          }
+          const revivedIdx = revived.indexOf(landing.tombstone.id);
+          if (revivedIdx >= 0) revived.splice(revivedIdx, 1);
+          // No cascade onto the members either, for the reason above: the origin
+          // device cleared their `groupId` and stamped them, so those rows arrive
+          // as host landings of their own. A member whose record has not landed
+          // yet names a group that is gone, which renders as ungrouped - the same
+          // visible, recoverable state `assertReferences` already accepts. Child
+          // GROUPS follow the same rule: `deleteGroup`'s own cascade re-parented
+          // and stamped them on the origin device, so they arrive as group
+          // landings of their own, and one that has not landed yet still names
+          // the deleted parent - which `groupTree.ts`'s read-time fallback reads
+          // as root rather than losing the row.
+          buried.push(landing.tombstone);
+          continue;
+        }
+        const supersedingGroup = graves.find(
+          (t) => t.id === landing.id && t.kind === GROUP_TOMBSTONE_KIND,
+        );
+        if (supersedingGroup && supersedingGroup.deletedAt > landing.updatedAt) continue;
+        // No reference check on `parentId` here, on purpose: a per-write
+        // refusal on a landing would drop a record another device already
+        // holds. `KNOWN-LIMITS.md` carries what that costs.
+        const record: HostGroup = { ...landing.record, updatedAt: landing.updatedAt };
+        const idx = nextGroups.findIndex((g) => g.id === landing.id);
+        if (idx >= 0) nextGroups[idx] = record;
+        else nextGroups.push(record);
+        const buriedIdx = buried.findIndex((t) => t.id === landing.id);
+        if (buriedIdx >= 0) buried.splice(buriedIdx, 1);
+        revived.push(landing.id);
+        groupsTouched = true;
+      }
+
+      const entries: [string, unknown][] = [];
+      if (hostsTouched) entries.push([HOSTS_KEY, nextHosts]);
+      if (groupsTouched) entries.push([HOST_GROUPS_KEY, nextGroups]);
+      const next = landedTombstones(graves, revived, buried, at);
+      if (next) entries.push([TOMBSTONES_KEY, next]);
+      // An apply with nothing to write costs no commit at all, which is what
+      // keeps a pull that landed nothing - the ordinary case once two devices
+      // agree - from rewriting the file on every focus.
+      if (entries.length > 0) await persist(entries, []);
+      return refusals;
     });
   }
 
@@ -996,11 +1447,12 @@ export function createHostsStore(io: HostsIo): HostsStore {
    * The three SSH secrets one host owns, in plaintext, for the host editor
    * prefilling a draft.
    *
-   * Reading a secret back into JS is the PRE-EXISTING SSH defect, not one this
-   * store introduces: `resolveSshAuth` does the same on every connect and every
-   * ProxyJump hop. It is SSH-only and there is deliberately no RDP counterpart -
-   * an RDP password reaches the backend as a keychain reference and must never
-   * enter the webview.
+   * Reading a secret back into JS is a real cost, paid here only because the
+   * editor has to prefill a draft with what is stored. Nothing else reads one:
+   * the connect path sends keychain references and the host process
+   * dereferences them. SSH-only, with deliberately no RDP counterpart - an RDP
+   * password reaches the backend as a keychain reference and must never enter
+   * the webview.
    *
    * Empty for a vault-bound host, which owns no accounts to read.
    */
@@ -1027,34 +1479,58 @@ export function createHostsStore(io: HostsIo): HostsStore {
    * `assertBindingOwner` on what `patch` returns makes the credential half of that
    * enforced rather than remembered, and costs nothing: every pin path hands back a
    * byte-identical credential.
+   *
+   * DELIBERATELY DOES NOT STAMP `updatedAt`, and that omission is what this
+   * paragraph protects. The three callbacks move `lastConnectedAt` and the pins,
+   * which are per-machine history and a per-machine trust decision - neither is
+   * record content, and neither syncs. Stamping here would put every connect and
+   * every first-connect prompt onto the push path, so a machine that merely
+   * reconnects would outrank a real edit made elsewhere.
    */
-  async function patchHost(id: string, patch: (current: Host) => Host | null): Promise<void> {
+  async function patchHost(
+    id: string,
+    patch: (current: Host) => Host | null,
+  ): Promise<Host | null> {
     return enqueueWrite(async () => {
       const hosts = await listHosts();
       const idx = hosts.findIndex((h) => h.id === id);
-      if (idx < 0) return;
+      if (idx < 0) return null;
       const next = patch(hosts[idx]);
-      if (!next) return;
+      if (!next) return null;
       // Against `id`, not `next.id`: a patch that rewrote both would otherwise
       // agree with itself while landing at this index.
       assertBindingOwner(next.credential, id);
       const list = [...hosts];
       list[idx] = next;
-      await persist([[HOSTS_KEY, list]]);
+      // NOTHING IS OWED, which is the same statement the missing `updatedAt`
+      // stamp above makes, in the one place a sync hook could see it. The three
+      // callbacks move `lastConnectedAt` and the pins; both are per-machine and
+      // neither is published, so a push scheduled from here would be a push of
+      // unchanged record content on every connect and every first-connect prompt.
+      await persist([[HOSTS_KEY, list]], []);
+      return next;
     });
   }
 
   /** Marks a successful connect: the timestamp, and the key or certificate the
-   *  server actually presented, recorded against the address that record names. */
+   *  server actually presented, recorded against the address that record names.
+   *  For a vault-bound host it then stamps the identity the connect authenticated
+   *  as, through `HostsIo.markIdentityConnected`. */
   async function markConnected(id: string, fingerprint: string): Promise<void> {
     const at = Date.now();
     // An empty fingerprint leaves the pin alone rather than clearing it: a
     // reconnect that could not report one must not discard the key an earlier
     // connect recorded.
-    return patchHost(id, (h) => ({
+    const written = await patchHost(id, (h) => ({
       ...withFingerprint(h, fingerprint || hostPins(h)[h.host]),
       lastConnectedAt: at,
     }));
+    // After the host's own commit, so a vault that refuses the write costs only the
+    // vault stamp. Read off the record just written, so a hop stamps the hop's own
+    // identity.
+    if (written?.credential.kind === "identity") {
+      await io.markIdentityConnected?.(written.credential.identityId, written.protocol);
+    }
   }
 
   /**
@@ -1079,16 +1555,46 @@ export function createHostsStore(io: HostsIo): HostsStore {
     if (!fingerprint) return;
     // Against the pin for THIS record's address, so an unchanged key writes
     // nothing - including the file rewrite a no-op patch would still cost.
-    return patchHost(id, (h) =>
+    await patchHost(id, (h) =>
       hostPins(h)[h.host] === fingerprint ? null : withFingerprint(h, fingerprint),
     );
   }
 
-  // Through the shared lookup, so the hosts this refuses a delete over are exactly
-  // the hosts the Vault page lists as holders. Two implementations of one question
-  // is how a delete refused for reasons a page does not show gets shipped.
-  const identityHostRefs: IdentityHostRefs = async (identityId) =>
-    hostsUsingIdentity(await listHosts(), identityId);
+  /**
+   * The Known Hosts page's revoke: {@link pinFingerprint} in reverse, at an
+   * address the caller names rather than one this record currently points
+   * at - a jump-hop address a chain no longer uses can still carry a pin
+   * nothing else names, so the address cannot be read off the record the
+   * way {@link withFingerprint} reads it. Through {@link patchHost}, so the
+   * write is serialized with every other write and the credential is
+   * re-asserted exactly as {@link pinFingerprint}'s is. Absent from the map
+   * already: a no-op, the same shape {@link pinFingerprint} takes on an
+   * unchanged key - no write, no file rewrite, no `updatedAt` bump.
+   */
+  async function forgetPin(id: string, address: string): Promise<void> {
+    await patchHost(id, (h) => {
+      const pins = hostPins(h);
+      if (!(address in pins)) return null;
+      const next = { ...pins };
+      delete next[address];
+      return withPins(h, next);
+    });
+  }
+
+  // Through the shared lookups, so the holders this refuses a delete over are
+  // exactly the holders the Vault page lists. Two implementations of one
+  // question is how a delete refused for reasons a page does not show gets
+  // shipped. Group holders are suffixed with `GROUP_DEFAULT_SUFFIX` so a mixed
+  // list is unambiguous both in the raw holder-name join `deleteRefusalText`
+  // still uses, and as the signal `deleteRefusalText` reads to swap in
+  // noun-neutral copy when any holder is a group.
+  const identityHostRefs: IdentityHostRefs = async (identityId) => [
+    ...hostsUsingIdentity(await listHosts(), identityId),
+    ...groupsUsingIdentity(await listGroups(), identityId).map((ref) => ({
+      ...ref,
+      name: `${ref.name}${GROUP_DEFAULT_SUFFIX}`,
+    })),
+  ];
 
   return {
     listHosts,
@@ -1102,12 +1608,16 @@ export function createHostsStore(io: HostsIo): HostsStore {
     duplicateHost,
     deleteHost,
     deleteGroup,
+    applyRemote,
     getHostSshSecrets,
     markConnected,
     pinFingerprint,
+    forgetPin,
     identityHostRefs,
+    listTombstones: () => readTombstones(),
     onHostsChanged: (cb) => io.store.onChanged(cb),
     ensureLoaded: () => io.store.ensureLoaded(),
+    fileState: () => io.store.fileState(),
     takeRecoveryNotice: () => io.store.takeRecoveryNotice(),
     purgeLegacySecrets: () =>
       runLegacyPurge({
@@ -1122,6 +1632,12 @@ export function createHostsStore(io: HostsIo): HostsStore {
 export const hostsStore = createHostsStore({
   store: createTauriHostsStoreIo(),
   secrets: tauriSecretsIo,
+  // Through a sink rather than straight to the scheduler, so this file gains no
+  // import edge on a network module - see `src/lib/dirtySink.ts`. Nothing is
+  // registered until `main` starts sync, and `markDirty` is a no-op until then.
+  markDirty,
+  markIdentityConnected: vaultStore.markIdentityConnected,
+  findIdentity: vaultStore.findIdentity,
 });
 
 export const {
@@ -1136,12 +1652,16 @@ export const {
   duplicateHost,
   deleteHost,
   deleteGroup,
+  applyRemote,
   getHostSshSecrets,
   markConnected,
   pinFingerprint,
+  forgetPin,
   identityHostRefs,
+  listTombstones,
   onHostsChanged,
   ensureLoaded,
+  fileState,
   takeRecoveryNotice,
   purgeLegacySecrets,
 } = hostsStore;

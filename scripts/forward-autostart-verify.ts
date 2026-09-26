@@ -1,22 +1,19 @@
 /**
  * Self-check for `startWithHost` - the terminal-owned forwards
  * map (`src/modules/forwards/hostOwned.ts`), the autostart entry point
- * (`src/modules/forwards/autostart.ts`), its call site and its two release
- * sites in `src/modules/terminal/lib/ssh-session.ts`, and the read-only
+ * (`src/modules/forwards/autostart.ts`), and the read-only
  * "Running (with host)" row in `src/modules/forwards/page/RuleCard.tsx`.
  * Run: `pnpm verify forward-autostart` (or `npx tsx
  * scripts/forward-autostart-verify.ts` to iterate).
  *
- * Sections 1-7 and 11-16 are BEHAVIOURAL: they drive the real
- * `startHostForwards` through the `AutostartDeps` seam that module exports for
- * exactly this purpose, so no Tauri IPC and no DOM is needed for the properties
- * that matter. Sections 8-10 are source pins, because a call site inside
- * `ssh-session.ts` cannot be imported at all (that file's own import graph
- * reaches `@xterm/xterm` and `@tauri-apps/plugin-os`, which throw on load
- * outside the app) and a React component's rendered text is not reachable
- * from node either. 11-15 sit AFTER the pins rather than beside 1-7 so the
- * numbering stays in file order; they are the fix round's additions and each
- * one names the blocker it closes.
+ * Sections 1-7, 11-16, 18 and 19 are BEHAVIOURAL: they drive the real
+ * `startHostForwards`/`attachHostForwards` through the `AutostartDeps` seam
+ * those functions take for exactly this purpose, so no Tauri IPC and no DOM
+ * is needed for the properties that matter. Sections 9-10 are source pins,
+ * because a React component's rendered text is not reachable from node
+ * either. 11-15 sit AFTER the pins rather than beside 1-7 so the numbering
+ * stays in file order; they are the fix round's additions and each one names
+ * the blocker it closes.
  *
  * What each section pins, and why it is a bug that has already happened once
  * in this codebase or is one wrong character away:
@@ -49,26 +46,12 @@
  *
  * 6. A TERMINAL OWNS WHAT IT OPENED, AND THE ENDING IS THE SESSION'S.
  *    `releaseSession(a)` drops exactly session a's entries; session b's
- *    forwards belong to a tab that is still open, and a release keyed on
- *    anything coarser closes the wrong tab's rows out of the page.
+ *    forwards belong to a DIFFERENT session that may still have tabs on it,
+ *    and a release keyed on anything coarser closes the wrong session's rows
+ *    out of the page.
  *
  * 7. AN UNREADABLE STORE IS ONE BANNER, NOT A FAILED CONNECT. Same ordering
  *    claim and same deferred-rejection fixture as section 4.
- *
- * 8. THE CALL SITE AND THE TWO RELEASES. The `finishSsh` release sits ABOVE
- *    `if (s.disposed) return;`: a disposed pane's forwards are as dead as a
- *    live one's, so a release under that guard leaks every entry for every tab
- *    the user closed. Two independent `includes` are both satisfied by a
- *    release written BELOW it, so this compares indices. Position is not the
- *    whole claim, though: the call site also has to be UNCONDITIONAL (wrapped
- *    in a runtime-false guard the feature is inert for every rule and every
- *    gate in this repo passes) and the adapter-close release has to be
- *    UNDEFERRED (queued into a microtask it survives the session it is ending).
- *    Two structural assertions each, and the second of each pair covers what
- *    the first was blind to: an EXPRESSION guard
- *    (`sessionEnded && void startHostForwards(...)`) is a direct top-level
- *    statement, and `await` defers without a callback. Every one of them closes
- *    an open set of spellings that no deny-list could.
  *
  * 9. THE ROW THE TERMINAL'S FORWARD GETS. "Running (with host)", the port that
  *    is actually listening, and a disabled Start/Stop whose tooltip says where
@@ -88,24 +71,29 @@
  *    were still behind the deny-list this one replaced (no `scripts/lib`
  *    exists).
  *
- * 11. TWO PANES ON ONE HOST ARE TWO OWNERS, AND THE SECOND IS REFUSED -
- *    SEQUENTIALLY AND CONCURRENTLY. The terminal dials its own session per
- *    pane, so two tabs to one host are two autostart runs; `hostOwned.ts` is
- *    keyed by rule id alone and cannot represent two owners, so `claim` used to
- *    OVERWRITE and the first tab's live listener became untracked. Reachable
- *    with no timing at all through the default rule shape, because a blank
- *    Local port binds a second port successfully. And the two runs are not
- *    serialised by anything, so the ordering that matters is BOTH STARTED
- *    BEFORE EITHER IS AWAITED - the one a pre-bind read cannot separate.
+ * 11. TWO SESSIONS TO ONE HOST ARE TWO OWNERS, AND THE SECOND IS REFUSED -
+ *    SEQUENTIALLY AND CONCURRENTLY. `startHostForwards` itself has no idea a
+ *    session is shared across tabs - that guarantee lives one level up, in
+ *    `attachHostForwards`'s epoch (only the FIRST tab on a session calls this
+ *    function at all) - so two DIFFERENT session ids for one host (a
+ *    reconnect racing the old session's own teardown, say) are still two
+ *    autostart runs here. `hostOwned.ts` is keyed by rule id alone and cannot
+ *    represent two owners, so `claim` used to OVERWRITE and the first
+ *    session's live listener became untracked. Reachable with no timing at
+ *    all through the default rule shape, because a blank Local port binds a
+ *    second port successfully. And the two runs are not serialised by
+ *    anything, so the ordering that matters is BOTH STARTED BEFORE EITHER IS
+ *    AWAITED - the one a pre-bind read cannot separate.
  *
- * 12. A CLAIM MUST NOT LAND AFTER THE SESSION'S RELEASE, AND A DEAD SESSION
- *    MUST NOT BIND AT ALL. Both release sites are one-shot, so an entry written
- *    after either has run is never released: the row reads "Running (with
- *    host)" for the app's whole lifetime with a disabled Stop and a note
- *    pointing at a tab that is already gone. `finishSsh` sets its flag
- *    unconditionally, so a session that ended before this run reached its first
- *    bind is a real state too - and a bind-then-check loop orphaned one
- *    listener on it before breaking.
+ * 12. A CLAIM MUST NOT LAND AFTER stillLive TURNS FALSE, AND A DEAD SESSION
+ *    MUST NOT BIND AT ALL - AND WHAT IT BINDS ANYWAY GETS CLOSED. A session
+ *    shared across tabs has nothing on the backend left to reap an orphaned
+ *    listener, so the post-bind `stillLive` check now closes what it just
+ *    bound rather than trusting the connection's own teardown: the row
+ *    otherwise reads "Running (with host)" for the app's whole lifetime with
+ *    a disabled Stop. `stillLive` going false before this run reached its
+ *    first bind is a real state too - and a bind-then-check loop used to
+ *    orphan one listener on it before breaking.
  *
  * 13. NEVER REJECTS, AND STRUCTURALLY SO. The call site is a `void` and there
  *    is no `unhandledrejection` handler in `src/`. Before the fix the claim
@@ -127,9 +115,18 @@
  *    low stakes - but arms nothing exercises is the shape that has produced
  *    real defects against a green suite twice here.
  *
- * 16. AUTOSTART NEVER WRITES THE PAGE'S STORE. The load-bearing half of mutual
+ * 16. AUTOSTART NEVER WRITES THE PAGE'S STORE DIRECTLY. The load-bearing half of mutual
  *    exclusion, and the one thing the `AutostartDeps` seam cannot see: `claimHostOwned` is
  *    injected, a direct `useForwardRuntime.getState().markRunning(...)` is not.
+ *    Its one write, resetting a `failed` entry on takeover, goes through the
+ *    `markPageStopped` seam.
+ *
+ * 18. A TAKEOVER DISCARDS THE PAGE'S STALE FAILURE. A page Start that failed
+ *    leaves `{ status: "failed", error }`, and a terminal that then claimed the
+ *    rule only hid that error under "Running (with host)" - closing the tab
+ *    brought back a red line naming a port nothing held. The claim now resets
+ *    the entry through `markPageStopped`; driven here on the real stores with
+ *    the real default deps.
  */
 
 import { readFileSync, readdirSync, statSync } from "node:fs";
@@ -143,7 +140,6 @@ import type { HostOwnedEntry } from "../src/modules/forwards/hostOwned";
 import type { ForwardStatus } from "../src/modules/forwards/runtime";
 import type { ForwardRule } from "../src/modules/forwards/types";
 import { stripComments, stripperSelfTest } from "./lib/source";
-import { isDirectlyInFunctionBody } from "./lib/ast";
 import { norm, primitiveSelectorBody, selectorParamName } from "./lib/ast";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -203,7 +199,7 @@ function assert(cond: boolean, msg: string, detail?: unknown): void {
   },
 };
 
-const { defaultAutostartDeps, startHostForwards } =
+const { defaultAutostartDeps, startHostForwards, attachHostForwards } =
   await import("../src/modules/forwards/autostart");
 const { useHostOwnedForwards } = await import("../src/modules/forwards/hostOwned");
 // Imported as a VALUE, not `import type`, and that is the whole of section 15:
@@ -286,6 +282,7 @@ function world(over: {
   const closeCalls: CloseCall[] = [];
   const statusCalls: string[] = [];
   const claims: Array<{ ruleId: string; entry: HostOwnedEntry }> = [];
+  const pageResets: string[] = [];
   /** Generations handed out by this world's binds, per session id. */
   const generations = new Map<number, number>();
   const deps: AutostartDeps = {
@@ -317,6 +314,9 @@ function world(over: {
       claims.push({ ruleId, entry });
       useHostOwnedForwards.getState().claim(ruleId, entry);
     },
+    markPageStopped: (ruleId) => {
+      pageResets.push(ruleId);
+    },
     ...(over.stillLive ? { stillLive: over.stillLive } : {}),
   };
   return {
@@ -326,6 +326,7 @@ function world(over: {
     closeCalls,
     statusCalls,
     claims,
+    pageResets,
     writeBanner: (t: string) => banners.push(t),
   };
 }
@@ -392,7 +393,9 @@ console.log("[1. startWithHost] a rule that does not start with its host is neve
   // inside `startHostForwards` would satisfy every dep-injected check in this
   // file. If it ever happened the page would believe it can Stop a
   // terminal-owned rule, and would spend a claim nobody took. Read here rather
-  // than after a reset, because the claim is that autostart NEVER writes it.
+  // than after a reset, because the claim is that autostart NEVER writes it
+  // directly: its one write, resetting a `failed` entry, goes through the
+  // `markPageStopped` seam, which section 18 drives.
   check(
     "autostart left the PAGE's runtime store completely untouched",
     useForwardRuntime.getState().byRule,
@@ -487,6 +490,11 @@ for (const pageStatus of ["running", "starting"] as const) {
     w.openCalls.map((c) => c.localPort),
     [18080, 18081],
   );
+  check(
+    "the failed rule's stale page entry is reset at takeover, the stopped one's is not",
+    w.pageResets,
+    ["f-failed"],
+  );
 }
 {
   // Read off what the MODULE wrote, not off this file's copy of it: a check
@@ -575,7 +583,7 @@ console.log("\n[5. the bound port] the banner names what openForward RESOLVED wi
     w.banners[0],
     forwardingBanner(54321, "10.0.0.9:5432", "auto rule"),
   );
-  check("as does the claim", w.claims[0]?.entry, { sessionId: 7, boundPort: 54321 });
+  check("as does the claim", w.claims[0]?.entry, { sessionId: 7, boundPort: 54321, generation: 1 });
 }
 {
   resetHostOwned();
@@ -590,7 +598,7 @@ console.log("\n[5. the bound port] the banner names what openForward RESOLVED wi
     w.banners[0],
     forwardingBanner(18099, "10.0.0.9:5432", "pinned rule"),
   );
-  check("as does the claim", w.claims[0]?.entry, { sessionId: 7, boundPort: 18099 });
+  check("as does the claim", w.claims[0]?.entry, { sessionId: 7, boundPort: 18099, generation: 1 });
 }
 
 // ===========================================================================
@@ -613,9 +621,9 @@ console.log(
     "every opened rule is in the map, with its session and its BOUND port",
     useHostOwnedForwards.getState().byRule,
     {
-      "f-a1": { sessionId: 11, boundPort: 18080 },
-      "f-a2": { sessionId: 11, boundPort: 54321 },
-      "f-b1": { sessionId: 22, boundPort: 18443 },
+      "f-a1": { sessionId: 11, boundPort: 18080, generation: 1 },
+      "f-a2": { sessionId: 11, boundPort: 54321, generation: 2 },
+      "f-b1": { sessionId: 22, boundPort: 18443, generation: 1 },
     },
   );
 
@@ -623,14 +631,14 @@ console.log(
   check(
     "releasing session 11 drops exactly its entries and leaves 22's standing",
     useHostOwnedForwards.getState().byRule,
-    { "f-b1": { sessionId: 22, boundPort: 18443 } },
+    { "f-b1": { sessionId: 22, boundPort: 18443, generation: 1 } },
   );
 
   useHostOwnedForwards.getState().releaseSession(11);
   check(
     "and releasing it again is a no-op - both release sites fire without knowing about each other",
     useHostOwnedForwards.getState().byRule,
-    { "f-b1": { sessionId: 22, boundPort: 18443 } },
+    { "f-b1": { sessionId: 22, boundPort: 18443, generation: 1 } },
   );
 
   useHostOwnedForwards.getState().releaseSession(22);
@@ -655,11 +663,11 @@ console.log(
   const second = world({ rules: [r] });
   await startHostForwards("h-1", 32, second.writeBanner, second.deps);
   check("the newer session owns the rule", useHostOwnedForwards.getState().byRule, {
-    "f-re": { sessionId: 32, boundPort: 18080 },
+    "f-re": { sessionId: 32, boundPort: 18080, generation: 1 },
   });
   useHostOwnedForwards.getState().releaseSession(31);
   check("and the dead session's release leaves it alone", useHostOwnedForwards.getState().byRule, {
-    "f-re": { sessionId: 32, boundPort: 18080 },
+    "f-re": { sessionId: 32, boundPort: 18080, generation: 1 },
   });
 }
 
@@ -708,10 +716,20 @@ console.log("\n[wiring] defaultAutostartDeps is complete");
         "runtimeStatus",
         "hostOwnedBy",
         "claimHostOwned",
+        "markPageStopped",
         "stillLive",
       ] as const
     ).map((k) => typeof defaultAutostartDeps[k]),
-    ["function", "function", "function", "function", "function", "function", "function"],
+    [
+      "function",
+      "function",
+      "function",
+      "function",
+      "function",
+      "function",
+      "function",
+      "function",
+    ],
   );
   check(
     'runtimeStatus answers "stopped" for a rule the page has never heard of',
@@ -780,7 +798,7 @@ console.log("\n[wiring] defaultAutostartDeps is complete");
 }
 
 // ===========================================================================
-// Source-pin helpers for sections 8-10.
+// Source-pin helpers for sections 9-10.
 // ===========================================================================
 
 // The mandatory two-assertion self-test for a script that strips a `.tsx`. The
@@ -850,42 +868,6 @@ function findFunctionBody(sf: ts.SourceFile, name: string): ts.Node | null {
 }
 
 /**
- * The `ExpressionStatement` this expression is the whole of, or null - walking
- * up, so it works for a call buried under `void <call>.catch(...)`.
- *
- * WHAT THIS ANSWERS THAT {@link isDirectlyInFunctionBody} CANNOT, and it is a
- * total-feature-loss hole this suite had twice: nesting and CONDITIONALITY are
- * different questions. `if (sessionEnded) { void startHostForwards(...) }` where
- * `sessionEnded` is `false` at that point is neither below an exit nor inside a
- * nested FUNCTION, so the positional and nesting checks both pass while the
- * statement never runs and the whole feature is inert for every rule -
- * measured, with 195/195 ok, `forwards-shell` green and `tsc --noEmit` green.
- * `allowUnreachableCode: false` does not fire either: a runtime-false guard is
- * REACHABLE code. (Measured which shapes TS7027 actually flags: `if (false)`
- * yes, `while (false)` yes, `if (0)` no, `if (someBoolean)` no.)
- *
- * Comparing this statement's own `parent` against the function BODY closes the
- * STATEMENT wrapper family at once - `if`, `try`, `for`, `switch`, a block
- * written next year - which is what a positional or nesting check never could,
- * because each of those is one more member of an open set.
- *
- * WHAT IT DOES NOT CLOSE, and the previous version of this sentence claimed
- * otherwise: the EXPRESSION family. `sessionEnded && void startHostForwards(...)`
- * is an expression statement whose parent IS the body, so this walk returns it
- * and the parent comparison passes - and with `sessionEnded` false at that point
- * the whole feature is inert for every rule again (measured: 57/57 scripts, this
- * file 219/219 ok, `tsc` and `prettier` clean). `&&`, `||`, `?:` and `??` are all
- * that shape. Section 8 closes them with a SECOND assertion, that the
- * statement's own `expression` IS the `void <call>.catch(...)` the shape checks
- * already located - not merely something inside it.
- */
-function enclosingStatement(node: ts.Node): ts.ExpressionStatement | null {
-  let cur: ts.Node | undefined = node;
-  while (cur && !ts.isExpressionStatement(cur)) cur = cur.parent;
-  return cur ? (cur as ts.ExpressionStatement) : null;
-}
-
-/**
  * The leftmost operand of a `&&`/`||` chain, parentheses unwrapped - or the
  * expression itself when it is not one.
  *
@@ -923,17 +905,6 @@ function findConditionals(root: ts.Node): ts.ConditionalExpression[] {
   };
   visit(root);
   return out;
-}
-
-function findPropertyValue(
-  obj: ts.ObjectLiteralExpression,
-  name: string,
-  sf: ts.SourceFile,
-): ts.Expression | null {
-  for (const prop of obj.properties) {
-    if (ts.isPropertyAssignment(prop) && prop.name.getText(sf) === name) return prop.initializer;
-  }
-  return null;
 }
 
 /** Every `.ts`/`.tsx` file under `dir`, recursively. Copied from
@@ -1025,409 +996,6 @@ function walkSrcFiles(dir: string): string[] {
 }
 
 // ===========================================================================
-console.log("\n[8. ssh-session.ts] the call site, and the two releases");
-// ===========================================================================
-// A source pin, because this file cannot be imported: its own graph reaches
-// `@xterm/xterm` and `@tauri-apps/plugin-os`, which throw on load outside the
-// app. Parsed from COMMENT-STRIPPED text - every claim below is a positive,
-// and a positive over raw source is satisfied by a comment describing the code
-// it wants. Each claim reads one AST NODE's own text, whitespace- and
-// trailing-comma-normalised, so a legal Prettier reformat of the call site is
-// invisible to it (mutation M9).
-{
-  const sshSessionSrc = stripComments(read("src/modules/terminal/lib/ssh-session.ts"));
-  const sf = parse("ssh-session.ts", sshSessionSrc);
-
-  const calls = findCallsTo(sf, sf, "startHostForwards");
-  check("exactly one startHostForwards(...) call site", calls.length, 1);
-  const call = calls[0];
-  if (call) {
-    // THE FOURTH ARGUMENT IS THE WIRING, and it is the only thing that catches
-    // `stillLive: () => true` written here while the loop's own check stays
-    // exactly as it is: every behavioural section drives its own deps, so a
-    // dead flag at the production call site is invisible to all of them. Pinned
-    // as the ARGUMENT NODE's whole text, not by `includes("sessionEnded")` -
-    // `stillLive: () => !sessionEnded && false` would satisfy a substring.
-    check(
-      "it is handed the host id, the LIVE session id, a banner writer bound to this pane, and a session-scoped stillLive",
-      call.arguments.map((a) => norm(a.getText(sf))),
-      [
-        "sshConnectionId",
-        "sshSession.id",
-        "(text)=>writeSshBanner(s,text)",
-        "{...defaultAutostartDeps,stillLive:()=>!sessionEnded}",
-      ],
-    );
-    // R1's second half: `ssh-session.ts`'s own idiom - the fire-and-forget
-    // `void <call>.catch(() => {})` around `markConnected` in
-    // `onJumpConnected`, `markConnected` in `onConnected`, and `pinFingerprint`
-    // in the host-key-trust callback. There is no `unhandledrejection` handler
-    // anywhere in `src/`, so a bare
-    // `void` here rests entirely on reading another function's body.
-    assert(
-      call.parent !== undefined &&
-        ts.isPropertyAccessExpression(call.parent) &&
-        call.parent.name.text === "catch",
-      "and the fire-and-forget call carries its own .catch, like every other void-ed promise in this file",
-      call.parent?.getText(sf).slice(0, 120),
-    );
-    // THE `void` ITSELF, which nothing pinned. `openSshForSession` is `async`,
-    // so `await` in place of `void` compiles, and there is NO ESLINT IN THIS
-    // PROJECT AT ALL - no `eslint.config.*`, and `package.json` has only
-    // `lint:imports` and `lint:rust` - so `no-floating-promises` does not
-    // exist here to notice either. Measured mutation M-G: the whole suite
-    // stayed green with the pane's first prompt held behind N sequential
-    // binds, which is exactly what the comment above the call site says must
-    // not happen and the reason the call is fire-and-forget at all.
-    //
-    // The shape round 1 landed is `void <call>.catch(() => {})`, so the walk
-    // up from the call is: call -> `.catch` property access -> `.catch(...)`
-    // call -> VoidExpression. `await` at that outermost position is an
-    // AwaitExpression and reddens here.
-    const catchCall = call.parent?.parent;
-    const outer = catchCall?.parent;
-    assert(
-      catchCall !== undefined &&
-        ts.isCallExpression(catchCall) &&
-        outer !== undefined &&
-        ts.isVoidExpression(outer),
-      "and the whole `<call>.catch(...)` is VOID-ed rather than awaited - an await holds the pane's first prompt behind every bind",
-      outer?.getText(sf).slice(0, 140),
-    );
-    // Structural position, not a count: a deletion whose decoy re-adds the
-    // call inside a nested arrow keeps the count at 1 and never runs.
-    const body = findFunctionBody(sf, "openSshForSession");
-    check("found openSshForSession's body", body !== null, true);
-    if (body) {
-      assert(
-        isDirectlyInFunctionBody(call, body),
-        "and the call is a direct statement of openSshForSession's own body, not nested in a decoy",
-      );
-      // UNCONDITIONAL, which is a THIRD question and the one that closes the
-      // family. `isDirectlyInFunctionBody` tests NESTING (its own docstring says
-      // so) and the index comparison below tests POSITION; neither can see a
-      // statement wrapped in a runtime-false guard. See
-      // `enclosingStatement`'s own doc for the measurement: wrapped as
-      // `if (sessionEnded) { void startHostForwards(...) }` the suite stayed at
-      // 195/195 ok with `forwards-shell` and `tsc --noEmit` both green, and
-      // `startWithHost` was inert for every rule. Comparing the enclosing
-      // statement's PARENT against the body is what refuses every wrapper -
-      // `if`, `try`, `for`, `switch` - in one assertion.
-      const stmt = enclosingStatement(call);
-      assert(stmt !== null, "the call sits inside an expression STATEMENT at all");
-      assert(
-        stmt !== null && stmt.parent === body,
-        "and that statement is an UNCONDITIONAL top-level statement of openSshForSession's body - wrapped in any guard, the feature is inert for every rule and every gate in this repo still passes",
-        stmt === null ? undefined : ts.SyntaxKind[stmt.parent.kind],
-      );
-      // AND THE STATEMENT IS NOTHING BUT THAT CALL. The parent comparison
-      // above closes the STATEMENT wrapper family and leaves the EXPRESSION
-      // one wide open - measured, after `prettier --write` so the formatting
-      // is what a developer would actually commit:
-      //
-      //   sessionEnded &&
-      //     void startHostForwards(sshConnectionId, sshSession.id, ..., {
-      //       ...defaultAutostartDeps,
-      //       stillLive: () => !sessionEnded,
-      //     }).catch(() => {});
-      //
-      // `sessionEnded` (`ssh-session.ts`'s `openSshForSession`, initialised
-      // `false`) is still `false` at that point, so terminal autostart was inert
-      // for every rule with 57/57 scripts, this file 219/219 ok, and `tsc` and
-      // `prettier --check` both green. `&&`, `||`, `?:` and `??` are all this
-      // shape, and each is one more member of an open set - so this compares
-      // the statement's own expression against `outer`, the `void <call>.catch(...)`
-      // the two assertions above already located by walking UP from the call.
-      // A guard in front of it, in any spelling, makes them different nodes.
-      assert(
-        stmt !== null && outer !== undefined && stmt.expression === outer,
-        "and the statement IS that `void <call>.catch(...)` and nothing else - `sessionEnded && void startHostForwards(...)` is a direct top-level statement too, and with that flag false the feature is inert for every rule",
-        stmt === null ? undefined : norm(stmt.expression.getText(sf)).slice(0, 90),
-      );
-      // REACHABILITY BY POSITION. Measured mutation M-H: delete this statement
-      // and re-add the identical statement AFTER the `return { ... }` below.
-      // That one is now ALSO caught by `tsconfig.json`'s
-      // `allowUnreachableCode: false` (TS7027), which it was not when this
-      // check was written, so what is left here is the cheap belt: a statement
-      // below the function's final exit.
-      //
-      // AGAINST THE LAST EXIT AND NOT EVERY EXIT, deliberately softened. The
-      // "every exit" form reddened when a CORRECT early return was added above
-      // the call site - measured - and its failure message then told the reader
-      // the feature was silently inert, which was false. With the parent check
-      // above covering the wrapper family and TS7027 covering real
-      // unreachability, "above every exit" bought nothing and cost a
-      // false-positive surface aimed at the next developer. `openSshForSession`
-      // has exactly one direct-body `return` today, so the two forms are
-      // identical on this file and the softening is about the exits somebody
-      // adds later. The seven direct-body `throw`s are deliberately not in the
-      // exit set: they all precede `sshSession`, so the call would not
-      // typecheck below them anyway.
-      const exits: ts.ReturnStatement[] = [];
-      const visitExits = (n: ts.Node): void => {
-        if (ts.isReturnStatement(n) && isDirectlyInFunctionBody(n, body)) exits.push(n);
-        ts.forEachChild(n, visitExits);
-      };
-      visitExits(body);
-      assert(exits.length > 0, "openSshForSession has an exit to sit above at all", exits.length);
-      const lastExit = exits.length > 0 ? Math.max(...exits.map((r) => r.getStart(sf))) : -1;
-      assert(
-        exits.length > 0 && call.getStart(sf) < lastExit,
-        "and it sits ABOVE the LAST exit of that body - below the final return the statement is unreachable",
-        { call: call.getStart(sf), lastExit, exits: exits.length },
-      );
-    }
-  }
-
-  // Release 1: inside `finishSsh`, ABOVE the disposed guard. Compared by
-  // INDEX - two independent `includes` are both satisfied by a release written
-  // below the guard, which is the leak this half exists to catch.
-  //
-  // WHAT THE INDEX COMPARISON DOES NOT ESTABLISH, said here because the
-  // alternative is a reader assuming it does. The claim is TEXTUAL POSITION
-  // RELATIVE TO THE GUARD, and that is the claim it is right for. It cannot see
-  // a DEFERRAL: measured mutation M-I wrapped this release in
-  // `setTimeout(..., 5000)` while leaving it textually above the guard, and the
-  // suite stayed green even though the entry then survives five seconds past
-  // the session.
-  //
-  // THE ALLOW-LIST THAT CLOSES THAT FAMILY WAS ALREADY IN THIS FILE, which the
-  // previous version of this comment missed while correctly arguing that a
-  // deny-list over `setTimeout`/`queueMicrotask`/`.then` is a list over an open
-  // set. Every deferral primitive there can ever be - including a scheduler
-  // written next year - has to put the statement inside a NESTED FUNCTION
-  // EXPRESSION, and `isDirectlyInFunctionBody` above refuses exactly that. It
-  // is applied to the ADAPTER-CLOSE release below, where the deferral is the
-  // live risk (measured: `queueMicrotask(() => { ...releaseSession(...) })`
-  // left textually above the close kept all three gates green).
-  //
-  // NOT applied to this `finishSsh` twin, and the reason is that it is covered
-  // by two ACCIDENTS rather than by design: deferring it while keeping
-  // `resolvedSessionId` as the argument trips TS2345 inside the closure, and
-  // hoisting it to a local breaks the exact-text `indexOf` below. Both hold
-  // today; neither is a claim this section makes. If either stops holding, the
-  // remedy is the same structural check the close half now carries.
-  const finishSsh = findConstInitializer(sf, "finishSsh");
-  check("found finishSsh", finishSsh !== null, true);
-  if (finishSsh) {
-    const body = norm((finishSsh as ts.Expression).getText(sf));
-    const release = body.indexOf(
-      "useHostOwnedForwards.getState().releaseSession(resolvedSessionId)",
-    );
-    const guard = body.indexOf("if(s.disposed)return;");
-    assert(release >= 0, "finishSsh releases this session's forwards", body.slice(0, 200));
-    assert(guard >= 0, "finishSsh still has its disposed guard", body.slice(0, 200));
-    assert(
-      release >= 0 && guard >= 0 && release < guard,
-      "and the release is ABOVE that guard - a disposed pane's forwards are just as dead",
-      { release, guard },
-    );
-    assert(
-      body.includes("if(resolvedSessionId!==null)"),
-      "guarded on a session id having been resolved at all",
-    );
-    // The `stillLive` flag, set here as well as at the adapter's close. Both
-    // release sites are ONE-SHOT, so a claim landing after either has run is
-    // never released - the row then reads "Running (with host)" for the rest of
-    // the app's life with a disabled Stop.
-    const ended = body.indexOf("sessionEnded=true");
-    assert(
-      ended >= 0,
-      "finishSsh marks the session ENDED as well as releasing",
-      body.slice(0, 240),
-    );
-    assert(
-      ended >= 0 && ended < guard,
-      "and it does so above the disposed guard too - a disposed pane's in-flight claim is just as unwanted",
-      { ended, guard },
-    );
-    // UNCONDITIONAL, unlike the release: a session that ended before `openSsh`
-    // ever resolved an id is still one an in-flight autostart must not claim
-    // against.
-    assert(
-      release >= 0 && ended < release,
-      "the flag is set BEFORE (and so outside) the resolved-session-id guard",
-      { ended, release },
-    );
-  }
-
-  // Release 2: the PtySession adapter's own `close`, for the ending that never
-  // reaches `finishSsh` (a user-initiated disconnect, a pane closing).
-  const openBody = findFunctionBody(sf, "openSshForSession");
-  let closeText: string | null = null;
-  let closeValue: ts.Expression | null = null;
-  if (openBody) {
-    const visit = (n: ts.Node): void => {
-      if (
-        ts.isReturnStatement(n) &&
-        n.expression &&
-        ts.isObjectLiteralExpression(n.expression) &&
-        isDirectlyInFunctionBody(n, openBody)
-      ) {
-        const value = findPropertyValue(n.expression, "close", sf);
-        if (value) {
-          closeText = norm(value.getText(sf));
-          closeValue = value;
-        }
-      }
-      ts.forEachChild(n, visit);
-    };
-    visit(openBody);
-  }
-  assert(closeText !== null, "found the PtySession adapter's close member");
-  if (closeText !== null) {
-    // INDEX-COMPARED, like the `finishSsh` twin above and for the same reason.
-    // Two independent `includes` are both satisfied by
-    // `close: () => sshSession.close().finally(() => ...releaseSession(...))`,
-    // which mentions everything this section names while moving the release
-    // AFTER the close IPC resolves - and that widens exactly the window an
-    // in-flight autostart claim slips through.
-    const text = closeText as string;
-    const release = text.indexOf("useHostOwnedForwards.getState().releaseSession(sshSession.id)");
-    const closes = text.indexOf("sshSession.close()");
-    const ended = text.indexOf("sessionEnded=true");
-    assert(release >= 0, "the adapter's close releases this session's forwards too", text);
-    assert(closes >= 0, "and still closes the session itself", text);
-    assert(ended >= 0, "and marks the session ENDED, like finishSsh does", text);
-    assert(
-      release >= 0 && closes >= 0 && release < closes,
-      "the release is ORDERED BEFORE the close IPC, not chained off its resolution",
-      { release, closes },
-    );
-    assert(
-      ended >= 0 && closes >= 0 && ended < closes,
-      "as is the flag - a claim resolving during the close IPC must already see a dead session",
-      { ended, closes },
-    );
-  }
-  // AND THE RELEASE IS NOT DEFERRED, which is the half every index comparison
-  // above is blind to. Measured: `queueMicrotask(() => { ...releaseSession(...)
-  // })` keeps the release textually above `sshSession.close()` and every one of
-  // the three index assertions passes, with `tsc` and `forwards-shell` green
-  // too - and the entry then survives past the session the close is ending.
-  //
-  // ONE POSITIVE OVER MOST OF THE OPEN SET, and the previous version of this
-  // comment claimed the whole of it. `setTimeout`, `queueMicrotask`, `.then`,
-  // `.finally`, `requestIdleCallback` and whatever comes next all have to put
-  // the statement inside a nested function expression, and the nesting check
-  // refuses that whatever its spelling.
-  //
-  // `await` DOES NOT, and it is the most idiomatic deferral of the lot.
-  // Measured: making `close` `async` and inserting `await Promise.resolve()`
-  // above the release keeps the release a DIRECT statement of `close`'s own
-  // body and textually above `sshSession.close()`, so every index comparison
-  // and the nesting check all passed - 57/57 scripts, `tsc` and `prettier`
-  // clean - while the entry survived the session the close was ending. So two
-  // more assertions: `close` is not an async function, and no `await` sits
-  // above the release. Neither is a list over an open set; both are the
-  // absence of a language feature.
-  if (closeValue !== null) {
-    const arrow = closeValue as ts.Expression;
-    const closeBody = ts.isArrowFunction(arrow) && ts.isBlock(arrow.body) ? arrow.body : null;
-    assert(closeBody !== null, "the close member is an arrow with a block body to root this in");
-    assert(
-      ts.isArrowFunction(arrow) &&
-        !(arrow.modifiers ?? []).some((m) => m.kind === ts.SyntaxKind.AsyncKeyword),
-      "and close is NOT an async function - an async close can suspend before the release with the release still a direct statement of its own body",
-      ts.isArrowFunction(arrow) ? norm(arrow.getText(sf)).slice(0, 60) : undefined,
-    );
-    if (closeBody) {
-      const releases = findCallsTo(closeBody, sf, "useHostOwnedForwards.getState().releaseSession");
-      check("exactly one releaseSession(...) call inside close", releases.length, 1);
-      const releaseCall = releases[0];
-      if (releaseCall) {
-        assert(
-          isDirectlyInFunctionBody(releaseCall, closeBody),
-          "and it runs DIRECTLY in close's own body - not deferred into a callback, which would leave the entry alive past the session while every textual-position check above still passed",
-        );
-        // Every `await` anywhere under close's body, positioned against the
-        // release. Not "no await at all": one BELOW the release would be
-        // harmless, and refusing it would redden a correct future edit.
-        const awaits: ts.AwaitExpression[] = [];
-        const visitAwaits = (n: ts.Node): void => {
-          if (ts.isAwaitExpression(n)) awaits.push(n);
-          ts.forEachChild(n, visitAwaits);
-        };
-        visitAwaits(closeBody);
-        const above = awaits.filter((a) => a.getStart(sf) < releaseCall.getStart(sf));
-        check(
-          "and NO await precedes it - a suspension point above the release defers it just as surely as a callback does, and leaves it a direct statement",
-          above.map((a) => norm(a.getText(sf)).slice(0, 40)),
-          [],
-        );
-      }
-    }
-  }
-
-  // THE FLAG'S WHOLE ASSIGNMENT SET, which is the family every check above is
-  // blind to. The call-site pin closes the GUARD family - a wrapper around the
-  // `void startHostForwards(...)` statement - and this is the FLAG family,
-  // which reaches the same result without touching that statement at all.
-  //
-  // Measured: `sessionEnded = true;` inserted immediately ABOVE the call site
-  // leaves the statement unconditional, a direct top-level statement of
-  // `openSshForSession`'s own body, `stmt.expression === outer`, above the last
-  // exit, with the argument node's text byte-identical - 238/202/79/36 ok,
-  // `tsc --noEmit` and `prettier --check` green - while `stillLive()` answers
-  // `false` for the whole run and terminal autostart is INERT FOR EVERY RULE.
-  // Not closable behaviourally either: this file's import graph reaches
-  // `@xterm/xterm` and `@tauri-apps/plugin-os`, so it cannot be imported here.
-  //
-  // So the honest form is a claim about WHERE THE FLAG MAY BE WRITTEN - the two
-  // release sites and nowhere else - plus what it starts out as. A third
-  // assignment is what the mutation needs, and it is also exactly the kind of
-  // edit that deserves an argument rather than a green suite.
-  //
-  // ASSIGNMENT TARGETS OFF THE AST, never a substring: `stillLive: () =>
-  // !sessionEnded` is a READ of the same name and must not count, and the
-  // `let` DECLARATION is deliberately not in the set either - it is pinned
-  // separately below, because `let sessionEnded = true;` is the same defect in
-  // a different spelling.
-  const sessionEndedWrites: ts.BinaryExpression[] = [];
-  const visitWrites = (n: ts.Node): void => {
-    if (
-      ts.isBinaryExpression(n) &&
-      ts.isIdentifier(n.left) &&
-      n.left.text === "sessionEnded" &&
-      n.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
-      n.operatorToken.kind <= ts.SyntaxKind.LastAssignment
-    ) {
-      sessionEndedWrites.push(n);
-    }
-    ts.forEachChild(n, visitWrites);
-  };
-  visitWrites(sf);
-  check("sessionEnded is assigned in EXACTLY two places", sessionEndedWrites.length, 2);
-  const declaration = findConstInitializer(sf, "sessionEnded");
-  check(
-    "and it starts out `false` - a declaration initialised true is the same inert feature in one fewer statement",
-    declaration === null ? null : norm((declaration as ts.Expression).getText(sf)),
-    "false",
-  );
-  /** Is `n` inside `container`'s own span? Span containment rather than a
-   *  parent walk, because the two containers here are an arrow's initializer
-   *  and an object member's value, which have no common ancestor kind. */
-  const inside = (n: ts.Node, container: ts.Node | null): boolean =>
-    container !== null &&
-    n.getStart(sf) >= container.getStart(sf) &&
-    n.getEnd() <= container.getEnd();
-  assert(
-    sessionEndedWrites.length > 0 &&
-      sessionEndedWrites.every(
-        (w) => inside(w, finishSsh as ts.Expression | null) || inside(w, closeValue),
-      ),
-    "and every one of them is a RELEASE SITE - finishSsh, or the PtySession adapter's close - so nothing between the declaration and the autostart call site can pre-set the flag and leave the feature inert for every rule",
-    sessionEndedWrites.map((w) => norm(w.getText(sf))),
-  );
-  assert(
-    sessionEndedWrites.some((w) => inside(w, finishSsh as ts.Expression | null)) &&
-      sessionEndedWrites.some((w) => inside(w, closeValue)),
-    "ONE IN EACH, not two in one - a release site that stopped setting it leaves the endings it handles able to claim after the session is gone",
-    sessionEndedWrites.map((w) => norm(w.getText(sf))),
-  );
-}
-
-// ===========================================================================
 console.log("\n[9. RuleCard.tsx] the read-only row a terminal-owned forward gets");
 // ===========================================================================
 {
@@ -1468,16 +1036,6 @@ console.log("\n[9. RuleCard.tsx] the read-only row a terminal-owned forward gets
         want,
       );
     }
-  }
-
-  const note = findConstInitializer(sf, "HOST_OWNED_NOTE");
-  check("found HOST_OWNED_NOTE", note !== null, true);
-  if (note) {
-    check(
-      "the disabled button's tooltip says exactly where to stop it",
-      (note as ts.Expression).getText(sf),
-      '"Started with its terminal. Close that terminal tab to stop it."',
-    );
   }
 
   // The status line. Pinned inside `statusText`'s own body, so a copy of the
@@ -1615,12 +1173,24 @@ console.log("\n[9. RuleCard.tsx] the read-only row a terminal-owned forward gets
   const cases: Array<[string, string]> = [
     ["startDisabled", "hostOwned||row.hostDangling||starting"],
     ["toggleLabel", 'hostOwned?"Stop":starting?"Starting…":running?"Stop":"Start"'],
-    ["localLabel", "localPortLabel(rule,hostOwnedPort??boundPort)"],
   ];
   for (const [name, want] of cases) {
     const init = findConstInitializer(sf, name);
     check(`found ${name}`, init !== null, true);
     if (init) check(`${name} is ${want}`, norm((init as ts.Expression).getText(sf)), want);
+  }
+  // The PRECEDENCE is what this pins (a terminal-owned port wins over the page's
+  // bound port), not the argument list: `-R` rows pass the host name as a third
+  // argument, and that tail is not this check's business.
+  const localLabel = findConstInitializer(sf, "localLabel");
+  check("found localLabel", localLabel !== null, true);
+  if (localLabel) {
+    const text = norm((localLabel as ts.Expression).getText(sf));
+    assert(
+      text.startsWith("localPortLabel(rule,hostOwnedPort??boundPort"),
+      "localLabel prefers the terminal-owned port over the page's bound port",
+      text,
+    );
   }
   const tooltip = findConstInitializer(sf, "toggleTooltip");
   check("found toggleTooltip", tooltip !== null, true);
@@ -1693,7 +1263,7 @@ console.log("\n[10. the second store] every useHostOwnedForwards( selector is pr
   // raw-source regex - the same exception the `useForwardRuntime(` selector
   // rule section of `scripts/forwards-shell-verify.ts` already carves out for
   // its own copy of this claim. Inconsistent with
-  // sections 8 and 9, which strip, until now.
+  // section 9, which strips, until now.
   assert(
     !/from ["']zustand\/react\/shallow["']/.test(stripComments(hostOwnedSrc)),
     "hostOwned.ts imports nothing from zustand/react/shallow (comment-stripped text)",
@@ -1757,7 +1327,7 @@ console.log(
   const a = world({ rules: [shared], open: async () => nextPort++ });
   await startHostForwards("h-1", 41, a.writeBanner, a.deps);
   check("tab A owns the rule", useHostOwnedForwards.getState().byRule, {
-    "f-shared": { sessionId: 41, boundPort: 54321 },
+    "f-shared": { sessionId: 41, boundPort: 54321, generation: 1 },
   });
 
   const b = world({ rules: [shared], open: async () => nextPort++ });
@@ -1770,7 +1340,7 @@ console.log(
   check(
     "the map still names session 41 - the live first owner was not overwritten",
     useHostOwnedForwards.getState().byRule,
-    { "f-shared": { sessionId: 41, boundPort: 54321 } },
+    { "f-shared": { sessionId: 41, boundPort: 54321, generation: 1 } },
   );
 
   // The consequence the overwrite used to have, pinned from the other end:
@@ -1779,7 +1349,7 @@ console.log(
   // overwritten, so its own release was a no-op and the row leaked).
   useHostOwnedForwards.getState().releaseSession(42);
   check("closing tab B leaves tab A's forward standing", useHostOwnedForwards.getState().byRule, {
-    "f-shared": { sessionId: 41, boundPort: 54321 },
+    "f-shared": { sessionId: 41, boundPort: 54321, generation: 1 },
   });
   useHostOwnedForwards.getState().releaseSession(41);
   check("and closing tab A clears it", useHostOwnedForwards.getState().byRule, {});
@@ -1801,7 +1371,7 @@ console.log(
   const first = world({ rules: [same] });
   await startHostForwards("h-1", 41, first.writeBanner, first.deps);
   check("the first run claims it", useHostOwnedForwards.getState().byRule, {
-    "f-same": { sessionId: 41, boundPort: 18080 },
+    "f-same": { sessionId: 41, boundPort: 18080, generation: 1 },
   });
   const again = world({ rules: [same] });
   await startHostForwards("h-1", 41, again.writeBanner, again.deps);
@@ -1821,7 +1391,7 @@ console.log(
     "the entry is byte-identical to the one the first run wrote",
     useHostOwnedForwards.getState().byRule,
     {
-      "f-same": { sessionId: 41, boundPort: 18080 },
+      "f-same": { sessionId: 41, boundPort: 18080, generation: 1 },
     },
   );
 }
@@ -1878,7 +1448,7 @@ console.log(
   releaseA(54321);
   await tick();
   check("A resolves first and claims", useHostOwnedForwards.getState().byRule, {
-    "f-race": { sessionId: 41, boundPort: 54321 },
+    "f-race": { sessionId: 41, boundPort: 54321, generation: 1 },
   });
 
   releaseB(54322);
@@ -1895,7 +1465,7 @@ console.log(
   check(
     "the map still names session 41, with the port A actually bound",
     useHostOwnedForwards.getState().byRule,
-    { "f-race": { sessionId: 41, boundPort: 54321 } },
+    { "f-race": { sessionId: 41, boundPort: 54321, generation: 1 } },
   );
   check("A said it was forwarding", a.banners, [forwardingBanner(54321, "10.0.0.9:5432", "raced")]);
   check("B said why it did not", b.banners, [otherTerminalBanner("raced")]);
@@ -1943,7 +1513,7 @@ console.log(
   await tick();
   check("the first rule is up and the loop is parked on the second's bind", w.openCalls.length, 2);
   check("the first rule's claim is on file", useHostOwnedForwards.getState().byRule, {
-    "f-l1": { sessionId: 41, boundPort: 18080 },
+    "f-l1": { sessionId: 41, boundPort: 18080, generation: 1 },
   });
 
   // The session ends while the bind is in flight. This is the REAL order:
@@ -1960,6 +1530,11 @@ console.log(
     "the late bind claimed NOTHING - both release sites are one-shot, so an entry written now is never released",
     useHostOwnedForwards.getState().byRule,
     {},
+  );
+  check(
+    "and the late bind's own listener was closed - nothing else would reap it on a shared session",
+    w.closeCalls,
+    [{ id: 41, boundPort: 18081, generation: 2 }],
   );
   check("nor was it recorded through the seam", w.claims.length, 1);
   check(
@@ -1992,8 +1567,8 @@ console.log(
   resolveTwo(18081);
   await settled;
   check("a live session claims both rules", useHostOwnedForwards.getState().byRule, {
-    "f-k1": { sessionId: 41, boundPort: 18080 },
-    "f-k2": { sessionId: 41, boundPort: 18081 },
+    "f-k1": { sessionId: 41, boundPort: 18080, generation: 1 },
+    "f-k2": { sessionId: 41, boundPort: 18081, generation: 2 },
   });
 }
 {
@@ -2231,11 +1806,16 @@ console.log(
     [],
   );
   check("the terminal CLAIMS", useHostOwnedForwards.getState().byRule, {
-    "f-starting": { sessionId: 41, boundPort: 54321 },
+    "f-starting": { sessionId: 41, boundPort: 54321, generation: 1 },
   });
   check("with the ordinary forwarding banner, not a yield", w.banners, [
     forwardingBanner(54321, "10.0.0.9:5432", "still dialling"),
   ]);
+  check(
+    "and the page's entry is NOT reset - a rule the page is still dialling resolves or fails on its own side",
+    w.pageResets,
+    [],
+  );
 }
 {
   // The paired control: both reads say "stopped", so nothing is closed and the
@@ -2247,7 +1827,7 @@ console.log(
   await startHostForwards("h-1", 41, w.writeBanner, w.deps);
   check("a rule the page never took is not closed", w.closeCalls, []);
   check("and it is claimed", useHostOwnedForwards.getState().byRule, {
-    "f-keep": { sessionId: 41, boundPort: 54321 },
+    "f-keep": { sessionId: 41, boundPort: 54321, generation: 1 },
   });
   check("with the ordinary forwarding banner", w.banners, [
     forwardingBanner(54321, "10.0.0.9:5432", "kept"),
@@ -2294,17 +1874,21 @@ console.log("\n[15. describeError] the two FALLBACK arms, not only the two alrea
 }
 
 // ===========================================================================
-console.log("\n[16. mutual exclusion's load-bearing half] autostart never writes the PAGE's store");
+console.log(
+  "\n[16. mutual exclusion's load-bearing half] autostart never writes the PAGE's store directly",
+);
 // ===========================================================================
 {
   // Read after every section above has run, with NO reset in between - the
-  // claim is that `startHostForwards` never writes this store at all, on any
+  // claim is that `startHostForwards` never writes this store directly, on any
   // path: not the happy one, not the skip, not the yield, not the failure.
   // `claimHostOwned` is behind the `AutostartDeps` seam and every fixture
   // substitutes it; a direct `useForwardRuntime.getState().markRunning(...)`
   // is not, and `autostart.ts` already holds a live reference to that store.
   // If it ever happened the page would believe it can Stop a terminal-owned
-  // rule, and would spend a claim nobody took.
+  // rule, and would spend a claim nobody took. The one sanctioned write, the
+  // `markPageStopped` reset of a `failed` entry, is behind the seam and is
+  // recorded rather than applied by `world()`; section 18 drives the real one.
   check(
     "after every run in this file, the page's runtime store is still empty",
     useForwardRuntime.getState().byRule,
@@ -2314,68 +1898,144 @@ console.log("\n[16. mutual exclusion's load-bearing half] autostart never writes
 
 // ===========================================================================
 console.log(
-  "\n[17. the two halves of one yield wait the same way] every release in autostart.ts and controller.ts is awaited, and each carries its own .catch",
+  "\n[18. a takeover discards the page's stale failure] the red line does not come back when the terminal tab closes",
 );
 // ===========================================================================
-// A CONSISTENCY CHECK AND NOTHING MORE, said plainly because the finding it
-// came from claimed nothing more either. `startRule` (`controller.ts`), both its
-// pre-dial refusal and its post-dial superseded-attempt release, argues that a
-// release must be awaited - "a close that landed later could land
-// on a listener a subsequent Start has since bound on that port" - while
-// `autostart.ts`'s two yield releases fired UN-awaited on the identical hazard.
-// Nothing here was measured against the Rust side, so the claim is that the two
-// frontend halves of one rule now wait in the same way, not that the race was
-// observed.
-//
-// The `.catch(() => {})` half is what keeps the awaited close out of
-// `autostart.ts`'s per-rule catch: a close that reports a failure must not
-// print `failedBanner`, which would say the forward could not be opened when in
-// fact it opened and was handed over. Awaiting a chain ending in `.catch`
-// cannot throw, so the two properties are not in tension - and pinning both
-// together is what stops the next reader from restoring the bare `void` to get
-// the second one back.
-//
-// Source pins over COMMENT-STRIPPED text: every claim is a positive, and a
-// positive over raw source is satisfied by a comment describing the code it
-// wants.
 {
-  for (const [rel, callee, wantCatch, wantCount] of [
-    // autostart.ts: the pre-claim other-terminal yield and the page-took-it
-    // yield. controller.ts: the superseded-attempt release, the post-dial yield
-    // and `stopRule`'s own close - THREE, and the count is asserted so a
-    // release added or deleted has to be argued for rather than skipped.
-    ["src/modules/forwards/autostart.ts", "deps.closeForward", true, 2],
-    ["src/modules/forwards/controller.ts", "runtime.closeForward", false, 3],
-  ] as const) {
-    const sf = parse(rel, stripComments(read(rel)));
-    const calls = findCallsTo(sf, sf, callee);
-    check(`${rel}: found all ${wantCount} ${callee}(...) releases`, calls.length, wantCount);
-    for (const call of calls) {
-      // The AWAIT, read off the AST and walking up through the `.catch(...)`
-      // wrapper when there is one: `void x.catch(...)` keeps every substring a
-      // text check would look for.
-      const chainTop =
-        call.parent !== undefined &&
-        ts.isPropertyAccessExpression(call.parent) &&
-        call.parent.name.text === "catch" &&
-        call.parent.parent !== undefined &&
-        ts.isCallExpression(call.parent.parent)
-          ? call.parent.parent
-          : call;
-      assert(
-        chainTop.parent !== undefined && ts.isAwaitExpression(chainTop.parent),
-        `${rel}: and the release is AWAITED, not fired off - the same rule ${callee === "deps.closeForward" ? "controller.ts" : "autostart.ts"} follows on the other half of this yield`,
-        chainTop.parent === undefined ? undefined : ts.SyntaxKind[chainTop.parent.kind],
-      );
-      assert(
-        wantCatch ? chainTop !== call : chainTop === call,
-        wantCatch
-          ? `${rel}: and it carries its own .catch(...), so the awaited close cannot reach the per-rule catch and print failedBanner`
-          : `${rel}: and it carries NO .catch - a release that reported here has nowhere else to go, and this file's own stopRule uses a finally instead`,
-        norm(chainTop.getText(sf)).slice(0, 70),
-      );
-    }
-  }
+  resetHostOwned();
+  useForwardRuntime.setState({ byRule: {} });
+  useForwardRuntime
+    .getState()
+    .markFailed("f-takeover", "Port 18088 is already in use on this machine.");
+  const banners: string[] = [];
+  await startHostForwards("h-1", 7, (t: string) => void banners.push(t), {
+    ...defaultAutostartDeps,
+    listRules: async () => [rule({ id: "f-takeover", name: "takeover-1", localPort: 18088 })],
+    openForward: async () => ({ boundPort: 18088, generation: 1 }),
+    closeForward: async () => true,
+  });
+  check(
+    "the terminal claims the rule the page failed to start",
+    useHostOwnedForwards.getState().byRule["f-takeover"],
+    { sessionId: 7, boundPort: 18088, generation: 1 },
+  );
+  check("with the ordinary forwarding banner", banners, [
+    forwardingBanner(18088, "10.0.0.9:5432", "takeover-1"),
+  ]);
+  check(
+    "and the page's stale failure is gone at takeover, so closing the tab shows Stopped",
+    useForwardRuntime.getState().byRule["f-takeover"],
+    { status: "stopped" },
+  );
+}
+
+// ===========================================================================
+console.log(
+  "\n[19. attachHostForwards] one autostart run per shared session; the LAST tab's detach stops it",
+);
+// ===========================================================================
+{
+  resetHostOwned();
+  const r = rule({ id: "f-at", name: "attach test", localPort: 18080 });
+  const w = world({ rules: [r] });
+  const bannersB: string[] = [];
+  const detachA = attachHostForwards("h-1", 51, w.writeBanner, w.deps);
+  const detachB = attachHostForwards("h-1", 51, (t) => bannersB.push(t), w.deps);
+  await tick();
+  check("only the first tab's attach dialled startHostForwards", w.openCalls.length, 1);
+  check(
+    "the rule is claimed once, naming the shared session",
+    useHostOwnedForwards.getState().byRule,
+    { "f-at": { sessionId: 51, boundPort: 18080, generation: 1 } },
+  );
+  check("the second tab's own banner sink got nothing - it rode the first tab's run", bannersB, []);
+
+  detachA();
+  await tick();
+  check("one tab is still attached - nothing closed yet", w.closeCalls, []);
+  check("and the rule is still claimed", useHostOwnedForwards.getState().byRule, {
+    "f-at": { sessionId: 51, boundPort: 18080, generation: 1 },
+  });
+
+  detachA();
+  detachB();
+  await tick();
+  check("the LAST detach closes the listener", w.closeCalls, [
+    { id: 51, boundPort: 18080, generation: 1 },
+  ]);
+  check("and releases the claim", useHostOwnedForwards.getState().byRule, {});
+
+  detachB();
+  await tick();
+  check("a repeated detach is a no-op", w.closeCalls.length, 1);
+
+  const detachC = attachHostForwards("h-1", 51, w.writeBanner, w.deps);
+  await tick();
+  check("a fresh attach on the same session dials again", w.openCalls.length, 2);
+  detachC();
+  await tick();
+}
+{
+  // LAST DETACH WHILE A BIND IS IN FLIGHT. `stillLive` (from the epoch) has
+  // already gone false by the time the parked open resolves, so the post-bind
+  // check in `startHostForwards` closes it - nothing else would.
+  resetHostOwned();
+  const r = rule({ id: "f-inflight", name: "inflight", localPort: 18080 });
+  let resolveOpen: (p: number) => void = () => {};
+  const parked = new Promise<number>((res) => {
+    resolveOpen = res;
+  });
+  const w = world({ rules: [r], open: () => parked });
+  const detach = attachHostForwards("h-1", 52, w.writeBanner, w.deps);
+  await tick();
+  detach();
+  await tick();
+  resolveOpen(18080);
+  await tick();
+  check(
+    "no claim survives a last detach that landed before the bind resolved",
+    useHostOwnedForwards.getState().byRule,
+    {},
+  );
+  check("and the late bind's own listener was closed", w.closeCalls, [
+    { id: 52, boundPort: 18080, generation: 1 },
+  ]);
+}
+{
+  // A SESSION THAT GOES 1->0->1 TABS MID-BIND. The epoch OBJECT is the
+  // liveness token: `stillLive` compares identity, so the FIRST run's late
+  // bind must not land as a claim in the SECOND run's epoch.
+  resetHostOwned();
+  const r = rule({ id: "f-ep", name: "epoch", localPort: 18080 });
+  let resolveParked: (p: number) => void = () => {};
+  const parked = new Promise<number>((res) => {
+    resolveParked = res;
+  });
+  const w1 = world({ rules: [r], open: () => parked });
+  const w2 = world({ rules: [r] });
+  const detachA = attachHostForwards("h-1", 53, w1.writeBanner, w1.deps);
+  await tick();
+  detachA();
+  const detachB = attachHostForwards("h-1", 53, w2.writeBanner, w2.deps);
+  await tick();
+  resolveParked(18080);
+  await tick();
+  check(
+    "the FIRST run's late bind was closed - it never claimed into the second epoch",
+    w1.closeCalls,
+    [{ id: 53, boundPort: 18080, generation: 1 }],
+  );
+  check("and it claimed nothing", w1.claims.length, 0);
+  check("the store names the SECOND run's claim instead", useHostOwnedForwards.getState().byRule, {
+    "f-ep": { sessionId: 53, boundPort: 18080, generation: 1 },
+  });
+
+  detachB();
+  await tick();
+  check("the second run's own detach then closes its listener", w2.closeCalls, [
+    { id: 53, boundPort: 18080, generation: 1 },
+  ]);
+  check("and the store is empty", useHostOwnedForwards.getState().byRule, {});
 }
 
 if (failed > 0) throw new Error(`forward-autostart-verify: ${failed} FAILED`);
@@ -2418,13 +2078,6 @@ console.log("\nforward-autostart-verify: OK\n");
 //                                                          plus its close. The two
 //                                                          checks are layered, not
 //                                                          redundant.
-//   Y9    ssh-session.ts: the call site wrapped as       RED, section 8's
-//           `if (sessionEnded) { void ... }`, textually    UNCONDITIONAL check.
-//           unchanged otherwise                            Measured GREEN across all
-//                                                          three gates before the
-//                                                          parent check existed,
-//                                                          with the feature inert
-//                                                          for every rule.
 //   Y10   hostOwned.ts: a new selector hook returning    RED, section 10's
 //           `(s.byRule[id]?.boundPort ?? 0,                primitive verdict for
 //           Object.keys(s.byRule))`                        that selector. Measured
@@ -2432,33 +2085,6 @@ console.log("\nforward-autostart-verify: OK\n");
 //                                                          arm existed - the section
 //                                                          printed it as "returns a
 //                                                          primitive".
-//   Y11   ssh-session.ts: the adapter-close release      RED, section 8's
-//           wrapped in `queueMicrotask(() => ...)`,        undeferred check.
-//           still textually above `sshSession.close()`     Measured GREEN across all
-//                                                          three gates before it -
-//                                                          every index comparison
-//                                                          passed.
-//   Y8    `prettier --write --print-width 60` over all   GREEN, the paired control
-//           seven src files this file pins (770              - BUT ONLY AFTER
-//           changed lines; at this repo's printWidth of      `findCallsTo` was
-//           100 the reflow would have been a no-op, so       fixed to normalise the
-//           the narrower width is what makes the            CALLEE text. On the
-//           control measure anything)                       first run it reddened
-//                                                          section 8's new
-//                                                          releaseSession lookup,
-//                                                          because Prettier splits
-//                                                          `useHostOwnedForwards
-//                                                          .getState()
-//                                                          .releaseSession(...)`
-//                                                          over three lines and the
-//                                                          raw `===` on the callee
-//                                                          then found zero calls.
-//                                                          An exact-text pin needs
-//                                                          its reformat control, and
-//                                                          this is the second time
-//                                                          in this file that the
-//                                                          control is what found the
-//                                                          defect.
 // ----------------------------------------------------------------------------
 // Mutation table - FIX ROUND 4. Same discipline and the same both-trees reset;
 // baseline fa 238 ok, fs 202 ok, fp 79 ok, both tsc projects and
@@ -2466,41 +2092,6 @@ console.log("\nforward-autostart-verify: OK\n");
 //
 //   Id    Mutation                                       Result
 //   ----  ---------------------------------------------  --------------------------
-//   Z3    ssh-session.ts: the autostart call site        RED, fa 237/238 - the NEW
-//           wrapped in an EXPRESSION guard,                `stmt.expression === outer`
-//           `sessionEnded && void startHostForwards(…)`,   assertion, and nothing
-//           then `prettier --write` so the formatting      else. GREEN across every
-//           is what a developer would actually commit      gate before it: the
-//                                                          statement's parent IS the
-//                                                          body, so enclosingStatement
-//                                                          returned it and the wrapper
-//                                                          check passed while the whole
-//                                                          feature was inert for every
-//                                                          rule (`sessionEnded`
-//                                                          is still false in
-//                                                          `openSshForSession`).
-//   Z7    ssh-session.ts: `close: async () => {` with    RED, fa 236/238 - both new
-//           `await Promise.resolve();` above the           assertions, the not-async
-//           release                                        one and the no-await-above
-//                                                          one. `tsc` and `prettier`
-//                                                          clean, and the release
-//                                                          stays a DIRECT statement of
-//                                                          close's own body, which is
-//                                                          why the nesting check could
-//                                                          not see it.
-//   Z7b   `close: async () => {` with NO await added     RED on the not-async
-//                                                          assertion ALONE - so the two
-//                                                          are independent rather than
-//                                                          one claim written twice.
-//   Z7c   `close: async () => {` with the await placed   RED on the not-async
-//           BELOW the release                              assertion alone; the
-//                                                          position assertion stayed
-//                                                          GREEN, which is the scoping
-//                                                          it was written with - an
-//                                                          await after the release
-//                                                          defers nothing, and
-//                                                          refusing it would redden a
-//                                                          correct future edit.
 //   Z4    the four fresh-reference selectors, Z5 the     see forwards-shell-verify.ts's
 //    Z5     rename control, Z5c the reverted               own round-4 table. Z5c
 //    Z5c    parameterisation, Z8 the reflow control       reddens THIS file too (fa
@@ -2511,25 +2102,6 @@ console.log("\nforward-autostart-verify: OK\n");
 //
 //   Round 5 - the flag family the call-site pin could not see
 //   ----  -------------------------------------------      ----------------------------
-//   W4    ssh-session.ts: `sessionEnded = true;`         RED, fa 240/242 - the new
-//           inserted immediately ABOVE the                 two-assignment count and
-//           `void startHostForwards(...)` statement        the release-site
-//                                                          membership assert. Every
-//                                                          check the call-site pin
-//                                                          makes still passed: the
-//                                                          statement is unconditional,
-//                                                          a direct top-level statement
-//                                                          of the body, `stmt.expression
-//                                                          === outer`, above the last
-//                                                          exit, argument text
-//                                                          byte-identical. tsc green,
-//                                                          and autostart inert for
-//                                                          EVERY rule.
-//   W4b   the same defect in one fewer statement:        RED, fa 241/242 - the
-//           `let sessionEnded = true;` at the              declaration assert alone.
-//           declaration                                    The count stays at 2, so
-//                                                          this is the paired mutation
-//                                                          that arm needs.
 //   W5    this file's own classifier tightened (its      GREEN HERE at 242, RED in
 //           prefix-unary arm deleted)                      forwards-shell at 227/228.
 //                                                          The drift is invisible from

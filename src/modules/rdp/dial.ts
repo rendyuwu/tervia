@@ -127,6 +127,9 @@ export async function openRdpDialTarget(
 export async function rdpOpenInput(
   row: RdpHost,
   target: { host: string; port: number },
+  /** Fit-mode override. Absent for a `"preset"` row and for the editor's Test
+   *  probe, which is a reachability check with no pane to match. */
+  size?: { width: number; height: number; scaleFactor: number },
 ): Promise<RdpOpenInput> {
   // `resolveRdpAuth` hands back a keychain REFERENCE, never the secret: the
   // host process reads it itself and hands the plaintext straight into
@@ -139,8 +142,10 @@ export async function rdpOpenInput(
     username,
     domain,
     credential,
-    width: row.desktopWidth,
-    height: row.desktopHeight,
+    width: size?.width ?? row.desktopWidth,
+    height: size?.height ?? row.desktopHeight,
     expectedCertFingerprint: row.certFingerprint,
+    scaleFactor: size?.scaleFactor,
+    clipboard: row.clipboard,
   };
 }

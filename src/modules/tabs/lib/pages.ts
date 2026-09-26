@@ -30,7 +30,7 @@ export type { TabPageKind };
 export type RailViewKind = Exclude<PageKind, TabPageKind>;
 
 /** Rail order, top to bottom, below the Hosts button. */
-export const RAIL_VIEW_KINDS: readonly RailViewKind[] = ["vault", "forwards"];
+export const RAIL_VIEW_KINDS: readonly RailViewKind[] = ["vault", "forwards", "known-hosts"];
 
 /** The one page that is a tab. Named so the leaf constructors read as the rule
  *  rather than as a hardcoded string that happens to be right. */

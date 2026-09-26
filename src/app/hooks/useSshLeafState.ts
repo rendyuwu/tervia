@@ -82,8 +82,8 @@ export function useSshLeafState({ activePaneTab, tabs }: Params): {
     for (const t of tabs) {
       if (t.kind !== "pane") continue;
       for (const l of leaves(t.paneTree)) {
-        if (l.leafKind !== "terminal" || !l.sshConnectionId) continue;
-        m.set(l.sshConnectionId, foldSshBinding(m.get(l.sshConnectionId), sshStatuses.get(l.id)));
+        if (l.leafKind !== "terminal" || !l.hostId) continue;
+        m.set(l.hostId, foldSshBinding(m.get(l.hostId), sshStatuses.get(l.id)));
       }
     }
     return m;
@@ -150,10 +150,10 @@ export function useSshLeafState({ activePaneTab, tabs }: Params): {
     for (const t of tabs) {
       if (t.kind !== "pane") continue;
       for (const l of leaves(t.paneTree)) {
-        // A saved SSH profile (sshConnectionId) OR a live session keyed in
+        // A saved SSH profile (hostId) OR a live session keyed in
         // sshStatuses both mark an SSH terminal, so an ad-hoc connection (no
         // saved profile) still surfaces the remote file tree section.
-        if (l.leafKind === "terminal" && (l.sshConnectionId || sshStatuses.has(l.id))) {
+        if (l.leafKind === "terminal" && (l.hostId || sshStatuses.has(l.id))) {
           return true;
         }
       }

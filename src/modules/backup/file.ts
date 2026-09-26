@@ -14,7 +14,8 @@
  * no longer NAME: a row that arrives bound to a vault identity names none, and a
  * row that arrives on the other protocol names fewer. Landing either one over a
  * saved host deletes that host's secrets with nothing copied anywhere first, and
- * there is no `secrets_list` to find what is left. See
+ * the only thing that would name what is left afterwards is the Vault page's
+ * unreferenced-entry sweep, which the user has to go and run. See
  * {@link resolveIdentityBindings} and {@link refuseProtocolConflicts}.
  *
  * THREE MORE RECORD KINDS cross the same boundary, and what a bad row costs
@@ -36,11 +37,16 @@
  *   the key material, and it is the only thing a saved record has to say that an
  *   arriving key needs a passphrase nobody here holds. See {@link sanitizeKey}.
  *
- *   A RULE is a saved port-forward riding an SSH host. `upsertRule` refuses a
- *   blank name or remote host, a local port outside `0` or `1-65535`, a remote
- *   port outside `1-65535`, and a `hostId` naming anything but a saved SSH host
- *   - every one of them a throw, so every one of them costs the rows behind it.
- *   See {@link sanitizeRule}.
+ *   A RULE is a saved port-forward riding an SSH host, of one of three TYPES -
+ *   `-L` (`type` absent), `-R` (`"remote"`) or `-D` (`"dynamic"`) - and
+ *   `upsertRule`'s refusals are TYPE-CONDITIONAL to match: see
+ *   `src/modules/forwards/types.ts`'s
+ *   doc on `ForwardRule` for which type uses which field. A `hostId` naming
+ *   anything but a saved SSH host and a blank name are refused for every
+ *   type; every other refusal here mirrors one of `upsertRule`'s own, so
+ *   every one of them costs the rows behind it. A `type` string this build
+ *   does not recognise drops just that row, the same as any other unknown
+ *   field value. See {@link sanitizeRule}.
  *
  * THE PASSES OVER THOSE RECORDS HAVE AN ORDER, and it is stated here because no
  * signature carries it and nothing in the type system enforces it. Each function
@@ -81,15 +87,19 @@
  * Kept free of the Tauri runtime so `scripts/backup-verify.ts` can exercise the
  * parser under plain node. That constraint matters more now: the value imports
  * below (`RDP_DEFAULT_PRESET`, `hostPins`) come from `@/modules/hosts/types`,
- * alongside type-only imports from `@/modules/vault/types` and
- * `@/modules/forwards/types` - all three plain TypeScript with no IPC of their
- * own, which is why those imports are safe; anything reaching a store or an
- * `invoke` belongs in `apply.ts` instead.
+ * `effectiveParents` from `@/modules/hosts/groupTree`, alongside type-only
+ * imports from `@/modules/vault/types` and `@/modules/forwards/types` - all
+ * four plain TypeScript with no IPC of their own, which is why those imports
+ * are safe; anything reaching a store or an `invoke` belongs in `apply.ts`
+ * instead.
  */
-import type { ForwardRule } from "@/modules/forwards/types";
+import type { ForwardRule, ForwardRuleType } from "@/modules/forwards/types";
+import { effectiveParents } from "@/modules/hosts/groupTree";
 import {
+  RDP_CLIPBOARD_MODES,
   RDP_DEFAULT_PRESET,
   hostPins,
+  normalizeHostTags,
   type Host,
   type HostBase,
   type HostGroup,
@@ -104,6 +114,7 @@ import type {
   VaultAuthMode,
   VaultIdentity,
   VaultKey,
+  VaultKeyKind,
   VaultKeyType,
 } from "@/modules/vault/types";
 
@@ -222,8 +233,11 @@ const isRecord = (v: unknown): v is Record<string, unknown> =>
 
 const str = (v: unknown): string => (typeof v === "string" ? v : "");
 
-/** A port is only usable if it is a whole number in range; 0 is not valid to dial. */
-function port(v: unknown): number | null {
+/** A port is only usable if it is a whole number in range; 0 is not valid to
+ *  dial. Exported for `sshConfigImport.ts`/`puttyRegImport.ts`, which validate
+ *  a `Port`/`PortNumber` directive against the same rule a backup row's port
+ *  already goes through. */
+export function port(v: unknown): number | null {
   return typeof v === "number" && Number.isInteger(v) && v >= 1 && v <= 65535 ? v : null;
 }
 
@@ -274,6 +288,9 @@ function baseOf(raw: Record<string, unknown>): HostBase | null {
   const groupId = str(raw.groupId).trim();
   const description = str(raw.description).trim();
   const lastConnectedAt = raw.lastConnectedAt;
+  const tags = normalizeHostTags(raw.tags);
+  const icon = str(raw.icon).trim();
+  const color = str(raw.color).trim();
 
   return {
     id,
@@ -287,6 +304,12 @@ function baseOf(raw: Record<string, unknown>): HostBase | null {
     // group exists here under a different id.
     ...(groupId ? { groupId } : {}),
     ...(description ? { description } : {}),
+    ...(tags ? { tags } : {}),
+    // Trimmed like `description`, not checked against this build's ids: the
+    // card resolves them on read (`hostIconId`/`hostColorId`), so an id a
+    // later build exported survives the trip instead of being dropped.
+    ...(icon ? { icon } : {}),
+    ...(color ? { color } : {}),
     ...(typeof lastConnectedAt === "number" && Number.isFinite(lastConnectedAt)
       ? { lastConnectedAt }
       : {}),
@@ -416,9 +439,12 @@ function rdpArm(base: HostBase, raw: Record<string, unknown>): RdpHost {
   const certFingerprint = str(raw.certFingerprint).trim();
   const pins = pinsOf(raw.pins, base.host, certFingerprint);
   const sshHostId = isRecord(raw.tunnel) ? str(raw.tunnel.sshHostId).trim() : "";
-  // Only one member today, so anything else - including a mode a later build
-  // writes - resolves to the mode this build can actually render.
-  const sizeMode: RdpSizeMode = "preset";
+  // An unrecognised mode from a later build still resolves to the mode this
+  // build can actually render.
+  const sizeMode: RdpSizeMode = raw.sizeMode === "fit" ? "fit" : "preset";
+  // Dropped rather than defaulted, so the record stays "absent means both"
+  // instead of pinning a value a later build might redefine.
+  const clipboard = RDP_CLIPBOARD_MODES.find((mode) => mode === raw.clipboard);
 
   return {
     ...base,
@@ -438,6 +464,7 @@ function rdpArm(base: HostBase, raw: Record<string, unknown>): RdpHost {
     // Keyed the same way on both arms - only the flat field's NAME differs.
     ...(pins ? { pins } : {}),
     ...(sshHostId ? { tunnel: { sshHostId } } : {}),
+    ...(clipboard ? { clipboard } : {}),
   };
 }
 
@@ -461,6 +488,14 @@ export function sanitizeHost(raw: unknown): Host | null {
 /**
  * Validate one group. Null when it could not be a pickable label: `upsertGroup`
  * refuses a blank name, because a group is chosen by name from a dropdown.
+ *
+ * `parentId` travels only as a trimmed, non-empty string, same as every other
+ * id-shaped field this function reads - whether it names a group that will
+ * actually exist after this import is `orderGroupWrites`'s question, not
+ * this one's: a dangling or cyclic reference is read as root there rather
+ * than refused here. `defaultIdentityId` travels the same way; whether it
+ * names an identity that will exist after this import is
+ * `resolveGroupDefaults`'s question, not this one's.
  */
 export function sanitizeGroup(raw: unknown): HostGroup | null {
   if (!isRecord(raw)) return null;
@@ -468,10 +503,14 @@ export function sanitizeGroup(raw: unknown): HostGroup | null {
   const name = str(raw.name).trim();
   if (!id || !name) return null;
   const order = raw.order;
+  const parentId = str(raw.parentId).trim();
+  const defaultIdentityId = str(raw.defaultIdentityId).trim();
   return {
     id,
     name,
+    ...(parentId ? { parentId } : {}),
     ...(typeof order === "number" && Number.isFinite(order) ? { order } : {}),
+    ...(defaultIdentityId ? { defaultIdentityId } : {}),
   };
 }
 
@@ -554,6 +593,12 @@ export function sanitizeIdentity(raw: unknown): VaultIdentity | null {
  * survive an export/import round trip: `buildBackup` seals the records
  * themselves, so the field travels out unaided, and this is the only gate on
  * the way back in.
+ *
+ * `kind` and, for a `"cert"` key, its certificate and parsed facts are
+ * carried the same way `fingerprint`/`publicKey` are - public, unvalidated
+ * strings, display data on this side. An unrecognised `kind` (a future kind
+ * this build does not know) drops the whole row rather than importing it as
+ * a `pem` key with fields missing that kind actually needs.
  */
 export function sanitizeKey(raw: unknown): VaultKey | null {
   if (!isRecord(raw)) return null;
@@ -561,14 +606,36 @@ export function sanitizeKey(raw: unknown): VaultKey | null {
   const name = str(raw.name).trim();
   if (!id || !name) return null;
 
+  // Unlike `keyType` below, an unrecognised `kind` is not merely omitted:
+  // it changes which fields the record even needs to be usable at all (a
+  // certificate, for `"cert"`; nothing secret, for `"hardware"`), so
+  // importing it as though `kind` were absent would silently promise a
+  // plain PEM key the row never was. Drop the whole row instead.
+  if (raw.kind !== undefined && raw.kind !== "cert" && raw.kind !== "hardware") return null;
+  const kind: VaultKeyKind | undefined =
+    raw.kind === "cert" || raw.kind === "hardware" ? raw.kind : undefined;
+
   const type = keyType(raw.keyType);
   const fingerprint = str(raw.fingerprint).trim();
   const publicKey = str(raw.publicKey).trim();
   const description = str(raw.description).trim();
+  // The certificate and its parsed facts: public data, carried like
+  // `fingerprint`/`publicKey` above - trimmed strings, not re-validated
+  // (`ssh_key_classify` already did that on the exporting machine), and
+  // only when `kind === "cert"`, since they name nothing outside it.
+  const certificate = str(raw.certificate).trim();
+  const certCaFingerprint = str(raw.certCaFingerprint).trim();
+  const certKeyId = str(raw.certKeyId).trim();
+  const certPrincipals = Array.isArray(raw.certPrincipals)
+    ? raw.certPrincipals.filter((p): p is string => typeof p === "string")
+    : [];
+  const certValidAfter = typeof raw.certValidAfter === "number" ? raw.certValidAfter : undefined;
+  const certValidBefore = typeof raw.certValidBefore === "number" ? raw.certValidBefore : undefined;
 
   return {
     id,
     name,
+    ...(kind ? { kind } : {}),
     ...(type ? { keyType: type } : {}),
     ...(fingerprint ? { fingerprint } : {}),
     ...(publicKey ? { publicKey } : {}),
@@ -583,50 +650,118 @@ export function sanitizeKey(raw: unknown): VaultKey | null {
     hasPrivateKey: false,
     hasPassphrase: false,
     ...(description ? { description } : {}),
+    ...(kind === "cert" && certificate ? { certificate } : {}),
+    ...(kind === "cert" && certCaFingerprint ? { certCaFingerprint } : {}),
+    ...(kind === "cert" && certKeyId ? { certKeyId } : {}),
+    ...(kind === "cert" && certPrincipals.length > 0 ? { certPrincipals } : {}),
+    ...(kind === "cert" && certValidAfter !== undefined ? { certValidAfter } : {}),
+    ...(kind === "cert" && certValidBefore !== undefined ? { certValidBefore } : {}),
   };
 }
+
+/** The `type` strings this build recognises - absent means `-L`. A literal
+ *  lookup rather than derived from `ForwardRuleType` so an unrecognised
+ *  STRING is a runtime fact this function can act on, not merely a
+ *  compile-time refusal. */
+const KNOWN_RULE_TYPES: Record<string, true> = { remote: true, dynamic: true };
 
 /**
  * Validate one forward rule. Null when the row could not be a working one.
  *
  * Every refusal below mirrors one `upsertRule` already makes, so a row that
- * would throw at the write is skipped and counted here instead. The two that do
- * not mirror anything - a blank `id`, a blank `hostId` - are refused for the
- * same reason every other record's are: a rule with no id has no slot, and a
- * rule naming no host is refused by the host lookup a moment later anyway.
+ * would throw at the write is skipped and counted here instead. `id`, `name`
+ * and `hostId` blank are refused for every type, for the same reason every
+ * other record's are: a rule with no id has no slot, and a rule naming no
+ * host is refused by the host lookup a moment later anyway.
  *
- * THE TWO PORTS ARE DIFFERENT and the store says so: `localPort` may be `0`,
- * which means "let the OS pick", and `remotePort` may not, because it is dialled
- * on the far side. See {@link localPort} for why that is a second predicate
- * rather than a looser {@link port}.
+ * `type` ABSENT MEANS `-L`, matching `ForwardRule`'s own read-time-adoption
+ * shape. A `type` that is a STRING this build does not recognise - a future
+ * build's fourth type - drops just this row, the same "known field, unknown
+ * value" answer every other sanitizer in this file already gives; it is not a
+ * hard failure of the whole import.
+ *
+ * THE REST IS TYPE-CONDITIONAL, mirroring `upsertRule`'s own per-type
+ * refusals (`src/modules/forwards/store.ts`): `-D` needs only a valid
+ * `localPort` (its SOCKS port; `0` legal, "let the OS pick"); `-R` needs a
+ * non-blank `targetHost` (its OWN dial-target field, never `remoteHost` -
+ * see `ForwardRule.remoteHost`'s own doc on why it is forced blank instead)
+ * and a valid `targetPort` (`1-65535`, never `0` - it is dialled), plus -
+ * only when the file names one - a valid `bindPort` (`0` legal, "let the
+ * SERVER pick"); `-L` is unchanged from before this type existed: a
+ * non-blank `remoteHost`, `localPort` `0` or `1-65535`, `remotePort`
+ * `1-65535`.
  *
  * `startWithHost` is `true` only when the file literally says `true`. A missing
  * or non-boolean value falls to `false`, which is the safe direction: a rule
  * that does not start itself is visible and one click from running, where one
  * that starts unasked opens a listening socket the user did not ask for.
+ * `startWithApp` reads the same three-state way and is OMITTED
+ * from the record when `false`, matching `bindAddress`/`bindPort` below - the
+ * read-time-adoption shape `src/modules/forwards/types.ts`'s own doc commits to. A file naming
+ * both `startWithHost` and `startWithApp` `true` drops the row, mirroring
+ * `upsertRule`'s own refusal - this function's own header says every refusal
+ * here mirrors one of that function's.
  */
 export function sanitizeRule(raw: unknown): ForwardRule | null {
   if (!isRecord(raw)) return null;
   const id = str(raw.id).trim();
   const name = str(raw.name).trim();
   const hostId = str(raw.hostId).trim();
-  const remoteHost = str(raw.remoteHost).trim();
-  const local = localPort(raw.localPort);
-  const remote = port(raw.remotePort);
-  if (!id || !name || !hostId || !remoteHost || local === null || remote === null) return null;
+  if (!id || !name || !hostId) return null;
+
+  const rawType = raw.type;
+  if (rawType !== undefined && (typeof rawType !== "string" || !KNOWN_RULE_TYPES[rawType])) {
+    return null;
+  }
+  const type = rawType as ForwardRuleType | undefined;
+
+  const startWithHost = raw.startWithHost === true;
+  const startWithApp = raw.startWithApp === true;
+  if (startWithHost && startWithApp) return null;
 
   const description = str(raw.description).trim();
-
-  return {
+  const base = {
     id,
     name,
     hostId,
-    localPort: local,
-    remoteHost,
-    remotePort: remote,
-    startWithHost: raw.startWithHost === true,
+    startWithHost,
+    ...(startWithApp ? { startWithApp } : {}),
     ...(description ? { description } : {}),
   };
+
+  if (type === "dynamic") {
+    const local = localPort(raw.localPort);
+    if (local === null) return null;
+    return { ...base, type, localPort: local, remoteHost: "", remotePort: 0 };
+  }
+
+  if (type === "remote") {
+    const targetHost = str(raw.targetHost).trim();
+    const target = port(raw.targetPort);
+    if (!targetHost || target === null) return null;
+    const bindAddress = str(raw.bindAddress).trim();
+    const rawBindPort = raw.bindPort;
+    const bindPort = rawBindPort === undefined ? undefined : localPort(rawBindPort);
+    if (rawBindPort !== undefined && bindPort === null) return null;
+    return {
+      ...base,
+      type,
+      localPort: 0,
+      remoteHost: "",
+      remotePort: 0,
+      targetHost,
+      targetPort: target,
+      ...(bindAddress ? { bindAddress } : {}),
+      ...(bindPort !== undefined && bindPort !== null ? { bindPort } : {}),
+    };
+  }
+
+  // `-L`: unchanged from before `type` existed.
+  const remoteHost = str(raw.remoteHost).trim();
+  const local = localPort(raw.localPort);
+  const remote = port(raw.remotePort);
+  if (!remoteHost || local === null || remote === null) return null;
+  return { ...base, localPort: local, remoteHost, remotePort: remote };
 }
 
 function sanitizeSealed(raw: unknown): SealedBlob | null {
@@ -724,8 +859,13 @@ function chainOf(startId: string, byId: Map<string, Host>): string[] {
  * ITSELF, and a cycle. A cycle clears the reference on every member rather than
  * picking a survivor - there is no principled winner, and keeping one would mean
  * this pass decided which of two hosts the user meant.
+ *
+ * GENERIC over `T extends Host` so a caller narrower than `Host` (an
+ * `SshHost[]`, e.g. `foreignImport.ts`'s preview rows) gets its own narrower
+ * type back rather than the `Host` union - the function only maps/filters, so
+ * `T` flows straight through.
  */
-export function clearDanglingJumps(incoming: Host[], existing: Host[]): Host[] {
+export function clearDanglingJumps<T extends Host>(incoming: T[], existing: Host[]): T[] {
   const byId = hostIndex(incoming, existing);
   return incoming.map((h) =>
     h.protocol === "ssh" && h.proxyJumpId && !chainResolves(h.id, h.proxyJumpId, byId)
@@ -765,13 +905,15 @@ export function clearDanglingTunnels(incoming: Host[], existing: Host[]): Host[]
  * Run AFTER both clearing passes: this assumes every remaining reference
  * resolves and no chain loops. The `walking` guard is belt-and-braces, so a
  * cycle that somehow survived yields a bad order rather than a hang.
+ *
+ * GENERIC over `T extends Host`, same reason as {@link clearDanglingJumps}.
  */
-export function orderHostWrites(incoming: Host[], existing: Host[]): Host[] {
+export function orderHostWrites<T extends Host>(incoming: T[], existing: Host[]): T[] {
   const byId = hostIndex(incoming, existing);
   const pending = new Map(incoming.map((h) => [h.id, h]));
   const emitted = new Set<string>();
   const walking = new Set<string>();
-  const out: Host[] = [];
+  const out: T[] = [];
 
   const visit = (id: string): void => {
     const host = pending.get(id);
@@ -791,6 +933,46 @@ export function orderHostWrites(incoming: Host[], existing: Host[]): Host[] {
 }
 
 /**
+ * The order groups have to be WRITTEN in: a group's parent, if it is one of
+ * THESE rows, before the group that names it - `upsertGroup` re-reads the
+ * store on every write and refuses a `parentId` it cannot find there, on
+ * `orderHostWrites`'s exact reasoning for a jump-host chain.
+ *
+ * Every row's `parentId` is first rewritten to what {@link effectiveParents}
+ * resolves it to over the COMBINED `existing ∪ incoming` universe - a
+ * dangling or cyclic reference lands on root here, before any row is
+ * written, rather than reaching `upsertGroup`'s own (stricter, throwing)
+ * check. No `walking` re-entrancy guard here, unlike `orderHostWrites`:
+ * `effectiveParents` has already resolved every row's `parentId` to a value
+ * that cannot cycle back through this walk, so `emitted` alone is enough to
+ * terminate it.
+ */
+export function orderGroupWrites(incoming: HostGroup[], existing: HostGroup[]): HostGroup[] {
+  const byId = new Map(existing.map((g) => [g.id, g]));
+  for (const g of incoming) byId.set(g.id, g);
+  const resolved = effectiveParents([...byId.values()]);
+  const pending = new Map(
+    incoming.map((g) => [g.id, { ...g, parentId: resolved.get(g.id) }] as const),
+  );
+  const emitted = new Set<string>();
+  const out: HostGroup[] = [];
+
+  const visit = (id: string): void => {
+    const group = pending.get(id);
+    if (!group || emitted.has(id)) return;
+    // Only a parent that is ALSO in this batch needs ordering - one already on
+    // disk needs none, and `resolved` has already ruled out this reaching a
+    // cycle or a dangling id.
+    if (group.parentId && pending.has(group.parentId)) visit(group.parentId);
+    emitted.add(id);
+    out.push(group);
+  };
+
+  for (const group of incoming) visit(group.id);
+  return out;
+}
+
+/**
  * Drop every row whose id names a saved host of the OTHER protocol.
  *
  * Both rows are well-formed, so this is not validation: it is the one merge the
@@ -806,11 +988,13 @@ export function orderHostWrites(incoming: Host[], existing: Host[]): Host[] {
  * REFUSED rather than repaired, because there is no version of the row that is
  * both the file's and the saved one's. Deleting the saved host first is a
  * decision only its owner can make.
+ *
+ * GENERIC over `T extends Host`, same reason as {@link clearDanglingJumps}.
  */
-export function refuseProtocolConflicts(
-  incoming: Host[],
+export function refuseProtocolConflicts<T extends Host>(
+  incoming: T[],
   existing: Host[],
-): { hosts: Host[]; conflicts: number } {
+): { hosts: T[]; conflicts: number } {
   const byId = new Map(existing.map((h) => [h.id, h]));
   const hosts = incoming.filter((h) => (byId.get(h.id)?.protocol ?? h.protocol) === h.protocol);
   return { hosts, conflicts: incoming.length - hosts.length };
@@ -933,8 +1117,9 @@ function isSameIdentity(
  * among them. A vault-bound record names none, so landing one over a saved inline
  * host releases everything that host owned - all three accounts for SSH
  * (password, private key, key passphrase), the password for RDP. Nothing copied
- * them anywhere first, and there is no `secrets_list` command, so "released"
- * means unreachable rather than untidy.
+ * them anywhere first, so "released" means gone as far as any record is
+ * concerned: the accounts themselves survive in the keychain, and only the Vault
+ * page's unreferenced-entry sweep would ever name them again.
  *
  * THREE OUTCOMES. `identityIds` is what separates the second from the third.
  *
@@ -1143,6 +1328,34 @@ export function carryPins(incoming: Host[], existing: Host[]): Host[] {
 }
 
 /**
+ * Drop a `defaultIdentityId` that names no identity that actually LANDED in
+ * this import - the identity-side counterpart of {@link resolveIdentityBindings},
+ * much smaller because there is no secret at stake: a group's default owns
+ * no keychain account, so honouring one that travelled costs nothing the
+ * way applying a host's vault binding can.
+ *
+ * Called at `applyV3`'s own WRITE 3, against the union of the identities
+ * already on disk and the ones `WRITE 2` actually saved - NOT the pre-write
+ * `identityIds` set `resolveIdentityBindings` above uses, which counts an
+ * identity whose write FAILED as existing. Filtering with that earlier,
+ * wider set here would leave a group naming an identity that never landed,
+ * which `upsertGroup`'s own existence check then refuses outright - losing
+ * the whole group row, and every new sub-group under it, over one failed
+ * identity write. Filtering against what actually landed instead is what
+ * keeps this drop, never a refusal, true regardless of WRITE 2's outcome.
+ */
+export function resolveGroupDefaults(
+  groups: HostGroup[],
+  identityIds: ReadonlySet<string>,
+): HostGroup[] {
+  return groups.map((g) => {
+    if (!g.defaultIdentityId || identityIds.has(g.defaultIdentityId)) return g;
+    const { defaultIdentityId: _drop, ...rest } = g;
+    return rest;
+  });
+}
+
+/**
  * Merge the file's groups into the saved ones, and repoint the incoming hosts at
  * whatever group they end up in.
  *
@@ -1169,6 +1382,11 @@ export function carryPins(incoming: Host[], existing: Host[]): Host[] {
  *
  * Returned together because applying one half without the other is the bug: a
  * repoint nobody applies leaves the host naming a group that was never written.
+ * A survivor's own `parentId` gets the SAME repoint `hosts[].groupId` does,
+ * for the reason it has to: `parentId` is the other field that can name a
+ * group id, and a child left naming a group this pass just remapped away
+ * would point at nothing `orderGroupWrites` can find on either side of the
+ * merge.
  */
 export function mergeGroups(
   incoming: HostGroup[],
@@ -1180,7 +1398,7 @@ export function mergeGroups(
   const key = (name: string): string => name.trim().toLowerCase();
   const owner = new Map(existing.map((g) => [key(g.name), g.id]));
   const savedName = new Map(existing.map((g) => [g.id, g.name]));
-  const groups: HostGroup[] = [];
+  const survivors: HostGroup[] = [];
   const remap = new Map<string, string>();
   let keptNames = 0;
 
@@ -1198,13 +1416,15 @@ export function mergeGroups(
       continue;
     }
     owner.set(key(group.name), group.id);
-    groups.push(group);
+    survivors.push(group);
   }
 
   const merged = remap.size;
-  if (merged === 0) return { groups, hosts, merged, keptNames };
+  if (merged === 0) return { groups: survivors, hosts, merged, keptNames };
   return {
-    groups,
+    groups: survivors.map((g) =>
+      g.parentId && remap.has(g.parentId) ? { ...g, parentId: remap.get(g.parentId) } : g,
+    ),
     merged,
     keptNames,
     hosts: hosts.map((h) => {

@@ -18,6 +18,7 @@ import { SectionStack, type StackSection } from "./SectionStack";
 type Props = {
   sidebarRef: RefObject<PanelImperativeHandle | null>;
   explorerRoot: string | null;
+  tabAreaCovered: boolean;
   hasAnySshLeaf: boolean;
   onOpenFile: (path: string, pin?: boolean) => void;
   onPathRenamed: (from: string, to: string) => void;
@@ -51,7 +52,7 @@ type Props = {
   onRenameLeaf: (leafId: number, title: string | null) => void;
   /** Close a tab listed in the Workspaces panel (same handler as the tab
    *  strip's X, so both share the busy / unsaved confirms). */
-  onCloseEntry: (tabId: number, leafId: number | null) => void;
+  onCloseEntry: (leafId: number) => void;
   /** Currently focused leaf id, to highlight its row in Workspaces. */
   activeLeafId: number | null;
   /** Live SSH status per leaf, so a connected host is green in Workspaces too. */
@@ -85,6 +86,7 @@ const ORDER_LS_KEY = "tervia:sidebar:sectionOrder";
 export function AppSidebar({
   sidebarRef,
   explorerRoot,
+  tabAreaCovered,
   hasAnySshLeaf,
   onOpenFile,
   onPathRenamed,
@@ -153,6 +155,7 @@ export function AppSidebar({
         return (
           <FileExplorer
             rootPath={explorerRoot}
+            tabAreaCovered={tabAreaCovered}
             onOpenFile={onOpenFile}
             onPathRenamed={onPathRenamed}
             onPathDeleted={onPathDeleted}

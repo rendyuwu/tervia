@@ -30,6 +30,7 @@ import {
   identityPasswordHelp,
   identityRecordFrom,
   identitySecretsForSave,
+  rebaseIdentityDraft,
   type IdentityDraft,
   validateIdentityDraft,
 } from "./draft";
@@ -193,15 +194,34 @@ export function IdentityEditorDialog({
       onClose();
     } catch (e) {
       if (e instanceof VaultRecordChangedError) {
-        // Rendered so the user can act on it, and NO recovery is offered - see
-        // `KeyEditorDialog`'s twin of this arm for why a second press cannot
-        // help and neither message may invite one.
+        // The same three arms as `KeyEditorDialog`'s twin, for the same reasons:
+        // a deleted record cannot be recovered from, a moved one is re-read so
+        // the next stamp is `vaultIdentityStamp(fresh)` and the draft re-based
+        // through `rebaseIdentityDraft`, and a missing or failed re-read leaves
+        // "close and reopen" as the only true instruction. The password help
+        // needs nothing extra: `identityPasswordHelp` reads `existing`, which is
+        // `fresh` from the next render.
+        if (e.actual === VAULT_STAMP_ABSENT) {
+          setError(
+            `${e.message} Close this editor - pressing Save again will not help: this form ` +
+              `still names the deleted record, so the write is refused the same way every time.`,
+          );
+          return;
+        }
+        const loaded = existing;
+        const fresh = loaded ? await findIdentity(e.recordId).catch(() => undefined) : undefined;
+        if (!loaded || !fresh) {
+          setError(
+            `${e.message} Close and reopen this identity to edit it against what is stored ` +
+              `now; anything typed here has to be entered again.`,
+          );
+          return;
+        }
+        setExisting(fresh);
+        setDraft((d) => rebaseIdentityDraft(d, loaded, fresh));
         setError(
-          e.actual === VAULT_STAMP_ABSENT
-            ? `${e.message} Close this editor - pressing Save again will not help: this form ` +
-                `still names the deleted record, so the write is refused the same way every time.`
-            : `${e.message} Close and reopen this identity to edit it against what is stored ` +
-                `now; anything typed here has to be entered again.`,
+          `${e.message} Your edits are still here, and fields you had not changed now show what ` +
+            `is stored. Review them and press Save again.`,
         );
         return;
       }

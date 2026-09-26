@@ -145,8 +145,32 @@ pub(crate) fn classify_bytes(path: &Path, bytes: Vec<u8>) -> ReadResult {
         };
     }
 
-    // Null-byte sniff on the first chunk. Misses UTF-16 BOM cases but
-    // cheaply catches the common "this is a PNG" mistake.
+    // UTF-16 BOM decode, BEFORE the null-byte sniff below: UTF-16LE/BE text
+    // (e.g. a PuTTY `.reg` export from `regedit.exe`, which writes UTF-16LE
+    // with a `FF FE` BOM by default) has a `0x00` byte after every ASCII
+    // character and would otherwise be caught by that sniff and reported as
+    // `Binary`. A decode failure (an unpaired surrogate) falls through to the
+    // null-byte/UTF-8 path unchanged rather than erroring - the BOM alone is
+    // not a strong enough claim to refuse the file outright.
+    if bytes.len() >= 2 {
+        let (pairs, _) = bytes[2..].as_chunks::<2>();
+        let content = if bytes[0] == 0xFF && bytes[1] == 0xFE {
+            let units: Vec<u16> = pairs.iter().map(|c| u16::from_le_bytes(*c)).collect();
+            String::from_utf16(&units).ok()
+        } else if bytes[0] == 0xFE && bytes[1] == 0xFF {
+            let units: Vec<u16> = pairs.iter().map(|c| u16::from_be_bytes(*c)).collect();
+            String::from_utf16(&units).ok()
+        } else {
+            None
+        };
+        if let Some(content) = content {
+            return ReadResult::Text { content, size };
+        }
+    }
+
+    // Null-byte sniff on the first chunk. Misses UTF-16 content with no BOM
+    // (the branch above only catches the BOM-marked case) but cheaply catches
+    // the common "this is a PNG" mistake.
     let sniff_len = bytes.len().min(BINARY_SNIFF_BYTES);
     if bytes[..sniff_len].contains(&0) {
         return ReadResult::Binary { size };
@@ -349,5 +373,40 @@ mod tests {
             err.trim_end().ends_with("(os error 2)") || err.trim_end().ends_with("(os error 3)"),
             "the frontend matches on this suffix; got {err:?}"
         );
+    }
+
+    /// A PuTTY `.reg` export (`regedit.exe`'s default "Export Registry File")
+    /// is UTF-16LE with a `FF FE` BOM. Every ASCII character in that encoding
+    /// carries a trailing `0x00` byte, which the null-byte sniff a few lines
+    /// above this test would otherwise classify as `Binary` - this is the case
+    /// the BOM check exists to catch before that sniff ever runs.
+    #[test]
+    fn utf16le_bom_decodes_as_text() {
+        let mut bytes = vec![0xFF, 0xFE];
+        for unit in "Windows Registry Editor Version 5.00\r\n".encode_utf16() {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        match classify_bytes(Path::new("export.reg"), bytes) {
+            ReadResult::Text { content, .. } => {
+                assert_eq!(content, "Windows Registry Editor Version 5.00\r\n");
+            }
+            ReadResult::Binary { .. } => panic!("UTF-16LE BOM text misread as binary"),
+            _ => panic!("expected Text"),
+        }
+    }
+
+    /// The big-endian counterpart - less common in the wild, but the same BOM
+    /// check handles both marks with the same fallback.
+    #[test]
+    fn utf16be_bom_decodes_as_text() {
+        let mut bytes = vec![0xFE, 0xFF];
+        for unit in "hello".encode_utf16() {
+            bytes.extend_from_slice(&unit.to_be_bytes());
+        }
+        match classify_bytes(Path::new("export.reg"), bytes) {
+            ReadResult::Text { content, .. } => assert_eq!(content, "hello"),
+            ReadResult::Binary { .. } => panic!("UTF-16BE BOM text misread as binary"),
+            _ => panic!("expected Text"),
+        }
     }
 }

@@ -12,6 +12,11 @@ import {
   takeRecoveryNotice as takeHostsRecoveryNotice,
 } from "@/modules/hosts/store";
 import {
+  ensureLoaded as ensureSettingsLoaded,
+  onSettingsStoreChanged,
+  takeRecoveryNotice as takeSettingsRecoveryNotice,
+} from "@/modules/settings/store";
+import {
   ensureLoaded as ensureCliAgentsLoaded,
   onCliAgentsChanged,
   takeRecoveryNotice as takeCliAgentsRecoveryNotice,
@@ -69,6 +74,13 @@ const STORES: RecoverableStore[] = [
     ensureLoaded: ensureWorkspacesLoaded,
     takeRecoveryNotice: takeWorkspacesRecoveryNotice,
     onChanged: onWorkspacesChanged,
+  },
+  {
+    // What the window that edits them is called.
+    label: "Settings",
+    ensureLoaded: ensureSettingsLoaded,
+    takeRecoveryNotice: takeSettingsRecoveryNotice,
+    onChanged: onSettingsStoreChanged,
   },
   {
     // What the settings card that edits them is called.

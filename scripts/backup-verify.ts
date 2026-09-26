@@ -42,7 +42,8 @@
  * again: `upsertHost` releases every account the new record can no longer NAME,
  * so a row that arrives vault-bound (owning none) or on the other protocol
  * (owning fewer) deletes the saved host's secrets, with nothing copied first and
- * no `secrets_list` to find what is left.
+ * nothing but the Vault page's unreferenced-entry sweep - a screen the user has
+ * to go and visit - able to name what is left.
  *
  * `hostRefs` and `storedFields` are reached from `backup/apply.ts` rather than
  * from `backup/file.ts`, and they are the producing half of the
@@ -152,9 +153,11 @@ import {
   clearDanglingTunnels,
   mergeGroups,
   normaliseIdentityKeys,
+  orderGroupWrites,
   orderHostWrites,
   parseBackupFile,
   refuseProtocolConflicts,
+  resolveGroupDefaults,
   resolveIdentityBindings,
   sanitizeGroup,
   sanitizeHost,
@@ -163,7 +166,7 @@ import {
   sanitizePayload,
   sanitizeRule,
 } from "../src/modules/backup/file";
-import { sshCredentialValues } from "../src/modules/vault/resolve";
+import { sshInlineCredentials } from "../src/modules/vault/resolve";
 import {
   IDENTITY_PASSWORD_FIELD,
   KEY_PRIVATE_KEY_FIELD,
@@ -712,6 +715,37 @@ check(
 check("proxyJumpId survives", jumpOf(host(ssh({ proxyJumpId: "h-2" }))), "h-2");
 check("groupId survives", host(ssh({ groupId: "g-1" })).groupId, "g-1");
 check("description survives", host(ssh({ description: "note" })).description, "note");
+check("tags survive", host(ssh({ tags: ["prod", "db"] })).tags, ["prod", "db"]);
+check(
+  "an imported tag array is normalised the same way a live write is",
+  host(ssh({ tags: ["  Prod  ", "prod", "", "  "] })).tags,
+  ["Prod"],
+);
+check(
+  "a non-string tag entry is dropped, not imported as-is",
+  host(ssh({ tags: ["ok", 5, null] })).tags,
+  ["ok"],
+);
+check(
+  "a non-array tags value is dropped rather than crashing the import",
+  host(ssh({ tags: "prod" })).tags,
+  undefined,
+);
+check("no tags field at all leaves tags absent", host(ssh({})).tags, undefined);
+{
+  const set = host(ssh({ icon: "rocket", color: " cyan " }));
+  check(
+    "icon and color survive the import whitelist trimmed, even an id this build cannot draw",
+    [set.icon, set.color],
+    ["rocket", "cyan"],
+  );
+  const junk = host(ssh({ icon: 5, color: "  " }));
+  check(
+    "a non-string or blank icon/color is dropped, not imported as-is",
+    [junk.icon, junk.color],
+    [undefined, undefined],
+  );
+}
 check(
   "lastConnectedAt survives, but only as a real number",
   [
@@ -755,12 +789,28 @@ check("so does an absurd one", sizeOf(rdp({ desktopWidth: 99999 })), [1600, 900]
 // with the fallback and with itself. The kept width proves the row was not
 // wholesale defaulted on the way through.
 check("and a non-number", sizeOf(rdp({ desktopWidth: 1280, desktopHeight: "800" })), [1280, 900]);
-// Only one mode exists today. A file written by a later build must resolve to
-// the mode THIS build can render, not to a string the pane cannot switch on.
+// `"fit"` is a mode this build renders, so it must survive an import. A mode it
+// does not recognise - a file written by a later build - must resolve to one the
+// pane can switch on, rather than to a string it cannot.
+check("a known sizeMode survives", rdpOf(sanitizeHost(rdp({ sizeMode: "fit" })))?.sizeMode, "fit");
 check(
   "an unknown sizeMode becomes preset",
-  rdpOf(sanitizeHost(rdp({ sizeMode: "fit" })))?.sizeMode,
+  rdpOf(sanitizeHost(rdp({ sizeMode: "scale" })))?.sizeMode,
   "preset",
+);
+// Every sanitizer here is a whitelist, so an un-whitelisted field is dropped on
+// import with no error at all - which is the one silent failure this field can
+// have. Absent is meaningful (it reads as "both"), so an unknown value must
+// come back absent rather than pinned to a default.
+check(
+  "a known clipboard mode survives",
+  rdpOf(sanitizeHost(rdp({ clipboard: "off" })))?.clipboard,
+  "off",
+);
+check(
+  "an unknown clipboard mode is dropped",
+  rdpOf(sanitizeHost(rdp({ clipboard: "sideways" })))?.clipboard,
+  undefined,
 );
 
 console.log("\n[rdp tunnel] a bastion that did not travel must not break every connect");
@@ -934,6 +984,53 @@ check(
 );
 
 console.log(
+  "\n[foreign import] the merge machinery reads Host[], not provenance - ssh_config/PuTTY import",
+);
+// Every fixture above this line reaches `clearDanglingJumps`/`orderHostWrites`
+// through `host(ssh(...))`, which is `sanitizeHost` under the hood - so none of
+// them proves these functions work on a row that never passed through it.
+// `sshConfigImport.ts`/`foreignImport.ts` build an `SshHost` literal directly
+// (no raw JSON, no sanitizer), and this is the one place that shape is
+// actually constructed and run through the same three passes, so a hidden
+// dependency on something `sanitizeHost` happens to populate (a default, a
+// field order) would redden here and nowhere else.
+const handTyped: SshHost = {
+  id: "h-cfg-1",
+  name: "prod",
+  host: "prod.example.com",
+  port: 22,
+  protocol: "ssh",
+  credential: {
+    kind: "inline",
+    hostId: "h-cfg-1",
+    user: "deploy",
+    authMode: "password",
+    hasPassword: false,
+    hasPrivateKey: false,
+    hasKeyPassphrase: false,
+  },
+  proxyJumpId: "h-cfg-missing",
+};
+check(
+  "a hand-typed SshHost's dangling proxyJumpId is cleared exactly like a sanitizeHost row's",
+  jumpOf(clearDanglingJumps([handTyped], [])[0]),
+  null,
+);
+const handTypedConflict: SshHost = { ...handTyped, id: "h-existing-rdp" };
+check(
+  "a hand-typed SshHost is still refused for an id an existing RDP host owns",
+  refuseProtocolConflicts([handTypedConflict], [host(rdp({ id: "h-existing-rdp" }))]).conflicts,
+  1,
+);
+const bastion: SshHost = { ...handTyped, id: "h-cfg-bastion", proxyJumpId: undefined };
+const target: SshHost = { ...handTyped, id: "h-cfg-target", proxyJumpId: "h-cfg-bastion" };
+check(
+  "orderHostWrites puts a hand-typed bastion ahead of the target that jumps through it",
+  orderHostWrites([target, bastion], []).map((h) => h.id),
+  ["h-cfg-bastion", "h-cfg-target"],
+);
+
+console.log(
   "\n[vault bindings] a v3 payload carries a vault, so this is a DECISION, not a refusal",
 );
 // THREE OUTCOMES, and the third one covers two rows that are conservative for
@@ -954,8 +1051,9 @@ const NO_IDENTITIES: ReadonlySet<string> = new Set();
 // The failure this closes. `h-7` is a saved inline host holding the only copy of a
 // passphrased key. A file says `h-7` is `{kind:"identity"}`; a vault-bound record
 // owns no accounts, so `upsertHost` makes all three of that host's fields stale
-// and deletes them - nothing copied them, and there is no `secrets_list`. The
-// import reported `withoutSecrets: 1`, which reads as "the credential did not
+// and deletes them - nothing copied them, and nothing but the Vault page's
+// unreferenced-entry sweep can name them afterwards. The import reported
+// `withoutSecrets: 1`, which reads as "the credential did not
 // travel" rather than "the credential is gone".
 //
 // THE IDENTITY HAVING TRAVELLED DOES NOT MAKE IT SAFE TO APPLY, which is the step
@@ -1733,7 +1831,64 @@ check("a non-numeric order is ignored", sanitizeGroup({ id: "g-1", name: "prod",
 check("a blank name is dropped", sanitizeGroup({ id: "g-1", name: "   " }), null);
 check("so is a missing id", sanitizeGroup({ name: "prod" }), null);
 check("and a non-object", sanitizeGroup("g-1"), null);
+check(
+  "parentId travels, trimmed",
+  sanitizeGroup({ id: "g-1", name: "prod", parentId: " g-0 " })?.parentId,
+  "g-0",
+);
+check(
+  "a blank parentId is dropped rather than kept as an empty string",
+  sanitizeGroup({ id: "g-1", name: "prod", parentId: "  " }),
+  { id: "g-1", name: "prod" },
+);
+check(
+  "defaultIdentityId travels, trimmed, same as parentId",
+  sanitizeGroup({ id: "g-1", name: "prod", defaultIdentityId: " i-1 " })?.defaultIdentityId,
+  "i-1",
+);
+check(
+  "a blank defaultIdentityId is dropped rather than kept as an empty string",
+  sanitizeGroup({ id: "g-1", name: "prod", defaultIdentityId: "  " }),
+  { id: "g-1", name: "prod" },
+);
 
+console.log(
+  "\n[groups] resolveGroupDefaults: a default identity must be in the FILE OR on the device",
+);
+check(
+  "an identity travelling in the file keeps the group's default",
+  resolveGroupDefaults([{ id: "g-1", name: "prod", defaultIdentityId: "i-1" }], travelled("i-1"))[0]
+    .defaultIdentityId,
+  "i-1",
+);
+check(
+  "an identity already on the device (not in the file at all) is just as good",
+  resolveGroupDefaults(
+    [{ id: "g-1", name: "prod", defaultIdentityId: "i-local" }],
+    travelled("i-local"),
+  )[0].defaultIdentityId,
+  "i-local",
+);
+check(
+  "an identity in neither set is DROPPED, not refused - the group row still writes",
+  resolveGroupDefaults([{ id: "g-1", name: "prod", defaultIdentityId: "i-gone" }], NO_IDENTITIES),
+  [{ id: "g-1", name: "prod" }],
+);
+check(
+  "a group with no default at all is untouched",
+  resolveGroupDefaults([{ id: "g-1", name: "prod" }], NO_IDENTITIES),
+  [{ id: "g-1", name: "prod" }],
+);
+
+check(
+  "the matched-id-and-name replace path carries defaultIdentityId, the same way order does",
+  mergeGroups(
+    [{ id: "g-1", name: "prod", defaultIdentityId: "i-2" }],
+    [{ id: "g-1", name: "prod", defaultIdentityId: "i-1" }],
+    [],
+  ).groups[0].defaultIdentityId,
+  "i-2",
+);
 const collide = mergeGroups(
   [{ id: "g-file", name: "Prod" }],
   [{ id: "g-local", name: " prod " }],
@@ -1808,6 +1963,86 @@ check(
     .groupId,
   undefined,
 );
+check(
+  "a survivor's own parentId is repointed through the same remap its members get",
+  mergeGroups(
+    [
+      { id: "g-file", name: "Prod" },
+      { id: "g-child", name: "Web", parentId: "g-file" },
+    ],
+    [{ id: "g-local", name: " prod " }],
+    [],
+  ).groups.find((g) => g.id === "g-child")?.parentId,
+  "g-local",
+);
+
+console.log("\n[orderGroupWrites] a parent new in this same file is written before its child");
+check(
+  "a three-level chain, all new, lands parent-before-child",
+  orderGroupWrites(
+    [
+      { id: "g-leaf", name: "Leaf", parentId: "g-mid" },
+      { id: "g-mid", name: "Mid", parentId: "g-root" },
+      { id: "g-root", name: "Root" },
+    ],
+    [],
+  ).map((g) => g.id),
+  ["g-root", "g-mid", "g-leaf"],
+);
+check(
+  "a parent already saved here needs no reordering",
+  orderGroupWrites(
+    [{ id: "g-child", name: "Child", parentId: "g-saved" }],
+    [{ id: "g-saved", name: "Saved" }],
+  ).map((g) => g.id),
+  ["g-child"],
+);
+check(
+  "a parentId naming nothing on either side is dropped to root, not refused",
+  orderGroupWrites([{ id: "g-1", name: "A", parentId: "g-gone" }], [])[0].parentId,
+  undefined,
+);
+{
+  const cyclic = orderGroupWrites(
+    [
+      { id: "g-a", name: "A", parentId: "g-b" },
+      { id: "g-b", name: "B", parentId: "g-a" },
+    ],
+    [],
+  );
+  check("a cycle within one file's groups still terminates", cyclic.length, 2);
+  check(
+    "and both of its members land at root rather than looping",
+    cyclic.map((g) => g.parentId),
+    [undefined, undefined],
+  );
+}
+
+// The combined universe is the reason `existing` is a parameter at all: a
+// within-file-only cycle or dangling parent is already covered above, but a
+// bad edge can equally SPAN the two sides of a merge.
+{
+  const crossCycle = orderGroupWrites(
+    [{ id: "g-x", name: "X", parentId: "g-saved-cyclic" }],
+    [{ id: "g-saved-cyclic", name: "SavedCyclic", parentId: "g-x" }],
+  );
+  check(
+    "an incoming row that closes a cycle WITH an on-disk row resolves to root, not just a within-file cycle",
+    crossCycle[0]!.parentId,
+    undefined,
+  );
+}
+{
+  const acrossDangling = orderGroupWrites(
+    [{ id: "g-new-child", name: "New child", parentId: "g-saved-anc" }],
+    [{ id: "g-saved-anc", name: "Saved ancestor", parentId: "g-missing" }],
+  );
+  check(
+    "an incoming child of a saved group whose OWN ancestor dangles keeps its saved parent, not root",
+    acrossDangling.map((g) => ({ id: g.id, parentId: g.parentId })),
+    [{ id: "g-new-child", parentId: "g-saved-anc" }],
+  );
+}
 
 console.log("\n[identities] a bad row is wrong everywhere it is referenced, not just once");
 check("a good identity survives", sanitizeIdentity(identity()), {
@@ -1941,6 +2176,114 @@ check(
     sanitizeKey(key({ hasPrivateKey: true, hasPassphrase: true }))?.hasPassphrase,
   ],
   [false, false],
+);
+
+// `kind`, and for `"cert"` its certificate text and parsed facts, carried
+// like `fingerprint`/`publicKey` above - public, display-only fields on
+// this side (`ssh_key_classify` already validated them on the exporting
+// machine).
+check(
+  'a cert-kind key round-trips kind: "cert", its certificate text and every parsed fact',
+  sanitizeKey(
+    key({
+      id: "k-cert",
+      kind: "cert",
+      certificate: "ssh-ed25519-cert-v01@openssh.com AAAA...",
+      certCaFingerprint: "SHA256:ca",
+      certKeyId: "tervia",
+      certPrincipals: ["rendy", "root"],
+      certValidAfter: 1_700_000_000,
+      certValidBefore: 1_800_000_000,
+    }),
+  ),
+  {
+    id: "k-cert",
+    name: "laptop",
+    kind: "cert",
+    keyType: "ed25519",
+    fingerprint: "SHA256:FPR",
+    publicKey: "ssh-ed25519 AAAAC3Nz",
+    hasPrivateKey: false,
+    hasPassphrase: false,
+    certificate: "ssh-ed25519-cert-v01@openssh.com AAAA...",
+    certCaFingerprint: "SHA256:ca",
+    certKeyId: "tervia",
+    certPrincipals: ["rendy", "root"],
+    certValidAfter: 1_700_000_000,
+    certValidBefore: 1_800_000_000,
+  },
+);
+check(
+  "a certificate that never expires carries no certValidBefore at all - OpenSSH's forever sentinel, absent rather than a giant number",
+  has(
+    keyOf(
+      key({
+        kind: "cert",
+        certificate: "ssh-ed25519-cert-v01@openssh.com AAAA...",
+        certCaFingerprint: "SHA256:ca",
+        certKeyId: "tervia",
+        certPrincipals: ["rendy"],
+        certValidAfter: 1,
+      }),
+    ),
+    "certValidBefore",
+  ),
+  false,
+);
+check(
+  "certPrincipals entries are coerced/filtered to strings, the same way the rest of a payload row is",
+  sanitizeKey(
+    key({
+      kind: "cert",
+      certificate: "x",
+      certCaFingerprint: "x",
+      certKeyId: "x",
+      certPrincipals: ["rendy", 5, null, "root"],
+      certValidAfter: 1,
+    }),
+  )?.certPrincipals,
+  ["rendy", "root"],
+);
+check(
+  'a hardware-kind key round-trips kind: "hardware" and carries no cert field at all - it has none to carry',
+  sanitizeKey(key({ id: "k-hw", kind: "hardware", fingerprint: "SHA256:HW" })),
+  {
+    id: "k-hw",
+    name: "laptop",
+    kind: "hardware",
+    keyType: "ed25519",
+    fingerprint: "SHA256:HW",
+    publicKey: "ssh-ed25519 AAAAC3Nz",
+    hasPrivateKey: false,
+    hasPassphrase: false,
+  },
+);
+check(
+  'cert fields on a PEM (kind-absent) row are dropped - they name nothing outside kind === "cert"',
+  sanitizeKey(key({ certificate: "ssh-ed25519-cert-v01@openssh.com AAAA..." })),
+  {
+    id: "k-1",
+    name: "laptop",
+    keyType: "ed25519",
+    fingerprint: "SHA256:FPR",
+    publicKey: "ssh-ed25519 AAAAC3Nz",
+    hasPrivateKey: false,
+    hasPassphrase: false,
+  },
+);
+// UNLIKE `keyType`, whose unrecognised value is merely OMITTED (the row
+// still imports as a working, unlabelled PEM key): an unrecognised `kind`
+// changes which fields the record even NEEDS to be usable, so it drops the
+// WHOLE row rather than importing it as if `kind` were absent.
+check(
+  "an unrecognised kind string drops the whole row, not merely the field",
+  sanitizeKey(key({ kind: "fido2" })),
+  null,
+);
+check(
+  "kind: null also drops the row - the file said something, and it names neither kind this build knows",
+  sanitizeKey(key({ kind: null })),
+  null,
 );
 
 console.log("\n[identity keys] a keyId may never dangle: upsertIdentity throws on one either way");
@@ -2115,6 +2458,169 @@ check(
   has(sanitizeRule(rule({ description: " " })) ?? {}, "description"),
   false,
 );
+// same three-state read as startWithHost, and OMITTED from the
+// record when false rather than carried as an explicit `false` - matching
+// bindAddress/bindPort above, the read-time-adoption shape
+// `src/modules/forwards/types.ts` commits to.
+check(
+  "startWithApp is true only for a literal true",
+  [
+    sanitizeRule(rule({ startWithApp: true }))?.startWithApp,
+    sanitizeRule(rule({ startWithApp: "true" }))?.startWithApp,
+    sanitizeRule(rule({ startWithApp: 1 }))?.startWithApp,
+    sanitizeRule(rule({ startWithApp: undefined }))?.startWithApp,
+  ],
+  [true, undefined, undefined, undefined],
+);
+check(
+  "and startWithApp is OMITTED from the record when false, not carried as false",
+  has(sanitizeRule(rule({})) ?? {}, "startWithApp"),
+  false,
+);
+check(
+  "a row naming both startWithHost and startWithApp true is dropped, mirroring upsertRule's refusal",
+  sanitizeRule(rule({ startWithHost: true, startWithApp: true })),
+  null,
+);
+
+console.log("\n[rules type -D] a SOCKS port is the only field sanitizeRule cares about");
+check(
+  "a good -D row survives, with no remoteHost/remotePort refusal",
+  sanitizeRule(rule({ type: "dynamic", localPort: 0, remoteHost: "", remotePort: 0 })),
+  {
+    id: "f-1",
+    name: "postgres",
+    hostId: "h-1",
+    type: "dynamic",
+    localPort: 0,
+    remoteHost: "",
+    remotePort: 0,
+    startWithHost: false,
+  },
+);
+check(
+  "an invalid SOCKS port drops the row, same predicate as -L's localPort",
+  [
+    sanitizeRule(rule({ type: "dynamic", localPort: -1 })),
+    sanitizeRule(rule({ type: "dynamic", localPort: 65536 })),
+  ],
+  [null, null],
+);
+
+console.log("\n[rules type -R] the local target host/port, and an optional bind address/port");
+check(
+  "a good -R row survives, targetHost/targetPort read as the LOCAL TARGET",
+  sanitizeRule(
+    rule({
+      type: "remote",
+      localPort: 0,
+      remoteHost: "",
+      remotePort: 0,
+      targetHost: "127.0.0.1",
+      targetPort: 8080,
+      bindAddress: "0.0.0.0",
+      bindPort: 0,
+    }),
+  ),
+  {
+    id: "f-1",
+    name: "postgres",
+    hostId: "h-1",
+    type: "remote",
+    localPort: 0,
+    remoteHost: "",
+    remotePort: 0,
+    targetHost: "127.0.0.1",
+    targetPort: 8080,
+    bindAddress: "0.0.0.0",
+    bindPort: 0,
+    startWithHost: false,
+  },
+);
+check(
+  "a -R row with no bindAddress/bindPort at all is still good - both are optional - asserted as the WHOLE object, not just bindPort's absence, so a dropped row (null) cannot pass the same way a kept one does",
+  sanitizeRule(
+    rule({
+      type: "remote",
+      remoteHost: "",
+      remotePort: 0,
+      targetHost: "127.0.0.1",
+      targetPort: 22,
+    }),
+  ),
+  {
+    id: "f-1",
+    name: "postgres",
+    hostId: "h-1",
+    type: "remote",
+    localPort: 0,
+    remoteHost: "",
+    remotePort: 0,
+    targetHost: "127.0.0.1",
+    targetPort: 22,
+    startWithHost: false,
+  },
+);
+check(
+  "a -R row's target port 0 is refused - it is dialled, same as -L's remotePort",
+  sanitizeRule(
+    rule({ type: "remote", remoteHost: "", remotePort: 0, targetHost: "127.0.0.1", targetPort: 0 }),
+  ),
+  null,
+);
+check(
+  "a -R row's blank target host is refused",
+  sanitizeRule(
+    rule({ type: "remote", remoteHost: "", remotePort: 0, targetHost: "  ", targetPort: 22 }),
+  ),
+  null,
+);
+check(
+  "a -R row's invalid bindPort is refused, only when one is present",
+  sanitizeRule(
+    rule({
+      type: "remote",
+      remoteHost: "",
+      remotePort: 0,
+      targetHost: "127.0.0.1",
+      targetPort: 22,
+      bindPort: 65536,
+    }),
+  ),
+  null,
+);
+check(
+  "a -R row's remoteHost/remotePort are forced blank even when the file supplies real values - the field-mapping fix for issue 78: an older build must refuse this row, not read it as a working -L",
+  sanitizeRule(
+    rule({
+      type: "remote",
+      remoteHost: "should-be-ignored",
+      remotePort: 9999,
+      targetHost: "127.0.0.1",
+      targetPort: 22,
+    }),
+  ),
+  {
+    id: "f-1",
+    name: "postgres",
+    hostId: "h-1",
+    type: "remote",
+    localPort: 0,
+    remoteHost: "",
+    remotePort: 0,
+    targetHost: "127.0.0.1",
+    targetPort: 22,
+    startWithHost: false,
+  },
+);
+
+console.log("\n[rules unknown type] a type this build does not recognise drops just that row");
+check(
+  "a future build's fourth type is dropped, not a hard failure of anything else",
+  sanitizeRule(rule({ type: "streamlocal" })),
+  null,
+);
+check("a non-string type is dropped the same way", sanitizeRule(rule({ type: 1 })), null);
 
 console.log("\n[rule hosts] a rule rides an SSH session, so it needs one that will be there");
 // Two refusals, and both are `upsertRule`'s: a `hostId` naming no host at all, and
@@ -2396,27 +2902,28 @@ check(
   )?.authMode,
   "password",
 );
-// `sshCredentialValues` is the ONE place that turns a saved mode into credentials
-// on the wire (it backs `resolveSshAuth`, so terminal session, tunnel, jump hops
-// and the dialog's Test all reach it). The agent case matters most: it must send
-// the flag and NOTHING else, or a stale key from a previous mode would ride along.
+// `sshInlineCredentials` is the ONE place that turns a typed draft into
+// credentials on the wire. Its only caller is the host editor's Test probe -
+// every saved connection goes through `sshKeychainCredentials` and sends
+// references instead. The agent case matters most: it must send the flag and
+// NOTHING else, or a stale key from a previous mode would ride along.
 const secrets = { password: "pw", privateKey: "KEY", keyPassphrase: "pp" };
-check("password mode sends only the password", sshCredentialValues("password", secrets), {
-  password: "pw",
+check("password mode sends only the password", sshInlineCredentials("password", secrets), {
+  password: { kind: "inline", value: "pw" },
 });
-check("key mode sends the key and its passphrase", sshCredentialValues("key", secrets), {
-  privateKey: "KEY",
-  privateKeyPassphrase: "pp",
+check("key mode sends the key and its passphrase", sshInlineCredentials("key", secrets), {
+  privateKey: { kind: "inline", value: "KEY" },
+  privateKeyPassphrase: { kind: "inline", value: "pp" },
 });
-check("agent mode sends no secret at all", sshCredentialValues("agent", secrets), {
+check("agent mode sends no secret at all", sshInlineCredentials("agent", secrets), {
   useAgent: true,
 });
-check("agent mode ignores leftovers in the keychain", sshCredentialValues("agent", {}), {
+check("agent mode ignores leftovers in the keychain", sshInlineCredentials("agent", {}), {
   useAgent: true,
 });
 check(
   "a missing secret becomes undefined, not an empty string",
-  JSON.stringify(sshCredentialValues("password", { password: "" })),
+  JSON.stringify(sshInlineCredentials("password", { password: "" })),
   "{}",
 );
 

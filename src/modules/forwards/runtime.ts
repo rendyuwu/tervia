@@ -6,19 +6,24 @@
  *
  * SESSION-SCOPED ONLY - nothing here is persisted, so a relaunch comes up with
  * every rule stopped. That is the design and not an omission: do not add a
- * `LazyStore` (or any other persistence) to "fix" it.
+ * store file (or any other persistence) to "fix" it.
  *
  * KEYED BY `ruleId` ALONE, not `(ruleId, owner)`, because a rule runs under one
  * owner at a time. That has a consequence worth stating up front: a
  * rule with `startWithHost: true` is started by `startWithHost` on the
- * TERMINAL's own session, dies with the tab, and this store never hears about
- * it - the page shows it "Running (with host)" read-only, off a SEPARATE map
- * the terminal writes (`./hostOwned.ts`) and this page only reads. A
- * terminal-owned forward is therefore never in `byRule` - but that is held by
- * A CHECK ON EACH SIDE, not by construction: `controller.ts`'s `startRule`
- * refuses a rule a terminal already owns, and `autostart.ts` reads
- * `runtimeStatus` before the bind and again before the claim, yielding if the
- * page has it running by then. `./hostOwned.ts`'s header gives both in full.
+ * TERMINAL's own session, dies with the tab, and this store hears about it
+ * only to FORGET a stale failure (below) - the page shows it "Running (with
+ * host)" read-only, off a SEPARATE map the terminal writes (`./hostOwned.ts`)
+ * and this page only reads. A terminal-owned forward is therefore never
+ * `running` in `byRule` - but that is held by A CHECK ON EACH SIDE, not by
+ * construction:
+ * `controller.ts`'s `startRule` refuses a rule a terminal already owns, and
+ * `autostart.ts` reads `runtimeStatus` before the bind and again before the
+ * claim, yielding if the page has it running by then. `./hostOwned.ts`'s
+ * header gives both in full. The one write the terminal side makes here is a
+ * reset: when `autostart.ts` claims a rule whose entry reads `failed`, it
+ * calls `markStopped` through its `markPageStopped` dep, because the claim has
+ * just proven that error moot.
  *
  * The `claim` field is what makes Stop safe. `SshForward.claim` (in
  * `ssh/tunnel.ts`) is monotonic and names the ENTRY a caller took its

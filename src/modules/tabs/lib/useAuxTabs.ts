@@ -81,7 +81,6 @@ export function useAuxTabs({ setTabs, setActiveId, nextIdRef, tabsRef }: AuxTabs
       id: leafId,
       leafKind: "rdp",
       rdpConnectionId,
-      sizeMode: "preset",
     };
     setTabs((curr) => [
       ...curr,

@@ -1,6 +1,6 @@
 import { cn } from "@/lib/utils";
 import { EntryIcon } from "@/modules/tabs/components/EntryIcon";
-import { buildEntries, type PaneEntry } from "@/modules/tabs/lib/entries";
+import { buildEntries, type Entry } from "@/modules/tabs/lib/entries";
 import type { Tab } from "@/modules/tabs";
 import { useGitBranch } from "@/modules/scm/branch";
 import { useHosts } from "@/modules/hosts/useHosts";
@@ -58,7 +58,7 @@ export function WorkspaceBoard({
   /** Called with the current cards whenever they change. The float window has
    *  no tab tree of its own, so the mounted main-window board IS the data
    *  source that feeds it. */
-  mirrorToFloat?: (cards: PaneEntry[], titles: Record<number, string>) => void;
+  mirrorToFloat?: (cards: Entry[], titles: Record<number, string>) => void;
 }) {
   const hosts = useHosts();
   const titles = useTerminalTitles((s) => s.titles);
@@ -66,7 +66,7 @@ export function WorkspaceBoard({
   const cards = useMemo(
     () =>
       buildEntries(tabs, hosts, sshStatuses, aiCliStatuses).filter(
-        (e): e is PaneEntry => e.kind === "pane-leaf" && e.leafKind === "terminal",
+        (e) => e.leafKind === "terminal",
       ),
     [tabs, hosts, sshStatuses, aiCliStatuses],
   );
@@ -84,14 +84,14 @@ export function WorkspaceBoard({
 /**
  * The board itself, given its cards. Split out from the data half so the float
  * window renders THIS, not a lookalike: the float has no tab tree, so it
- * receives the same `PaneEntry` objects over an event and hands them here.
+ * receives the same `Entry` objects over an event and hands them here.
  */
 export function BoardColumns({
   cards,
   titles,
   onOpen,
 }: {
-  cards: PaneEntry[];
+  cards: Entry[];
   titles: Record<number, string>;
   onOpen?: (tabId: number, leafId: number) => void;
 }) {
@@ -157,7 +157,7 @@ function BoardCardItem({
   title,
   onOpen,
 }: {
-  entry: PaneEntry;
+  entry: Entry;
   /** Program-set terminal title (OSC 2), e.g. the agent's current task. */
   title?: string;
   onOpen?: (tabId: number, leafId: number) => void;
@@ -175,7 +175,7 @@ function BoardCardItem({
   // one git call, not N.
   const sshSessionId = e.sshStatus?.kind === "connected" ? e.sshStatus.sessionId : undefined;
   const branch = useGitBranch(
-    !e.sshConnectionId || sshSessionId !== undefined ? e.cwd : undefined,
+    !e.hostId || sshSessionId !== undefined ? e.cwd : undefined,
     sshSessionId,
   );
   // The agent's own todo list, read from its store. Only asked for when an AI

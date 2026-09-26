@@ -10,6 +10,7 @@
  * Where behaviors are set up (each is its own hook unless noted):
  *   - useWorkspaceRoot         - home / picked root + `tervia <path>` CLI targets
  *   - useStoreRecoveryNotices  - toasts a store recovered from its `.bak`
+ *   - useForwardsAutostart     - brings a `startWithApp` forward rule up once, no tab required
  *   - useWorkspacePersistence  - hydrate + auto-snapshot workspaces
  *   - useQuitGuard             - pre-quit snapshot flush + busy-terminal prompt
  *   - useWorkspaceSwitching    - switch / create / close orchestration
@@ -31,14 +32,7 @@ import { type EditorPaneHandle } from "@/modules/editor";
 import { Header, type SearchInlineHandle } from "@/modules/header";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import { useSshRightPanelStore } from "@/modules/ssh/sshRightPanelStore";
-import {
-  focusTargetOf,
-  isTerminalControlChord,
-  isTerminalMetaChord,
-  ownsRawKeyboard,
-  useGlobalShortcuts,
-  type ShortcutHandlers,
-} from "@/modules/shortcuts";
+import { useGlobalShortcuts, type ShortcutHandlers } from "@/modules/shortcuts";
 import { StatusBar } from "@/modules/statusbar";
 import {
   activeLeafKind,
@@ -79,6 +73,7 @@ import { useQuitGuard } from "./hooks/useQuitGuard";
 import { useWorkspacePersistence } from "./hooks/useWorkspacePersistence";
 import { useSessionDisposal } from "./hooks/useSessionDisposal";
 import { useStoreRecoveryNotices } from "./hooks/useStoreRecoveryNotices";
+import { useForwardsAutostart } from "./hooks/useForwardsAutostart";
 import { useAdoptDaemonSessions } from "./hooks/useAdoptDaemonSessions";
 import { useActiveLeafSurface } from "./hooks/useActiveLeafSurface";
 import { useProjectUrl } from "./hooks/useProjectUrl";
@@ -287,16 +282,18 @@ export default function App() {
 
   // -------- one-shot legacy secret purge --------
   // The two old connection stores are gone, and with them the only code that
-  // could name `tervia-ssh :: <id>::*` or `tervia-rdp :: <id>::password`. There
-  // is no `secrets_list` command, so whatever they left in the macOS keychain,
-  // the Windows `secrets.bin` or the Linux mode-0600 JSON would otherwise be
-  // unreachable forever - private keys included. This clears it once and
-  // remembers that it did.
+  // could name `tervia-ssh :: <id>::*` or `tervia-rdp :: <id>::password`.
+  // `secrets_list` can enumerate them, but its only consumer is the Vault page's
+  // unreferenced-entry sweep, which the user has to find, read and confirm - so
+  // without this pass whatever they left in the macOS keychain, the Windows
+  // `secrets.bin` or the Linux mode-0600 JSON sits there until somebody goes
+  // looking, private keys included. This clears it once and remembers that it
+  // did.
   //
   // Fired and forgotten deliberately: it runs after paint, gates nothing, and
   // never rejects. A partial pass leaves the marker unwritten so the next launch
   // tries again - and it is said out loud rather than swallowed, because the
-  // accounts it could not clear are exactly the ones nothing can name again.
+  // accounts it could not clear are exactly the ones nothing releases on its own.
   useEffect(() => {
     void purgeLegacySecrets()
       .then((result) => {
@@ -325,6 +322,12 @@ export default function App() {
   // back from its `.bak`. Without this the recovery happened silently: the
   // notice was produced and nothing ever took it.
   useStoreRecoveryNotices();
+
+  // -------- forward autostart --------
+  // Brings every `startWithApp` rule up once the stores it needs have
+  // hydrated - see the hook's own header for the launch-trigger and
+  // backoff-ladder reasoning.
+  useForwardsAutostart();
 
   // -------- workspaces wiring --------
   const wsHydrate = useWorkspacesStore((s) => s.hydrate);
@@ -495,6 +498,7 @@ export default function App() {
     pendingClose,
     handleClose,
     requestCloseLeaf,
+    requestCloseLeaves,
     confirmClose,
     cancelClose,
     cycleTab,
@@ -626,47 +630,7 @@ export default function App() {
     ],
   );
 
-  // The options object is read fresh each keydown (see useGlobalShortcuts), so
-  // closing over `railView` without a dep array is fine.
-  useGlobalShortcuts(shortcutHandlers, {
-    isDisabled: (id, e) =>
-      // A focused terminal owns every bare-Ctrl control code (Ctrl+E, Ctrl+W,
-      // Ctrl+K, Ctrl+L, Ctrl+[ Esc, Ctrl+I Tab, the tmux/screen prefix, …) and
-      // every bare-Alt meta sequence (readline M-b / M-f / M-d / M-1..9). On
-      // Win/Linux `Mod`=Ctrl, so those chords otherwise fire app actions (close
-      // tab, word-wrap, …) and the byte never reaches the shell. Let them fall
-      // through. Exception: pane.splitRight (Ctrl+D) always fires;
-      // pane.splitDown already passes because it carries Shift. Terminal-safe
-      // app chords keep Shift/Meta or add a second modifier (Ctrl+Shift+C copy,
-      // Ctrl+Shift+X close, Ctrl+Alt+P, Shift+Alt+F) and stay active; Ctrl+Tab /
-      // Ctrl+digit / zoom are not control codes either.
-      //
-      // A focused RDP pane is gated the same way and for the same reason: the
-      // remote desktop owns its own Ctrl and Alt chords, so Ctrl+W has to reach
-      // Windows rather than close the pane showing it. (Ctrl+Alt+Del is the one
-      // chord no gate can deliver - the OS eats it - which is why the pane
-      // header has a button for it.)
-      //
-      // "FOCUSED" IS ASKED OF THE DOM. This used to read
-      // `activeLeafKindCurrent === "terminal" || === "rdp"` - which is where
-      // the caret is *in the tab*, not where it is on screen - and its own
-      // comment justified it with "a FOCUSED terminal". The two differ exactly
-      // when the surface is not holding the keys: click the tab strip and
-      // Ctrl+W stayed suppressed, so it closed no tab anywhere; open a rail
-      // view and Ctrl+T / Ctrl+] / Ctrl+[ were eaten by a terminal that was
-      // invisible and pointer-events-none. `ownsRawKeyboard` asks the keydown's
-      // own target instead - see `shortcuts/lib/keyboardOwner.ts`.
-      //
-      // `railView === null` on top of that, rather than trusting the browser to
-      // blur what it hides: a covered surface does not own the keyboard by
-      // definition, and making that a state question rather than a focus
-      // question is what keeps the rail-view case from depending on whether
-      // Chromium happens to move focus off a `visibility: hidden` subtree.
-      id !== "pane.splitRight" &&
-      railView === null &&
-      ownsRawKeyboard(focusTargetOf(e)) &&
-      (isTerminalControlChord(e) || isTerminalMetaChord(e)),
-  });
+  useGlobalShortcuts(shortcutHandlers, { tabAreaCovered: railView !== null });
 
   const paneHandles = usePaneHandles({
     terminalRefs,
@@ -689,7 +653,6 @@ export default function App() {
   const {
     handleOpenDetectedPreview,
     handleHeaderSelectEntry,
-    handleHeaderCloseEntry,
     handleHeaderPinLeaf,
     handleHeaderOpenSettings,
     handleHeaderConnectSsh,
@@ -698,8 +661,6 @@ export default function App() {
   } = useHeaderActions({
     activePaneTab,
     detectedBrowserUrl,
-    handleClose,
-    requestCloseLeaf,
     setActiveId,
     focusPane,
     pinTab,
@@ -711,8 +672,9 @@ export default function App() {
   // `host.protocol` rather than a narrowing cast: a merged host list can
   // return either arm for a given id, and `isSshHost`/`isRdpHost` are what
   // keep a stray RDP row from being read as an SSH one or vice versa. Backs
-  // BOTH the header quick-connect and the page-leaf body (via PaneTreeView's
-  // context) - one path, not two copies of the same routing.
+  // the header quick-connect, the command palette's `#` mode and the page-leaf
+  // body (via PaneTreeView's context) - one path, not three copies of the same
+  // routing.
   const handleConnectHost = useCallback(
     (host: Host) => {
       if (isSshHost(host)) handleHeaderConnectSsh(host);
@@ -743,7 +705,8 @@ export default function App() {
             tabs={tabs}
             activeId={activeId}
             onSelectEntry={handleHeaderSelectEntry}
-            onCloseEntry={handleHeaderCloseEntry}
+            onCloseEntry={requestCloseLeaf}
+            onCloseLeaves={requestCloseLeaves}
             onNewTerminal={openNewTab}
             onRenameLeaf={renameLeaf}
             onOpenAgents={() => setAgentDialogOpen(true)}
@@ -784,6 +747,7 @@ export default function App() {
               <AppSidebar
                 sidebarRef={sidebarRef}
                 explorerRoot={explorerRoot}
+                tabAreaCovered={railView !== null}
                 hasAnySshLeaf={hasAnySshLeaf}
                 onOpenFile={handleOpenFile}
                 onPathRenamed={handlePathRenamed}
@@ -802,7 +766,7 @@ export default function App() {
                 cachedTabsByWorkspace={liveTabsByWorkspace}
                 onFocusLeaf={focusLeafInTab}
                 onRenameLeaf={renameLeaf}
-                onCloseEntry={handleHeaderCloseEntry}
+                onCloseEntry={requestCloseLeaf}
                 activeLeafId={activePaneTab?.activeLeafId ?? null}
                 sshStatuses={sshStatuses}
                 openBoardTab={openBoardTab}
@@ -836,6 +800,7 @@ export default function App() {
                 rightSections={rightSections}
                 sshRightOpen={sshRightOpen}
                 explorerRoot={explorerRoot}
+                tabAreaCovered={railView !== null}
                 onPathDeleted={handlePathDeleted}
                 closeSshRight={closeSshRight}
                 activeSshContext={activeSshContext}
@@ -856,7 +821,7 @@ export default function App() {
                   cachedTabsByWorkspace: liveTabsByWorkspace,
                   onFocusLeaf: focusLeafInTab,
                   onRenameLeaf: renameLeaf,
-                  onCloseEntry: handleHeaderCloseEntry,
+                  onCloseEntry: requestCloseLeaf,
                   activeLeafId: activePaneTab?.activeLeafId ?? null,
                   sshStatuses,
                 }}
@@ -885,6 +850,7 @@ export default function App() {
             onOpenChange={setCommandPaletteOpen}
             explorerRoot={explorerRoot ?? null}
             onOpenFile={handleOpenFile}
+            onConnectHost={handleConnectHost}
           />
 
           <AppDialogs

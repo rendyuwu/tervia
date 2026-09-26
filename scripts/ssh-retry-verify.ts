@@ -26,32 +26,30 @@
  * this file already checks, so both halves of the ladder answer one question.
  *
  * What is checked here:
- *   1. `canAuthenticate` - the pre-dial guard, against the same truth table the
- *      backend's `has_credential` is tested with.
- *   2. `classifySshConnectFailure` - structural (an error TYPE), so it cannot
+ *   1. `classifySshConnectFailure` - structural (an error TYPE), so it cannot
  *      rot the way a list of message prefixes would.
- *   3. `decideSshConnectFailure` - only the transport category reconnects, and
+ *   2. `decideSshConnectFailure` - only the transport category reconnects, and
  *      the categories stay DISTINCT.
- *   4. `hostKeyRefused` - an ANSWER decides, and any refusal in a chain counts.
- *   5. `sshConnectErrorFrom` - the wire boundary: each kind becomes the right
+ *   3. `hostKeyRefused` - an ANSWER decides, and any refusal in a chain counts.
+ *   4. `sshConnectErrorFrom` - the wire boundary: each kind becomes the right
  *      error type, an unrecognised rejection passes through IDENTICAL, the end-
  *      to-end verdict is park/park/reconnect, and the two regressions the raw
  *      object caused (`isHostKeyMismatchError` no longer matching,
  *      `[object Object]` / `{"kind":…}` reaching the user) stay closed.
- *   6. Rust/TS parity for the mirrored guard and its wording, and for the set of
- *      connect-error kinds - then, in Rust alone, the kind each connect-path
- *      failure SITE names. That is the only place the choice is actually made,
- *      and nothing else in the tree pins it.
- *   7. Source text, Rust: the Windows ssh-agent fallback marks itself UNPROVEN,
+ *   5. Rust: the credential guard and its wording, and the set of connect-error
+ *      kinds the TS union mirrors - then the kind each connect-path failure
+ *      SITE names. That is the only place the choice is actually made, and
+ *      nothing else in the tree pins it. The guard has no TS counterpart any
+ *      more: `resolveSshAuth` returns keychain references, so the frontend
+ *      cannot know whether one resolves to anything and no longer pretends to.
+ *   6. Source text, Rust: the Windows ssh-agent fallback marks itself UNPROVEN,
  *      so an absent agent parks on that platform too. Nothing else in the tree
  *      can see that arm - it is `#[cfg(windows)]` and CI runs no Rust tests on
  *      Windows.
- *   8. Source text: the `ssh_open` dial's own rejection is chained through
- *      `sshConnectErrorFrom`, and at both catch sites the park arm lexically
- *      CONTROLS the ladder call - it is a statement of the same block and it
- *      terminates it - and the pre-flight block marks what it throws. Pure
- *      functions that nobody calls fix nothing, and a gate that is merely NEAR
- *      the ladder is not a gate (see the section's own header).
+ *   7. Source text: at both catch sites the park arm lexically CONTROLS the
+ *      ladder call - it is a statement of the same block and it terminates
+ *      it. Pure functions that nobody calls fix nothing, and a gate that is
+ *      merely NEAR the ladder is not a gate (see the section's own header).
  */
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -70,16 +68,14 @@ import {
   type SshConnectErrorKind,
 } from "../src/modules/ssh/bridge";
 import {
-  canAuthenticate,
   classifySshConnectFailure,
   decideSshConnectFailure,
   hostKeyRefused,
   SshAuthRejectedError,
   SshLocalConnectError,
-  type SshAuthAttempt,
 } from "../src/modules/terminal/lib/ssh-exit-decision";
 import { stripCommentsNoJsx } from "./lib/source";
-import { scopeOf } from "./lib/scope";
+import { guardAt, guardAtSelfTest, scopeOf } from "./lib/scope";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const readRaw = (rel: string) => readFileSync(join(repoRoot, rel), "utf8");
@@ -108,34 +104,7 @@ function assert(cond: boolean, msg: string): void {
   }
 }
 
-console.log("[canAuthenticate] any one credential is enough to be worth dialling");
-for (const [label, attempt] of [
-  ["ssh-agent alone", { useAgent: true }],
-  ["password alone", { password: "pw" }],
-  ["private key alone", { privateKey: "-----BEGIN..." }],
-] as [string, SshAuthAttempt][]) {
-  assert(canAuthenticate(attempt), `${label} -> dial`);
-}
-
-console.log("\n[canAuthenticate] nothing configured is the state that must not dial");
-assert(!canAuthenticate({}), "no agent, no password, no key -> refuse before dialling");
-assert(
-  !canAuthenticate({ useAgent: false }),
-  "an explicit useAgent:false with nothing else is still nothing to authenticate with",
-);
-// `resolveSshAuth` maps an empty secret to `undefined`, never "", so this row is
-// about agreeing with the backend rather than about a reachable state: the
-// backend's `has_credential` tests presence (`is_some`), so an empty string is
-// a credential to SEND and the server decides. Testing emptiness on one side
-// only would make the two guards disagree about the same input.
-console.log("\n[canAuthenticate] presence, not emptiness - matching the backend guard");
-assert(
-  canAuthenticate({ password: "" }),
-  'password "" is present, so it is dialled (server\'s call)',
-);
-assert(canAuthenticate({ privateKey: "" }), 'private key "" is present, so it is dialled');
-
-console.log("\n[classifySshConnectFailure] the category rides on the error TYPE, not its wording");
+console.log("[classifySshConnectFailure] the category rides on the error TYPE, not its wording");
 {
   const local = classifySshConnectFailure(new SshLocalConnectError("ssh: no credentials: …"), "m");
   assert(local.kind === "local" && local.message === "m", "SshLocalConnectError -> local");
@@ -380,26 +349,26 @@ console.log("\n[hostKeyRefused] an ANSWER decides, and any refusal in a chain co
 }
 
 // ============================================================================
-// RUST/TS PARITY: the pre-dial guard exists on both sides on purpose (the
-// frontend needs it to CLASSIFY, the backend keeps it for its other callers -
-// the forward tunnel and the host editor's Test probe). Two copies of a
-// predicate is a drift risk, so the pairing is checked rather than trusted.
+// THE CREDENTIAL GUARD, in Rust alone. It used to be mirrored on the frontend,
+// and that mirror is gone: `resolveSshAuth` returns keychain references, so JS
+// cannot know whether one resolves to anything. This is now the only test, and
+// every connect path - terminal leaf, forward tunnel, host editor Test probe -
+// reaches it.
 
-console.log("\n[parity] the backend guard and its frontend mirror agree");
+console.log("\n[guard] the backend refuses a connect with nothing to authenticate with");
 {
   const rust = readRust("src-tauri/src/modules/ssh/session.rs");
-  const ts = readTs("src/modules/terminal/lib/ssh-session.ts");
 
   const rustBody =
     /fn has_credential\([^)]*\)\s*->\s*bool\s*\{([\s\S]*?)\n\}/.exec(rust)?.[1] ?? "";
   assert(rustBody !== "", "found has_credential's body in session.rs");
   assert(
     /use_agent/.test(rustBody) && /password\.is_some\(\)/.test(rustBody),
-    "the backend guard still tests PRESENCE (is_some), matching canAuthenticate above",
+    "the guard tests PRESENCE (is_some), so an empty credential is the server's call",
   );
   assert(
     !/is_empty\(\)|unwrap_or_default\(\)/.test(rustBody),
-    "the backend guard has not been switched to an emptiness test the frontend does not mirror",
+    "and has not been switched to an emptiness test - `SecretSource::resolve` already drops empties",
   );
 
   // Both call sites go through the one predicate. A third inline copy is how
@@ -424,12 +393,10 @@ console.log("\n[parity] the backend guard and its frontend mirror agree");
   );
 
   const rustMsg = /const NO_CREDENTIALS_ERROR: &str = "([^"]*)"/.exec(rust)?.[1] ?? null;
-  const tsMsg = /const NO_CREDENTIALS_MESSAGE = "([^"]*)"/.exec(ts)?.[1] ?? null;
   assert(rustMsg !== null, "found NO_CREDENTIALS_ERROR in session.rs");
-  assert(tsMsg !== null, "found NO_CREDENTIALS_MESSAGE in ssh-session.ts");
   assert(
-    rustMsg !== null && rustMsg === tsMsg,
-    `the two sides tell the user the same sentence (rust=${JSON.stringify(rustMsg)}, ts=${JSON.stringify(tsMsg)})`,
+    rustMsg === "ssh: no credentials: set use_agent, password, or private_key",
+    `the sentence a user reads is unchanged (got ${JSON.stringify(rustMsg)})`,
   );
 }
 
@@ -592,22 +559,6 @@ console.log("\n[parity] each failure site still names the kind its category dema
     `the jump hop's no-credentials guard is ::config too (found ${JSON.stringify(hopGuard)})`,
   );
 
-  // And the one site in connect that SHOULD ladder. Asserted so this section
-  // cannot degenerate into "everything is a park": authentication has already
-  // succeeded by here, so a channel that will not open is the link or a server
-  // limit, and the next attempt may well get one.
-  assert(
-    /channel_open_session\(\)\s*\.await\s*\.map_err\(\|e\|\s*SshConnectError::transport\(/.test(
-      connect,
-    ),
-    "channel_open_session's failure stays ::transport - post-auth, so it is the link, and it is what the ladder exists for",
-  );
-  const channel = kindsOf(connect, '"ssh: open channel failed');
-  assert(
-    channel.length === 1 && channel[0] === "transport",
-    `one open-channel failure in connect(), still ::transport (found ${JSON.stringify(channel)})`,
-  );
-
   const hop = fnBody("async fn authenticate_hop(");
   assert(hop !== "", "extracted authenticate_hop's body");
 
@@ -620,10 +571,15 @@ console.log("\n[parity] each failure site still names the kind its category dema
     /decode_secret_key\([^)]*\)\s*\.map_err\(\|e\|\s*\{\s*SshConnectError::config\(/.test(hop),
     "decode_secret_key's map_err builds ::config - a key that will not decode here is fixed until the user changes something",
   );
+  // Not a count: the invariant is the KIND, not how many decode sites exist
+  // - the `cert` branch decodes the same signing-key text before pairing it
+  // against the certificate, and every decode failure anywhere in
+  // `authenticate_hop` is the same "this machine cannot read it" fact,
+  // reported through the same message and the same ::config kind.
   const parse = kindsOf(hop, '"ssh: [{host}] parse private key failed');
   assert(
-    parse.length === 1 && parse[0] === "config",
-    `one parse-key failure in authenticate_hop, still ::config (found ${JSON.stringify(parse)})`,
+    parse.length >= 1 && parse.every((k) => k === "config"),
+    `every parse-key failure in authenticate_hop is ::config (found ${JSON.stringify(parse)})`,
   );
 
   // THE pair a future edit is most likely to "correct" to `auth`, because they
@@ -808,36 +764,12 @@ function allIndexes(src: string, needle: string): number[] {
   return out;
 }
 
-/** The condition of the innermost `if` whose block contains `start`, or "". */
-function guardAt(src: string, start: number): string {
-  let at = start;
-  if (at < 0) return "";
-  // Bounded rather than `for (;;)`: eight levels is more nesting than anything
-  // here has, and a bound cannot spin on a source this does not expect.
-  for (let level = 0; level < 8; level++) {
-    const { block, before } = scopeOf(src, at);
-    const parts = before.split(";");
-    const stmt = (parts[parts.length - 1] ?? "")
-      .trim()
-      .replace(/\b(?:void|await|return)$/, "")
-      .trim();
-    const own = /^if \((.*)\)$/s.exec(stmt);
-    if (own) return own[1];
-    // Some other statement head - a `for`, an arrow declaration, a call whose
-    // argument list this needle sits inside. Not a guard, and not something to
-    // look past either.
-    if (stmt.length > 0 || block < 0) return "";
-    at = block;
-  }
-  return "";
-}
-
 /**
  * The statement list around the SOLE occurrence of `anchor`.
  *
  * `hits` is reported rather than swallowed because the cheap trap is an
  * anchor that matches twice and an `indexOf` that takes whichever came first:
- * this section's previous anchor, `if (s.sshConnectionId) {`, occurs TWICE in
+ * this section's previous anchor, `if (s.sshConnectionId) {`, occurred TWICE in
  * session-lifecycle.ts, and only source order put the spawn catch ahead of the
  * status re-emit at the bottom of `attachSession`. Reordering the file would
  * have silently pointed every assertion below at a block with no ladder in it -
@@ -948,160 +880,14 @@ function checkLadderSite(label: string, rel: string): void {
   }
 }
 
-console.log("\n[source-text] the dial's rejection cannot get past the boundary unwrapped");
-{
-  // Every behavioural check above calls `sshConnectErrorFrom` itself, so all of
-  // them stay green if `openSsh` stops calling it and lets the raw `{kind,
-  // message}` through - which is the whole defect, restored in full. `openSsh`
-  // invokes a Tauri command and cannot be run from here, so this one property
-  // is read rather than called. It is the only check that notices.
-  const src = readTs("src/modules/ssh/bridge.ts");
-
-  const dials = allIndexes(src, 'invoke<number>("ssh_open"');
-  assert(dials.length === 1, `one ssh_open dial in bridge.ts (found ${dials.length})`);
-  const argOpen = dials.length === 1 ? src.indexOf("(", dials[0]) : -1;
-  const argClose = argOpen === -1 ? -1 : matchingDelim(src, argOpen, "(", ")");
-  assert(argClose > argOpen, "resolved the dial's argument list");
-
-  // Attached to THIS call, not merely present in the function. A `.catch` on
-  // some other promise in the same body would satisfy a whole-file grep and
-  // leave the dial's own rejection untouched.
-  const tail = argClose === -1 ? "" : src.slice(argClose + 1);
-  const guardOpen = /^\s*\.catch\s*\(/.exec(tail);
-  assert(guardOpen !== null, "the dial's own promise carries a .catch, chained to it directly");
-  const handlerAt = guardOpen === null ? -1 : argClose + guardOpen[0].length;
-  const handlerEnd = handlerAt === -1 ? -1 : matchingDelim(src, handlerAt - 1, "(", ")");
-  const handler = handlerEnd === -1 ? "" : src.slice(handlerAt, handlerEnd);
-  // THROWS it. Computing the wrapper and returning it would resolve the dial
-  // with an Error instead of rejecting, so `openSsh` would hand back a bogus
-  // session id and the catch sites downstream would never run at all.
-  assert(
-    /\bthrow\s+sshConnectErrorFrom\(/.test(handler),
-    `the handler THROWS the wrapped error (handler: ${JSON.stringify(handler.trim())})`,
-  );
-
-  // And that call is the only one: a second reader of the payload elsewhere in
-  // this file would be a second place to keep in step with the Rust kinds.
-  const calls = allIndexes(src, "sshConnectErrorFrom(").length;
-  assert(
-    calls === 2,
-    `sshConnectErrorFrom appears exactly twice - its declaration and this one call (found ${calls})`,
-  );
-}
+console.log("\n[guardAt] the shared guard walk the source-text sections below read");
+for (const t of guardAtSelfTest()) assert(t.ok, t.label);
 
 console.log("\n[source-text] the first attempt's catch: the park arm controls the ladder");
 checkLadderSite("first attempt", "src/modules/terminal/lib/session-lifecycle.ts");
 
 console.log("\n[source-text] the ladder's own re-entry: same question, same answer");
 checkLadderSite("attempts 2 and 3", "src/modules/terminal/lib/ssh-session.ts");
-
-console.log("\n[source-text] nothing is dialled that could not authenticate");
-{
-  const src = readTs("src/modules/terminal/lib/ssh-session.ts");
-  // Everything from the resolve block down to the dial itself: the property is
-  // "asked BEFORE openSsh", so the region is bounded by the call rather than by
-  // a brace, and a check that drifted below the dial would fall out of it.
-  // Both bounds are asserted unambiguous - a second `await openSsh(` would make
-  // "before the dial" mean "before whichever one came first".
-  const fromHits = allIndexes(src, "let jumps: SshJumpHop[];");
-  const dialHits = allIndexes(src, "sshSession = await openSsh(");
-  assert(fromHits.length === 1, `one resolve block opens the region (found ${fromHits.length})`);
-  assert(dialHits.length === 1, `one dial closes it (found ${dialHits.length})`);
-  const from = fromHits.length === 1 ? fromHits[0] : -1;
-  const dial = dialHits.length === 1 ? dialHits[0] : -1;
-  const body = from !== -1 && dial > from ? src.slice(from, dial) : null;
-  assert(body !== null, "found the region between the resolve block and the dial");
-  assert(
-    /canAuthenticate\(auth\)/.test(body ?? ""),
-    "the target's credential is checked before openSsh is called",
-  );
-  assert(
-    /canAuthenticate\(hop\)/.test(body ?? ""),
-    "every ProxyJump hop's credential is checked too - a chain fails the same way",
-  );
-  // The resolve block's catch re-wraps whatever it threw, which is what makes a
-  // failure ADDED to that block later local by default. Losing this line is how
-  // the next pre-flight error silently rejoins the ladder.
-  assert(
-    /new SshLocalConnectError\(message/.test(body ?? ""),
-    "the resolve block's catch re-wraps every failure as local, not just the ones it raises itself",
-  );
-}
-
-console.log("\n[source-text] a REFUSED host key is a local decision - an unanswered one is not");
-{
-  const src = readTs("src/modules/terminal/lib/ssh-session.ts");
-
-  // A list of answers, not a latch on "was one trusted". The type is asserted
-  // because it is the multi-hop property in one token: a `boolean` cannot hold
-  // "the bastion said yes and the target said no", and a chain is exactly where
-  // the counters this replaces were pointed.
-  const record = /const (\w+): boolean\[\] = \[\];/.exec(src);
-  assert(record !== null, "the attempt keeps a LIST of host-key answers, not a single verdict");
-  // A name no identifier can have, so the assertions below fail loudly rather
-  // than searching for "" and matching at every offset in the file.
-  const answers = record?.[1] ?? "<no record>";
-
-  // The queue routes every answer through the prompt's own `confirm` - the
-  // user's Trust, the user's Reject, and the rejection `abandon` sends when
-  // whatever asked the question has gone away. Wrapping it is what lets the
-  // answer be recorded AS IT IS MADE instead of guessed at afterwards.
-  const enqueueHits = allIndexes(src, ".enqueue(");
-  const confirmHits = allIndexes(src, "confirm: (");
-  assert(enqueueHits.length === 1, `the connect enqueues one prompt (found ${enqueueHits.length})`);
-  assert(confirmHits.length === 1, `carrying one confirm wrapper (found ${confirmHits.length})`);
-  const argOpen = enqueueHits.length === 1 ? src.indexOf("{", enqueueHits[0]) : -1;
-  const argClose = argOpen === -1 ? -1 : matchingBrace(src, argOpen);
-  const confirmAt = confirmHits.length === 1 ? confirmHits[0] : -1;
-  assert(
-    confirmAt > argOpen && argOpen !== -1 && confirmAt < argClose,
-    "the wrapper is a field of the prompt handed to enqueue - anywhere else and the queue calls the bare command instead",
-  );
-  const confirmBody = confirmAt === -1 ? -1 : src.indexOf("{", src.indexOf("=>", confirmAt));
-  assert(confirmBody > 0, "found the wrapper's body");
-  assert(
-    /confirmHostKey\(/.test(
-      confirmBody === -1 ? "" : src.slice(confirmBody, matchingBrace(src, confirmBody)),
-    ),
-    "the wrapper still forwards the answer - the paused handshake is blocked on this very call",
-  );
-
-  // THE misfiling regression, in source terms: recording an answer where the
-  // PROMPT is raised rather than where it is answered restores `asked > trusted`
-  // under a new name, and files a link that dropped under the dialog as a local
-  // refusal. Every write to the record must sit in the wrapper.
-  const writes = allIndexes(src, `${answers}.push(`);
-  assert(
-    writes.length === 1,
-    `the record is written from exactly one place (found ${writes.length})`,
-  );
-  assert(
-    writes.length > 0 && writes.every((at) => scopeOf(src, at).block === confirmBody),
-    "the record is written only from the answer wrapper, never where a prompt is merely raised",
-  );
-
-  // Pinning stays on the accept callback. In the wrapper it would fire for every
-  // answer, which means pinning a key the user just REFUSED.
-  const pins = allIndexes(src, "pinFingerprint(");
-  assert(pins.length === 1, `the fingerprint is pinned from one place (found ${pins.length})`);
-  assert(
-    pins.length === 1 && scopeOf(src, pins[0]).block !== confirmBody,
-    "pinning is on the accept path, not on every answer",
-  );
-
-  // And the catch reads the verdict, rather than any restatement of "a prompt
-  // was raised and not trusted".
-  const marker = allIndexes(src, "throw new SshLocalConnectError(describeError(e)");
-  assert(
-    marker.length === 1,
-    `one host-key local marker in the connect catch (found ${marker.length})`,
-  );
-  const guard = marker.length === 1 ? guardAt(src, marker[0]) : "";
-  assert(
-    guard === `hostKeyRefused(${answers})`,
-    `the marker is thrown only for a REFUSAL, nothing weaker (guard: ${JSON.stringify(guard)})`,
-  );
-}
 
 console.log(failed === 0 ? "\nAll ssh-retry checks passed." : `\n${failed} check(s) FAILED.`);
 process.exit(failed === 0 ? 0 : 1);

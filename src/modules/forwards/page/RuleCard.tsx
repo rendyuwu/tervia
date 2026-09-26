@@ -98,7 +98,8 @@ import { localPortLabel, stopNote, type ForwardRuleRow } from "./derive";
  *  cannot stop - the terminal that opened it owns it, and it dies with that
  *  tab. See `../hostOwned.ts`: a Stop here would spend a reference nobody on
  *  this page ever took. */
-const HOST_OWNED_NOTE = "Started with its terminal. Close that terminal tab to stop it.";
+const HOST_OWNED_NOTE =
+  "Started with its terminal. Close every terminal tab to this host to stop it.";
 
 export type RuleCardProps = {
   row: ForwardRuleRow;
@@ -135,7 +136,8 @@ function statusDotClass(status: ReturnType<typeof useForwardStatus>, hostOwned: 
   // A terminal-owned forward IS running, it is simply running somewhere this
   // store cannot see (`../hostOwned.ts`), so it gets the running tone. Checked
   // ahead of `status`, which for such a rule reads "stopped" - the page's
-  // runtime store never hears about a forward the terminal opened.
+  // runtime store holds nothing live for a forward the terminal opened; its one
+  // write there is the takeover reset to `stopped`.
   if (hostOwned) return "bg-icon-idle";
   switch (status) {
     case "starting":
@@ -191,19 +193,26 @@ export function RuleCard({ row, onEdit, onDelete }: RuleCardProps): ReactNode {
   // `running`. So a mid-dial row handed `running` alone told the user "Deleting
   // it changes nothing else." about a bind the confirm was about to close.
   //
-  // KEPT IN STEP WITH `pageMustStopFirst` BY NAME AND NOT BY LUCK: this is the
-  // flag captured at click time and that predicate is the live read, they are
-  // deliberately separate (`ForwardsPage.tsx`'s `PendingDelete`), and the two
-  // status sets have to match or the sentence goes false again. `failed` and
-  // `stopped` are out of both - neither retains a claim.
+  // KEPT IN STEP WITH `pageMustStopFirst` BY NAME WHERE A LIVE BIND IS AT
+  // STAKE, AND NOT BY LUCK: this is the flag captured at click time and that
+  // predicate is the live read, they are deliberately separate
+  // (`ForwardsPage.tsx`'s `PendingDelete`), and the two must agree on every
+  // row that HOLDS SOMETHING - `running`/`starting`. `pageMustStopFirst` ALSO
+  // answers `true` for a `failed` row with a pending backoff retry (a
+  // scheduled timer, not a bound port - `controller.ts`'s own header on the
+  // ladder), and `pageStops` here does NOT widen to match: a pending retry has
+  // nothing live to report, so "Deleting it changes nothing else." stays true
+  // of it, the same as it already was for `stopped`.
   //
   // A terminal-owned rule is stopped by closing its tab, which is why
   // `hostOwned` rides along as its own argument rather than being folded in
   // here: the dialog has a different sentence for it, not a missing one.
   const pageStops = running || starting;
   // The port that is ACTUALLY LISTENING, whichever owner bound it -
-  // `hostOwnedPort` first, the same order as everything below.
-  const localLabel = localPortLabel(rule, hostOwnedPort ?? boundPort);
+  // `hostOwnedPort` first, the same order as everything below. `row.hostName`
+  // is only read by the `-R` branch: that port is the SERVER's, not this
+  // machine's, and `localPortLabel` needs the name to say so.
+  const localLabel = localPortLabel(rule, hostOwnedPort ?? boundPort, row.hostName);
 
   // A dangling row's host is gone, so there is no credential and no route left
   // to dial - Start is refused at the UI rather than left to fail at
@@ -294,7 +303,8 @@ export function RuleCard({ row, onEdit, onDelete }: RuleCardProps): ReactNode {
           a different mechanism from a conditional render, this page owns no
           error surface of its own, and the
           reachable window is narrow: the page yields to a mid-dial terminal
-          claim with `markStopped` and a warning rather than `markFailed`
+          claim, whether its dial resolves or rejects, with `markStopped` and a
+          warning rather than `markFailed`
           (`controller.ts`), so what is left is a page Start that genuinely
           failed on its own and a terminal that came up afterwards. */}
       {hostOwned ? (

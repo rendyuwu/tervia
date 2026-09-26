@@ -2,7 +2,7 @@
  * Self-check for the repository's comment-citation rule.
  * Run: `npx tsx scripts/citation-format-verify.ts`.
  *
- * `TERVIA.md` and `CONTRIBUTING.md` both carry the rule: a comment may cite only
+ * `TERVIA.md` carries the rule: a comment may cite only
  * what a reader holding nothing but the clone can open. A checked-in file, a
  * symbol, a path in the repo, an upstream project's public tracker named with
  * its project, or a pinned dependency's own source named with its crate. A LINE
@@ -133,36 +133,29 @@
  * 2,342 distinct backticked identifiers in this tree's comments appear nowhere
  * in its comment-stripped code, and almost every one is legitimate. They name
  * Win32 entry points, a dependency's internals, TypeScript compiler node kinds,
- * DOM events, and external tools. The decisive case is `secrets_list`, cited 22
- * times across 12 files precisely BECAUSE it does not exist: the secrets IPC
- * surface names an account per call and exposes no listing command, and several
- * docblocks argue exactly that. A resolvability rule would redden all 22 for
- * being right. So the ratio on offer was about 186 false positives to 1 true
- * one, and a symbol can legitimately live in a dependency in any case. Out of
- * scope, deliberately.
+ * DOM events, and external tools. A resolvability rule would redden all 131 of
+ * them, almost every one for being right, and a symbol can legitimately live in
+ * a dependency in any case. Out of scope, deliberately.
  *
- * THAT SYMBOL IS NAMED HERE, AND ITS ABSENCE IS ASSERTED, which is what makes
- * naming it safe. Two checks below hold this paragraph's arithmetic: one that
- * `secrets_list` still appears nowhere outside a comment in the three roots, and
- * one that it is still cited 22 times inside them. The day somebody implements
- * such a command, or edits one of those comments, a check reddens and whoever is
- * holding it learns that this paragraph needs rewriting. A prose claim about the
- * tree is exactly as durable as the assertion standing behind it, and with no
- * assertion it is a line number by another name.
+ * NO INSTANCE OF THAT CLASS IS NAMED HERE, and that is the rule rather than a
+ * gap. This paragraph used to name `secrets_list` as its decisive case - a
+ * command the secrets IPC surface deliberately did not expose, cited in 26
+ * comments precisely because it did not exist - and two checks at the end of
+ * this file asserted both halves of that arithmetic, which is what made naming
+ * it safe. That command has since been implemented, those two checks were
+ * retired with it, and the paragraph lost its example. It did not lose its
+ * point: a prose claim about the state of the tree is exactly as durable as the
+ * assertion standing behind it, and with no assertion it is a line number by
+ * another name. So the class is described and no instance is named, which is the
+ * same treatment the row-id class above gets, for the same reason.
  *
- * THE ROW-ID CLASS ABOVE NAMES NO INSTANCE, and the contrast with `secrets_list`
- * is the point rather than an inconsistency. An earlier draft named one such row
- * id and the file holding it, which was true when written and false within the
- * hour, because the id was deleted. A comment asserting a state of the tree rots
- * on the next commit for the same reason a line number does, and the shape of
- * the mistake does not change just because the subject is a defect rather than a
- * location.
- *
- * What separates the two: a row id's absence is nobody's invariant, so it can
- * change without anyone noticing and no check could reasonably watch it, whereas
- * `secrets_list` not existing is a deliberate architectural property that 22
- * comments already assert and that a check here now watches. Name a fact when
- * something announces its change, and describe the class when nothing does.
+ * An earlier draft of that row-id paragraph did name one such row id and the
+ * file holding it, which was true when written and false within the hour,
+ * because the id was deleted. A comment asserting a state of the tree rots on the
+ * next commit for the same reason a line number does, and the shape of the
+ * mistake does not change just because the subject is a defect rather than a
+ * location. Name a fact only when something announces its change; describe the
+ * class when nothing does.
  *
  * WHY THE CONTROLS ARE HERE AND NOT IN A NOTE SOMEWHERE. Both halves of this
  * check can fail silently: a detector that matches nothing passes the tree, and
@@ -238,7 +231,7 @@ function check(label: string, ok: boolean, detail?: unknown): void {
  *
  * Every version here is checked against `src-tauri/Cargo.lock` on every run, so
  * an entry cannot survive the bump that invalidates it. A crate that is NOT on
- * this list is not citable at all: `Cargo.lock` pins far more than seven
+ * this list is not citable at all: `Cargo.lock` pins far more than ten
  * crates, and the ones listed are the ones whose internals this repository
  * actually reasons about.
  *
@@ -251,7 +244,10 @@ function check(label: string, ok: boolean, detail?: unknown): void {
  * happen to say, and only the lockfile can confirm an entry.
  */
 const THIRD_PARTY_SOURCES = [
+  "arboard 3.6.1",
   "ironrdp-async 0.9.0",
+  "ironrdp-cliprdr 0.6.0",
+  "ironrdp-cliprdr-format 0.2.0",
   "ironrdp-connector 0.9.0",
   "ironrdp-input 0.6.0",
   "ironrdp-pdu 0.8.0",
@@ -288,8 +284,8 @@ const sortedSet = (xs: string[]): boolean =>
 
 console.log("[allow-list] pinned, sorted, and still true of the lockfile");
 check(
-  "the third-party source allow-list is a sorted set of exactly 7 entries",
-  sortedSet(THIRD_PARTY_SOURCES) && THIRD_PARTY_SOURCES.length === 7,
+  "the third-party source allow-list is a sorted set of exactly 10 entries",
+  sortedSet(THIRD_PARTY_SOURCES) && THIRD_PARTY_SOURCES.length === 10,
   THIRD_PARTY_SOURCES,
 );
 check(
@@ -1520,40 +1516,6 @@ function walk(dir: string, out: string[] = []): string[] {
 const PARTIAL_PATH_CEILING = 38;
 
 /**
- * The symbol this file's own docblock names as absent, and the two counts that
- * keep that paragraph from becoming prose nobody checks.
- *
- * Naming an instance in a comment is safe exactly when something announces its
- * change, and unsafe otherwise: the docblock argues that distinction, and this
- * is the announcing half. Cited in comments and defined nowhere is a deliberate
- * property of the secrets IPC surface, so the day it stops being true a check
- * here reddens rather than a paragraph quietly going stale.
- *
- * Counted with the same instrument the claim came from, `lib/comments.ts`, so
- * the assertion and the measurement cannot disagree about what a comment is.
- */
-const ABSENT_SYMBOL = "secrets_list";
-/** How many comments cite it. An exact pin: the docblock states this number. */
-const ABSENT_SYMBOL_CITATIONS = 22;
-/**
- * This file, excluded from that accounting, because it names the symbol in order
- * to discuss it.
- *
- * Measured the moment the assertion was written: naming `secrets_list` in the
- * docblock moved the comment count from 22 to 27 and put the string literal
- * holding it into the code half, so BOTH assertions failed on their first run
- * against text that is entirely correct. The claim is about the app's IPC
- * surface, not about the file making the claim, and this is the same distinction
- * the docblock draws for a deliberately dead name.
- *
- * Derived from `import.meta.url` rather than written out, so renaming this file
- * cannot silently empty the exclusion and leave the counts looking wrong.
- */
-const SELF = relative(ROOT, fileURLToPath(import.meta.url))
-  .split("\\")
-  .join("/");
-
-/**
  * What gets scanned, as labelled units, so a failure names where it came from.
  *
  * The named files are one unit rather than one each, because two checks apiece
@@ -1584,8 +1546,6 @@ check(
 let partialTotal = 0;
 const partialSites: string[] = [];
 const unitComments: string[] = [];
-let absentInComments = 0;
-const absentInCode: string[] = [];
 for (const { label: root, files } of SCAN_UNITS) {
   check(`${root} has files with comment syntax to scan`, files.length > 0, files.length);
   // Listed is not the same as READ. A unit whose files all failed to yield a
@@ -1601,22 +1561,6 @@ for (const { label: root, files } of SCAN_UNITS) {
     const rel = relative(ROOT, file);
     const src = readFileSync(file, "utf8");
     found.push(...violationsIn(rel, src));
-    // Only the handful of files that mention it at all pay for a second parse.
-    if (src.includes(ABSENT_SYMBOL) && rel !== SELF) {
-      const ranges = commentRangesOf(rel, src);
-      const occurrences = (text: string): number => text.split(ABSENT_SYMBOL).length - 1;
-      absentInComments += ranges.reduce((n, c) => n + occurrences(c.text), 0);
-      // Everything OUTSIDE the comments, which is where a definition, an
-      // invocation or a registration would have to appear.
-      let code = "";
-      let at = 0;
-      for (const c of ranges) {
-        code += src.slice(at, c.pos);
-        at = c.end;
-      }
-      code += src.slice(at);
-      if (occurrences(code) > 0) absentInCode.push(`${rel} (${occurrences(code)})`);
-    }
   }
 
   for (const kind of [
@@ -1651,19 +1595,6 @@ check(
   "every scanned unit yielded comments, so none is listed but unread",
   unitComments.every((u) => Number(u.split(" ").pop()) > 0),
   unitComments,
-);
-
-// The docblock's own arithmetic, asserted. The first is the load-bearing half:
-// were `secrets_list` ever implemented, the paragraph naming it as the decisive
-// argument for leaving symbols alone would be citing a symbol that exists.
-check(
-  `${ABSENT_SYMBOL} appears nowhere outside a comment, which is what the docblock claims`,
-  absentInCode.length === 0,
-  absentInCode,
-);
-check(
-  `${ABSENT_SYMBOL} is still cited ${ABSENT_SYMBOL_CITATIONS} times in comments (now ${absentInComments})`,
-  absentInComments === ABSENT_SYMBOL_CITATIONS,
 );
 
 console.log(failed === 0 ? "\nAll citation-format checks passed." : `\n${failed} check(s) FAILED.`);

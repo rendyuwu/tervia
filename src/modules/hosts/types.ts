@@ -17,9 +17,7 @@ import {
 //
 // Nothing here makes a secret safer. The store holds metadata and presence flags
 // only; on Linux a private key sits in a mode-0600 JSON file before and after
-// this work, and the SSH connect path still round-trips plaintext through the
-// webview on every connect and every ProxyJump hop. What a vault binding buys is
-// FEWER COPIES of one secret.
+// this work. What a vault binding buys is FEWER COPIES of one secret.
 
 export const HOSTS_STORE_PATH = "tervia-hosts.json";
 export const HOSTS_KEY = "hosts";
@@ -30,8 +28,23 @@ export const HOST_GROUPS_KEY = "groups";
  * because this store OUTLIVES the two connection modules whose secrets that purge
  * clears, and it is listed beside the others so this stays the one place that says
  * what is in the file. See `legacyPurge.ts`.
+ *
+ * A FOURTH key lives in this file too, and is not spelled here because all three
+ * stores share one name for it: `TOMBSTONES_KEY` in `src/lib/tombstones.ts`,
+ * holding what `deleteHost` and `deleteGroup` leave behind.
  */
 export const LEGACY_PURGE_KEY = "legacySecretsPurged";
+
+/**
+ * What a host and a group are called in a tombstone's `kind`.
+ *
+ * Both kinds share ONE tombstone list, because both live in one file and `kind`
+ * is what tells them apart. The ids never collide - one is `h-` prefixed and the
+ * other `g-` - but a merge has to know which list a resurrection belongs in, and
+ * the id prefix is a convention this layer does not want to re-derive.
+ */
+export const HOST_TOMBSTONE_KIND = "host";
+export const GROUP_TOMBSTONE_KIND = "group";
 
 /** Seeds for a new row. A stored row always carries a real port. */
 export const SSH_DEFAULT_PORT = 22;
@@ -58,12 +71,27 @@ export const HOST_RDP_SECRET_FIELDS = [HOST_RDP_PASSWORD_FIELD] as const;
 /**
  * How the remote desktop's resolution is chosen.
  *
- * `"preset"` is the only mode today: the desktop is negotiated at a fixed size
- * and the pane letterboxes it. It is persisted from day one anyway, so a later
- * `"fit"` mode is a new union member and a new branch in the pane - not a store
- * migration over everyone's saved rows.
+ * `"preset"` negotiates a fixed size and the pane letterboxes it. `"fit"` opens
+ * at the pane's device-pixel size and asks the server to follow it over the
+ * Display Control channel (MS-RDPEDISP).
+ *
+ * `desktopWidth`/`desktopHeight` stay meaningful in `"fit"`: they are the size
+ * used when the pane cannot be measured at connect, and the size a server with
+ * no Display Control channel stays at.
  */
-export type RdpSizeMode = "preset";
+export type RdpSizeMode = "preset" | "fit";
+
+export const RDP_CLIPBOARD_MODES = ["both", "hostToRemote", "remoteToHost", "off"] as const;
+
+/**
+ * Which directions the RDP clipboard bridge carries.
+ *
+ * Derived from the list above so the runtime check and the type cannot drift.
+ * Absent means `"both"`: optional-with-default on read, so no stored record
+ * needs migrating. `"off"` does not register the CLIPRDR channel at all, so
+ * the server is never told there is a clipboard.
+ */
+export type RdpClipboardMode = (typeof RDP_CLIPBOARD_MODES)[number];
 
 /** One offered desktop resolution. */
 export type RdpSizePreset = {
@@ -89,6 +117,11 @@ export const RDP_SIZE_PRESETS: readonly RdpSizePreset[] = [
 ];
 
 export const RDP_DEFAULT_PRESET = RDP_SIZE_PRESETS[4];
+
+/** `<Combobox>` value for fit mode in the host editor's size picker. Not a
+ *  preset id, so `presetById` returns `undefined` for it and the editor falls
+ *  through to `RDP_DEFAULT_PRESET` for the persisted fallback size. */
+export const RDP_FIT_SIZE_ID = "fit";
 
 /** Preset id for a width/height pair, or "" when it matches no preset (a row
  *  written by a later build offering a size this one does not). */
@@ -119,8 +152,41 @@ export type HostBase = {
   name: string;
   host: string;
   port: number;
-  /** At most one, and groups do not nest. */
+  /** At most one, directly. The group itself may nest under another
+   *  (`HostGroup.parentId`), but this field still names exactly one group -
+   *  an ancestor filter match runs through the chain of `HostGroup` records,
+   *  never through a path stored here. */
   groupId?: string;
+  /**
+   * Free-form labels, cross-cutting rather than exclusive: unlike `groupId`
+   * (at most one), a host can carry several. Normalised by
+   * {@link normalizeHostTags} on every LOCAL write - the store, the host
+   * editor, the backup importer - so a reader coming from one of those never
+   * sees a blank entry, a duplicate spelling, or an over-length or
+   * over-count array. A sync landing is carried as-is, like every other host
+   * field, so that guarantee does not extend to a record another device
+   * wrote. `undefined` means "no tags", never `[]` - the store never
+   * persists an empty array, the same convention `pins` and `updatedAt`
+   * already use for "not written yet".
+   *
+   * No managed tag record backs this, so there is no rename- or
+   * delete-everywhere across the hosts that carry a tag - `KNOWN-LIMITS.md`
+   * carries it, under "Host tags".
+   */
+  tags?: readonly string[];
+  /**
+   * One of {@link HOST_ICON_IDS}, drawn beside the name on the host card.
+   * Typed `string`, not `HostIconId`: no writer checks it against this build's
+   * ids (the editor and store carry it as-is, a backup import only trims it),
+   * so an id a later build wrote survives an unrelated edit here, and
+   * {@link hostIconId} is where a reader turns it into something drawable.
+   * Absent = no glyph, which is the card as it was before this field existed.
+   */
+  icon?: string;
+  /** One of {@link HOST_COLOR_IDS}. Same terms as `icon`, resolved through
+   *  {@link hostColorId}. Never the card's only distinguishing mark: the host
+   *  name is always rendered beside it. */
+  color?: string;
   description?: string;
   /** Unix ms of the last successful connect. */
   lastConnectedAt?: number;
@@ -150,7 +216,130 @@ export type HostBase = {
    * `nextPins`, which is the one place that inference lives.
    */
   pins?: HostPins;
+  /**
+   * Unix ms of the last change to this record's own content, stamped by the
+   * store on every write.
+   *
+   * ABSENT IS NOT ZERO, AND MUST NOT BE BACKFILLED ON READ. A record with no
+   * stamp has simply never been written by a build that stamps, and reading
+   * that as "changed just now" would have every legacy record win every merge
+   * it takes part in. A read never rewrites the file to add one; the next
+   * ordinary save does.
+   *
+   * NEVER TRUSTED FROM THE CALLER - the store overwrites whatever arrives here,
+   * for the reason `withPins` in `store.ts` gives about pins: an editor
+   * round-trips the record it loaded, so honouring a caller's value would mean
+   * a save never bumps the stamp. A restored backup is therefore stamped as a
+   * local write, which it genuinely is: every sanitizer in `modules/backup` is
+   * a whitelist, so an exported stamp is dropped at import rather than carried
+   * through. The one writer that does NOT overwrite it is `applyRemote` in
+   * `store.ts`, which lands an already-merged record at the timestamp the remote
+   * gave it - the only caller that did not originate what it is writing.
+   *
+   * On {@link HostBase} rather than per arm, on the same grounds as `pins`: the
+   * shape does not depend on `protocol`, so nothing needs narrowing.
+   *
+   * NOT moved by a connect or by pinning a key. Those write `lastConnectedAt`
+   * and the pins, which are per-machine history and trust rather than record
+   * content - see `patchHost` in `store.ts`.
+   */
+  updatedAt?: number;
 };
+
+/** A tag longer than this is truncated, not refused - a tag is a short label,
+ *  not a place for prose (`description` already exists for that). */
+export const HOST_TAG_MAX_LENGTH = 40;
+
+/** A host past this many tags keeps its first `HOST_TAG_MAX_COUNT`, in the
+ *  order given, and drops the rest: `HostCard`'s badge row has no
+ *  overflow affordance, so this bounds how many badges one card can grow.
+ *  It does not bound `page/TagStrip.tsx`, which shows one chip per tag in
+ *  use across the whole fleet, not per host. */
+export const HOST_TAG_MAX_COUNT = 24;
+
+/**
+ * `tags` normalised the one way every writer must agree on: trimmed, cut to
+ * {@link HOST_TAG_MAX_LENGTH} Unicode CODE POINTS (not UTF-16 units, so a
+ * surrogate pair straddling the cut survives whole rather than splitting)
+ * with any trailing space the cut left behind trimmed too, blanks dropped,
+ * deduped case-insensitively with the FIRST spelling kept (the same rule
+ * `sameName` in `store.ts` already applies to a group's name), and capped at
+ * {@link HOST_TAG_MAX_COUNT}.
+ *
+ * TOTAL: `tags` is `unknown` rather than `readonly string[] | undefined`
+ * because a landed sync record was never run through this (see
+ * {@link HostBase.tags}) and is read by the same code paths a local record
+ * is, so a non-array value or a non-string entry is dropped rather than
+ * thrown on - the shape every other reader of a landed record already
+ * tolerates.
+ *
+ * Every LOCAL writer means every local writer: `store.ts`'s `writeHost`, the
+ * host editor's save path, and `modules/backup/file.ts`'s `sanitizeHost` all
+ * call this rather than each keeping its own idea of what counts as a valid
+ * tag. `applyRemote` does not - see {@link HostBase.tags}.
+ *
+ * Returns `undefined` for "no tags left after normalising", never `[]` - see
+ * {@link HostBase.tags}.
+ */
+export function normalizeHostTags(tags: unknown): readonly string[] | undefined {
+  if (!Array.isArray(tags)) return undefined;
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of tags) {
+    if (typeof raw !== "string") continue;
+    const trimmed = Array.from(raw.trim()).slice(0, HOST_TAG_MAX_LENGTH).join("").trimEnd();
+    if (!trimmed) continue;
+    const key = trimmed.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(trimmed);
+    if (out.length >= HOST_TAG_MAX_COUNT) break;
+  }
+  return out.length > 0 ? out : undefined;
+}
+
+/**
+ * The glyphs a host can wear on its card, by the id that is STORED. Lucide's own
+ * kebab-case names, so an id reads as the icon it draws. `appearance.tsx` maps
+ * each to its component through a `Record<HostIconId, ...>`, which is what keeps
+ * the two lists from drifting.
+ */
+export const HOST_ICON_IDS = [
+  "server",
+  "database",
+  "globe",
+  "cloud",
+  "monitor",
+  "laptop",
+  "terminal",
+  "shield",
+  "router",
+  "container",
+] as const;
+export type HostIconId = (typeof HOST_ICON_IDS)[number];
+
+/**
+ * A fixed palette, not a free picker. Each id names an ANSI slot of the active
+ * theme (`--tervia-ansi-<id>`), which `appearance.tsx` paints with, so a host
+ * colour follows every theme preset and custom theme on both light and dark
+ * instead of needing its own contrast check - and `scripts/theme-verify.ts`
+ * forbids raw Tailwind hues in `src/` regardless.
+ */
+export const HOST_COLOR_IDS = ["red", "yellow", "green", "cyan", "blue", "magenta"] as const;
+export type HostColorId = (typeof HOST_COLOR_IDS)[number];
+
+/** `value` as an icon id this build can draw, else `undefined`. TOTAL, for the
+ *  reason `normalizeHostTags` is: a landed sync record, or one a later build
+ *  wrote with an id this build does not know, reaches the card unchecked. */
+export function hostIconId(value: unknown): HostIconId | undefined {
+  return HOST_ICON_IDS.find((id) => id === value);
+}
+
+/** `value` as a colour id this build can paint, else `undefined`. Same terms as
+ *  {@link hostIconId}. */
+export function hostColorId(value: unknown): HostColorId | undefined {
+  return HOST_COLOR_IDS.find((id) => id === value);
+}
 
 /**
  * A machine reached over SSH.
@@ -216,6 +405,8 @@ export type RdpHost = HostBase & {
    */
   certFingerprint?: string;
   tunnel?: RdpTunnel;
+  /** Clipboard directions. Absent means `"both"`; see {@link RdpClipboardMode}. */
+  clipboard?: RdpClipboardMode;
 };
 
 /**
@@ -228,8 +419,39 @@ export type RdpHost = HostBase & {
 export type Host = SshHost | RdpHost;
 
 /** A label, not an owner - which is why deleting one clears `groupId` on its
- *  members instead of deleting them. */
-export type HostGroup = { id: string; name: string; order?: number };
+ *  members instead of deleting them, and re-parents its own child groups to
+ *  its OWN parent instead of deleting or orphaning them. `parentId` nests one
+ *  group under another; absent, it is a root group. A `parentId` naming a
+ *  group that no longer exists, naming itself, or sitting in a cycle with
+ *  another group's `parentId` is read as root rather than refused - see
+ *  `groupTree.ts`'s `buildGroupTree`, which every reader of this list goes
+ *  through. `upsertGroup` (`store.ts`) refuses all three at WRITE time
+ *  instead, on the pattern its jump-host chain check already set.
+ *  `updatedAt` reads exactly as {@link HostBase.updatedAt} does, absent
+ *  included.
+ *
+ *  `defaultIdentityId` names the vault identity a NEW host created in this
+ *  group (or in a descendant with no default of its own -
+ *  `groupTree.ts`'s `defaultIdentityFor` walks the chain) is pre-bound to,
+ *  copied into the host's `credential` at CREATE time only - editing or
+ *  clearing this field never moves a host that already exists, the same way
+ *  `resolve.ts` never reads a group at all. One field, not one per protocol:
+ *  a `VaultIdentity` is protocol-agnostic by design (its own doc in
+ *  `modules/vault/types.ts`), so there is no per-protocol validity to
+ *  narrow on. `upsertGroup` refuses a value naming no identity, but only
+ *  when this field is the one changing - on `parentId`'s own pattern, so a
+ *  dangling value arriving through sync never blocks a rename, and
+ *  `defaultIdentityFor` skips a dangling value at read time and falls
+ *  through to a live ancestor's instead of refusing anything or shadowing
+ *  one further up the chain. */
+export type HostGroup = {
+  id: string;
+  name: string;
+  parentId?: string;
+  order?: number;
+  updatedAt?: number;
+  defaultIdentityId?: string;
+};
 
 export function isSshHost(host: Host): host is SshHost {
   return host.protocol === "ssh";
@@ -269,6 +491,49 @@ export function hostPins(host: Host): HostPins {
   if (host.pins) return host.pins;
   const flat = hostFingerprint(host);
   return flat ? { [host.host]: flat } : {};
+}
+
+/**
+ * One row for the Known Hosts page: one pinned key or certificate, at one
+ * address, on one host. {@link hostPins} above is per-host and keyed by
+ * address; this flattens every host's map into the shape a page listing
+ * every pin across the whole store wants, one row per (host, address).
+ */
+export type KnownHostRow = {
+  hostId: string;
+  hostName: string;
+  protocol: Host["protocol"];
+  address: string;
+  fingerprint: string;
+};
+
+/**
+ * Every pinned key or certificate across every host, sorted by host name
+ * then address (both case-insensitively), with the host id as a final
+ * tie-break so two hosts sharing a name still sort the same way twice -
+ * the read side of {@link HostPins} that nothing before the Known Hosts
+ * page ever needed, because every earlier reader already held one host's
+ * own record.
+ */
+export function knownHostRows(hosts: readonly Host[]): KnownHostRow[] {
+  const rows: KnownHostRow[] = [];
+  for (const host of hosts) {
+    for (const [address, fingerprint] of Object.entries(hostPins(host))) {
+      rows.push({
+        hostId: host.id,
+        hostName: host.name,
+        protocol: host.protocol,
+        address,
+        fingerprint,
+      });
+    }
+  }
+  return rows.sort(
+    (a, b) =>
+      a.hostName.toLowerCase().localeCompare(b.hostName.toLowerCase()) ||
+      a.address.toLowerCase().localeCompare(b.address.toLowerCase()) ||
+      a.hostId.localeCompare(b.hostId),
+  );
 }
 
 /** The value {@link credentialStamp} reports for a host that is not in the store. */

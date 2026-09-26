@@ -21,6 +21,12 @@ import { useHostKeyPrompt } from "./hostKeyPrompt";
  * click-outside disabled) so credentials are never sent to an unverified host
  * by accident. Mounted once at the app root.
  *
+ * The modal is intentional; `handshake_error` (ssh/session.rs) records why a
+ * lapse parks. A link that drops while the dialog is up re-enters the
+ * reconnect ladder, and each attempt raises a fresh prompt. The ladder speaks
+ * through terminal banners behind this dialog, so the backdrop dims and does
+ * not blur: those lines stay readable while the dialog stays blocking.
+ *
  * A prompt carrying `certificate` is the RDP case; the copy switches on that
  * rather than on a protocol tag, because the difference IS the certificate: an
  * SSH host key has no subject or issuer to show, and there is no `ssh-keygen`
@@ -74,6 +80,7 @@ export function HostKeyPromptDialog() {
       {current && (
         <DialogContent
           showCloseButton={false}
+          overlayClassName="supports-backdrop-filter:backdrop-blur-none"
           onEscapeKeyDown={(e) => e.preventDefault()}
           onInteractOutside={(e) => e.preventDefault()}
           className="sm:max-w-lg"

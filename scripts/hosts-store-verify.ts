@@ -51,14 +51,16 @@
  *    otherwise is a secret `resolveRdpAuth` hands the backend regardless.
  *
  * 7. NO ACCOUNT OUTLIVES THE RECORD NAMING IT, AND NO RECORD OUTLIVES ITS
- *    ACCOUNT. There is no `secrets_list` command, so an account nothing
- *    references is unreachable, not merely untidy. A delete clears the host's
- *    accounts; an upsert clears the ones the new record can no longer name, but
- *    only AFTER the new record is on disk, because a protocol change has no
- *    copy step and this layer cannot put a secret back; a partial write on a
- *    brand-new host rolls back. The two OLD connection stores' accounts are swept
- *    once by `legacyPurge.ts`, which is the only thing that can ever name them
- *    after those modules are deleted.
+ *    ACCOUNT. `secrets_list` can enumerate an account nothing references, but
+ *    its only consumer is the Vault page's unreferenced-entry sweep, which the
+ *    user has to find, read and confirm - so an account this layer fails to
+ *    release waits on somebody going looking rather than being merely untidy. A
+ *    delete clears the host's accounts; an upsert clears the ones the new record
+ *    can no longer name, but only AFTER the new record is on disk, because a
+ *    protocol change has no copy step and this layer cannot put a secret back; a
+ *    partial write on a brand-new host rolls back. The two OLD connection
+ *    stores' accounts are swept once by `legacyPurge.ts`, which is what gives
+ *    that sweep a known set to subtract from for those two services.
  *
  * 8. AN RDP PASSWORD NEVER ENTERS THE WEBVIEW. There is no read-back for one, not
  *    even for the editor. A DUPLICATE still carries it, because `secrets_copy`
@@ -84,6 +86,7 @@
 import { createWriteQueue } from "../src/lib/recoveredStore";
 import type { StoreFileIo, StoreFileRead, StoreRecovery } from "../src/lib/storeRecovery";
 import type { HostsStoreIo } from "../src/modules/hosts/adapters";
+import { defaultIdentityFor } from "../src/modules/hosts/groupTree";
 import { MAX_JUMP_HOPS, resolveJumpHops } from "../src/modules/hosts/jumps";
 import {
   createHostsStore,
@@ -95,6 +98,8 @@ import {
   CREDENTIAL_STAMP_ABSENT,
   CREDENTIAL_STAMP_INLINE,
   hostFingerprint,
+  hostPins,
+  knownHostRows,
   HostBindingChangedError,
   isRdpHost,
   isSshHost,
@@ -337,7 +342,22 @@ function harness(
     },
   };
 
-  const hosts = createHostsStore({ store, secrets, files });
+  // Wired from the same `seed.identities` the `deps.vault` stub below reads,
+  // so a test that seeds an identity gets BOTH: `upsertGroup`'s existence
+  // check for `defaultIdentityId`, and a bindable identity for the resolve
+  // deps. UNWIRED (not merely empty) when `seed.identities` is omitted
+  // entirely, so a test that never mentions a vault can still exercise
+  // `upsertGroup`'s own "optional, omitting means the check never runs"
+  // contract for `findIdentity` - a wired stub that simply finds nothing
+  // would prove the wrong thing.
+  const hosts = createHostsStore({
+    store,
+    secrets,
+    files,
+    findIdentity: seed.identities
+      ? async (id) => seed.identities?.find((i) => i.id === id)
+      : undefined,
+  });
   // Just enough of a vault for `resolveSshAuth` to dereference an identity
   // binding. The real store satisfies the same two-method shape.
   const deps: ResolveDeps = {
@@ -345,7 +365,6 @@ function harness(
       findIdentity: async (id) => (seed.identities ?? []).find((i) => i.id === id),
       findKey: async (id) => (seed.keys ?? []).find((k) => k.id === id),
     },
-    secrets,
   };
   return {
     hosts,
@@ -808,8 +827,9 @@ console.log("\n[duplicate] a copy that cannot carry a secret writes no record at
     ["h-1"],
   );
   // The partial copy is rolled back, which is safe for exactly one reason: the
-  // copy's id is brand new, so there was nothing at these accounts to lose. There
-  // is no `secrets_list`, so anything left here is unreachable rather than untidy.
+  // copy's id is brand new, so there was nothing at these accounts to lose. No
+  // record would name anything left here, so only the Vault page's
+  // unreferenced-entry sweep would find it.
   check(
     "the account that DID copy is cleared again, leaving only the source's two",
     [...h.kept.keys()].sort(),
@@ -906,21 +926,22 @@ console.log("\n[jumps] the chain resolves in connect order, once per hop");
     useAgent: true,
     expectedFingerprint: undefined,
   });
-  check("a vault-bound hop resolves through the identity, not the host accounts", hops[1], {
+  check("a vault-bound hop references the identity, not the host accounts", hops[1], {
     connectionId: "j-mid",
     host: "j-mid.example",
     port: 22,
     user: "vaulted",
-    password: "from-the-vault",
+    password: { kind: "keychain", service: "tervia-vault", account: "i-1::password" },
     expectedFingerprint: undefined,
   });
-  // The call LOG, not the hop shape: the agent hop's empty credential is what the
-  // check above proves, and this is what proves it cost no IPC. One read for the
-  // whole chain, against the vault, for the one hop that has an identity.
+  // The call LOG, not the hop shape: the references above say WHERE each hop's
+  // credential lives, and this says the chain never went and got one. Resolving
+  // a chain of any depth costs no keychain IPC at all - the host process
+  // dereferences at connect time.
   check(
-    "the only keychain read in the whole chain is the vault identity's",
+    "resolving the whole chain reads nothing",
     h.reads().flatMap((c) => c.accounts.map((a) => `${c.service}::${a}`)),
-    ["tervia-vault::i-1::password"],
+    [],
   );
   check("no jump host is no hops", await resolveJumpHops(undefined, "h-target", all, h.deps), []);
 }
@@ -1102,6 +1123,58 @@ console.log("\n[flags] presence flags track writes, and never read a secret back
 }
 
 // ---------------------------------------------------------------------------
+console.log("\n[tags] normalised on every write: trimmed, deduped, capped, absent not []");
+{
+  const h = harness();
+  const created = await h.hosts.upsertHost(
+    sshHost({ id: "h-1", tags: ["  Prod  ", "prod", "PROD", "db", ""] }),
+  );
+  check("trimmed, blanks dropped, deduped case-insensitively, first spelling kept", created.tags, [
+    "Prod",
+    "db",
+  ]);
+  check("and that is what got persisted", (await h.hosts.findHost("h-1"))?.tags, ["Prod", "db"]);
+
+  const long = "x".repeat(60);
+  const truncated = await h.hosts.upsertHost(sshHost({ id: "h-1", tags: [long] }));
+  check("an over-length tag is truncated, not dropped", truncated.tags?.[0]?.length, 40);
+
+  const trailingSpaceAtCut = "a".repeat(39) + " b";
+  const cutDropsTrailingSpace = await h.hosts.upsertHost(
+    sshHost({ id: "h-1", tags: [trailingSpaceAtCut] }),
+  );
+  check(
+    "a cut landing on a space trims it, rather than keeping a trailing space",
+    cutDropsTrailingSpace.tags,
+    ["a".repeat(39)],
+  );
+
+  const surrogatePairAtCut = "a".repeat(39) + "\u{1F600}";
+  const cutIsCodePointSafe = await h.hosts.upsertHost(
+    sshHost({ id: "h-1", tags: [surrogatePairAtCut] }),
+  );
+  check(
+    "the cut counts Unicode code points, so a surrogate pair at the boundary survives whole",
+    cutIsCodePointSafe.tags,
+    [surrogatePairAtCut],
+  );
+
+  const many = Array.from({ length: 30 }, (_, i) => `tag-${i}`);
+  const capped = await h.hosts.upsertHost(sshHost({ id: "h-1", tags: many }));
+  check(
+    "a host past the count cap keeps only the first 24, in order",
+    capped.tags,
+    many.slice(0, 24),
+  );
+
+  const cleared = await h.hosts.upsertHost(sshHost({ id: "h-1", tags: ["   ", ""] }));
+  check("tags left empty after normalising are absent, never []", cleared.tags, undefined);
+
+  const untouched = await h.hosts.upsertHost(sshHost({ id: "h-1" }));
+  check("no tags field at all is also absent, not an empty array", untouched.tags, undefined);
+}
+
+// ---------------------------------------------------------------------------
 console.log("\n[flags] an RDP row owns one account and refuses key material");
 {
   const h = harness();
@@ -1128,7 +1201,8 @@ console.log("\n[flags] an RDP row owns one account and refuses key material");
 console.log("\n[accounts] no secret outlives the record naming it");
 {
   // A partial write on a BRAND-NEW host rolls back, or the first secret sits at an
-  // account no record names - and there is no `secrets_list` to find it with.
+  // account no record names - and only the Vault page's unreferenced-entry sweep
+  // would find it.
   const broken = harness({ fail: { setAccount: "h-1::privateKey" } });
   await rejects(
     "a write that throws partway is reported",
@@ -1137,6 +1211,28 @@ console.log("\n[accounts] no secret outlives the record naming it");
   );
   check("and the secret that DID land is cleared again", broken.kept.size, 0);
   check("with no half-written row persisted", (await broken.hosts.listHosts()).length, 0);
+
+  // The rollback tries EVERY account even after one refuses. It used to stop at
+  // the first throw, and the fields after it - written a moment ago under an id
+  // no record will ever name - were never attempted.
+  const stuck = harness({
+    fail: { setAccount: "h-1::keyPassphrase", deleteAccount: "h-1::password" },
+  });
+  await rejects(
+    "a rollback that is itself refused still reports the write's own error",
+    () =>
+      stuck.hosts.upsertHost(sshHost({ id: "h-1" }), {
+        password: "pw",
+        privateKey: "PEM",
+        keyPassphrase: "pp",
+      }),
+    ["keychain refused h-1::keyPassphrase"],
+  );
+  check(
+    "and the account after the refused one is still cleared",
+    [...stuck.kept.keys()],
+    [at("h-1", "password")],
+  );
 
   // For a host that already exists the accounts stay reachable through
   // `deleteHost`, so clearing them would destroy a secret this layer cannot
@@ -1350,6 +1446,43 @@ console.log("\n[accounts] the release happens AFTER the record is written, never
     [partial.kept.get(at("h-1", "privateKey")), partial.kept.get(at("h-1", "keyPassphrase"))],
     [undefined, "pp"],
   );
+
+  // The FIRST stale field refusing no longer strands the second: every field is
+  // tried, so the message names only the one really left.
+  const firstFails = harness({
+    hosts: [
+      sshHost({
+        id: "h-1",
+        credential: {
+          kind: "inline",
+          hostId: "h-1",
+          user: "root",
+          authMode: "key",
+          hasPassword: false,
+          hasPrivateKey: true,
+          hasKeyPassphrase: true,
+        },
+      }),
+    ],
+    kept: { [at("h-1", "privateKey")]: "PEM", [at("h-1", "keyPassphrase")]: "pp" },
+    fail: { deleteAccount: "h-1::privateKey" },
+  });
+  let firstSaid = "";
+  try {
+    await firstFails.hosts.upsertHost(rdpHost({ id: "h-1" }));
+  } catch (e) {
+    firstSaid = e instanceof Error ? e.message : String(e);
+  }
+  assert(firstSaid.includes("privateKey"), "a refused first field is named");
+  assert(
+    !firstSaid.includes("keyPassphrase"),
+    "and the field after it is cleared, not stranded and named",
+  );
+  check(
+    "the refused field is still there and the one after it is gone",
+    [firstFails.kept.get(at("h-1", "privateKey")), firstFails.kept.get(at("h-1", "keyPassphrase"))],
+    ["PEM", undefined],
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -1395,8 +1528,9 @@ console.log("\n[vault] a vault-bound host owns no accounts");
 console.log("\n[delete] an unreferenced host takes its accounts with it");
 {
   // What is left of a delete once both cascades are refusals. Nothing rides
-  // `h-gone`, so it goes, and every account it owned goes by NAME - there is no
-  // `secrets_list`, so an account left behind is unreachable rather than untidy.
+  // `h-gone`, so it goes, and every account it owned goes by NAME - an account
+  // left behind is named by no record, so only the Vault page's
+  // unreferenced-entry sweep would find it.
   // The two refusal cases are the next two blocks.
   const h = harness();
   await h.hosts.upsertHost(sshHost({ id: "h-keep" }), { password: "keeppw" });
@@ -1678,11 +1812,21 @@ console.log("\n[groups] deleting a group clears the label and keeps the rows");
   // Against a LITERAL, not against what `upsertGroup` returned - that is the very
   // object the store persisted, so comparing the two proves persistence happened
   // and could not notice a mangled field.
-  check("a group round-trips field for field", await h.hosts.findGroup("g-1"), {
+  // `updatedAt` is the one field the literal cannot state in advance, because the
+  // store stamps it from the real clock. That it is stamped at all, that it moves,
+  // and that a caller's value is overridden are `scripts/sync-prereq-verify.ts`'s
+  // subject; here it is only removed so the remaining fields can be named.
+  const found: Partial<HostGroup> = { ...(await h.hosts.findGroup("g-1")) };
+  const stamp = found.updatedAt;
+  // Deleted rather than overwritten with `undefined`, so what is compared still
+  // has EXACTLY the remaining keys and an extra field would still redden this.
+  delete found.updatedAt;
+  check("a group round-trips field for field, apart from the store's stamp", found, {
     id: "g-1",
     name: "Production",
     order: 0,
   });
+  check("and it carries that stamp", typeof stamp, "number");
   await rejects("a group needs a name", () => h.hosts.upsertGroup({ id: "g-3", name: "  " }), [
     "needs a name",
   ]);
@@ -1719,6 +1863,328 @@ console.log("\n[groups] deleting a group clears the label and keeps the rows");
     groupsBefore,
   );
   check("and the host list with it", JSON.stringify(h.rows()), rowsBefore);
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n[groups] nesting: a parent round-trips, and a bad one is refused like a jump host");
+{
+  const h = harness();
+  await h.hosts.upsertGroup({ id: "g-1", name: "Production" });
+  const child = await h.hosts.upsertGroup({ id: "g-2", name: "Web", parentId: "g-1" });
+  check("a good parent round-trips", child.parentId, "g-1");
+
+  await rejects(
+    "a group cannot be its own parent",
+    () => h.hosts.upsertGroup({ id: "g-3", name: "Self", parentId: "g-3" }),
+    ["cannot be its own parent"],
+  );
+  await rejects(
+    "a parent that does not exist is refused",
+    () => h.hosts.upsertGroup({ id: "g-3", name: "Gap", parentId: "g-gone" }),
+    ["does not exist"],
+  );
+
+  // `assertSshTarget`'s transitive half, mirrored: `g-2`'s own 1-cycle refusal
+  // already caught the immediate case above, so this proves the WALK catches
+  // A -> B -> A instead of only the first hop.
+  await h.hosts.upsertGroup({ id: "g-4", name: "A" });
+  await h.hosts.upsertGroup({ id: "g-5", name: "B", parentId: "g-4" });
+  await rejects(
+    "reparenting A under its own descendant closes a cycle and is refused",
+    () => h.hosts.upsertGroup({ id: "g-4", name: "A", parentId: "g-5" }),
+    ["cycle"],
+  );
+  check(
+    "neither side of the attempted cycle moved",
+    (await h.hosts.findGroup("g-4"))?.parentId,
+    undefined,
+  );
+}
+
+// ---------------------------------------------------------------------------
+console.log(
+  "\n[groups] a landed bad chain refuses nothing UNTIL a write actually touches the bad edge",
+);
+{
+  // Seeded directly, bypassing `upsertGroup` - this is state only a sync
+  // landing (`applyRemote`, no reference check by design) can produce.
+  // `upsertGroup` itself would have refused every one of these three edges.
+  const h = harness({
+    groups: [
+      { id: "g-dangling", name: "Dangling", parentId: "g-missing" },
+      { id: "g-a", name: "A", parentId: "g-b" },
+      { id: "g-b", name: "B", parentId: "g-a" },
+    ],
+  });
+  const renamed = await h.hosts.upsertGroup({
+    id: "g-dangling",
+    name: "Renamed",
+    parentId: "g-missing",
+  });
+  check(
+    "renaming a group whose stored parent dangles succeeds - the edge did not change",
+    renamed.name,
+    "Renamed",
+  );
+  const child = await h.hosts.upsertGroup({ id: "g-child", name: "Child", parentId: "g-dangling" });
+  check(
+    "creating a sub-group under a group whose OWN parent dangles succeeds - `g-dangling` itself exists",
+    child.parentId,
+    "g-dangling",
+  );
+  const renamedCycleMember = await h.hosts.upsertGroup({
+    id: "g-a",
+    name: "Also renamed",
+    parentId: "g-b",
+  });
+  check(
+    "renaming a group stuck in a landed cycle succeeds too, for the same reason",
+    renamedCycleMember.name,
+    "Also renamed",
+  );
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n[groups] deleting a group re-parents its children, never deletes them");
+{
+  const h = harness();
+  await h.hosts.upsertGroup({ id: "g-root", name: "Root" });
+  await h.hosts.upsertGroup({ id: "g-mid", name: "Mid", parentId: "g-root" });
+  await h.hosts.upsertGroup({ id: "g-leaf", name: "Leaf", parentId: "g-mid" });
+  const solo = await h.hosts.upsertGroup({ id: "g-solo", name: "Solo" });
+
+  await h.hosts.deleteGroup("g-mid");
+  check(
+    "the leaf moves up to the deleted group's own parent",
+    (await h.hosts.findGroup("g-leaf"))?.parentId,
+    "g-root",
+  );
+
+  await h.hosts.deleteGroup("g-root");
+  check(
+    "and a child of a ROOT group becomes root itself, not orphaned",
+    (await h.hosts.findGroup("g-leaf"))?.parentId,
+    undefined,
+  );
+  // `g-solo` never had a parent, so a check that its `parentId` is still
+  // `undefined` can never fail - it would pass even if EVERY group got
+  // touched. `updatedAt` is the row that actually distinguishes "left alone"
+  // from "rewritten to the same value", on the `[cascade]` block's
+  // "non-member is left exactly as it was" pattern in `sync-prereq-verify.ts`.
+  check(
+    "a group with no children of its own is untouched by either delete",
+    (await h.hosts.findGroup("g-solo"))?.updatedAt,
+    solo.updatedAt,
+  );
+}
+
+// ---------------------------------------------------------------------------
+console.log(
+  "\n[groups] deleting a group re-parents a child through a landed cycle to root, not to itself",
+);
+{
+  // Seeded directly: `upsertGroup` would refuse this pair, but a sync landing
+  // can still merge it. `target`'s raw `parentId` (`g-d`) is itself part of
+  // the cycle being deleted out from under it, so a child re-parented to the
+  // raw value would land on itself.
+  const h = harness({
+    groups: [
+      { id: "g-c", name: "C", parentId: "g-d" },
+      { id: "g-d", name: "D", parentId: "g-c" },
+    ],
+  });
+  await h.hosts.deleteGroup("g-c");
+  check(
+    "D's new parent is D's own EFFECTIVE parent (root - its cycle partner is gone), not itself",
+    (await h.hosts.findGroup("g-d"))?.parentId,
+    undefined,
+  );
+}
+
+// ---------------------------------------------------------------------------
+console.log(
+  "\n[groups] defaultIdentityFor: own group wins, else the nearest ancestor's - and a dead default is skipped",
+);
+{
+  const groups: HostGroup[] = [
+    { id: "g-root", name: "Root", defaultIdentityId: "i-root" },
+    { id: "g-mid", name: "Mid", parentId: "g-root" },
+    { id: "g-leaf", name: "Leaf", parentId: "g-mid", defaultIdentityId: "i-leaf" },
+    { id: "g-solo", name: "Solo" },
+  ];
+  const live = new Set(["i-root", "i-leaf", "i-x"]);
+  check(
+    "a group's own default wins over any ancestor's",
+    defaultIdentityFor("g-leaf", groups, live),
+    "i-leaf",
+  );
+  check(
+    "with no default of its own, the nearest ancestor's is used",
+    defaultIdentityFor("g-mid", groups, live),
+    "i-root",
+  );
+  check(
+    "a group with no default anywhere on its chain answers undefined",
+    defaultIdentityFor("g-solo", groups, live),
+    undefined,
+  );
+  check(
+    "no group selected answers undefined",
+    defaultIdentityFor(undefined, groups, live),
+    undefined,
+  );
+  check(
+    "a group id naming nothing in the list answers undefined",
+    defaultIdentityFor("g-gone", groups, live),
+    undefined,
+  );
+  check(
+    "an OWN default naming an identity that is not live is skipped, falling through to a live ancestor",
+    defaultIdentityFor("g-leaf", groups, new Set(["i-root"])),
+    "i-root",
+  );
+  check(
+    "a dead own default with no live ancestor answers undefined, not the dead id",
+    defaultIdentityFor("g-leaf", groups, new Set()),
+    undefined,
+  );
+
+  // Tolerant of a dangling or cyclic parent, on `effectiveParents`'s own
+  // terms: neither vanishes the answer nor hangs the walk.
+  const withBadEdges: HostGroup[] = [
+    { id: "g-a", name: "A", parentId: "g-b" },
+    { id: "g-b", name: "B", parentId: "g-a" },
+    { id: "g-dangling", name: "Dangling", parentId: "g-missing", defaultIdentityId: "i-x" },
+    { id: "g-child", name: "Child", parentId: "g-dangling" },
+  ];
+  check(
+    "a group ON a landed cycle has no ancestor to fall through to",
+    defaultIdentityFor("g-a", withBadEdges, live),
+    undefined,
+  );
+  check(
+    "a dangling parent does not stop the group's OWN default from answering",
+    defaultIdentityFor("g-dangling", withBadEdges, live),
+    "i-x",
+  );
+  check(
+    "a child of a dangling-parented group still falls through to it",
+    defaultIdentityFor("g-child", withBadEdges, live),
+    "i-x",
+  );
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n[groups] a default identity must exist, and only when the field is CHANGING");
+{
+  const identity: VaultIdentity = {
+    id: "i-1",
+    name: "root @ prod",
+    username: "vaulted",
+    authMode: "password",
+    hasPassword: true,
+  };
+  const h = harness({ identities: [identity] });
+  const group = await h.hosts.upsertGroup({
+    id: "g-1",
+    name: "Production",
+    defaultIdentityId: "i-1",
+  });
+  check("a live default round-trips", group.defaultIdentityId, "i-1");
+
+  await rejects(
+    "a default naming no identity is refused",
+    () => h.hosts.upsertGroup({ id: "g-2", name: "Staging", defaultIdentityId: "i-gone" }),
+    ["does not exist"],
+  );
+
+  const renamed = await h.hosts.upsertGroup({
+    ...group,
+    name: "Production (renamed)",
+  });
+  check(
+    "leaving the default alone on an unrelated edit is not re-checked",
+    renamed.defaultIdentityId,
+    "i-1",
+  );
+
+  const cleared = await h.hosts.upsertGroup({ ...renamed, defaultIdentityId: undefined });
+  check(
+    "clearing the default never needs the identity to exist",
+    cleared.defaultIdentityId,
+    undefined,
+  );
+
+  // Seeded directly, on the `[groups] a landed bad chain...` block's own
+  // pattern above - state only a sync landing (`applyRemote`, no reference
+  // check by design) can produce. `upsertGroup` itself would have refused
+  // writing this value in the first place.
+  const landed = harness({
+    groups: [{ id: "g-dangling", name: "Dangling", defaultIdentityId: "i-nowhere" }],
+    // An explicit empty list, not an omitted one: `findIdentity` must be
+    // WIRED here (unlike the "no vault wired" case below), or the write
+    // this section proves DOES get refused would pass for the wrong reason.
+    identities: [],
+  });
+  const renamedDangling = await landed.hosts.upsertGroup({
+    id: "g-dangling",
+    name: "Renamed",
+    defaultIdentityId: "i-nowhere",
+  });
+  check(
+    "a landed dangling default refuses nothing UNTIL a write actually changes it",
+    renamedDangling.name,
+    "Renamed",
+  );
+  await rejects(
+    "and a write that DOES change it is refused, the same as if it had never landed",
+    () => landed.hosts.upsertGroup({ ...renamedDangling, defaultIdentityId: "i-also-nowhere" }),
+    ["does not exist"],
+  );
+
+  // No `identities` seeded at all: `io.findIdentity` is unwired, on
+  // `markIdentityConnected`'s own "optional, omitting means the check never
+  // runs" terms - so a caller/test with no vault behind it can still write
+  // any `defaultIdentityId` string.
+  const noVault = harness();
+  const unchecked = await noVault.hosts.upsertGroup({
+    id: "g-3",
+    name: "No vault wired",
+    defaultIdentityId: "i-whatever",
+  });
+  check(
+    "an unwired findIdentity skips the check rather than refusing everything",
+    unchecked.defaultIdentityId,
+    "i-whatever",
+  );
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n[groups] identityHostRefs names a group's default alongside any host binding");
+{
+  const identity: VaultIdentity = {
+    id: "i-1",
+    name: "root @ prod",
+    username: "vaulted",
+    authMode: "password",
+    hasPassword: true,
+  };
+  const h = harness({
+    hosts: [
+      sshHost({ id: "h-1", name: "web-1", credential: { kind: "identity", identityId: "i-1" } }),
+    ],
+    groups: [{ id: "g-1", name: "Production", defaultIdentityId: "i-1" }],
+    identities: [identity],
+  });
+  check(
+    "both a host binding and a group default are named",
+    await h.hosts.identityHostRefs("i-1"),
+    [
+      { id: "h-1", name: "web-1" },
+      { id: "g-1", name: "Production (group default)" },
+    ],
+  );
+  check("an identity nothing names has no holders", await h.hosts.identityHostRefs("i-unused"), []);
 }
 
 // ---------------------------------------------------------------------------
@@ -1807,6 +2273,113 @@ console.log("\n[pins] one pin per (host, address), in whichever field the protoc
     beforePins,
   );
   check("and the binding still names its own host", await ownerOf("h-3"), "h-3");
+}
+
+// ---------------------------------------------------------------------------
+// The Known Hosts page's revoke. One property beyond what pinFingerprint
+// above already covers: forgetPin takes an ADDRESS, not the record's own current
+// one, because a jump-hop address a chain no longer uses can still carry a pin
+// nothing else names - so removing "the host's own address" must not be the only
+// case exercised.
+console.log(
+  "\n[pins] forgetPin removes one address, through the same withPins path pinFingerprint writes",
+);
+{
+  const h = harness({
+    hosts: [
+      sshHost({
+        id: "h-1",
+        pins: { "prod.example": "SHA256:PROD", "jump.example": "SHA256:JUMP" },
+      }),
+      rdpHost({ id: "h-2" }),
+    ],
+  });
+  const pin = async (id: string): Promise<string | undefined> => {
+    const host = await h.hosts.findHost(id);
+    return host ? hostFingerprint(host) : undefined;
+  };
+  const keys = (id: string): Record<string, string> | "MISSING" =>
+    h.rows().find((x) => x.id === id)?.pins ?? "MISSING";
+
+  await h.hosts.pinFingerprint("h-2", "SHA256:CERT");
+
+  // A jump-hop address, not the record's own `host` - the mirror field must be
+  // untouched, because withPins recomputes it from `pins[host.host]` alone.
+  await h.hosts.forgetPin("h-1", "jump.example");
+  check("the named address is gone, the other kept", keys("h-1"), {
+    "prod.example": "SHA256:PROD",
+  });
+  check(
+    "and the record's own pin (the mirror field) is untouched, since the forgotten address was a jump hop",
+    await pin("h-1"),
+    "SHA256:PROD",
+  );
+
+  // The record's OWN address, on the RDP arm: the mirror (certFingerprint) must
+  // follow the map down to nothing, same as pinFingerprint's own mirror write.
+  await h.hosts.forgetPin("h-2", "vps.example");
+  check("the RDP pin is gone too", keys("h-2"), "MISSING");
+  check("and its mirror field (certFingerprint) follows it", await pin("h-2"), undefined);
+  check("the unrelated SSH host was not touched", await pin("h-1"), "SHA256:PROD");
+
+  const rowsBefore = JSON.stringify(h.rows());
+  const commitsBefore = h.commits();
+  await h.hosts.forgetPin("h-1", "jump.example");
+  check(
+    "forgetting an address that is already gone writes nothing",
+    JSON.stringify(h.rows()),
+    rowsBefore,
+  );
+  check("and commits nothing - no updatedAt bump, no file rewrite", h.commits(), commitsBefore);
+
+  await h.hosts.forgetPin("h-x", "nowhere.example");
+  check(
+    "forgetting a pin on a host that no longer exists writes nothing either",
+    JSON.stringify(h.rows()),
+    rowsBefore,
+  );
+
+  // The seam the acceptance box actually cares about: the next host-key check
+  // reads `hostPins`/`hostFingerprint`, exactly as the accept-path attribution and
+  // the connect's fingerprint comparison do, so an address with no pin here is an
+  // address that re-triggers the trust-on-first-use prompt on the next connect.
+  const afterHost = await h.hosts.findHost("h-1");
+  check(
+    "the next host-key check sees no pin for the forgotten address",
+    afterHost ? hostPins(afterHost)["jump.example"] : "MISSING-HOST",
+    undefined,
+  );
+}
+
+// The Known Hosts page's whole read path: one row per (host, address), never one
+// per host, sorted by host name then address. The RDP host carries only the flat
+// `certFingerprint` a pre-keying build wrote, so it also proves the page reads
+// through `hostPins`'s adoption rather than the raw map.
+console.log("\n[pins] knownHostRows lists one row per pinned address, sorted");
+{
+  const rows = knownHostRows([
+    sshHost({
+      id: "h-web",
+      name: "web",
+      pins: { "prod.example": "SHA256:PROD", "jump.example": "SHA256:JUMP" },
+    }),
+    sshHost({ id: "h-bare", name: "bare", host: "bare.example" }),
+    rdpHost({ id: "h-desk", name: "Desk", certFingerprint: "SHA256:CERT" }),
+  ]);
+  check(
+    "a host with two pinned addresses gives two rows, a host with none gives none",
+    rows.map((r) => `${r.hostName}|${r.address}|${r.fingerprint}`),
+    [
+      "Desk|vps.example|SHA256:CERT",
+      "web|jump.example|SHA256:JUMP",
+      "web|prod.example|SHA256:PROD",
+    ],
+  );
+  check(
+    "each row carries its own host id and protocol",
+    rows.map((r) => `${r.hostId}:${r.protocol}`),
+    ["h-desk:rdp", "h-web:ssh", "h-web:ssh"],
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -2260,9 +2833,10 @@ console.log("\n[purge] the two old connection stores' secrets are cleared once, 
     "tervia-rdp-connections.json": rdp,
   });
 
-  // What makes this worth building at all: once the old modules are gone there is
-  // no `secrets_list`, so `tervia-ssh :: <id>::privateKey` is a private key with no
-  // delete button anywhere in the app, forever.
+  // What makes this worth building at all: once the old modules are gone, nothing
+  // NAMES `tervia-ssh :: <id>::privateKey` - it is a private key with no delete
+  // button on any screen that shows a host, and the only thing left that reaches
+  // it is a sweep the user has to go and run.
   const h = harness({
     legacy: legacy(sshFile(["c-1", "c-2"]), sshFile(["r-1"])),
     kept: {

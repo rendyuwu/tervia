@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
 import { createRecoveredStore, type RecoveredStoreIo } from "@/lib/recoveredStore";
+import type { DirtyId } from "@/lib/tombstones";
 
 import { VAULT_IDENTITIES_KEY, VAULT_STORE_PATH } from "./types";
 
@@ -72,7 +73,16 @@ export type SecretsIo = {
   copy(from: SecretEntry, to: SecretEntry): Promise<boolean>;
 };
 
-export type VaultIo = { store: VaultStoreIo; secrets: SecretsIo };
+/** `now` is the clock every `updatedAt` and `deletedAt` here is stamped from, and
+ *  `markDirty` is told which records a committed write owes a push. Both optional
+ *  with the real default - see `HostsIo` in `modules/hosts/adapters.ts` for why
+ *  each is a port rather than an inline call. */
+export type VaultIo = {
+  store: VaultStoreIo;
+  secrets: SecretsIo;
+  now?: () => number;
+  markDirty?: (dirty: DirtyId[]) => void;
+};
 
 /** The real vault store, with crash recovery in front of it. */
 export function createTauriVaultStoreIo(): VaultStoreIo {
@@ -111,3 +121,18 @@ export const tauriSecretsIo: SecretsIo = {
       toAccount: to.account,
     }),
 };
+
+/**
+ * Every account stored under `service`. Never a value.
+ *
+ * Beside {@link SecretsIo} rather than on it, and the port's own doc is the
+ * reason: it says there is "no single-value read on this port at all, precisely
+ * so no caller can assemble one", and every method it does carry is named
+ * against accounts the caller already holds. This is the one call that answers
+ * a question the caller could not answer itself, so it is the one that does not
+ * belong on the shared surface - and keeping it off leaves the in-memory
+ * `SecretsIo` fakes under `scripts/` untouched, all but one of which would have
+ * gained a method nothing calls.
+ */
+export const listSecrets = (service: string): Promise<string[]> =>
+  invoke<string[]>("secrets_list", { service });

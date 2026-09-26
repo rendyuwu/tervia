@@ -7,6 +7,7 @@ import {
   SshAuthRejectedError,
   SshLocalConnectError,
 } from "@/modules/terminal/lib/ssh-exit-decision";
+import type { SecretSource } from "@/modules/vault/resolve";
 
 /** First-connect host-key confirmation request from the backend. */
 export type SshHostKeyPrompt = { promptId: string; fingerprint: string; host: string };
@@ -36,15 +37,13 @@ export type SshExitReason =
   | { kind: "disconnected" };
 
 export type SshEvent =
-  | { type: "connected"; fingerprint: string }
   | { type: "jumpConnected"; connectionId: string; fingerprint: string }
   | { type: "hostKeyPrompt"; promptId: string; fingerprint: string; host: string }
   | { type: "data"; data: string }
   | { type: "stderr"; data: string }
   | { type: "exit"; code: number }
   | { type: "signal"; name: string; coreDumped: boolean }
-  | { type: "disconnected" }
-  | { type: "error"; message: string };
+  | { type: "disconnected" };
 
 /**
  * A wire event that ends the channel -> the two arguments `onExit` is called
@@ -78,7 +77,6 @@ export function exitReasonFromSshEvent(
 }
 
 export type SshHandlers = {
-  onConnected?: (fingerprint: string) => void;
   /** A jump host in the ProxyJump chain authenticated. `connectionId` is the
    *  saved connection the hop came from, so the caller pins its fingerprint. */
   onJumpConnected?: (connectionId: string, fingerprint: string) => void;
@@ -86,24 +84,29 @@ export type SshHandlers = {
    *  `confirmHostKey(promptId, accept)`; the handshake is paused (no
    *  credentials sent) until then. */
   onHostKeyPrompt?: (prompt: SshHostKeyPrompt) => void;
-  onData: (bytes: Uint8Array) => void;
-  /** Fires exactly once when the channel ends - see `SshExitReason`. */
-  onExit?: (code: number, reason: SshExitReason) => void;
-  onError?: (message: string) => void;
+  /** The session's connection ended on its own - remote disconnect, transport
+   *  error, keepalive timeout. At most once; never for `close()`. */
+  onClosed?: () => void;
 };
 
-/** One hop in a ProxyJump chain, resolved from a saved connection + its
- *  keychain secrets. Passed to `openSsh` in connect order (entry host first). */
+/** One hop in a ProxyJump chain, resolved from a saved connection into keychain
+ *  references. Passed to `openSsh` in connect order (entry host first). */
 export type SshJumpHop = {
   connectionId: string;
   host: string;
   port: number;
   user: string;
   useAgent?: boolean;
-  password?: string;
-  privateKey?: string;
-  privateKeyPassphrase?: string;
+  password?: SecretSource;
+  privateKey?: SecretSource;
+  privateKeyPassphrase?: SecretSource;
   expectedFingerprint?: string;
+  /** OpenSSH certificate text, paired with `privateKey` - set only for a
+   *  vault entry of the `cert` kind. Public, unlike every field above it. */
+  certificate?: string;
+  /** Restrict `useAgent` to the ssh-agent identity with this SHA256
+   *  fingerprint - set for a vault entry of the `hardware` kind. */
+  agentKeyFingerprint?: string;
 };
 
 export type SshOpenInput = {
@@ -113,15 +116,19 @@ export type SshOpenInput = {
   /** Authenticate through the local ssh-agent. The private key stays in the
    *  agent; only signatures cross the wire, so no secret is read or stored. */
   useAgent?: boolean;
-  password?: string;
-  privateKey?: string;
-  privateKeyPassphrase?: string;
+  password?: SecretSource;
+  privateKey?: SecretSource;
+  privateKeyPassphrase?: SecretSource;
   /** SHA256 fingerprint from a previous connect. If set and the server key differs, the backend returns a `host key mismatch` error. */
   expectedFingerprint?: string;
+  /** OpenSSH certificate text, paired with `privateKey` - set only for a
+   *  vault entry of the `cert` kind. Public, unlike every field above it. */
+  certificate?: string;
+  /** Restrict `useAgent` to the ssh-agent identity with this SHA256
+   *  fingerprint - set for a vault entry of the `hardware` kind. */
+  agentKeyFingerprint?: string;
   /** ProxyJump chain in connect order (entry host first). Empty/absent = direct. */
   jumps?: SshJumpHop[];
-  cols: number;
-  rows: number;
 };
 
 /** One key held by the local ssh-agent, as `ssh-add -l` would list it. */
@@ -129,6 +136,11 @@ export type SshAgentKey = {
   algorithm: string;
   comment: string;
   fingerprint: string;
+  /** The `.pub` line, empty when the backend could not build one. Lets a
+   *  vault `hardware` key editor fill its public-key field from a picked
+   *  agent identity, the same shape `SshTextClassification`'s `publicKey`
+   *  variant already carries for a pasted line. */
+  publicKey: string;
 };
 
 /** Keys the local ssh-agent is holding. Rejects with a message naming what to
@@ -161,6 +173,68 @@ export type SshKeyInfo = {
  *  wrong passphrase. */
 export function inspectSshKey(pem: string, passphrase?: string): Promise<SshKeyInfo> {
   return invoke<SshKeyInfo>("ssh_key_inspect", { pem, passphrase: passphrase ?? null });
+}
+
+/** What `ssh_key_classify` resolves pasted text as - a private key
+ *  (`ssh_key_inspect` unlocks and describes it, unchanged), an OpenSSH
+ *  certificate, a bare public-key line, or neither. Backs the vault key
+ *  editor's `cert` and `hardware` kinds. */
+export type SshTextClassification =
+  | { kind: "privateKey" }
+  | {
+      kind: "certificate";
+      caFingerprint: string;
+      /** The CERTIFIED key's own fingerprint, not the CA's. */
+      fingerprint: string;
+      keyId: string;
+      principals: string[];
+      validAfter: number;
+      /** `null` when the certificate never expires. */
+      validBefore: number | null;
+    }
+  | {
+      kind: "publicKey";
+      algorithm: string;
+      fingerprint: string;
+      comment: string | null;
+      publicKey: string;
+    }
+  | { kind: "unsupported"; reason: string };
+
+/** Classify pasted text as a private key, an OpenSSH certificate, a public
+ *  key line, or neither - no passphrase, no unlocking, no KDF. Rejects on
+ *  empty text with the same message `ssh_key_inspect` uses. */
+export function classifySshText(text: string): Promise<SshTextClassification> {
+  return invoke<SshTextClassification>("ssh_key_classify", { text });
+}
+
+/** Algorithms `ssh_key_generate` accepts, matched exactly against the Rust
+ *  side's own list in `src-tauri/src/modules/ssh/mod.rs`. */
+export type SshKeyAlgorithm = "ed25519" | "ecdsa-p256" | "rsa-4096";
+
+/** `ssh_key_generate`'s answer: the new PEM plus exactly what `SshKeyInfo`
+ *  reports for it (the Rust side flattens the two), so a generated key
+ *  describes itself the same way an inspected one does and `describeKeyInfo`/
+ *  `vaultKeyFactsFrom` (`src/modules/vault/keyInspect.ts`) need no second
+ *  translation for it. */
+export type SshKeyGenerated = SshKeyInfo & { pem: string };
+
+/** Generate a new SSH key pair - the vault's other half of "only import one".
+ *  The private key is built and serialized entirely in Rust, for the same two
+ *  reasons {@link inspectSshKey}'s own comment gives; this returns the PEM the
+ *  caller stores exactly as a pasted key's body, never anything less final.
+ *  RSA-4096 generation can take a few seconds - the same `spawn_blocking` cost
+ *  `inspectSshKey` already pays for bcrypt-pbkdf. */
+export function generateSshKey(
+  algorithm: SshKeyAlgorithm,
+  passphrase?: string,
+  comment?: string,
+): Promise<SshKeyGenerated> {
+  return invoke<SshKeyGenerated>("ssh_key_generate", {
+    algorithm,
+    passphrase: passphrase ?? null,
+    comment: comment ?? null,
+  });
 }
 
 /** Prefix used by the Rust side for host-key-mismatch errors. Callers check for this to offer a "trust new key" prompt instead of auto-reconnecting. */
@@ -231,10 +305,60 @@ export function closeSshForward(
   return invoke<boolean>("ssh_forward_close", { id, boundPort, generation });
 }
 
+/**
+ * Start an `ssh -R` remote forward on a live session: ask the server to
+ * listen on `bindAddress:bindPort` (`bindPort` 0 lets the SERVER pick) and
+ * route every connection it accepts back to `localHost:localPort` on THIS
+ * machine. Resolves with the SAME {@link SshForwardHandle} shape `-L` does -
+ * `boundPort` here is the port the SERVER bound. Both halves have to come
+ * back to {@link closeSshRemoteForward}.
+ */
+export function openSshRemoteForward(
+  id: number,
+  bindAddress: string,
+  bindPort: number,
+  localHost: string,
+  localPort: number,
+): Promise<SshForwardHandle> {
+  return invoke<SshForwardHandle>("ssh_remote_forward_open", {
+    id,
+    bindAddress,
+    bindPort,
+    localHost,
+    localPort,
+  });
+}
+
+/** Close ONE `ssh -R` listener on a live session, naming it with `bindAddress`
+ *  plus both halves of the {@link SshForwardHandle} the open handed back.
+ *  `false` means there was no such forward, on the same terms
+ *  {@link closeSshForward} already gives for `-L`. */
+export function closeSshRemoteForward(
+  id: number,
+  bindAddress: string,
+  boundPort: number,
+  generation: number,
+): Promise<boolean> {
+  return invoke<boolean>("ssh_remote_forward_close", { id, bindAddress, boundPort, generation });
+}
+
+/**
+ * Start an `ssh -D` SOCKS5 listener on a live session: bind
+ * `127.0.0.1:localPort` (0 picks a free port) and open one
+ * `channel_open_direct_tcpip` per accepted CONNECT. Resolves with the SAME
+ * {@link SshForwardHandle} shape `-L` does, and closes through the SAME
+ * {@link closeSshForward} - a SOCKS5 listener lives in the identical
+ * per-session forward map `-L`'s does, so it needs no close command of its
+ * own.
+ */
+export function openSshSocks(id: number, localPort: number): Promise<SshForwardHandle> {
+  return invoke<SshForwardHandle>("ssh_socks_open", { id, localPort });
+}
+
 export type SshSession = {
   id: number;
-  write: (data: string) => Promise<void>;
-  resize: (cols: number, rows: number) => Promise<void>;
+  /** SHA256 fingerprint the target presented. */
+  fingerprint: string;
   close: () => Promise<void>;
 };
 
@@ -304,9 +428,6 @@ export async function openSsh(input: SshOpenInput, handlers: SshHandlers): Promi
   const channel = new Channel<SshEvent>();
   channel.onmessage = (event) => {
     switch (event.type) {
-      case "connected":
-        handlers.onConnected?.(event.fingerprint);
-        break;
       case "jumpConnected":
         handlers.onJumpConnected?.(event.connectionId, event.fingerprint);
         break;
@@ -317,6 +438,80 @@ export async function openSsh(input: SshOpenInput, handlers: SshHandlers): Promi
           host: event.host,
         });
         break;
+      case "disconnected":
+        handlers.onClosed?.();
+        break;
+      case "data":
+      case "stderr":
+      case "exit":
+      case "signal":
+        // Shell-channel events; never sent on the session channel `openSsh` opens.
+        break;
+    }
+  };
+
+  // The one place the connect error's kind is read. Everything downstream -
+  // the reconnect ladder, the host editor's Test button, the forward tunnel -
+  // receives an `Error` and behaves exactly as it did when this command
+  // rejected with a string.
+  const { id, fingerprint } = await invoke<{ id: number; fingerprint: string }>("ssh_open", {
+    input: {
+      host: input.host,
+      port: input.port,
+      user: input.user,
+      useAgent: input.useAgent ?? false,
+      password: input.password ?? null,
+      privateKey: input.privateKey ?? null,
+      privateKeyPassphrase: input.privateKeyPassphrase ?? null,
+      expectedFingerprint: input.expectedFingerprint ?? null,
+      certificate: input.certificate ?? null,
+      agentKeyFingerprint: input.agentKeyFingerprint ?? null,
+      jumps: (input.jumps ?? []).map((j) => ({
+        connectionId: j.connectionId,
+        host: j.host,
+        port: j.port,
+        user: j.user,
+        useAgent: j.useAgent ?? false,
+        password: j.password ?? null,
+        privateKey: j.privateKey ?? null,
+        privateKeyPassphrase: j.privateKeyPassphrase ?? null,
+        expectedFingerprint: j.expectedFingerprint ?? null,
+        certificate: j.certificate ?? null,
+        agentKeyFingerprint: j.agentKeyFingerprint ?? null,
+      })),
+    },
+    onEvent: channel,
+  }).catch((e: unknown) => {
+    throw sshConnectErrorFrom(e);
+  });
+
+  return { id, fingerprint, close: () => invoke("ssh_close", { id }) };
+}
+
+export type SshShellHandlers = {
+  onData: (bytes: Uint8Array) => void;
+  /** Fires exactly once when the shell channel ends on its own - see SshExitReason. Never for close(). */
+  onExit: (code: number, reason: SshExitReason) => void;
+};
+
+export type SshShell = {
+  write: (data: string) => Promise<void>;
+  resize: (cols: number, rows: number) => Promise<void>;
+  close: () => Promise<void>;
+};
+
+/** Open one interactive shell channel on a live session. Every terminal tab
+ *  calls this - not `openSsh` - so N tabs on one host share the session and
+ *  cost N shell channels, not N russh connections. */
+export async function openSshShell(
+  sessionId: number,
+  cols: number,
+  rows: number,
+  handlers: SshShellHandlers,
+): Promise<SshShell> {
+  const channel = new Channel<SshEvent>();
+  channel.onmessage = (event) => {
+    switch (event.type) {
       case "data":
         handlers.onData(decodeBase64(event.data));
         break;
@@ -330,52 +525,24 @@ export async function openSsh(input: SshOpenInput, handlers: SshHandlers): Promi
         // One call for all three, so the mapping itself is the pure function's
         // and cannot drift per arm.
         const ending = exitReasonFromSshEvent(event);
-        handlers.onExit?.(ending.code, ending.reason);
+        handlers.onExit(ending.code, ending.reason);
         break;
       }
-      case "error":
-        handlers.onError?.(event.message);
+      case "jumpConnected":
+      case "hostKeyPrompt":
+        // Session-channel events; never sent on a shell channel.
         break;
     }
   };
-
-  // The one place the connect error's kind is read. Everything downstream -
-  // the reconnect ladder, the host editor's Test button, the forward tunnel -
-  // receives an `Error` and behaves exactly as it did when this command
-  // rejected with a string.
-  const id = await invoke<number>("ssh_open", {
-    input: {
-      host: input.host,
-      port: input.port,
-      user: input.user,
-      useAgent: input.useAgent ?? false,
-      password: input.password ?? null,
-      privateKey: input.privateKey ?? null,
-      privateKeyPassphrase: input.privateKeyPassphrase ?? null,
-      expectedFingerprint: input.expectedFingerprint ?? null,
-      jumps: (input.jumps ?? []).map((j) => ({
-        connectionId: j.connectionId,
-        host: j.host,
-        port: j.port,
-        user: j.user,
-        useAgent: j.useAgent ?? false,
-        password: j.password ?? null,
-        privateKey: j.privateKey ?? null,
-        privateKeyPassphrase: j.privateKeyPassphrase ?? null,
-        expectedFingerprint: j.expectedFingerprint ?? null,
-      })),
-      cols: input.cols,
-      rows: input.rows,
-    },
+  const shellId = await invoke<number>("ssh_shell_open", {
+    id: sessionId,
+    cols,
+    rows,
     onEvent: channel,
-  }).catch((e: unknown) => {
-    throw sshConnectErrorFrom(e);
   });
-
   return {
-    id,
-    write: (data) => invoke("ssh_write", { id, data }),
-    resize: (cols, rows) => invoke("ssh_resize", { id, cols, rows }),
-    close: () => invoke("ssh_close", { id }),
+    write: (data) => invoke("ssh_shell_write", { id: sessionId, shellId, data }),
+    resize: (cols, rows) => invoke("ssh_shell_resize", { id: sessionId, shellId, cols, rows }),
+    close: () => invoke("ssh_shell_close", { id: sessionId, shellId }),
   };
 }

@@ -63,6 +63,9 @@ type Props = {
   onMoveToLeft?: () => void;
   /** Right-panel instance: close the docked panel. */
   onClose?: () => void;
+  /** Whether a rail view currently covers the tab area; forwarded straight
+   *  through to `useGlobalShortcuts` (see `shortcuts/lib/keyboardOwner.ts`). */
+  tabAreaCovered: boolean;
 };
 
 /**
@@ -106,6 +109,7 @@ export function FileExplorer({
   onMoveToRight,
   onMoveToLeft,
   onClose,
+  tabAreaCovered,
 }: Props) {
   const showHiddenFiles = usePreferencesStore((s) => s.showHiddenFiles);
   // Re-render once the lazy-loaded catppuccin icon set arrives so file +
@@ -234,37 +238,40 @@ export function FileExplorer({
     }
   }, [flat, collapsed]);
 
-  useGlobalShortcuts({
-    "explorer.search": () => {
-      if (collapsed) onToggleCollapsed?.();
-      if (searchRef.current?.isFocused()) {
-        setIsSearchOpen(false);
-        return;
-      }
-      setIsGrepOpen(false);
-      setIsSearchOpen(true);
-      searchRef.current?.focus();
-    },
-    "explorer.grep": () => {
-      if (collapsed) onToggleCollapsed?.();
-      if (grepRef.current?.isFocused()) {
+  useGlobalShortcuts(
+    {
+      "explorer.search": () => {
+        if (collapsed) onToggleCollapsed?.();
+        if (searchRef.current?.isFocused()) {
+          setIsSearchOpen(false);
+          return;
+        }
         setIsGrepOpen(false);
-        return;
-      }
-      setIsSearchOpen(false);
-      setIsGrepOpen(true);
-      grepRef.current?.focus();
+        setIsSearchOpen(true);
+        searchRef.current?.focus();
+      },
+      "explorer.grep": () => {
+        if (collapsed) onToggleCollapsed?.();
+        if (grepRef.current?.isFocused()) {
+          setIsGrepOpen(false);
+          return;
+        }
+        setIsSearchOpen(false);
+        setIsGrepOpen(true);
+        grepRef.current?.focus();
+      },
+      "explorer.replaceAll": () => {
+        // VSCode-style: Ctrl+Shift+H opens the folder-wide grep panel with the
+        // replace input already expanded so the user can type and apply
+        // without an extra click.
+        if (collapsed) onToggleCollapsed?.();
+        setIsSearchOpen(false);
+        setIsGrepOpen(true);
+        grepRef.current?.focusWithReplace();
+      },
     },
-    "explorer.replaceAll": () => {
-      // VSCode-style: Ctrl+Shift+H opens the folder-wide grep panel with the
-      // replace input already expanded so the user can type and apply
-      // without an extra click.
-      if (collapsed) onToggleCollapsed?.();
-      setIsSearchOpen(false);
-      setIsGrepOpen(true);
-      grepRef.current?.focusWithReplace();
-    },
-  });
+    { tabAreaCovered },
+  );
 
   useEffect(() => {
     if (collapsed) {

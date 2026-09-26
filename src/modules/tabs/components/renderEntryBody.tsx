@@ -19,7 +19,7 @@ import { X } from "lucide-react";
 import { useSortable } from "@dnd-kit/sortable";
 import { Fragment } from "react";
 import type { ReactNode } from "react";
-import { type Entry, type PaneEntry, entryLabelClass, tabAccentClass } from "../lib/entries";
+import { type Entry, entryLabelClass, tabAccentClass } from "../lib/entries";
 import { type SelectEntry, entrySelectHandlers } from "../lib/selectEntry";
 import { InlineInput } from "@/modules/explorer/InlineInput";
 import { EntryIcon } from "./EntryIcon";
@@ -59,7 +59,7 @@ export type RenderEntryArgs = {
    *  under a rail view. Every caller has one. */
   onSelectEntry: SelectEntry;
   onPinLeaf: (tabId: number, leafId: number) => void;
-  onCloseEntry: (tabId: number, leafId: number | null) => void;
+  onCloseEntry: (leafId: number) => void;
   onCloseEntriesAfter: (entry: Entry) => void;
   hosts: Map<string, Host>;
   onMoveLeafToGroup?: (leafId: number, targetTabId: number) => void;
@@ -104,15 +104,13 @@ export function renderEntryBody(args: RenderEntryArgs): ReactNode {
     onSetRenaming,
     onRename,
   } = args;
-  const sshHostCandidate =
-    e.kind === "pane-leaf" && e.sshConnectionId ? hosts.get(e.sshConnectionId) : undefined;
+  const sshHostCandidate = e.hostId ? hosts.get(e.hostId) : undefined;
   const sshHost = sshHostCandidate && isSshHost(sshHostCandidate) ? sshHostCandidate : undefined;
-  const isPaneLeaf = e.kind === "pane-leaf";
   // Declared before the trigger JSX below, which reads `renaming` to swap the
   // label for an edit field. Keeping them with the other right-click flags
   // further down would be a use-before-init at render time.
-  const canRename = isPaneLeaf && !!onRename && !!onSetRenaming;
-  const renaming = isPaneLeaf && e.kind === "pane-leaf" && renamingLeafId === e.leafId;
+  const canRename = !!onRename && !!onSetRenaming;
+  const renaming = renamingLeafId === e.leafId;
   const trigger = (
     <TabsTrigger
       key={e.key}
@@ -122,7 +120,7 @@ export function renderEntryBody(args: RenderEntryArgs): ReactNode {
       data-tab-id={e.tabId}
       data-tauri-drag-region="false"
       onDoubleClick={() => {
-        if (e.kind === "pane-leaf" && e.italic) {
+        if (e.italic) {
           onPinLeaf(e.tabId, e.leafId);
         }
       }}
@@ -164,11 +162,10 @@ export function renderEntryBody(args: RenderEntryArgs): ReactNode {
         //
         // "WHENEVER" AND NOT "ALWAYS", deliberately. `hasContextActions` is
         // true for every chip the app currently renders, which is why deleting
-        // the variants changed nothing visible - but that rests on three facts
-        // none of which is pinned: `canRename` needs both rename callbacks and
-        // a `pane-leaf` entry, every entry `buildEntries` produces is
-        // `pane-leaf`, and the one call site always passes them. Break any one
-        // and an unwrapped chip reports Radix's own `data-state="active"`. The
+        // the variants changed nothing visible - but that rests on two facts
+        // neither of which is pinned: `canRename` needs both rename callbacks,
+        // and the one call site always passes them. Break either and an
+        // unwrapped chip reports Radix's own `data-state="active"`. The
         // stripe is the marker regardless, so this stays correct either way -
         // what would be wrong is reading the conclusion as unconditional.
         //
@@ -210,7 +207,7 @@ export function renderEntryBody(args: RenderEntryArgs): ReactNode {
         )}
       >
         <EntryIcon entry={e} />
-        {renaming && e.kind === "pane-leaf" ? (
+        {renaming ? (
           // `stopPropagation` on pointerdown so a drag-to-reorder gesture cannot
           // start from inside the field: the drag listeners live on the trigger
           // this input sits in, and text selection would otherwise reorder tabs.
@@ -272,7 +269,7 @@ export function renderEntryBody(args: RenderEntryArgs): ReactNode {
             icon={X}
             label="Close"
             variant="danger"
-            onClick={() => onCloseEntry(e.tabId, e.kind === "pane-leaf" ? e.leafId : null)}
+            onClick={() => onCloseEntry(e.leafId)}
           />
         )}
       </span>
@@ -281,19 +278,14 @@ export function renderEntryBody(args: RenderEntryArgs): ReactNode {
 
   // Right-click actions: rotate split, leave group, join group, close right.
   // Rotate/leave-group only for leaves inside a split. Move-to-group needs another tab.
-  const moveTargets =
-    isPaneLeaf && onMoveLeafToGroup ? paneGroupsForMove.filter((g) => g.id !== e.tabId) : [];
-  const canRotate = isPaneLeaf && isSplit && !!onRotateLeafSplit;
-  const canLeaveGroup = isPaneLeaf && isSplit && !!onMoveLeafToNewTab;
+  const moveTargets = onMoveLeafToGroup ? paneGroupsForMove.filter((g) => g.id !== e.tabId) : [];
+  const canRotate = isSplit && !!onRotateLeafSplit;
+  const canLeaveGroup = isSplit && !!onMoveLeafToNewTab;
   const canMove = moveTargets.length > 0;
   const canCloseToRight = lastEntryKey !== null && e.key !== lastEntryKey;
   const hasContextActions = canRename || canRotate || canLeaveGroup || canMove || canCloseToRight;
   const hasLeafActions = canRename || canRotate || canLeaveGroup || canMove;
-  const tooltipMode: "ssh" | "ai" | null = sshHost
-    ? "ssh"
-    : isPaneLeaf && e.aiCliStatus
-      ? "ai"
-      : null;
+  const tooltipMode: "ssh" | "ai" | null = sshHost ? "ssh" : e.aiCliStatus ? "ai" : null;
 
   // Build innermost-out. TabsTrigger must be the DOM child of every asChild
   // trigger so Radix' Slot can merge handlers. Tooltip is a Provider, not a
@@ -309,22 +301,10 @@ export function renderEntryBody(args: RenderEntryArgs): ReactNode {
         {wrapped}
         <ContextMenuContent className="min-w-44">
           {canRename && (
-            <ContextMenuItem
-              onSelect={() => {
-                if (e.kind === "pane-leaf") onSetRenaming!(e.leafId);
-              }}
-            >
-              Rename
-            </ContextMenuItem>
+            <ContextMenuItem onSelect={() => onSetRenaming!(e.leafId)}>Rename</ContextMenuItem>
           )}
-          {canRename && e.kind === "pane-leaf" && e.renamed && (
-            <ContextMenuItem
-              onSelect={() => {
-                if (e.kind === "pane-leaf") onRename!(e.leafId, null);
-              }}
-            >
-              Reset Name
-            </ContextMenuItem>
+          {canRename && e.renamed && (
+            <ContextMenuItem onSelect={() => onRename!(e.leafId, null)}>Reset Name</ContextMenuItem>
           )}
           {canRotate && (
             <ContextMenuItem onSelect={() => onRotateLeafSplit!(e.leafId)}>
@@ -332,11 +312,7 @@ export function renderEntryBody(args: RenderEntryArgs): ReactNode {
             </ContextMenuItem>
           )}
           {canLeaveGroup && (
-            <ContextMenuItem
-              onSelect={() => {
-                if (e.kind === "pane-leaf") onMoveLeafToNewTab!(e.leafId);
-              }}
-            >
+            <ContextMenuItem onSelect={() => onMoveLeafToNewTab!(e.leafId)}>
               Move to New Tab
             </ContextMenuItem>
           )}
@@ -348,9 +324,7 @@ export function renderEntryBody(args: RenderEntryArgs): ReactNode {
                   <ContextMenuItem
                     key={g.id}
                     disabled={g.full}
-                    onSelect={() => {
-                      if (e.kind === "pane-leaf") onMoveLeafToGroup!(e.leafId, g.id);
-                    }}
+                    onSelect={() => onMoveLeafToGroup!(e.leafId, g.id)}
                   >
                     {/* min-w-0 lets the long page title ellipsize instead of
                         stretching the menu; the count stays pinned. */}
@@ -374,8 +348,8 @@ export function renderEntryBody(args: RenderEntryArgs): ReactNode {
     );
   }
   if (tooltipMode === "ssh") {
-    const sshStatus = isPaneLeaf ? e.sshStatus : undefined;
-    const ai = isPaneLeaf ? e.aiCliStatus : undefined;
+    const sshStatus = e.sshStatus;
+    const ai = e.aiCliStatus;
     wrapped = (
       <Tooltip>
         {wrapped}
@@ -411,7 +385,7 @@ export function renderEntryBody(args: RenderEntryArgs): ReactNode {
       </Tooltip>
     );
   } else if (tooltipMode === "ai") {
-    const ai = (e as PaneEntry).aiCliStatus!;
+    const ai = e.aiCliStatus!;
     wrapped = (
       <Tooltip>
         {wrapped}

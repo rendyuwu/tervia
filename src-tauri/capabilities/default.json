@@ -26,7 +26,6 @@
     "dialog:allow-save",
     "log:default",
     "os:default",
-    "store:default",
     "autostart:allow-enable",
     "autostart:allow-disable",
     "autostart:allow-is-enabled",

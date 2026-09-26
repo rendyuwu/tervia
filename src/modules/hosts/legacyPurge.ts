@@ -11,11 +11,14 @@ import { LEGACY_PURGE_KEY } from "./types";
 // hosts get re-entered once. Nobody accepted leaving the SECRETS.
 // The moment those modules are deleted, `tervia-ssh :: <id>::{password,
 // privateKey, keyPassphrase}` and `tervia-rdp :: <id>::password` become
-// UNENUMERABLE: the IPC surface is `secrets_get`, `secrets_get_all`, `secrets_set`,
-// `secrets_delete` and `secrets_copy` - each named against the specific accounts it
-// acts on - with no `secrets_list`, so nothing left in the macOS keychain, the Windows
-// `secrets.bin` or the Linux mode-0600 JSON could ever be named from inside the app
-// again. Private keys, permanently, with no delete button anywhere.
+// UNENUMERABLE BY ANY AUTOMATIC PATH: `secrets_list` can now enumerate them, but
+// its only consumer is the Vault page's unreferenced-entry sweep, which the user
+// has to find, read and confirm. That sweep is also what this pass gives a known
+// set to subtract from, so the two are complements rather than substitutes -
+// without this, whatever those modules left in the macOS keychain, the Windows
+// `secrets.bin` or the Linux mode-0600 JSON waits on somebody going looking.
+// Private keys, until they do, with no delete button on any screen that names a
+// host.
 //
 // So this module must OUTLIVE what it cleans up. It reads the two old store files
 // DIRECTLY, through `storeRecovery`'s existing file port, and imports nothing from

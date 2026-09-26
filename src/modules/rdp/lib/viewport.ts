@@ -7,10 +7,14 @@
  * click landed a few pixels from the cursor", which is unpleasant to chase
  * through a canvas and trivial to reason about here.
  *
- * `sizeMode` is `"preset"` only - `RdpSizeMode` in `hosts/types.ts` has no
- * other member - so the remote
- * desktop never changes size to match the pane and letterboxing is not
- * optional: the aspect ratios genuinely differ.
+ * In `"preset"` the remote desktop never changes size to match the pane, so
+ * letterboxing is not optional: the aspect ratios genuinely differ. In `"fit"`
+ * the remote is asked to match the pane (see `fitDesktopSize`), so the bars
+ * shrink to the rounding/parity remainder - but they never vanish, because the
+ * server may grant a different size than requested and an older server grants
+ * none at all. Both `fitViewport` and `toRemotePoint` therefore stay exactly as
+ * they are: they are driven by the framebuffer dimensions the backend reports,
+ * whatever those turn out to be.
  */
 
 /** Where the remote desktop lands inside the pane, in CSS pixels. */
@@ -126,4 +130,35 @@ export function toRemotePoint(
 export function wheelRotation(delta: number): number {
   if (!delta) return 0;
   return delta > 0 ? -120 : 120;
+}
+
+/**
+ * The desktop size to ask for so the remote matches the pane one-to-one, or
+ * `null` when the pane cannot be measured (a hidden tab, or mid-layout).
+ *
+ * DEVICE pixels, not CSS pixels. `paneWidth`/`paneHeight` come from
+ * `getBoundingClientRect`, so they are already in the visual space the UI zoom
+ * produces; multiplying by `devicePixelRatio` is what makes one remote pixel
+ * one physical pixel, which is the whole point of fit mode - asking for CSS
+ * pixels on a 2x display would upscale the framebuffer and give a blurrier
+ * picture than the preset it replaced.
+ *
+ * The 200..=8192 clamp and the even width are MS-RDPEDISP 2.2.2.2.1. The
+ * backend re-applies them through `MonitorLayoutEntry::adjust_display_size`,
+ * but they are applied here too so that the value the pane remembers as
+ * "already requested" is the value the server is actually asked for -
+ * otherwise an odd pane width would re-request the same adjusted size on every
+ * resize.
+ */
+export function fitDesktopSize(
+  paneWidth: number,
+  paneHeight: number,
+  devicePixelRatio: number,
+): { width: number; height: number } | null {
+  if (paneWidth <= 0 || paneHeight <= 0 || devicePixelRatio <= 0) return null;
+  const width = Math.min(8192, Math.max(200, Math.round(paneWidth * devicePixelRatio)));
+  const height = Math.min(8192, Math.max(200, Math.round(paneHeight * devicePixelRatio)));
+  // `& ~1` after the clamp, not before: 200 and 8192 are both even, so the
+  // clamped range is closed under it.
+  return { width: width & ~1, height };
 }

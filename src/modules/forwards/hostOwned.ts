@@ -4,10 +4,12 @@
  * it and the loopback port it actually bound.
  *
  * SESSION-SCOPED ONLY, and one step more so than `runtime.ts` - nothing here is
- * persisted, and nothing here outlives the tab either. A terminal owns every
- * forward it opened, so the ending an entry has is the SESSION's: `finishSsh`
- * and the pane's own `close()` both call {@link HostOwnedState.releaseSession},
- * and a reconnect comes back with a new session id and claims afresh.
+ * persisted, and nothing here outlives the session either. A terminal owns
+ * every forward it opened, so the ending an entry has is the SESSION's:
+ * `autostart.ts`'s `stopHostForwards` calls {@link HostOwnedState.releaseSession}
+ * from the LAST terminal tab to detach from that session - not from every
+ * tab's own close, now that tabs share one session - and a reconnect comes
+ * back with a new session id and claims afresh.
  *
  * THE OTHER SIDE OF `runtime.ts`'s "KEYED BY `ruleId` ALONE" paragraph. That
  * store is the PAGE's and is keyed by `ruleId` alone; this one is the
@@ -23,14 +25,20 @@
  *   yields (closes its own just-bound listener) if the page has the rule
  *   RUNNING by then; `controller.ts`'s `startRule` refuses outright a rule that
  *   is already in here, and also yields - releasing the reference its own dial
- *   just received - when it finds one here on the way back. One rule, seen from
- *   two sides: whoever resolves SECOND gives up the duplicate it created, so
- *   neither side can take the other's listener down and leave the rule down on
- *   both.
- * - **This map against ITSELF.** Two panes on one host are two sessions and two
- *   autostart runs (see `ssh/tunnel.ts`'s header, on what is NOT shared), with
- *   nothing serialising them, so
- *   `autostart.ts` reads `hostOwnedBy` TWICE as well - before the bind and again
+ *   just received, or marking the row `stopped` rather than `failed` if that
+ *   dial rejected instead - when it finds one here on the way back. One rule,
+ *   seen from two sides: whoever resolves SECOND gives up the duplicate it
+ *   created, so neither side can take the other's listener down and leave the
+ *   rule down on both. A claim over a page entry that reads `failed` resets it
+ *   to `stopped` (`autostart.ts`'s `markPageStopped`), since the claim proves
+ *   that error moot.
+ * - **This map against ITSELF.** Two panes on ONE host now share one session
+ *   and one autostart run - `attachHostForwards` (`autostart.ts`) runs
+ *   `startHostForwards` only for the first tab to attach to a session, and
+ *   every later tab on it rides the forwards already up. What is still
+ *   concurrent is two DIFFERENT sessions to the same host - a reconnect's new
+ *   dial racing the old session's own teardown - so
+ *   `autostart.ts` still reads `hostOwnedBy` TWICE: before the bind and again
  *   immediately before the claim. The pre-bind read alone is a read two
  *   concurrent runs both pass.
  *
@@ -42,11 +50,13 @@
 
 import { create } from "zustand";
 
-/** What a terminal-owned forward is: the session that opened it, and the
- *  loopback port that open RESOLVED WITH - never the port the rule asked for.
- *  An auto rule asks for 0, and a pinned rule can be handed a different port
- *  than it named, so the requested one describes nothing that is listening. */
-export type HostOwnedEntry = { sessionId: number; boundPort: number };
+/** What a terminal-owned forward is: the session that opened it, the loopback
+ *  port that open RESOLVED WITH - never the port the rule asked for - and the
+ *  generation that same open handed back, so a stop can name the listener to
+ *  `closeSshForward` (`ssh/bridge.ts`'s `SshForwardHandle`). An auto rule asks
+ *  for 0, and a pinned rule can be handed a different port than it named, so
+ *  the requested one describes nothing that is listening. */
+export type HostOwnedEntry = { sessionId: number; boundPort: number; generation: number };
 
 type HostOwnedState = {
   byRule: Record<string, HostOwnedEntry>;
@@ -72,10 +82,11 @@ type HostOwnedState = {
    * Drop every entry `sessionId` opened, whatever rule it belongs to.
    *
    * A SESSION ID, NOT A RULE ID. The terminal is the owner here, so the
-   * ending is the session's - one tab closing takes exactly its own forwards
-   * with it and leaves every other tab's standing. Idempotent, because both
-   * release sites (`ssh-session.ts`'s `finishSsh` and the pane adapter's
-   * `close`) fire without knowing whether the other already did.
+   * ending is the SESSION's - the LAST terminal tab to detach from it takes
+   * every forward it opened with it, and leaves every other session's
+   * standing. Idempotent: `autostart.ts`'s `stopHostForwards` is the one
+   * caller, and `attachHostForwards`'s epoch already guards against a second
+   * last-detach firing for the same session.
    */
   releaseSession(sessionId: number): void;
 };

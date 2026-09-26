@@ -180,6 +180,63 @@ console.log("[1] ruleRows: hostName and hostDangling resolve independently, rout
     )[0].route,
     "Auto → bastion → 10.0.0.9:5432",
   );
+  check(
+    "route for a -D rule: 'SOCKS <label> -> hostName', never a blank host/zero port",
+    ruleRows(
+      [
+        rule("r-socks", {
+          hostId: "h-bastion",
+          type: "dynamic",
+          localPort: 1080,
+          remoteHost: "",
+          remotePort: 0,
+        }),
+      ],
+      hosts,
+      true,
+    )[0].route,
+    "SOCKS localhost:1080 → bastion",
+  );
+  check(
+    "route for a -R rule: '<bindAddress or localhost>:<bindPort or Auto> on hostName -> targetHost:targetPort'",
+    ruleRows(
+      [
+        rule("r-remote", {
+          hostId: "h-bastion",
+          type: "remote",
+          localPort: 0,
+          remoteHost: "",
+          remotePort: 0,
+          targetHost: "10.0.0.9",
+          targetPort: 5432,
+          bindAddress: "0.0.0.0",
+          bindPort: 2222,
+        }),
+      ],
+      hosts,
+      true,
+    )[0].route,
+    "0.0.0.0:2222 on bastion → 10.0.0.9:5432",
+  );
+  check(
+    "route for a -R rule with no bindAddress/bindPort: falls back to localhost/Auto, never bastion's own remoteHost/remotePort (which are forced blank)",
+    ruleRows(
+      [
+        rule("r-remote-auto", {
+          hostId: "h-bastion",
+          type: "remote",
+          localPort: 0,
+          remoteHost: "",
+          remotePort: 0,
+          targetHost: "10.0.0.9",
+          targetPort: 5432,
+        }),
+      ],
+      hosts,
+      true,
+    )[0].route,
+    "localhost:Auto on bastion → 10.0.0.9:5432",
+  );
 
   // N2: `hostDangling` must never mean "the hosts have not loaded yet".
   // `useForwards()` and `useHosts()` are two INDEPENDENT async loads that both
@@ -507,6 +564,28 @@ console.log("\n[6] localPortLabel: auto, pinned, bound, and the pinned-vs-bound-
     localPortLabel(rule("r-4", { localPort: 8080 }), 9090),
     "localhost:9090",
   );
+  // `-R`'s live label names the SERVER, never `localhost` - the port shown
+  // is one THIS MACHINE never bound.
+  check(
+    "-R, not bound, bindPort pinned: '<hostName>:<bindPort>'",
+    localPortLabel(rule("r-5", { type: "remote", bindPort: 2222 }), undefined, "bastion"),
+    "bastion:2222",
+  );
+  check(
+    "-R, not bound, bindPort absent: Auto",
+    localPortLabel(rule("r-6", { type: "remote" }), undefined, "bastion"),
+    "Auto",
+  );
+  check(
+    "-R, bound: '<hostName>:<boundPort>', the SERVER's port and never localhost's",
+    localPortLabel(rule("r-7", { type: "remote", bindPort: 2222 }), 54321, "bastion"),
+    "bastion:54321",
+  );
+  check(
+    "-R with no hostName supplied falls back to a generic word, never blames localhost",
+    localPortLabel(rule("r-8", { type: "remote" }), 54321),
+    "server:54321",
+  );
 }
 
 // --- 7. bindFailureText: the four-way table, and the fallback that matters --
@@ -701,13 +780,20 @@ console.log(
 {
   const STOPPING = "Stopping it first is not required — deleting a running rule stops it.";
   const HOST_OWNED =
-    "Deleting the rule does not stop its forward — that one dies with the terminal tab that opened it.";
+    "Deleting the rule does not stop its forward — that one stops when the last terminal tab to its host closes.";
   const START = "It will no longer start automatically with its host.";
+  // the app-launch analog of START, mutually exclusive with it at
+  // every REACHABLE write (`src/modules/forwards/store.ts`'s `upsertRule`
+  // refuses a rule naming both), so `deleteNote` never has to choose between
+  // the two in practice - it just reads whichever one this rule happens to
+  // carry.
+  const START_APP = "It will no longer start automatically when Tervia starts.";
   const FALLBACK = "Deleting it changes nothing else.";
 
   const subject = (over: Partial<DeleteNoteSubject> = {}): DeleteNoteSubject => ({
     pageStops: false,
     startWithHost: false,
+    startWithApp: false,
     hostOwned: false,
     ...over,
   });
@@ -723,6 +809,17 @@ console.log(
   const hostOwnedAndStart = subject({ hostOwned: true, startWithHost: true });
   const hostOwnedAndPageStops = subject({ hostOwned: true, pageStops: true });
   const allThree = subject({ hostOwned: true, pageStops: true, startWithHost: true });
+  // the same four cells `startWithHost` gets, for `startWithApp` -
+  // the two never coexist in a rule this app wrote
+  // (`src/modules/forwards/store.ts`'s `upsertRule` refuses both true), so
+  // there is no "both start flags at once" cell to add;
+  // `hostOwnedAndStartApp` is reachable the same way `hostOwnedAndStart` is -
+  // the rule was edited from `startWithHost` to `startWithApp` AFTER a
+  // terminal already claimed it, and the confirm has to be right about both.
+  const startAppOnly = subject({ startWithApp: true });
+  const bothApp = subject({ pageStops: true, startWithApp: true });
+  const hostOwnedAndStartApp = subject({ hostOwned: true, startWithApp: true });
+  const allThreeApp = subject({ hostOwned: true, pageStops: true, startWithApp: true });
 
   check(
     "the page stops it, does not start with host: the stopping sentence alone",
@@ -777,6 +874,26 @@ console.log(
     deleteNote(allThree),
     `${HOST_OWNED} ${START}`,
   );
+  check(
+    "no forward to stop, starts with app: the start-with-app sentence alone",
+    deleteNote(startAppOnly),
+    START_APP,
+  );
+  check(
+    "the page stops it AND it starts with app: both sentences",
+    deleteNote(bothApp),
+    `${STOPPING} ${START_APP}`,
+  );
+  check(
+    "terminal-owned AND starts with app: both sentences",
+    deleteNote(hostOwnedAndStartApp),
+    `${HOST_OWNED} ${START_APP}`,
+  );
+  check(
+    "all three, app-flavoured: the terminal sentence plus the start-with-app one",
+    deleteNote(allThreeApp),
+    `${HOST_OWNED} ${START_APP}`,
+  );
 
   // D8: the stops-it/does-not pair must differ. A `deleteNote` that branched on
   // `startWithHost` alone (or ignored `pageStops` altogether) would return
@@ -809,6 +926,10 @@ console.log(
     hostOwnedAndStart,
     hostOwnedAndPageStops,
     allThree,
+    startAppOnly,
+    bothApp,
+    hostOwnedAndStartApp,
+    allThreeApp,
   ].map((s) => deleteNote(s));
   for (const note of everyNote) {
     ok(
