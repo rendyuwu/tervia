@@ -45,8 +45,8 @@ export function sftpWriteFile(sessionId: number, path: string, contents: string)
   return invoke("ssh_sftp_write_file", { id: sessionId, path, contents });
 }
 
-/** Byte progress for one file's upload; `written === total` means done. */
-export type UploadProgress = { written: number; total: number };
+/** Byte progress for one file's upload or download; `written === total` means done. */
+export type TransferProgress = { written: number; total: number };
 
 /** Upload a local file (by absolute path) to a remote path over SFTP. Bytes are
  *  read on the Rust side so binary files upload intact (never round-tripped as a
@@ -56,14 +56,36 @@ export function sftpUpload(
   sessionId: number,
   localPath: string,
   remotePath: string,
-  onProgress?: (p: UploadProgress) => void,
+  onProgress?: (p: TransferProgress) => void,
 ): Promise<void> {
-  const onProgressChannel = new Channel<UploadProgress>();
+  const onProgressChannel = new Channel<TransferProgress>();
   if (onProgress) onProgressChannel.onmessage = onProgress;
   return invoke("ssh_sftp_upload", {
     id: sessionId,
     localPath,
     remotePath,
+    onProgress: onProgressChannel,
+  });
+}
+
+/** Download a remote file to a local path over SFTP. Bytes stay on the Rust
+ *  side, so binary files arrive intact. `overwrite: false` refuses an existing
+ *  local file (a drag onto a Files folder); the save-dialog caller passes
+ *  `true` because the OS dialog already confirmed the replace. */
+export function sftpDownload(
+  sessionId: number,
+  remotePath: string,
+  localPath: string,
+  overwrite: boolean,
+  onProgress?: (p: TransferProgress) => void,
+): Promise<void> {
+  const onProgressChannel = new Channel<TransferProgress>();
+  if (onProgress) onProgressChannel.onmessage = onProgress;
+  return invoke("ssh_sftp_download", {
+    id: sessionId,
+    remotePath,
+    localPath,
+    overwrite,
     onProgress: onProgressChannel,
   });
 }

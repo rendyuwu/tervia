@@ -33,6 +33,7 @@ type Props = {
     fromActiveLeaf: boolean;
   };
   onOpenRemoteFile: (path: string, sessionId: number, hostLabel: string | null) => void;
+  onRemotePathRenamed: (sessionId: number, from: string, to: string) => void;
   /** When true, the Remote/SSH section is docked in the right slot, so the
    *  sidebar drops its pane. */
   sshInRightPanel: boolean;
@@ -96,6 +97,7 @@ export function AppSidebar({
   activeFilePath,
   activeSshContext,
   onOpenRemoteFile,
+  onRemotePathRenamed,
   sshInRightPanel,
   onSwitchWorkspace,
   onCreateWorkspace,
@@ -176,6 +178,7 @@ export function AppSidebar({
               hostLabel={activeSshContext.hostLabel}
               currentCwd={activeSshContext.cwd}
               onOpenFile={onOpenRemoteFile}
+              onPathRenamed={onRemotePathRenamed}
               dragHandle={controls}
               collapsed={collapsed}
             />

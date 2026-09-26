@@ -76,11 +76,12 @@ pub fn atomic_write_mode(path: &Path, bytes: &[u8], mode: u32) -> io::Result<()>
 /// registers `tauri-plugin-single-instance`, so a second launch forwards its
 /// argv and exits rather than becoming a second writer.
 ///
-/// Four call sites reach this, and three of them could already race:
+/// Five call sites reach this, and four of them could already race:
 /// `secrets.rs`'s `write_store` (the reported failure - `deleteHost` fans out one
-/// delete per account); `fs/file.rs`'s `fs_write_file` and `fs/grep.rs`'s two
-/// replace commands (Tauri commands, so two invocations naming one file overlap);
-/// and `pty/shell_init.rs`'s `write_if_changed`, whose own comment is about two
+/// delete per account); `fs/file.rs`'s `fs_write_file`, `fs/grep.rs`'s two
+/// replace commands and `ssh/sftp.rs`'s `ssh_sftp_download` with `overwrite`
+/// (Tauri commands, so two invocations naming one file overlap); and
+/// `pty/shell_init.rs`'s `write_if_changed`, whose own comment is about two
 /// shells starting at once. `secrets.rs` also serializes one level up, because
 /// its cache and its file have to move together.
 static TARGET_LOCKS: LazyLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> =

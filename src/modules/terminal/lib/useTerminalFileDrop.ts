@@ -53,16 +53,27 @@ let dragStyleInjected = false;
  *     drop-target outline via `tervia-fs-dragging`).
  *   - `mouseup` over `data-terminal-leaf-id` writes the shell-quoted
  *     path into that PTY.
- *   - `mouseup` elsewhere or `Escape` cancels cleanly.
+ *   - For a Remote (`data-sftp-tree`) source only: `mouseup` over another
+ *     row of that tree or its empty body dispatches `FS_ROW_DROP_EVENT`
+ *     (a move), and over a local Files folder row the same event (a
+ *     download). The SSH explorer handles it.
+ *   - `mouseup` elsewhere, back on the source row, or `Escape` cancels.
  *
  * Tradeoff: no native ghost preview under the cursor (browser only
  * draws ghosts for HTML5 drags). We compensate with a body-level
- * `cursor: copy` and an outline on the terminal pane under the cursor.
+ * `cursor: copy` and an outline on the drop target under the cursor.
+ * A drag out to the OS file manager is not supported (see the SFTP
+ * entry in `KNOWN-LIMITS.md`).
  *
  * The OS-level file drop path is unchanged. `useTerminalFileDrop`
  * still handles `tauri://drag-drop` for files dragged from outside.
  */
 const DRAG_ACTIVATION_PX = 5;
+
+/** Bubbles from the Remote tree body when a Remote row is dropped on a move
+ *  or download target. */
+export const FS_ROW_DROP_EVENT = "tervia:fs-row-drop";
+export type FsRowDropDetail = { from: string; target: HTMLElement };
 
 type SyntheticDragState = {
   path: string;
@@ -70,7 +81,28 @@ type SyntheticDragState = {
   startY: number;
   active: boolean;
   currentTarget: HTMLElement | null;
+  /** The row the drag started on. */
+  source: HTMLElement;
+  /** The Remote tree body the source row sits in, null for any other row. */
+  tree: HTMLElement | null;
 };
+
+/** The drop target under a point: a terminal pane for any source, and for a
+ *  Remote source also a row or the body of its own tree (move) or a local
+ *  Files folder row (download). */
+function dropTargetAt(x: number, y: number, d: SyntheticDragState): HTMLElement | null {
+  const under = document.elementFromPoint(x, y);
+  const leaf = under?.closest<HTMLElement>("[data-terminal-leaf-id]");
+  if (leaf) return leaf;
+  if (!d.tree || !under) return null;
+  const row = under.closest<HTMLElement>("[data-fs-path]");
+  if (row === d.source) return null;
+  if (d.tree.contains(under)) return row ?? d.tree;
+  if (row && !row.closest("[data-sftp-tree]") && row.getAttribute("data-fs-kind") === "dir") {
+    return row;
+  }
+  return null;
+}
 
 function injectFsDragStyle(): void {
   if (dragStyleInjected) return;
@@ -91,7 +123,7 @@ body.tervia-fs-dragging * {
   cursor: copy !important;
   user-select: none !important;
 }
-body.tervia-fs-dragging [data-terminal-leaf-id].tervia-fs-drop-target {
+body.tervia-fs-dragging .tervia-fs-drop-target {
   outline: 2px solid var(--ring, #3b82f6);
   outline-offset: -2px;
   transition: outline-color 80ms;
@@ -132,7 +164,7 @@ export function ensureFsDragListener(): void {
       // visual state.
       if (drag) reset();
       const target = e.target as HTMLElement | null;
-      const el = target?.closest?.("[data-fs-path]");
+      const el = target?.closest?.<HTMLElement>("[data-fs-path]");
       if (!el) return;
       const path = el.getAttribute("data-fs-path");
       if (!path) return;
@@ -142,6 +174,8 @@ export function ensureFsDragListener(): void {
         startY: e.clientY,
         active: false,
         currentTarget: null,
+        source: el,
+        tree: el.closest<HTMLElement>("[data-sftp-tree]"),
       };
     },
     true,
@@ -158,16 +192,15 @@ export function ensureFsDragListener(): void {
         drag.active = true;
         document.body.classList.add("tervia-fs-dragging");
       }
-      // Highlight the terminal pane under the cursor. `elementFromPoint`
+      // Highlight the drop target under the cursor. `elementFromPoint`
       // is more reliable than `e.target` here because the cursor may be
       // over an element our `mousemove` listener doesn't bubble to
       // (e.g. xterm internal layers).
-      const under = document.elementFromPoint(e.clientX, e.clientY);
-      const leafEl = (under?.closest?.("[data-terminal-leaf-id]") ?? null) as HTMLElement | null;
-      if (leafEl !== drag.currentTarget) {
+      const targetEl = dropTargetAt(e.clientX, e.clientY, drag);
+      if (targetEl !== drag.currentTarget) {
         drag.currentTarget?.classList.remove("tervia-fs-drop-target");
-        drag.currentTarget = leafEl;
-        leafEl?.classList.add("tervia-fs-drop-target");
+        drag.currentTarget = targetEl;
+        targetEl?.classList.add("tervia-fs-drop-target");
       }
     },
     true,
@@ -177,31 +210,41 @@ export function ensureFsDragListener(): void {
     "mouseup",
     (e: MouseEvent) => {
       if (!drag) return;
-      const wasActive = drag.active;
-      const path = drag.path;
-      const targetLeaf = drag.currentTarget;
+      const d = drag;
+      const wasActive = d.active;
+      const path = d.path;
+      const lastTarget = d.currentTarget;
       // Any button release ends the gesture and clears `tervia-fs-dragging` FIRST,
       // so the body class (which forces cursor:copy + user-select:none app-wide)
       // can never get stuck if the terminating release isn't the left button
       // (chorded click, or a WebView2 quirk). Only a left-button release over a
-      // terminal commits a drop; a right-click mid-drag still just cancels.
+      // terminal or another drop target commits a drop; a right-click mid-drag
+      // still just cancels.
       reset();
       if (e.button !== 0) return;
       // Below the activation threshold → treat as a click; let onClick
       // on the source row run normally (we never preventDefault on
       // mousedown, so the click event still fires).
       if (!wasActive) return;
-      // Drop ONLY counts if released over a terminal pane. Use
-      // `elementFromPoint` at release time in case the cursor moved
-      // off the highlighted target in the final frame.
-      const under = document.elementFromPoint(e.clientX, e.clientY);
-      const leafEl =
-        (under?.closest("[data-terminal-leaf-id]") as HTMLElement | null) ?? targetLeaf;
-      if (!leafEl) return;
-      const leafIdAttr = leafEl.getAttribute("data-terminal-leaf-id");
-      const leafId = leafIdAttr ? Number(leafIdAttr) : NaN;
-      if (Number.isNaN(leafId)) return;
-      writeToLeaf(leafId, quoteForShell(path));
+      // Resolve the target at release time in case the cursor moved off the
+      // highlighted one in the final frame. The last-frame fallback is for
+      // terminal-only sources: a Remote row released over nothing, or back on
+      // itself, does nothing.
+      const target = dropTargetAt(e.clientX, e.clientY, d) ?? (d.tree === null ? lastTarget : null);
+      if (!target) return;
+      const leafIdAttr = target.getAttribute("data-terminal-leaf-id");
+      if (leafIdAttr !== null) {
+        const leafId = Number(leafIdAttr);
+        if (Number.isNaN(leafId)) return;
+        writeToLeaf(leafId, quoteForShell(path));
+        return;
+      }
+      d.tree?.dispatchEvent(
+        new CustomEvent<FsRowDropDetail>(FS_ROW_DROP_EVENT, {
+          bubbles: true,
+          detail: { from: path, target },
+        }),
+      );
     },
     true,
   );

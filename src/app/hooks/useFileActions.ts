@@ -15,6 +15,25 @@ type Params = {
   sshBindingByConnection: Map<string, SshConnectionBinding>;
 } & Pick<TabsApi, "openFileTab" | "setEditorLeafPath">;
 
+/** `path` after `from` became `to`: `to` itself, or `to` plus the suffix of a
+ *  path under `from`. Null when `path` is unaffected. */
+function renamedPath(path: string, from: string, to: string): string | null {
+  if (path === from) return to;
+  if (path.startsWith(`${from}/`)) return `${to}${path.slice(from.length)}`;
+  return null;
+}
+
+/** The saved profile id behind a live SSH session, undefined for ad-hoc ones. */
+function connectionOf(
+  bindings: Map<string, SshConnectionBinding>,
+  sessionId: number,
+): string | undefined {
+  for (const [connId, binding] of bindings) {
+    if (binding.sessionId === sessionId) return connId;
+  }
+  return undefined;
+}
+
 /**
  * File-open / rename / delete wiring shared by the local explorer, the SSH
  * tree, the extension workspace bridge, and OS file drops. Moved verbatim from
@@ -35,6 +54,7 @@ export function useFileActions({
   handleOpenFile: (path: string, pin?: boolean) => void;
   handleOpenRemoteFile: (path: string, sessionId: number, hostLabel: string | null) => void;
   handlePathRenamed: (from: string, to: string) => void;
+  handleRemotePathRenamed: (sessionId: number, from: string, to: string) => void;
   handlePathDeleted: (path: string) => void;
 } {
   const handleOpenFile = useCallback(
@@ -62,13 +82,7 @@ export function useFileActions({
       // number: the number dies with the app, the profile is what lets the tab
       // come back and rebind after a restart. Ad-hoc sessions have none, and
       // stay session-only.
-      let hostId: string | undefined;
-      for (const [connId, binding] of sshBindingByConnection) {
-        if (binding.sessionId === sessionId) {
-          hostId = connId;
-          break;
-        }
-      }
+      const hostId = connectionOf(sshBindingByConnection, sessionId);
       openFileTab(path, true, {
         hostId,
         sshSessionId: sessionId,
@@ -84,16 +98,33 @@ export function useFileActions({
         if (t.kind !== "pane") continue;
         for (const leaf of leaves(t.paneTree)) {
           if (leaf.leafKind !== "editor") continue;
-          if (leaf.path === from) {
-            setEditorLeafPath(leaf.id, to);
-          } else if (leaf.path.startsWith(`${from}/`)) {
-            const suffix = leaf.path.slice(from.length);
-            setEditorLeafPath(leaf.id, `${to}${suffix}`);
-          }
+          const next = renamedPath(leaf.path, from, to);
+          if (next !== null) setEditorLeafPath(leaf.id, next);
         }
       }
     },
     [tabs, setEditorLeafPath],
+  );
+
+  // The Remote tree moved or renamed `from` to `to` on `sessionId`. Retarget
+  // only that host's editor leaves; matching the profile also catches a
+  // restored tab not yet rebound (see `isRemoteEditorLeaf`).
+  const handleRemotePathRenamed = useCallback(
+    (sessionId: number, from: string, to: string) => {
+      const hostId = connectionOf(sshBindingByConnection, sessionId);
+      for (const t of tabs) {
+        if (t.kind !== "pane") continue;
+        for (const leaf of leaves(t.paneTree)) {
+          if (leaf.leafKind !== "editor") continue;
+          const sameHost =
+            (hostId !== undefined && leaf.hostId === hostId) || leaf.sshSessionId === sessionId;
+          if (!sameHost) continue;
+          const next = renamedPath(leaf.path, from, to);
+          if (next !== null) setEditorLeafPath(leaf.id, next);
+        }
+      }
+    },
+    [tabs, setEditorLeafPath, sshBindingByConnection],
   );
 
   const handlePathDeleted = useCallback(
@@ -111,5 +142,11 @@ export function useFileActions({
     [tabs, disposeTab],
   );
 
-  return { handleOpenFile, handleOpenRemoteFile, handlePathRenamed, handlePathDeleted };
+  return {
+    handleOpenFile,
+    handleOpenRemoteFile,
+    handlePathRenamed,
+    handleRemotePathRenamed,
+    handlePathDeleted,
+  };
 }

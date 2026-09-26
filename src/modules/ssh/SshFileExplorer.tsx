@@ -18,9 +18,17 @@ import {
   useExplorerIconsReady,
 } from "@/modules/explorer/lib/iconResolver";
 import { COMPACT_CONTENT, COMPACT_ITEM } from "@/modules/explorer/lib/menuItemClass";
-import type { useFileTree } from "@/modules/explorer/lib/useFileTree";
+import { joinPath as joinLocalPath, type useFileTree } from "@/modules/explorer/lib/useFileTree";
+import {
+  FS_ROW_DROP_EVENT,
+  type FsRowDropDetail,
+} from "@/modules/terminal/lib/useTerminalFileDrop";
+import { toast } from "@/components/ui/toast";
+import { IS_WINDOWS } from "@/lib/platform";
+import { save as saveFileDialog } from "@tauri-apps/plugin-dialog";
 import { basename } from "@/lib/path";
 import { cn } from "@/lib/utils";
+import { describeError } from "@/lib/describeError";
 import { DESTRUCTIVE_ACTION } from "@/lib/toolbarButton";
 import { humanizeFsError } from "@/lib/fsError";
 import { segmentsFromCwd } from "@/modules/statusbar/lib/pathUtils";
@@ -30,6 +38,8 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { sftpHome } from "./sftp";
 import { useSshFileTree } from "./useSshFileTree";
 import { useSshFileDrop } from "./useSshFileDrop";
+import { useSshTransfers } from "./useSshTransfers";
+import { remoteBasename, remoteDropDir, unsafeOnWindows } from "./remotePath";
 import { useSshNav } from "./useSshNav";
 import { useSshRightPanelStore } from "./sshRightPanelStore";
 import {
@@ -74,6 +84,8 @@ type Props = {
    *  Its presence also swaps the "move to right" header button for the
    *  "move back to left sidebar" + "close" pair. Mirrors SCM's PanelHeader. */
   onClose?: () => void;
+  /** A remote entry moved or was renamed, so open editor tabs can follow. */
+  onPathRenamed?: (sessionId: number, from: string, to: string) => void;
 };
 
 export function SshFileExplorer({
@@ -85,6 +97,7 @@ export function SshFileExplorer({
   onToggleCollapsed,
   dragHandle,
   onClose,
+  onPathRenamed,
 }: Props) {
   const showHiddenFiles = usePreferencesStore((s) => s.showHiddenFiles);
   // Re-render once the lazy-loaded catppuccin icon set arrives.
@@ -129,11 +142,16 @@ export function SshFileExplorer({
   // session changes so a reconnect never replays a stale path.
   const nav = useSshNav(followRoot, sessionId);
   const rootPath = nav.root;
-  const tree = useSshFileTree(sessionId, rootPath, { includeHidden: showHiddenFiles });
+  const tree = useSshFileTree(sessionId, rootPath, {
+    includeHidden: showHiddenFiles,
+    onPathRenamed,
+  });
 
   // Drag-and-drop upload: drop OS files onto this panel to SFTP them to the
   // remote folder under the cursor. Refresh (and reveal) the target dir after.
   const containerRef = useRef<HTMLDivElement>(null);
+  // The tree body: a drop target for row moves, never the header/breadcrumb.
+  const treeRef = useRef<HTMLDivElement>(null);
   const onUploaded = useCallback(
     (dir: string) => {
       tree.refresh(dir);
@@ -141,10 +159,65 @@ export function SshFileExplorer({
     },
     [tree, rootPath],
   );
-  const upload = useSshFileDrop({ sessionId, rootPath, containerRef, onUploaded });
+  const { transfer, uploadFiles, downloadFile } = useSshTransfers(sessionId, onUploaded);
+  useSshFileDrop({ sessionId, rootPath, containerRef, onDrop: uploadFiles });
   // total 0 = size not known yet (first event) -> show indeterminate-ish 0%.
-  const uploadPct =
-    upload && upload.total > 0 ? Math.round((upload.written / upload.total) * 100) : 0;
+  // Clamped: a file that grows mid-read would pass 100.
+  const transferPct =
+    transfer && transfer.total > 0
+      ? Math.min(100, Math.round((transfer.written / transfer.total) * 100))
+      : 0;
+
+  const downloadViaDialog = useCallback(
+    async (remotePath: string) => {
+      const name = remoteBasename(remotePath);
+      let localPath: string | null;
+      try {
+        // A hostile name would steer the Windows dialog's starting folder;
+        // offer no default then, and let the user type one.
+        localPath = await saveFileDialog({
+          defaultPath: IS_WINDOWS && unsafeOnWindows(name) ? undefined : name,
+        });
+      } catch (e) {
+        console.error("ssh download save dialog failed:", e);
+        toast(`Download failed: ${describeError(e)}`, { variant: "error" });
+        return;
+      }
+      if (!localPath) return;
+      await downloadFile(remotePath, localPath, true);
+    },
+    [downloadFile],
+  );
+
+  // A Remote row dropped on another Remote row or the tree body (move), or on a
+  // local Files folder row (download). Dispatched by `ensureFsDragListener`;
+  // bubbles up from the tree body to the always-mounted root.
+  const onRowDropRef = useRef<(from: string, target: HTMLElement) => void>(() => {});
+  onRowDropRef.current = (from, target) => {
+    if (sessionId === null || !rootPath) return;
+    if (containerRef.current?.contains(target)) {
+      void tree.moveEntry(from, remoteDropDir(target, rootPath));
+      return;
+    }
+    const localDir = target.getAttribute("data-fs-path");
+    if (!localDir) return;
+    const name = remoteBasename(from);
+    if (IS_WINDOWS && unsafeOnWindows(name)) {
+      toast(`Download failed: "${name}" is not a valid Windows file name`, { variant: "error" });
+      return;
+    }
+    void downloadFile(from, joinLocalPath(localDir, name), false);
+  };
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const onDrop = (e: Event) => {
+      const { from, target } = (e as CustomEvent<FsRowDropDetail>).detail;
+      onRowDropRef.current(from, target);
+    };
+    el.addEventListener(FS_ROW_DROP_EVENT, onDrop);
+    return () => el.removeEventListener(FS_ROW_DROP_EVENT, onDrop);
+  }, []);
 
   const accordion = !!onToggleCollapsed;
   const headerLabel = rootPath ? basename(rootPath) : (hostLabel ?? "SSH");
@@ -390,19 +463,19 @@ export function SshFileExplorer({
         </div>
       ) : null}
 
-      {upload && !collapsed ? (
+      {transfer && !collapsed ? (
         <div className="border-border/60 shrink-0 border-b px-2 py-1.5">
           <div className="mb-1 flex items-center justify-between gap-2 text-[11px]">
             <span className="text-foreground/80 min-w-0 truncate">
-              Uploading {upload.name}
-              {upload.count > 1 ? ` (${upload.index}/${upload.count})` : ""}
+              {transfer.verb} {transfer.name}
+              {transfer.count > 1 ? ` (${transfer.index}/${transfer.count})` : ""}
             </span>
-            <span className="text-muted-foreground shrink-0 tabular-nums">{uploadPct}%</span>
+            <span className="text-muted-foreground shrink-0 tabular-nums">{transferPct}%</span>
           </div>
           <div className="bg-muted h-1 w-full overflow-hidden rounded-full">
             <div
               className="bg-primary h-full rounded-full transition-[width] duration-150"
-              style={{ width: `${uploadPct}%` }}
+              style={{ width: `${transferPct}%` }}
             />
           </div>
         </div>
@@ -431,7 +504,7 @@ export function SshFileExplorer({
 
           <ContextMenu>
             <ContextMenuTrigger asChild>
-              <ScrollArea className="min-h-0 flex-1">
+              <ScrollArea ref={treeRef} data-sftp-tree="" className="min-h-0 flex-1 outline-none">
                 <div className="py-1">
                   {pendingAtRoot && (
                     <div
@@ -518,6 +591,7 @@ export function SshFileExplorer({
                         selectedPath={selectedPath}
                         onSelectPath={setSelectedPath}
                         remote
+                        onDownload={downloadViaDialog}
                       />
                     ))}
                 </div>

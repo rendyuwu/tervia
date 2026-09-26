@@ -11,10 +11,11 @@ the same change that lifts it.
   RD Gateway, Kerberos (NTLM only), multi-monitor, `.rdp` import, 9+
   sessions. `src-tauri/src/modules/rdp/mod.rs` (module docs,
   `MAX_RDP_SESSIONS`), `session.rs` (`NoNetworkClient`).
-- **SFTP**: download to local disk, folder upload, opening files over
-  16 MiB or not UTF-8, uploads over 256 MiB.
-  `src-tauri/src/modules/ssh/sftp.rs` (`MAX_SFTP_READ_BYTES`,
-  `MAX_UPLOAD_BYTES`).
+- **SFTP**: folder download, folder upload, dragging a remote file out to
+  the OS file manager, opening files over 16 MiB or not UTF-8, uploads or
+  downloads over 256 MiB. `src-tauri/src/modules/ssh/sftp.rs`
+  (`MAX_SFTP_READ_BYTES`, `MAX_UPLOAD_BYTES`, `MAX_DOWNLOAD_BYTES`),
+  `src/modules/terminal/lib/useTerminalFileDrop.ts` (`ensureFsDragListener`).
 - **SSH**: `ssh-rsa` (SHA-1) host keys. `src-tauri/src/modules/ssh/session.rs`
   (`HOST_KEY_ALGOS`).
 - **Forwards**: binding `-L` or `-D` to anything but `127.0.0.1`; SOCKS5

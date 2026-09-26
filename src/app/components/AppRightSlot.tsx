@@ -29,6 +29,7 @@ type Props = {
     fromActiveLeaf: boolean;
   };
   onOpenRemoteFile: (path: string, sessionId: number, hostLabel: string | null) => void;
+  onRemotePathRenamed: (sessionId: number, from: string, to: string) => void;
   /** Files-section props, so a right-docked Files section renders in the column
    *  (same values App passes to AppSidebar). */
   filesSection: {
@@ -86,6 +87,7 @@ export function AppRightSlot({
   closeSshRight,
   activeSshContext,
   onOpenRemoteFile,
+  onRemotePathRenamed,
   filesSection,
   workspacesSection,
   openBoardTab,
@@ -105,6 +107,7 @@ export function AppRightSlot({
               hostLabel={activeSshContext.hostLabel}
               currentCwd={activeSshContext.cwd}
               onOpenFile={onOpenRemoteFile}
+              onPathRenamed={onRemotePathRenamed}
               onClose={closeSshRight}
               dragHandle={controls}
               collapsed={collapsed}

@@ -549,14 +549,19 @@ export default function App() {
   // never saw start by reading the url the project declares for itself.
   useProjectUrl(explorerRoot, handleProjectUrl);
 
-  const { handleOpenFile, handleOpenRemoteFile, handlePathRenamed, handlePathDeleted } =
-    useFileActions({
-      tabs,
-      disposeTab,
-      openFileTab,
-      setEditorLeafPath,
-      sshBindingByConnection,
-    });
+  const {
+    handleOpenFile,
+    handleOpenRemoteFile,
+    handlePathRenamed,
+    handleRemotePathRenamed,
+    handlePathDeleted,
+  } = useFileActions({
+    tabs,
+    disposeTab,
+    openFileTab,
+    setEditorLeafPath,
+    sshBindingByConnection,
+  });
 
   // Drop a file onto an editor pane or the tab strip to open it, VSCode-style —
   // works for any absolute path, even outside the current workspace root. A
@@ -757,6 +762,7 @@ export default function App() {
                 activeFilePath={activeFilePath}
                 activeSshContext={activeSshContext}
                 onOpenRemoteFile={handleOpenRemoteFile}
+                onRemotePathRenamed={handleRemotePathRenamed}
                 sshInRightPanel={sshInRightPanel}
                 onSwitchWorkspace={switchToWorkspace}
                 onCreateWorkspace={createNewWorkspace}
@@ -805,6 +811,7 @@ export default function App() {
                 closeSshRight={closeSshRight}
                 activeSshContext={activeSshContext}
                 onOpenRemoteFile={handleOpenRemoteFile}
+                onRemotePathRenamed={handleRemotePathRenamed}
                 filesSection={{
                   onOpenFile: handleOpenFile,
                   onPathRenamed: handlePathRenamed,
