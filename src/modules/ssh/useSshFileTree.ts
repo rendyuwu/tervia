@@ -3,6 +3,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { sameEntries } from "@/modules/explorer/lib/useFileTree";
 import { sftpCreateDir, sftpCreateFile, sftpDelete, sftpReadDir, sftpRename } from "./sftp";
 import { coalesceResume } from "@/lib/windowResume";
+import { toast } from "@/components/ui/toast";
+import { describeError } from "@/lib/describeError";
+import { humanizeFsError } from "@/lib/fsError";
 
 // SFTP-backed file tree. Same shape as `useFileTree` so `FileTreeNode` can
 // render it unchanged. Differences from the local hook:
@@ -334,6 +337,7 @@ export function useSshFileTree(
         await fetchChildren(dirname(path));
       } catch (e) {
         console.error("ssh delete failed:", e);
+        toast(`Delete failed: ${humanizeFsError(describeError(e)).message}`, { variant: "error" });
       }
     },
     [fetchChildren, sessionId],

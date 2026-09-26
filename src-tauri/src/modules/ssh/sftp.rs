@@ -339,6 +339,69 @@ pub async fn ssh_sftp_rename(
     .await
 }
 
+/// Delete `path` over SFTP; a directory goes with everything under it.
+/// SFTP `RMDIR` only removes an EMPTY directory, so the tree is walked first:
+/// every non-directory is removed as it is listed, directories are collected
+/// breadth-first, then removed in reverse so each child goes before its
+/// parent. Symlinks are removed as links, their targets left alone: the
+/// top-level check is LSTAT, and an entry READDIR reports as a directory is
+/// LSTATed again before the walk goes into it, because READDIR attributes are
+/// lstat results on OpenSSH but may be followed-stat results elsewhere. A
+/// directory swapped for a link between that LSTAT and the READDIR is still
+/// followed; SFTP has no `openat`-style call to close that race. A child that
+/// vanishes mid-walk (a second Delete, another client) counts as removed, as
+/// in `std::fs::remove_dir_all`. Any other failure stops the walk and leaves
+/// whatever was not removed yet.
+pub(super) async fn ssh_sftp_delete_inner(
+    sftp: &SftpSession,
+    path: String,
+) -> Result<(), SftpError> {
+    if !sftp
+        .symlink_metadata(path.clone())
+        .await?
+        .file_type()
+        .is_dir()
+    {
+        return sftp.remove_file(path).await;
+    }
+    // ponytail: one sequential round trip per entry, no progress or cancel.
+    // Send each listing's removes at once if big trees over slow links matter.
+    let mut dirs = vec![path];
+    let mut i = 0;
+    while let Some(dir) = dirs.get(i).cloned() {
+        i += 1;
+        let Some(entries) = unless_gone(sftp.read_dir(dir).await)? else {
+            continue;
+        };
+        for entry in entries {
+            let child = entry.path();
+            let is_dir = entry.file_type().is_dir()
+                && match unless_gone(sftp.symlink_metadata(child.clone()).await)? {
+                    Some(meta) => meta.file_type().is_dir(),
+                    None => continue,
+                };
+            if is_dir {
+                dirs.push(child);
+            } else {
+                unless_gone(sftp.remove_file(child).await)?;
+            }
+        }
+    }
+    for dir in dirs.into_iter().rev() {
+        unless_gone(sftp.remove_dir(dir).await)?;
+    }
+    Ok(())
+}
+
+/// `Ok(None)` when the server says the path no longer exists.
+fn unless_gone<T>(result: Result<T, SftpError>) -> Result<Option<T>, SftpError> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(SftpError::Status(s)) if s.status_code == StatusCode::NoSuchFile => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
 #[tauri::command]
 pub async fn ssh_sftp_delete(
     state: tauri::State<'_, SshState>,
@@ -346,16 +409,7 @@ pub async fn ssh_sftp_delete(
     path: String,
 ) -> Result<(), String> {
     on_sftp(&state, id, move |sftp| async move {
-        // SFTP needs separate calls for files vs dirs. `rmdir` only
-        // succeeds on empty dirs on most servers. Stat once to pick the
-        // right call. Server permission errors surface through humanize()
-        // so the user sees `permission denied` instead of a generic failure.
-        let metadata = sftp.metadata(path.clone()).await.map_err(humanize)?;
-        if metadata.file_type().is_dir() {
-            sftp.remove_dir(path).await.map_err(humanize)
-        } else {
-            sftp.remove_file(path).await.map_err(humanize)
-        }
+        ssh_sftp_delete_inner(&sftp, path).await.map_err(humanize)
     })
     .await
 }
