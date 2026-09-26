@@ -1,69 +1,33 @@
 # Security
 
-Tervia runs shells, reads and writes files, holds SSH credentials, and dials
-remote hosts on your behalf, so security bugs matter. If you find one, please
-tell us before posting it publicly.
-
 ## Reporting
 
-Use
-**[GitHub Security Advisories](https://github.com/rendyuwu/tervia/security/advisories/new)**
-to file a private report. Include:
-
-- What the issue is and what it lets an attacker do
-- Steps to reproduce (a small PoC is great)
-- Version, OS, arch
-
-You'll usually hear back within a few days. Once it's fixed, we'll credit you in
-the release notes, unless you'd rather stay anonymous.
-
-Please **don't** open a public GitHub issue for security reports.
-
-## Supported versions
+File a private report through
+**[GitHub Security Advisories](https://github.com/rendyuwu/tervia/security/advisories/new)**.
+Do not open a public issue. Include what it lets an attacker do, steps to
+reproduce, and version, OS, arch. Fixed reports are credited in the release
+notes unless you ask otherwise.
 
 Until `1.0.0`, only the latest minor gets security fixes.
 
-## What's in scope
+## Scope
 
-- The Rust backend in `src-tauri/` (PTY, FS, SSH, IPC, keychain, plugins)
-- The frontend in `src/`, anywhere untrusted input lands: terminal output,
-  remote file content, an imported connection backup, a host's key material
-- The update feed and the signatures on release artifacts
+- In: the Rust backend (`src-tauri/`), the frontend wherever untrusted input lands (terminal output, remote files, RDP data, imported backups and configs, sync objects), the update feed and release signatures.
+- Out: bugs in upstream dependencies (Tauri, `russh`, IronRDP, xterm.js, CodeMirror), report those upstream. Attacks that need an already-compromised machine or local shell access.
 
-## What's not
+## What Tervia does
 
-- Bugs in upstream deps (Tauri, `russh`, xterm.js, CodeMirror). Report those
-  upstream; we'll ship the fix once it's released.
-- Anything that needs an already-compromised machine or a local attacker with
-  shell access
+- **Secrets stay out of the store files.** macOS: Keychain. Windows: a DPAPI-encrypted file. Linux: a plaintext file with mode 0600. With ssh-agent auth the private key never enters Tervia.
+- **Host keys and RDP certificates are pinned** (SHA-256). First connect asks before a password or key is used; a changed key fails the connection.
+- **Local listeners bind `127.0.0.1`** (`-L`, `-D`). A `-R` rule listens on the server, at the address the rule names.
+- **Backups are sealed in Rust**: PBKDF2-HMAC-SHA256 (600,000 rounds) into AES-256-GCM, fresh salt and nonce per file. A wrong passphrase or a corrupt file fails on the GCM tag.
+- **Sync is end-to-end encrypted.** The storage provider sees ciphertext and opaque object names. Private key bodies are uploaded only if you opt in.
+- **Updates are signed** (minisign, key built into the app) and install only when you start them.
+- **No telemetry.** Network traffic is what you ask for, plus the update check.
+- **The webview reaches the OS only through registered Tauri commands.**
 
-## What we do to keep things safe
+## What Tervia cannot promise
 
-- **SSH secrets live in the OS keychain** via `keyring`. Not on disk, not in
-  `localStorage`, not in logs. An `agent`-auth connection never sees the
-  private key at all — the local ssh-agent signs each handshake.
-- **Host keys are pinned.** An unknown host raises a trust-on-first-use prompt;
-  a changed key fails the connection. The port-forward path refuses a
-  connection with no pinned key outright, because nothing there can show that
-  prompt.
-- **Port forwards bind loopback only.** A forward is never exposed on the LAN.
-- **The connection backup is encrypted in the Rust process** —
-  PBKDF2-HMAC-SHA256 into AES-256-GCM, a fresh salt and nonce per seal. A wrong
-  passphrase and a corrupted file both fail closed on the GCM tag.
-- **No telemetry.** Tervia only talks to the network when you ask it to, plus
-  the update check.
-- **Updates are signed.** The updater verifies a minisign signature against the
-  public key baked into the build before it installs anything. It does not
-  install without you starting it.
-- **No Node in the renderer.** The frontend only reaches the host through
-  allow-listed Tauri commands.
-
-## What we can't promise
-
-- Tervia runs whatever you tell it to run, locally and remotely, with your
-  permissions. That's the point of a terminal.
-- A remote host you connect to sees whatever you type into it, and its output
-  is rendered in your terminal. Connect to hosts you trust.
-- An imported connection backup is only as trustworthy as wherever you got it
-  from. The parser re-validates every field for exactly this reason, but the
-  hosts inside it are still hosts someone else chose.
+- It runs what you tell it to, locally and remotely, with your permissions.
+- A remote host sees what you type and controls what your terminal renders. Connect to hosts you trust.
+- An imported backup, `ssh_config` or PuTTY export is only as trustworthy as its source. Every field is re-validated, but the hosts in it were chosen by someone else.
