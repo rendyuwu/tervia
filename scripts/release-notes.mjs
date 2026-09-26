@@ -41,7 +41,7 @@ if (start !== -1) {
     .trim();
 }
 
-const body = section || `Release ${version}. Full changelog: ${REPO}/blob/main/CHANGELOG.md`;
+const body = section || `Release ${version}. All releases: ${REPO}/releases`;
 
 const footer = [
   "---",

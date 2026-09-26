@@ -2,7 +2,7 @@
  * Self-check for the repository's comment-citation rule.
  * Run: `npx tsx scripts/citation-format-verify.ts`.
  *
- * `TERVIA.md` and `CONTRIBUTING.md` both carry the rule: a comment may cite only
+ * `TERVIA.md` carries the rule: a comment may cite only
  * what a reader holding nothing but the clone can open. A checked-in file, a
  * symbol, a path in the repo, an upstream project's public tracker named with
  * its project, or a pinned dependency's own source named with its crate. A LINE
