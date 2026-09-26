@@ -143,6 +143,10 @@ url = "2"
 # RDP dependency set.
 russh = { version = "=0.60.1", default-features = false, features = ["ring", "flate2", "rsa"] }
 russh-sftp = "2.1"
+# `buffer_unordered` for the pipelined recursive SFTP delete
+# (`src-tauri/src/modules/ssh/sftp.rs`). Already compiled with default features
+# via reqwest/hyper-util; this adds no crate.
+futures-util = "0.3"
 # OS CSPRNG for `ssh_key_generate` (`src-tauri/src/modules/ssh/mod.rs`): rand_core
 # 0.10 ships no `OsRng`, so `UnwrapErr(SysRng)` is the `CryptoRng` `PrivateKey::random`
 # takes. Already compiled with `sys_rng` via russh's `rand` 0.10; this adds no crate.

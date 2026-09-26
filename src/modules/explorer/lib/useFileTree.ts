@@ -112,6 +112,8 @@ export function useFileTree(rootPath: string | null, options?: Options) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [pendingCreate, setPendingCreate] = useState<PendingCreate | null>(null);
   const [renaming, setRenaming] = useState<string | null>(null);
+  /** Paths with a delete still running, so the row shows "Deleting…". */
+  const [deleting, setDeleting] = useState<Set<string>>(new Set());
   const includeHidden = options?.includeHidden ?? false;
 
   // Per-path generation counter so only the latest in-flight fetch commits.
@@ -412,12 +414,19 @@ export function useFileTree(rootPath: string | null, options?: Options) {
 
   const deletePath = useCallback(
     async (path: string) => {
+      setDeleting((s) => new Set(s).add(path));
       try {
         await invoke("fs_delete", { path });
         options?.onPathDeleted?.(path);
         await fetchChildren(dirname(path));
       } catch (e) {
         console.error("fs_delete failed:", e);
+      } finally {
+        setDeleting((s) => {
+          const next = new Set(s);
+          next.delete(path);
+          return next;
+        });
       }
     },
     [fetchChildren, options],
@@ -445,6 +454,7 @@ export function useFileTree(rootPath: string | null, options?: Options) {
       expanded,
       pendingCreate,
       renaming,
+      deleting,
       toggle,
       expand,
       refresh,
@@ -463,6 +473,7 @@ export function useFileTree(rootPath: string | null, options?: Options) {
       expanded,
       pendingCreate,
       renaming,
+      deleting,
       toggle,
       expand,
       refresh,

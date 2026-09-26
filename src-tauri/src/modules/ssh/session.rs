@@ -3792,7 +3792,7 @@ mod chain_tests {
     }
 }
 
-/// Live end-to-end checks for `-R`, `-D` and shells sharing one session,
+/// Live end-to-end checks for `-R`, `-D`, shells sharing one session, and SFTP delete,
 /// against a throwaway `/usr/sbin/sshd` this process spawns itself - unlike
 /// `chain_tests`' own live checks above, which need a real VPS and env vars.
 /// Every test here is
@@ -3883,7 +3883,8 @@ mod remote_dynamic_forward_tests {
                      UsePAM no\n\
                      StrictModes no\n\
                      AllowTcpForwarding yes\n\
-                     GatewayPorts no\n",
+                     GatewayPorts no\n\
+                     Subsystem sftp internal-sftp\n",
                     host_key.display(),
                     authorized_keys.display(),
                 ),
@@ -4235,5 +4236,63 @@ mod remote_dynamic_forward_tests {
             assert!(gone, "the ended shell left its session");
             eprintln!("[remote_dynamic_forward_tests] OK: a remote hangup fired the end signal");
         });
+    }
+
+    /// SFTP delete of a symlink-to-directory and of a non-empty folder. The sshd
+    /// is local, so the "remote" tree is built and checked with `std::fs`. The
+    /// link must go as a link, the folder must go with everything in it, and the
+    /// directory both links point at must survive.
+    #[test]
+    #[ignore = "needs /usr/sbin/sshd"]
+    #[cfg(unix)]
+    fn sftp_delete_removes_contents_without_following_symlinks() {
+        let Some(sshd) = TestSshd::start() else {
+            return;
+        };
+        let (input, secrets) = connect_input(&sshd);
+        let outside = sshd.dir.join("outside");
+        let top_link = sshd.dir.join("top-link");
+        let root = sshd.dir.join("del");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("keep"), b"x").unwrap();
+        std::os::unix::fs::symlink(&outside, &top_link).unwrap();
+        std::fs::create_dir_all(root.join("sub/deeper")).unwrap();
+        std::fs::write(root.join("top"), b"x").unwrap();
+        std::fs::write(root.join("sub/deeper/f"), b"x").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("sub/link")).unwrap();
+
+        let (link_arg, root_arg) = (
+            top_link.to_string_lossy().into_owned(),
+            root.to_string_lossy().into_owned(),
+        );
+        it_runtime().block_on(async move {
+            let session = connect(input, secrets, IpcChannel::new(|_msg| Ok(())))
+                .await
+                .expect("connect failed");
+            let sftp = session.ensure_sftp().await.expect("open sftp");
+            crate::modules::ssh::sftp::ssh_sftp_delete_inner(&sftp, link_arg)
+                .await
+                .expect("delete symlink failed");
+            crate::modules::ssh::sftp::ssh_sftp_delete_inner(&sftp, root_arg)
+                .await
+                .expect("delete non-empty folder failed");
+            session.close().await;
+        });
+
+        assert!(
+            std::fs::symlink_metadata(&top_link).is_err(),
+            "top-level symlink must be removed"
+        );
+        assert!(
+            std::fs::symlink_metadata(&root).is_err(),
+            "non-empty folder must be removed"
+        );
+        assert!(
+            outside.join("keep").exists(),
+            "symlink target must be left alone"
+        );
+        eprintln!(
+            "[remote_dynamic_forward_tests] OK: sftp delete removed a link and a non-empty tree, target intact"
+        );
     }
 }

@@ -9,6 +9,7 @@
 
 use std::sync::Arc;
 
+use futures_util::stream::{self, StreamExt, TryStreamExt};
 use russh_sftp::client::error::Error as SftpError;
 use russh_sftp::client::SftpSession;
 use russh_sftp::protocol::{FileType, OpenFlags, StatusCode};
@@ -339,6 +340,92 @@ pub async fn ssh_sftp_rename(
     .await
 }
 
+/// Requests the recursive delete keeps in flight. Enough to hide the round
+/// trip on a slow link. Bounded because the server answers one at a time and
+/// russh-sftp's 10 s response timeout starts when a request is queued.
+const DELETE_IN_FLIGHT: usize = 64;
+
+/// Delete `path` over SFTP; a directory goes with everything under it.
+/// SFTP `RMDIR` only removes an EMPTY directory, so the tree is walked first,
+/// one depth level at a time: every directory of the level is listed, then
+/// every listed non-directory is removed and every subdirectory becomes the
+/// next level. Each step keeps up to `DELETE_IN_FLIGHT` requests in flight, so
+/// a big tree costs about one round trip per `DELETE_IN_FLIGHT` entries, not
+/// one per entry. Levels are then removed deepest first, so each child goes
+/// before its parent. Symlinks are removed as links, their targets left alone:
+/// the top-level check is LSTAT, and an entry READDIR reports as a directory
+/// is LSTATed again before the walk goes into it, because READDIR attributes
+/// are lstat results on OpenSSH but may be followed-stat results elsewhere. A
+/// directory swapped for a link between that LSTAT and the READDIR is still
+/// followed; SFTP has no `openat`-style call to close that race. A child that
+/// vanishes mid-walk (a second Delete, another client) counts as removed, as
+/// in `std::fs::remove_dir_all`. Any other failure stops the walk and leaves
+/// whatever was not removed yet; requests already in flight may still land.
+pub(super) async fn ssh_sftp_delete_inner(
+    sftp: &SftpSession,
+    path: String,
+) -> Result<(), SftpError> {
+    if !sftp
+        .symlink_metadata(path.clone())
+        .await?
+        .file_type()
+        .is_dir()
+    {
+        return sftp.remove_file(path).await;
+    }
+    // ponytail: no progress or cancel. Stream counts over a `Channel` like
+    // `ssh_sftp_upload` if huge trees make the wait opaque.
+    let mut levels = vec![vec![path]];
+    loop {
+        // Every listing runs to the end before an error is returned: dropping
+        // a `read_dir` between its OPENDIR and CLOSE leaks a server handle.
+        let listings: Vec<_> = stream::iter(levels[levels.len() - 1].clone())
+            .map(|dir| async move { unless_gone(sftp.read_dir(dir).await) })
+            .buffer_unordered(DELETE_IN_FLIGHT)
+            .collect()
+            .await;
+        let listings = listings.into_iter().collect::<Result<Vec<_>, _>>()?;
+        let subdirs: Vec<_> = stream::iter(listings.into_iter().flatten().flatten())
+            .map(|entry| async move {
+                let child = entry.path();
+                if entry.file_type().is_dir() {
+                    match unless_gone(sftp.symlink_metadata(child.clone()).await)? {
+                        Some(meta) if meta.file_type().is_dir() => return Ok(Some(child)),
+                        Some(_) => {}
+                        None => return Ok(None),
+                    }
+                }
+                unless_gone(sftp.remove_file(child).await)?;
+                Ok::<_, SftpError>(None)
+            })
+            .buffer_unordered(DELETE_IN_FLIGHT)
+            .try_collect()
+            .await?;
+        let subdirs: Vec<String> = subdirs.into_iter().flatten().collect();
+        if subdirs.is_empty() {
+            break;
+        }
+        levels.push(subdirs);
+    }
+    for level in levels.into_iter().rev() {
+        stream::iter(level)
+            .map(|dir| async move { unless_gone(sftp.remove_dir(dir).await).map(drop) })
+            .buffer_unordered(DELETE_IN_FLIGHT)
+            .try_collect::<()>()
+            .await?;
+    }
+    Ok(())
+}
+
+/// `Ok(None)` when the server says the path no longer exists.
+fn unless_gone<T>(result: Result<T, SftpError>) -> Result<Option<T>, SftpError> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(SftpError::Status(s)) if s.status_code == StatusCode::NoSuchFile => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
 #[tauri::command]
 pub async fn ssh_sftp_delete(
     state: tauri::State<'_, SshState>,
@@ -346,16 +433,7 @@ pub async fn ssh_sftp_delete(
     path: String,
 ) -> Result<(), String> {
     on_sftp(&state, id, move |sftp| async move {
-        // SFTP needs separate calls for files vs dirs. `rmdir` only
-        // succeeds on empty dirs on most servers. Stat once to pick the
-        // right call. Server permission errors surface through humanize()
-        // so the user sees `permission denied` instead of a generic failure.
-        let metadata = sftp.metadata(path.clone()).await.map_err(humanize)?;
-        if metadata.file_type().is_dir() {
-            sftp.remove_dir(path).await.map_err(humanize)
-        } else {
-            sftp.remove_file(path).await.map_err(humanize)
-        }
+        ssh_sftp_delete_inner(&sftp, path).await.map_err(humanize)
     })
     .await
 }

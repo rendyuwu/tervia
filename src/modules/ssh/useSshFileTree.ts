@@ -3,6 +3,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { sameEntries } from "@/modules/explorer/lib/useFileTree";
 import { sftpCreateDir, sftpCreateFile, sftpDelete, sftpReadDir, sftpRename } from "./sftp";
 import { coalesceResume } from "@/lib/windowResume";
+import { toast } from "@/components/ui/toast";
+import { describeError } from "@/lib/describeError";
+import { humanizeFsError } from "@/lib/fsError";
 
 // SFTP-backed file tree. Same shape as `useFileTree` so `FileTreeNode` can
 // render it unchanged. Differences from the local hook:
@@ -65,6 +68,8 @@ export function useSshFileTree(
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [pendingCreate, setPendingCreate] = useState<PendingCreate | null>(null);
   const [renaming, setRenaming] = useState<string | null>(null);
+  /** Paths with a delete still running, so the row shows "Deleting…". */
+  const [deleting, setDeleting] = useState<Set<string>>(new Set());
   const includeHidden = options?.includeHidden ?? false;
 
   // Per-path fetch generation. Guards against race conditions within a
@@ -329,11 +334,19 @@ export function useSshFileTree(
   const deletePath = useCallback(
     async (path: string) => {
       if (sessionId === null) return;
+      setDeleting((s) => new Set(s).add(path));
       try {
         await sftpDelete(sessionId, path);
         await fetchChildren(dirname(path));
       } catch (e) {
         console.error("ssh delete failed:", e);
+        toast(`Delete failed: ${humanizeFsError(describeError(e)).message}`, { variant: "error" });
+      } finally {
+        setDeleting((s) => {
+          const next = new Set(s);
+          next.delete(path);
+          return next;
+        });
       }
     },
     [fetchChildren, sessionId],
@@ -345,6 +358,7 @@ export function useSshFileTree(
       expanded,
       pendingCreate,
       renaming,
+      deleting,
       toggle,
       expand,
       refresh,
@@ -364,6 +378,7 @@ export function useSshFileTree(
       expanded,
       pendingCreate,
       renaming,
+      deleting,
       toggle,
       expand,
       refresh,
