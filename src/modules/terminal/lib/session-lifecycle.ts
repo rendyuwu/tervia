@@ -49,6 +49,7 @@ import {
   armAltExitRepaintWatchdog,
   flushPendingInput,
   openPtyForSession,
+  refitSession,
   retryPty,
   syncPtySize,
   writePtyError,
@@ -135,22 +136,43 @@ if (opacityWin && !opacityWin.__terviaCanvasOpacityBound) {
   });
 }
 
-/**
- * True when `el` is laid out and the window is on-screen, i.e. a `fitAddon.fit()`
- * would measure a real size. On Windows a minimized (or hidden) borderless window
- * reports a ~0px container (the same event App.tsx guards for the sidebar); fitting
- * to that collapses xterm to FitAddon's 2x1 floor and rewraps the whole scrollback,
- * and the reflow back on restore is lossy - the cursor/text end up garbled. Skipping
- * the fit while collapsed keeps the buffer untouched, so restore needs no repair.
- * The `< 2` floor matches MIN_PTY_DIM; real panes are hundreds of px wide.
- */
-export function canFit(el: HTMLElement | null | undefined): boolean {
-  return (
-    !!el &&
-    document.visibilityState === "visible" &&
-    el.clientWidth >= MIN_PTY_DIM &&
-    el.clientHeight >= MIN_PTY_DIM
-  );
+// Refit panes when their cell width can change with no container resize,
+// which the ResizeObserver in `attachSession` cannot see:
+//  - devicePixelRatio changed (window moved to a monitor with another scale, OS
+//    scale changed). Every pane. xterm re-measures its cells from its OWN
+//    matchMedia listener; listener order across media queries is not ours to
+//    rely on, so the fit waits a frame. The query matches only the current
+//    ratio, so it is re-armed on every change.
+//  - the document became visible again. Only panes whose refit `canFit`
+//    skipped while hidden (a renderer swap on GPU context loss during lock or
+//    minimize), which `refitSession` marks by zeroing lastW/lastH; nothing
+//    else refits such a pane when its size did not change (a lock screen). The
+//    rest stay with the ResizeObserver: a Windows restore walks the client area
+//    through ~40-400px (see AppSidebar), and refitting here mid-ramp would send
+//    the shell a SIGWINCH at that transitional width, which the observer's
+//    debounced PTY push absorbs.
+// `refitSession` skips hidden tabs (0px) and no-ops on an unchanged grid.
+const refitWin =
+  typeof window !== "undefined" ? (window as Window & { __terviaRefitBound?: boolean }) : null;
+if (refitWin && !refitWin.__terviaRefitBound) {
+  refitWin.__terviaRefitBound = true;
+  const watchDpr = () => {
+    window.matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`).addEventListener(
+      "change",
+      () => {
+        watchDpr();
+        requestAnimationFrame(() => {
+          for (const s of sessions.values()) refitSession(s);
+        });
+      },
+      { once: true },
+    );
+  };
+  watchDpr();
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState !== "visible") return;
+    for (const s of sessions.values()) if (s.lastW === 0) refitSession(s);
+  });
 }
 
 export function ensureSession(
@@ -524,19 +546,16 @@ export function attachSession(
     container.appendChild(s.term.element);
   }
 
-  // Fit before WebGL and PTY open so renderer and shell start at the right size.
-  // Guarded so an attach that lands while the window is minimized (0px container,
-  // e.g. workspace restore) doesn't fit to a degenerate size or cache 0 as the
-  // last good width - the ResizeObserver fits once the real size lands.
-  if (canFit(container)) {
-    s.fitAddon.fit();
-    s.lastW = container.clientWidth;
-    s.lastH = container.clientHeight;
-  }
-
+  // Load the renderer before fitting: the cell width depends on it, and a
+  // DOM-renderer fit followed by a WebGL load leaves the grid narrower than the
+  // pane. Both happen before the PTY opens, so the shell and the
+  // `lastSentCols/Rows` seed below use the final size. `refitSession` skips a
+  // minimized window's 0px container (e.g. workspace restore) instead of fitting
+  // to a degenerate size - the ResizeObserver fits once the real size lands.
   if (firstAttach && !s.webglAddon && s.webglEnabled && !wallpaperActive()) {
     loadWebglRenderer(s);
   }
+  refitSession(s);
 
   if (!s.pty && !s.ptyOpening) {
     s.ptyOpening = true;

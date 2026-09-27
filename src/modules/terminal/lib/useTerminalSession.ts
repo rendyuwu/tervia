@@ -11,10 +11,10 @@ import { cursorLineLooksLikeShellPrompt } from "./aiCliDetector";
 import type { AiCliKind, AiCliStatus } from "./aiCliStatus";
 import { isSessionBusy, sessions, type Callbacks, type Session } from "./sessionState";
 import { STUCK_RECOVERY_MS, effectiveTerminalFontSize, describeError } from "./session-helpers";
-import { respawnSession, retryPty, syncPtySize, writePtyError } from "./pty-lifecycle";
+import { refitSession, respawnSession, retryPty, writePtyError } from "./pty-lifecycle";
 import { disconnectSsh, reconnectSsh, retrySsh } from "./ssh-session";
 import { loadWebglRenderer, disposeWebglRenderer, syncRendererForWallpaper } from "./webgl";
-import { ensureSession, attachSession, detachSession, canFit } from "./session-lifecycle";
+import { ensureSession, attachSession, detachSession } from "./session-lifecycle";
 
 export type { TerviaOpenInput, TerviaSpawnTabInput };
 export { disconnectSsh, reconnectSsh, respawnSession };
@@ -35,10 +35,7 @@ function reloadWebglAndRefit(s: Session): void {
     disposeWebglRenderer(s);
     if (s.webglEnabled) loadWebglRenderer(s);
   }
-  if (canFit(s.term.element?.parentElement)) {
-    s.fitAddon.fit();
-    syncPtySize(s);
-  }
+  refitSession(s);
 }
 
 type Options = {
@@ -330,12 +327,7 @@ export function useTerminalSession({
     const s = sessions.get(leafId);
     if (!s) return;
     s.webglEnabled = webglPref;
-    if (!s.term.element) return;
-    if (webglPref && !s.webglAddon) {
-      loadWebglRenderer(s);
-    } else if (!webglPref && s.webglAddon) {
-      disposeWebglRenderer(s);
-    }
+    syncRendererForWallpaper(s);
   }, [leafId, webglPref]);
 
   // Per-leaf terminal theme override. `resolveTerminalPreset` returns the
@@ -360,18 +352,17 @@ export function useTerminalSession({
     // Hand the GPU context back while this pane sits in an inactive tab, and
     // take it again on the way in. Cheap both ways: the DOM renderer is fine for
     // a pane nobody is looking at, and the glyph atlas repopulates lazily on the
-    // next paint. Runs before the fit below so the addon sees the final size.
+    // next paint. A swap refits itself; the refit below covers a show that did
+    // not swap.
     s.visible = visible;
     syncRendererForWallpaper(s);
     if (!visible) return;
-    // Don't fit against a 0px container (window minimized) - it would reflow the
-    // buffer the same way the ResizeObserver path does. Focus still runs.
-    if (canFit(container.current)) {
-      s.fitAddon.fit();
-      // Push PTY size across the visibility flip. ResizeObserver doesn't fire on
-      // hidden->visible since dimensions don't change, so we sync explicitly.
-      syncPtySize(s);
-    }
+    // The ResizeObserver does tick on show (a hidden tab is `display: none`, so
+    // 0px), but that tick can dedupe against lastW/lastH and it delays the PTY
+    // push, so refit and sync now. `refitSession` skips a 0px container (window
+    // minimized), which would reflow the buffer the same way the ResizeObserver
+    // path guards against. Focus still runs.
+    refitSession(s);
     // Claimed, not taken. This effect runs INSIDE the mousedown that switched
     // the tab (Radix `Tabs` changes value on mousedown and React 19 flushes the
     // commit synchronously there), so a `term.focus()` here is undone by the
