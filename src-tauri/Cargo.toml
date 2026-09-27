@@ -16,7 +16,7 @@ default-members = ["."]
 
 [package]
 name = "tervia"
-version = "0.1.1"
+version = "0.1.2"
 description = "Tervia - a lightweight desktop client for remote machines: SSH, port forwarding, SFTP and RDP."
 authors = ["rendyuwu"]
 license = "Apache-2.0"
