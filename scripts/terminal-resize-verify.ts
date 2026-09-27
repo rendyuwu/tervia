@@ -36,6 +36,13 @@
  *    behaviour, not ours, and an xterm upgrade could quietly change it. These
  *    checks pin it: vim/htop/lazygit must resize exactly as before, and column
  *    reflow must be untouched in both directions.
+ *
+ * 4. THE NUDGE'S OWN ECHO (`armAltExitRepaintWatchdog`). omp answers every
+ *    SIGWINCH by borrowing the alternate screen and leaving it ~120ms after
+ *    the resizes stop. That exit is an alt->normal edge, which arms the
+ *    watchdog, whose nudge is another SIGWINCH: a flicker loop that never
+ *    settles. The watchdog must ignore a trigger that lands right after its
+ *    own nudge, and must not SIGWINCH at all unless an AI CLI owns the pane.
  */
 
 export {};
@@ -49,9 +56,15 @@ export {};
   },
 };
 
-const { conptyCompat, MIN_PTY_DIM, REATTACH_REPAINT_NUDGE_GAP_MS } =
-  await import("../src/modules/terminal/lib/session-helpers");
-const { nudgeResizeRoundTrip } = await import("../src/modules/terminal/lib/pty-lifecycle");
+const {
+  conptyCompat,
+  MIN_PTY_DIM,
+  REATTACH_REPAINT_NUDGE_GAP_MS,
+  ALT_EXIT_REPAINT_DELAY_MS,
+  REPAINT_NUDGE_ECHO_MS,
+} = await import("../src/modules/terminal/lib/session-helpers");
+const { nudgeResizeRoundTrip, armAltExitRepaintWatchdog } =
+  await import("../src/modules/terminal/lib/pty-lifecycle");
 type Session = Parameters<typeof nudgeResizeRoundTrip>[0];
 
 let failed = 0;
@@ -181,6 +194,100 @@ console.log("\nthe nudge stays inside the floor and bails on a dead/replaced ses
   s.disposed = true;
   await settle();
   assert(sent.length === 1, "a disposed session never gets the restore resize");
+}
+
+console.log("\nthe alt-exit watchdog never feeds on its own nudge");
+/**
+ * Session with a fake program in the PTY that resizes like omp: every resize
+ * enters the alternate screen, and 120ms after the last one it leaves again and
+ * fires the alt->normal edge, as `session-lifecycle`'s onBufferChange handler
+ * would. With `borrows` false the program only counts resizes, like Claude.
+ */
+function altBorrowSession(aiCli: boolean, borrows = true) {
+  const log = { resizes: 0, scrollResets: 0, atlasClears: 0 };
+  const buffer = { active: { type: "normal" } };
+  let borrow: ReturnType<typeof setTimeout> | undefined;
+  const s = {
+    disposed: false,
+    ptySpawnEpoch: 1,
+    aiCliStatus: aiCli ? { tool: "pi", state: "idle", since: 0 } : null,
+    term: {
+      cols: 120,
+      rows: 40,
+      buffer,
+      write: (data: string) => {
+        if (data === "\x1b7\x1b[r\x1b8") log.scrollResets++;
+      },
+      refresh: () => {},
+    },
+    webglAddon: {
+      clearTextureAtlas: () => {
+        log.atlasClears++;
+      },
+    },
+    lastSentCols: 120,
+    lastSentRows: 40,
+    pty: {
+      resize: () => {
+        log.resizes++;
+        if (!borrows) return Promise.resolve();
+        buffer.active.type = "alternate";
+        clearTimeout(borrow);
+        borrow = setTimeout(() => {
+          buffer.active.type = "normal";
+          armAltExitRepaintWatchdog(s);
+        }, 120);
+        return Promise.resolve();
+      },
+    },
+  } as unknown as Session;
+  return { s, log };
+}
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const oneRepair = () => sleep(ALT_EXIT_REPAINT_DELAY_MS + REATTACH_REPAINT_NUDGE_GAP_MS + 40);
+{
+  const { s, log } = altBorrowSession(true);
+  armAltExitRepaintWatchdog(s); // the program closed an overlay (?1049l)
+  await sleep(REPAINT_NUDGE_ECHO_MS + 200);
+  assert(
+    log.resizes === 2,
+    `an AI CLI gets one round trip, then its echo is ignored (sent ${log.resizes})`,
+  );
+  assert(log.atlasClears === 1, "and one atlas rebuild, not one per echo");
+  armAltExitRepaintWatchdog(s); // a genuine exit after the echo window has passed
+  await oneRepair();
+  assert(log.resizes === 4, "a later alt exit still gets the full recovery");
+  s.disposed = true; // stop the fake program's echo of that last nudge
+}
+{
+  // Claude 2.1.280 leaving fullscreen: "Switching back..." text, then ?1049l.
+  const { s, log } = altBorrowSession(true, false);
+  armAltExitRepaintWatchdog(s);
+  await sleep(20);
+  armAltExitRepaintWatchdog(s);
+  await oneRepair();
+  assert(log.resizes === 2, "two triggers queued before the first nudge send one round trip");
+  s.disposed = true;
+}
+{
+  const { s, log } = altBorrowSession(true);
+  armAltExitRepaintWatchdog(s);
+  s.aiCliStatus = null; // the detector's next tick drops the tool after the alt exit
+  await oneRepair();
+  assert(
+    log.atlasClears === 1,
+    "the AI CLI check is read at the trigger, not when the timer fires",
+  );
+  s.disposed = true;
+}
+{
+  const { s, log } = altBorrowSession(false);
+  armAltExitRepaintWatchdog(s); // vim / less / omp closing an overlay
+  await oneRepair();
+  assert(log.scrollResets === 1, "a plain alt exit still resets the scroll region");
+  assert(log.resizes === 0, "but sends no SIGWINCH, so nothing can echo back");
+  assert(log.atlasClears === 0, "and keeps the glyph atlas");
+  s.disposed = true;
 }
 
 // --- what `windowsPty` actually changes, against the real xterm ------------

@@ -344,14 +344,13 @@ export function ensureSession(
   session.cleanups.push(() => titleSub.dispose());
 
   // Repair the pane when a foreground program LEAVES the alternate screen
-  // (CSI ?1049l). The trigger case is Claude Code's `/tui fullscreen` <->
-  // `/tui default` renderer toggle: xterm restores the cursor but not the
-  // normal buffer's scroll region, no pane-pixel-size change means the
-  // ResizeObserver never repaints, and the relaunched classic renderer then
-  // draws a corrupted prompt box whose line-editor redraw lands off-screen (so
-  // input looks dead). `armAltExitRepaintWatchdog` resets the region + nudges a
-  // resize. Gated on `sawAltScreenBuffer` so only the alt->normal exit edge
-  // fires - launching a TUI (normal->alt) is left untouched.
+  // (CSI ?1049l): xterm restores the cursor but not the normal buffer's scroll
+  // region, and no pane-pixel-size change means the ResizeObserver never
+  // repaints. `armAltExitRepaintWatchdog` resets the region and repaints; when
+  // an AI CLI owns the pane (Claude Code leaving its fullscreen renderer via
+  // `/tui default`) it also nudges a resize so the relaunched renderer redraws.
+  // Gated on `sawAltScreenBuffer` so only the alt->normal exit edge fires -
+  // launching a TUI (normal->alt) is left untouched.
   let sawAltScreenBuffer = false;
   const bufferSub = term.buffer.onBufferChange(() => {
     let isAlt = false;

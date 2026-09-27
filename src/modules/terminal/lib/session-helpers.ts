@@ -128,6 +128,16 @@ export const REATTACH_REPAINT_NUDGE_GAP_MS = 50;
 export const ALT_EXIT_REPAINT_DELAY_MS = 180;
 
 /**
+ * How long after `nudgeResizeRoundTrip` fires that `armAltExitRepaintWatchdog`
+ * treats a new trigger as the program answering that fake SIGWINCH rather than
+ * a new event. omp (pi-tui) answers every resize by borrowing the alternate
+ * screen and leaving it ~170ms later (~510ms behind a 150ms SSH link); without
+ * this window that exit re-arms the watchdog, whose nudge causes the next
+ * borrow, forever. Accepted limit, listed in `KNOWN-LIMITS.md`.
+ */
+export const REPAINT_NUDGE_ECHO_MS = 1000;
+
+/**
  * Snapshot the visible xterm viewport as newline-joined text in original
  * case. Returns "" on any buffer API error so a mid-reflow throw doesn't
  * kill the detector loop.

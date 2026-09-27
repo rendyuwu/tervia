@@ -9,6 +9,7 @@ import {
   REATTACH_REPAINT_CHECK_MS,
   REATTACH_REPAINT_NUDGE_GAP_MS,
   ALT_EXIT_REPAINT_DELAY_MS,
+  REPAINT_NUDGE_ECHO_MS,
   isDebugPty,
   describeError,
   readTerminalViewport,
@@ -382,6 +383,12 @@ export function armNoDataWatchdog(s: Session, epoch: number): void {
 }
 
 /**
+ * When `nudgeResizeRoundTrip` last sent its fake SIGWINCH, per session. Read by
+ * `armAltExitRepaintWatchdog` to recognise the program's echo of it.
+ */
+const lastRepaintNudgeAt = new WeakMap<Session, number>();
+
+/**
  * Arm a one-shot blank-viewport repaint check for the current spawn. A short
  * time after a byte that should have painted, if the normal-screen viewport is
  * still empty while the shell is live, force the shell's line editor
@@ -411,6 +418,7 @@ export function armNoDataWatchdog(s: Session, epoch: number): void {
  */
 export function nudgeResizeRoundTrip(s: Session, epoch: number): void {
   if (!s.pty) return;
+  lastRepaintNudgeAt.set(s, performance.now());
   const cols = Math.max(MIN_PTY_DIM, s.term.cols);
   const rows = Math.max(MIN_PTY_DIM, s.term.rows);
   const nudgeRows = rows > MIN_PTY_DIM ? rows - 1 : rows + 1;
@@ -545,15 +553,21 @@ function maybeNudgeOnRendererSwitch(s: Session, bytes: Uint8Array): void {
  *
  * Recovery, deferred so the relaunch's first frame has landed: reset the scroll
  * region (DECSC/DECRC wrap it so the cursor + SGR are preserved; a no-op for a
- * plain shell prompt), force a full local repaint, then SIGWINCH the PTY in a
- * round-trip so the foreground program redraws its frame at the correct current
+ * plain shell prompt) and force a full local repaint. When an AI CLI owned the
+ * pane at the trigger, also rebuild the WebGL glyph atlas and SIGWINCH the PTY
+ * in a round-trip so its relaunched renderer redraws at the correct current
  * size - which is what brings the prompt back on-screen and "un-deads" input.
- * The row toggle defeats ConPTY's same-size resize coalescing. Mirrors
- * `armBlankViewportRepaint`; fires only on the alt->normal edge so a TUI
- * being launched (normal->alt) is never disturbed.
+ * The row toggle defeats ConPTY's same-size resize coalescing. A trigger within
+ * `REPAINT_NUDGE_ECHO_MS` of the last nudge is the program answering that
+ * nudge and gets the local repair only. Mirrors `armBlankViewportRepaint`;
+ * fires only on the alt->normal edge so a TUI being launched (normal->alt) is
+ * never disturbed.
  */
 export function armAltExitRepaintWatchdog(s: Session): void {
   const epoch = s.ptySpawnEpoch;
+  // Sampled at the trigger, not when the timer fires: the AI CLI detector drops
+  // the tool on its next tick after an alt-screen exit, well inside the delay.
+  const aiCli = s.aiCliStatus !== null;
   setTimeout(() => {
     if (s.disposed || epoch !== s.ptySpawnEpoch || !s.pty) return;
     let isAlt = false;
@@ -563,17 +577,27 @@ export function armAltExitRepaintWatchdog(s: Session): void {
       return;
     }
     if (isAlt) return; // a TUI re-entered the alt screen during the delay
+    // The local repair cannot feed back, so it runs even inside the echo window.
+    // ponytail: fixed window, escapes once that echo takes >~800ms (a very slow
+    // SSH link); accepted in `KNOWN-LIMITS.md`.
+    const echo =
+      performance.now() - (lastRepaintNudgeAt.get(s) ?? -Infinity) < REPAINT_NUDGE_ECHO_MS;
+    // Only an AI CLI's relaunched renderer needs the atlas rebuild and the
+    // SIGWINCH (Claude Code's `/tui` switch; 2.1.280's fullscreen renderer is on
+    // the alternate screen). Any other program redraws itself on its alt exit.
+    // Accepted in `KNOWN-LIMITS.md`.
+    const full = aiCli && !echo;
     try {
       // DECSC + DECSTBM-reset + DECRC: reset the scroll region, keep the cursor.
       s.term.write("\x1b7\x1b[r\x1b8");
       // Force the WebGL renderer to re-rasterize glyphs, clearing any stale
       // texture-atlas cells left behind by the renderer-switch redraw.
-      s.webglAddon?.clearTextureAtlas();
+      if (full) s.webglAddon?.clearTextureAtlas();
       s.term.refresh(0, s.term.rows - 1);
     } catch {
       return;
     }
-    nudgeResizeRoundTrip(s, epoch);
+    if (full) nudgeResizeRoundTrip(s, epoch);
   }, ALT_EXIT_REPAINT_DELAY_MS);
 }
 

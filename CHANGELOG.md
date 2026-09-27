@@ -18,6 +18,12 @@ The latest release only. Every earlier version:
 
 - A remote file dragged onto the local Files explorer can also land on a file row (its folder) or on empty tree space (the root), not only on a folder row.
 
+### Fixed
+
+**Terminal**
+
+- omp and other programs that briefly open the alternate screen on every resize no longer flicker nonstop after an overlay closes or the pane is resized, locally or over SSH. After leaving the alternate screen, only a detected AI CLI gets a resize nudge.
+
 ## [0.1.1] - 27-09-2026
 
 ### Added

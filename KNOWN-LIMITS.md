@@ -43,6 +43,26 @@ the same change that lifts it.
   every reference lets go. `src/modules/ssh/tunnel.ts` (`sessionFor`).
   Changes when: a report of an edit not applying.
 
+## Terminal
+
+- **Only a detected AI CLI gets a resize nudge after leaving the alternate
+  screen.** vim, less, htop, omp and an AI CLI the detector does not
+  recognise get the scroll-region reset and a repaint, never a SIGWINCH or
+  a glyph-atlas rebuild. The detector also drops Claude Code at its first
+  fullscreen-to-classic exit, so a later `/tui default` in the same run gets
+  the local repair only. `src/modules/terminal/lib/pty-lifecycle.ts`
+  (`armAltExitRepaintWatchdog`). Changes when: a report of a broken prompt
+  after a `/tui default` switch, or of a program that only redraws after a
+  resize.
+- **The alt-exit watchdog treats a trigger within about 0.8 s of its own
+  nudge as that nudge's echo** (1 s, measured when the repair runs 180 ms
+  after the trigger). A program that answers the nudge more slowly (a very
+  slow SSH link) re-arms the full recovery about once a second, and a
+  genuine AI CLI alt exit inside the window gets the local repair only.
+  `src/modules/terminal/lib/session-helpers.ts` (`REPAINT_NUDGE_ECHO_MS`),
+  `src/modules/terminal/lib/pty-lifecycle.ts` (`armAltExitRepaintWatchdog`).
+  Changes when: the flicker is reported again on a slow link.
+
 ## Forwards
 
 - **`-R`/`-D` rules do not autostart with their host.** `startWithHost`
