@@ -48,7 +48,7 @@ import { sftpHome } from "./sftp";
 import { useSshFileTree } from "./useSshFileTree";
 import { useSshFileDrop } from "./useSshFileDrop";
 import { useSshTransfers } from "./useSshTransfers";
-import { remoteBasename, remoteDropDir, unsafeOnWindows } from "./remotePath";
+import { remoteBasename, treeDropDir, unsafeOnWindows } from "./remotePath";
 import { useSshNav } from "./useSshNav";
 import { useSshRightPanelStore } from "./sshRightPanelStore";
 import {
@@ -169,7 +169,12 @@ export function SshFileExplorer({
     [tree, rootPath],
   );
   const { transfer, uploadFiles, downloadFile } = useSshTransfers(sessionId, onUploaded);
-  useSshFileDrop({ sessionId, rootPath, containerRef, onDrop: uploadFiles });
+  useSshFileDrop({
+    sessionId,
+    rootPath,
+    containerRef,
+    onDrop: (paths, dir) => void uploadFiles(paths, dir, true),
+  });
   // total 0 = size not known yet (first event) -> show indeterminate-ish 0%.
   // Clamped: a file that grows mid-read would pass 100.
   const transferPct =
@@ -198,32 +203,36 @@ export function SshFileExplorer({
     [downloadFile],
   );
 
-  // A Remote row dropped on another Remote row or the tree body (move), or on a
-  // local Files folder row (download). Dispatched by `ensureFsDragListener`;
-  // bubbles up from the tree body to the always-mounted root.
-  const onRowDropRef = useRef<(from: string, target: HTMLElement) => void>(() => {});
-  onRowDropRef.current = (from, target) => {
-    if (sessionId === null || !rootPath) return;
-    if (containerRef.current?.contains(target)) {
-      void tree.moveEntry(from, remoteDropDir(target, rootPath));
+  // A row dropped by `ensureFsDragListener`, bubbling up from the tree body to the
+  // always-mounted root: a Remote row onto another Remote row or the tree body
+  // (move) or onto the local Files tree (download), or a local Files row onto this
+  // tree (upload).
+  const onRowDropRef = useRef<(drop: FsRowDropDetail) => void>(() => {});
+  onRowDropRef.current = ({ from, target, upload }) => {
+    const container = containerRef.current;
+    if (sessionId === null || !rootPath || !container) return;
+    if (upload) {
+      // A drag is easy to drop in the wrong place: never replace a remote file.
+      void uploadFiles([from], treeDropDir(target, rootPath), false);
       return;
     }
-    const localDir = target.getAttribute("data-fs-path");
-    if (!localDir) return;
+    if (container.contains(target)) {
+      void tree.moveEntry(from, treeDropDir(target, rootPath));
+      return;
+    }
+    const localRoot = target.closest("[data-fs-tree]")?.getAttribute("data-fs-tree");
+    if (!localRoot) return;
     const name = remoteBasename(from);
     if (IS_WINDOWS && unsafeOnWindows(name)) {
       toast(`Download failed: "${name}" is not a valid Windows file name`, { variant: "error" });
       return;
     }
-    void downloadFile(from, joinLocalPath(localDir, name), false);
+    void downloadFile(from, joinLocalPath(treeDropDir(target, localRoot), name), false);
   };
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
-    const onDrop = (e: Event) => {
-      const { from, target } = (e as CustomEvent<FsRowDropDetail>).detail;
-      onRowDropRef.current(from, target);
-    };
+    const onDrop = (e: Event) => onRowDropRef.current((e as CustomEvent<FsRowDropDetail>).detail);
     el.addEventListener(FS_ROW_DROP_EVENT, onDrop);
     return () => el.removeEventListener(FS_ROW_DROP_EVENT, onDrop);
   }, []);
@@ -236,7 +245,7 @@ export function SshFileExplorer({
         toast("No copied files to paste", { variant: "info" });
         return;
       }
-      await uploadFiles(paths, dir);
+      await uploadFiles(paths, dir, true);
     },
     [uploadFiles],
   );
@@ -258,7 +267,7 @@ export function SshFileExplorer({
     const row = selectedPath
       ? (treeRef.current?.querySelector(`[data-fs-path="${CSS.escape(selectedPath)}"]`) ?? null)
       : null;
-    void pasteInto(remoteDropDir(row, rootPath));
+    void pasteInto(treeDropDir(row, rootPath));
   };
 
   // WKWebView does not focus a clicked `<button>`, and the keyboard paste needs

@@ -24,11 +24,14 @@ export function dispatchFsRefresh(path?: string, file?: string): void {
   );
 }
 
-/** Derives `dirname(filePath)` and dispatches a refresh. Handles `/` and `\`. */
+/** Derives `dirname(filePath)` and dispatches a refresh. Handles `/` and `\`.
+ *  A file directly under `/` or a drive root keeps the root's separator (`/`,
+ *  `C:/`): that is the key a tree rooted there refreshes by. */
 export function dispatchFsRefreshForFile(filePath: string): void {
   const i = Math.max(filePath.lastIndexOf("/"), filePath.lastIndexOf("\\"));
-  if (i <= 0) return;
-  dispatchFsRefresh(filePath.slice(0, i), filePath);
+  if (i < 0) return;
+  const dir = filePath.slice(0, i);
+  dispatchFsRefresh(i === 0 || /^[A-Za-z]:$/.test(dir) ? filePath.slice(0, i + 1) : dir, filePath);
 }
 
 /**

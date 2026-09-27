@@ -86,7 +86,7 @@ export function ExplorerTreeList({
       {!isSearchActive && !isGrepActive ? (
         <ContextMenu>
           <ContextMenuTrigger asChild>
-            <ScrollArea className="min-h-0 flex-1">
+            <ScrollArea data-fs-tree={rootPath} className="min-h-0 flex-1">
               <div className="py-1" ref={listRef}>
                 {pendingAtRoot && (
                   <div

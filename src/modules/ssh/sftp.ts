@@ -51,11 +51,14 @@ export type TransferProgress = { written: number; total: number };
 /** Upload a local file (by absolute path) to a remote path over SFTP. Bytes are
  *  read on the Rust side so binary files upload intact (never round-tripped as a
  *  JS string). Folders are rejected; write permission is enforced by the remote.
- *  `onProgress` fires per chunk so callers can show a percentage. */
+ *  `overwrite: false` refuses an existing remote file (a drag from the Files
+ *  tree); OS drop and paste pass `true` and replace it. `onProgress` fires per
+ *  chunk so callers can show a percentage. */
 export function sftpUpload(
   sessionId: number,
   localPath: string,
   remotePath: string,
+  overwrite: boolean,
   onProgress?: (p: TransferProgress) => void,
 ): Promise<void> {
   const onProgressChannel = new Channel<TransferProgress>();
@@ -64,6 +67,7 @@ export function sftpUpload(
     id: sessionId,
     localPath,
     remotePath,
+    overwrite,
     onProgress: onProgressChannel,
   });
 }

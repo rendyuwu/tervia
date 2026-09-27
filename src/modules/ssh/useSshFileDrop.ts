@@ -1,6 +1,6 @@
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { useEffect, useRef, type RefObject } from "react";
-import { remoteDropDir } from "./remotePath";
+import { treeDropDir } from "./remotePath";
 
 // OS drag-and-drop onto the SSH file tree. Rides Tauri's `tauri://drag-drop`
 // (the same OS-level target the terminal file-drop uses); we hit-test the drop
@@ -43,7 +43,7 @@ export function useSshFileDrop({ sessionId, rootPath, containerRef, onDrop }: Pa
       const under = document.elementFromPoint(physX / dpr, physY / dpr) as HTMLElement | null;
       const container = containerRef.current;
       if (!under || !container || !container.contains(under)) return null;
-      return remoteDropDir(under.closest("[data-fs-path]"), rootPath);
+      return treeDropDir(under.closest("[data-fs-path]"), rootPath);
     };
 
     getCurrentWebviewWindow()

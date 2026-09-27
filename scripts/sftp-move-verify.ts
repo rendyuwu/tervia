@@ -3,11 +3,11 @@
  * Run: `npx tsx scripts/sftp-move-verify.ts`.
  *
  * `remoteMoveTarget` decides where an SFTP RENAME sends a dragged entry; a
- * wrong answer moves a folder into itself or onto its own path. `remoteDropDir`
- * picks the folder a drop targets. `unsafeOnWindows` guards a server-supplied
+ * wrong answer moves a folder into itself or onto its own path. `treeDropDir`
+ * picks the folder a drop targets in either tree. `unsafeOnWindows` guards a server-supplied
  * name before it is joined onto a local folder for a drag-download.
  */
-import { remoteDropDir, remoteMoveTarget, unsafeOnWindows } from "../src/modules/ssh/remotePath";
+import { remoteMoveTarget, treeDropDir, unsafeOnWindows } from "../src/modules/ssh/remotePath";
 
 let failed = 0;
 function check(label: string, got: unknown, want: unknown): void {
@@ -45,22 +45,33 @@ check(
   "/home/u/docs/doc",
 );
 
-console.log("[remoteDropDir]");
+console.log("[treeDropDir]");
 const row = (path: string, kind: string) => ({
   getAttribute: (name: string) =>
     name === "data-fs-path" ? path : name === "data-fs-kind" ? kind : null,
 });
 check(
   "folder row targets itself",
-  remoteDropDir(row("/home/u/docs", "dir"), "/home/u"),
+  treeDropDir(row("/home/u/docs", "dir"), "/home/u"),
   "/home/u/docs",
 );
 check(
   "file row targets its parent",
-  remoteDropDir(row("/home/u/docs/a.txt", "file"), "/home/u"),
+  treeDropDir(row("/home/u/docs/a.txt", "file"), "/home/u"),
   "/home/u/docs",
 );
-check("no row targets the root", remoteDropDir(null, "/home/u"), "/home/u");
+check("no row targets the root", treeDropDir(null, "/home/u"), "/home/u");
+check(
+  "top-level file under a drive root targets the root",
+  treeDropDir(row("C:/a.txt", "file"), "C:/"),
+  "C:/",
+);
+check("top-level file under / targets /", treeDropDir(row("/a.txt", "file"), "/"), "/");
+check(
+  "file under a backslash root keeps the root as written",
+  treeDropDir(row("C:\\Users\\me\\proj/a.ts", "file"), "C:\\Users\\me\\proj"),
+  "C:\\Users\\me\\proj",
+);
 
 console.log("[unsafeOnWindows]");
 check("backslash traversal", unsafeOnWindows("..\\..\\Startup\\x.bat"), true);

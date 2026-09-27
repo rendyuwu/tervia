@@ -4400,4 +4400,77 @@ mod remote_dynamic_forward_tests {
             "[remote_dynamic_forward_tests] OK: sftp download byte-identical, folder refused, taken move refused, move landed"
         );
     }
+
+    /// SFTP upload of a binary file (byte-identical, progress emitted), then a
+    /// second upload onto that name without overwrite (refused, file intact)
+    /// and with overwrite (replaced).
+    #[test]
+    #[ignore = "needs /usr/sbin/sshd"]
+    #[cfg(unix)]
+    fn sftp_upload_refuses_a_taken_name_unless_overwriting() {
+        let Some(sshd) = TestSshd::start() else {
+            return;
+        };
+        let (input, secrets) = connect_input(&sshd);
+        let payload: Vec<u8> = (0..700 * 1024).map(|i| (i % 251) as u8).collect();
+        let target = sshd.dir.join("up.bin");
+        let target_arg = target.to_string_lossy().into_owned();
+        let check_path = target.clone();
+        let events = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = events.clone();
+        let bytes = payload.clone();
+        it_runtime().block_on(async move {
+            let session = connect(input, secrets, IpcChannel::new(|_msg| Ok(())))
+                .await
+                .expect("connect failed");
+            let sftp = session.ensure_sftp().await.expect("open sftp");
+            let progress =
+                IpcChannel::<crate::modules::ssh::sftp::TransferProgress>::new(move |_| {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                });
+            crate::modules::ssh::sftp::ssh_sftp_upload_inner(
+                &sftp,
+                &bytes,
+                target_arg.clone(),
+                false,
+                &progress,
+            )
+            .await
+            .expect("upload failed");
+            let err = crate::modules::ssh::sftp::ssh_sftp_upload_inner(
+                &sftp,
+                b"clobber",
+                target_arg.clone(),
+                false,
+                &progress,
+            )
+            .await
+            .expect_err("an upload onto a taken name must be refused");
+            assert!(err.contains("already exists"), "{err}");
+            assert!(
+                std::fs::read(&check_path).unwrap() == bytes,
+                "refused upload must leave the remote file intact"
+            );
+            crate::modules::ssh::sftp::ssh_sftp_upload_inner(
+                &sftp,
+                b"replaced",
+                target_arg,
+                true,
+                &progress,
+            )
+            .await
+            .expect("overwriting upload failed");
+            session.close().await;
+        });
+
+        assert!(
+            events.load(Ordering::SeqCst) >= 2,
+            "upload must report progress"
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), b"replaced");
+        eprintln!(
+            "[remote_dynamic_forward_tests] OK: sftp upload byte-identical, taken name refused, overwrite replaced"
+        );
+    }
 }

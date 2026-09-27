@@ -4,6 +4,20 @@ The latest release only. Every earlier version:
 [GitHub Releases](https://github.com/rendyuwu/tervia/releases). Versions:
 [SemVer](https://semver.org/); before `1.0` a minor bump may break things.
 
+## [Unreleased]
+
+### Added
+
+**SFTP**
+
+- Drag a file from the local Files explorer onto the Remote tree to upload it: onto a folder, onto a file for that file's folder, or onto empty tree space for the root. A drag never replaces an existing remote file; OS drop and paste still do.
+
+### Changed
+
+**SFTP**
+
+- A remote file dragged onto the local Files explorer can also land on a file row (its folder) or on empty tree space (the root), not only on a folder row.
+
 ## [0.1.1] - 27-09-2026
 
 ### Added

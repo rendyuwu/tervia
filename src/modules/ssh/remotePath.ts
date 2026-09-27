@@ -14,12 +14,18 @@ export function remoteBasename(path: string): string {
   return path.slice(path.lastIndexOf("/") + 1);
 }
 
-/** Folder a drop onto `row` targets: a folder row is itself, any other row its
- *  parent, no row (the tree body, `null`) the root. */
-export function remoteDropDir(row: Pick<Element, "getAttribute"> | null, rootPath: string): string {
+/** Folder a drop onto `row` targets, in either tree: a folder row is itself, any
+ *  other row (file, symlink) its parent, no row (the tree body, `null`) the root.
+ *  The local Files tree also joins child paths with `/` (`useFileTree.joinPath`),
+ *  so one rule serves both. A parent shorter than the root is that root minus its
+ *  trailing slash (`C:/`, `/srv/`), so the root is returned as written: it is the
+ *  key the tree refreshes by. */
+export function treeDropDir(row: Pick<Element, "getAttribute"> | null, rootPath: string): string {
   const p = row?.getAttribute("data-fs-path");
   if (!p) return rootPath;
-  return row?.getAttribute("data-fs-kind") === "dir" ? p : remoteDirname(p);
+  if (row?.getAttribute("data-fs-kind") === "dir") return p;
+  const parent = remoteDirname(p);
+  return parent.length < rootPath.length ? rootPath : parent;
 }
 
 /** Where moving `from` into `toDir` lands it, or null for a no-op or impossible

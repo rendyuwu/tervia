@@ -16,8 +16,8 @@ export type SshTransferState = {
   total: number;
 };
 
-// Uploads (OS drop, paste) and downloads (Download…, drag onto a local folder)
-// for the Remote tree, sharing one progress strip.
+// Uploads (OS drop, paste, drag from the Files tree) and downloads (Download…,
+// drag onto the Files tree) for the Remote tree, sharing one progress strip.
 export function useSshTransfers(sessionId: number | null, onUploaded: (remoteDir: string) => void) {
   const onUploadedRef = useRef(onUploaded);
   onUploadedRef.current = onUploaded;
@@ -28,7 +28,7 @@ export function useSshTransfers(sessionId: number | null, onUploaded: (remoteDir
   const [transfer, setTransfer] = useState<SshTransferState | null>(null);
 
   const uploadFiles = useCallback(
-    async (paths: string[], dir: string) => {
+    async (paths: string[], dir: string, overwrite: boolean) => {
       if (sessionId === null || paths.length === 0) return;
       const failures: string[] = [];
       for (let i = 0; i < paths.length; i++) {
@@ -37,7 +37,7 @@ export function useSshTransfers(sessionId: number | null, onUploaded: (remoteDir
         const base = { verb: "Uploading", name, index: i + 1, count: paths.length } as const;
         setTransfer({ ...base, written: 0, total: 0 });
         try {
-          await sftpUpload(sessionId, local, remoteJoin(dir, name), (p) =>
+          await sftpUpload(sessionId, local, remoteJoin(dir, name), overwrite, (p) =>
             setTransfer({ ...base, ...p }),
           );
         } catch (e) {

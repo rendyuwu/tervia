@@ -138,6 +138,16 @@ check(
   detailOf(() => dispatchFsRefreshForFile("catatanSMA.md")),
   "NOTHING DISPATCHED",
 );
+check(
+  "a file under / names / (the key a tree rooted there refreshes by)",
+  detailOf(() => dispatchFsRefreshForFile("/a.bin")),
+  { path: "/", file: "/a.bin" },
+);
+check(
+  "a file under a drive root names the root with its slash",
+  detailOf(() => dispatchFsRefreshForFile("C:/a.bin")),
+  { path: "C:/", file: "C:/a.bin" },
+);
 
 console.log(failed === 0 ? "\nAll editor-reload checks passed." : `\n${failed} check(s) FAILED.`);
 process.exit(failed === 0 ? 0 : 1);

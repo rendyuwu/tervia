@@ -137,10 +137,8 @@ function FileTreeNodeImpl({
               // cursor over every drop zone. Instead, drag handling is
               // synthesized from `mousedown`/`mousemove`/`mouseup` by
               // `useTerminalFileDrop.ts::ensureFsDragListener`, which hit-
-              // tests the source against `[data-fs-path]` and the target
-              // against `[data-terminal-leaf-id]`, plus, for a Remote row,
-              // another Remote row or tree body (move) or a local folder row
-              // (download). See that file for the full rationale.
+              // tests the source against `[data-fs-path]`; see that file for
+              // the drop targets and the full rationale.
               data-fs-kind={entry.kind}
               onClick={handleNodeSelect}
               onDoubleClick={() => !isDir && tree.beginRename(path)}

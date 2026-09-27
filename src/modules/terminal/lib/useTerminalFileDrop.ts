@@ -53,10 +53,11 @@ let dragStyleInjected = false;
  *     drop-target outline via `tervia-fs-dragging`).
  *   - `mouseup` over `data-terminal-leaf-id` writes the shell-quoted
  *     path into that PTY.
- *   - For a Remote (`data-sftp-tree`) source only: `mouseup` over another
- *     row of that tree or its empty body dispatches `FS_ROW_DROP_EVENT`
- *     (a move), and over a local Files folder row the same event (a
- *     download). The SSH explorer handles it.
+ *   - A Remote (`data-sftp-tree`) row released over another row of its tree
+ *     or its empty body dispatches `FS_ROW_DROP_EVENT` (a move), and over a
+ *     local Files (`data-fs-tree`) row or empty body the same event (a
+ *     download). A local Files row released over a Remote row or empty body
+ *     dispatches it too (an upload). The SSH explorer handles all three.
  *   - `mouseup` elsewhere, back on the source row, or `Escape` cancels.
  *
  * Tradeoff: no native ghost preview under the cursor (browser only
@@ -70,10 +71,11 @@ let dragStyleInjected = false;
  */
 const DRAG_ACTIVATION_PX = 5;
 
-/** Bubbles from the Remote tree body when a Remote row is dropped on a move
- *  or download target. */
+/** Bubbles from a Remote tree body when a row is dropped on a move, download
+ *  or upload target. `upload` is set at mousedown (a local Files source), so a
+ *  Remote row re-rendered mid-drag still routes as a move or download. */
 export const FS_ROW_DROP_EVENT = "tervia:fs-row-drop";
-export type FsRowDropDetail = { from: string; target: HTMLElement };
+export type FsRowDropDetail = { from: string; target: HTMLElement; upload: boolean };
 
 type SyntheticDragState = {
   path: string;
@@ -87,21 +89,21 @@ type SyntheticDragState = {
   tree: HTMLElement | null;
 };
 
-/** The drop target under a point: a terminal pane for any source, and for a
- *  Remote source also a row or the body of its own tree (move) or a local
- *  Files folder row (download). */
+/** The drop target under a point: a terminal pane for any source; for a Remote
+ *  source also a row or the body of its own tree (move) or of the local Files
+ *  tree (download); for a local source also a row or the body of a Remote tree
+ *  (upload). A local row over its own tree has no target. */
 function dropTargetAt(x: number, y: number, d: SyntheticDragState): HTMLElement | null {
   const under = document.elementFromPoint(x, y);
-  const leaf = under?.closest<HTMLElement>("[data-terminal-leaf-id]");
+  if (!under) return null;
+  const leaf = under.closest<HTMLElement>("[data-terminal-leaf-id]");
   if (leaf) return leaf;
-  if (!d.tree || !under) return null;
+  const tree = d.tree?.contains(under)
+    ? d.tree
+    : under.closest<HTMLElement>(d.tree ? "[data-fs-tree]" : "[data-sftp-tree]");
+  if (!tree) return null;
   const row = under.closest<HTMLElement>("[data-fs-path]");
-  if (row === d.source) return null;
-  if (d.tree.contains(under)) return row ?? d.tree;
-  if (row && !row.closest("[data-sftp-tree]") && row.getAttribute("data-fs-kind") === "dir") {
-    return row;
-  }
-  return null;
+  return row === d.source ? null : (row ?? tree);
 }
 
 function injectFsDragStyle(): void {
@@ -227,10 +229,13 @@ export function ensureFsDragListener(): void {
       // mousedown, so the click event still fires).
       if (!wasActive) return;
       // Resolve the target at release time in case the cursor moved off the
-      // highlighted one in the final frame. The last-frame fallback is for
-      // terminal-only sources: a Remote row released over nothing, or back on
+      // highlighted one in the final frame. Only a local row falls back to the
+      // last frame's target, and only to a terminal: a stale Remote row must not
+      // take an upload, and a Remote row released over nothing, or back on
       // itself, does nothing.
-      const target = dropTargetAt(e.clientX, e.clientY, d) ?? (d.tree === null ? lastTarget : null);
+      const target =
+        dropTargetAt(e.clientX, e.clientY, d) ??
+        (d.tree === null && lastTarget?.hasAttribute("data-terminal-leaf-id") ? lastTarget : null);
       if (!target) return;
       const leafIdAttr = target.getAttribute("data-terminal-leaf-id");
       if (leafIdAttr !== null) {
@@ -239,10 +244,12 @@ export function ensureFsDragListener(): void {
         writeToLeaf(leafId, quoteForShell(path));
         return;
       }
-      d.tree?.dispatchEvent(
+      // A move or download goes to the source's Remote tree, an upload to the
+      // target's; `SshFileExplorer` tells them apart.
+      (d.tree ?? target.closest<HTMLElement>("[data-sftp-tree]"))?.dispatchEvent(
         new CustomEvent<FsRowDropDetail>(FS_ROW_DROP_EVENT, {
           bubbles: true,
-          detail: { from: path, target },
+          detail: { from: path, target, upload: d.tree === null },
         }),
       );
     },

@@ -225,7 +225,9 @@ pub async fn ssh_sftp_write_file(
 
 /// Upload a local file to the remote over SFTP. Reads `local_path` off the
 /// async runtime (a big file must not block it) and streams the bytes into
-/// `remote_path`, replacing it in place. Directories are rejected up front -
+/// `remote_path`. `overwrite: true` replaces an existing file in place (OS
+/// drop, paste); `overwrite: false` refuses one (a drag from the Files tree,
+/// easy to drop in the wrong place). Directories are rejected up front -
 /// recursive upload is a separate feature. The remote kernel enforces write
 /// permission on the target dir; a denial surfaces as `permission denied`.
 /// `on_progress` emits `{written, total}` as each chunk lands so the explorer
@@ -236,6 +238,7 @@ pub async fn ssh_sftp_upload(
     id: u32,
     local_path: String,
     remote_path: String,
+    overwrite: bool,
     on_progress: Channel<TransferProgress>,
 ) -> Result<(), String> {
     // Cap the whole-file read so a huge drop can't OOM the app. Matches the
@@ -260,34 +263,57 @@ pub async fn ssh_sftp_upload(
     .map_err(|e| format!("read task join failed: {e}"))??;
 
     on_sftp(&state, id, move |sftp| async move {
-        let total = bytes.len() as u64;
-        let mut file = sftp
-            .open_with_flags(
-                remote_path,
-                OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE,
-            )
-            .await
-            .map_err(humanize)?;
-        use tokio::io::AsyncWriteExt;
-        // Chunk the write so a large file reports a moving percentage. 256 KiB
-        // keeps the event count bounded (<=1024 for the 256 MiB cap) while
-        // still feeling live. Send an initial 0% so the bar appears at once.
-        const CHUNK: usize = 256 * 1024;
-        let _ = on_progress.send(TransferProgress { written: 0, total });
-        let mut written: u64 = 0;
-        for chunk in bytes.chunks(CHUNK) {
-            file.write_all(chunk)
-                .await
-                .map_err(|e| format!("sftp write: {e}"))?;
-            written += chunk.len() as u64;
-            let _ = on_progress.send(TransferProgress { written, total });
-        }
-        file.shutdown()
-            .await
-            .map_err(|e| format!("sftp close: {e}"))?;
-        Ok(())
+        ssh_sftp_upload_inner(&sftp, &bytes, remote_path, overwrite, &on_progress).await
     })
     .await
+}
+
+/// Write `bytes` to `remote_path` for `ssh_sftp_upload`, reporting
+/// `{written, total}` per chunk. `overwrite: false` refuses an existing path,
+/// a symlink included: the LSTAT gives a clear "already exists" in place of
+/// whatever status the server returns (as in `ssh_sftp_rename_inner`), and
+/// `EXCLUDE` refuses atomically a file created in between.
+pub(super) async fn ssh_sftp_upload_inner(
+    sftp: &SftpSession,
+    bytes: &[u8],
+    remote_path: String,
+    overwrite: bool,
+    on_progress: &Channel<TransferProgress>,
+) -> Result<(), String> {
+    let flags = if overwrite {
+        OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE
+    } else {
+        if unless_gone(sftp.symlink_metadata(remote_path.clone()).await)
+            .map_err(humanize)?
+            .is_some()
+        {
+            return Err(format!("{remote_path} already exists"));
+        }
+        OpenFlags::CREATE | OpenFlags::EXCLUDE | OpenFlags::WRITE
+    };
+    let total = bytes.len() as u64;
+    let mut file = sftp
+        .open_with_flags(remote_path, flags)
+        .await
+        .map_err(humanize)?;
+    use tokio::io::AsyncWriteExt;
+    // Chunk the write so a large file reports a moving percentage. 256 KiB
+    // keeps the event count bounded (<=1024 for the 256 MiB cap) while
+    // still feeling live. Send an initial 0% so the bar appears at once.
+    const CHUNK: usize = 256 * 1024;
+    let _ = on_progress.send(TransferProgress { written: 0, total });
+    let mut written: u64 = 0;
+    for chunk in bytes.chunks(CHUNK) {
+        file.write_all(chunk)
+            .await
+            .map_err(|e| format!("sftp write: {e}"))?;
+        written += chunk.len() as u64;
+        let _ = on_progress.send(TransferProgress { written, total });
+    }
+    file.shutdown()
+        .await
+        .map_err(|e| format!("sftp close: {e}"))?;
+    Ok(())
 }
 
 /// Read a whole remote file into memory for `ssh_sftp_download`, reporting
