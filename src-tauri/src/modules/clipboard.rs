@@ -185,6 +185,17 @@ pub async fn clipboard_read_file_list() -> Result<Vec<String>, String> {
         .map_err(|e| format!("clipboard task failed: {e}"))?
 }
 
+/// Text a terminal program copied with OSC 52 (tmux copy-mode, neovim's
+/// clipboard provider, vim-oscyank), written in the HOST process. The sequence
+/// arrives on the PTY stream, not from a user gesture, so the webview's
+/// `navigator.clipboard.writeText` has no activation to write under.
+#[tauri::command]
+pub async fn clipboard_write_text(text: String) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || write_text(&text))
+        .await
+        .map_err(|e| format!("clipboard task failed: {e}"))?
+}
+
 /// Tests against a real X selection. They need a display and `xclip`, so every
 /// one is `#[ignore]`d and `cargo test` stays hermetic - the same arrangement
 /// `rdp::session::rdp_live` uses for tests that need a real server.

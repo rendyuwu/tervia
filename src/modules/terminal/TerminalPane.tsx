@@ -160,6 +160,55 @@ export function TerminalPane({
     terminalCustomPalette,
   ]);
 
+  // PuTTY-style select-to-copy: a left-button drag, double-click word or
+  // triple-click line is copied wherever the button comes up. xterm keeps
+  // tracking the drag on `document`, so the release can land past the bottom
+  // edge while autoscrolling, right of the end of a line, or on the pane
+  // padding, all outside this div.
+  // - `mousedown` listens in the capture phase: in a mouse-reporting app,
+  //   `SelectionService.handleMouseDown` calls `stopPropagation()` on the press
+  //   that forces a selection (Shift, or Option on macOS), so a bubbling
+  //   listener (React's `onMouseDown` included) never sees it. Every left press
+  //   anywhere in the app runs `onDown`, so a press elsewhere disarms this pane.
+  // - `mouseup` listens on `window` in the bubble phase, after xterm's own
+  //   `document` mouseup has finished the selection. Nothing stops mouseup:
+  //   xterm's `cancel()` is a no-op unless `cancelEvents` is set, which Tervia
+  //   does not set.
+  // - Only a press in this pane arms the copy, so SearchAddon's `term.select()`
+  //   and any other selection made in code never reaches the clipboard. A plain
+  //   click leaves no selection, so nothing is copied.
+  // - An arming press clears any leftover selection (except with Shift, which
+  //   extends it, `_handleIncrementalClick`). A normal click already clears and
+  //   SGR mouse reports clear through `onUserInput`, but a DEFAULT-encoded mouse
+  //   report (`triggerBinaryEvent`) clears nothing, so a search match left
+  //   selected would be copied by a plain click into such an app. Double- and
+  //   triple-click select after this capture-phase clear, so they still work.
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    let armed = false;
+    const onDown = (e: MouseEvent) => {
+      if (e.button !== 0) return;
+      armed = e.target instanceof Node && el.contains(e.target);
+      if (armed && !e.shiftKey) sessionRef.current.clearSelection();
+    };
+    const onUp = (e: MouseEvent) => {
+      if (e.button !== 0 || !armed) return;
+      armed = false;
+      const sel = sessionRef.current.getSelection();
+      if (!sel) return;
+      void navigator.clipboard.writeText(sel).catch((err) => {
+        console.warn("terminal select-to-copy: clipboard write failed:", err);
+      });
+    };
+    window.addEventListener("mousedown", onDown, true);
+    window.addEventListener("mouseup", onUp);
+    return () => {
+      window.removeEventListener("mousedown", onDown, true);
+      window.removeEventListener("mouseup", onUp);
+    };
+  }, []);
+
   useImperativeHandle(
     ref,
     () => ({
@@ -200,18 +249,6 @@ export function TerminalPane({
         }
         void readClipboardText().then((text) => {
           if (text) session.paste(text);
-        });
-      }}
-      // Select-to-copy (PuTTY convention): releasing a left-button drag/word/line
-      // selection also copies it to the clipboard, so copy out of the terminal is
-      // just "highlight it". Left button only, so the right-click copy/paste above
-      // isn't caught; a plain click leaves no selection and is skipped.
-      onMouseUp={(e) => {
-        if (e.button !== 0) return;
-        const sel = session.getSelection();
-        if (!sel) return;
-        void navigator.clipboard.writeText(sel).catch((err) => {
-          console.warn("terminal select-to-copy: clipboard write failed:", err);
         });
       }}
       // Internal drag-drops (file explorer rows → terminal) are

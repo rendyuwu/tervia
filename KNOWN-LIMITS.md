@@ -24,6 +24,11 @@ the same change that lifts it.
 - **Import**: `ssh_config` stanzas using `ProxyCommand`, `Include`, `Match`
   or wildcard `Host`; PuTTY sessions with a proxy or a non-SSH protocol.
   `src/modules/backup/sshConfigImport.ts`, `puttyRegImport.ts`.
+- **Terminal OSC 52**: clipboard reads (a `?` request is never answered), a
+  separate PRIMARY selection (every target writes the system clipboard), and
+  copies over 1 MiB decoded (dropped).
+  `src/modules/terminal/lib/osc-handlers.ts` (`registerClipboardHandler`,
+  `OSC52_MAX_BYTES`).
 
 ## SSH sessions
 

@@ -184,6 +184,12 @@ export type Session = {
    * `flushPendingInput` the instant the PTY goes live.
    */
   pendingInput: string[];
+  /**
+   * True while xterm parses a reattach's scrollback replay. The OSC 52
+   * handler skips copies while it is set, because they are history, not new
+   * copies. Set and cleared by `muteOsc52ForReplay` in `pty-lifecycle.ts`.
+   */
+  osc52Muted: boolean;
 };
 
 export const sessions = new Map<number, Session>();

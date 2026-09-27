@@ -74,6 +74,33 @@ export function registerProgressHandler(
   return () => d.dispose();
 }
 
+/** Largest OSC 52 copy accepted, in decoded bytes. Bigger copies are dropped whole. Accepted limit, listed in `KNOWN-LIMITS.md`. */
+export const OSC52_MAX_BYTES = 1024 * 1024;
+
+/**
+ * OSC 52 clipboard copy (XTerm origin; what tmux copy-mode, neovim's clipboard
+ * provider and vim-oscyank emit). Wire form:
+ *   ESC ] 52 ; <targets> ; <base64> ST   (ST = BEL or ESC \)
+ * Any target (`c`, `p`, `s`, digits, or empty; tmux sends empty by default)
+ * goes to the one system clipboard. A read request (`?`) is consumed and NEVER
+ * answered: answering would let a remote host read the local clipboard. An
+ * empty or invalid payload is ignored rather than clearing the clipboard as
+ * XTerm does, so a remote program cannot wipe the host clipboard. A payload
+ * decoding past `OSC52_MAX_BYTES` is dropped. Always returns `true`, so no other
+ * handler ever sees an OSC 52.
+ */
+export function registerClipboardHandler(
+  term: Terminal,
+  onCopy: (text: string) => void,
+): () => void {
+  const d = term.parser.registerOscHandler(52, (data) => {
+    const text = parseOsc52(data);
+    if (text !== null) onCopy(text);
+    return true;
+  });
+  return () => d.dispose();
+}
+
 export type TerviaOpenInput = {
   file: string;
 };
@@ -159,4 +186,19 @@ function parseTerviaSpawnTab(data: string): TerviaSpawnTabInput | null {
   }
   if (!out.cwd && !out.cmd && !out.title && !out.split) return null;
   return out;
+}
+
+function parseOsc52(data: string): string | null {
+  const sep = data.indexOf(";");
+  if (sep < 0) return null;
+  const payload = data.slice(sep + 1);
+  if (payload === "" || payload === "?") return null;
+  let bin: string;
+  try {
+    bin = atob(payload);
+  } catch {
+    return null;
+  }
+  if (bin.length > OSC52_MAX_BYTES) return null;
+  return new TextDecoder().decode(Uint8Array.from(bin, (c) => c.charCodeAt(0)));
 }

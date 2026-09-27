@@ -50,6 +50,33 @@ export function flushPendingInput(s: Session): void {
   void s.pty.write(data);
 }
 
+/**
+ * Wrap a reattach's `onData` so OSC 52 is muted while xterm parses the FIRST
+ * chunk: the daemon's scrollback replay (`PtyClient::attach`). Copies in it
+ * are history; running them again would put stale text on the host clipboard
+ * on every relaunch. xterm parses writes in order, so the empty write's
+ * callback fires right after the replay has been parsed. The write meter is
+ * fresh per spawn, so this first chunk goes straight to xterm (nothing is
+ * outstanding yet) instead of being held past the unmute.
+ */
+export function muteOsc52ForReplay(
+  s: Session,
+  onData: (bytes: Uint8Array) => void,
+): (bytes: Uint8Array) => void {
+  let replayed = false;
+  return (bytes) => {
+    if (replayed) return onData(bytes);
+    replayed = true;
+    s.osc52Muted = true;
+    onData(bytes);
+    if (!s.disposed) {
+      s.term.write("", () => {
+        s.osc52Muted = false;
+      });
+    }
+  };
+}
+
 export function openPtyForSession(s: Session, cwd: string | undefined): Promise<PtySession> {
   // Capture spawn epoch. Late exit events for a superseded spawn bail before mutating newer state.
   s.ptySpawnEpoch += 1;
@@ -229,7 +256,10 @@ export function openPtyForSession(s: Session, cwd: string | undefined): Promise<
       (async (): Promise<PtySession> => {
         let attached: PtySession;
         try {
-          attached = await reattachPty(reattachId, spawnCols, spawnRows, { onData, onExit });
+          attached = await reattachPty(reattachId, spawnCols, spawnRows, {
+            onData: muteOsc52ForReplay(s, onData),
+            onExit,
+          });
         } catch (e) {
           if (isDebugPty()) {
             console.info(

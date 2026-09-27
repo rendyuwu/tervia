@@ -7,6 +7,7 @@
  * `useTerminalSession` hook stays a thin binding layer over these functions.
  */
 
+import { writeClipboardText } from "@/lib/clipboard";
 import { buildContentFontFamily } from "@/lib/fonts";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import { resolveTerminalPreset } from "@/modules/settings/terminalPalette";
@@ -18,6 +19,7 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import {
+  registerClipboardHandler,
   registerCwdHandler,
   registerProgressHandler,
   registerPromptTracker,
@@ -186,6 +188,11 @@ export function ensureSession(
     // Required so the WebGL renderer honours an rgba `theme.background` and
     // lets the Theme tab's wallpaper bleed through the terminal canvas.
     allowTransparency: true,
+    // On macOS, Option+drag forces a normal selection inside a mouse-reporting
+    // app (tmux, vim, htop), like Shift+drag on Linux and Windows.
+    // TerminalPane's select-to-copy then copies it. xterm no longer treats
+    // Option+drag as column selection on macOS.
+    macOptionClickForcesSelection: true,
     // ConPTY resize semantics for local Windows shells - see `WINDOWS_PTY`.
     // An SSH leaf's pty is on the remote host, so it keeps xterm's Unix
     // default; xterm normalizes the undefined back to that default.
@@ -248,6 +255,7 @@ export function ensureSession(
     sawShellIntegration: false,
     pendingCommandInput: false,
     pendingInput: [],
+    osc52Muted: false,
   };
   sessions.set(leafId, session);
 
@@ -439,6 +447,13 @@ export function ensureSession(
       // it survives the subagent case where the on-screen footer looks idle.
       registerProgressHandler(term, (state, progress) => {
         session.aiCliDetector?.pushProgress(state, progress);
+      }),
+      // OSC 52: a program's own copy (tmux copy-mode, neovim, vim-oscyank)
+      // lands on the host clipboard. Written by the host process because the
+      // sequence comes off the PTY stream, with no user gesture behind it.
+      // Skipped while a reattach replays old scrollback (`osc52Muted`).
+      registerClipboardHandler(term, (text) => {
+        if (!session.osc52Muted) void writeClipboardText(text);
       }),
     );
   })();
