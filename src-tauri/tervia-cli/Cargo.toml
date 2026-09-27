@@ -11,7 +11,7 @@
 # stub out of the GUI manifest entirely; only the Windows release step
 # (`cargo build --release -p tervia-cli`) builds it.
 name = "tervia-cli"
-version = "0.1.0"
+version = "0.1.1"
 description = "Console-subsystem launcher stub for the Tervia GUI app (Windows)."
 authors = ["rendyuwu"]
 license = "Apache-2.0"
