@@ -5,13 +5,14 @@ import { useSshRightPanelStore } from "@/modules/ssh/sshRightPanelStore";
 import { SshRoutePill } from "@/modules/ssh/SshRoutePill";
 import type { SshRouteHop } from "@/modules/ssh/status";
 import { usePreferencesStore } from "@/modules/settings/preferences";
-import { setStatusBarCompact } from "@/modules/settings/store";
+import { setStatusBarCompact, setStatusBarResourceMonitor } from "@/modules/settings/store";
 import { UpdaterPill } from "@/modules/updater";
 import { cn } from "@/lib/utils";
 import { IS_LINUX, IS_MAC, IS_WINDOWS } from "@/lib/platform";
 import { CwdBreadcrumb } from "./CwdBreadcrumb";
 import { ZoomControl } from "./ZoomControl";
-import { Server } from "lucide-react";
+import { Activity, Server } from "lucide-react";
+import { SshResourceBar } from "./ResourceMonitor";
 
 type Props = {
   cwd: string | null;
@@ -56,10 +57,18 @@ function StatusBarInner({
   sshRoute,
 }: Props) {
   const compact = usePreferencesStore((s) => s.statusBarCompact);
+  const resourceMonitorOpen = usePreferencesStore((s) => s.statusBarResourceMonitor);
+  const showResourceMonitor =
+    !compact && activeIsSsh && sshSessionId != null && resourceMonitorOpen;
 
   return (
-    <footer className="border-border/60 bg-card/60 flex h-8 shrink-0 items-center justify-between gap-3 border-t px-3 text-[11px]">
-      <div className="flex min-w-0 flex-1 items-center gap-1.5 truncate">
+    <footer className="border-border/60 bg-card/60 flex h-8 shrink-0 items-center justify-between gap-2 border-t px-3 text-[11px]">
+      <div
+        className={cn(
+          "flex min-w-0 items-center gap-1.5 truncate",
+          showResourceMonitor ? "max-w-[32%] flex-[0_1_32%]" : "flex-1",
+        )}
+      >
         {/* One slot, two readings of "where am I". A jump chain wins whenever
             there is one - deliberately NOT gated on `activeIsSsh`, which is
             only true once the session is fully connected: the route is most
@@ -77,6 +86,7 @@ function StatusBarInner({
           sshSessionId={sshSessionId}
         />
       </div>
+      {showResourceMonitor && sshSessionId != null && <SshResourceBar sessionId={sshSessionId} />}
       {/* Left to right: the update prompt, the zoom pill, then the panel
           toggles you CLICK. Zoom is only on screen while zoomed, and that is
           where it is wanted. Compact mode keeps only what you glance at - the
@@ -103,6 +113,27 @@ function StatusBarInner({
         <Group>
           {compact ? null : (
             <>
+              {activeIsSsh && sshSessionId != null && (
+                <IconTooltip
+                  label={`${resourceMonitorOpen ? "Hide" : "Show"} SSH resource monitor`}
+                  side="top"
+                >
+                  <button
+                    type="button"
+                    onClick={() => void setStatusBarResourceMonitor(!resourceMonitorOpen)}
+                    aria-label={`${resourceMonitorOpen ? "Hide" : "Show"} SSH resource monitor`}
+                    aria-pressed={resourceMonitorOpen}
+                    className={cn(
+                      "flex size-6 cursor-pointer items-center justify-center rounded-md transition-colors",
+                      resourceMonitorOpen
+                        ? "text-foreground bg-accent/60"
+                        : "text-muted-foreground hover:text-foreground",
+                    )}
+                  >
+                    <Activity size={16} strokeWidth={1.75} className="shrink-0" />
+                  </button>
+                </IconTooltip>
+              )}
               <RightSectionToggles />
               <SshRightOpenButton hasAnySshLeaf={hasAnySshLeaf} />
             </>

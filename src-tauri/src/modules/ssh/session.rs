@@ -17,7 +17,7 @@ use russh::{ChannelMsg, ChannelWriteHalf, Disconnect};
 use russh_sftp::client::SftpSession;
 use serde::Serialize;
 use tauri::ipc::Channel as IpcChannel;
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::{oneshot, watch, Mutex};
 use tokio::task::JoinHandle;
 use zeroize::Zeroizing;
 
@@ -480,6 +480,11 @@ pub struct SshSession {
     shells: std::sync::Mutex<HashMap<u32, Arc<SshShell>>>,
     /// Source of the ids in `shells`.
     shell_seq: AtomicU32,
+    /// Optional resource sampler owned by the session. At most one monitor
+    /// channel is active for this SSH connection; its sequence guards a late
+    /// stop request from cancelling a newer sampler.
+    resource_stream: std::sync::Mutex<Option<(u32, watch::Sender<bool>)>>,
+    resource_stream_seq: AtomicU32,
     /// Underlying client handle. Kept alive so the TCP connection stays up;
     /// dropping it drops the SSH session. `pub(super)` so the sibling `sftp`
     /// module can open new subsystem channels on it.
@@ -645,6 +650,11 @@ impl SshShell {
 }
 
 impl SshSession {
+    /// The configured SSH target, used for a local-to-remote ICMP measurement.
+    pub(super) fn target_host(&self) -> &str {
+        &self.host
+    }
+
     /// Take the one-shot session-end receiver out of the session. Called once
     /// by `ssh_open` to wire up the janitor task; subsequent callers get
     /// `None`.
@@ -893,6 +903,11 @@ impl SshSession {
     pub async fn close(self: Arc<Self>) {
         // Collected first: `ssh_close` awaits this inside a Tauri command, so
         // the std guard must not be held across the closes below.
+        if let Ok(mut stream) = self.resource_stream.lock() {
+            if let Some((_, cancel)) = stream.take() {
+                let _ = cancel.send(true);
+            }
+        }
         let shells: Vec<Arc<SshShell>> = self
             .shells
             .lock()
@@ -923,6 +938,42 @@ impl SshSession {
                 .disconnect(Disconnect::ByApplication, "tervia: client closed", "")
                 .await;
         }
+    }
+
+    /// Begin the session's single resource stream and cancel any previous one.
+    /// See the resource-monitor constraints in `KNOWN-LIMITS.md`.
+    pub fn begin_resource_stream(&self) -> Result<(u32, watch::Receiver<bool>), String> {
+        let stream_id = self.resource_stream_seq.fetch_add(1, Ordering::Relaxed);
+        let (cancel, receiver) = watch::channel(false);
+        let mut stream = self
+            .resource_stream
+            .lock()
+            .map_err(|_| "ssh resource stream state is unavailable".to_string())?;
+        if let Some((_, previous)) = stream.replace((stream_id, cancel)) {
+            let _ = previous.send(true);
+        }
+        Ok((stream_id, receiver))
+    }
+
+    /// Stop the named sampler only if it is still the active one.
+    pub fn stop_resource_stream(&self, stream_id: u32) {
+        if let Ok(mut stream) = self.resource_stream.lock() {
+            if stream
+                .as_ref()
+                .is_some_and(|(active_id, _)| *active_id == stream_id)
+            {
+                if let Some((_, cancel)) = stream.take() {
+                    let _ = cancel.send(true);
+                }
+            }
+        }
+    }
+
+    pub fn has_jump_hosts(&self) -> bool {
+        self.jump_handles
+            .try_lock()
+            .map(|handles| !handles.is_empty())
+            .unwrap_or(true)
     }
 
     /// Start an `ssh -L` local forward: bind `127.0.0.1:local_port` and pipe
@@ -1172,6 +1223,36 @@ impl SshSession {
         Ok(sftp)
     }
 
+    /// Open a session channel and request remote command execution, with
+    /// bounded channel-open and exec-request deadlines.
+    async fn open_exec_channel(
+        &self,
+        cmd: &str,
+        timeout: Duration,
+        open_context: &str,
+        exec_context: &str,
+    ) -> Result<russh::Channel<Msg>, String> {
+        // Hold the handle lock only across the channel open, exactly like
+        // `open_sftp_on_handle`. Keeping it for the whole command would park
+        // `ssh_close` (the other holder) behind a poll for up to the deadline,
+        // so closing an SSH tab could hang for seconds.
+        let channel = {
+            let handle_guard = self.handle.lock().await;
+            let handle = handle_guard
+                .as_ref()
+                .ok_or_else(|| "ssh session is closed".to_string())?;
+            tokio::time::timeout(timeout, handle.channel_open_session())
+                .await
+                .map_err(|_| format!("ssh: {open_context} timed out after {}s", timeout.as_secs()))?
+                .map_err(|e| format!("ssh: {open_context}: {e}"))?
+        };
+        tokio::time::timeout(timeout, channel.exec(true, cmd))
+            .await
+            .map_err(|_| format!("ssh: {exec_context} timed out after {}s", timeout.as_secs()))?
+            .map_err(|e| format!("ssh: {exec_context}: {e}"))?;
+        Ok(channel)
+    }
+
     /// Run one non-interactive command on the remote and capture its stdout.
     /// Opens a one-shot channel on the retained handle, the same way
     /// `open_sftp_on_handle` does, so it is independent of the shell channel
@@ -1182,24 +1263,14 @@ impl SshSession {
     /// dubious-ownership, a denied exec - indistinguishable from "empty output",
     /// so the caller could only ever report "not a repository".
     pub async fn exec_capture(&self, cmd: &str) -> Result<String, String> {
-        // Hold the handle lock only across the channel open, exactly like
-        // `open_sftp_on_handle`. Keeping it for the whole command would park
-        // `ssh_close` (the other holder) behind a poll for up to the deadline,
-        // so closing an SSH tab could hang for seconds.
-        let mut channel = {
-            let handle_guard = self.handle.lock().await;
-            let handle = handle_guard
-                .as_ref()
-                .ok_or_else(|| "ssh session is closed".to_string())?;
-            handle
-                .channel_open_session()
-                .await
-                .map_err(|e| format!("ssh: open exec channel failed: {e}"))?
-        };
-        channel
-            .exec(true, cmd)
-            .await
-            .map_err(|e| format!("ssh: exec failed: {e}"))?;
+        let mut channel = self
+            .open_exec_channel(
+                cmd,
+                Duration::from_secs(15),
+                "open exec channel",
+                "exec request",
+            )
+            .await?;
 
         // Bounded so a pathological remote can neither exhaust memory nor hang
         // the caller. All three are far above a `git status` on a large repo.
@@ -1236,6 +1307,9 @@ impl SshSession {
                         }
                     }
                     Some(ChannelMsg::ExitStatus { exit_status }) => exit = exit_status,
+                    Some(ChannelMsg::Failure) => {
+                        return Err("ssh server rejected the exec request".to_string());
+                    }
                     // A signal death arrives as exit-signal, NOT exit-status
                     // (RFC 4254 6.10 - a server sends one or the other), so
                     // without this `exit` would stay 0 and a truncated read
@@ -1277,6 +1351,100 @@ impl SshSession {
             });
         }
         Ok(String::from_utf8_lossy(&out).into_owned())
+    }
+
+    /// Keep one exec channel open and forward each stdout chunk until the
+    /// caller cancels it or the remote command ends. This is for remote
+    /// streams such as resource monitoring; one-shot commands should keep
+    /// using `exec_capture` so their output stays bounded.
+    pub async fn exec_stream<F>(
+        &self,
+        cmd: &str,
+        mut cancel: watch::Receiver<bool>,
+        mut on_data: F,
+    ) -> Result<(), String>
+    where
+        F: FnMut(&[u8]) -> Result<bool, String> + Send,
+    {
+        let mut channel = self
+            .open_exec_channel(
+                cmd,
+                Duration::from_secs(10),
+                "open resource stream channel",
+                "start resource stream",
+            )
+            .await?;
+
+        const ERR_CAP: usize = 4096;
+        let mut err = Vec::new();
+        let mut exit = None;
+        let mut received_sample = false;
+        let sample_deadline = tokio::time::sleep(Duration::from_secs(8));
+        tokio::pin!(sample_deadline);
+        loop {
+            tokio::select! {
+                _ = &mut sample_deadline => {
+                    let _ = channel.close().await;
+                    return Err(if received_sample {
+                        "ssh resource stream timed out waiting for the next sample after 8s".to_string()
+                    } else {
+                        "ssh resource stream timed out waiting for its first sample after 8s".to_string()
+                    });
+                }
+                changed = cancel.changed() => {
+                    if changed.is_err() || *cancel.borrow() {
+                        let _ = channel.close().await;
+                        return Ok(());
+                    }
+                }
+                msg = channel.wait() => match msg {
+                    Some(ChannelMsg::Data { ref data }) => {
+                        match on_data(data) {
+                            Ok(true) => {
+                                received_sample = true;
+                                sample_deadline.as_mut().reset(tokio::time::Instant::now() + Duration::from_secs(8));
+                            }
+                            Ok(false) => {}
+                            Err(error) => {
+                                let _ = channel.close().await;
+                                return Err(error);
+                            }
+                        }
+                    }
+                    Some(ChannelMsg::ExtendedData { ref data, ext: 1 }) => {
+                        err.extend_from_slice(data);
+                        if err.len() > ERR_CAP {
+                            err.drain(..err.len() - ERR_CAP);
+                        }
+                    }
+                    Some(ChannelMsg::ExitStatus { exit_status }) => exit = Some(exit_status),
+                    Some(ChannelMsg::ExitSignal { ref signal_name, .. }) => {
+                        exit = Some(128);
+                        if err.is_empty() {
+                            err.extend_from_slice(
+                                format!("killed by signal {signal_name:?}").as_bytes(),
+                            );
+                        }
+                    }
+                    Some(ChannelMsg::Failure) => {
+                        let _ = channel.close().await;
+                        return Err("ssh server rejected the resource stream exec request".to_string());
+                    }
+                    Some(ChannelMsg::Close) | None => break,
+                    _ => {}
+                },
+            }
+        }
+
+        let detail = String::from_utf8_lossy(&err);
+        let detail = detail.trim();
+        match exit {
+            Some(code) if code != 0 && !detail.is_empty() => {
+                Err(format!("ssh resource stream ({code}): {detail}"))
+            }
+            Some(code) if code != 0 => Err(format!("ssh resource stream exited {code}")),
+            _ => Err("ssh resource stream ended".to_string()),
+        }
     }
 }
 
@@ -2170,6 +2338,8 @@ pub async fn connect(
     Ok(Arc::new(SshSession {
         shells: std::sync::Mutex::new(HashMap::new()),
         shell_seq: AtomicU32::new(1),
+        resource_stream: std::sync::Mutex::new(None),
+        resource_stream_seq: AtomicU32::new(1),
         handle: Mutex::new(Some(handle)),
         jump_handles: Mutex::new(jump_handles),
         sftp: Mutex::new(None),

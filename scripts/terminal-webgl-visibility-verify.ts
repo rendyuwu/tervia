@@ -132,6 +132,73 @@ console.log("\ndispose is idempotent (a second hide must not throw)");
   assert(s.webglAddon === null, "disposing an already-disposed session is a no-op");
 }
 
+console.log("\na renderer swap refits, and the PTY hears a changed width exactly once");
+// `refitSession` gates on `document.visibilityState` (via `canFit`).
+Object.assign(globalThis, {
+  document: { visibilityState: "visible", documentElement: { dataset: { terviaGlass: "off" } } },
+});
+/**
+ * A session whose fake fit stands in for the real cell-width dependence: WebGL
+ * floors the cell width to whole device pixels, so more columns fit under it.
+ * `fake` is the mutable handle; `s` is the same object as the code sees it.
+ */
+function fittingSession(webglCols: number, domCols: number, webglOn: boolean) {
+  const sent: [number, number][] = [];
+  const term = {
+    cols: webglOn ? webglCols : domCols,
+    rows: 24,
+    element: { parentElement: { clientWidth: 900, clientHeight: 360 } },
+    loadAddon() {},
+  };
+  const fake = {
+    webglEnabled: true,
+    visible: true,
+    disposed: false,
+    webglLossReloads: 0,
+    webglAddon: webglOn ? fakeAddon({ yes: false }) : null,
+    term,
+    fitAddon: { fit() {} },
+    pty: {
+      resize: (c: number, r: number) => {
+        sent.push([c, r]);
+      },
+    },
+    lastSentCols: term.cols,
+    lastSentRows: 24,
+    lastW: 900,
+    lastH: 360,
+  };
+  // Only the fields the refit path reads; the rest of Session is never touched.
+  const s = fake as unknown as Session;
+  fake.fitAddon.fit = () => {
+    term.cols = s.webglAddon ? webglCols : domCols;
+  };
+  return { s, fake, sent };
+}
+{
+  const { s, fake, sent } = fittingSession(109, 103, true);
+  fake.webglEnabled = false;
+  syncRendererForWallpaper(s);
+  assert(
+    s.webglAddon === null && s.term.cols === 103 && JSON.stringify(sent) === "[[103,24]]",
+    "WebGL off refits to the DOM renderer's wider cells and resizes the PTY once",
+  );
+}
+{
+  const { s, sent } = fittingSession(109, 103, false);
+  syncRendererForWallpaper(s);
+  assert(
+    s.webglAddon !== null && s.term.cols === 109 && JSON.stringify(sent) === "[[109,24]]",
+    "WebGL back on refits to its narrower cells and resizes the PTY once",
+  );
+}
+{
+  const { s, fake, sent } = fittingSession(109, 109, true);
+  fake.webglEnabled = false;
+  syncRendererForWallpaper(s);
+  assert(sent.length === 0, "a swap that leaves cols alone sends no SIGWINCH");
+}
+
 // `throw` (not process.exit) for a non-zero exit, matching the other verify scripts.
 if (failed > 0) throw new Error(`terminal-webgl-visibility-verify: ${failed} check(s) failed`);
 console.log("\nterminal-webgl-visibility-verify: all checks passed");

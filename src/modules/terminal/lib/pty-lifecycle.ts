@@ -20,6 +20,24 @@ import { useTerminalTitles } from "./terminalTitles";
 import { createWriteMeter } from "./writeMeter";
 
 /**
+ * True when `el` is laid out and the window is on-screen, i.e. a `fitAddon.fit()`
+ * would measure a real size. On Windows a minimized (or hidden) borderless window
+ * reports a ~0px container (the same event App.tsx guards for the sidebar); fitting
+ * to that collapses xterm to FitAddon's 2x1 floor and rewraps the whole scrollback,
+ * and the reflow back on restore is lossy - the cursor/text end up garbled. Skipping
+ * the fit while collapsed keeps the buffer untouched, so restore needs no repair.
+ * The `< 2` floor matches MIN_PTY_DIM; real panes are hundreds of px wide.
+ */
+function canFit(el: HTMLElement | null | undefined): el is HTMLElement {
+  return (
+    !!el &&
+    document.visibilityState === "visible" &&
+    el.clientWidth >= MIN_PTY_DIM &&
+    el.clientHeight >= MIN_PTY_DIM
+  );
+}
+
+/**
  * Push xterm dimensions to the live PTY, floored to MIN_PTY_DIM and
  * deduplicated against `lastSentCols/Rows`. Returns true when an IPC resize
  * was issued. Central to every callsite so behavior stays consistent.
@@ -33,6 +51,33 @@ export function syncPtySize(s: Session): boolean {
   s.lastSentRows = rows;
   void s.pty.resize(cols, rows);
   return true;
+}
+
+/**
+ * Fit the grid to its container and push the result to the PTY. For every
+ * cell-width change that leaves the container's CSS size alone, which the
+ * ResizeObserver in `attachSession` never sees: a renderer swap (WebGL floors
+ * the cell width to whole device pixels, the DOM renderer does not), a
+ * devicePixelRatio change, a font change. Records the fitted size as
+ * `lastW/lastH` so that observer's dedupe compares against what was actually
+ * fitted. When `canFit` refuses (hidden document, 0px container) it zeroes
+ * them instead, so the observer's next real-size tick refits rather than
+ * deduping against a size this grid was never fitted to, and so the
+ * `visibilitychange` listener in `session-lifecycle` knows this pane still
+ * owes a refit. `fit()` and `syncPtySize` each no-op when nothing changed, so
+ * an unchanged grid sends no SIGWINCH.
+ */
+export function refitSession(s: Session): void {
+  const el = s.term.element?.parentElement;
+  if (!canFit(el)) {
+    s.lastW = 0;
+    s.lastH = 0;
+    return;
+  }
+  s.fitAddon.fit();
+  s.lastW = el.clientWidth;
+  s.lastH = el.clientHeight;
+  syncPtySize(s);
 }
 
 /**

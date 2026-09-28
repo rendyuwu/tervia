@@ -1,5 +1,6 @@
 import { WebglAddon } from "@xterm/addon-webgl";
 
+import { refitSession } from "./pty-lifecycle";
 import { wallpaperActive } from "./session-helpers";
 import type { Session } from "./sessionState";
 
@@ -52,6 +53,7 @@ export function shouldUseWebgl(s: Session): boolean {
  * Swallows construction failures — some environments have no WebGL — leaving
  * the session on the DOM renderer. No-ops unless `shouldUseWebgl` agrees, so a
  * caller cannot light up a pane that should stay on the DOM renderer.
+ * Changes the cell width; the caller refits (`syncRendererForWallpaper` does).
  */
 export function loadWebglRenderer(s: Session): void {
   if (!shouldUseWebgl(s)) return;
@@ -61,6 +63,9 @@ export function loadWebglRenderer(s: Session): void {
       webgl.dispose();
       if (s.webglAddon !== webgl) return;
       s.webglAddon = null;
+      // The pane is on the DOM renderer from here on (for the reload delay, or
+      // for good once the cap is hit), and its cells are wider.
+      refitSession(s);
       if (s.webglLossReloads >= MAX_CONTEXT_LOSS_RELOADS) {
         console.warn("WebGL context lost repeatedly; staying on the DOM renderer");
         return;
@@ -81,7 +86,10 @@ export function loadWebglRenderer(s: Session): void {
   }
 }
 
-/** Dispose any active WebGL renderer on the session and clear the slot. */
+/**
+ * Dispose any active WebGL renderer on the session and clear the slot.
+ * Changes the cell width; the caller refits (`syncRendererForWallpaper` does).
+ */
 export function disposeWebglRenderer(s: Session): void {
   if (!s.webglAddon) return;
   try {
@@ -98,13 +106,15 @@ export function disposeWebglRenderer(s: Session): void {
  * the wallpaper turns on (so semi-transparent cell backgrounds render correctly
  * via the DOM renderer) and re-loaded when it turns off, and likewise dropped
  * while the pane sits in an inactive tab. This is the single "should it be on at
- * all" decision, so it is also what hands a hidden pane's context back.
+ * all" decision, so it is also what hands a hidden pane's context back. Every
+ * swap refits, because `cols` fitted under one renderer overflows or underfills
+ * the pane under the other, and the container does not resize to tell the
+ * ResizeObserver.
  */
 export function syncRendererForWallpaper(s: Session): void {
   const wantWebgl = shouldUseWebgl(s);
-  if (wantWebgl && !s.webglAddon) {
-    loadWebglRenderer(s);
-  } else if (!wantWebgl && s.webglAddon) {
-    disposeWebglRenderer(s);
-  }
+  if (wantWebgl === (s.webglAddon !== null)) return;
+  if (wantWebgl) loadWebglRenderer(s);
+  else disposeWebglRenderer(s);
+  refitSession(s);
 }

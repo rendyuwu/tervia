@@ -29,6 +29,7 @@ use serde::{Deserialize, Serialize};
 use tauri::ipc::Channel;
 use tauri::AppHandle;
 use tokio::runtime::Runtime;
+use tokio::sync::watch;
 use zeroize::Zeroizing;
 
 use crate::modules::secrets::{SecretSource, SecretsState};
@@ -145,6 +146,318 @@ pub struct SshOpenInput {
 pub struct SshOpened {
     pub id: u32,
     pub fingerprint: String,
+}
+
+/// Independent metric groups from one Linux SSH host sample. Missing kernel
+/// files or fields leave only the affected metric unavailable.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SshResourceSample {
+    pub hostname: Option<String>,
+    pub version: Option<String>,
+    pub uptime_seconds: Option<f64>,
+    pub cpu_total: Option<u64>,
+    pub cpu_idle: Option<u64>,
+    pub memory_total: Option<u64>,
+    pub memory_available: Option<u64>,
+    pub memory_cached: Option<u64>,
+    pub memory_buffers: Option<u64>,
+    pub disk_read_bytes: Option<u64>,
+    pub disk_write_bytes: Option<u64>,
+    pub filesystems: Option<Vec<SshFilesystemUsage>>,
+    pub network_interfaces: Option<Vec<SshNetworkInterface>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SshFilesystemUsage {
+    pub source: String,
+    pub mount: String,
+    pub total_kib: u64,
+    pub used_kib: u64,
+    pub available_kib: u64,
+    pub use_percent: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SshNetworkInterface {
+    pub name: String,
+    pub received_bytes: u64,
+    pub received_errors: u64,
+    pub received_dropped: u64,
+    pub sent_bytes: u64,
+    pub sent_errors: u64,
+    pub sent_dropped: u64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum SshResourceStreamEvent {
+    Sample {
+        sample: SshResourceSample,
+    },
+    Ping {
+        host: String,
+        latency_ms: Option<f64>,
+    },
+    Error {
+        message: String,
+    },
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SshResourceStreamStart {
+    pub stream_id: u32,
+    pub ping_enabled: bool,
+}
+
+/// Parse each metric independently; unavailable fields do not drop an otherwise
+/// useful frame. Device-family and platform limits are listed in
+/// `KNOWN-LIMITS.md`.
+fn parse_resource_sample(raw: &str) -> SshResourceSample {
+    let mut hostname = None;
+    let mut version = None;
+    let mut uptime_seconds = None;
+    let mut cpu = None;
+    let mut memory_total = None;
+    let mut memory_available = None;
+    let mut memory_cached = None;
+    let mut memory_buffers = None;
+    let mut disk_read_bytes: Option<u64> = None;
+    let mut disk_write_bytes: Option<u64> = None;
+    let mut filesystems: Option<Vec<SshFilesystemUsage>> = None;
+    let mut network_interfaces: Option<Vec<SshNetworkInterface>> = None;
+    let mut section = "";
+
+    for line in raw.lines() {
+        let line = line.trim();
+        match line {
+            "HOST" => {
+                section = "host";
+                continue;
+            }
+            "VERSION" => {
+                section = "version";
+                continue;
+            }
+            "UPTIME" => {
+                section = "uptime";
+                continue;
+            }
+            "CPU" => {
+                section = "cpu";
+                continue;
+            }
+            "MEM" => {
+                section = "memory";
+                continue;
+            }
+            "NET" => {
+                section = "network";
+                network_interfaces = Some(Vec::new());
+                continue;
+            }
+            "DISK" => {
+                section = "disk";
+                disk_read_bytes = None;
+                disk_write_bytes = None;
+                continue;
+            }
+            "FS" => {
+                section = "filesystems";
+                filesystems = Some(Vec::new());
+                continue;
+            }
+            _ => {}
+        }
+
+        match section {
+            "host" => {
+                hostname = Some(line.to_string());
+                section = "";
+            }
+            "version" => {
+                version = Some(line.to_string());
+                section = "";
+            }
+            "uptime" => {
+                uptime_seconds = line
+                    .split_whitespace()
+                    .next()
+                    .and_then(|value| value.parse::<f64>().ok());
+                section = "";
+            }
+            "cpu" if line.starts_with("cpu ") => {
+                let values = line
+                    .split_whitespace()
+                    .skip(1)
+                    .map(str::parse::<u64>)
+                    .collect::<Result<Vec<_>, _>>();
+                let Ok(values) = values else {
+                    section = "";
+                    continue;
+                };
+                if values.len() >= 5 {
+                    // Guest time is already included in user/nice, so only sum
+                    // the first eight Linux CPU counters.
+                    cpu = Some((
+                        values.iter().take(8).sum(),
+                        values[3].saturating_add(values[4]),
+                    ));
+                }
+            }
+            "memory" => {
+                if let Some(value) = line.strip_prefix("MemTotal:") {
+                    memory_total = value.split_whitespace().next().and_then(|v| v.parse().ok());
+                } else if let Some(value) = line.strip_prefix("MemAvailable:") {
+                    memory_available = value.split_whitespace().next().and_then(|v| v.parse().ok());
+                } else if let Some(value) = line.strip_prefix("Cached:") {
+                    memory_cached = value.split_whitespace().next().and_then(|v| v.parse().ok());
+                } else if let Some(value) = line.strip_prefix("Buffers:") {
+                    memory_buffers = value.split_whitespace().next().and_then(|v| v.parse().ok());
+                }
+            }
+            "network" => {
+                if let Some((name, counters)) = line.split_once(':') {
+                    let name = name.trim();
+                    if !is_virtual_network_interface(name) {
+                        let fields = counters
+                            .split_whitespace()
+                            .map(str::parse::<u64>)
+                            .collect::<Result<Vec<_>, _>>();
+                        if let Ok(fields) = fields {
+                            if fields.len() >= 16 {
+                                network_interfaces
+                                    .as_mut()
+                                    .unwrap()
+                                    .push(SshNetworkInterface {
+                                        name: name.to_string(),
+                                        received_bytes: fields[0],
+                                        received_errors: fields[2],
+                                        received_dropped: fields[3],
+                                        sent_bytes: fields[8],
+                                        sent_errors: fields[10],
+                                        sent_dropped: fields[11],
+                                    });
+                            }
+                        }
+                    }
+                }
+            }
+            "disk" => {
+                let fields = line.split_whitespace().collect::<Vec<_>>();
+                if fields.len() >= 10 && is_whole_disk(fields[2]) {
+                    if let (Ok(read_sectors), Ok(write_sectors)) =
+                        (fields[5].parse::<u64>(), fields[9].parse::<u64>())
+                    {
+                        disk_read_bytes = Some(
+                            disk_read_bytes
+                                .unwrap_or_default()
+                                .saturating_add(read_sectors.saturating_mul(512)),
+                        );
+                        disk_write_bytes = Some(
+                            disk_write_bytes
+                                .unwrap_or_default()
+                                .saturating_add(write_sectors.saturating_mul(512)),
+                        );
+                    }
+                }
+            }
+            "filesystems" if !line.starts_with("Filesystem") => {
+                let fields = line.split_whitespace().collect::<Vec<_>>();
+                if fields.len() >= 6 {
+                    if let (Ok(total), Ok(used), Ok(available), Ok(use_percent)) = (
+                        fields[1].parse(),
+                        fields[2].parse(),
+                        fields[3].parse(),
+                        fields[4].trim_end_matches('%').parse(),
+                    ) {
+                        filesystems.as_mut().unwrap().push(SshFilesystemUsage {
+                            source: fields[0].to_string(),
+                            mount: fields[5..].join(" "),
+                            total_kib: total,
+                            used_kib: used,
+                            available_kib: available,
+                            use_percent,
+                        });
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let (cpu_total, cpu_idle) = cpu.map_or((None, None), |(total, idle)| (Some(total), Some(idle)));
+    SshResourceSample {
+        hostname: hostname.filter(|value| !value.is_empty()),
+        version: version.filter(|value| !value.is_empty()),
+        uptime_seconds,
+        cpu_total,
+        cpu_idle,
+        memory_total,
+        memory_available,
+        memory_cached,
+        memory_buffers,
+        disk_read_bytes,
+        disk_write_bytes,
+        filesystems,
+        network_interfaces,
+    }
+}
+
+fn is_virtual_network_interface(name: &str) -> bool {
+    name == "lo"
+        || [
+            "docker",
+            "veth",
+            "br",
+            "virbr",
+            "tun",
+            "tap",
+            "wg",
+            "tailscale",
+            "ifb",
+            "flannel",
+            "cni",
+            "podman",
+            "vnet",
+            "bond",
+            "team",
+        ]
+        .iter()
+        .any(|prefix| name.starts_with(prefix))
+}
+
+fn is_whole_disk(name: &str) -> bool {
+    name.starts_with("sd")
+        && !name[2..].is_empty()
+        && name[2..].chars().all(|c| c.is_ascii_lowercase())
+        || name.starts_with("vd")
+            && !name[2..].is_empty()
+            && name[2..].chars().all(|c| c.is_ascii_lowercase())
+        || name.starts_with("xvd")
+            && !name[3..].is_empty()
+            && name[3..].chars().all(|c| c.is_ascii_lowercase())
+        || name.starts_with("hd")
+            && !name[2..].is_empty()
+            && name[2..].chars().all(|c| c.is_ascii_lowercase())
+        || name.strip_prefix("nvme").is_some_and(|part| {
+            part.split_once('n').is_some_and(|(device, namespace)| {
+                !device.is_empty()
+                    && device.chars().all(|c| c.is_ascii_digit())
+                    && !namespace.is_empty()
+                    && namespace.chars().all(|c| c.is_ascii_digit())
+            })
+        })
+        || name
+            .strip_prefix("mmcblk")
+            .is_some_and(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()))
 }
 
 /// One hop's secrets, read out of the keychain at the command boundary.
@@ -853,6 +1166,256 @@ async fn shell_of(
     })
 }
 
+const RESOURCE_STREAM_BEGIN: &str = "__TERVIA_RESOURCE_BEGIN__";
+const RESOURCE_STREAM_END: &str = "__TERVIA_RESOURCE_END__";
+const RESOURCE_STREAM_SCRIPT: &str = r#"first=1;tick=0;while :; do printf '\n__TERVIA_RESOURCE_BEGIN__\n'; if [ "$first" -eq 1 ]; then printf 'HOST\n'; hostname 2>/dev/null; printf 'VERSION\n'; uname -sr 2>/dev/null; first=0; fi; awk 'BEGIN { printf "UPTIME\n"; if ((getline line < "/proc/uptime") > 0) { split(line, a); print a[1] } close("/proc/uptime"); printf "CPU\n"; while ((getline line < "/proc/stat") > 0) { if (line ~ /^cpu /) { print line; break } } close("/proc/stat"); printf "MEM\n"; while ((getline line < "/proc/meminfo") > 0) { if (line ~ /^(MemTotal|MemAvailable|Cached|Buffers):/) print line } close("/proc/meminfo"); printf "NET\n"; n=0; while ((getline line < "/proc/net/dev") > 0) { if (++n > 2) print line } close("/proc/net/dev"); printf "DISK\n"; while ((getline line < "/proc/diskstats") > 0) { sub(/^[ \t]+/, "", line); split(line, f, /[ \t]+/); name=f[3]; if (name ~ /^(sd[a-z]+|vd[a-z]+|xvd[a-z]+|hd[a-z]+|nvme[0-9]+n[0-9]+|mmcblk[0-9]+)$/) print line } close("/proc/diskstats") }'; if [ "$tick" -eq 0 ] && command -v timeout >/dev/null 2>&1; then printf 'FS\n'; timeout 3 df -Pk / 2>/dev/null; fi; printf '__TERVIA_RESOURCE_END__\n'; tick=$(( (tick + 1) % 30 )); sleep 1 || exit 0; done"#;
+
+fn resource_stream_command() -> String {
+    format!("sh -c {}", shell_quote(RESOURCE_STREAM_SCRIPT))
+}
+
+fn parse_resource_stream_chunk(
+    pending: &mut String,
+    frame: &mut Option<String>,
+    chunk: &[u8],
+) -> Result<Vec<SshResourceSample>, String> {
+    const FRAME_CAP: usize = 4 * 1024 * 1024;
+    let mut samples = Vec::new();
+    pending.push_str(&String::from_utf8_lossy(chunk));
+    let mut consumed = 0;
+    while let Some(relative_newline) = pending[consumed..].find('\n') {
+        let newline = consumed + relative_newline;
+        let line = pending[consumed..newline].trim_end_matches('\r');
+        if line == RESOURCE_STREAM_BEGIN {
+            *frame = Some(String::new());
+        } else if line == RESOURCE_STREAM_END {
+            if let Some(raw) = frame.take() {
+                samples.push(parse_resource_sample(&raw));
+            }
+        } else if let Some(raw) = frame.as_mut() {
+            raw.push_str(line);
+            raw.push('\n');
+            if raw.len() > FRAME_CAP {
+                return Err("ssh resource sample exceeded 4 MiB".to_string());
+            }
+        }
+        consumed = newline + 1;
+    }
+    if consumed > 0 {
+        pending.drain(..consumed);
+    }
+    if pending.len() > FRAME_CAP {
+        return Err("ssh resource stream line exceeded 4 MiB".to_string());
+    }
+    Ok(samples)
+}
+
+fn consume_resource_stream_chunk(
+    pending: &mut String,
+    frame: &mut Option<String>,
+    chunk: &[u8],
+    on_event: &Channel<SshResourceStreamEvent>,
+) -> Result<bool, String> {
+    let samples = parse_resource_stream_chunk(pending, frame, chunk)?;
+    let completed_sample = !samples.is_empty();
+    for sample in samples {
+        on_event
+            .send(SshResourceStreamEvent::Sample { sample })
+            .map_err(|error| format!("ssh resource IPC channel failed: {error}"))?;
+    }
+    Ok(completed_sample)
+}
+
+fn parse_local_ping_latency(output: &str) -> Option<f64> {
+    for line in output.lines() {
+        let lowercase = line.to_lowercase();
+        let marker = [
+            "time=",
+            "time<",
+            "zeit=",
+            "zeit<",
+            "temps=",
+            "temps<",
+            "время=",
+            "время<",
+        ]
+        .iter()
+        .filter_map(|marker| lowercase.find(marker).map(|index| (index, *marker)))
+        .min_by_key(|(index, _)| *index);
+        let Some((start, marker)) = marker else {
+            continue;
+        };
+        let rest = &lowercase[start + marker.len()..];
+        let number_len = rest
+            .chars()
+            .take_while(|character| character.is_ascii_digit() || matches!(character, '.' | ','))
+            .map(char::len_utf8)
+            .sum::<usize>();
+        if number_len == 0 {
+            continue;
+        }
+        let unit = rest[number_len..].trim_start();
+        if !unit.starts_with("ms") && !unit.starts_with("мс") {
+            continue;
+        }
+        let milliseconds = rest[..number_len].replace(',', ".").parse::<f64>().ok()?;
+        return Some(if marker.ends_with('<') {
+            0.5
+        } else {
+            milliseconds
+        });
+    }
+    None
+}
+
+fn run_local_ping(host: &str) -> Option<f64> {
+    if host.is_empty() || host.starts_with('-') || host.chars().any(char::is_whitespace) {
+        return None;
+    }
+
+    let mut command = std::process::Command::new("ping");
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        command.args(["-n", "1", "-w", "1000"]);
+    }
+    #[cfg(target_os = "macos")]
+    command.args(["-n", "-c", "1", "-W", "1000"]);
+    #[cfg(all(unix, not(target_os = "macos")))]
+    command.args(["-n", "-c", "1", "-W", "1"]);
+    #[cfg(not(any(unix, target_os = "windows")))]
+    return None;
+
+    let mut child = command
+        .arg(host)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let started_at = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let output = child.wait_with_output().ok()?;
+                if !status.success() {
+                    return None;
+                }
+                return parse_local_ping_latency(&String::from_utf8_lossy(&output.stdout));
+            }
+            Ok(None) if started_at.elapsed() < std::time::Duration::from_millis(1500) => {
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            Ok(None) | Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+}
+
+async fn stream_local_ping(
+    host: String,
+    mut cancel: watch::Receiver<bool>,
+    on_event: Channel<SshResourceStreamEvent>,
+) {
+    // This is local ICMP, not a probe through SSH. ProxyJump sessions skip the
+    // task in `ssh_resource_stream_start`; see `KNOWN-LIMITS.md`.
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            changed = cancel.changed() => {
+                if changed.is_err() || *cancel.borrow() {
+                    return;
+                }
+            }
+            _ = interval.tick() => {
+                let target = host.clone();
+                let ping = tokio::task::spawn_blocking(move || run_local_ping(&target));
+                let latency_ms = tokio::select! {
+                    changed = cancel.changed() => {
+                        if changed.is_err() || *cancel.borrow() {
+                            return;
+                        }
+                        continue;
+                    }
+                    result = ping => result.ok().flatten(),
+                };
+                if on_event.send(SshResourceStreamEvent::Ping {
+                    host: host.clone(),
+                    latency_ms,
+                }).is_err() {
+                    return;
+                }
+            }
+        }
+    }
+}
+
+/// Start the optional remote sampler. The stream ID is minted by Rust and
+/// belongs to the SSH session, which keeps cancellation valid in release
+/// builds and makes the session the owner of its extra SSH channel. Platform,
+/// retry, and connection limits are documented in `KNOWN-LIMITS.md`.
+#[tauri::command]
+pub async fn ssh_resource_stream_start(
+    state: tauri::State<'_, SshState>,
+    id: u32,
+    on_event: Channel<SshResourceStreamEvent>,
+) -> Result<SshResourceStreamStart, String> {
+    let session = state
+        .sessions
+        .read()
+        .await
+        .get(&id)
+        .cloned()
+        .ok_or_else(|| "no SSH session".to_string())?;
+
+    let (stream_id, cancel_rx) = session.begin_resource_stream()?;
+    let ping_enabled = !session.has_jump_hosts();
+    let ping_cancel = cancel_rx.clone();
+    let ping_host = session.target_host().to_string();
+    let ping_channel = on_event.clone();
+    ssh_runtime().spawn(async move {
+        let ping_task = ping_enabled
+            .then(|| ssh_runtime().spawn(stream_local_ping(ping_host, ping_cancel, ping_channel)));
+        let command = resource_stream_command();
+        let mut pending = String::new();
+        let mut frame = None;
+        let result = session
+            .exec_stream(&command, cancel_rx, |chunk| {
+                consume_resource_stream_chunk(&mut pending, &mut frame, chunk, &on_event)
+            })
+            .await;
+
+        session.stop_resource_stream(stream_id);
+        if let Some(ping_task) = ping_task {
+            let _ = ping_task.await;
+        }
+        if let Err(error) = result {
+            let _ = on_event.send(SshResourceStreamEvent::Error { message: error });
+        }
+    });
+    Ok(SshResourceStreamStart {
+        stream_id,
+        ping_enabled,
+    })
+}
+
+/// Stop just the monitor started by this status bar instance.
+#[tauri::command]
+pub async fn ssh_resource_stream_stop(
+    state: tauri::State<'_, SshState>,
+    id: u32,
+    stream_id: u32,
+) -> Result<(), String> {
+    if let Some(session) = state.sessions.read().await.get(&id) {
+        session.stop_resource_stream(stream_id);
+    }
+    Ok(())
+}
+
 /// Open one more interactive shell (a terminal tab) on the live session `id`,
 /// streaming its output to `on_event`. Returns the shell's id within the
 /// session.
@@ -1400,11 +1963,15 @@ pub async fn ssh_git(
 #[cfg(test)]
 mod tests {
     use super::{
-        last_line, shell_quote, ssh_key_classify_inner, ssh_key_generate_inner,
+        is_whole_disk, last_line, parse_local_ping_latency, parse_resource_sample,
+        parse_resource_stream_chunk, shell_quote, ssh_key_classify_inner, ssh_key_generate_inner,
         ssh_key_inspect_inner, SshTextClassification, SysRng, UnwrapErr, ERR_EMPTY,
         ERR_OPENSSH_BODY, ERR_PASSPHRASE_OR_CORRUPT, ERR_UNKNOWN, ERR_UNREADABLE,
         ERR_WRONG_PASSPHRASE,
     };
+
+    #[cfg(unix)]
+    use super::resource_stream_command;
 
     /// `ssh-keygen -t ed25519 -N '' -C tervia-test@localhost`.
     const PLAIN_ED25519: &str = "\
@@ -2201,6 +2768,208 @@ Ym9ndXMgYm9keSwgbmV2ZXIgcmVhY2hlZA==
         assert_eq!(
             shell_quote("/tmp/x'; rm -rf ~ ;'"),
             r"'/tmp/x'\''; rm -rf ~ ;'\'''"
+        );
+    }
+
+    const RESOURCE_LINUX_FRAME: &str = "HOST\nvm-node-01\nVERSION\nLinux 6.8.7\nUPTIME\n123.45 12.3\nCPU\ncpu 100 20 30 400 50 0 0 0\nMEM\nMemTotal: 2048 kB\nMemAvailable: 1024 kB\nCached: 256 kB\nBuffers: 128 kB\nNET\nInter-| Receive | Transmit\n face |bytes packets errs drop fifo frame compressed multicast|bytes packets errs drop fifo frame compressed multicast\neth0: 100 0 1 2 0 0 0 0 200 0 3 4 0 0 0 0\nveth123: 900 0 0 0 0 0 0 0 900 0 0 0 0 0 0 0\nDISK\n8 0 sda 1 0 12 0 4 0 32 0 0 0 0\n8 1 sda1 1 0 999 0 4 0 999 0 0 0 0\nFS\nFilesystem 1K-blocks Used Available Use% Mounted on\n/dev/sda1 1000 100 900 10% /\n";
+
+    #[test]
+    fn parses_linux_sample_and_filters_virtual_devices() {
+        let sample = parse_resource_sample(RESOURCE_LINUX_FRAME);
+        assert_eq!(sample.hostname.as_deref(), Some("vm-node-01"));
+        assert_eq!(sample.version.as_deref(), Some("Linux 6.8.7"));
+        assert_eq!(sample.uptime_seconds, Some(123.45));
+        assert_eq!(sample.cpu_total, Some(600));
+        assert_eq!(sample.cpu_idle, Some(450));
+        assert_eq!(sample.memory_total, Some(2048));
+        assert_eq!(sample.memory_available, Some(1024));
+        assert_eq!(sample.disk_read_bytes, Some(12 * 512));
+        assert_eq!(sample.disk_write_bytes, Some(32 * 512));
+        assert_eq!(sample.network_interfaces.as_ref().unwrap().len(), 1);
+        assert_eq!(sample.network_interfaces.as_ref().unwrap()[0].name, "eth0");
+        assert_eq!(sample.filesystems.as_ref().unwrap()[0].mount, "/");
+    }
+
+    #[test]
+    fn whole_disk_filter_matches_sampler_device_families() {
+        assert!(is_whole_disk("sda"));
+        assert!(is_whole_disk("xvdb"));
+        assert!(is_whole_disk("nvme0n1"));
+        assert!(is_whole_disk("mmcblk0"));
+        assert!(!is_whole_disk("sd"));
+        assert!(!is_whole_disk("sda1"));
+    }
+
+    #[test]
+    fn missing_mem_available_does_not_discard_other_metrics() {
+        let sample = parse_resource_sample(
+            "CPU\ncpu 1 2 3 4 5\nMEM\nMemTotal: 1024 kB\nNET\neth0: 1 0 0 0 0 0 0 0 2 0 0 0 0 0 0 0\n",
+        );
+        assert_eq!(sample.cpu_total, Some(15));
+        assert_eq!(sample.memory_total, Some(1024));
+        assert_eq!(sample.memory_available, None);
+        assert_eq!(sample.network_interfaces.as_ref().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn non_linux_sample_keeps_independent_metrics_unavailable() {
+        let sample = parse_resource_sample("HOST\nmacbook\nVERSION\nDarwin 24.0\n");
+        assert_eq!(sample.hostname.as_deref(), Some("macbook"));
+        assert_eq!(sample.cpu_total, None);
+        assert_eq!(sample.memory_total, None);
+        assert_eq!(sample.disk_read_bytes, None);
+        assert_eq!(sample.network_interfaces, None);
+        assert_eq!(sample.filesystems, None);
+    }
+
+    #[test]
+    fn df_header_and_dash_usage_are_unavailable_filesystem_data() {
+        let sample = parse_resource_sample(
+            "FS\nFilesystem 1K-blocks Used Available Use% Mounted on\nserver:share 1 1 0 - /mnt/share\n",
+        );
+        assert_eq!(sample.filesystems, Some(Vec::new()));
+    }
+
+    #[test]
+    fn resource_chunk_parser_handles_split_markers_crlf_and_noise() {
+        let mut pending = String::new();
+        let mut frame = None;
+        let mut samples = parse_resource_stream_chunk(
+            &mut pending,
+            &mut frame,
+            b"remote startup noise\r\n__TERVIA_RESOURCE_",
+        )
+        .unwrap();
+        assert!(samples.is_empty());
+        samples.extend(
+            parse_resource_stream_chunk(
+                &mut pending,
+                &mut frame,
+                b"BEGIN__\r\nHOST\r\nnode\r\nCPU\r\ncpu 1 1 1 1 1\r\n__TERVIA_RESOURCE_END__\r\n",
+            )
+            .unwrap(),
+        );
+        assert_eq!(samples.len(), 1);
+        assert_eq!(samples[0].hostname.as_deref(), Some("node"));
+        assert_eq!(samples[0].cpu_total, Some(5));
+    }
+
+    #[test]
+    fn resource_chunk_parser_ignores_end_without_begin() {
+        let mut pending = String::new();
+        let mut frame = None;
+        let samples = parse_resource_stream_chunk(
+            &mut pending,
+            &mut frame,
+            b"noise\n__TERVIA_RESOURCE_END__\n",
+        )
+        .unwrap();
+        assert!(samples.is_empty());
+    }
+
+    #[test]
+    fn resource_chunk_parser_caps_pending_and_frame_size() {
+        const CAP: usize = 4 * 1024 * 1024;
+        let mut pending = String::new();
+        let mut frame = None;
+        assert!(
+            parse_resource_stream_chunk(&mut pending, &mut frame, &vec![b'x'; CAP + 1],)
+                .unwrap_err()
+                .contains("line exceeded")
+        );
+
+        let mut pending = String::new();
+        let mut frame = None;
+        let mut input = Vec::with_capacity(CAP + 64);
+        input.extend_from_slice(b"__TERVIA_RESOURCE_BEGIN__\n");
+        input.resize(CAP + 32, b'x');
+        input.extend_from_slice(b"\n__TERVIA_RESOURCE_END__\n");
+        assert!(
+            parse_resource_stream_chunk(&mut pending, &mut frame, &input)
+                .unwrap_err()
+                .contains("sample exceeded")
+        );
+    }
+
+    #[test]
+    fn local_ping_parser_accepts_common_localized_windows_output() {
+        assert_eq!(
+            parse_local_ping_latency("64 bytes from app2ms.example.com: time=3.25 ms"),
+            Some(3.25)
+        );
+        assert_eq!(
+            parse_local_ping_latency("Ответ от 192.0.2.1: число байт=32 время<1мс TTL=64"),
+            Some(0.5)
+        );
+        assert_eq!(
+            parse_local_ping_latency("app2ms.example.com unreachable"),
+            None
+        );
+        assert_eq!(
+            parse_local_ping_latency("Antwort von 192.0.2.1: Zeit=2 ms"),
+            Some(2.0)
+        );
+        assert_eq!(
+            parse_local_ping_latency("Réponse de 192.0.2.1: temps=2,5 ms"),
+            Some(2.5)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resource_stream_command_emits_a_parseable_linux_sample() {
+        use std::{
+            io::Read,
+            process::{Command, Stdio},
+            sync::mpsc,
+            thread,
+            time::Duration,
+        };
+
+        if !std::path::Path::new("/proc/stat").exists() {
+            return;
+        }
+
+        let command = resource_stream_command();
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg(command)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("start the resource stream command through sh -c");
+        let mut stdout = child.stdout.take().expect("capture resource stream stdout");
+        let (sample_tx, sample_rx) = mpsc::channel();
+
+        let reader = thread::spawn(move || {
+            let mut pending = String::new();
+            let mut frame = None;
+            let mut chunk = [0u8; 8192];
+            loop {
+                let size = match stdout.read(&mut chunk) {
+                    Ok(0) | Err(_) => return,
+                    Ok(size) => size,
+                };
+                if let Ok(samples) =
+                    parse_resource_stream_chunk(&mut pending, &mut frame, &chunk[..size])
+                {
+                    if let Some(sample) = samples.into_iter().next() {
+                        let _ = sample_tx.send(sample);
+                        return;
+                    }
+                }
+            }
+        });
+
+        let sample = sample_rx.recv_timeout(Duration::from_secs(6));
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = reader.join();
+
+        let sample = sample.expect("sampler should emit a frame within six seconds");
+        assert!(
+            sample.cpu_total.is_some(),
+            "sampler frame did not contain Linux CPU counters: {sample:?}"
         );
     }
 }
