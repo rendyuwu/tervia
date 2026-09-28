@@ -18,6 +18,25 @@ the same change that lifts it.
   `src/modules/terminal/lib/useTerminalFileDrop.ts` (`ensureFsDragListener`).
 - **SSH**: `ssh-rsa` (SHA-1) host keys. `src-tauri/src/modules/ssh/session.rs`
   (`HOST_KEY_ALGOS`).
+- **Resource monitoring**: live metrics require a Linux SSH host with `/proc`
+  and remote command execution. Missing fields report unavailable per metric;
+  disk I/O covers common whole-disk device names, network totals exclude
+  common virtual interfaces, and root filesystem usage is checked every 30
+  seconds only when `timeout` is installed. The optional strip uses one
+  persistent exec channel and can be hidden. A stream that fails before its
+  first sample stays unavailable without automatic retries; streams that go
+  stale after becoming live retry with backoff. `src-tauri/src/modules/ssh/mod.rs`
+  (`ssh_resource_stream_start`, `parse_resource_sample`),
+  `src/modules/statusbar/ResourceMonitor.tsx`.
+  Changes when: non-Linux metrics or additional Linux disk/network device
+  families are supported.
+- **Local ping is a direct-connection ICMP check**: it runs every two seconds
+  on this computer, so it can show no reply when ICMP is blocked or the host
+  name does not resolve on the local network. ProxyJump connections skip ping
+  so the final hop name is not resolved locally. `src-tauri/src/modules/ssh/mod.rs`
+  (`stream_local_ping`, `ssh_resource_stream_start`),
+  `src/modules/statusbar/ResourceMonitor.tsx`.
+  Changes when: ping is measured through the SSH route instead.
 - **Forwards**: binding `-L` or `-D` to anything but `127.0.0.1`; SOCKS5
   auth or anything but CONNECT. `src-tauri/src/modules/ssh/session.rs`
   (`open_forward`, `open_socks`).
@@ -33,10 +52,12 @@ the same change that lifts it.
 ## SSH sessions
 
 - **Shared session hits OpenSSH's `MaxSessions` cap.** Every tab shares one
-  channel-bearing session per host; past OpenSSH's default `MaxSessions`
-  (10) the next tab's channel open fails and retries (unverified against a
-  real server at the limit). `src/modules/ssh/tunnel.ts`
-  (`openShellForConnection`). Changes when: a user hits the limit.
+  channel-bearing session per host, and an enabled resource monitor holds one
+  additional exec channel. Past OpenSSH's default `MaxSessions` (10) the next
+  channel open fails and retries (unverified against a real server at the
+  limit). `src/modules/ssh/tunnel.ts` (`openShellForConnection`),
+  `src-tauri/src/modules/ssh/session.rs` (`begin_resource_stream`). Changes
+  when: a user hits the limit.
 - **A host edit reaches its terminals only once the old session releases.**
   New tabs join the host's live session dialled at open time; pre-flight
   can show a new endpoint while the shell still rides the old one until

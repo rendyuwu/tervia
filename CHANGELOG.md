@@ -6,6 +6,12 @@ The latest release only. Every earlier version:
 
 ## [Unreleased]
 
+### Added
+
+**SSH**
+
+- The status bar can show live Linux host CPU, RAM, network, disk I/O, root filesystem usage, uptime and local ping. Its visibility choice is remembered across launches.
+
 ### Fixed
 
 **Terminal**

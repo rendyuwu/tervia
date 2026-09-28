@@ -129,6 +129,8 @@ export type Preferences = {
    * back off. Default false.
    */
   statusBarCompact: boolean;
+  /** Keep the SSH resource monitor visible by default and remember the choice. */
+  statusBarResourceMonitor: boolean;
   /**
    * Mount the SSH (Remote) file explorer in the right slot instead of as a
    * sidebar pane on the left. Default false. When true, the left sidebar drops
@@ -280,6 +282,7 @@ const KEY_TERMINAL_SCROLLBACK = "terminalScrollback";
 const KEY_TERMINAL_ENV_PATH = "terminalEnvPath";
 const KEY_SHOW_HIDDEN_FILES = "showHiddenFiles";
 const KEY_STATUS_BAR_COMPACT = "statusBarCompact";
+const KEY_STATUS_BAR_RESOURCE_MONITOR = "statusBarResourceMonitor";
 const KEY_SSH_IN_RIGHT_PANEL = "sshInRightPanel";
 const KEY_SHORTCUTS = "shortcuts";
 const KEY_CONTENT_ZOOM = "contentZoom";
@@ -390,6 +393,7 @@ export const DEFAULT_PREFERENCES: Preferences = {
   terminalEnvPath: [],
   showHiddenFiles: false,
   statusBarCompact: false,
+  statusBarResourceMonitor: true,
   sshInRightPanel: false,
   shortcuts: {} as Record<ShortcutId, KeyBinding[]>,
   contentZoom: CONTENT_ZOOM_DEFAULT,
@@ -433,6 +437,7 @@ const PREF_STORE_KEYS = {
   terminalEnvPath: KEY_TERMINAL_ENV_PATH,
   showHiddenFiles: KEY_SHOW_HIDDEN_FILES,
   statusBarCompact: KEY_STATUS_BAR_COMPACT,
+  statusBarResourceMonitor: KEY_STATUS_BAR_RESOURCE_MONITOR,
   sshInRightPanel: KEY_SSH_IN_RIGHT_PANEL,
   shortcuts: KEY_SHORTCUTS,
   contentZoom: KEY_CONTENT_ZOOM,
@@ -494,14 +499,14 @@ async function writePref<T>(key: string, value: T): Promise<void> {
 export async function loadPreferences(): Promise<Preferences> {
   // No file read at all: the port's settle pass already forced the load, and
   // `createFileKeyValueStore` serves every later `get` from the whole-file cache
-  // it installed. A cold path would still cost ONE `fs_read_file` for all 33,
+  // it installed. A cold path would still cost ONE `fs_read_file` for all 34,
   // because the load shares its in-flight promise.
   const entries = await Promise.all(
     Object.values(PREF_STORE_KEYS).map(async (k) => [k, await io.get<unknown>(k)] as const),
   );
   const map = new Map<string, unknown>(entries);
   // `RecoveredStoreIo.get` coerces a missing key to `null` where `Map.get` gave
-  // `undefined`. Normalised back here rather than at 33 call sites: the body
+  // `undefined`. Normalised back here rather than at 34 call sites: the body
   // below is unchanged, and every consumer in it already tolerates `null`
   // (`isValidContentFontId` takes `unknown`, `normalizeBrandColor` takes
   // `string | undefined | null`, the five other normalisers take `unknown`, and
@@ -540,6 +545,8 @@ export async function loadPreferences(): Promise<Preferences> {
     terminalEnvPath: normalizeTerminalPathEntries(get<unknown>(KEY_TERMINAL_ENV_PATH)),
     showHiddenFiles: get<boolean>(KEY_SHOW_HIDDEN_FILES) ?? DEFAULT_PREFERENCES.showHiddenFiles,
     statusBarCompact: get<boolean>(KEY_STATUS_BAR_COMPACT) ?? DEFAULT_PREFERENCES.statusBarCompact,
+    statusBarResourceMonitor:
+      get<boolean>(KEY_STATUS_BAR_RESOURCE_MONITOR) ?? DEFAULT_PREFERENCES.statusBarResourceMonitor,
     sshInRightPanel: get<boolean>(KEY_SSH_IN_RIGHT_PANEL) ?? DEFAULT_PREFERENCES.sshInRightPanel,
     shortcuts:
       get<Record<ShortcutId, KeyBinding[]>>(KEY_SHORTCUTS) ?? DEFAULT_PREFERENCES.shortcuts,
@@ -710,6 +717,10 @@ export async function setShowHiddenFiles(value: boolean): Promise<void> {
 
 export async function setStatusBarCompact(value: boolean): Promise<void> {
   await writePref(KEY_STATUS_BAR_COMPACT, value);
+}
+
+export async function setStatusBarResourceMonitor(value: boolean): Promise<void> {
+  await writePref(KEY_STATUS_BAR_RESOURCE_MONITOR, value);
 }
 
 export async function setSshInRightPanel(value: boolean): Promise<void> {

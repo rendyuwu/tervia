@@ -8,6 +8,30 @@ import {
   SshLocalConnectError,
 } from "@/modules/terminal/lib/ssh-exit-decision";
 import type { SecretSource } from "@/modules/vault/resolve";
+import type { SshResourceSample } from "@/modules/statusbar/resourceMetrics";
+
+export type SshResourceStreamStart = { streamId: number; pingEnabled: boolean };
+
+export type SshResourceStreamEvent =
+  | { type: "sample"; sample: SshResourceSample }
+  | { type: "ping"; host: string; latencyMs: number | null }
+  | { type: "error"; message: string };
+
+export function startSshResourceStream(
+  sessionId: number,
+  onEvent: (event: SshResourceStreamEvent) => void,
+): Promise<SshResourceStreamStart> {
+  const channel = new Channel<SshResourceStreamEvent>();
+  channel.onmessage = onEvent;
+  return invoke<SshResourceStreamStart>("ssh_resource_stream_start", {
+    id: sessionId,
+    onEvent: channel,
+  });
+}
+
+export function stopSshResourceStream(sessionId: number, streamId: number): Promise<void> {
+  return invoke("ssh_resource_stream_stop", { id: sessionId, streamId });
+}
 
 /** First-connect host-key confirmation request from the backend. */
 export type SshHostKeyPrompt = { promptId: string; fingerprint: string; host: string };
