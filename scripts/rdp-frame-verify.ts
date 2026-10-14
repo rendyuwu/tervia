@@ -1,8 +1,8 @@
 /**
- * RDP frame-format, letterbox, scancode and input-queue audit. Six properties,
- * and every one of them fails SILENTLY: there is no exception to see, just
- * wrong pixels, a cursor that lands away from the click, a key that types
- * something else, or a modifier stuck down.
+ * RDP frame-format, letterbox, scancode, input-queue and frame-pull audit.
+ * Seven properties, and every one of them fails SILENTLY: there is no exception
+ * to see, just wrong pixels, a cursor that lands away from the click, a key that
+ * types something else, or a modifier stuck down.
  *
  * 1. WIRE FORMAT. `frame.ts` is the reader for the format `src-tauri/src/
  *    modules/rdp/frame.rs` writes. The fixtures below are byte-for-byte the
@@ -33,6 +33,12 @@
  *    runs that seam creates, and must touch nothing else: a key transition or
  *    a `releaseAll` dropped there strands a modifier down on the server for
  *    the rest of the session, silently.
+ * 7. A FRAME-READY SIGNAL IS NEVER LOST BEHIND THE PULL CREDIT. `frameReady` is
+ *    edge-triggered (a push announces only when it finds the batcher empty) and
+ *    the pane holds one pull credit, so a signal that lands while a pull is in
+ *    flight has no second chance: drop it, let that pull come back empty, and the
+ *    batcher stays dirty with nothing scheduled - a pane frozen until a resize, a
+ *    tab switch or a reconnect re-arms it.
  *
  * Run: `npx tsx scripts/rdp-frame-verify.ts`.
  */
@@ -45,6 +51,7 @@ import {
 } from "../src/modules/rdp/lib/viewport";
 import { CTRL_ALT_DEL_SCANCODES, scancodeFor } from "../src/modules/rdp/scancodes";
 import { coalesceMoves } from "../src/modules/rdp/lib/inputQueue";
+import { createPullGate } from "../src/modules/rdp/lib/framePull";
 import type { RdpInputEvent } from "../src/modules/rdp/bridge";
 
 let failures = 0;
@@ -549,6 +556,38 @@ console.log("\n[input queue] a re-queued batch keeps every key transition");
 
   const nonMoves = (events: RdpInputEvent[]) => events.filter((e) => e.kind !== "mouseMove").length;
   check("every non-move survives", nonMoves(coalesceMoves(seam)), nonMoves(seam));
+}
+
+console.log("\n[frame pull] a signal is never lost behind the pull credit");
+{
+  // The order that used to freeze the pane: the credit is taken, a push announces
+  // its rects, and the pull that raced it comes back empty. Nothing scheduled a
+  // follow-up, so the batcher stayed dirty until an external re-arm. Every check
+  // below is one link of that chain, phrased as the gate's own answers.
+  const gate = createPullGate();
+  check("an idle gate starts a pull", gate.request(), true);
+  check("a request during one in flight is not a second pull", gate.request(), false);
+  check("and the settle schedules it, even with an empty batch", gate.settle(false), true);
+
+  check("a non-empty batch always schedules the next pull", gate.settle(true), true);
+  check("and the loop goes idle on an empty one", gate.settle(false), false);
+
+  // Several signals during one flight collapse into ONE re-arm rather than a loop
+  // that never stops: the credit is released by the settle either way.
+  const burst = createPullGate();
+  check("the first request starts a pull", burst.request(), true);
+  check("a second signal during it is not a pull", burst.request(), false);
+  check("nor a third", burst.request(), false);
+  check("one re-arm, not two", burst.settle(false), true);
+  check("and it is consumed", burst.settle(false), false);
+
+  // A batch that arrives after the session was replaced is not painted, so its
+  // settle reports an empty pull - and must still honour the request that arrived
+  // meanwhile, or a redial leaves the new session with nothing scheduled.
+  const replaced = createPullGate();
+  check("a pull is started", replaced.request(), true);
+  check("a signal for the new session arrives mid-flight", replaced.request(), false);
+  check("the stale settle still re-arms", replaced.settle(false), true);
 }
 
 if (failures > 0) throw new Error(`rdp-frame-verify: ${failures} FAILED`);

@@ -1,5 +1,6 @@
 //! One RDP session: the connect sequence and the active-stage task.
 
+use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -26,7 +27,7 @@ use ironrdp_pdu::rdp::client_info::{PerformanceFlags, TimezoneInfo};
 use ironrdp_session::image::DecodedImage;
 use ironrdp_session::{fast_path, ActiveStage, ActiveStageOutput, SessionError};
 use ironrdp_tokio::bytes::BytesMut;
-use ironrdp_tokio::{FramedWrite as _, NetworkClient, TokioFramed};
+use ironrdp_tokio::{FramedWrite, NetworkClient, TokioFramed};
 use serde::Serialize;
 // Only the test harnesses inspect a sink's payloads directly; the session
 // itself only ever sends JSON, through `event_body`.
@@ -482,9 +483,36 @@ impl Drop for RdpSession {
 ///
 /// `30s` idle matches the SSH module's `KEEPALIVE` (`ssh/session.rs`), which
 /// exists for the same failure. With `10s` probes and the platform default
-/// retry count, a dead peer surfaces in roughly a minute.
+/// retry count, a dead peer surfaces in roughly two minutes.
 const KEEPALIVE_IDLE: Duration = Duration::from_secs(30);
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
+
+/// How long one frame write may take to finish before the session is failed.
+///
+/// `Framed::write_all` is the other await the session task parks on, and it parks
+/// the task that drains input as well: a peer that stops reading - a full socket
+/// buffer, a stalled TCP window, a black-holed path - leaves the task inside the
+/// write, so `input_rx` is not polled, the pane's keystrokes and clicks sit in the
+/// queue and `alive` still reads `true`. That is the reported freeze. Keepalive
+/// does not cover it: keepalive only fires against a DEAD peer, and this is a
+/// live peer that stopped reading.
+///
+/// `30s` is above any congestion burst a working link recovers from (TCP's first
+/// retransmit is about a second and backs off doubling, so five of them fit) and
+/// below the ~2min keepalive needs to declare a dead peer, so a stalled write
+/// fails naming the write rather than the vaguer read-side message.
+///
+/// The bound is on the write COMPLETING, not on progress within it, because
+/// `FramedWrite::write_all` exposes no progress to bound instead: a multi-megabyte
+/// clipboard paste onto a slow link can therefore end the session. Accepted - see
+/// KNOWN-LIMITS.md for the entry and what would change it.
+///
+/// The write stays on this task rather than moving to one of its own. The halves
+/// can be split, but they have to be reunited around every Deactivation All,
+/// which reads and writes the same `Framed`, and an outbound queue would need a
+/// full-queue policy on top of the input queue's - a second task and a second way
+/// for a session to sit at `alive: true` with nothing draining it.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Live mirror sinks per session. Low because Tauri's channel API needs an
 /// owned `Vec<u8>` per sink (see `ChannelTransport::deliver`), so each extra
@@ -946,6 +974,31 @@ enum Ending {
     Faulted(String),
 }
 
+/// Write one frame to the wire, bounded.
+///
+/// Not cancel-safe (`ironrdp-async` 0.9.0, `<Framed<S> as FramedWrite>::write_all`),
+/// so a fired deadline leaves the stream mid-frame. That is safe only because the
+/// caller ends the session on `Err` and never touches the stream again, which is
+/// exactly why an expired deadline is returned as an error here rather than
+/// hidden: it is the caller's only exit.
+///
+/// Generic over the trait rather than over `TlsFramed`, and the deadline is a
+/// parameter rather than a read of `WRITE_TIMEOUT`, so a test can hand this a
+/// writer that never finishes without waiting 30 seconds to prove it.
+async fn write_frame<W: FramedWrite>(
+    framed: &mut W,
+    frame: &[u8],
+    deadline: Duration,
+) -> io::Result<()> {
+    match tokio::time::timeout(deadline, framed.write_all(frame)).await {
+        Ok(result) => result,
+        Err(_) => Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!("did not finish in {}s", deadline.as_secs()),
+        )),
+    }
+}
+
 /// The active-stage loop.
 ///
 /// Every `ActiveStageOutput` variant is handled. `ResponseFrame` **must** be
@@ -1149,6 +1202,10 @@ async fn run(
         // documented cancel-safe.
         // Do not move this write into the select.
         //
+        // The write is now bounded, and that does not make it cancel-safe: it
+        // still stays out of the select, and a fired deadline ends the session
+        // because the stream is mid-frame.
+        //
         // `ActiveStageOutput` is matched exhaustively on purpose: unlike the
         // error kinds it is not `#[non_exhaustive]`, so a version bump that adds
         // a variant should fail the build rather than silently drop it.
@@ -1156,7 +1213,7 @@ async fn run(
             match output {
                 // Must go back out or the server stops sending updates.
                 ActiveStageOutput::ResponseFrame(frame) => {
-                    if let Err(e) = framed.write_all(&frame).await {
+                    if let Err(e) = write_frame(&mut framed, &frame, WRITE_TIMEOUT).await {
                         break 'session Ending::Faulted(format!("rdp: write failed: {e}"));
                     }
                 }
@@ -2041,6 +2098,88 @@ mod tests {
             flatten(&Head, Some(&Cause)),
             "negotiation failure: server requires CredSSP"
         );
+    }
+
+    /// A `FramedWrite` that accepts a write and never finishes it: a peer that
+    /// stopped reading, where the socket buffer is full and `write_all` would park
+    /// the session task there for as long as the peer stays quiet.
+    struct StalledWriter;
+
+    impl FramedWrite for StalledWriter {
+        type WriteAllFut<'write> = core::future::Pending<io::Result<()>>;
+
+        fn write_all<'a>(&'a mut self, _buf: &'a [u8]) -> Self::WriteAllFut<'a> {
+            core::future::pending()
+        }
+    }
+
+    /// A `FramedWrite` that completes at once and records how many bytes reached
+    /// it.
+    #[derive(Default)]
+    struct RecordingWriter(usize);
+
+    impl FramedWrite for RecordingWriter {
+        type WriteAllFut<'write> = core::future::Ready<io::Result<()>>;
+
+        fn write_all<'a>(&'a mut self, buf: &'a [u8]) -> Self::WriteAllFut<'a> {
+            self.0 += buf.len();
+            core::future::ready(Ok(()))
+        }
+    }
+
+    /// A write that cannot finish must end as an error within its deadline: the
+    /// caller's only safe response to a spent write is to end the session, since
+    /// the stream is mid-frame. Parking instead is the reported freeze - the task
+    /// that writes is the task that drains input, so every keystroke waits behind
+    /// it while `alive` still reads `true`.
+    ///
+    /// The outer `timeout` is the harness, not the assertion: with the deadline
+    /// removed from `write_frame` this call never returns, and a test that hangs
+    /// reports nothing, so the guard turns it into a named failure.
+    #[test]
+    fn a_stalled_write_is_bounded_rather_than_parked() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("runtime")
+            .block_on(async {
+                let mut writer = StalledWriter;
+                let outcome = tokio::time::timeout(
+                    Duration::from_secs(5),
+                    write_frame(&mut writer, b"one input PDU", Duration::from_millis(20)),
+                )
+                .await;
+                let Ok(stalled) = outcome else {
+                    panic!("a stalled write parked the task rather than ending");
+                };
+                let Err(error) = stalled else {
+                    panic!("a write that cannot finish must not report success");
+                };
+                assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+                assert!(
+                    error.to_string().contains("did not finish"),
+                    "the message names the deadline rather than the peer: {error}"
+                );
+            });
+    }
+
+    /// The other half of a deadline: a write that finishes is passed through with
+    /// its bytes. A deadline that failed ordinary writes would end the session on
+    /// the first keystroke.
+    #[test]
+    fn a_completed_write_is_not_cut_short() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("runtime")
+            .block_on(async {
+                let mut writer = RecordingWriter::default();
+                let frame = b"one input PDU";
+                write_frame(&mut writer, frame, Duration::from_millis(20))
+                    .await
+                    .expect("a completed write is not an error");
+                assert_eq!(writer.0, frame.len(), "the whole frame reached the stream");
+            });
     }
 }
 
