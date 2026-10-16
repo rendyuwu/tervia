@@ -1,5 +1,6 @@
 import { confirmRdpCert, openRdp, type RdpCredential } from "@/modules/rdp/bridge";
 import { openRdpDialTarget, type RdpDialTarget } from "@/modules/rdp/dial";
+import type { RdpSecurityMode } from "@/modules/hosts/types";
 import { useHostKeyPrompt } from "@/modules/ssh/hostKeyPrompt";
 
 // `RdpConnectionDialog`'s Test probe, lifted out whole: open the tunnel if there
@@ -25,6 +26,10 @@ export type RdpProbeArgs = {
    *  certificate. A new host leaves it unset and takes the TOFU prompt. */
   expectedCertFingerprint?: string;
   tunnelSshHostId?: string;
+  /** The security protocol the saved row would use. Test must exercise the
+   *  same negotiation a real connect makes: a TLS-only row probed as NLA
+   *  reports a negotiation failure the connect would never hit. */
+  security: RdpSecurityMode;
   /** The user accepted a certificate mid-probe. Called before the backend hears
    *  the answer, so it must not throw. */
   onTrusted: (fingerprint: string) => void;
@@ -95,6 +100,7 @@ export async function runRdpProbe(args: RdpProbeArgs): Promise<RdpProbeResult> {
             width: args.width,
             height: args.height,
             expectedCertFingerprint: args.expectedCertFingerprint || undefined,
+            security: args.security,
           },
           {
             onCertPrompt: (prompt) => {

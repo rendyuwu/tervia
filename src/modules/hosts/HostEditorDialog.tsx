@@ -112,6 +112,7 @@ import {
   type HostGroup,
   type HostPins,
   type RdpClipboardMode,
+  type RdpSecurityMode,
   type SshHost,
 } from "./types";
 
@@ -413,6 +414,7 @@ export function HostEditorDialog({
   const [presetId, setPresetId] = useState(RDP_FIT_SIZE_ID);
   const [tunnelSshHostId, setTunnelSshHostId] = useState("");
   const [clipboardMode, setClipboardMode] = useState<RdpClipboardMode>("both");
+  const [securityMode, setSecurityMode] = useState<RdpSecurityMode>("nla");
   /** The stored record being edited, or null in create mode. */
   const [existing, setExisting] = useState<Host | null>(null);
   const [hosts, setHosts] = useState<Host[]>([]);
@@ -625,6 +627,7 @@ export function HostEditorDialog({
         setPresetId(RDP_FIT_SIZE_ID);
         setTunnelSshHostId("");
         setClipboardMode("both");
+        setSecurityMode("nla");
         setPins({});
         // A quick-connect `user@host` (or any prefilled user) already named
         // an account, so the group re-seed below - and the picker's own
@@ -688,6 +691,7 @@ export function HostEditorDialog({
         setPresetId(RDP_FIT_SIZE_ID);
         setTunnelSshHostId("");
         setClipboardMode("both");
+        setSecurityMode("nla");
         // Interactive BEFORE the secret read, deliberately. Moving this below the
         // await would close the race the seed below guards against, but it would
         // hold the whole form - name, address, port, group - behind "Loading…" for
@@ -736,6 +740,7 @@ export function HostEditorDialog({
         );
         setTunnelSshHostId(liveSshHost(host.tunnel?.sshHostId));
         setClipboardMode(host.clipboard ?? "both");
+        setSecurityMode(host.security ?? "nla");
         setSshCred(EMPTY_SSH_CRED);
         setProxyJumpId("");
         setReady(true);
@@ -1129,6 +1134,7 @@ export function HostEditorDialog({
         height: preset.height,
         expectedCertFingerprint: pins[host] || undefined,
         tunnelSshHostId: tunnelSshHostId || undefined,
+        security: securityMode,
         onTrusted,
         prompts: {
           raised: (id) => pendingPrompts.current.add(id),
@@ -1302,6 +1308,7 @@ export function HostEditorDialog({
           // written by this build is indistinguishable from one written before
           // the field existed.
           clipboard: clipboardMode === "both" ? undefined : clipboardMode,
+          security: securityMode === "nla" ? undefined : securityMode,
         };
         // `undefined`, not `""`, when the field was left blank: an empty string
         // would DELETE the stored password, so an edit that only renamed the host
@@ -1908,9 +1915,11 @@ export function HostEditorDialog({
                     presetId={presetId}
                     tunnelSshHostId={tunnelSshHostId}
                     clipboardMode={clipboardMode}
+                    securityMode={securityMode}
                     onPresetChange={setPresetId}
                     onTunnelChange={setTunnelSshHostId}
                     onClipboardChange={setClipboardMode}
+                    onSecurityChange={setSecurityMode}
                   />
                 )}
 

@@ -40,7 +40,7 @@ Tauri 2: a Rust backend and one webview, no Electron. No telemetry.
 
 **RDP**
 
-- TLS and CredSSP (NTLM). Server certificate pinned on first connect.
+- TLS and CredSSP (NTLM), or TLS only for a server with no NLA (xrdp). Server certificate pinned on first connect.
 - Resolution follows the pane, or a fixed size. Clipboard text and images, both ways.
 - Direct, or tunnelled through a saved SSH host.
 

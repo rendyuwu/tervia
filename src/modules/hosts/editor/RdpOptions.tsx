@@ -3,6 +3,7 @@ import {
   RDP_FIT_SIZE_ID,
   RDP_SIZE_PRESETS,
   type RdpClipboardMode,
+  type RdpSecurityMode,
   type SshHost,
 } from "../types";
 import { Combobox, type ComboboxOption } from "./Combobox";
@@ -28,14 +29,29 @@ const CLIPBOARD_OPTIONS: ComboboxOption[] = [
   { value: "off", label: "Off", search: "clipboard disabled off none" },
 ];
 
+const SECURITY_OPTIONS: ComboboxOption[] = [
+  {
+    value: "nla",
+    label: "Network Level Authentication (default)",
+    search: "nla credssp network level authentication default",
+  },
+  {
+    value: "tls",
+    label: "TLS only (xrdp, Linux)",
+    search: "tls ssl legacy xrdp linux no nla downgrade",
+  },
+];
+
 export function RdpOptions({
   sshHosts,
   presetId,
   tunnelSshHostId,
   clipboardMode,
+  securityMode,
   onPresetChange,
   onTunnelChange,
   onClipboardChange,
+  onSecurityChange,
 }: {
   /** Saved SSH hosts, offered as tunnels. The whole list: any host that can reach
    *  the target's 3389 works, and it is usually not the target itself - a Linux
@@ -44,9 +60,11 @@ export function RdpOptions({
   presetId: string;
   tunnelSshHostId: string;
   clipboardMode: RdpClipboardMode;
+  securityMode: RdpSecurityMode;
   onPresetChange: (presetId: string) => void;
   onTunnelChange: (sshHostId: string) => void;
   onClipboardChange: (mode: RdpClipboardMode) => void;
+  onSecurityChange: (mode: RdpSecurityMode) => void;
 }) {
   const selectedTunnel = sshHosts.find((h) => h.id === tunnelSshHostId);
 
@@ -121,6 +139,32 @@ export function RdpOptions({
               Text and images are carried across; files are not. The transfer happens as focus
               enters and leaves the pane, so a copy made without leaving it is picked up on the next
               switch.
+            </>
+          )}
+        </span>
+      </Field>
+
+      <Field label="Security">
+        <Combobox
+          options={SECURITY_OPTIONS}
+          value={securityMode}
+          onChange={(value) => onSecurityChange(value as RdpSecurityMode)}
+          searchPlaceholder="Search security modes…"
+          emptyLabel="No matching mode."
+        />
+        <span className="text-muted-foreground text-[10.5px]">
+          {securityMode === "tls" ? (
+            <>
+              A deliberate downgrade for a server that has no NLA. The session is established before
+              the server authenticates this client, so every channel this connection carries — the
+              clipboard, when it has one — is joined first; the saved password goes inside TLS and
+              the server logs on with it. Needed for a Linux host running xrdp.
+            </>
+          ) : (
+            <>
+              The server must authenticate the connection before the session is up (CredSSP).
+              Windows hosts support this. A server that cannot is refused rather than downgraded,
+              and the error names what to change.
             </>
           )}
         </span>

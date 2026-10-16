@@ -98,6 +98,7 @@ import { effectiveParents } from "@/modules/hosts/groupTree";
 import {
   RDP_CLIPBOARD_MODES,
   RDP_DEFAULT_PRESET,
+  RDP_SECURITY_MODES,
   hostPins,
   normalizeHostTags,
   type Host,
@@ -445,6 +446,8 @@ function rdpArm(base: HostBase, raw: Record<string, unknown>): RdpHost {
   // Dropped rather than defaulted, so the record stays "absent means both"
   // instead of pinning a value a later build might redefine.
   const clipboard = RDP_CLIPBOARD_MODES.find((mode) => mode === raw.clipboard);
+  // Dropped rather than defaulted, like the clipboard: absent means "nla".
+  const security = RDP_SECURITY_MODES.find((mode) => mode === raw.security);
 
   return {
     ...base,
@@ -465,6 +468,7 @@ function rdpArm(base: HostBase, raw: Record<string, unknown>): RdpHost {
     ...(pins ? { pins } : {}),
     ...(sshHostId ? { tunnel: { sshHostId } } : {}),
     ...(clipboard ? { clipboard } : {}),
+    ...(security ? { security } : {}),
   };
 }
 

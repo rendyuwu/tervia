@@ -147,5 +147,6 @@ export async function rdpOpenInput(
     expectedCertFingerprint: row.certFingerprint,
     scaleFactor: size?.scaleFactor,
     clipboard: row.clipboard,
+    security: row.security,
   };
 }

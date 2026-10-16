@@ -93,6 +93,20 @@ export const RDP_CLIPBOARD_MODES = ["both", "hostToRemote", "remoteToHost", "off
  */
 export type RdpClipboardMode = (typeof RDP_CLIPBOARD_MODES)[number];
 
+export const RDP_SECURITY_MODES = ["nla", "tls"] as const;
+
+/**
+ * Which security protocol the connect offers.
+ *
+ * Derived from the list above so the runtime check and the type cannot drift.
+ * Absent means `"nla"`: CredSSP authenticates before the session is up.
+ * `"tls"` is the explicit opt-in for a server with no NLA - a Linux host
+ * running xrdp - and runs the legacy graphical-login path, where the server
+ * authenticates the credentials the Client Info PDU carries inside the TLS
+ * session.
+ */
+export type RdpSecurityMode = (typeof RDP_SECURITY_MODES)[number];
+
 /** One offered desktop resolution. */
 export type RdpSizePreset = {
   /** Stable id, `<w>x<h>`. Only used as a `<select>` value / React key. */
@@ -407,6 +421,8 @@ export type RdpHost = HostBase & {
   tunnel?: RdpTunnel;
   /** Clipboard directions. Absent means `"both"`; see {@link RdpClipboardMode}. */
   clipboard?: RdpClipboardMode;
+  /** Security protocol. Absent means `"nla"`; see {@link RdpSecurityMode}. */
+  security?: RdpSecurityMode;
 };
 
 /**

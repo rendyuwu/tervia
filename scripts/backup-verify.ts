@@ -812,6 +812,19 @@ check(
   rdpOf(sanitizeHost(rdp({ clipboard: "sideways" })))?.clipboard,
   undefined,
 );
+// Same two rules as the clipboard above: this sanitizer is a whitelist, and an
+// absent value is meaningful (it reads as "nla"), so an unrecognised mode must
+// come back absent rather than pinned to a default.
+check(
+  "a known security mode survives",
+  rdpOf(sanitizeHost(rdp({ security: "tls" })))?.security,
+  "tls",
+);
+check(
+  "an unknown security mode is dropped",
+  rdpOf(sanitizeHost(rdp({ security: "kerberos" })))?.security,
+  undefined,
+);
 
 console.log("\n[rdp tunnel] a bastion that did not travel must not break every connect");
 check("a tunnel survives", tunnelOf(host(rdp({ tunnel: { sshHostId: "h-1" } }))), "h-1");

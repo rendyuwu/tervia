@@ -86,6 +86,9 @@ export type RdpOpenInput = {
    *  file is the IPC surface and owns its own wire types. `tsc` pins the two
    *  copies against each other through `dial.ts`. */
   clipboard?: "both" | "hostToRemote" | "remoteToHost" | "off";
+  /** Security protocol this session offers. Omit for NLA, which is what the
+   *  backend defaults to; `"tls"` is the xrdp-compatible arm. */
+  security?: "nla" | "tls";
 };
 
 /** One live session, as `rdp_list_sessions` reports it. */
@@ -355,6 +358,9 @@ export async function openRdp(input: RdpOpenInput, handlers: RdpHandlers): Promi
       // non-optional enum, so an explicit null would fail to deserialise
       // where an absent key would have defaulted.
       clipboard: input.clipboard ?? "both",
+      // Same rule as `clipboard` above: `#[serde(default)]` sits over a
+      // non-optional enum, so the key must carry a value rather than null.
+      security: input.security ?? "nla",
     },
     onEvent: buildChannel(handlers),
   });
