@@ -144,11 +144,17 @@ the same change that lifts it.
   previous content. `src-tauri/src/modules/rdp/session.rs`
   (`RdpSession::clipboard_focus`). Changes when: a report of a stale
   paste in ordinary use.
-- **A large clipboard transfer head-of-line blocks the RDP graphics
-  path.** The outbound frame is one `write_all` on the same task that
-  serves frames, up to `MAX_CLIPBOARD_BYTES` (32 MiB); the desktop stalls
-  during a large copy. `src-tauri/src/modules/rdp/session.rs` (`run`,
-  `Wake::Clipboard`). Changes when: a measured stall matters.
+- **A clipboard paste onto a slow link can end the RDP session.** The
+  outbound frame is one `write_all` on the same task that serves frames, up
+  to `MAX_CLIPBOARD_BYTES` (32 MiB), and it carries the same 30s bound as
+  every other write: a paste that cannot finish inside that window fails the
+  session with `did not finish in 30s` rather than stalling the desktop
+  until it drains. Chosen over a second, larger budget for this path: a
+  paste that cannot move its payload in 30s is a link the user cannot work
+  over anyway, and a second budget is a second thing to keep true.
+  `src-tauri/src/modules/rdp/session.rs` (`WRITE_TIMEOUT`, `write_frame`,
+  `run`). Changes when: a deadline that resets on each partial write exists,
+  or a paste that would have finished fails a session on a real link.
 - **The connector's `Credentials` holds the RDP password unscrubbed.**
   `Credentials::UsernamePassword.password` is a plain `String`;
   `build_config` copies it in and it is dropped unscrubbed, unlike the

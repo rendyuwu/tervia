@@ -24,6 +24,7 @@ import {
   type RdpViewport,
 } from "./lib/viewport";
 import { coalesceMoves } from "./lib/inputQueue";
+import { createPullGate } from "./lib/framePull";
 import { onRdpPaneAction, type RdpPaneAction } from "./paneActions";
 import { CTRL_ALT_DEL_SCANCODES, scancodeFor } from "./scancodes";
 
@@ -140,8 +141,10 @@ export function RdpPane({ leafId, connectionId, visible, focused = true }: Props
   // ---------------------------------------------------------------- rendering
 
   const compositeHandle = useRef<number | null>(null);
-  /** At most one pull in flight; that single credit IS the backpressure. */
-  const pullingRef = useRef(false);
+  /** At most one pull in flight; that single credit IS the backpressure. A
+   *  request made while it is taken is remembered rather than dropped, which is
+   *  the whole of `lib/framePull`. */
+  const pull = useRef(createPullGate());
   /** `pullFrame`, read through a ref so `composite` can drive it without the
    *  two memoizations depending on each other. Assigned on every render, and
    *  only ever read from a frame callback, so there is nothing stale here. */
@@ -263,20 +266,23 @@ export function RdpPane({ leafId, connectionId, visible, focused = true }: Props
   /** Collect whatever the backend has accumulated. */
   const pullFrame = useCallback(() => {
     const session = sessionRef.current;
-    if (!session || pullingRef.current) return;
-    pullingRef.current = true;
+    if (!session) return;
+    // `false` means the credit is taken: the request is remembered, and the settle
+    // below schedules another pull for it. Dropping it here is the freeze this gate
+    // exists to prevent.
+    if (!pull.current.request()) return;
+    // Read by the settle below: a non-empty batch may have more behind it, and a
+    // batch that arrived for a session since replaced is not ours to paint.
+    let painted = false;
     void rdpTakeFrame(session.id)
       .then((batch) => {
         if (!batch || sessionRef.current !== session) return;
         blitBatch(batch);
-        // There may be more behind it. Scheduling a composite rather than
-        // pulling again immediately is what rate-limits pulls to one per frame
-        // and lets the backend coalesce in between.
-        scheduleComposite();
+        painted = true;
       })
       .catch(() => {})
       .finally(() => {
-        pullingRef.current = false;
+        if (pull.current.settle(painted)) scheduleComposite();
       });
   }, [blitBatch, scheduleComposite]);
 
@@ -325,8 +331,9 @@ export function RdpPane({ leafId, connectionId, visible, focused = true }: Props
 
   // Redraw on becoming visible: composites are skipped while the tab is hidden,
   // so without this the pane shows whatever was on screen when it left. It also
-  // RE-ARMS the pull loop, which is why there is no "was it stale" condition -
-  // the loop stops whenever a pull comes back empty.
+  // re-arms the pull loop, which is now only a convenience: an empty pull stops
+  // the loop only when no request is outstanding, so nothing has to re-arm it
+  // from outside to get the pane moving again.
   useEffect(() => {
     if (visible) scheduleComposite();
   }, [visible, scheduleComposite]);
@@ -781,6 +788,9 @@ export function RdpPane({ leafId, connectionId, visible, focused = true }: Props
         }
         session = opened;
         sessionRef.current = opened;
+        // A `frameReady` that landed while this was in flight pulled nothing (no
+        // session yet) and cannot repeat itself, so pull now.
+        scheduleComposite();
         // The pane can have been dragged while this was still dialling, and
         // `requestFit` bails when there is no session yet, so that resize was
         // dropped. Re-check now that there is one - after the ref is set, not
