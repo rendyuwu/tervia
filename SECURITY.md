@@ -19,6 +19,9 @@ Until `1.0.0`, only the latest minor gets security fixes.
 
 - **Secrets stay out of the store files.** macOS: Keychain. Windows: a DPAPI-encrypted file. Linux: a plaintext file with mode 0600. With ssh-agent auth the private key never enters Tervia.
 - **Host keys and RDP certificates are pinned** (SHA-256). First connect asks before a password or key is used; a changed key fails the connection.
+  RDP authenticates with NLA (CredSSP) by default. A connection can be set to
+  TLS only for a server that has no NLA; that is an explicit per-connection
+  downgrade, and the session is established before the server authenticates.
 - **Local listeners bind `127.0.0.1`** (`-L`, `-D`). A `-R` rule listens on the server, at the address the rule names.
 - **Backups are sealed in Rust**: PBKDF2-HMAC-SHA256 (600,000 rounds) into AES-256-GCM, fresh salt and nonce per file. A wrong passphrase or a corrupt file fails on the GCM tag.
 - **Sync is end-to-end encrypted.** The storage provider sees ciphertext and opaque object names. Private key bodies are uploaded only if you opt in.

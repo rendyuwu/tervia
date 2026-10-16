@@ -19,10 +19,13 @@
 //! TLS handshake, so a rejection happens before CredSSP sends the password or
 //! runs the NTLM exchange. The username does go out earlier, as the X.224
 //! Connection Request cookie on plain TCP - see [`tls`] and
-//! `session::build_config`. First connect prompts the user; later connects pass
-//! the recorded fingerprint back as `expectedCertFingerprint` and a mismatch
-//! aborts. See [`tls`] for the full policy, including why the pin is keyed to
-//! the saved connection rather than to `host:port`.
+//! `session::build_config`. With the connection's Security set to TLS only
+//! there is no CredSSP leg at all, so the transfer is different in one
+//! respect: the check still runs before the Client Info PDU, which is what
+//! carries the password there. First connect prompts the user; later connects
+//! pass the recorded fingerprint back as `expectedCertFingerprint` and a
+//! mismatch aborts. See [`tls`] for the full policy, including why the pin is
+//! keyed to the saved connection rather than to `host:port`.
 //!
 //! # Clipboard
 //!
@@ -222,6 +225,10 @@ pub struct RdpOpenInput {
     /// [`RdpClipboardMode::Both`], so no stored connection needs migrating.
     #[serde(default)]
     pub clipboard: RdpClipboardMode,
+    /// Which security protocol to offer. Absent means [`RdpSecurityMode::Nla`],
+    /// so no stored connection needs migrating.
+    #[serde(default)]
+    pub security: RdpSecurityMode,
 }
 
 /// Which directions the clipboard bridge carries.
@@ -249,6 +256,30 @@ impl RdpClipboardMode {
     pub(crate) fn remote_to_host(self) -> bool {
         matches!(self, Self::Both | Self::RemoteToHost)
     }
+}
+
+/// Which security protocol the connect offers.
+///
+/// [`Self::Nla`] is the default and what a saved connection normally carries:
+/// CredSSP authenticates before the session is up, so no static channel is
+/// ever joined for a client the server has not authenticated, and the password
+/// is only sent after the server has answered with the pinned certificate.
+///
+/// [`Self::Tls`] is the explicit per-connection opt-in for a server that has no
+/// NLA at all - a Linux host running xrdp, whose own mask is TLS plus the
+/// classic RDP security this client does not implement. It runs the legacy
+/// graphical-login path: the session is established first and the server
+/// authenticates the credentials the Client Info PDU carries inside that TLS
+/// session (`ironrdp-pdu` 0.8.0, `ClientInfo`). `build_config` sets the logon
+/// hint that makes the server use them, so the whole static channel set is
+/// joined on behalf of a client the server has not authenticated yet.
+/// `KNOWN-LIMITS.md` carries the trade.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RdpSecurityMode {
+    #[default]
+    Nla,
+    Tls,
 }
 
 fn default_rdp_port() -> u16 {
@@ -884,6 +915,7 @@ mod tests {
             expected_cert_fingerprint: None,
             scale_factor: 0,
             clipboard: RdpClipboardMode::Both,
+            security: RdpSecurityMode::Nla,
         };
         let rendered = format!("{input:?}");
         assert!(!rendered.contains("hunter2"), "got: {rendered}");

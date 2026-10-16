@@ -161,6 +161,26 @@ the same change that lifts it.
   rest of the chain. `src-tauri/src/modules/rdp/session.rs`
   (`build_config`). Changes when: `ironrdp-connector` ships a zeroizing
   password type.
+- **Standard RDP Security is not implemented, so a server that offers only
+  that cannot be reached.** `build_config` offers NLA or TLS and never the
+  classic security whose `PROTOCOL_RDP` is the empty mask; a server that
+  answers the negotiation with it gets a refusal naming the setting instead of
+  a downgrade. Chosen over implementing it: it authenticates only after the
+  session is up, and it is a second cipher stack kept alive for hosts that can
+  offer TLS instead. `src-tauri/src/modules/rdp/session.rs` (`build_config`,
+  `connect_error`). Changes when: a target with no TLS at all becomes one worth
+  reaching.
+- **An uncompressed bitmap row whose rectangle is not a multiple of four
+  pixels wide shears on xrdp.** xrdp pads the row up to a four-pixel
+  `bitmapWidth` before sending it; the pinned `ironrdp-session` (`=0.10.0`)
+  strips that padding and then walks the buffer at the destination rectangle's
+  width, so each row starts one to three pixels further left than the one
+  above - visible as a diagonal shear across whatever the server paints that
+  way. `src-tauri/Cargo.toml`,
+  `src-tauri/src/modules/rdp/session.rs` (`connect`). Changes when: a published
+  `ironrdp-session` carries the source stride (IronRDP #1486) in a set that
+  also resolves with the pinned `russh`, which the IronRDP block in
+  `src-tauri/Cargo.toml` works out.
 
 ## Known Hosts
 

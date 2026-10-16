@@ -43,7 +43,7 @@ use crate::modules::lockext::LockExt as _;
 use super::cliprdr::{self, ClipboardShared, TerviaCliprdrBackend};
 use super::frame::{self, encode_batch, Batch, FrameBatcher, FrameBuffer, Rect, HEADER_LEN};
 use super::tls;
-use super::{event_body, EventSink, InputOp, RdpClipboardMode, RdpOpenInput};
+use super::{event_body, EventSink, InputOp, RdpClipboardMode, RdpOpenInput, RdpSecurityMode};
 use super::{RdpSessionInfo, SessionOp};
 
 type TlsFramed = TokioFramed<tokio_rustls::client::TlsStream<TcpStream>>;
@@ -574,41 +574,94 @@ fn flatten(
 
 /// Turn a connect-sequence failure into something a user can act on.
 ///
+/// The advice depends on the connection's security mode, because the same
+/// server fails the two modes differently and a fixed sentence is false for one
+/// of them: "Tervia already requests CredSSP" is not true of a connection that
+/// offers TLS only.
+///
 /// `NegotiationFailure` gets explicit remediation because it is the most
-/// actionable failure class in RDP: it is the server stating exactly which
-/// security protocol it wanted. `ConnectorErrorKind` is `#[non_exhaustive]`,
-/// hence the wildcard.
-fn connect_error(context: &str, err: &ConnectorError) -> String {
+/// actionable failure class in RDP: the server stating which security protocol
+/// it wanted. `ConnectorErrorKind` is `#[non_exhaustive]`, hence the wildcards.
+fn connect_error(context: &str, mode: RdpSecurityMode, err: &ConnectorError) -> String {
     use ironrdp_pdu::nego::FailureCode;
 
     let base = format!(
         "{context}: {}",
         flatten(err.kind(), core::error::Error::source(err))
     );
-    let ConnectorErrorKind::Negotiation(failure) = err.kind() else {
-        return base;
-    };
-    let advice = match failure.code() {
-        // We asked for HYBRID (NLA) and the server only speaks Standard RDP
-        // Security. Refusing is deliberate - see `build_config`.
-        FailureCode::SSL_NOT_ALLOWED_BY_SERVER => {
-            "Tervia requires Network Level Authentication and will not fall back to Standard \
-             RDP Security, which authenticates only after the session is already up. Enable NLA \
-             on the server (System Properties -> Remote -> \"Allow connections only from \
-             computers running Remote Desktop with Network Level Authentication\")."
-        }
-        FailureCode::SSL_CERT_NOT_ON_SERVER => {
-            "The server has no usable TLS certificate. On Windows this usually means the Remote \
-             Desktop Configuration service could not create its self-signed certificate; \
-             restarting that service normally fixes it."
-        }
-        FailureCode::SSL_REQUIRED_BY_SERVER | FailureCode::HYBRID_REQUIRED_BY_SERVER => {
-            "This should not happen - Tervia already requests CredSSP - so it usually means a \
-             middlebox or gateway rewrote the negotiation."
-        }
-        FailureCode::SSL_WITH_USER_AUTH_REQUIRED_BY_SERVER => {
-            "The server wants certificate-based client authentication, which Tervia does not \
-             implement."
+    let advice = match err.kind() {
+        ConnectorErrorKind::Negotiation(failure) => match failure.code() {
+            // NLA was offered and the server only speaks Standard RDP Security,
+            // which is not offered at all - see `build_config`.
+            FailureCode::SSL_NOT_ALLOWED_BY_SERVER => match mode {
+                RdpSecurityMode::Nla => {
+                    "Tervia requires Network Level Authentication and will not fall back to \
+                     Standard RDP Security, which authenticates only after the session is already \
+                     up. Enable NLA on the server (System Properties -> Remote -> \"Allow \
+                     connections only from computers running Remote Desktop with Network Level \
+                     Authentication\")."
+                }
+                // TLS was offered and the server refused that too.
+                RdpSecurityMode::Tls => {
+                    "The server is set to Standard RDP Security only, so it rejected TLS as well. \
+                     Tervia does not implement Standard RDP Security: enable TLS or NLA on the \
+                     server."
+                }
+            },
+            FailureCode::SSL_CERT_NOT_ON_SERVER => {
+                "The server has no usable TLS certificate. On Windows this usually means the \
+                 Remote Desktop Configuration service could not create its self-signed \
+                 certificate; restarting that service normally fixes it. A Linux host running \
+                 xrdp sends this when its configured certificate or key file is not readable."
+            }
+            FailureCode::SSL_REQUIRED_BY_SERVER => match mode {
+                RdpSecurityMode::Nla => {
+                    "This should not happen - Tervia already requests CredSSP - so it usually \
+                     means a middlebox or gateway rewrote the negotiation."
+                }
+                RdpSecurityMode::Tls => {
+                    "This should not happen - this connection already offers TLS - so it usually \
+                     means a middlebox or gateway rewrote the negotiation."
+                }
+            },
+            FailureCode::HYBRID_REQUIRED_BY_SERVER => match mode {
+                RdpSecurityMode::Nla => {
+                    "This should not happen - Tervia already requests CredSSP - so it usually \
+                     means a middlebox or gateway rewrote the negotiation."
+                }
+                RdpSecurityMode::Tls => {
+                    "The server requires Network Level Authentication, which this connection's \
+                     Security setting does not offer. Set it to NLA, or enable TLS on the \
+                     server."
+                }
+            },
+            FailureCode::SSL_WITH_USER_AUTH_REQUIRED_BY_SERVER => {
+                "The server wants certificate-based client authentication, which Tervia does not \
+                 implement."
+            }
+            _ => return base,
+        },
+        // No failure code covers a server that falls back to Standard RDP
+        // Security. It answers the negotiation with a *successful* confirm whose
+        // selected protocol is 0, and the connector turns that empty
+        // intersection into a reason string. The text is the pinned crate's
+        // (`ironrdp-connector` 0.9.0, `Sequence::step`), which is what makes
+        // matching on it stable for this build - and what the test pins.
+        ConnectorErrorKind::Reason(description)
+            if description.contains("but server selected STANDARD_RDP_SECURITY") =>
+        {
+            match mode {
+                RdpSecurityMode::Nla => {
+                    "The server selected Standard RDP Security, so it offers no Network Level \
+                     Authentication. A Linux host running xrdp is the common case: set this \
+                     connection's Security to TLS only, which xrdp does implement."
+                }
+                RdpSecurityMode::Tls => {
+                    "The server selected Standard RDP Security, so it offers neither TLS nor NLA. \
+                     On a Linux host running xrdp that is `security_layer=rdp` in `xrdp.ini`, \
+                     which must be `negotiate` or `tls`."
+                }
+            }
         }
         _ => return base,
     };
@@ -625,11 +678,14 @@ fn session_error(context: &str, err: &SessionError) -> String {
 
 /// Connector configuration.
 ///
-/// `enable_tls: false` + `enable_credssp: true` refuses to fall back to the
-/// legacy "TLS only" security protocol, which would put the server in graphical
-/// login mode with every static channel joined before authentication - a much
-/// wider attack surface (see `ironrdp_connector::Config::enable_tls`). NLA or
-/// nothing.
+/// The security flags come from the connection's [`RdpSecurityMode`], and at
+/// most one of them is ever set. `enable_credssp` advertises
+/// `HYBRID | HYBRID_EX` and `enable_tls` advertises `SSL`; asking for both
+/// would offer `PROTOCOL_SSL` next to NLA and accept exactly the downgrade to
+/// the legacy TLS security protocol that this module refuses by default
+/// (`ironrdp-connector` 0.9.0, `Sequence::step`). Compare the two arms on
+/// [`RdpSecurityMode`]; `KNOWN-LIMITS.md` carries what neither arm reaches.
+///
 /// `password` arrives already resolved (from the OS keychain, or inline for an
 /// unsaved draft) so this module never has to know where secrets live.
 fn build_config(input: &RdpOpenInput, password: &str) -> Config {
@@ -639,8 +695,8 @@ fn build_config(input: &RdpOpenInput, password: &str) -> Config {
             height: input.height,
         },
         desktop_scale_factor: input.scale_factor,
-        enable_tls: false,
-        enable_credssp: true,
+        enable_tls: input.security == RdpSecurityMode::Tls,
+        enable_credssp: input.security == RdpSecurityMode::Nla,
         credentials: Credentials::UsernamePassword {
             username: input.username.clone(),
             password: password.to_owned(),
@@ -671,7 +727,13 @@ fn build_config(input: &RdpOpenInput, password: &str) -> Config {
         // disclosure. See the note on `connect` about exactly what does and
         // does not cross the wire before the certificate is verified.
         request_data: None,
-        autologon: false,
+        // TLS-only has no CredSSP leg, so the saved password is only used if
+        // the server is told to: this is what sets INFO_AUTOLOGON, which makes
+        // the server log the session in from the credentials the Client Info
+        // PDU carries. The password field is written either way
+        // (`ironrdp-pdu` 0.8.0, `ClientInfo`), so declining the flag would buy
+        // no confidentiality and cost a login screen the user has to type into.
+        autologon: input.security == RdpSecurityMode::Tls,
         enable_audio_playback: false,
         performance_flags: PerformanceFlags::default(),
         license_cache: None,
@@ -783,7 +845,7 @@ pub async fn connect(
     )
     .await
     .map_err(|_| format!("rdp: X.224 negotiation with {host}:{port} timed out"))?
-    .map_err(|e| connect_error("rdp: security negotiation failed", &e))?;
+    .map_err(|e| connect_error("rdp: security negotiation failed", input.security, &e))?;
 
     // Hand the raw TCP stream over.
     //
@@ -903,7 +965,7 @@ pub async fn connect(
     )
     .await
     .map_err(|_| format!("rdp: authentication with {host}:{port} timed out"))?
-    .map_err(|e| connect_error("rdp: authentication failed", &e))?;
+    .map_err(|e| connect_error("rdp: authentication failed", input.security, &e))?;
 
     // The server's size, not ours - it is free to disagree with what we asked
     // for. A zero in either axis has to be refused here: `DecodedImage::new`
@@ -1480,7 +1542,28 @@ fn apply_reactivation(shared: &Shared, width: u16, height: u16) -> Result<(), St
 mod tests {
     use super::frame::RECT_LEN;
     use super::*;
+    use ironrdp_connector::{ConnectorError, ConnectorErrorKind, NegotiationFailure};
     use ironrdp_pdu::input::fast_path::{FastPathInput, FastPathInputEvent};
+    use ironrdp_pdu::nego::FailureCode;
+
+    fn config_input(security: RdpSecurityMode) -> RdpOpenInput {
+        RdpOpenInput {
+            host: "win.example.com".into(),
+            port: 3389,
+            username: "admin".into(),
+            domain: Some("CORP".into()),
+            credential: super::super::RdpCredential::Keychain {
+                service: "tervia-rdp".into(),
+                account: "abc::password".into(),
+            },
+            width: 1280,
+            height: 800,
+            expected_cert_fingerprint: None,
+            scale_factor: 0,
+            clipboard: RdpClipboardMode::Both,
+            security,
+        }
+    }
 
     /// The frontend reads these tags and fields by name, so the serialised
     /// shape is the contract. `rename_all_fields` is what turns
@@ -1548,26 +1631,13 @@ mod tests {
     /// would join every static channel before authentication.
     #[test]
     fn config_enforces_nla_and_software_pointer() {
-        let config = build_config(
-            &RdpOpenInput {
-                host: "win.example.com".into(),
-                port: 3389,
-                username: "admin".into(),
-                domain: Some("CORP".into()),
-                credential: super::super::RdpCredential::Keychain {
-                    service: "tervia-rdp".into(),
-                    account: "abc::password".into(),
-                },
-                width: 1280,
-                height: 800,
-                expected_cert_fingerprint: None,
-                scale_factor: 0,
-                clipboard: RdpClipboardMode::Both,
-            },
-            "secret",
-        );
+        let config = build_config(&config_input(RdpSecurityMode::Nla), "secret");
         assert!(!config.enable_tls, "no legacy TLS-only downgrade");
         assert!(config.enable_credssp, "NLA required");
+        assert!(
+            !config.autologon,
+            "NLA already authenticates; the Client Info PDU needs no logon hint"
+        );
         assert!(
             config.enable_server_pointer,
             "pointer PDUs must be processed or there is no cursor at all"
@@ -1585,6 +1655,75 @@ mod tests {
             config.credentials,
             Credentials::UsernamePassword { ref password, .. } if password == "secret"
         ));
+    }
+
+    /// TLS only is the arm a Linux host without NLA can answer: `SSL` instead of
+    /// `HYBRID | HYBRID_EX`, no CredSSP leg, and the logon hint that makes the
+    /// server use the credentials the Client Info PDU carries.
+    #[test]
+    fn config_tls_only_offers_ssl_and_asks_for_the_logon() {
+        let config = build_config(&config_input(RdpSecurityMode::Tls), "secret");
+
+        assert!(config.enable_tls, "TLS only must offer PROTOCOL_SSL");
+        assert!(!config.enable_credssp, "no NLA in this arm");
+        assert!(
+            config.autologon,
+            "a saved credential the server never uses is a login screen"
+        );
+    }
+
+    fn negotiation_failure(code: FailureCode) -> ConnectorError {
+        ConnectorError::new(
+            "negotiation failure",
+            ConnectorErrorKind::Negotiation(NegotiationFailure::from(code)),
+        )
+    }
+
+    /// A server that falls back to Standard RDP Security answers with a
+    /// successful confirm, so the connector reports it as a reason string
+    /// rather than a failure code. This pins both that text and the arm split.
+    #[test]
+    fn standard_security_fallback_advice_follows_the_mode() {
+        let err = ConnectorError::reason(
+            "Initiation",
+            "client advertised HYBRID | HYBRID_EX, but server selected STANDARD_RDP_SECURITY",
+        );
+
+        let nla = connect_error(
+            "rdp: security negotiation failed",
+            RdpSecurityMode::Nla,
+            &err,
+        );
+        assert!(nla.contains("TLS only"), "got: {nla}");
+
+        let tls = connect_error(
+            "rdp: security negotiation failed",
+            RdpSecurityMode::Tls,
+            &err,
+        );
+        assert!(tls.contains("security_layer"), "got: {tls}");
+    }
+
+    /// The one advice sentence that is false in the other mode: a TLS-only
+    /// connection meeting an NLA-only server is not "already requests CredSSP".
+    #[test]
+    fn hybrid_required_advice_follows_the_mode() {
+        let err = negotiation_failure(FailureCode::HYBRID_REQUIRED_BY_SERVER);
+
+        let tls = connect_error(
+            "rdp: security negotiation failed",
+            RdpSecurityMode::Tls,
+            &err,
+        );
+        assert!(tls.contains("Set it to NLA"), "got: {tls}");
+        assert!(!tls.contains("already requests CredSSP"), "got: {tls}");
+
+        let nla = connect_error(
+            "rdp: security negotiation failed",
+            RdpSecurityMode::Nla,
+            &err,
+        );
+        assert!(nla.contains("already requests CredSSP"), "got: {nla}");
     }
 
     /// An NLA rejection is the most common real failure, and IronRDP renders it
@@ -2198,6 +2337,7 @@ mod tests {
 ///                                which the harness auto-confirms.
 /// TERVIA_RDP_WIDTH     default 1280
 /// TERVIA_RDP_HEIGHT    default 800
+/// TERVIA_RDP_SECURITY  default nla. `tls` => the TLS-only negotiation.
 /// ```
 ///
 /// Run with `cargo test --release rdp_live -- --ignored --nocapture`.
@@ -2252,6 +2392,10 @@ mod rdp_live {
             expected_cert_fingerprint: fingerprint,
             scale_factor: 0,
             clipboard: RdpClipboardMode::Both,
+            security: match env_opt("TERVIA_RDP_SECURITY").as_deref() {
+                Some("tls") => RdpSecurityMode::Tls,
+                _ => RdpSecurityMode::Nla,
+            },
         };
         Some((input, Zeroizing::new(password)))
     }
